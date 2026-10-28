@@ -116,3 +116,11 @@ test("removal states have visible deleting and failed copy", () => {
   assert.match(removalLabel(operation("draining")), /正在删除/);
   assert.match(removalLabel({ ...operation("failed"), error: "busy" }), /删除失败.*busy/);
 });
+
+test("draining label surfaces the backend wait/retry note", () => {
+  assert.equal(removalLabel(operation("draining")), "正在删除媒体库 · 正在等待任务结束");
+  assert.equal(
+    removalLabel({ ...operation("draining"), error: "waiting for active Library work to stop (60s)" }),
+    "正在删除媒体库 · 正在等待任务结束（waiting for active Library work to stop (60s)）",
+  );
+});
