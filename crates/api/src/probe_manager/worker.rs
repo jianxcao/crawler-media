@@ -77,12 +77,9 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
                         .ok()
                         .flatten()
                 })
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(1)
-                .min(8)
         })
-        .await;
+        .await
+        .map(|setting| metadata_worker_count(setting.as_deref()));
         let Ok(metadata_workers) = configured else {
             tracing::error!("探测 worker 启动配置步骤失败");
             bootstrap.workers_started.store(false, Ordering::SeqCst);
@@ -100,7 +97,38 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     true
 }
 
+/// Default metadata probe workers when `probe.concurrency` is unset.
+pub(crate) const DEFAULT_METADATA_WORKERS: usize = 4;
+/// Upper bound for `probe.concurrency`; protects the remote (pan-302) source.
+pub(crate) const MAX_METADATA_WORKERS: usize = 16;
+
+/// `probe.concurrency` → metadata worker count (default 4, clamped 1..=16).
+pub(crate) fn metadata_worker_count(setting: Option<&str>) -> usize {
+    setting
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_METADATA_WORKERS)
+        .min(MAX_METADATA_WORKERS)
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    #[test]
+    fn probe_concurrency_defaults_higher_and_is_clamped() {
+        assert_eq!(metadata_worker_count(None), 4);
+        assert_eq!(metadata_worker_count(Some("0")), 4);
+        assert_eq!(metadata_worker_count(Some("junk")), 4);
+        assert_eq!(metadata_worker_count(Some(" 6 ")), 6);
+        assert_eq!(metadata_worker_count(Some("99")), 16);
+    }
+}
+
 fn start_workers(manager: &Arc<ProbeManager>, metadata_workers: usize) {
+    // Every metadata worker plus the fingerprint worker may hold one remote
+    // read; the gate no longer serializes them behind a fixed cooldown.
+    marker::media_read::configure_remote_reads(metadata_workers + 1, std::time::Duration::ZERO);
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
         return;

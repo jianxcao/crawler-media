@@ -7,19 +7,24 @@ use std::time::{Duration, Instant};
 use crate::{ProbeTarget, WorkControl};
 
 const CANCELLATION_POLL: Duration = Duration::from_millis(25);
+/// Default remote reads in flight; the probe manager re-configures this from
+/// `probe.concurrency` at startup.
+pub const DEFAULT_REMOTE_READ_LIMIT: usize = 4;
 static REMOTE_READS: LazyLock<MediaReadGate> =
-    LazyLock::new(|| MediaReadGate::new(Duration::from_secs(1)));
+    LazyLock::new(|| MediaReadGate::new(DEFAULT_REMOTE_READ_LIMIT, Duration::ZERO));
 
-/// One remote read at a time across metadata, fingerprint and artwork workers.
-/// Cooldown starts when the previous read finishes, including failed reads.
+/// Bounded remote reads shared by metadata, fingerprint and artwork workers:
+/// at most `limit` in flight, admitted FIFO. An optional cooldown starts when a
+/// read finishes (including failed reads) and delays the next admission.
 pub struct MediaReadGate {
     state: Mutex<State>,
     changed: Condvar,
-    cooldown: Duration,
 }
 
 struct State {
-    busy: bool,
+    active: usize,
+    limit: usize,
+    cooldown: Duration,
     available_at: Instant,
     next_ticket: u64,
     waiting: VecDeque<u64>,
@@ -30,17 +35,32 @@ pub struct MediaReadPermit<'a> {
 }
 
 impl MediaReadGate {
-    pub fn new(cooldown: Duration) -> Self {
+    pub fn new(limit: usize, cooldown: Duration) -> Self {
         Self {
             state: Mutex::new(State {
-                busy: false,
+                active: 0,
+                limit: limit.max(1),
+                cooldown,
                 available_at: Instant::now(),
                 next_ticket: 0,
                 waiting: VecDeque::new(),
             }),
             changed: Condvar::new(),
-            cooldown,
         }
+    }
+
+    /// Change the in-flight limit and cooldown; waiters re-check immediately.
+    pub fn configure(&self, limit: usize, cooldown: Duration) {
+        let mut state = self.lock();
+        state.limit = limit.max(1);
+        state.cooldown = cooldown;
+        self.changed.notify_all();
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     pub fn acquire(
@@ -55,10 +75,7 @@ impl MediaReadGate {
             return Ok(MediaReadPermit { gate: None });
         }
         let started = Instant::now();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self.lock();
         let ticket = state.next_ticket;
         state.next_ticket = state.next_ticket.wrapping_add(1);
         state.waiting.push_back(ticket);
@@ -70,11 +87,15 @@ impl MediaReadGate {
                 return Err("Library work cancelled".into());
             }
             let now = Instant::now();
-            if !state.busy && now >= state.available_at && state.waiting.front() == Some(&ticket) {
+            if state.active < state.limit
+                && now >= state.available_at
+                && state.waiting.front() == Some(&ticket)
+            {
                 state.waiting.pop_front();
-                state.busy = true;
+                state.active += 1;
                 tracing::debug!(path = %path.display(), waited_ms = started.elapsed().as_millis(),
-                    cooldown_ms = self.cooldown.as_millis(), "Remote media read admitted");
+                    active = state.active, limit = state.limit, "Remote media read admitted");
+                self.changed.notify_all();
                 return Ok(MediaReadPermit { gate: Some(self) });
             }
             state = self
@@ -100,15 +121,17 @@ impl MediaReadGate {
 impl Drop for MediaReadPermit<'_> {
     fn drop(&mut self) {
         if let Some(gate) = self.gate {
-            let mut state = gate
-                .state
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            state.busy = false;
-            state.available_at = Instant::now() + gate.cooldown;
+            let mut state = gate.lock();
+            state.active = state.active.saturating_sub(1);
+            state.available_at = Instant::now() + state.cooldown;
             gate.changed.notify_all();
         }
     }
+}
+
+/// Configure the process-wide gate (startup, from `probe.concurrency`).
+pub fn configure_remote_reads(limit: usize, cooldown: Duration) {
+    REMOTE_READS.configure(limit, cooldown);
 }
 
 /// All production background media reads use this process-wide gate.
