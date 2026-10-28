@@ -15,6 +15,8 @@ fn program(dir: &Path, name: &str, body: &str) -> PathBuf {
 
 #[test]
 fn metadata_and_artwork_processes_share_remote_admission() {
+    // Limit 1 makes sharing observable: both paths take the same gate.
+    marker::media_read::configure_remote_reads(1, std::time::Duration::ZERO);
     let dir = tempfile::tempdir().unwrap();
     let events = dir.path().join("events");
     let probe = program(

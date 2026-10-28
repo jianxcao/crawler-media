@@ -1175,6 +1175,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

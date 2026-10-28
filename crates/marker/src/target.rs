@@ -68,7 +68,7 @@ impl ProbeTarget {
                     "-probesize",
                     "10000000",
                 ])
-                .arg(url);
+                .arg(crate::redirect::resolve_remote(url));
             }
         }
     }
@@ -131,7 +131,7 @@ impl ProbeTarget {
                 if start_ms > 0 {
                     cmd.args(["-ss", &seek_str]);
                 }
-                cmd.args(["-i", url]);
+                cmd.arg("-i").arg(crate::redirect::resolve_remote(url));
             }
         }
     }
