@@ -1,6 +1,8 @@
 # library.db 结构审计：删掉不再挣钱的东西（Task 16）
 
 > 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
+>
+> 2026-10-28 对照 `9f6126d3`：R6 人物过滤、R9 静态 facet 边际读取、R11 死模块删除均已落地；真正未实施候选为 R5/R7/R8/R12，见第8节。生产连接已调用 `PRAGMA optimize`，可能生成/更新 sqlite_stat1；后续计划门禁须覆盖统计前后。以下历史空间与延迟数字不改写为本轮结果。
 
 日期：2026-10-26。分支：`feat/storage-redesign`。起点：`be7b6915`（layout v3）。
 任务：计划 `2026-10-26-storage-redesign-review-fixes.md`（历史原文：`git show 5730b032:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`） 的 Task 16。
@@ -18,8 +20,7 @@
    再用 `git grep` 把每个 `CREATE TABLE`/`CREATE INDEX` 追到 store 函数，再从函数追到 `crates/api` 调用点。
 2. **删掉会怎样**：对每个可疑索引，在**同一份**已播种库上 `DROP INDEX`，把 764 条语句重新规划一遍，
    逐条 diff。零 diff = 没有任何生产语句的计划会变（不是“我觉得没人用”）。这是本审计判“死索引”的判据。
-   注意：生产从不跑 `ANALYZE`，所以 `sqlite_stat1` 不存在，规划器的估算与实际行数无关——
-   空库上的计划与满库一致，这是可以放心用空库做计划断言的前提。
+   当时实验以无统计的空库计划为前提；该前提不适用于当前生产。`open.rs` 的打开/关闭策略已调用 `PRAGMA optimize`，可采样 ANALYZE，空库计划不能替代真实分布。当前索引裁决须同时核对统计前后。
 3. **空间与宽度**：`dbstat` 逐对象字节数 / 页数。
 
 播种夹具（合成，`sqlite3 < library.sql` + 一段纯 SQL 播种，脚本见第 9 节）：
@@ -52,7 +53,7 @@ CARGO_TARGET_DIR=target/audit cargo test -p store
 
 **v4 落地状态（2026-10-26 晚，Task 24）**：H4 的两个死索引、`protocol_people_tmdb` 改序、
 H3（R1）、H1（R2）、H6（R4）、H7（R3）以及版本号 3→4 已经落在同一个 v4 轮次里；
-R6（人物过滤 SQL）已作为 **Task 25** 单独落地（无 DDL，见第 6 节）；R9、R5、R7、R8、R11、R12 **没有**做，理由在各行。
+R6（人物过滤 SQL）已作为 **Task 25** 单独落地（无 DDL，见第 6 节）；随后 R9/R11 也已实现。当前未实施候选仅 R5/R7/R8/R12，理由见第8节。
 v4 之后的结构：**53 表 / 592 字段 / 76 命名索引 / 37 组 FK**。
 
 **一句话**：这份 schema 的问题不在“表太多”，而在**派生结构被写了很多次、读得很少**——
@@ -358,7 +359,7 @@ EXISTS (SELECT 1 FROM library_protocol_people p
   `query_model_layout.rs`、`media_alias_updates.rs`、`merge_support`、`media_merge_{recovery,snapshots}.rs`、
   `storage_work_bounds/seek_scale.rs`、`crates/api/tests/storage_query_scale.rs`（夹具列清单）
 
-**没有做的**（都是“读侧”或跨 crate，见第 6 节）：R6、R9、R5、R7、R8、R11、R12。
+该 DDL 轮次之外的建议见第6节；R6/R9/R11 后续已实现，R5/R7/R8/R12 仍为候选。
 
 ## 6. 按收益/风险排序的修复清单（给 Lead 决策）
 
@@ -374,9 +375,9 @@ EXISTS (SELECT 1 FROM library_protocol_people p
 | R6 | **修协议人物过滤的 SQL 形状**（身份集物化一次） | 同结果下 **1,310× 更少 VM 步**、**1,196×–5,921× 更快**；两个 `protocol_people_*` 索引从“0 读者”变成真有读者 | 低：只改 `library_query/protocol/{membership,mod}.rs` + 测试，**无 DDL** | store/src + 计划断言 + 工作上限断言 | **已落地（Task 25）** |
 | R7 | 把 studio 并进 `library_item_terms`，删 `library_protocol_terms` | −3.31 MB（表 + `protocol_terms_media`），少一张每卡同步的表 | 高：会让 web facet 的 genre/studio 取值集合变化（NFO 独有的 genre 进入公共倒排），属语义变更 | DDL + 投影 + facet 语义评审 | 只在确定“web facet 可以接受 NFO genre”后才做 |
 | R8 | `files_root_path(root_id,path_key)` → `(root_id)` 或 `(root_id,library_id)` | 少复制一份最宽的 `path_key` 文本（1.88 MB → ~0.2 MB 量级） | 低-中：需要 FK 子查询仍可 seek（`(root_id,library_id)` 满足 FK，`EXISTS(root_id)` 满足 prune） | DDL + 计划断言 | 可并入 v4；先补一条 `DELETE FROM library_roots` 的 FK 子查询断言 |
-| R9 | facet 计数改走 `library_query_counts`（9/10 维度） | 读放大从 O(cards)×10 降到 O(边际行) | 中：`bucket_count_sql` 的短路条件需重写，一致性依赖 `counts::apply` | store/src + Task 17 门禁 | 与 R6 并列的读侧收益；不入本轮 DDL |
+| R9 | facet 计数改走 `library_query_counts`（9/10 维度） | 读放大从 O(cards)×10 降到 O(边际行) | 中：`bucket_count_sql` 的短路条件需重写，一致性依赖 `counts::apply` | store/src + Task 17 门禁 | **后续已落地**：无筛静态边际；筛后精确交集仍有规模成本 |
 | R10 | `BrowseOrder::LastPlayed` 的 `COALESCE` 排序 | 每次该序都 TEMP B-TREE | — | 需要 `user_library_items` 上的表达式索引或改 SQL | **不建议**：一个排序序换一棵索引不划算，记录在案 |
-| R11 | 删死模块 `ledger_presence/probe_work.rs` + `schema/probe_backpressure.rs` | 无写放大收益，但它们引用**已删除的表**（`ledger`、`ledger_probe_obligations`），一旦被接线就是运行时错误 | 低（无调用点，`git grep` 已确认） | store/src | 建议任何人顺手删；不影响本任务的验收 |
+| R11 | 删死模块 `ledger_presence/probe_work.rs` + `schema/probe_backpressure.rs` | 无写放大收益，但它们引用**已删除的表**（`ledger`、`ledger_probe_obligations`），一旦被接线就是运行时错误 | 低（无调用点，`git grep` 已确认） | store/src | **后续已删除**：当前文件树不存在这些模块 |
 | R12 | `probe_job_units` 加 `enqueued_seq` 后转 WITHOUT ROWID | 少一棵 PK autoindex；派发顺序从隐式 rowid 变显式列 | 中：`probe_tasks.rs`/`probe_dispatch.rs` 4 处 `ORDER BY rowid` | DDL + store/src | v4 之后再说（先做 R6/R1 这类高收益项） |
 
 ### 6.1 R6 落地实测（Task 25，2026-10-26）
@@ -425,9 +426,7 @@ NEW 在同区间 ×3.7，即 O(卡 × 自己的 person 行)。**`fullscan_steps`
   索引总量 15.6 MB 确实等于表的 2.9 倍，但删任何一个都会让对应排序退化为 TEMP B-TREE，
   而 `library_schema_audit.rs` 现在会判红。
 - **`items_protocol_default` 与 `_explicit` 都保留**：v3 已用交叉实验钉死（E4），本轮不重新论证。
-- **`protocol_people_wire` / `protocol_people_tmdb` 保留**：今天是 0 读者，但它们是 R6 唯一便宜的修法
-  （实测 `wire_id` seek 0.0 ms）。**这是本审计里唯一“按未来读者保留”的索引，理由已量化**；
-  若 Lead 决定不做 R6，则这两个索引应连同 `library_protocol_people` 的协议过滤一起删。
+- **`protocol_people_wire` / `protocol_people_tmdb` 保留**：R6 已落地，`protocol/membership.rs` 的物化身份集分别 seek 两个索引；当前已有真实读者，不再以“未来读者”作保留理由。历史 seek 数字见第6.1节。
 - **`library_query_counts` 保留**：6 处生产读，唯一 O(1) 计数路径（第 2.3 节）。
 - **`library_query_count_rebuild` 保留**：integrity 的跨事务暂存，行数是
   `surface × dimension × value`（与卡片数无关），跑完即删。
@@ -440,21 +439,19 @@ NEW 在同区间 ×3.7，即 O(卡 × 自己的 person 行)。**`fullscan_steps`
 - **`chapter_frame_tasks`、`probe_season_comparison_history` 保留**：外部调用点各 1 处
   （章节帧生成、marker refresh 的比较摘要），窄表、行数有界。
 
-## 8. 建议但没有做（以及为什么）
+## 8. 当前仍未实施的候选（2026-10-28 核对）
 
-审计当时（v3）建议但没有做的项，v4 轮次里 R1/R2/R3/R4 已落地、版本号已 bump、两份
-`docs/database/*.md` 已按 v4 统计更新。**仍未做**的如下：
+R1/R2/R3/R4 已在 v4 实施；R6 人物过滤已实现，R9 无筛静态 facet 走边际表已实现（筛后仍精确求交），R11 所列死模块已删除。不要按原执行稿重复实施。当前公开工作量与未完成容量门见[复审](2026-10-28-storage-main-rereview.md#查询性能与真正未完成的优化)。
 
-| 项 | 为什么没做 |
+| 候选 | 下一步证据与风险 |
 |---|---|
-| R6（人物过滤 SQL） | 这是**读侧**修复（`library_query/protocol/membership.rs`），不动 DDL；已给出实测数字（157×/1000×+）与修法，Lead 已决定单独立项 |
-| R9（facet 走边际表） | 需要重写 `bucket_count_sql` 的短路语义，且它是“读放大”，不是“结构多余”；建议在 Task 17 门禁基线之上单独做 |
-| R5（`file_details` 两个指纹列） | 跨 `store` + `api` 两个 crate（`api/probe_manager/probe.rs:492` 一直写 `None`），需先确认那不是临时状态 |
-| R7（studio 并入 terms 后删 `library_protocol_terms`） | 会让 web facet 的 genre/studio 取值集合变化，属语义变更，需要单独评审 |
-| R8（`files_root_path` 收窄为 `(root_id,library_id)`） | 纯 DDL，可并入下个轮次；本轮不追加 DDL（一个版本号一次 DDL 轮次） |
-| R11（死模块 `ledger_presence/probe_work.rs`、`schema/probe_backpressure.rs`） | 已由 Lead 归入死代码任务，不在本任务 |
-| R12（`probe_job_units` 加 `enqueued_seq` 后转 WITHOUT ROWID） | 需要同时改 4 处 `ORDER BY rowid`，属下一轮 |
-| 用真实 20k/61k 夹具重测 | Task 17 的夹具缓存键包含 `schema/**/*.sql` 哈希，v4 的 DDL 改动会让它自动重播种；让 Task 17 跑完整门禁比在 debug 下重测更可信（本审计的百分比来自同一形状的合成夹具 + `dbstat`，与 Task 17 的 `dbstat` 口径一致） |
+| R5（file_details 两个指纹列） | 先列全部生产读写与重建成本，确认与 fingerprint_cache 是否真正重复，再做去列 A/B；跨 store/api。 |
+| R7（协议 terms 合并） | 可能改变 Web facet 的 genre/studio 集合，先单独明确语义，再测写放大和查询成本。 |
+| R8（files_root_path 收窄） | 核对真实根查询计划，统计前后比较读/写/页成本；不能仅凭较早空库 drop-diff 删列。 |
+| R12（Probe 显式派发序后 WITHOUT ROWID） | 先替换真实 rowid 顺序合同并测并发/重试公平性，再比较页与写入收益。 |
+| 完整规模/设备 | 既有20k/100k合成测量只对各自版本负责；1M文件/Playback组合、NAS等仍是独立现场门。 |
+
+上述是候选，不是已确认必须修复的设计缺陷；实施时 DDL、布局版本、唯一对象声明、字典与旧布局拒绝测试同批更新，不增加迁移兼容。
 
 ## 9. 复现
 

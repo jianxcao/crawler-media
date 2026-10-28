@@ -1,178 +1,144 @@
 # 存储重构再次复审与剩余修复方案
 
-日期：2026-10-28。比较基线 `main` / `origin/main`：`756444f76bef53f5fabed6d0ef53e9f280e005e9`；审查代码：`feat/storage-redesign@5730b0320c76992fac3b1517165567c2e6f1bbc6`。已 fetch 核实远端 main；merge base 即该 main。审查开始时工作区干净。
+日期：2026-10-28。审查代码：`feat/storage-redesign@9f6126d358c18afc532f6b551dadccdfa8ed0558`；比较基线 `main/origin/main@756444f76bef53f5fabed6d0ef53e9f280e005e9`，merge base 相同。开始时工作区干净。下文行号固定于该 HEAD；本文后续文档提交不属于被审查实现。
 
-> 后续实施记录：R1–R5 的修复已在本分支实现。扫描认领与执行使用专用线程，item-index 使用带最终权限重验的只读快照；NFO 失败退出和恢复受路径所有权约束；Integrity guard 使用部分索引，Library 布局升为 v8；分集状态按请求键窗口读取；卡片游标绑定版本和查询作用域。下文保留审查时的代码版本、复现和建议，不代表当前实现仍有这些原始缺陷。分集状态及覆盖查询的规模工作量和跨窗口快照已测，但完整 HTTP 请求跨线程的 SQL/解码工作量尚未汇总，不能视为该项规模验收通过。
+**结论：仍有 3 项 P1、1 项 P2，建议修复后再合并。** 五文件与 library.db 内的事务边界合理，上一轮 R2–R5 已有实质修复；R1 的主路径修好了，但执行器阻塞仍有遗漏。新增确认了写门禁绕过和 Media 冻结/退役后仍可写的问题。无兼容要求也尚未完全落实。
 
-> 修复验证：`cargo test -p store` 744 passed / 0 failed / 11 ignored；`cargo test -p api` 1,776 passed / 0 failed / 9 ignored；`cargo test --workspace --no-fail-fast` 3,161 passed / 0 failed / 24 ignored。忽略项不计为已验证。扫描恢复持有旧状态副本时使用已配置 Catalog 的回归也已覆盖。
+本轮只 review、运行现有测试及临时离线反例、更新文档；不修改 Rust/TS/SQL/测试，不部署、不改用户实例、不创建 issue。相对 main 共 1,527 文件、184,022 行新增、65,353 行删除；本轮重点追踪存储、生命周期、查询及消费者链路，不声称逐行穷尽全部差异。R6 明确属于 main 已存在的缺口，其他发现分别说明其来源。
 
-**结论：仍有问题，建议先修复下面 R1–R5 再合并。** 五文件及 library.db 内的事务边界合理；上一轮 F1–F8 大部分修复已经落地，但 F2 的执行器阻塞没有清完，F4 新增的独占路径缺少失败退出。另有已实测的 Integrity guard 历史扫描、分集查询放大，以及未绑定作用域的卡片游标。
+## 架构与数据库判断
 
-本轮只审查、运行现有测试和临时复现、更新文档；不修改 Rust/TS/SQL/测试，不执行修复方案，不操作用户实例或重建数据库，不创建 issue。下文行号固定于上述代码 SHA。相对 main 的范围为 1,524 个文件，183,257 行新增、65,235 行删除；重点追踪存储与消费者链路，不声称逐行穷尽整个 diff。
+- 保留 app.db（配置/凭证）、library.db（Media/Library/Playback 权威事实）、subscribe.db（策略/下载事实）、jobs.db（执行事实）、cache.db（外部响应）的生命周期分区。Media、文件、覆盖、采用元数据与摘要同库事务，比 main 的跨文件更新更合理，没有证据要求再次拆库或换数据库。
+- 显式 Library/root 归属、文件版本 CAS、原始 Playback 与物理恢复包分离、冷详情、单位覆盖及增量摘要均有用途。跨文件没有 FK/原子提交，持久操作负责恢复；R7 表明恢复正确性还依赖每个写入口遵守冻结合同，不能仅凭阶段表存在就验收。
+- 当前 library 布局 **v8：53 表、594 字段、81 个显式索引、37 组 FK、0 触发器**。五文件结构与唯一 DDL 见[数据库字典](../database/README.md)。表数/文件大小本身不是不合理设计的证据，热点工作量和写入代价才是优化依据。
+- 旧数据库布局拒绝、不导入、不双读双写；旧 directory 聚合、Naming 拆解、Downloader JSON 回退、无签发 self Playback 已删除。当前 Web 未发现继续调用这些旧入口，静态图片仍在 public 路由。仍有 R9 的旧输入别名/偏好转换；因此不能宣称“所有兼容已经清除”。Jellyfin 协议映射及外部 Metadata source 合法失败回退按各自合同处理。
 
-## 架构与无兼容切换判断
+## 剩余发现与技术方案
 
-- 保留 `app.db` 配置/凭证、`library.db` Media/Library/Playback 权威事实、`subscribe.db` 策略/下载事实、`jobs.db` 执行事实、`cache.db` 外部响应的分工。Media、文件、覆盖、采用元数据与摘要同库事务维护，比 main 的跨文件更新更合理；不建议再次拆库。
-- 文件的显式 Library/root 归属、完整版本 CAS、冷详情、单位覆盖、稀疏用户摘要、协议成员/边际计数均有明确用途。不能为减少表数删掉恢复状态或必要摘要；永久删除根边界也不能按普通历史清理。
-- 当前 library schema 为 **v7，53 表、594 字段、80 个显式索引、37 组 FK、0 触发器**。DDL 统计不等于业务完整性验收。权威源码及所有分区统计见[数据库入口](../database/README.md)。
-- 上轮具体旧合同已删除：`library_name/name` 双字段、Library operation `state/phase` 回退、merge 缺失/旧 phase 回退；Library PATCH 拒绝旧字段。旧 `/directory`、旧 Naming 拆解、Downloader settings JSON 回读和无签发 self Playback 没有因本次修复恢复。当前 schema 拒绝旧布局，不导入、不双读双写；没有发现需保留的旧数据库兼容层。
-- 本轮核查的存储相关前端消费者已使用当前合同，列出的旧字段/双形状未见残留；849 项测试、类型检查和构建通过，不代表逐条穷尽所有 API。仍存在的 `phase`、`library_name` 等词须按所属 DTO 判断；Jellyfin 协议映射、外部元数据失败回退、文件多版本和合法默认值不属于旧自有 API 兼容。
+沿用既有 R1–R5 编号用于历史对账，本轮新增从 R6 开始。
 
-## 剩余发现
-
-| 编号 | 优先级 | 触发与影响 | 与前轮关系 |
+| 编号 | 优先级 | 确认的问题 | 来源 |
 |---|---|---|---|
-| R1 | P1 | Store 争用让 up-next、扫描协调及部分收尾占住 Tokio worker；无关定时器也延迟 | F2 / 更早 Task 22 未完整完成 |
-| R2 | P2 | 首次 NFO 导出遇人工编辑后留下无法恢复的活跃 owner，新导出及 Library 配置一直被拒绝 | F4 原竞争已挡住，失败退出仍缺 |
-| R3 | P2 | Integrity 写屏障扫描全部终态 operation 历史，影响播放进度等高频写入 | F8 修的是另一条查询，不能覆盖此项 |
-| R4 | P2 | 分集状态批量读超出请求范围，另一分集接口仍逐集点查 | 前轮额外优化未完成 |
-| R5 | P2 | 同一游标换库或换排序仍被接受，静默漏项/空页 | 前轮游标作用域建议未完成 |
+| R6 | P1 | metadata 变更路由绕过实例只读与维护写门禁，受保护期间仍能删文件事实 | main 已存在，本轮确认；属于当前存储安全合同缺口 |
+| R7 | P1 | Playback mark 可写 merging/retired Media；阶段恢复后可能永久卡在 retire | 当前重构冻结/恢复合同未闭环 |
+| R8 | P1 | Media operation 等锁及 up-next 补图仍阻塞 Tokio worker | 原 R1 / Task22 剩余项 |
+| R9 | P2 | 新查询保留旧 watch 别名，Web 仍转换旧排序偏好 | main 旧逻辑保留，最新游标又延续别名 |
 
-### R1：同步 Store 等待仍在异步执行器上
+### R6：metadata 路由绕过写门禁
 
-关键位置：
+位置：`crates/api/src/http/routes/mod.rs:73` 直接 `.merge(admin_metadata_routes())`；对照同文件的 `write_gate` 会先检查 `require_writable`，再检查 `require_write_admitted`。`routes/admin.rs:253` 注册的 `DELETE /ledger/{id}` 进入 `http/library_admin.rs:129`，handler 没有补这两道检查。
 
-- `crates/api/src/http/playback_views/up_next.rs:87`、`:93` 同步调用候选读取，`:121` 获取 Store；仅后续 artwork 阶段进入 blocking budget。
-- `crates/api/src/scan_operations.rs:78`、`:94` 的 `trigger_next` 同步 claim；`:204` 的 `RunningGuard::drop` 从异步扫描任务调用它。
-- `scan_operations.rs:325` 调 `acquire_library_work`，经 `library_lifecycle.rs:202` 的 Registry → `:209` Store 同步锁。
-- `http/library_scan.rs:34` 的 scan/enqueue、`http/library_scan/operations.rs:57`、`:93` 的 cancel、`library_lifecycle.rs:91` 的删除异常收尾仍有相同问题。
-- `http/library_scan.rs:521`、`:544` 的 item-index，以及 `http/library.rs:582`、`:598` 的分集查询也在 async handler 内拿 Store。
+**已运行公开 HTTP 反例：** 临时 Store、有效管理员 token、发布文件事实，fake Fetcher/MemoryDownloader，无网络。
 
-**已运行复现：** ApiState 在 runtime 外建立；另一 OS 线程持 Store 500ms，在 current-thread runtime 中并发执行真实 `GET /api/v1/playback/up-next` 与 10ms timer。请求返回 200，timer 为 **502.608ms**；直接调用异步扫描收尾所用的 `trigger_next`，timer 为 **513.872ms**。两个路径均链接当前 api/store 编译产物，无真实网络。不同运行有约 1ms 波动，不影响阻塞结论。
+| 条件 | DELETE /api/v1/ledger/{id} | 对照 POST /api/v1/libraries |
+|---|---|---|
+| `state.with_instance_writable(false)` | 200，deleted=true，数据库文件行确实消失 | 409 instance.read_only |
+| 持有 `state.write_gate().close()` | 200，文件行确实消失 | 503 runtime.busy |
 
-同一修改还把 `scan_operations.rs:290`–`:450` 的 `run_operation` 扩至 161 行，超过 AGENTS 的生产函数 120 行硬上限；准入、线程执行与异常收尾也确实是不同职责，应随此项拆分，不以文件未超 800 行代替函数检查。
+反例未指定 delete_file=true，视频字节保留；没有把未运行的磁盘删除也写成实测。本缺口在 main 已存在，不能归因于最新修复；本次数据库设计仍承诺只读实例和维护期间拒绝变更，因此需要闭环。
 
-这是执行器阻塞；没有据此证明 SQLite 永久锁环。多 worker 运行时也会被足够多并发请求占满。SQLite busy_timeout 不限制外层 parking_lot Mutex 等待。
+**方案：** metadata 路由组的变更统一经过现有 write_gated，避免每个 handler 自己补一份判断。逐项核对真正只读的 GET 和 preview，只有无持久副作用的 preview 才可豁免；不得按名称假定安全。维持实例只读 409 优先、维护 503+Retry-After 的现有合同，写门检查位于任何数据库/磁盘副作用之前。核对其余存储变更路由是否已经由组或 handler 负责同一准入，避免再次遗漏。
 
-**修复方案：** HTTP 读取复用 `store_read`；写入使用既有 `run_to_completion` 与有界等锁，不以外部 timeout 在写入仍执行时提前报告失败。扫描 `Drop` 只以非阻塞方式发送完成/唤醒通知，由单一协调器维护运行集合并在阻塞边界执行 claim，或使用专用协调线程。现有 claim 会持 running_ops 等 Store，不能只把原函数 offload 后让 Drop 再等同一协调锁；不得跨 Store 等待持有 async/Drop 路径也会获取的协调锁。若保留短锁，先释放再等 Store，并用 reservation/CAS 保证准入唯一性。继续遵守 Registry → Store 顺序，等待工作排空时不持这两把锁。扫描 walk 保持专用线程；不能让占满 blocking pool 的 walk 再等待同池 bookkeeping。item-index 的全库排序遍历应走现有 reader snapshot，执行后重验凭据/ACL/config，避免把整个索引生成放在 Store guard 内。
+**验收：** 真实 Router 对 metadata 组每个变更入口覆盖两个关闭条件，分别断言 409/503+Retry-After、文件事实/摘要/操作行/磁盘字节不变；正常写入和安全读取作为对照。另测关闸前已准入请求与维护开始的交错，核对连接串行与预算结果；原子门禁标志本身不证明在途写已排空，不能仅检查响应码。
 
-**验收：** 同样 500ms 受控争用下，10ms timer 在 200ms 内完成；覆盖 up-next、scan 准入、取消、`Drop` 通知、删除异常收尾、item-index 与分集。HTTP busy 使用已有 503/Retry-After；写请求等待真实结果。测试始终先释放持锁线程并 join，再做响应性断言；同时验证有限 blocking 容量、取消、panic 和重启，不只覆盖成功 handler。按准入、执行/汇合、终态处理拆分 run_operation，每个生产函数不超过 120 行，避免只提取参数透传包装。
+### R7：Media 冻结与退役写屏障遗漏 Playback mark
 
-### R2：NFO 失败后永久占有 sidecar
+位置：`crates/store/src/playback/mutate.rs:324`–`:335` 仅检查 Integrity owner，随后直接 UPSERT playback_units；没有检查 Media identity_state。`http/playback/watch_state.rs:362`–`:377` 调用该入口，而 `http/playback/selection.rs:139` 对 whole 坐标直接放行。合并恢复 `media_operations/apply.rs:123` 按阶段继续，进入 subscribes/retire 后不再执行原 library 合并。
 
-位置：`crates/store/src/metadata/export_driver.rs:463`–`:465` 写失败直接返回；`:505`–`:536` 的无基线恢复保持 pending；`metadata/export.rs:160`–`:166` 拒绝第二个 owner；`crates/api/src/scrape_metadata/export.rs:105`–`:123`、`:148`–`:154` 的错误处理只记日志。
+**已运行证据：**
 
-**已运行的确定性交错：**
+1. Store 公共入口 begin_media_merge 冻结双方；mutate_playback(loser) 仍返回 Ok。完成合并后再写 retired loser 仍返回 Ok，新增事实重开 Store 后依然存在。
+2. 真实 `POST /api/v1/playback/marks` 对 merging loser、retired loser 均返回 **200**，收藏事实确实写入。使用有效 User/token，不是绕过 HTTP 的内部 SQL 写入。
+3. 临时库安装故障触发器，仅令 phase_cursor 向 retire 推进失败，使持久阶段停在 subscribes（模拟 library 事实提交后跨文件边界中断）；此时通过公共 mutate_playback 写 loser。撤掉故障后连续两次 advance_media_merge 均因 `references remain (playback_units=1)` 失败，游标停在 retire，两个身份保持冻结。初始故障已消失，恢复仍不能收敛。
 
-1. 文件存在、sidecar 不存在、没有旧导出基线，持久化 A 的 plan。
-2. 用户创建有效 `<movie><title>Hand edited</title></movie>`；A 的写入因 digest 不符返回 Conflict，writer 已退出。
-3. B/C 新 plan 均报 `nfo path ... owned by operation-a`；Library locale 变更报 `already has an operation`。
-4. 重开 Store，恢复 A 连续两次均报 `refused to overwrite externally changed`，pending 仍为 true；D 新 plan 仍被拒绝。人工 NFO 字节保留。
+这是持久业务状态阻塞，没有证据把它称为 SQLite 锁死。成功合并后允许对旧 ID 继续写也违反“retired 只作拒绝墓碑”的无兼容合同。
 
-活跃 Scrape 会阻止改根/语言/Integrity/删除（`library_operations/integrity_guard.rs:74`）。恢复在取得实例租约后的 startup work 执行（`api/src/job_loop.rs:183`、`:202` → `storage_operations.rs:234`）；此意图没有普通运行期周期重试。通用 retry 只接受 failed roots/locale/default_locale/integrity（`http/library_operations.rs:214`），没有可处理 planned Scrape 的取消/失败出口。
+**方案：** 在 Playback 公共写入口的同一 library 写事务内复用身份写屏障，merging/retired 拒绝后零写；不能只在 HTTP 层先查状态。盘点 mark、轨道编辑、直接 unit 写入及签发事件的生产路径，保留已有旧会话 IgnoredStale 语义，并确保迟到事件不会制造可写 loser 引用。将 Protected 映射为明确冲突及当前 survivor 信息，不自动把旧 ID 写重定向给 survivor。合并驱动继续只按已提交阶段推进；不得用每次重跑 library phase 来掩盖新引用，否则可能重复归并用户事实。
 
-**修复方案：** 在驱动确认原 writer 已退出后，把“源已被外部修改且无安全基线”等不可重放冲突，以当前 operation_id/owner CAS 转成终态 failed，记录原因并保留人工字节；允许后续请求重新观察。重新观察须按既有 Library-scoped NFO 输入/采用规则保留有效人工字段后再渲染，不能只更新 digest 后覆盖，也不能把失败计划伪造成已完成的导出基线。临时 IO 错误如需保留 pending，必须有真实、有界的重试调度和明确取消出口。终态转换和路径释放必须由拥有该次执行的驱动负责，不能为解锁删除仍可能写盘的意图。继续保留 v7 路径唯一性，不恢复“新意图覆盖旧意图”。
+**验收：** Store 和真实 self/Jellyfin mark seam 覆盖冻结、退役、正常身份；冻结/退役写入被拒绝且无用户行/摘要变化。固定上面的跨阶段中断，尝试晚到写入、重启后恢复，合并必须成功且 survivor 事实守恒；已签发会话、收藏、显式撤销与多 User 隔离全部保留。首次重现故障的 trigger 只用于 fixture，生产不加触发器兼容层。
 
-**验收：** 首次导出无基线/外部编辑、不可读或无效 NFO、临时 IO、写盘成功后登记前崩溃分别有公开 driver 回归。不可重放冲突退出后，人工字节不变、旧行 failed、新计划可创建、Library 配置可继续；后续成功导出仍保留人工字段，或明确停在可操作的待人工解决状态，不能只验证旧失败时未覆盖。重启行为一致。可重放失败必须能实际收敛。路径竞争回归继续通过。
+### R8：执行器阻塞仍有两个生产分支
 
-### R3：Integrity 写屏障随不相关操作历史线性增长
+- `http/media_operations.rs:132`、`:159`：async POST merge / GET operation 直接等待 Store Mutex。
+- `http/playback_views/up_next.rs:491`–`:493`：`tokio::spawn(async {...})` 内同步调用 attach_backdrop。后者在 `poster_fetch.rs:605`、`:612` 获取路径租约/Store，并在 `:636` 调同步 Catalog，还可能做文件/HTTP IO。async 包装不会把同步工作移出 Tokio worker。
 
-位置：`crates/store/src/library_operations/integrity_guard.rs:55`–`:65`：先从 `library_operations o` 选 `kind='integrity' AND state<>'succeeded'`，再按 Media 存在性检查；当前计划为 `SCAN o`。调用包括 `playback/event.rs:68`、`playback/mutate.rs:325`、`metadata/adopt.rs:34`、`library_write/publish.rs:285`，因此不限于少量管理员操作。
+**已运行真实 HTTP/current-thread 反例：** Media operation GET 遇外线程持 Store 500ms，10ms timer 延迟 **506.163ms**（请求 404）；up-next 有真实候选且缺 fanart，fake Catalog 耗时 500ms，10ms timer 延迟 **510.400ms**（请求 200）。无网络；第一个 holder 独立到期并 join 后才断言，测试不会因缺陷永久等锁。现有空 up-next 回归没有覆盖补图分支。
 
-**当前 bundled SQLite 3.50.2 实测：** 临时生产 schema；固定一个合法、无文件 Media，仅增加无关 succeeded Scrape 历史，执行 ANALYZE 并重开 Store，以载入统计。测公开 `Store::update_media` 的不变更新来隔离 guard 成本。没有重开、还用旧统计的连接可选出不同计划，不能省掉这一复现条件。
+**方案：** operation 读复用 store_read；写复用有界准入与 run_to_completion，响应真实完成结果，避免超时返回后写入仍继续却宣称未应用。背景图片补全放入有界 blocking 执行并按目标去重；保留 Registry→Store 顺序，磁盘/网络 IO 锁外执行。扫描已有专用线程，不再把它与补图混进无界同步 async 任务。
 
-| 无关终态历史 | 当前公开调用 VM / Fullscan / SQL数 | 仅临时库加候选索引后 |
-|---:|---|---|
-| 1,000 | 3,082 / 999 / 6 | 75 / 0 / 6 |
-| 20,000 | 60,082 / 19,999 / 6 | 75 / 0 / 6 |
+**验收：** 上述两个公开 HTTP 场景下 10ms timer 在 200ms 内完成；覆盖非空候选/缺图、Store 争用、busy、取消、panic 及副作用最终结果。先安全释放并 join holder，再断言响应性。当前未确认新的 SQLite 永久锁环或测试永久等待；这项是执行器饥饿，busy_timeout 不限制外层 Mutex 等待。
 
-隔离 guard SQL 本身为 3,009 → 60,009 VM，候选后均为 8；Sort 均为 0。候选仅用于临时数据库 A/B，不是已实施变更或生产延迟承诺。
+### R9：无兼容切换尚有旧值转换
 
-**修复方案：** 优先验证 `library_operations(library_id) WHERE kind='integrity' AND state<>'succeeded'` 的部分索引，同时覆盖按库与按 Media 的两种 guard。也可改查询从有关 Library 开始，但必须保留当前冻结保护语义，特别是 failed Integrity 仍可恢复且仍应拦写。索引变更同步提升布局版本、对象声明、字典与旧布局拒绝测试，不增加迁移；不能用缩短保留期代替消除热点扫描。
+位置：`store/src/library_query/items/filters.rs:84`–`:85`、`:150`–`:158` 接受 watched/unplayed/unseen；新 `items/cursor.rs:84`–`:88` 将这些值转换为 played/unwatched。它们来自 main 的旧过滤器；当前 Web 没有这些拼法的调用。
 
-**验收：** 真实 Store 写入口与签发会话的进度事件均覆盖；固定有关事实，将无关终态历史 1k → 20k，记录完整调用 SQL数/VM/Fullscan/Sort。加入活跃 Integrity 正确拒绝、无关库不拒绝、failed 继续冻结的对照。量插入/完成 operation 的写入与页成本后再保留候选索引；当前数据只证明读收益。
+**已运行 HTTP：** items/facets/item-index 对三种旧 watch 值的 **9 个请求均 200**，对照 nonsense 为 400。`seen` 是当前首页“最近观看”的独立业务语义，不能随旧别名删除。
 
-### R4：分集状态读取未按请求范围收敛
+另有 `web/lib/home-rows.ts:253`–`:265` 明确保留旧 release_date_asc 偏好转换，`web/test/home-rows.test.mjs:190` 起仍验收此兼容行为。当前部分 Web/API 的排序查询也实际使用 release_date_asc，所以若统一排序表示，必须同批迁移消费者，不能只删后端枚举。
 
-两个不同问题，不能混写为二次方扫描：
+**方案：** 只接受当前 watch 五值 unwatched/watching/played/favorite/seen，删除旧验证、SQL 分支与游标规范化。删除旧偏好专项转换，非法偏好按普通默认值处理。若统一旧排序表达，采用 release_date+order=asc，批量更新 Web enum、query builder、后端 parser 与测试，只保留一种表达，不做双格式读取。先明确当前合同再删除，不能把合法 Jellyfin 值当旧自有 API。
 
-1. Playback 的 `http/playback/episode_listing.rs:41` 先取整部 coverage；`:57`–`:60` 的 `effective_unit_states` 虽只做两条状态查询，但 `store/src/playback/assertions.rs:127`、`:174` 的 SQL 只限定 User/Media，加载整部的断言和状态。请求一季仍受其他季文件/历史数量影响。
-2. Library 的 `http/library.rs:598`–`:610` 按每集调用 `effective_watch_state` → `playback.rs:74` 的 Media 查询，加 own/whole/season/episode 点查，约 **5 条 SQL/集**。这一路是重复点查，不是每集加载全量快照。
-
-**当前 bundled 引擎的实际状态 SQL 工作量：** 固定请求 S01E01/E02，只增加 S02 的用户断言/行。
-
-| 无关分集状态行 | 两条 SQL 解码行数 | 两条 SQL VM | Fullscan / Sort |
-|---:|---|---|---|
-| 100 | 100 + 100 | 1,012 + 2,012 | 0 / 0 |
-| 10,000 | 10,000 + 10,000 | 100,012 + 200,012 | 0 / 0 |
-
-这测的是生产 SQL，不是整个 HTTP 的耗时；Fullscan=0 仍可能扫描大量索引区间。现有批量函数的 SQL 数常量不等于请求工作量常量。
-
-**修复方案：** 批量接口只读取请求 UnitKey 集合及其必要 whole/season 祖先，覆盖读取也按 Library/Media/季收窄；统一有效断言归约。Library 分集复用这个受限批量入口；不能直接换成现有整部批量函数再宣称完成。若键数超过 SQLite 绑定预算，按固定键窗口读取，并保证同一读快照。同步按 R1 移出执行器/长 Store guard。
-
-**验收：** 两个真实分集 HTTP 入口对相同可见逻辑单元返回一致的有效观看状态，并分别保留各自的列表语义和响应形状；较新 whole/season/episode、同时间 specificity、用户隔离全部保留。固定返回两集，把其他季状态/文件 100 → 10k，完整工作量不随无关数据增长；增加返回集数时，SQL 依固定键窗口增长，避免逐集查询。记录解码行和 VM，不能只断言 Fullscan=0 或 SQL 数=2。
-
-### R5：卡片游标不验证查询作用域
-
-位置：`crates/store/src/library_query/items/page.rs:51`–`:54` 的 PageCursor 仅有 keys/media_id；`:344`–`:350` 解码后构造 seek，未验证 Library/User/filter/order/direction 或键类型。对照 `library_query/details/episodes.rs:79`–`:87`，UnitCursor 已有 scope 校验。
-
-**Store 公共 API 已复现：** A 库 `[M,Z]` 第一页得到 M 的标题游标；B 库正常结果 `[A,B,X]`，复用该游标被接受并仅返回 `[X]`。将同一标题游标用于 Rating 排序也被接受，返回 `[]`。这是错误上下文被静默接受，当前 ACL 仍限定目标 Library，没有证明跨库数据泄漏，也未证明正常 UI 一定会发出该请求。
-
-**修复方案：** 当前唯一游标格式加入版本和规范化 scope 指纹，至少覆盖 Library、User 状态作用域、filter、order、direction、排序键类型；索引桶与分页共用同一编码/校验。换作用域或类型不符返回 Invalid/HTTP 400；删除无 scope 旧格式，不做解码回退。无需为此引入持久游标表或兼容转换。
-
-**验收：** 同 scope 连续分页稳定；换 Library/User/filter/order/direction 均拒绝；title 游标投 Rating、键类型损坏、缺失版本/scope 均 400；item-index 签发的桶游标仍可用于对应列表。数据自然变化的 seek 语义与 scope 不匹配分别测试。
+**验收：** 旧 watch 值在所有共享查询入口（含 gallery）返回 400，五个当前值保持正确结果；新游标 scope 回归继续通过。旧偏好不再得到专用映射，当前排序往返/首页顺序通过。用真实 HTTP/adapter 行为断言，不仅做源码字符串扫描。 `store/tests/probe_stage_state.rs:270` 的 v6_database_migrates_without_losing_probe_jobs 实际只创建并重开当前 v8，名称/注释仍声称迁移；下次清理应改为当前布局重开语义，配合既有旧布局拒绝门，不能把这个绿色测试当作迁移存在的证据。
 
 ## 上轮修复逐项对账
 
-前一轮审查代码为 `eb79bacd`，F1–F8 修复提交为 `5730b032`。原修复方案的 unchecked 不再用作当前待办。
+原 R1–R5 针对 `5730b032`，修复提交为 `9f6126d3`。旧完整反例与数字可从 `git show 9f6126d3:docs/audits/2026-10-28-storage-main-rereview.md` 读取，不再重复维护已完成实施步骤。
 
-| 旧编号 | 当前核对 | 证据/剩余 |
+| 原项 | 当前判断 | 本轮证据/剩余 |
 |---|---|---|
-| F1 有效观看状态 | 功能修复已落地 | `storage_review_playback` HTTP 覆盖整季/整部、取消、同时间、用户/重开；性能另见 R4 |
-| F2 executor 等锁 | **部分完成** | Transfer 等已 offload；R1 的真实生产路径仍阻塞 |
-| F3 failed Scrape 阻止准入 | 已修 | admission 复用 owning unfinished predicate；`terminal_operation_admission` |
-| F4 新意图替换旧 writer | 原交错已阻止，**失败退出未闭环** | v7 唯一路径 owner、`nfo_export_ownership`；R2 是新失败边界 |
-| F5 Barrier 错误路径挂死 | 已修该反例 | channel deadline/取消；`fingerprint_source_safety/rendezvous.rs` 有失败释放/无信号/掉线回归 |
-| F6 旧字段/双形状/phase 回退 | 已修列出的缺口 | 严格 PATCH、单字段 Web 消费、无效 merge phase 拒绝；当前 Web 三门通过 |
-| F7 NFO 秒写毫秒 | 已修 | `playback_clock.now_ms`；真实 export glue 的 retention 回归 |
-| F8 pending Scrape 扫终态历史 | 已修该查询 | `nfo_export_pending_age`；`nfo_export_work` 覆盖 pending 0/1/20、history 1k/20k；R3 是不同 SQL |
+| R1 / F2 / Task22 执行器 | 原点名的扫描协调、主 up-next DB 阶段、分集与 item-index 已修；整体**部分完成** | executor_not_blocked 5 passed；残余生产分支见 R8 |
+| R2 NFO 失败 owner | 原冲突/失败退出已修 | nfo_export_ownership 15 passed；精确 plan CAS、每路径执行 lease、失败终态释放及重启回归；不把代码存在扩大成真实设备验收 |
+| R3 Integrity guard 历史扫描 | 已修 | v8 部分索引，公开 update_media/progress 对无关历史 1k→20k 工作量稳定，含 failed 继续冻结对照及索引写成本 |
+| R4 分集超范围与逐集点查 | 原缺陷已修 | UnitKey+必要祖先、400 键窗口、同一读快照；状态/coverage 规模回归通过。完整 HTTP 跨线程 SQL/解码汇总尚未完成，见后续 O1 |
+| R5 游标无 scope | 已修 | 唯一 version/scope/键类型校验，跨库/User/filter/order/direction 拒绝；无旧游标解码回退 |
 
-更早 `710ac083` 的 R1–R10 经 `eb79bacd` 修复，当前代码已有完整 Presence 版本验证、多单元标记显式坐标、pending 发布顺序、毫秒时钟、完整 SDR 清 HDR、严格 Library 创建、Presence 窗口和去重归约、锁外 Subscribe 快照，以及旧死文件删除。相关回归仍在测试树；旧静态反例不能直接重报为当前缺陷。其 T9 的文件清理、存活 session、终态保留索引已进 v6，`storage_cleanup_work` 对 100/1k/10k 历史验证工作量；删除根墓碑未纳入 retention。
+更早 F1/F3/F5/F6/F7/F8 与 R1–R10/T9 的关闭映射保留在同一 Git 历史和各固定版本审计；本轮未把当年的反例重新报成当前缺陷。F6 当时列出的字段已删，并不意味着未列出的所有旧别名都已清除（R9）。
 
-历史 pending Scrape 查询曾在 bundled SQLite 下随 1k/20k 终态历史使用 7,012/140,012 VM、999/19,999 Fullscan、1 次排序；前轮候选为 9 VM、0/0。此为前轮数据，保留用于解释 F8，不能当本轮重新跑过的结果。
+## 查询性能与真正未完成的优化
 
-## 还值得做但没有证据要求立即改设计的优化
+本轮复跑现有公开 Store 工作量门，bundled SQLite **3.50.2**。下表是当前代码的 SQL 工作量；debug 与 workspace 并发运行，不以墙钟冒充 release/NAS 延迟。
 
-| 项目 | 当前判断 | 下一步验收 |
-|---|---|---|
-| 类型/genre/person/精确 total/facets | 成员投影、边际计数、kind 收窄与页内选源已存在；没有证据要求恢复旧 projection 或换数据库 | 保留现有工作量门禁。历史 [A 验收](../benchmarks/2026-10-25-large-hit-query-read-model.md)、[B 隔离](../benchmarks/2026-10-25-library-read-isolation.md) 的版本/规模不得冒充本轮实测 |
-| item-index 全库排序 | 桶计数本身可随命中规模增长；目前在 Store guard 内，首先按 R1 迁出 | 固定当前库、增加无关库；测 VM/解码/Store 持锁时间与 reader snapshot 生命周期 |
-| Store/cache schema 身份 | header/对象名校验不等于列、FK、CHECK、索引定义一致；Jobs 校验更严格 | 独立加固可比较生产 DDL 的规范化定义并对缺约束布局零写拒绝；当前不是发现自动迁移旧库 |
-| 独立 ResponseCache 连接策略 | Store 的 cache 为 NORMAL 并调 cache/mmap/temp；独立 media ResponseCache 只显式 WAL/timeout/FK | 先测写入 fsync、争用和 RSS，再决定共用策略。权威四库保持 FULL |
-| 进一步合并索引 / WITHOUT ROWID | v4/v5 已移除明确冗余；`playback_units` 不转换有历史空间证据。旧 schema audit 的 R5（指纹重复列）、R7（协议 terms 合并）、R8（根索引收窄）、R12（显式派发序后转换）仍待评估，不算已完成 | 先列全部真实读写路径和页成本；R7 涉及 facet 语义，须另评审，不能作为机械性能改动。历史空间数字不承诺当前收益 |
-| 完整容量与设备 | 100k Media / 1M Files / 1M Playback 组合、NAS/真机、OS 冷缓存、掉电尚未本轮验证 | 单独环境验收，不把未运行项写为通过；普通测试不接真实网络/Downloader/Chromium |
+| 数据变化/固定请求 | 当前结果 |
+|---|---|
+| 无关终态 operation 1k→20k | update_media 均 7 SQL / 109 VM / 0 Fullscan；签发会话 progress 均 27 SQL / 893 VM / 2 Fullscan |
+| 无关分集状态 100→10k，仅请求两集 | 均 3 SQL / 77 VM / 0 解码无关行 |
+| 其他季文件 100→10k，仅请求固定季两文件 | 均 1 SQL / 95 VM / 2 解码行 |
+| Query matrix 400→4000，固定页100 | 普通页 3184→3184 VM；Drama 页 6666→6666；协议 Drama 页 17459→17459 |
+| 同矩阵 facets | 无筛 567→567 VM；全命中 All 584→584；50% Drama 9146→84746，线性而非二次 |
+| Movie1000 固定、无关 TV400→4000 | kind_library 均10121 VM；kind_root 均172891 VM，total均1000 |
 
-R1 → R2 → R3 → R4 → R5 为建议实施顺序；R1 与 R4、游标与 item-index 有共同文件，避免同时改写。每项先在公开 seam 固定反例 red，再实现 green；每个触及 crate 单独 `cargo test -p <crate>`，末尾 workspace 一次；Web 有改动再跑三门。改 DDL 同步版本/对象校验/字典；任何任务均不添加旧布局或旧 DTO 兼容。
+类型（movie/TV）查询已先收窄，genre/person 成员投影、静态边际和页内水合已工作。当前证据支持这些改动，没有依据恢复旧 projection、盲目加索引或把精确 total 改成近似值。过滤后的 facets 仍需精确交集，大命中下并非常量成本。100k 历史 release/2-reader+writer 延迟只引用[原 A 报告](../benchmarks/2026-10-25-large-hit-query-read-model.md)及[原 B 报告](../benchmarks/2026-10-25-library-read-isolation.md)，不当作本轮重测。
+
+| 后续项 | 状态与技术验收 |
+|---|---|
+| O1 分集完整 HTTP 工作量 | **未完成验收**。Store 范围与快照已修；对 Library/Playback 两个实际 HTTP 请求汇总跨线程 SQL、VM、解码行及 coverage/归约，固定返回两集、其他季100→10k，工作量应稳定。只验证SQL条数不足。 |
+| O2 容量/设备 | 独立100k Media/1M Files/1M Playback组合、NAS、真实播放设备、OS冷缓存、掉电仍未执行。按单独环境验收，不把这些列成已发现回归。 |
+| O3 schema 身份加固 | Store/cache 的头与对象名不等于列/FK/CHECK/索引定义完整一致。可按 Jobs 单一DDL规范化比较加固，坏布局零写拒绝；不增加旧库迁移。 |
+| O4 连接策略 | 独立 ResponseCache 与 Store cache 策略尚未统一测量。先测fsync/争用/RSS与WAL再决定，权威库FULL不变；无证据不改耐久性换数字。 |
+| O5 schema 精简候选 | 旧结构审计真正未实施：R5指纹重复列、R7协议terms合并、R8根索引收窄、R12 Probe显式派发序后WITHOUT ROWID。先核对所有读写及页/写成本；R7涉及facet语义，不能机械合表。 |
+
+结构审计的 R6（人物过滤）、R9（静态 facets 走边际）、R11（死模块删除）已落地，不能再列待办；本轮已纠正该文。`PRAGMA optimize` 已可能采样 ANALYZE，旧“生产没有 sqlite_stat1、空库计划永远代表满库”的前提已失效。后续索引 A/B 应覆盖统计前后和 bundled 引擎。
+
+建议实施顺序：R6→R7→R8→R9；每项先公开 seam 固定 red，再实现 green，触及 crate 单独测试，末尾 workspace，Web变更跑typecheck/test/build。O1在下次声称分集性能完整验收前完成；O3–O5均需新证据再决定是否实施。本轮没有执行这些方案。
 
 ## 本轮验证与边界
 
-- Web：`npm --prefix web run typecheck` exit 0；`npm --prefix web test` **849 passed / 0 failed / 0 skipped**；`npm --prefix web run build` exit 0，存在原有大 chunk 提示。
-- Rust：`cargo test --workspace --no-fail-fast` exit 0，**3,127 passed / 0 failed / 24 ignored**，472 个测试程序/文档测试结果段；ignored 不计为已验证。本轮只改文档，没有触及需要另跑单 crate 门的源码。
-- 临时反例：真实 HTTP/current-thread 响应性、NFO 公共 driver 重启阻塞、Store 游标跨上下文、生产状态 SQL 规模、Integrity guard 公共写入口 A/B 均已运行。反例断言通过意味着缺陷成立，不意味着修复通过。
-- 测量引擎为项目 rusqlite bundled SQLite **3.50.2**；DDL 字典统计用 Python SQLite **3.54.0** 的内存库，仅作结构统计，不作运行性能证据。
-- Rust 文件行数检查未发现超过 800 行的 .rs；已确认 run_operation 为 161 行，R1 要求修复此函数硬上限，未声称全仓每个函数均已逐一通过大小检查。
-- 生产 SQLite 永久锁环和新的测试永久等待没有得到确认；R1 是执行器停顿，R2 是持久业务状态阻塞，不混称数据库死锁。workspace 正常路径通过也不能证明所有故障交错安全。
-- 没有运行真实 TMDB/Downloader/Chromium、真实浏览器或 Jellyfin 客户端、NAS/掉电/实例切换。没有修改运行代码，也没有应用上面的候选索引。
+- Web：typecheck、build exit 0；测试 **849 passed / 0 failed / 0 skipped**，有既有大 chunk 提示。
+- Store聚焦：`cargo test -p store --test episode_state_work --test integrity_guard_work --test library_query_filters --test library_query_plans -- --nocapture`，**31 passed / 0 failed**。
+- 额外现有工作量程序：`PERF_SIZES=400,4000` 执行 query_model_perf 的 ignored query_matrix，**1 passed**；这是主动执行该测量，不代表其余ignored项通过。
+- API executor_not_blocked **5 passed**；NFO owner 回归 **15 passed**。均是已有测试，未修改测试代码。
+- Rust：`cargo test --workspace --no-fail-fast` 完整结束，**3,161 passed / 0 failed / 24 ignored**，474 个结果段。ignored 不计为已验证；额外主动执行的 query_matrix 单独记录，不并入此总数。
+- 临时反例通过表示当前缺陷成立，不能当作修复通过。R6/R7/R8/R9 均有实际生产公共入口证据。
+- 未确认新的 SQLite 永久锁环或测试永久等待；R7是持久状态不能收敛、R8是执行器停顿。正常测试绿色不能证明所有故障交错安全。
+- 未运行真实 TMDB/Downloader/Chromium、NAS/设备/掉电/实例切换；未操作真实数据。Rust文件大小只作仓库约束检查，不代替生命周期正确性。
 
-临时源码/日志用于此次复核，不是项目依赖，`/tmp` 不保证长期存在：`crawler_review_executor.rs`、`crawler_review_nfo_orphan.rs`、`crawler_review_integrity_work.rs`、`crawler-review-cursor.rs` 及对应日志；主测试日志 `/tmp/crawler-storage-rereview-workspace.log`。下面保留可移植重现场景，永久测试按项目 fixture 拆分，不把临时程序整份塞进生产代码。
+临时产物不属于项目依赖，/tmp不保证长期存在。日志：`/tmp/crawler-storage-review-20261028-workspace.log`、`/tmp/schema-query-focused.log`、`/tmp/schema-query-matrix-current.log`；Web为`/tmp/crawler-review-web-{typecheck,test,build}.log`。反例源码：`crawler-review-admin-write-gate.rs`、`crawler-review-http-retired-marks-clean.rs`、`crawler-review-retired-marks.rs`、`crawler-review-merge-late-mark.rs`、`crawler-review-remaining-locks.rs`、`crawler-review-legacy-http.rs`（均在/tmp）。
 
-### 可移植复现步骤
-
-**R1：** 在 runtime 外用临时 Store、fake Fetcher/MemoryDownloader 创建 ApiState 和 Router；外线程持 `state.store().lock()`，用 channel 确认拿锁后保持 500ms。在 current-thread Tokio 中 `join!(GET up-next, sleep(10ms))`，记录 timer，join 持锁线程后断言 `<200ms`；当前约 503ms。以同样步骤调用 `scan_coordinator.trigger_next`；始终让 holder 独立于 runtime 到期释放。
-
-**R2：** 临时 Movie Library、Media、一个发布文件；依次 `nfo_export_target`、`plan_nfo_export`（sidecar 不存在）→ 写有效人工 NFO → `write_planned_nfo` 返回 Conflict → 新 operation 计划应能在旧 driver 明确退出/终态后建立，当前失败。重开 Store，再 `resume_nfo_export_phased(|| &store, &old_request, now_ms)`，当前重复失败且 `nfo_export_pending(old_id)==true`。同时验证 `begin_library_reconfiguration` 当前被阻止，以及人工 NFO 原字节不变。
-
-**R3：** `Store::open(temp)`、`insert_media`；通过临时 SQLite 连接事务插入 1k/20k succeeded Scrape 历史（所有 v7 必填列、非空 resource_key；可使用已删除 Library 的历史 ID），`ANALYZE` 后关闭/重开 Store。`with_stats(StatsScope::Library, || update_media(&same_media))` 记录上表；再仅在临时库创建候选索引，重复公共调用。量 SQL 时使用当前 `StatementStatus::{VmStep,FullscanStep,Sort}`，不是机器自带 sqlite3。
-
-**R4/R5：** 使用固定标签生成 Media 和 `publish_fixture_file`。分别建 A `[M,Z]`、B `[A,B,X]`，`LibraryQuery` 的 Title cursor 页签发 M 游标；将原游标不改直接用于 B，再用于 Rating，当前均成功，修复后应 Invalid。状态规模实验向同一 User/Media 的另一季写 100/10k 断言，仅请求固定两集；对 `assertions.rs` 两条原 SQL 记录解码行及 statement status。完整 HTTP 门还须覆盖 coverage 读取和归约，不能以这两条 SQL 的数字代替整条请求。
+可移植复现条件与断言已按R6–R9保留在正文；正式回归应复用现有fixture并按行为拆分，不把这些临时程序整份塞进生产树。
 
 ## 文档收敛记录
 
-本页是当前审查与剩余方案入口。移除以下已被实现/新复审替代的执行稿，避免照旧 unchecked 重做或相信旧“全部完成”：
-
-- `docs/superpowers/plans/2026-10-27-storage-redesign-review-plan.md`：原 R1–R10/T9 对账见上；实现提交 `eb79bacd`。
-- `docs/superpowers/plans/2026-10-27-storage-redesign-main-review-v2.md`：F1–F8 对账、未完成额外优化、历史 pending 查询数字见上；修复提交 `5730b032`。
-- `docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`：旧 v2→v5 步骤和相互冲突的完成状态撤下；独有逐表/索引决策与测量保留在 [schema audit](2026-10-26-library-schema-audit.md)、[perf baseline](2026-10-26-perf-baseline.md)、[Task22 锁清单](2026-10-26-task22-on-executor-store-locks.md)。Task22 余项仍由 R1 跟进，不自动关闭。
-- `docs/superpowers/plans/2026-10-26-codex-review-brief.md`：旧 review-base/命令提示稿已过期，不再作当前审查入口；对应独立报告标为历史。
-
-原文均可 `git show 5730b032:<上述路径>` 取回，包括旧复现程序、任务勘误与审批上下文。较早审计/benchmark 的独有数据不删除、不改成新版本结果；10-23 执行记录和 10-25 A/B 计划明确为历史。数据库入口、ADR-0008、主 Spec 和 API/部署的当前指针同步到本页；DDL 仍只在生产源码维护。
+- 用本版当前结论替换原报告中“顶部写已修、正文继续要求R1–R5修复后合并”的冲突状态；移除已完成步骤的重复方案，保留逐ID对账、当前未完成项和Git取回方式。
+- 同步 docs入口、数据库字典、ADR-0008、主Spec及API游标合同；删除NFO失败退出和分集范围仍为原缺陷的过时描述。
+- 纠正10-26结构审计中已落地R6/R9/R11和统计前提；保留当时测量，不重写历史速度/空间数字。
+- 之前已删除的10-26修复执行稿、Codex brief和两份10-27计划仍从`git show 5730b032:docs/superpowers/plans/<原路径>`取回。其独有finding与测量见旧报告Git版本、固定版本审计及benchmark。本轮不为清理再删除唯一证据，也不恢复多份“唯一当前方案”。

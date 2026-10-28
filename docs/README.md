@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。当前代码复审固定于 `feat/storage-redesign@5730b032`，基线为已 fetch 核实的 `main/origin/main@756444f7`。**仍有执行器阻塞、NFO 失败意图无法退出、热点查询放大和游标作用域问题，建议修复后合并。** 本轮仅文档变更，不修改运行代码或用户实例。
+更新：2026-10-28。当前代码复审固定于 `feat/storage-redesign@9f6126d3`，基线为本轮 fetch 核实的 `main/origin/main@756444f7`。**仍有写门禁绕过、Media 冻结/退役后可写、执行器阻塞及旧值兼容残留，建议修复后合并。** 原 R2–R5 已修，R1 部分完成。本轮仅文档变更，不修改运行代码或用户实例。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
-2. **唯一当前复审与剩余方案：** [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R1–R5、前轮 F1–F8 对账、实施顺序及验证边界。旧计划 unchecked 不代表当前待办。
+2. **唯一当前复审与剩余方案：** [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R6–R9、原 R1–R5 对账、查询实测、实施顺序及验证边界。旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
 4. **现行结构：** [五文件数据库字典](database/README.md)，library v8。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
@@ -119,3 +119,7 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 ## 2026-10-28 文档核对
 
 对照当时的 DDL、API、备份脚本及历史证据，修正 Library v7、索引清单、Library DTO、操作错误字段、文件续页和 Jobs 初始化说明；备份回滚要求保留实际存在的数据库、WAL 和 SHM 文件。更新过时的复审导航及回归场景，并将失效的历史源码链接改为固定版本路径线索。历史审计和 benchmark 保留其反例、数据及版本边界；该轮未修改代码或重跑代码测试。R1–R5 的后续实施状态见[复审实施记录](audits/2026-10-28-storage-main-rereview.md)。
+
+## 2026-10-28 修复后的再次核查
+
+对照 `9f6126d3` 更新当前复审，移除已修 R2–R5 的重复待办，R1 剩余分支归入 R8；新增已复现的 R6/R7/R9。同步 API 游标合同、NFO/分集字典、主 Spec 和 ADR 导航。结构审计中 R6/R9/R11 的过时“未做”状态及“生产无 ANALYZE”假设已纠正；保留历史测量与 Git 来源，不新增互相冲突的执行稿。本轮只更新文档并验证，未实施修复。

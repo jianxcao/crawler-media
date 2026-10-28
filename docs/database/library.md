@@ -6,7 +6,7 @@
 
 结构为 **53张业务表、594字段、81个显式命名索引、37组FK、0触发器**，不计SQLite自动索引。v4 删除 `media_seasons`（整表）、`library_item_terms.terms_media`、`library_items.aliases_json`/`added_at_ns`/`has_nfo`、`library_units.quality_json`，并重排 `library_item_terms` 主键；v5 删除 `playback_{sessions,logs,metrics}_media`（唯一消费者 `delete_playback_for_media` 已移入 `test_support`，生产没有任何按 `media_id` 删除播放行的路径），并按 DDL 补齐 `LIBRARY_INDEXES` 的两个漏项、把索引侧的布局校验改成双向。每项的理由见审计文档的逐项裁决。历史 49 表/580 字段/63 索引描述已撤下；当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
-v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；活跃路径唯一性与 pending 查询已有回归，前轮 F4/F8 对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。这不等于完整写入成本实测；NFO 失败退出仍见 R2。
+v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；活跃路径唯一性与 pending 查询已有回归，前轮 F4/F8 对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。失败退出、路径释放与重启恢复已在 `9f6126d3` 实现，本轮既有 owner 回归通过；这不等于完整写入成本或真实设备验收。
 
 v8 增加 `library_integrity_owner` 部分索引，供按 Library 和 Media 检查未成功 Integrity 的写屏障使用。`failed` 仍在索引内，保持可恢复操作的冻结语义。固定 1,000 个活跃 Integrity 的内存测试中，索引占 20,480 字节；1,000 次插入和完成分别增加 10,000 和 13,000 SQLite VM 步。这是指定数据集的工作量，不是磁盘延迟承诺。
 
@@ -70,7 +70,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议。旧无绑定 progress 换源反例的后续修复见[执行记录 S04](../superpowers/plans/2026-10-23-storage-review-remediation.md)，分集读取的当前性能缺口见[复审 R4](../audits/2026-10-28-storage-main-rereview.md#r4分集状态读取未按请求范围收敛)。清历史清完整resume与断言、favorite保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议。旧无绑定 progress 换源反例的后续修复见[执行记录 S04](../superpowers/plans/2026-10-23-storage-review-remediation.md)，分集已按请求单元/必要祖先分窗读取，同一快照内归约；公开 Store 工作量及尚未汇总的完整 HTTP 指标见[当前复审](../audits/2026-10-28-storage-main-rereview.md#查询性能与真正未完成的优化)。清历史清完整resume与断言、favorite保留。
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -731,7 +731,7 @@ CREATE TABLE library_query_counts (
 
 ## library_metadata_inputs
 
-Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验和路径独占；当前具体失败退出缺口见[复审 R2](../audits/2026-10-28-storage-main-rereview.md#r2nfo-失败后永久占有-sidecar)，不继续沿用旧 A12 状态。
+Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验、路径独占与执行 lease；不可重放失败退出和重启恢复已修，见[修复对账](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)，不继续沿用旧 A12/R2 缺陷状态。
 
 **写入方与生命周期（2026-10-24补修）**
 

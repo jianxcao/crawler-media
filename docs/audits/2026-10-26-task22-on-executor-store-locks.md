@@ -1,6 +1,6 @@
 # Task 22 slice 1 — on-executor `Store` locks: playback and search
 
-> Historical slice record, not a claim that every async Store wait is gone. Current code `5730b032` still has reproduced gaps; see [2026-10-28 review R1](2026-10-28-storage-main-rereview.md#r1同步-store-等待仍在异步执行器上). Wait budgets below describe this historical stage; current values live in `http/store_wait.rs`.
+> Historical slice record, not a claim that every async Store wait is gone. Current code `9f6126d3` fixes the previously named scan and main up-next Store stages, but Media operation handlers and up-next artwork still block the executor; see [2026-10-28 review R8](2026-10-28-storage-main-rereview.md#r8执行器阻塞仍有两个生产分支). Wait budgets below describe this historical stage; current values live in `http/store_wait.rs`.
 
 Audit and migration record for the user-latency paths. Task 22 covers ~174
 on-executor `.store.lock()` sites across 72 files; this slice lands the two paths
