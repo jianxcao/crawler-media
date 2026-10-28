@@ -218,6 +218,11 @@ pub(crate) fn write_series_nfos(
                 else {
                     continue;
                 };
+                // One file has one sidecar: it describes the file's first
+                // episode. Later units of a multi-episode file still adopt
+                // their metadata but must not overwrite that NFO.
+                let writes_file_nfo =
+                    file_nfo_episode(&row.units) == Some((unit_season, episode_number));
                 let path = row.file.path.with_extension("nfo");
                 let mut still_path = episode.still_path.clone();
                 if still_path.is_none()
@@ -240,15 +245,16 @@ pub(crate) fn write_series_nfos(
                     file: row.file.clone(),
                     units: vec![*unit],
                 };
-                if lease
-                    .publish(|| {
-                        Ok(write_nfo(
-                            &path,
-                            media,
-                            &nfo_from_episode(&episode_coverage, episode),
-                        ))
-                    })
-                    .is_err()
+                if writes_file_nfo
+                    && lease
+                        .publish(|| {
+                            Ok(write_nfo(
+                                &path,
+                                media,
+                                &nfo_from_episode(&episode_coverage, episode),
+                            ))
+                        })
+                        .is_err()
                 {
                     return matched_episodes;
                 }
@@ -257,6 +263,28 @@ pub(crate) fn write_series_nfos(
         }
     }
     matched_episodes
+}
+
+/// Episode a file's own `.nfo` describes: its first episode unit.
+fn file_nfo_episode(units: &[domain::UnitKey]) -> Option<(u32, u32)> {
+    units.iter().find_map(|unit| unit.episode_coordinates())
+}
+
+#[cfg(test)]
+mod file_nfo_tests {
+    use super::file_nfo_episode;
+    use domain::UnitKey;
+
+    #[test]
+    fn multi_episode_file_nfo_describes_its_first_episode() {
+        let units = [
+            UnitKey::new(1, 90),
+            UnitKey::new(1, 91),
+            UnitKey::new(1, 200),
+        ];
+        assert_eq!(file_nfo_episode(&units), Some((1, 90)));
+        assert_eq!(file_nfo_episode(&[UnitKey::WHOLE]), None);
+    }
 }
 
 pub(crate) fn nfo_from_episode(
