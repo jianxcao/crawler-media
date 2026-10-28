@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-状态：接受；五文件边界保留，`library.db` 当前布局为 version 7。原问题版本 `cf7fb70`，实施与验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，字段/索引见[数据库字典](../database/README.md)。
+状态：接受；五文件边界保留，`library.db` 当前布局为 version 7。当前复审代码 `5730b032`，剩余修复与验收见[再次复审](../audits/2026-10-28-storage-main-rereview.md)，字段/索引见[数据库字典](../database/README.md)。
 
 ## 决策
 
@@ -30,7 +30,7 @@ Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、
 
 Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。Store 的 application_id/user_version 和必需表/索引名校验不是完整逐列约束验证；Jobs 从唯一 DDL 校验对象定义和单例。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
 
-连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。Store 四连接及 Jobs Queue 显式 synchronous=FULL；独立 media ResponseCache 未显式指定 synchronous。NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID 需测量后决策，不把构建默认当耐久性合同。
+连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。app/library/subscribe 与 Jobs Queue 显式 synchronous=FULL；Store 的可重建 cache 使用 NORMAL。当前连接策略还设置 cache_size=-16384、temp_store=MEMORY、journal_size_limit=67108864、mmap_size=268435456；空库在 WAL/建表前设置 auto_vacuum=INCREMENTAL。实例 app 心跳 busy_timeout 为 10000ms。独立 media ResponseCache 仅显式设置 WAL/timeout/FK，策略统一尚需测量。页缓存和 mmap 是每连接预算，temp_store 与 journal_size_limit 不提供全进程内存/WAL硬上限；不把构建默认当耐久性合同。
 
 Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务内创建全部对象、单例和身份头；独立 Queue 与 API 共用。已有非空文件只读预检，旧/未知/未来或损坏当前布局拒绝且不修补；保留事实队列及备份提示。没有 Store→Jobs 生产依赖。
 

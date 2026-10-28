@@ -1,7 +1,9 @@
 # 性能基线 + 确定性回归门禁（Task 17）
 
+> 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
+
 日期：2026-10-26。分支：`feat/storage-redesign`。任务：计划
-[`2026-10-26-storage-redesign-review-fixes.md`](../superpowers/plans/2026-10-26-storage-redesign-review-fixes.md) 的 Task 17。
+`2026-10-26-storage-redesign-review-fixes.md`（历史原文：`git show 5730b032:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`） 的 Task 17。
 
 本分支**以性能为第一裁决标准**。在本文之前，“没有性能回退”只能靠直觉和零散的 `EXPLAIN QUERY PLAN` 断言；
 本文把它变成一个可以在几秒到两分钟内跑完、并且会用**确定性计数**判红/判绿的门禁。

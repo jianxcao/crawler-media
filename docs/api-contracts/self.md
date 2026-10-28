@@ -106,11 +106,11 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
   伪造下一页）。`total` **只在第一页**（不带 `cursor` 的那一页）给出，续页为 `null`——
   续页不再跑 `COUNT`；`gallery` 恒为 `null`（图组先剔除无图条目再分页，总数口径不同）。
 - 游标是服务端签发的不透明 JSON，客户端不得解析或构造；非 JSON / 空串游标 **400**
-  `library.invalid`。游标绑定 Library + 排序 + 筛选，三者任一改变都要从首页重来。
+  `library.invalid`。客户端必须在 Library/排序/筛选/方向改变后从首页重来。当前 `5730b032` 的卡片游标尚未由服务端验证这些作用域，误复用会漏项，见[复审 R5](../audits/2026-10-28-storage-main-rereview.md#r5卡片游标不验证查询作用域)；“作用域绑定”是待修合同，不能当作当前拒绝保证。
 - 前端只有一个实现：`web/lib/api/libraries.ts` 的 `buildBrowseQuery`，
   它**绝不**写 `offset`（`web/test/library-paging.test.mjs` 锁死）。海报墙是**前缀模型**：
-  从第 0 条起连续加载，追加用 `next_cursor`；A-Z 跳转/「回到上次位置」靠顺序走游标覆盖目标
-  位置（服务端暂无 anchor/before 游标，O(1) 跳转另行立项）。
+  从第 0 条起连续加载，追加用 `next_cursor`；A-Z 跳转/「回到上次位置」使用下节
+  item-index 签发的桶游标，不再按 offset 或多页游标走到目标。
 - 依据 `crates/api/src/http/library.rs` 的 `BrowseWindow`/`browse_response`、
   `crates/api/src/http/library_gallery.rs`、`crates/api/tests/library_cursor_paging.rs`。
 
@@ -132,7 +132,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 - 因此一次 A-Z 跳转 = **一次** `GET /libraries/{id}/items?cursor=<该档游标>`，返回
   的正是这一档的第一页（9.5k 部的库实测 1 次请求；「回到上次位置」同一条路）。
   跳转后窗口起点不为 0，向上滚动不做 prepend（与 cursor-only 分页同一取舍）。
-- 游标绑定 Library + 排序 + 筛选 + 方向：任一改变都要重新取 `item-index`。
+- Library/排序/筛选/方向任一改变，客户端必须重新取 `item-index`。当前卡片游标的服务端 scope 校验仍缺，见上面的 R5；item-index 仍在 Store guard 内计算，锁边界见 R1。
 
 ### LibraryItemFile 与文件续页
 
@@ -210,7 +210,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
 - 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
-- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [复审与剩余方案](<../audits/2026-10-28-storage-main-rereview.md>)。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 
@@ -232,7 +232,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
 
-## 当前存储切换边界（2026-10-24补修）
+## 当前存储切换边界（2026-10-28核对）
 
 四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除。Jellyfin协议与公开静态图片保留独立合同。
 
@@ -242,7 +242,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 **Playback 事件：** 自有 `POST /playback/progress` 必须提交签发的 play_session_id、非负 event_sequence、device_id 和 start/progress/stop event；缺失、空白、伪造或跨用户/设备绑定 400 且不写播放事实。签发绑定固定 target/file/revision/source/config/generation；已签发但过期事件按 IgnoredStale 合同处理，不能补当前源身份。`POST /playback/sessions` 签发失败返回500；成功回执的 play_session_id 必填，流地址仅由签发绑定生成，保留合法STRM直接URL。Web 显式签发后上报，Jellyfin adapter 按协议建立绑定后复用 Store 提交。
 
-**Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 仅从当前 downloaders 行及明确支持的环境覆盖选择，旧 settings JSON 不再读取。修复前反例保留于[固定版本复审](../audits/2026-10-24-storage-rereview.md)，当前验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+**Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 仅从当前 downloaders 行及明确支持的环境覆盖选择，旧 settings JSON 不再读取。修复前反例保留于[固定版本复审](../audits/2026-10-24-storage-rereview.md)，当前验证见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。
 
 **Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。本轮已核对实际Web调用者和create严格拒旧，原F01生产问题关闭；Rust共享fixture已使用当前字段；不恢复旧inline filter兼容。
 

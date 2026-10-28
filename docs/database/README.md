@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-结构核对：2026-10-26 当前生产 DDL（library v5，v4/v5 轮次见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)）；原审查版本 `cf7fb70`。本文件与实现同提交发布，修复证据和现场验收边界见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+结构核对：2026-10-28，代码 `5730b032` 的当前生产 DDL（library v7，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。当前问题、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
 
 ## 权威来源
 
@@ -14,12 +14,12 @@
 | 文件 | application_id / user_version | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
 | [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、Naming、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | 1129139249 / 5 | 53 | 592 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、持久工作 | 否 |
+| [library.db](library.md) | 1129139249 / 7 | 53 | 594 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、持久工作 | 否 |
 | [subscribe.db](subscribe.md) | 1129139250 / 2 | 4 | 47 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
 | [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应 | 是，受控清理 |
 | [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 4 | 29 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 
-合计76张业务表、746字段，不计SQLite内部表。Store四文件90个显式命名索引（library73、app2、subscribe3、cache12），38组FK、0触发器；Jobs另9命名索引/6触发器。app/library/subscribe统计来自本机 Python SQLite 执行当前生产DDL的内存核对；cache/Jobs统计与其生产建表声明对账。没有跨文件FK或原子提交。
+合计76张业务表、748字段，不计SQLite内部表。Store四文件97个显式命名索引（library80、app2、subscribe3、cache12），37组FK、0触发器；Jobs另9命名索引/6触发器。app/library/subscribe/Jobs统计来自本机 Python SQLite 3.54.0 执行当前生产DDL的内存核对；cache统计与其生产建表声明对账。没有跨文件FK或原子提交。
 
 `Store::open_at`只允许app另选路径；Jobs由Queue打开。正常启动不自动清库、不导入旧layout；错误/未知布局拒绝。连接显式WAL、5000ms busy_timeout、foreign_keys=ON；建库路径在切 WAL **之前**设 `auto_vacuum=INCREMENTAL`（文件头属性，只能在建表前改；WAL 库或事务内设置是静默 no-op）；Store四连接与独立Jobs Queue走同一套连接策略：`cache_size=-16384`（每连接16MiB）、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`（每连接地址空间上限，不是常驻内存），打开时`PRAGMA optimize=0x10002`、关闭时`PRAGMA optimize`；`synchronous`按库区分——cache.db用NORMAL（可重建，容忍掉电丢最近提交），app/library/subscribe与Jobs Queue保持FULL（权威库绝不牺牲已提交事务）；实例租约心跳的专用app连接同样是FULL，但busy_timeout拉长到10000ms；library读池连接使用相同的cache/mmap/temp_store且`query_only=ON`。Jobs已有OFF→实际policy→FULL的连接级回归。独立media ResponseCache连接未显式设置synchronous，保留其构建默认。Store 必需表/索引名称检查不等于逐列约束验证；app 额外表也被拒绝，避免保留退役 Naming 布局；Jobs 由唯一 DDL 验证当前对象定义及单例，不认领旧库。
 
@@ -54,6 +54,6 @@ flowchart TD
 
 - 当前无 ledger/file_meta/browse journal 持久表、旧布局导入器或兼容视图。旧 `/directory` 聚合/roots 写、旧 Naming 表和反拆、自有无签发 session Playback、Downloader settings JSON 回读均删除；Web/CLI 使用当前合同。
 - kind 先收窄授权 Library，查询使用同库精确成员、边际计数和页内选源；QueryWorkStats 纳入 exact count/辅助 SQL。新模型的实测与未运行范围见[2026-10-25 验收记录](../benchmarks/2026-10-25-large-hit-query-read-model.md)；[2026-10-24 历史测量](../benchmarks/2026-10-24-storage-query-rereview.md)保留原版本。
-- Probe/Claim/Watch/fs watcher/根配置的 filesystem 观察使用 owned 快照移出 Store；最终发布校验原归属、配置和源版本。未确认新的生产锁环；本轮修复的是可复现停滞、错误耦合和长持锁边界。
+- Probe/Claim/Watch/fs watcher/根配置的 filesystem 观察使用 owned 快照移出 Store；最终发布校验原归属、配置和源版本。未确认新的生产锁环；当前仍有异步执行器阻塞和 NFO 活跃意图无法退出，见本轮复审 R1/R2，不能由已有 offload 推断全部安全。
 - cache清空只允许连接内受控删除，或停写关闭全部连接后重建；备份不能直接复制活跃文件冒充跨文件一致快照。`request_visible_media`是TEMP表，WAL/SHM不是额外业务分区。
 - 本轮不访问真实实例，不部署、不重建数据库。媒体/字幕/NFO/图片/下载目录保留；NAS、真实Jellyfin客户端、100k Media/1M文件完整规模尚未在本轮运行。

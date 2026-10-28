@@ -1,5 +1,7 @@
 # Large-hit Query Read Model Implementation Plan
 
+> 历史实施计划：A/B 已落地，固定版本验收见[结果记录](../../benchmarks/2026-10-25-large-hit-query-read-model.md)；当前剩余问题见[2026-10-28 复审](../../audits/2026-10-28-storage-main-rereview.md)。下列步骤不作为新待办。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在保持精确 total、ACL、locale 和分页合同的前提下，将大命中查询从整卡片/JSON 的重复处理改为事务维护的精确成员、边际计数和有序取页。

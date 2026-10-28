@@ -2,11 +2,11 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-27 当前生产 DDL（library v7）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=7`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。
+结构核对：2026-10-28，代码 `5730b032` 的当前生产 DDL（library v7）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=7`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。
 
 结构为 **53张业务表、594字段、80个显式命名索引、37组FK、0触发器**，不计SQLite自动索引。v4 删除 `media_seasons`（整表）、`library_item_terms.terms_media`、`library_items.aliases_json`/`added_at_ns`/`has_nfo`、`library_units.quality_json`，并重排 `library_item_terms` 主键；v5 删除 `playback_{sessions,logs,metrics}_media`（唯一消费者 `delete_playback_for_media` 已移入 `test_support`，生产没有任何按 `media_id` 删除播放行的路径），并按 DDL 补齐 `LIBRARY_INDEXES` 的两个漏项、把索引侧的布局校验改成双向。每项的理由见审计文档的逐项裁决。历史 49 表/580 字段/63 索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
-v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；两索引 predicate 与现行 SQL 完全一致，写入代价与工作量证据见计划 Task 4/8。
+v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；活跃路径唯一性与 pending 查询已有回归，前轮 F4/F8 对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。这不等于完整写入成本实测；NFO 失败退出仍见 R2。
 
 v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件清理 attempts、关闭存活 session，以及三类终态 operation 的年龄窗口索引；生产公共清理路径的工作量测试覆盖 100/1,000/10,000 条无关历史。旧布局继续拒绝，不导入或原地升级。
 
@@ -16,7 +16,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
 - 根迁移每窗口≤100文件/Unidentified 候选，持久游标、公平轮转和状态可查询；API driver 批间放锁并在解冻后自动继续。关联 NFO 与文件同批迁移。Unidentified 的索引 seek 不重扫游标前记录。
-- 原问题证据保留在[版本固定复审](../audits/2026-10-24-storage-rereview.md)，本次实施与剩余现场验收见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+- 当前剩余问题与前轮对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。[10-24 复审](../audits/2026-10-24-storage-rereview.md)和[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)保留历史版本证据。
 
 ## 字段阅读规则
 
@@ -730,7 +730,7 @@ CREATE TABLE library_query_counts (
 
 ## library_metadata_inputs
 
-Library独立NFO输入、解析状态与导出来源字段。导出已有意图/版本校验，失败路径的区分性回归仍缺，见当前复审A12；不能概括为整条链未接通。
+Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验和路径独占；当前具体失败退出缺口见[复审 R2](../audits/2026-10-28-storage-main-rereview.md#r2nfo-失败后永久占有-sidecar)，不继续沿用旧 A12 状态。
 
 **写入方与生命周期（2026-10-24补修）**
 
@@ -739,7 +739,7 @@ Library独立NFO输入、解析状态与导出来源字段。导出已有意图/
 - `entity_scope`来自NFO层级与可确定坐标，不能将未知TV升为work。已有sidecar沿用首次登记的locale；display_locale切换不重标输入语言。实体层级或坐标实际变化时，仅替换该sidecar对应旧行。
 - locale由观察调用参数提供，当前没有从NFO声明语言自动推导的保证。卡片/详情按明确语言选择规则读取；不能在无命中时任取一份外语输入。
 - 录入事务验证原file/Media/root/path/revision/source与Library config_revision及当前最深根，不符则拒绝这一组观察。共享Store的扫描/Claim采用准备、锁外观察、提交三阶段；`reconcile_nfo_inputs`为包含路径IO的独立Store便捷入口。编辑/Unknown/删除各保留其语义。
-- work输入参与卡片/详情；season/episode输入也用于相应详情和协议读取。输入已随文件batch迁移/复制，原跨目录丢失回归通过；根operation、完整跨批重启/来源守恒仍须按当前方案验收。
+- work输入参与卡片/详情；season/episode输入也用于相应详情和协议读取。输入已随文件batch迁移/复制，原跨目录丢失回归通过；根 operation 与跨批重启有现有回归；当前剩余问题以本轮复审为准，现场容量验收另列。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -786,7 +786,7 @@ CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);
 
 ## library_operations
 
-roots/locale/integrity/scrape 操作载体。当前建表不代表完整运行处理器已交付。
+roots/locale/integrity/scrape 操作载体。当前已有运行驱动与恢复；终态以 owning module 为准，failed Scrape 为终态，failed Integrity 等仍可恢复。NFO 失败退出和 Integrity guard 历史扫描分别见本轮 R2/R3。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -1292,7 +1292,7 @@ v3 曾为 `playback_sessions`/`playback_logs`/`playback_metrics` 各建一个 `m
 
 ## playback_session_ids
 
-签发会话的逻辑目标、物理源、生命周期与 generation。已签发事件在 Store 提交校验绑定；自有无 ID 旧事件仍可绕开签发合同，见当前复审 S04。
+签发会话的逻辑目标、物理源、生命周期与 generation。self Playback 必须提交签发 session/sequence，缺失或伪造请求拒绝，过期绑定不发布；Jellyfin 由协议适配层建立绑定。旧 S04 是修复前证据，不是当前可绕过入口。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|

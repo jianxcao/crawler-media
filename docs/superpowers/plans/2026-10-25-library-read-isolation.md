@@ -1,5 +1,7 @@
 # Library Read Isolation Implementation Plan
 
+> 历史实施计划：A/B 已落地，固定版本验收见[结果记录](../../benchmarks/2026-10-25-library-read-isolation.md)；当前剩余问题见[2026-10-28 复审](../../audits/2026-10-28-storage-main-rereview.md)。下列步骤不作为新待办。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 使昂贵 Library 查询在有界只读连接上执行，减少其对扫描、Playback 和其他 writer 操作的 Store Mutex 阻塞。

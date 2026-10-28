@@ -1,10 +1,12 @@
 # 存储复审修复执行记录
 
-状态：2026-10-24，用户在只读复审后明确授权修复。实施基线 `feat/storage-redesign@96f7445`，本文与实现同提交发布；原问题代码基线为 `cf7fb70`。原始发现保留在[固定版本复审](../../audits/2026-10-24-storage-rereview.md)，5k–100k 数据形状和结果见[测量记录](../../benchmarks/2026-10-24-storage-query-rereview.md)。本文件是唯一当前执行状态入口，原只读技术方案可用 `git show 96f7445:docs/superpowers/plans/2026-10-23-storage-review-remediation.md` 读取。
+历史执行记录：以下状态与数字固定于 2026-10-24 阶段；当前代码 `5730b032` 的剩余问题见[2026-10-28 再次复审](../../audits/2026-10-28-storage-main-rereview.md)，不按本文重做已实现步骤。
+
+当时用户在只读复审后明确授权修复。实施基线 `feat/storage-redesign@96f7445`，本文与实现同提交发布；原问题代码基线为 `cf7fb70`。原始发现保留在[固定版本复审](../../audits/2026-10-24-storage-rereview.md)，5k–100k 数据形状和结果见[测量记录](../../benchmarks/2026-10-24-storage-query-rereview.md)。本文件是该历史阶段的执行状态记录，原只读技术方案可用 `git show 96f7445:docs/superpowers/plans/2026-10-23-storage-review-remediation.md` 读取。
 
 五文件边界、显式归属、事实/摘要同事务、冷详情与持久意图继续使用。旧数据库与旧自有 API 不提供导入、转发 shim、双读写或字段别名；静态图片 public，Jellyfin 保留协议鉴权及合法行为。
 
-后续规划（2026-10-25，未实施）：大命中精确统计与读写争用的下一步设计见[读模型与读取隔离方案](../specs/2026-10-25-large-hit-query-read-model.md)，含独立 A/B 实施计划；不改变本文已完成修复的验证范围。
+后续设计（2026-10-25，当时未实施，后来 A/B 已落地）：大命中精确统计与读写争用设计见[读模型与读取隔离方案](../specs/2026-10-25-large-hit-query-read-model.md)，本地 A/B 结果见[查询验收](../../benchmarks/2026-10-25-large-hit-query-read-model.md)与[读取隔离](../../benchmarks/2026-10-25-library-read-isolation.md)，不扩大本文历史验证范围。
 
 ## 修复对应表
 

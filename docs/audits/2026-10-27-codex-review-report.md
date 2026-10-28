@@ -1,8 +1,10 @@
 # Codex 原生 CLI 独立审查报告
 
+> 历史独立报告：以下结论针对当时 review-base 提交线，不能作为 `5730b032` 无阻塞/无漏页的证明。当前已复现的反例及剩余方案见[2026-10-28 再次复审](2026-10-28-storage-main-rereview.md)。
+
 - **基准**: `review-base` (`f2d4f033`) 到 `feat/storage-redesign` 提交线。
 - **审查模型**: `gpt-5.6-luna` (通过本地 Codex CLI `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` 独立运行)。
-- **审查重点**: 对照 `docs/superpowers/plans/2026-10-26-codex-review-brief.md`（ACL/所有权正确性、布局完整性、死锁与并发饥饿、热点查询表现、测试完整性与规模、文件与函数大小硬限制、可观测性规范、公共静态图片路由）。
+- **审查重点**: 对照当时 brief（已撤下，原文 `git show 5730b032:docs/superpowers/plans/2026-10-26-codex-review-brief.md`）（ACL/所有权正确性、布局完整性、死锁与并发饥饿、热点查询表现、测试完整性与规模、文件与函数大小硬限制、可观测性规范、公共静态图片路由）。
 
 ---
 

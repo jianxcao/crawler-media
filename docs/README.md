@@ -1,16 +1,16 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-24；只读复审 `feat/storage-redesign@cf7fb70`，比较本地 `main@86122d7` 与远端 `origin/main@14fdbb6`（生产代码基线相同，前者另有设计文档）。[当前复审](audits/2026-10-24-storage-rereview.md)确认仍有 Jobs 初始化、根迁移活性、旧配置/Playback 入口等正确性缺口，不能概括为只剩性能。本轮仅文档变更，未修改代码或操作实例。
+更新：2026-10-28。当前代码复审固定于 `feat/storage-redesign@5730b032`，基线为已 fetch 核实的 `main/origin/main@756444f7`。**仍有执行器阻塞、NFO 失败意图无法退出、热点查询放大和游标作用域问题，建议修复后合并。** 本轮仅文档变更，不修改运行代码或用户实例。
 
 ## 当前先读
 
-1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭issue。
-2. **唯一当前存储修复方案：** [剩余修复技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)。按当前反例重排优先级；先修正确性与旧路径，再做查询/写入优化和验收。历史审查固定在各自 SHA，不能当作当前缺陷清单。
-3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。规范不因未实现而放宽，不与当前事实混写。
-4. **现行结构：** [五文件数据库字典](database/README.md)。唯一可执行DDL在生产源码，docs不保留第二份SQL草案。
-5. **证据：** [存储复审与历史烟测](benchmarks/2026-10-18-library-storage.md)；旧审计/benchmark只对其明确版本和场景负责。
-6. **运行/API：** [deploy](deploy.md)、[自有API约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs) 与 [路由表](../crates/api/src/http/routes/mod.rs)、`web/lib/api/*` 为准。typed逻辑ID/物理源/UUID DTO不同，不保留旧数据兼容。
-7. **验收清单：** [system regression](testing/system-regression-cases.md)是场景清单，不是已运行证明。设备、NAS、规模未测须明确Not run。
+1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
+2. **唯一当前复审与剩余方案：** [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R1–R5、前轮 F1–F8 对账、实施顺序及验证边界。旧计划 unchecked 不代表当前待办。
+3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
+4. **现行结构：** [五文件数据库字典](database/README.md)，library v7。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
+5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
+6. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
+7. **验收清单：** [system regression](testing/system-regression-cases.md) 是场景清单，不是已运行证明；设备、NAS、完整容量未测须明确 Not run。
 
 ## 权威与保留规则
 
@@ -109,3 +109,9 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 - 当前发现只维护在[本轮复审](audits/2026-10-24-storage-rereview.md)，技术任务更新原唯一方案，不创建第二套执行步骤。
 - 删除数据库字典的来源合成/override 冲突/played 时钟等过时缺陷描述，修正“已全部无兼容/仅剩性能”的结论；ADR-0008 去除旧四文件、导入器及重复旧 SQL 正文，保留历史 Git 定位和决策理由。
 - 上一轮补修、历史审计与 benchmark 保留独有反例/数字并固定版本；当前测量见[查询与写入复测](benchmarks/2026-10-24-storage-query-rereview.md)。不因绿色测试保留旧协议，不以旧失败覆盖当前证据。
+
+## 2026-10-28 再次复审与过时执行稿清理
+
+本次删除 10-26 修复执行稿、旧 Codex 审查 brief，以及两份 10-27 修复计划。已实现项、残留问题和历史测量集中在[当前复审的对账与清理记录](audits/2026-10-28-storage-main-rereview.md#文档收敛记录)；原文可用 `git show 5730b032:docs/superpowers/plans/<文件名>` 读取。独有 schema/benchmark/审计证据保留，旧独立报告标为历史；不再维护多份互相冲突的“唯一当前方案”。
+
+[10-23 执行记录](superpowers/plans/2026-10-23-storage-review-remediation.md) 和 10-25 A/B 计划只记录各自阶段。同步修正数据库总览 v5/旧统计、ADR 的 cache 耐久设置、主 Spec/API 的当前指针，以及数据库字典里已修复入口仍被描述为未接线的段落。本轮没有执行新的修复步骤。

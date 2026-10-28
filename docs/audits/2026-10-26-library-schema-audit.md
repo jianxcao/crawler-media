@@ -1,7 +1,9 @@
 # library.db 结构审计：删掉不再挣钱的东西（Task 16）
 
+> 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
+
 日期：2026-10-26。分支：`feat/storage-redesign`。起点：`be7b6915`（layout v3）。
-任务：计划 [`2026-10-26-storage-redesign-review-fixes.md`](../superpowers/plans/2026-10-26-storage-redesign-review-fixes.md) 的 Task 16。
+任务：计划 `2026-10-26-storage-redesign-review-fixes.md`（历史原文：`git show 5730b032:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`） 的 Task 16。
 配套测量：Task 17 的[性能基线](2026-10-26-perf-baseline.md)（同一夹具形状的确定性计数门禁）。
 
 本分支以性能为第一裁决标准。**本审计的中心问题不是“这张表大不大”，而是“今天谁读它”**：
