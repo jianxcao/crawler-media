@@ -227,6 +227,8 @@ pub enum SubtitleDeliveryError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserMarksError {
+    #[error("user marks temporarily unavailable")]
+    Unavailable,
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -236,6 +238,7 @@ pub enum UserMarksError {
 impl UserMarksError {
     pub fn status_code(&self) -> axum::http::StatusCode {
         match self {
+            Self::Unavailable => axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Self::Conflict(_) => axum::http::StatusCode::CONFLICT,
             Self::Internal(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         }

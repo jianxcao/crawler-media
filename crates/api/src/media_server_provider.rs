@@ -31,6 +31,7 @@ mod item_metadata;
 mod person_images;
 mod playback;
 mod stream_binding;
+mod sync_operations;
 use item_metadata::{
     backdrop_path, item_metadata, local_primary_image, merge_catalog_metadata, primary_image_url,
 };
@@ -237,46 +238,33 @@ impl MediaServerProvider for ApiServerProvider {
             tracing::warn!(%user_id, "Playback credential observation skipped in read-only instance");
             return Ok(());
         }
-        if let Some(deadline) = deadline {
-            let state = self.state.clone();
-            let device_id = device_id.to_owned();
-            let token = token.to_owned();
-            return crate::library_read_work::run_store_query_stage_named(
-                &state.clone(),
-                deadline,
-                "credential_binding",
-                move |store| {
-                    if !state.instance_writable() {
-                        return Ok(());
-                    }
-                    store
-                        .bind_playback_credential(user_id, &device_id, &token)
-                        .map_err(Into::into)
-                },
-            )
-            .await
-            .map_err(query_stage_error);
-        }
-        let store = self.state.store.lock();
-        if !self.state.instance_writable() {
-            return Ok(());
-        }
-        store
-            .bind_playback_credential(user_id, device_id, token)
-            .map_err(|error| media_server::provider::QueryError::Internal(error.to_string()))
+        let deadline = deadline.unwrap_or_else(|| {
+            std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT
+        });
+
+        let state = self.state.clone();
+        let device_id = device_id.to_owned();
+        let token = token.to_owned();
+        crate::library_read_work::run_store_query_stage_named(
+            &state.clone(),
+            deadline,
+            "credential_binding",
+            move |store| {
+                if !state.instance_writable() {
+                    return Ok(());
+                }
+                store
+                    .bind_playback_credential(user_id, &device_id, &token)
+                    .map_err(Into::into)
+            },
+        )
+        .await
+        .map_err(query_stage_error)
     }
 
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
-        let store = self.state.store.lock();
-        let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
-            return Ok(None);
-        };
-        let role = store.user_role(user.id).unwrap_or_else(|_| "member".into());
-        Ok(Some(ServerUser {
-            id: user.id,
-            login: user.login,
-            is_admin: role == "admin",
-        }))
+        self.run_sync(move |provider| provider.get_user_sync(user_id))
+            .await?
     }
 
     async fn get_user_for_query(
@@ -428,19 +416,9 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let store = self.state.store.lock();
-        if let Ok(Some(lib)) = store.get_library(id)
-            && crate::http::library::library_visible(&store, &lib, user_id)
-        {
-            if let Some(cover) = crate::http::library::library_cover_path(&store, &lib) {
-                drop(store);
-                return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
-            }
-            let kind = lib.kind;
-            drop(store);
-            return default_library_cover(kind).map(Some);
-        }
-        Ok(None)
+        let id = id.to_owned();
+        self.run_sync(move |provider| provider.resolve_cover_bytes_sync(user_id, &id))
+            .await?
     }
 
     async fn resolve_poster_bytes(
@@ -448,23 +426,9 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = {
-            let store = self.state.store.lock();
-            items::resolve_entry(&store, user_id, id)?
-        };
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let path = if entry.is_series {
-            crate::http::library::poster_path(&entry.file)
-        } else {
-            local_primary_image(&entry.file, entry.unit, &entry.media)
-                .or_else(|| crate::http::library::poster_path(&entry.file))
-        };
-        match path {
-            Some(path) => std::fs::read(path).map(Some).map_err(|e| e.to_string()),
-            None => Ok(None),
-        }
+        let id = id.to_owned();
+        self.run_sync(move |provider| provider.resolve_poster_bytes_sync(user_id, &id))
+            .await?
     }
 
     async fn resolve_primary_image_url(
@@ -472,40 +436,49 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<String>, String> {
-        let (adopted_url, local_still, tmdb_episode) = {
-            let store = self.state.store.lock();
-            let entry = items::resolve_entry(&store, user_id, id)?;
-            let Some(entry) = entry else {
-                return Ok(None);
-            };
-            if entry.media.kind != MediaKind::Tv || entry.is_series {
-                return Ok(None);
-            }
-            // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
-            let Some((season, episode)) =
-                items::snapshot_unit(entry.unit).and_then(|unit| unit.episode_coordinates())
-            else {
-                return Ok(None);
-            };
-            // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
-            let adopted_still = item_metadata::page_fields(
-                &store,
-                &entry.file,
-                entry.unit,
-                &entry.media,
-                entry.is_series,
-            )
-            .ok()
-            .and_then(|fields| fields.still_url.value().cloned());
-            let adopted_url = primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
-            let local_still = crate::episode_still::existing(entry.file.path.as_path()).is_some();
-            let tmdb_episode = entry
-                .media
-                .tmdb_id
-                .filter(|_| !local_still && adopted_url.is_none())
-                .map(|tmdb_id| (tmdb_id, season, episode));
-            (adopted_url, local_still, tmdb_episode)
+        let id = id.to_owned();
+        let facts = self
+            .run_sync(move |provider| -> Result<_, String> {
+                let store = provider.bounded_store()?;
+                let entry = items::resolve_entry(&store, user_id, &id)?;
+                let Some(entry) = entry else {
+                    return Ok(None);
+                };
+                if entry.media.kind != MediaKind::Tv || entry.is_series {
+                    return Ok(None);
+                }
+                // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
+                let Some((season, episode)) =
+                    items::snapshot_unit(entry.unit).and_then(|unit| unit.episode_coordinates())
+                else {
+                    return Ok(None);
+                };
+                // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
+                let adopted_still = item_metadata::page_fields(
+                    &store,
+                    &entry.file,
+                    entry.unit,
+                    &entry.media,
+                    entry.is_series,
+                )
+                .ok()
+                .and_then(|fields| fields.still_url.value().cloned());
+                let adopted_url =
+                    primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
+                let local_still =
+                    crate::episode_still::existing(entry.file.path.as_path()).is_some();
+                let tmdb_episode = entry
+                    .media
+                    .tmdb_id
+                    .filter(|_| !local_still && adopted_url.is_none())
+                    .map(|tmdb_id| (tmdb_id, season, episode));
+                Ok(Some((adopted_url, local_still, tmdb_episode)))
+            })
+            .await??;
+        let Some((adopted_url, local_still, tmdb_episode)) = facts else {
+            return Ok(None);
         };
+
         if local_still {
             return Ok(None);
         }
@@ -545,19 +518,9 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = {
-            let store = self.state.store.lock();
-            items::resolve_entry(&store, user_id, id)?
-        };
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let Some(path) = backdrop_path(&entry.file, entry.is_series) else {
-            return Ok(None);
-        };
-        std::fs::read(path)
-            .map(Some)
-            .map_err(|error| error.to_string())
+        let id = id.to_owned();
+        self.run_sync(move |provider| provider.resolve_backdrop_bytes_sync(user_id, &id))
+            .await?
     }
 
     /// Stream routing: the public item id names the logical target, and the
@@ -580,71 +543,26 @@ impl MediaServerProvider for ApiServerProvider {
         play_session_id: Option<&str>,
         device_id: Option<&str>,
     ) -> Result<Option<(PathBuf, bool)>, String> {
-        // Must not accept bare file UUID as a logical ID
-        if id.len() == 36
-            && id.chars().filter(|c| *c == '-').count() == 4
-            && uuid::Uuid::parse_str(id).is_ok()
-        {
-            return Ok(None);
-        }
-        let entry = {
-            let store = self.state.store.lock();
-            items::resolve_entry(&store, Some(user_id), id)?
-        };
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-
-        let file = if let Some(msid) = media_source_id {
-            // Only the versioned `f1_<file>_<revision>` shape advertised by
-            // PlaybackInfo is accepted; a bare file UUID is not a MediaSourceId.
-            let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
-                return Ok(None);
-            };
-            let store = self.state.store.lock();
-            let Some(file) = store
-                .visible_file(user_id, physical.file_id)
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok(None);
-            };
-            let covers = store
-                .file_covers_unit(
-                    physical.file_id,
-                    entry.media.id,
-                    domain::UnitKey::new(entry.unit.0, entry.unit.1),
-                )
-                .map_err(|e| e.to_string())?;
-            if !covers
-                || file.media_id != entry.media.id
-                || file.version.revision != physical.revision
-            {
-                return Ok(None);
-            }
-            file
-        } else {
-            entry.file.clone()
-        };
-        if let Some(session_id) = play_session_id
-            && !self.stream_matches_binding(user_id, device_id, session_id, &entry, &file)?
-        {
-            tracing::warn!(%user_id, item_id = %id, "Jellyfin 取流与签发的播放会话绑定不符，拒绝");
-            return Ok(None);
-        }
-
-        let path = file.path.clone();
-        let is_strm = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
-        Ok(Some((path, is_strm)))
+        let id = id.to_owned();
+        let media_source_id = media_source_id.map(str::to_owned);
+        let play_session_id = play_session_id.map(str::to_owned);
+        let device_id = device_id.map(str::to_owned);
+        self.run_sync(move |provider| {
+            provider.resolve_stream_source_bound_sync(
+                user_id,
+                &id,
+                media_source_id.as_deref(),
+                play_session_id.as_deref(),
+                device_id.as_deref(),
+            )
+        })
+        .await?
     }
 
     async fn is_device_revoked(&self, user_id: UserId, device_id: &str) -> Result<bool, String> {
-        let store = self.state.store.lock();
-        store
-            .is_device_revoked(user_id, device_id)
-            .map_err(|e| e.to_string())
+        let device_id = device_id.to_owned();
+        self.run_sync(move |provider| provider.is_device_revoked_sync(user_id, &device_id))
+            .await?
     }
 
     async fn set_user_marks(
@@ -654,19 +572,16 @@ impl MediaServerProvider for ApiServerProvider {
         played: Option<bool>,
         favorite: Option<bool>,
     ) -> Result<bool, UserMarksError> {
-        let store = self.state.store.lock();
-        let Some((media_id, season, episode)) =
-            resolve_mark_unit(&store, user_id, id).map_err(UserMarksError::Internal)?
-        else {
-            return Ok(false);
-        };
-        let change = crate::store::playback::PlaybackMutation::marks(
-            user_id, season, episode, played, favorite,
-        );
-        store
-            .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
-            .map_err(|error| user_marks::mark_error(error, user_id, media_id))?;
-        Ok(true)
+        let id = id.to_owned();
+        let provider = Self::new(self.state.clone());
+        self.state
+            .http_work
+            .run_to_completion(move || provider.set_user_marks_sync(user_id, &id, played, favorite))
+            .await
+            .map_err(|error| match error {
+                crate::blocking_budget::BlockingError::Busy => UserMarksError::Unavailable,
+                error => UserMarksError::Internal(error.to_string()),
+            })?
     }
 
     async fn issue_play_session(
@@ -675,24 +590,10 @@ impl MediaServerProvider for ApiServerProvider {
         device_id: &str,
         id: &str,
     ) -> Result<String, String> {
-        let target = playback::resolve_target(self, user_id, id)?
-            .ok_or_else(|| format!("Playback item {id} missing or not visible"))?;
-        use std::str::FromStr;
-        let ledger_id = domain::LedgerId::from_str(&target.ledger_id).map_err(|e| e.to_string())?;
-        // 播放域时间走注入时钟；`issue_play_session` 的 `issued_at` 是**秒**。
-        let now = self.state.playback_clock.now_ms() / 1000;
-        let store = self.state.store.lock();
-        store
-            .issue_play_session(
-                user_id,
-                device_id,
-                ledger_id,
-                target.media.id,
-                domain::UnitKey::new(target.season, target.episode),
-                &target.file.version,
-                now,
-            )
-            .map_err(|e| e.to_string())
+        let id = id.to_owned();
+        let device_id = device_id.to_owned();
+        self.run_sync(move |provider| provider.issue_play_session_sync(user_id, &device_id, &id))
+            .await?
     }
 
     async fn report_playback_event(
@@ -705,16 +606,19 @@ impl MediaServerProvider for ApiServerProvider {
         event: PlaybackEvent,
         identity: media_server::provider::PlaybackEventIdentity,
     ) -> Result<(), String> {
-        playback::report_event(
-            self,
-            user_id,
-            id,
-            position_ms,
-            paused,
-            client,
-            event,
-            identity,
-        )
+        let id = id.to_owned();
+        self.run_sync(move |provider| {
+            provider.report_playback_event_sync(
+                user_id,
+                &id,
+                position_ms,
+                paused,
+                client,
+                event,
+                identity,
+            )
+        })
+        .await?
     }
 }
 
@@ -735,13 +639,15 @@ impl ApiServerProvider {
             .collect();
         let total = episodes.len();
         let played = episodes.iter().filter(|episode| episode.played).count();
-        let favorite = {
-            let store = self.state.store.lock();
-            store
-                .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
-                .map_err(|error| error.to_string())?
-                .is_some_and(|state| state.favorite)
-        };
+        let favorite = self
+            .run_sync(move |provider| {
+                provider
+                    .bounded_store()?
+                    .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
+                    .map(|state| state.is_some_and(|state| state.favorite))
+                    .map_err(|error| error.to_string())
+            })
+            .await??;
         let unplayed_item_count = total.saturating_sub(played);
         let item_id = domain::TypedItemId::Season { media, season }.to_wire_string();
         Ok(media_server::provider::UserItemData {

@@ -20,7 +20,7 @@ pub(super) fn resolve_target(
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
     let entry = {
-        let store = provider.state.store.lock();
+        let store = provider.bounded_store()?;
         super::items::resolve_entry(&store, Some(user_id), id)?
     };
     let Some(entry) = entry else {
@@ -44,7 +44,7 @@ pub(super) fn resolve_target(
                 file_id: entry.file.file_id,
                 revision: entry.file.version.revision,
             };
-            let store = provider.state.store.lock();
+            let store = provider.bounded_store()?;
             let resolved = store
                 .resolve_playback(user_id, &item, Some(&source), None)
                 .map_err(|error| error.to_string())?;
@@ -77,7 +77,10 @@ pub(super) fn report_event(
     let target = resolve_target(provider, user_id, id)?
         .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
     let now_ms = provider.state.playback_clock.now_ms();
-    let store = provider.state.store.lock();
+    let store = provider.bounded_store()?;
+    if !provider.state.instance_writable() {
+        return Err("instance is read-only or under maintenance".into());
+    }
     if store
         .is_device_revoked(user_id, &client.device_id)
         .map_err(|error| error.to_string())?

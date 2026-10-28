@@ -12,8 +12,8 @@
 
 use domain::{
     Confidence, EntityScope, FieldValue, FilePresence, FilePublication, FileVersion, LedgerId,
-    LibraryFile, LibraryId, Media, MediaId, MediaKind, MetadataFields, MetadataGenre, QualitySource,
-    UnitKey, User, UserId, UserRole,
+    LibraryFile, LibraryId, Media, MediaId, MediaKind, MetadataFields, MetadataGenre,
+    QualitySource, UnitKey, User, UserId, UserRole,
 };
 use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
@@ -143,6 +143,11 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// Keep an explicitly fresh connection for optimizer-state regression controls.
+    pub fn fresh(scale: Scale) -> Self {
+        seed(scale)
+    }
+
     /// Builds the fixture, reusing the seed cache when it matches this DDL and this scale.
     ///
     /// Seeding is ~50,000 write transactions (one per Media, per NFO override, per watch row),
@@ -343,7 +348,14 @@ fn file_row(
         transfer_mode: None,
         resolution: Some(resolution.to_string()),
         codec: Some("h264".into()),
-        hdr: Some(if index.is_multiple_of(4) { "HDR10" } else { "SDR" }.to_string()),
+        hdr: Some(
+            if index.is_multiple_of(4) {
+                "HDR10"
+            } else {
+                "SDR"
+            }
+            .to_string(),
+        ),
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
@@ -361,7 +373,10 @@ fn publish(store: &Store, library: &SeededLibrary, rows: &mut Vec<(LibraryFile, 
     if rows.is_empty() {
         return;
     }
-    assert!(rows.len() <= 100, "the store caps one publication at 100 files");
+    assert!(
+        rows.len() <= 100,
+        "the store caps one publication at 100 files"
+    );
     let publications: Vec<StorePublication<'_>> = rows
         .iter()
         .map(|(file, units)| StorePublication {

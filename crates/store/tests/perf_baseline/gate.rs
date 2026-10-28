@@ -3,8 +3,8 @@
 //!
 //! Budgets are per-operation **upper bounds on deterministic counters**, never on time:
 //! - `statements`: SQL statements the operation executed.
-//! - `fullscan_steps`: rows SQLite had to walk in a full table scan — the number that has
-//!   predicted every real problem on this branch.
+//! - `fullscan_steps`, `vm_steps`, sort operations and decoded SQL rows: an indexed
+//!   prefix scan can do excessive work without reporting any full-table scan steps.
 //! - `ledger_scans` / `media_ledger_reads` / `role_lookups`: the store's own diagnostics, so
 //!   an operation that quietly starts re-reading the whole ledger or the roster fails even
 //!   where no statement counter exists.
@@ -21,7 +21,7 @@
 //! the member marginal, so it is pinned at zero.
 
 use super::fixture::{Fixture, Scale};
-use super::measure::{print_context, print_table, Report};
+use super::measure::{Report, print_context, print_table};
 use super::ops;
 
 /// One pinned budget.
@@ -37,11 +37,11 @@ struct Limit {
     fullscan: (u64, u64),
     /// `vm_steps <= base + files * per_1k / 1000`, when a dimension's row work is pinned.
     ///
-    /// The general rule keeps `vm_steps` informational because a duration is not reproducible;
-    /// `vm_steps` on this fixed fixture **is** (the ten facet values reproduced to the digit
-    /// across runs and scales), and it is the only counter that sees "same statements, twice
-    /// the rows" — the shape of the `hdr` regression this bound exists to catch.
+    /// VM steps are deterministic row work, not elapsed time. They catch expensive
+    /// indexed scans even when SQLite reports zero full-scan steps.
     vm: Option<(u64, u64)>,
+    sorts: Option<u64>,
+    sql_rows: Option<u64>,
     allowed_ledger_scans: usize,
     allowed_role_lookups: usize,
 }
@@ -53,22 +53,22 @@ fn limit(label: &str, statements: Option<u64>, fullscan: (u64, u64)) -> Limit {
         statements: statements.map(|n| (n, 0)),
         fullscan,
         vm: None,
+        sorts: None,
+        sql_rows: None,
         allowed_ledger_scans: 0,
         allowed_role_lookups: 0,
     }
 }
 
 /// A budget whose counters grow with the fixture: `base + files * per_1k / 1000`.
-fn scaled_limit(
-    label: &str,
-    statements: Option<(u64, u64)>,
-    fullscan: (u64, u64),
-) -> Limit {
+fn scaled_limit(label: &str, statements: Option<(u64, u64)>, fullscan: (u64, u64)) -> Limit {
     Limit {
         label: label.to_string(),
         statements,
         fullscan,
         vm: None,
+        sorts: None,
+        sql_rows: None,
         allowed_ledger_scans: 0,
         allowed_role_lookups: 0,
     }
@@ -81,6 +81,8 @@ fn facet_limit(label: &str, statements: u64, fullscan: (u64, u64), vm: (u64, u64
         statements: Some((statements, 0)),
         fullscan,
         vm: Some(vm),
+        sorts: None,
+        sql_rows: None,
         allowed_ledger_scans: 0,
         allowed_role_lookups: 0,
     }
@@ -106,7 +108,14 @@ fn role_limit(label: &str, statements: Option<u64>, fullscan: (u64, u64)) -> Lim
 
 fn limits() -> Vec<Limit> {
     let mut limits = vec![
-        limit(ops::BROWSE_PAGE_1, Some(6), ZERO_SCAN),
+        Limit {
+            // The fixed 60-card page measures 1,938 VM steps at both 424 and
+            // 61,000 files. Allow 24% headroom, but no sort or off-page hydration.
+            vm: Some((2_400, 0)),
+            sorts: Some(0),
+            sql_rows: Some(70),
+            ..limit(ops::BROWSE_PAGE_1, Some(6), ZERO_SCAN)
+        },
         limit(ops::BROWSE_DEEP_OFFSET, Some(6), ZERO_SCAN),
         limit(ops::BROWSE_DEEP_CURSOR, Some(5), ZERO_SCAN),
         // Task 11 landed: the lease no longer validates the whole layout per request, so the
@@ -174,7 +183,8 @@ fn scaled((base, per_1k): (u64, u64), files: usize) -> u64 {
 /// Compares one report with its budget; returns every violated metric.
 fn check(report: &Report, limit: &Limit, files: usize) -> Vec<String> {
     let mut violations = Vec::new();
-    if let (Some(measured), Some(budget)) = (report.work.statements, statements_budget(limit, files))
+    if let (Some(measured), Some(budget)) =
+        (report.work.statements, statements_budget(limit, files))
         && measured > budget
     {
         violations.push(format!(
@@ -205,6 +215,19 @@ fn check(report: &Report, limit: &Limit, files: usize) -> Vec<String> {
             "{}: {} full ledger scans, budget {}",
             limit.label, report.work.ledger_scans, limit.allowed_ledger_scans
         ));
+    }
+    for (name, measured, budget) in [
+        ("sort operations", report.work.sort_operations, limit.sorts),
+        ("SQL result rows", report.work.sql_rows, limit.sql_rows),
+    ] {
+        if let (Some(measured), Some(budget)) = (measured, budget)
+            && measured > budget
+        {
+            violations.push(format!(
+                "{}: {measured} {name}, budget {budget}",
+                limit.label
+            ));
+        }
     }
     if report.work.media_ledger_reads > 0 {
         violations.push(format!(
@@ -322,7 +345,11 @@ fn gate_rejects_a_ledger_scan_inside_a_hot_read() {
         "the simulated regression did not scan: {:?}",
         report.work
     );
-    let violations = check(&report, &limit(label, None, ZERO_SCAN), fixture.scale.files());
+    let violations = check(
+        &report,
+        &limit(label, None, ZERO_SCAN),
+        fixture.scale.files(),
+    );
     assert!(
         !violations.is_empty(),
         "the gate accepted a hot read that scans the whole ledger: {:?}",
@@ -360,18 +387,35 @@ fn gate_rejects_a_duplicated_query() {
 ///
 /// The property that must survive is the one the gate exists for: **a hot read that
 /// loses the index it runs on must be rejected, not served more slowly**. `items_title`
-/// is the index `browse page 1` (offset 0, `BrowseOrder::Title`) walks; its budget is
-/// `ZERO_SCAN`, so dropping it turns the page into a table scan plus a sort and the
-/// shipped budget must reject the run. The answer stays correct — which is exactly why
-/// the counter, not the response, is the signal.
+/// is the index `browse page 1` (offset 0, `BrowseOrder::Title`) walks. Without it,
+/// SQLite may choose a table scan or another index plus a sort, depending on its
+/// statistics. The same shipped VM/sort budget must reject either plan even when
+/// fullscan is zero. Schema index presence has separate layout tests.
 #[test]
 fn a_lost_index_fails_loudly_instead_of_scanning() {
     let fixture = Fixture::build(Scale::TINY);
+    assert_lost_index_rejected(fixture);
+}
+
+#[test]
+fn lost_index_is_rejected_with_fresh_and_analyzed_statistics() {
+    for analyze in [false, true] {
+        let fixture = Fixture::fresh(Scale::TINY);
+        if analyze {
+            let db =
+                rusqlite::Connection::open(fixture.store.data_dir().join("library.db")).unwrap();
+            db.execute_batch("ANALYZE").unwrap();
+        }
+        assert_lost_index_rejected(fixture);
+    }
+}
+
+fn assert_lost_index_rejected(fixture: Fixture) {
     let budget = limits()
         .into_iter()
         .find(|limit| limit.label == ops::BROWSE_PAGE_1)
-        .expect("browse page 1 has a pinned budget");
-    let healthy = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, 20);
+        .unwrap();
+    let healthy = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, 60);
     assert!(
         check(&healthy, &budget, fixture.scale.files()).is_empty(),
         "the healthy run must fit its budget: {:?}",
@@ -379,7 +423,7 @@ fn a_lost_index_fails_loudly_instead_of_scanning() {
     );
 
     drop_index(&fixture, "items_title");
-    let degraded = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, 20);
+    let degraded = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, 60);
     let violations = check(&degraded, &budget, fixture.scale.files());
     println!(
         "negative control (lost index): {:?} -> {:?}, violations: {violations:?}",
@@ -392,8 +436,10 @@ fn a_lost_index_fails_loudly_instead_of_scanning() {
         fullscan_budget(&budget, fixture.scale.files())
     );
     assert!(
-        violations.iter().any(|v| v.contains("full-scan")),
-        "the lost index must show up as scan work: {violations:?}"
+        violations
+            .iter()
+            .any(|v| v.contains("vm steps") || v.contains("sort operations")),
+        "the lost index must expose query work regardless of scan strategy: {violations:?}"
     );
 }
 
@@ -416,9 +462,9 @@ fn with_stats_reports_the_work_the_database_really_did() {
     use store::stats::StatsScope;
 
     let fixture = Fixture::build(Scale::TINY);
-    let (coverage, scanning) = fixture
-        .store
-        .with_stats(StatsScope::Library, || fixture.store.list_file_coverage().unwrap());
+    let (coverage, scanning) = fixture.store.with_stats(StatsScope::Library, || {
+        fixture.store.list_file_coverage().unwrap()
+    });
     assert!(!coverage.is_empty(), "the coverage read returned nothing");
     assert!(
         scanning.statements >= 1 && scanning.fullscan_steps > 0,
@@ -426,11 +472,9 @@ fn with_stats_reports_the_work_the_database_really_did() {
     );
 
     let query = ops::page_query(&fixture);
-    let (_, keyed) = fixture
-        .store
-        .with_stats(StatsScope::Library, || {
-            fixture.store.library_item_page(&query).unwrap()
-        });
+    let (_, keyed) = fixture.store.with_stats(StatsScope::Library, || {
+        fixture.store.library_item_page(&query).unwrap()
+    });
     assert!(
         keyed.statements >= 1,
         "the seam counted no statements for a keyed page: {keyed:?}"
@@ -442,16 +486,17 @@ fn with_stats_reports_the_work_the_database_really_did() {
 
     // Nested scopes must not double-count the inner operation in the outer one.
     let (_, outer) = fixture.store.with_stats(StatsScope::Library, || {
-        let (_, inner) = fixture
-            .store
-            .with_stats(StatsScope::Library, || fixture.store.list_file_coverage().unwrap());
-        assert!(inner.fullscan_steps > 0, "inner scope saw no scan: {inner:?}");
+        let (_, inner) = fixture.store.with_stats(StatsScope::Library, || {
+            fixture.store.list_file_coverage().unwrap()
+        });
+        assert!(
+            inner.fullscan_steps > 0,
+            "inner scope saw no scan: {inner:?}"
+        );
     });
     assert!(
         outer.fullscan_steps >= scanning.fullscan_steps,
         "the outer scope must include the inner read: outer {outer:?} vs direct {scanning:?}"
     );
-    println!(
-        "seam control: full scan {scanning:?}, keyed page {keyed:?}, nested {outer:?}"
-    );
+    println!("seam control: full scan {scanning:?}, keyed page {keyed:?}, nested {outer:?}");
 }

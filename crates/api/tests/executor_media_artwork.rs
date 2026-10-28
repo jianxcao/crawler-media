@@ -123,6 +123,54 @@ fn merge_write_does_not_park_executor_on_store() {
     );
 }
 
+// Authentication uses its own AppReader; contend the handler Store instead.
+// The independent holder releases even if Tokio is parked.
+#[test]
+fn library_detail_and_file_page_do_not_park_executor() {
+    for suffix in ["", "/files?limit=1"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token) = state_with_admin(tmp.path());
+        let library_id = state.store().lock().list_libraries().unwrap()[0].id.clone();
+        let app = router(state.clone());
+        let runtime = runtime();
+        let store = state.store();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = store.lock();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+        });
+        rx.recv().unwrap();
+        // Session authentication reads app.db without taking the Store mutex.
+        let uri = format!(
+            "/api/v1/libraries/{library_id}/items/{}{suffix}",
+            MediaId::new()
+        );
+        let elapsed = runtime.block_on(async {
+            let started = Instant::now();
+            let (response, elapsed) = tokio::join!(
+                app.oneshot(request("GET", &uri, &token, Value::Null)),
+                async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    started.elapsed()
+                }
+            );
+            let expected = if suffix.is_empty() {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(response.unwrap().status(), expected);
+            elapsed
+        });
+        holder.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "{uri} blocked for {elapsed:?}"
+        );
+    }
+}
+
 struct SlowArtwork {
     entered: Arc<tokio::sync::Notify>,
 }

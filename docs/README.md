@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。复审基线为 `feat/storage-redesign@9f6126d3` 对 `main/origin/main@756444f7`。用户授权后实施 R6–R9：统一写门禁、补齐 Playback 身份屏障、移出残余执行器阻塞及删除旧输入兼容。完整验证为 Rust workspace 3,185 passed / 0 failed / 24 ignored，Web 850 passed，typecheck/build 通过。当前验收与独立现场边界见下方复审；未部署或操作用户实例。
+更新：2026-10-28。当前复审基线 `feat/storage-redesign@f569c3c7` 对本地 `main/origin/main@756444f7`。本轮复审后用户授权修复执行器同步锁、文件分页覆盖工作量及新夹具性能门禁；最终 workspace 3198 passed / 0 failed / 24 ignored；上一轮 R1–R9 修复及其测试数字保留为历史验收，不覆盖新发现。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
-2. **唯一当前复审与修复验收：** [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R6–R9 修复、原 R1–R5 对账、历史查询实测及验证边界。旧计划 unchecked 不代表当前待办。
+2. **当前复审与技术方案：** [f569c3c7 对 main 再复审](audits/2026-10-28-storage-final-review.md)；记录复审发现、授权修复与最终验证。上一轮修复验收： [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R6–R9 修复、原 R1–R5 对账、历史查询实测及验证边界。旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
 4. **现行结构：** [五文件数据库字典](database/README.md)，library v8。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。

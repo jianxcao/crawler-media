@@ -10,7 +10,7 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Use
 /// Sessions are user-scoped: the library layout keys `playback_sessions` by
 /// `(user_id, device_id)`, so two users sharing one device id never collide.
 #[test]
-fn legacy_device_primary_key_migrates_to_user_scoped_key() {
+fn current_sessions_use_user_scoped_device_key() {
     let dir = tempfile::tempdir().unwrap();
     let user = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
     let media = MediaId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
@@ -24,7 +24,7 @@ fn legacy_device_primary_key_migrates_to_user_scoped_key() {
             .insert_media(&Media {
                 id: media,
                 kind: MediaKind::Movie,
-                title: "Migration Fixture".into(),
+                title: "Session Fixture".into(),
                 year: None,
                 original_title: None,
                 aliases: Vec::new(),

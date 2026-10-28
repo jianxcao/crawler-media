@@ -298,27 +298,38 @@ pub(crate) async fn item_detail(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    let (detail, media, details) = {
-        let store = state.store.lock();
+    let loaded = super::store_wait::store_read(&state, move |store| {
         if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return response;
+            return Err(response);
         }
         let detail = match store.library_item_detail(lib_id, media_id, "") {
             Ok(Some(detail)) => detail,
-            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
-            Err(error) => return browse_store_error(error),
+            Ok(None) => {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
+            Err(error) => return Err(browse_store_error(error)),
         };
         let media = match store.get_media(media_id) {
             Ok(media) => media,
-            Err(error) => return browse_store_error(error),
+            Err(error) => return Err(browse_store_error(error)),
         };
         let file_ids: Vec<domain::LedgerId> =
             detail.files.iter().map(|file| file.file_id).collect();
         let details = match store.file_details_batch(&file_ids) {
             Ok(details) => details,
-            Err(error) => return browse_store_error(error),
+            Err(error) => return Err(browse_store_error(error)),
         };
-        (detail, media, details)
+        Ok((detail, media, details))
+    })
+    .await;
+    let (detail, media, details) = match loaded {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let mut files = Vec::with_capacity(detail.files.len());
     for file in &detail.files {
@@ -338,29 +349,7 @@ pub(crate) async fn item_detail(
         files.push(item_file_json(&state, file, units, &tracks));
     }
     let metadata = &detail.metadata;
-    let cast: Vec<Value> = metadata
-        .cast
-        .value()
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .map(|member| {
-            let avatar_url = member.thumb.as_ref().map(|thumb| {
-                if thumb.starts_with("http://") || thumb.starts_with("https://") {
-                    thumb.clone()
-                } else {
-                    format!("https://image.tmdb.org/t/p/w185{thumb}")
-                }
-            });
-            json!({
-                "name": member.name,
-                "role": member.role,
-                "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
-                "avatar_url": avatar_url,
-                "order": member.order,
-            })
-        })
-        .collect();
+    let cast = detail_cast(metadata);
     let item = &detail.item;
     let (original_title, tmdb_id) = match media {
         Some(media) => (media.original_title.clone(), media.tmdb_id.clone()),
@@ -404,6 +393,32 @@ pub(crate) async fn item_detail(
     .into_response()
 }
 
+fn detail_cast(metadata: &domain::MetadataFields) -> Vec<Value> {
+    metadata
+        .cast
+        .value()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|member| {
+            let avatar_url = member.thumb.as_ref().map(|thumb| {
+                if thumb.starts_with("http://") || thumb.starts_with("https://") {
+                    thumb.clone()
+                } else {
+                    format!("https://image.tmdb.org/t/p/w185{thumb}")
+                }
+            });
+            json!({
+                "name": member.name,
+                "role": member.role,
+                "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
+                "avatar_url": avatar_url,
+                "order": member.order,
+            })
+        })
+        .collect()
+}
+
 /// GET /libraries/{id}/items/{item_id}/files?after=&limit= — one bounded page of files.
 pub(crate) async fn item_files(
     State(state): State<ApiState>,
@@ -432,29 +447,26 @@ pub(crate) async fn item_files(
             );
         }
     };
-    let after = query.get("after").map(String::as_str);
-    let page = {
-        let store = state.store.lock();
-        if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return response;
-        }
-        match store.library_file_page(lib_id, media_id, after, limit) {
-            Ok(page) => page,
-            Err(error) => return browse_store_error(error),
-        }
-    };
-    let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
-    let (file_units, details) = {
-        let store = state.store.lock();
-        let units = match store.file_units(lib_id, media_id, &page.files) {
-            Ok(units) => units,
-            Err(error) => return browse_store_error(error),
-        };
-        let details = match store.file_details_batch(&file_ids) {
-            Ok(details) => details,
-            Err(error) => return browse_store_error(error),
-        };
-        (units, details)
+    let after = query.get("after").cloned();
+    let loaded = super::store_wait::store_read(&state, move |store| {
+        require_visible_library(store, &id, user_id)?;
+        let page = store
+            .library_file_page(lib_id, media_id, after.as_deref(), limit)
+            .map_err(browse_store_error)?;
+        let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
+        let units = store
+            .file_units(lib_id, media_id, &page.files)
+            .map_err(browse_store_error)?;
+        let details = store
+            .file_details_batch(&file_ids)
+            .map_err(browse_store_error)?;
+        Ok::<_, Response>((page, units, details))
+    })
+    .await;
+    let (page, file_units, details) = match loaded {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let mut files = Vec::with_capacity(page.files.len());
     for file in &page.files {

@@ -30,6 +30,8 @@ pub struct Work {
     pub statements: Option<u64>,
     pub fullscan_steps: Option<u64>,
     pub vm_steps: Option<u64>,
+    pub sort_operations: Option<u64>,
+    pub sql_rows: Option<u64>,
     /// Times `Store::list_file_coverage` executed its unfiltered coverage statement.
     pub ledger_scans: usize,
     /// Times `Store::file_coverage_for_media` executed its indexed read.
@@ -44,6 +46,8 @@ impl Work {
             statements: Some(stats.statements),
             fullscan_steps: Some(stats.fullscan_steps),
             vm_steps: Some(stats.vm_steps),
+            sort_operations: Some(stats.sort_operations),
+            sql_rows: Some(stats.sql_rows),
             ..Default::default()
         }
     }
@@ -78,7 +82,10 @@ pub fn measure(
     iterations: usize,
     mut op: impl FnMut() -> Work,
 ) -> Report {
-    assert!(iterations > 0, "{label}: need at least one measured iteration");
+    assert!(
+        iterations > 0,
+        "{label}: need at least one measured iteration"
+    );
     for _ in 0..warmups {
         let _ = op();
     }
@@ -139,7 +146,9 @@ fn counter(value: Option<u64>) -> String {
 /// Prints the report table as Markdown, so it can be pasted into the audit doc unchanged.
 pub fn print_table(header: &str, reports: &[Report]) {
     println!("\n### {header}\n");
-    println!("| operation | iterations | p50 ms | p95 ms | max ms | statements | full-scan steps | vm steps | ledger scans | media ledger reads | role lookups |");
+    println!(
+        "| operation | iterations | p50 ms | p95 ms | max ms | statements | full-scan steps | vm steps | ledger scans | media ledger reads | role lookups |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for report in reports {
         println!(

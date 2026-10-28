@@ -189,33 +189,54 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Coverage of the listed files (`(-1,-1)` marks a whole-work file), one query.
+    /// Coverage of the listed files (`(-1,-1)` marks a whole-work file), in bounded
+    /// file-id windows. Other files of the same Media are never decoded.
     pub fn file_units(
         &self,
         library_id: LibraryId,
         media_id: MediaId,
         files: &[domain::LibraryFile],
     ) -> Result<Vec<(LedgerId, Vec<UnitKey>)>, StoreError> {
-        let mut statement = self.library.prepare(
-            "SELECT file_id, season, episode FROM library_file_units WHERE library_id = ?1 AND media_id = ?2 ORDER BY season, episode, file_id",
-        )?;
-        let rows = statement.query_map(
-            params![library_id.to_string(), media_id.to_string()],
-            |row| {
+        let mut by_file: BTreeMap<String, Vec<UnitKey>> = BTreeMap::new();
+        let ids: std::collections::BTreeSet<_> =
+            files.iter().map(|file| file.file_id.to_string()).collect();
+        let ids: Vec<_> = ids.into_iter().collect();
+        let transaction = if ids.len() > 400 && self.library.is_autocommit() {
+            Some(self.library.unchecked_transaction()?)
+        } else {
+            None
+        };
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            // This WITHOUT ROWID table's primary key is (file_id, season, episode).
+            // Without the pin, an unanalyzed database can scan the entire
+            // (library_id, media_id, ...) index before testing the requested ids.
+            let sql = format!(
+                "SELECT file_id, season, episode
+                 FROM library_file_units INDEXED BY sqlite_autoindex_library_file_units_1
+                 WHERE file_id IN ({placeholders}) AND library_id = ? AND media_id = ?
+                 ORDER BY file_id, season, episode"
+            );
+            let mut bindings = chunk.to_vec();
+            bindings.extend([library_id.to_string(), media_id.to_string()]);
+            let mut statement = self.library.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(bindings), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i32>(1)?,
                     row.get::<_, i32>(2)?,
                 ))
-            },
-        )?;
-        let mut by_file: BTreeMap<String, Vec<UnitKey>> = BTreeMap::new();
-        for row in rows {
-            let (file_id, season, episode) = row?;
-            by_file
-                .entry(file_id)
-                .or_default()
-                .push(UnitKey::new(season, episode));
+            })?;
+            for row in rows {
+                let (file_id, season, episode) = row?;
+                by_file
+                    .entry(file_id)
+                    .or_default()
+                    .push(UnitKey::new(season, episode));
+            }
+        }
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
         }
         Ok(files
             .iter()
