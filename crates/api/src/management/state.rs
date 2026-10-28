@@ -19,11 +19,16 @@ use crate::store::StoreError;
 use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
 use domain::{SubscribeId, UserId};
 
+/// Production Library reader connections; the read gate admits the same count.
+const LIBRARY_READERS: usize = 2;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub(crate) store: Arc<Mutex<Store>>,
     pub(crate) library_reads: Arc<store::LibraryReadPool>,
     library_read_shutdown: Arc<LibraryReadShutdown>,
+    /// Bounded async admission for `library_reads` (one permit per connection).
+    pub(crate) library_read_gate: Arc<crate::library_read_work::LibraryReadGate>,
     /// 身份读专用的 app.db 只读连接（Task 27）：token→用户 / 用户→角色 / 用户详情。
     ///
     /// 它**不参与** `store` 那把进程级锁，因此长写事务（扫描、完整性）期间成员请求
@@ -284,7 +289,7 @@ impl ApiState {
         let library_reads = Arc::new(
             store
                 .lock()
-                .open_library_read_pool(NonZeroUsize::new(2).unwrap())?,
+                .open_library_read_pool(NonZeroUsize::new(LIBRARY_READERS).unwrap())?,
         );
         let data_dir = store.lock().data_dir().to_path_buf();
         // Task 27：身份读走自己的 app.db 连接，不再排在 `store` 锁后面。
@@ -307,6 +312,7 @@ impl ApiState {
         let state = Self {
             store: store.clone(),
             library_read_shutdown: Arc::new(LibraryReadShutdown(library_reads.clone())),
+            library_read_gate: Arc::new(crate::library_read_work::LibraryReadGate::new(LIBRARY_READERS)),
             library_reads,
             app_reader,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(
@@ -430,6 +436,8 @@ impl ApiState {
     pub fn with_library_read_pool_size(mut self, size: NonZeroUsize) -> Result<Self, StoreError> {
         let pool = Arc::new(self.store.lock().open_library_read_pool(size)?);
         self.library_reads = pool.clone();
+        self.library_read_gate =
+            Arc::new(crate::library_read_work::LibraryReadGate::new(size.get()));
         self.library_read_shutdown = Arc::new(LibraryReadShutdown(pool));
         Ok(self)
     }

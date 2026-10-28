@@ -265,15 +265,10 @@ fn pool_closes_on_shutdown_and_releases_after_final_owner() {
     assert!(weak.upgrade().is_none());
 }
 
-#[test]
-fn full_one_reader_pool_returns_503_and_recovers() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("data")).unwrap();
+fn one_reader_fixture(
+    dir: &std::path::Path,
+) -> (ApiState, String, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let store = Store::open(dir.join("data")).unwrap();
     let library = store
         .default_library(domain::MediaKind::Movie)
         .unwrap()
@@ -288,8 +283,8 @@ fn full_one_reader_pool_returns_503_and_recovers() {
         "management-secret".into(),
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
-        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
+        Arc::new(MemoryDownloader::new(dir.join("stage"))),
+        dir.join("library"),
     )
     .unwrap()
     .with_library_read_pool_size(std::num::NonZeroUsize::new(1).unwrap())
@@ -304,30 +299,94 @@ fn full_one_reader_pool_returns_503_and_recovers() {
                 .unwrap();
         }
     }));
+    (state, library, entered_rx, release_tx)
+}
+
+fn facets_request(library: &str) -> Request<Body> {
+    Request::get(format!("/api/v1/libraries/{library}/facets"))
+        .header("Authorization", "Bearer management-secret")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// T4: a full reader pool queues a normal concurrent read (outside the blocking
+/// worker) until a connection is returned, instead of failing it immediately.
+#[test]
+fn full_one_reader_pool_queues_reader_until_lease_returns() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (state, library, entered_rx, release_tx) = one_reader_fixture(dir.path());
     runtime.block_on(async {
         let app = router(state);
-        let request = || {
-            Request::get(format!("/api/v1/libraries/{library}/facets"))
-                .header("Authorization", "Bearer management-secret")
-                .body(Body::empty())
-                .unwrap()
-        };
-        let first_reader = tokio::spawn(app.clone().oneshot(request()));
+        let first_reader = tokio::spawn(app.clone().oneshot(facets_request(&library)));
         tokio::task::spawn_blocking(move || {
             entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
         })
         .await
         .unwrap();
-        let busy = app.clone().oneshot(request()).await.unwrap();
+        let queued = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!queued.is_finished(), "queued reader must wait, not fail");
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            first_reader.await.unwrap().unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(queued.await.unwrap().unwrap().status(), StatusCode::OK);
+    });
+}
+
+/// T4: the wait queue is bounded; once it is full a read fails fast with 503,
+/// and the pool recovers after the lease returns.
+#[test]
+fn saturated_reader_queue_returns_503_and_recovers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (state, library, entered_rx, release_tx) = one_reader_fixture(dir.path());
+    runtime.block_on(async {
+        let app = router(state);
+        let first_reader = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        let mut waiters = Vec::new();
+        let mut busy = None;
+        for _ in 0..64 {
+            let task = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if task.is_finished() {
+                busy = Some(task.await.unwrap().unwrap());
+                break;
+            }
+            waiters.push(task);
+        }
+        let busy = busy.expect("bounded queue must reject once full");
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!waiters.is_empty(), "some readers must have queued");
         release_tx.send(()).unwrap();
         assert_read_error_body(busy).await;
         assert_eq!(
             first_reader.await.unwrap().unwrap().status(),
             StatusCode::OK
         );
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap().unwrap().status(), StatusCode::OK);
+        }
         assert_eq!(
-            app.oneshot(request()).await.unwrap().status(),
+            app.oneshot(facets_request(&library))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::OK
         );
     });

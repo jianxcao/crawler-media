@@ -10,7 +10,9 @@ use std::future::Future;
 use store::{LibraryReadError, QueryBudget};
 use store::{LibraryReadRequest, LibraryReadResult, ReadCredential};
 
+mod gate;
 mod metrics;
+pub(crate) use gate::LibraryReadGate;
 use media_server::query_metrics::QueryMetrics;
 use metrics::{StageMetrics, WorkerMetrics};
 
@@ -151,6 +153,23 @@ pub(crate) async fn run_lease_stage(
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
+    // T4: wait for a free reader on the async side, bounded and deadline-aware,
+    // before taking a blocking worker; the permit travels into the worker and is
+    // released only when that worker exits.
+    let reader_permit = state
+        .library_read_gate
+        .acquire(deadline)
+        .await
+        .map_err(|error| match error {
+            gate::GateError::Saturated => {
+                phase.rejected();
+                LibraryReadError::Busy
+            }
+            gate::GateError::Deadline => {
+                phase.timeout();
+                LibraryReadError::Deadline
+            }
+        })?;
     let reservation = state.http_work.try_reserve().map_err(|_| {
         phase.rejected();
         LibraryReadError::Busy
@@ -164,6 +183,7 @@ pub(crate) async fn run_lease_stage(
     let worker = WorkerMetrics::queued(request_metrics.clone(), "lease", deadline);
     let result = reservation
         .run(remaining, move || {
+            let _reader_permit = reader_permit;
             let worker = worker.start();
             let budget = QueryBudget {
                 deadline,
