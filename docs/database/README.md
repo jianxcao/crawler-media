@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-> 本轮修复与验证进度见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)。原[7030c1dd 审查](../audits/2026-10-28-storage-head-review.md)保留当时反例，不作为当前未修清单。
+> 当前发现及未实施方案见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)，测量见[工作量记录](../benchmarks/2026-10-28-storage-lock-work.md)。[上轮修复记录](../audits/2026-10-28-storage-remediation-verification.md)保留固定范围门禁，不构成读写隔离和所有接口规模验收。
 
 结构核对：2026-10-28，当前分支的唯一生产 DDL。各文件只声明当前定义，初始化空库并重开相同定义；没有历史布局、迁移阶梯或兼容分支。
 
@@ -55,6 +55,8 @@ flowchart TD
 ## 运维与性能边界
 
 本轮将指纹模型的 Media/成员校验和发布放入同一 IMMEDIATE 事务；Series 断言使用三个精确坐标 seek；重复文件复用单次 coverage 捕获，多单元候选共享每份 coverage。接口同步 SQL 在 blocking worker 捕获 owned 事实，文件/网络观察释放 Store 后执行。公开定向回归与最终门禁分别记录，不能由局部通过推断所有设备/规模已验收。
+
+上述三坐标 seek 仅覆盖 Series scalar，协议 IsPlayed 谓词仍有独立二次扫描。Store 四连接共用一个进程级 Mutex；详情/图片/统计及 reader 的 prepare/validate 仍需此锁，offload 未消除读写串行。Probe 每文件全量归约和冷扫描逐 Media 整库水合也仍在，详见当前复审 L1–L4；五文件和同库原子性不要求所有读请求共享写连接。
 
 待删除路径持久保存规范键和意图 generation；入队前在锁外观察磁盘身份，入队后阻止对应路径被发布/换源/改名。后台按持久身份重验和重试，完成磁盘动作后再清除对应文件事实。重命名附属文件的删除入队失败会保留可恢复阶段。
 

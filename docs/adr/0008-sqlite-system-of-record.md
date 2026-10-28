@@ -1,8 +1,8 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 当前只读审查见[7030c1dd 对 main](../audits/2026-10-28-storage-head-review.md)，待实施任务见[H1–H6 方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)：仍有恢复屏障、执行器、超线性工作量与旧输入残留，暂不建议合并。前轮修复结果仅对其当时范围负责。
+> 当前只读审查与未实施方案见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)：offload 已修，读路径仍依赖全局 Store 锁，Probe 归约及协议观看筛选仍有超线性工作量。上轮 H1–H6 的固定范围结果见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)，不将其绿灯扩大到所有接口。
 
-状态：接受；五文件边界保留，`library.db` 当前布局为 version 8。复审代码 `9f6126d3` 的发现及后续 R6–R9 修复验收见[再次复审](../audits/2026-10-28-storage-main-rereview.md)：写门禁、身份冻结屏障与当时点名的异步执行分支已补齐；字段/索引见[数据库字典](../database/README.md)。
+状态：接受；五文件边界保留。未合并的开发中间布局已收敛为唯一生产定义，五文件当前身份版本均为 1；这是当前结构标识，不是旧库迁移支持。字段/索引见[数据库字典](../database/README.md)。新的连接/调度调整仍为提案，不以本文宣称已经实现。
 
 ## 决策
 
@@ -30,7 +30,7 @@ Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、
 
 生产 DDL 只有 [Store v1](../../crates/store/src/schema/v1/)、[ResponseCache](../../crates/media/src/response_cache/mod.rs) 和 [Jobs 唯一 DDL](../../crates/jobs/src/schema.sql)；本文不复制第二套 SQL 或模板字段列表。
 
-Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。Store 的 application_id/user_version 和必需表/索引名校验不是完整逐列约束验证；Jobs 从唯一 DDL 校验对象定义和单例。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
+Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。Store 核对 application_id/user_version，并从唯一生产 DDL 生成表、索引和视图定义清单，对照 sqlite_schema（包括表内约束），拒绝缺失、定义不同或额外对象；诊断/故障注入 trigger 不属于该结构清单。Jobs 同样从唯一 DDL 校验对象定义和单例。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
 
 连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。app/library/subscribe 与 Jobs Queue 显式 synchronous=FULL；Store 的可重建 cache 使用 NORMAL。当前连接策略还设置 cache_size=-16384、temp_store=MEMORY、journal_size_limit=67108864、mmap_size=268435456；空库在 WAL/建表前设置 auto_vacuum=INCREMENTAL。实例 app 心跳 busy_timeout 为 10000ms。独立 media ResponseCache 仅显式设置 WAL/timeout/FK，策略统一尚需测量。页缓存和 mmap 是每连接预算，temp_store 与 journal_size_limit 不提供全进程内存/WAL硬上限；不把构建默认当耐久性合同。
 
@@ -40,7 +40,7 @@ Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务�
 
 ## 有界 Library 读连接
 
-实例为覆盖的 Library/Jellyfin 查询持有最多两个独占只读 lease，连接只打开已验证的当前 `library.db`，不初始化布局、不获取 writer 租约、不 ATTACH app.db。短 Store 阶段持原请求 token 形成 owned 上下文；单库快照重验 Library roster 后执行；快照关闭并归池后，短 Store 阶段重验原凭据、角色、ACL/config/lifecycle、当前 roster 与选中文件引用。Latest 的多个片段统一发布，最多重试一次；跨文件权限最终重验是授权线性化点。
+实例为覆盖的 Library/Jellyfin 查询持有最多两个独占只读 lease，连接只打开已验证的当前 `library.db`，不初始化布局、不获取 writer 租约、不 ATTACH app.db。短 Store 阶段持原请求 token 形成 owned 上下文；单库快照重验 Library roster 后执行；快照关闭并归池后，短 Store 阶段重验原凭据、角色、ACL/config/lifecycle、当前 roster 与选中文件引用。Latest 的多个片段统一发布，最多重试一次；最终重验是现有授权发布检查点，不表示 app/library 两文件具有原子授权快照。完整解除共享锁的提案及跨文件竞态边界见当前复审 T1。
 
 Store Mutex 和 reader lease 不同时持有；writer 不等待读池。认证前的 30 秒预算贯穿所有阶段，busy 不超过剩余预算与 5000ms 较小值，progress 每 1000 VM 检查取消/截止。超时不提前归还 lease/permit，实际 worker 清理后才释放；物理 IO 不承诺即时中止。关闭或确认身份/布局变化后拒绝新租用并排空，保留只读实例现有读写合同。
 

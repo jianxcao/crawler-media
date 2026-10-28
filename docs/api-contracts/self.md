@@ -11,7 +11,7 @@
 
 本实例的管理面是**自有 REST**。不做上游 MoviePilot / MovieClaw 的信封、DTO 字段名或数字哈希 ID。Jellyfin/Emby 播放协议（Infuse 直连）是另一套表面，见 ADR-0005，不是「上游兼容层」。
 
-当前实现的存储/锁/性能与旧输入缺口见[7030c1dd审查](../audits/2026-10-28-storage-head-review.md)及[待实施方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)。其中Filter仍接受三个旧kind是待删除缺陷，不是当前应保留的兼容合同。
+当前实现的锁/性能和旧输入缺口见[共享锁复审与未实施方案](../audits/2026-10-28-storage-lock-review.md)。上轮已删除三个旧 Filter kind 及旧根合并路由，结果见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)；仍接受旧 title_ref 是待修缺陷，不是兼容合同。
 
 ## 通用约定
 
@@ -136,13 +136,15 @@ R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的
 - 因此一次 A-Z 跳转 = **一次** `GET /libraries/{id}/items?cursor=<该档游标>`，返回
   的正是这一档的第一页（9.5k 部的库实测 1 次请求；「回到上次位置」同一条路）。
   跳转后窗口起点不为 0，向上滚动不做 prepend（与 cursor-only 分页同一取舍）。
-- Library/排序/筛选/方向任一改变，客户端必须重新取 `item-index`。当前卡片游标的服务端 scope 校验仍缺，见上面的 R5；item-index 仍在 Store guard 内计算，锁边界见 R1。
+- Library/排序/筛选/方向任一改变，客户端必须重新取 `item-index`。卡片游标已有服务端 scope 校验；item-index 走独立 reader，但准备/最终校验仍依赖共享 Store，边界见[当前复审 L1](../audits/2026-10-28-storage-lock-review.md)。索引生成需遍历排序集合，不承诺一页的常量工作量。
 
 ### LibraryItemFile 与文件续页
 
 `GET /libraries/{id}/items/{media_item_id}` 首详情带 `files` 首页与 `next_file_cursor`；
 续页 `GET /libraries/{id}/items/{media_item_id}/files?after=&limit=`（`limit` 为 `1..=100`，默认 50）
 返回 `{files, next_cursor}`。`cursor` 绑定 Library/Media/`file_id ASC` 顺序，越界或跨 scope 一律 400。
+
+当前 Web adapter 会收齐全部文件页才 resolve 详情，并在 Probe 未结束时定期重拉；这是[复审 L5](../audits/2026-10-28-storage-lock-review.md)的性能缺口，不代表后端已实现的文件分页本身仍读取全部覆盖。首屏与按需加载的新消费者合同尚未实施。
 
 单个文件行（`web/lib/api/libraries.ts` 的 `LibraryItemFile`）：
 

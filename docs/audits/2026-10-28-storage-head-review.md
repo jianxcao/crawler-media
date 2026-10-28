@@ -1,10 +1,10 @@
 # 存储重构对 main 的审查基线（7030c1dd）
 
-> 本文固定记录修复前的审查与反例。用户随后授权实施修复，当前状态见[修复与验证记录](2026-10-28-storage-remediation-verification.md)，不要把下文“暂不合并”或结构数字当作修复后结论。
+> 本文固定记录修复前的审查与反例。后续修复见[修复与验证记录](2026-10-28-storage-remediation-verification.md)，最新结论与未实施方案见[共享锁复审](2026-10-28-storage-lock-review.md)。下文问题、结构数字与门禁仅属于当时版本。
 
 日期：2026-10-28。审查对象 `feat/storage-redesign@7030c1ddc8b6e28e457fdd309d00bbc5a21c09d6`；执行 `git fetch origin main` 后，本地 main、origin/main 与 merge base 均为 `756444f76bef53f5fabed6d0ef53e9f280e005e9`。开始时工作区干净。差异为 1,540 文件、187,136 行新增、65,496 行删除；这是重点调用链审查，不是全部差异逐行穷尽证明。
 
-**结论：暂不建议合并。确认两项 P1、四项 P2；本轮只审查、测量和整理文档，没有修改业务代码、测试或 DDL。** 修复任务见[实施方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)，可复核的临时探针源码与输出见[证据附录](2026-10-28-storage-head-review-evidence.md)。上一轮报告及其绿灯只对[当时的修复](2026-10-28-storage-final-review.md)负责。
+**当轮结论：暂不建议合并。确认两项 P1、四项 P2；当轮只审查、测量和整理文档，没有修改业务代码、测试或 DDL。** 后续 H1–H6 修复对账见[修复记录](2026-10-28-storage-remediation-verification.md)，原实施计划已完成撤下；当前剩余见[共享锁复审](2026-10-28-storage-lock-review.md)。原始临时探针源码与输出见[证据附录](2026-10-28-storage-head-review-evidence.md)。
 
 ## 架构与数据库判断
 

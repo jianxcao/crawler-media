@@ -1,6 +1,6 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
-> 当前行为修复及验证边界见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)。历史审查保留固定版本的反例与测量。
+> 当前锁/查询/归约缺口见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。[上轮修复记录](../audits/2026-10-28-storage-remediation-verification.md)仅负责当时范围；历史审查保留固定版本反例。
 
 [返回数据库总览](README.md)
 

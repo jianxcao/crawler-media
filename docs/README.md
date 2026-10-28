@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。当前分支 `feat/storage-redesign` 基于 main `756444f7`。本轮已按用户后续授权实施存储复审修复，当前修复范围、验证及尚未运行的边界集中在[修复记录](audits/2026-10-28-storage-remediation-verification.md)。历史审查保留固定提交的反例，不再作为当前待办入口。
+更新：2026-10-28。当前复审基线 `feat/storage-redesign@7e3bd653`，对比 main `756444f7`。用户要求只审查及整理文档；[共享锁复审与技术方案](audits/2026-10-28-storage-lock-review.md)确认全局锁、Probe 重建和协议观看筛选仍有问题，暂不建议合并。上轮已修项与本轮未实施方案分别记录。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
-2. **当前修复与验证：** [修复记录](audits/2026-10-28-storage-remediation-verification.md)、[任务对账](superpowers/plans/2026-10-28-storage-head-remediation.md)。原[7030c1dd 对 main 审查](audits/2026-10-28-storage-head-review.md)及[复现证据](audits/2026-10-28-storage-head-review-evidence.md)为历史基线。[前次修复验收](audits/2026-10-28-storage-final-review.md)与[更早修复](audits/2026-10-28-storage-main-rereview.md)只对各自版本负责；旧计划 unchecked 不代表当前待办。
+2. **唯一当前审查与方案：** [共享锁复审](audits/2026-10-28-storage-lock-review.md)、[隔离测量与复现源码](benchmarks/2026-10-28-storage-lock-work.md)。[上轮修复记录](audits/2026-10-28-storage-remediation-verification.md)保留 H1–H6 的实现与门禁。[7030c1dd 审查](audits/2026-10-28-storage-head-review.md)及[证据](audits/2026-10-28-storage-head-review-evidence.md)、[前次修复](audits/2026-10-28-storage-final-review.md)和[更早修复](audits/2026-10-28-storage-main-rereview.md)均只对各自范围负责；旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
 4. **现行结构：** [五文件数据库字典](database/README.md)；各文件只保留一份当前定义。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
@@ -138,3 +138,9 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 - 删除 `scripts/storage-cutover-rebuild.sh` 及部署页的旧 cache 切换步骤。该脚本只搬 cache，不能兑现旧启动提示中“重建事实库”的说法；当前启动不再指向它。
 - 原 subscribe schema fixture 已删除；结构拒绝测试只构造当前定义缺失/篡改或未知身份，不维护历史布局。
 - 数据库字典更新至 76 表 / 750 字段，library 53 表 / 596 字段 / 83 命名索引。历史结构测量仍保留其原日期和版本，不作为运行操作指南。
+
+## 2026-10-28 现场反馈后的共享锁复审
+
+读取「测试」会话的原现场结果及更新代码后的结论，逐项核对 `7e3bd653`，把 offload 已修和仍然读写串行区分。当前发现/方案集中在共享锁复审；Probe 与协议观看筛选测量保留到 benchmark。同步 ADR、数据库、API、主 Spec 和历史修复记录导航。
+
+删除已完成的 `superpowers/plans/2026-10-28-storage-head-remediation.md`：其 H1–H6 与最终门禁均已收录上轮修复记录，原文从 `git show 7e3bd653:docs/superpowers/plans/2026-10-28-storage-head-remediation.md` 取回。本轮只提交文档，不实施新方案或修改真实实例。

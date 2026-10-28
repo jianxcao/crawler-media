@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-> 当前只读审查见[7030c1dd 对 main](../../audits/2026-10-28-storage-head-review.md)，待实施任务见[H1–H6 方案](../plans/2026-10-28-storage-head-remediation.md)：仍有恢复屏障、执行器、超线性工作量与旧输入残留，暂不建议合并。前轮修复结果仅对其当时范围负责。
+> 当前只读审查与未实施方案见[共享锁复审](../../audits/2026-10-28-storage-lock-review.md)。上轮 H1–H6 已有[修复记录](../../audits/2026-10-28-storage-remediation-verification.md)；当前剩余包含全局 Store 读写串行、Probe 全量归约、协议观看筛选和旧引用输入，不重报已修执行器/文件页/scalar 问题。
 
 状态（2026-10-28）：本页第3–10节定义目标合同。原 NFO 失败退出、Integrity 热点索引、分集范围读取及游标作用域已修；后续 R6–R9 补齐写门禁、Playback 身份屏障、异步执行边界及旧值清理，实施与验收见[再次复审](../../audits/2026-10-28-storage-main-rereview.md)。独立容量/设备门仍按实际证据验收。
 
@@ -19,7 +19,7 @@
 
 ## 2. 重设计前的问题证据（历史）
 
-下表是2026-10-18设计时的旧架构定位，不是现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产缺口与历史证据分别见[数据库文档](../../database/README.md)、[当前方案](../plans/2026-10-28-storage-head-remediation.md)和[证据记录](../../benchmarks/2026-10-18-library-storage.md)。
+下表是2026-10-18设计时的旧架构定位，不是现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产缺口与历史证据分别见[数据库文档](../../database/README.md)、[当前审查与方案](../../audits/2026-10-28-storage-lock-review.md)和[证据记录](../../benchmarks/2026-10-18-library-storage.md)。
 
 | 设计时的代码 | 当时已观察到的行为 | 本设计对应变化 |
 |---|---|---|
@@ -246,9 +246,9 @@ ORDER BY title_sort ASC, media_id ASC
 LIMIT :limit;
 ```
 
-示例对应索引 `(library_id,title_sort,media_id)`，采用非NULL排序键进行复合seek。首屏省去cursor条件；降序排序为避免混合方向的OR条件退化，使用与排序方向一致的复合seek（例如DESC/DESC），cursor模式同值按ID同向排序；旧offset协议保留现有tie-break。标题/上映时间/评分/时长/大小/分辨率/固定随机键按真实查询建复合索引，NULL映射必须保留既有排序语义。标题排序须与现有大小写/Unicode规则一致，不用SQLite NOCASE假装解决全语言排序。
+示例对应索引 `(library_id,title_sort,media_id)`，采用非NULL排序键进行复合seek。首屏省去cursor条件；降序排序为避免混合方向的OR条件退化，使用与排序方向一致的复合seek（例如DESC/DESC），自有API只接受当前cursor格式，同值按ID同向排序；Jellyfin协议的StartIndex分页保留协议规定的offset与现有tie-break，不作为旧自有API兼容层。标题/上映时间/评分/时长/大小/分辨率/固定随机键按真实查询建复合索引，NULL映射必须保留既有排序语义。标题排序须与现有大小写/Unicode规则一致，不用SQLite NOCASE假装解决全语言排序。
 
-cursor 包含排序类型、方向、过滤指纹和末项排序键/ID，服务端绑定 Library/User；翻页中有数据变化允许下一页反映新状态，不承诺跨请求冻结快照。现有 offset/StartIndex API 保留可用并如实报告深页成本；前端可切 cursor，不能悄悄破坏 Jellyfin 或 CLI 协议。
+cursor 包含排序类型、方向、过滤指纹和末项排序键/ID，服务端绑定 Library/User；翻页中有数据变化允许下一页反映新状态，不承诺跨请求冻结快照。自有 Library 卡片列表只定义当前 cursor 合同，Web/CLI 同批切换，不保留旧 offset 入口。Jellyfin 的 StartIndex 按播放协议保留，并如实报告深页成本。
 
 ### 6.2 必要关联：有边界、有索引、分页前完成
 
