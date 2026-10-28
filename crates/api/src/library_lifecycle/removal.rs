@@ -40,12 +40,7 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     }
     cancel_probes(state, id).await?;
     close_remaining_sessions(state, id).await?;
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        state.library_work.wait_idle(&library),
-    )
-    .await
-    .map_err(|_| "Library work did not stop within 30 seconds".to_owned())?;
+    wait_work_stopped(state, id, &library).await?;
     // No lease or accepted publication can recreate a cover after freeze.
     // Finish the filesystem side effect before a DB worker can publish succeeded.
     remove_covers(state, &library).await?;
@@ -71,6 +66,44 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
         "Library 索引清理完成，删除操作成功"
     );
     Ok(())
+}
+
+/// How often a slow drain re-cancels and reports progress.
+const DRAIN_SLICE: Duration = Duration::from_secs(30);
+
+/// Waits until every lease on the Library is released. Heavy Libraries can have
+/// work that needs longer than any fixed window to observe cancellation, so slow
+/// work never fails the removal (it used to flip to `failed`, leaving the Library
+/// hidden with all rows intact). Each slice re-cancels late leases and records the
+/// wait on the operation so clients can show it.
+async fn wait_work_stopped(state: &ApiState, id: &str, library: &str) -> Result<(), String> {
+    let started = tokio::time::Instant::now();
+    loop {
+        if tokio::time::timeout(DRAIN_SLICE, state.library_work.wait_idle(library))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let waited = started.elapsed().as_secs();
+        tracing::warn!(
+            operation_id = id,
+            library_id = library,
+            waited_secs = waited,
+            "Library 删除仍在等待活跃任务退出，重新发出取消"
+        );
+        let work = state.library_work.clone();
+        let owned_library = library.to_owned();
+        tokio::task::spawn_blocking(move || work.cancel(&owned_library))
+            .await
+            .map_err(|e| e.to_string())?;
+        let owned = id.to_owned();
+        let note = format!("waiting for active Library work to stop ({waited}s)");
+        window(state, move |store| {
+            store.set_removal_state(&owned, "draining", Some(&note))
+        })
+        .await?;
+    }
 }
 
 async fn remove_covers(state: &ApiState, library: &str) -> Result<(), String> {

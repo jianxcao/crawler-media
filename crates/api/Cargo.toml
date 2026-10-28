@@ -51,6 +51,7 @@ libc.workspace = true
 [dev-dependencies]
 store = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { version = "1", features = ["test-util"] }
 
 [[bin]]
 name = "crawler-media"
