@@ -13,6 +13,7 @@ pub use nfo_identity::{NfoIdentity, parse_nfo_identity};
 pub use watch_identity::read_watch_identity;
 mod probe_target;
 mod scrape;
+pub mod sidecar_cleanup;
 pub mod source_observation;
 pub mod subtitles;
 pub use source_observation::{

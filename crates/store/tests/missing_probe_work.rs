@@ -237,13 +237,11 @@ fn pruning_a_missing_file_cancels_queued_and_running_units() {
                 .unwrap()
                 .is_none()
         );
-        let probe = store.get_probe_job("probe").unwrap().unwrap();
-        assert_eq!(probe.status, "cancelled");
-        assert_eq!(probe.error.as_deref(), Some("source missing"));
-        assert_eq!((probe.total, probe.completed, probe.failed), (0, 0, 0));
+        // The Media lost its last file, so its probe job is purged with it.
+        assert!(store.get_probe_job("probe").unwrap().is_none());
 
         // The file row, its obligation and its cold details go with the delete;
-        // Media-owned facts stay.
+        // so does the now-orphan Media.
         assert!(
             store
                 .file_coverage_by_id(fixture.file_id)
@@ -252,7 +250,7 @@ fn pruning_a_missing_file_cancels_queued_and_running_units() {
         );
         assert!(store.scan_probe_obligations(100).unwrap().is_empty());
         assert!(store.get_file_meta(&ledger_id).unwrap().is_none());
-        assert!(store.get_media(fixture.media_id).unwrap().is_some());
+        assert!(store.get_media(fixture.media_id).unwrap().is_none());
     }
 }
 

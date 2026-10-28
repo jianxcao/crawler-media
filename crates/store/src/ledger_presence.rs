@@ -32,6 +32,9 @@ pub struct LedgerPresenceObservation {
 pub enum LedgerPresenceMode {
     Verify,
     Prune,
+    /// A full rescan proved the source gone: remove it now, without the
+    /// missing-then-prune two-step (2026-10-29 E2E "missing-rows").
+    Purge,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -83,6 +86,9 @@ impl crate::Store {
     /// - Present: clears `missing_at` if set.
     /// - Unknown: no change.
     ///
+    /// In Purge mode: Missing removes the row whether or not it was marked
+    /// missing; Present clears `missing_at`.
+    ///
     /// A `pending` file observed as present is the crash-recovery case: its bytes
     /// completed Transfer, so it becomes published content.
     pub fn apply_ledger_presence(
@@ -107,6 +113,18 @@ impl crate::Store {
             apply_observation(&tx, obs, mode, now, &mut result, &mut batch)?;
         }
         batch.settle(&tx)?;
+        if result.deleted > 0 {
+            let candidates: HashSet<domain::MediaId> = observations
+                .iter()
+                .map(|obs| obs.file.file.media_id)
+                .collect();
+            let subscribed = self.subscribed_media(&candidates)?;
+            crate::library_write::orphan_media::purge_orphan_media_in_tx(
+                &tx,
+                &candidates,
+                &subscribed,
+            )?;
+        }
 
         tx.commit()?;
         Ok(result)
@@ -158,7 +176,8 @@ fn apply_observation(
             (LedgerPresenceMode::Verify, FilePresence::Missing, None) => {
                 Some(LedgerPresenceOutcome::Missing)
             }
-            (LedgerPresenceMode::Prune, FilePresence::Missing, Some(_)) => {
+            (LedgerPresenceMode::Prune, FilePresence::Missing, Some(_))
+            | (LedgerPresenceMode::Purge, FilePresence::Missing, _) => {
                 Some(LedgerPresenceOutcome::Deleted)
             }
             (_, FilePresence::Present, Some(_)) => Some(LedgerPresenceOutcome::Restored),

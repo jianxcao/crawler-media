@@ -362,9 +362,12 @@ impl api::file_stat_read::FileStatRead for ReconciliationFileRead {
                         .file_coverage_by_path(from.to_str().unwrap())
                         .unwrap()
                         .unwrap();
+                    let media = store.get_media(cov.file.media_id).unwrap().unwrap();
                     store
                         .delete_ledger_path(&cov.file.path.display().to_string())
                         .unwrap();
+                    // The last file's deletion purged the orphan Media; re-identify it.
+                    store.insert_media(&media).unwrap();
                     let spec = FixtureFile {
                         file_id: Some(LedgerId::new()),
                         media_id: cov.file.media_id,

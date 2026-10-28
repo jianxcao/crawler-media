@@ -175,7 +175,7 @@ fn physical_deletion_refuses_exhausted_filesystem_budget_before_facts_change() {
 }
 
 #[test]
-fn physical_deletion_keeps_media_identity_and_finishes_durable_intent() {
+fn physical_deletion_purges_orphan_media_and_finishes_durable_intent() {
     for item in [false, true] {
         let f = Fixture::new();
         let response = runtime()
@@ -190,7 +190,8 @@ fn physical_deletion_keeps_media_identity_and_finishes_durable_intent() {
         let store = handle.lock();
         assert!(store.file_coverage_by_id(f.file.file_id).unwrap().is_none());
         assert!(store.list_pending_file_deletions().unwrap().is_empty());
-        assert!(store.get_media(f.file.media_id).unwrap().is_some());
+        // Its only file is gone, so the orphan Media is purged too (2026-10-29 E2E).
+        assert!(store.get_media(f.file.media_id).unwrap().is_none());
         assert!(!f.file.path.exists());
     }
 }

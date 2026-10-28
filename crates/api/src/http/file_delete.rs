@@ -153,30 +153,62 @@ fn process_queued_deletion(
         }
     }
     let result = remove_physical_file(path);
-    let store = store.lock();
-    // A replacement may publish while filesystem work is outside the lock. Never
-    // clear its file row after the accepted intent was cancelled or replaced.
-    if store.due_file_deletion_intent(entry, now)?.as_ref() != Some(entry) {
-        return Ok(());
-    }
-    match &result {
-        Ok(()) => {
-            let current = store.file_id_at_deletion_path(entry)?;
-            if current
-                .as_deref()
-                .is_some_and(|id| Some(id) != entry.file_id.as_deref())
-            {
-                store.abandon_file_deletion(entry)?;
-            } else {
-                store.complete_file_deletion(entry)?;
+    let mut completed = false;
+    {
+        let store = store.lock();
+        // A replacement may publish while filesystem work is outside the lock. Never
+        // clear its file row after the accepted intent was cancelled or replaced.
+        if store.due_file_deletion_intent(entry, now)?.as_ref() != Some(entry) {
+            return Ok(());
+        }
+        match &result {
+            Ok(()) => {
+                let current = store.file_id_at_deletion_path(entry)?;
+                if current
+                    .as_deref()
+                    .is_some_and(|id| Some(id) != entry.file_id.as_deref())
+                {
+                    store.abandon_file_deletion(entry)?;
+                } else {
+                    store.complete_file_deletion(entry)?;
+                    completed = true;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = %path, %error, "删除文件失败，保留在待删除队列稍后重试");
+                store.record_file_deletion_failure(entry, now, error)?;
             }
         }
-        Err(error) => {
-            tracing::warn!(path = %path, %error, "删除文件失败，保留在待删除队列稍后重试");
-            store.record_file_deletion_failure(entry, now, error)?;
-        }
+    }
+    if completed {
+        prune_disk_leftovers(store, std::path::Path::new(path));
     }
     Ok(())
+}
+
+/// Removes the deleted source's sidecars (nfo/artwork/subtitles) and the
+/// directories they leave empty, up to (never including) its Library root.
+/// Filesystem work runs outside the Store lock; failures only log.
+pub(crate) fn prune_disk_leftovers(store: &parking_lot::Mutex<Store>, deleted: &std::path::Path) {
+    let roots = match store.lock().list_library_roots() {
+        Ok(roots) => roots,
+        Err(error) => {
+            tracing::warn!(path = %deleted.display(), %error, "读取 Library 根失败，跳过附属文件清理");
+            return;
+        }
+    };
+    let Some(root) = roots
+        .iter()
+        .map(|root| root.path.clone())
+        .filter(|root| deleted.starts_with(root) && deleted != root)
+        .max_by_key(|root| root.as_os_str().len())
+    else {
+        return;
+    };
+    let removed = library::sidecar_cleanup::prune_after_delete(deleted, &root);
+    if !removed.is_empty() {
+        tracing::info!(path = %deleted.display(), removed = removed.len(), "已清理删除源的附属文件与空目录");
+    }
 }
 
 fn observed_identity(path: &str) -> Result<Option<(u64, Option<u64>)>, store::StoreError> {

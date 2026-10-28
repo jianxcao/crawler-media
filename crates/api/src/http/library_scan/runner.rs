@@ -175,6 +175,26 @@ pub(crate) fn scan_library_leased_resumable(
             error: "library.root_unavailable".to_string(),
         }));
     }
+    if full_scope || targets.is_empty() {
+        // 整库扫描确认源已消失：直接清理（行、孤立 Media、附属文件），不留 missing 行。
+        match crate::library_presence::purge_vanished(state, id, lease) {
+            Ok(result) if result.deleted > 0 => {
+                tracing::info!(
+                    library_id = id,
+                    deleted = result.deleted,
+                    "扫描清理已消失的源文件"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    library_id = id,
+                    ?error,
+                    "扫描后清理已消失源文件失败，保留现状"
+                );
+            }
+        }
+    }
     {
         // 封面失效只做锁内短 DB 读写：`clear_library_cover_checked` 清掉「可重试」
         // 标记，让下一次封面读取走 `LibraryCoverService::ensure_cover` 重生成。

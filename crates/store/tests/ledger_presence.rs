@@ -350,6 +350,8 @@ fn stale_observation_does_not_delete_replacement_file() {
 
     // The file disappears and a replacement lands on the same path.
     store.delete_ledger_path(&path).unwrap();
+    // The last file's delete purged the orphan Media; the replacement re-identifies it.
+    store.insert_media(&sample_media(media_id)).unwrap();
     let replacement = publish_file(
         &store,
         &library,

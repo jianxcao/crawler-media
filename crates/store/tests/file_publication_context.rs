@@ -150,10 +150,17 @@ fn second_connection_deletion_cannot_be_reversed_by_delayed_publication() {
 #[test]
 fn second_connection_insertion_invalidates_an_absent_destination_snapshot() {
     let fixture = fixture();
+    let media = fixture
+        .writer
+        .get_media(fixture.file.media_id)
+        .unwrap()
+        .unwrap();
     fixture
         .writer
         .delete_files(fixture.file.library_id, &[fixture.file.file_id])
         .unwrap();
+    // The last file's delete purged the orphan Media; re-identify it.
+    fixture.writer.insert_media(&media).unwrap();
     let mut delayed = fixture.file.clone();
     delayed.file_id = domain::LedgerId::new();
     fixture
@@ -205,10 +212,17 @@ fn second_connection_insertion_invalidates_an_absent_destination_snapshot() {
 #[test]
 fn an_unchanged_absent_destination_snapshot_can_publish() {
     let fixture = fixture();
+    let media = fixture
+        .writer
+        .get_media(fixture.file.media_id)
+        .unwrap()
+        .unwrap();
     fixture
         .other
         .delete_files(fixture.file.library_id, &[fixture.file.file_id])
         .unwrap();
+    // The last file's delete purged the orphan Media; re-identify it.
+    fixture.other.insert_media(&media).unwrap();
     let result = fixture
         .writer
         .publish_file_checked_context(

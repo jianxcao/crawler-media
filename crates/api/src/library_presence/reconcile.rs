@@ -13,6 +13,26 @@ pub(super) fn reconcile_presence(
     target_media_id: Option<MediaId>,
     mode: LedgerPresenceMode,
 ) -> Result<LedgerPresenceResult, PresenceError> {
+    reconcile(state, library_id, target_media_id, mode, None)
+}
+
+/// Same reconciliation, under a lease the caller (a scan) already holds.
+pub(super) fn reconcile_presence_leased(
+    state: &ApiState,
+    library_id: &str,
+    mode: LedgerPresenceMode,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+) -> Result<LedgerPresenceResult, PresenceError> {
+    reconcile(state, library_id, None, mode, Some(lease))
+}
+
+fn reconcile(
+    state: &ApiState,
+    library_id: &str,
+    target_media_id: Option<MediaId>,
+    mode: LedgerPresenceMode,
+    held: Option<&crate::library_lifecycle::LibraryWorkLease>,
+) -> Result<LedgerPresenceResult, PresenceError> {
     let (target_lib, snapshot) = {
         let guard = state.store.lock();
         let snapshot = guard.library_ownership()?;
@@ -35,14 +55,21 @@ pub(super) fn reconcile_presence(
             return Err(PresenceError::RootUnavailable);
         }
     }
-    let lease = state
-        .acquire_library_work(library_id)
-        .map_err(|_| PresenceError::Deleting)?;
+    let owned;
+    let lease = match held {
+        Some(lease) => lease,
+        None => {
+            owned = state
+                .acquire_library_work(library_id)
+                .map_err(|_| PresenceError::Deleting)?;
+            &owned
+        }
+    };
     let id = library_id.parse().map_err(store::StoreError::from)?;
     let mut cursor = None;
     let mut total = LedgerPresenceResult::default();
     loop {
-        let mut observations = publish_presence(&lease, || {
+        let mut observations = publish_presence(lease, || {
             let store = state.store.lock();
             ensure_scope(&store, &scope, library_id)?;
             store
@@ -55,7 +82,7 @@ pub(super) fn reconcile_presence(
         cursor = Some(last.file.file.file_id);
         observe_window(state, &mut observations, mode);
         let now = crate::job_loop::unix_now();
-        let result = publish_presence(&lease, || {
+        let result = publish_presence(lease, || {
             let store = state.store.lock();
             ensure_scope(&store, &scope, library_id)?;
             store
@@ -65,6 +92,7 @@ pub(super) fn reconcile_presence(
         // Durable cancellation/rearming committed with these exact file generations.
         // Never cancel from the observed input: it may have been skipped as stale.
         state.probe.presence_committed(&result.applied);
+        prune_deleted_sidecars(state, &observations, &result);
         total.missing += result.missing;
         total.restored += result.restored;
         total.deleted += result.deleted;
@@ -122,4 +150,24 @@ fn ensure_scope(
         return Err(PresencePublishError::ScopeChanged);
     }
     Ok(())
+}
+
+/// Rows the publish actually deleted also lose their on-disk sidecars and
+/// emptied directories (outside the Store lock).
+fn prune_deleted_sidecars(
+    state: &ApiState,
+    observations: &[LedgerPresenceObservation],
+    result: &LedgerPresenceResult,
+) {
+    for applied in &result.applied {
+        if applied.outcome != store::LedgerPresenceOutcome::Deleted {
+            continue;
+        }
+        if let Some(obs) = observations
+            .iter()
+            .find(|obs| obs.file.file.file_id == applied.file_id)
+        {
+            crate::http::file_delete::prune_disk_leftovers(&state.store, &obs.file.file.path);
+        }
+    }
 }

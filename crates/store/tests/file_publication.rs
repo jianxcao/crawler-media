@@ -523,7 +523,7 @@ fn publish_file_details_persists_details_atomically() {
 }
 
 #[test]
-fn deleting_all_files_cleans_item_but_preserves_media() {
+fn deleting_all_files_cleans_item_and_orphan_media() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
 
@@ -595,9 +595,12 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
             .is_none()
     );
 
-    // But Canonical Media must still exist!
+    // Its last file is gone, so the orphan Media is purged (2026-10-29 E2E).
     let m = store.get_media(media_id.parse().unwrap()).unwrap();
-    assert!(m.is_some(), "Media fact must survive file deletion");
+    assert!(
+        m.is_none(),
+        "orphan Media must be purged with its last file"
+    );
 }
 
 /// A Transfer reservation and its publication carry the same `file_id`, so the

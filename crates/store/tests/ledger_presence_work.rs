@@ -119,8 +119,9 @@ fn presence_page_limits_files_without_cutting_coverage_and_settles_media_once() 
     assert_eq!(pruned.deleted, 4);
     assert!(store.get_library_item(library_id, id).unwrap().is_none());
     assert!(store.file_coverage_for_media(id).unwrap().is_empty());
-    assert_eq!(store.playback_marks(user, id).unwrap(), Some((false, true)));
-    assert!(store.get_media(id).unwrap().is_some());
+    // Orphan Media and its per-user state are purged with the last file.
+    assert_eq!(store.playback_marks(user, id).unwrap(), None);
+    assert!(store.get_media(id).unwrap().is_none());
     assert!(
         store
             .ledger_presence_page(library_id, None, None, 101)

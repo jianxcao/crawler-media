@@ -1,8 +1,8 @@
 //! File fact removal: `library_files` rows, their coverage, probe bookkeeping and the
 //! summaries derived from them, all inside one transaction.
 //!
-//! Removing a file removes Library content only: Media identity, user playback facts,
-//! collections and subscriptions are never touched here.
+//! When a Media loses its last file it is purged with everything it owns, unless a
+//! collection or subscription still references it (see `orphan_media`).
 
 use std::collections::HashSet;
 
@@ -26,7 +26,9 @@ impl super::super::Store {
             return Ok(0);
         }
         let tx = crate::write_tx(&self.library)?;
-        let removed = delete_files_in_tx(&tx, library_id, file_ids)?;
+        let (removed, affected) = delete_files_in_tx(&tx, library_id, file_ids)?;
+        let subscribed = self.subscribed_media(&affected)?;
+        super::orphan_media::purge_orphan_media_in_tx(&tx, &affected, &subscribed)?;
         tx.commit()?;
         Ok(removed)
     }
@@ -41,7 +43,7 @@ pub(crate) fn delete_files_in_tx(
     tx: &Connection,
     library_id: LibraryId,
     file_ids: &[LedgerId],
-) -> Result<usize, StoreError> {
+) -> Result<(usize, HashSet<MediaId>), StoreError> {
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[library_id])?;
     let library = library_id.to_string();
     let mut affected: HashSet<MediaId> = HashSet::new();
@@ -69,8 +71,8 @@ pub(crate) fn delete_files_in_tx(
         affected.insert(media_id.parse::<MediaId>()?);
         removed += 1;
     }
-    for media_id in affected {
-        reduce_library_media(tx, library_id, media_id)?;
+    for media_id in &affected {
+        reduce_library_media(tx, library_id, *media_id)?;
     }
-    Ok(removed)
+    Ok((removed, affected))
 }

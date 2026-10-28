@@ -311,10 +311,16 @@ impl Store {
         if let Some((file_id, library_id)) = current
             && Some(file_id.as_str()) == queued_file_id.as_deref()
         {
-            crate::library_write::delete::delete_files_in_tx(
+            let (_, affected) = crate::library_write::delete::delete_files_in_tx(
                 &tx,
                 library_id.parse()?,
                 &[file_id.parse()?],
+            )?;
+            let subscribed = self.subscribed_media(&affected)?;
+            crate::library_write::orphan_media::purge_orphan_media_in_tx(
+                &tx,
+                &affected,
+                &subscribed,
             )?;
         }
         tx.execute(

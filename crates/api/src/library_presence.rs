@@ -175,6 +175,16 @@ pub(crate) fn prune(
     reconcile_presence(state, library_id, media_id, LedgerPresenceMode::Prune)
 }
 
+/// End of a full scan: every ledger row whose source the walk proved gone is
+/// removed now (with its orphan Media and disk sidecars), not just flagged.
+pub(crate) fn purge_vanished(
+    state: &ApiState,
+    library_id: &str,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+) -> Result<LedgerPresenceResult, PresenceError> {
+    reconcile::reconcile_presence_leased(state, library_id, LedgerPresenceMode::Purge, lease)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

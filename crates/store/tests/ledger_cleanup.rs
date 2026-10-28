@@ -1,5 +1,7 @@
-//! Deleting a Library file removes its file-derived rows and nothing else:
-//! Media identity, user playback facts, collections and other files survive.
+//! Deleting a Library file removes its file-derived rows. When the last file of
+//! a Media goes, the Media and everything it owns (episodes, markers, metadata,
+//! probe jobs, playback state) go too, unless a collection or subscription still
+//! references it. Other Media and files are untouched.
 
 use std::path::Path;
 
@@ -201,8 +203,109 @@ fn deleting_a_file_removes_only_its_derived_rows() {
             .unwrap()
             .is_some()
     );
-    assert!(store.get_media(movies.id).unwrap().is_some());
-    assert_eq!(store.playback_progress(user, movies.id).unwrap(), Some(500));
+    // The deleted file was the Media's last one: the orphan Media and its
+    // playback state are purged; the other Media stays.
+    assert!(store.get_media(movies.id).unwrap().is_none());
+    assert_eq!(store.playback_progress(user, movies.id).unwrap(), None);
+    assert!(store.get_media(other.id).unwrap().is_some());
+}
+
+fn count(conn: &Connection, table: &str, media: MediaId) -> i64 {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE media_id = ?1"),
+        [media.to_string()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn seed_owned_rows(conn: &Connection, media: MediaId) {
+    let id = media.to_string();
+    conn.execute(
+        "INSERT INTO media_episodes (media_id,season,episode,locale,revision) VALUES (?1,1,1,'zh-CN',1)",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO media_markers (media_id,season,episode,source,updated_at) VALUES (?1,1,1,'fingerprint',1)",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO probe_jobs (id,kind,media_id,scope_key,status,total,created_at_ms,finished_at_ms)
+         VALUES (?1||'-job','media_probe',?1,?1||'-scope','succeeded',1,1,2)",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO media_metadata_sources (media_id,entity_scope,source,locale,provider_entity_id,
+            provider_work_id,normalized_json,present_fields_json,preferences_json,selection_origins_json,
+            fetched_at,source_revision)
+         VALUES (?1,'work','tmdb','zh-CN','1','1','{}','[]','{}','{}',1,0)",
+        [&id],
+    )
+    .unwrap();
+}
+
+const OWNED: &[&str] = &[
+    "media",
+    "media_episodes",
+    "media_markers",
+    "probe_jobs",
+    "media_metadata_sources",
+];
+
+#[test]
+fn last_file_delete_purges_orphan_media_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let gone = create_media(&store, "Gone", MediaKind::Movie);
+    let shared = create_media(&store, "Shared", MediaKind::Movie);
+    let gone_file = make_file(&library, &root_id, gone.id, "Gone.mkv");
+    let shared_a = make_file(&library, &root_id, shared.id, "Shared.a.mkv");
+    let shared_b = make_file(&library, &root_id, shared.id, "Shared.b.mkv");
+    for file in [&gone_file, &shared_a, &shared_b] {
+        publish(&store, &library, file);
+    }
+    let conn = library_db(tmp.path());
+    seed_owned_rows(&conn, gone.id);
+    seed_owned_rows(&conn, shared.id);
+
+    let library_id = library.id.parse().unwrap();
+    store
+        .delete_files(library_id, &[gone_file.file_id, shared_a.file_id])
+        .unwrap();
+
+    for table in OWNED {
+        assert_eq!(count(&conn, table, gone.id), 0, "{table} orphan rows");
+        assert_eq!(
+            count(&conn, table, shared.id),
+            1,
+            "{table} of a Media with files"
+        );
+    }
+}
+
+#[test]
+fn collected_media_survives_its_last_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let kept = create_media(&store, "Kept", MediaKind::Movie);
+    let file = make_file(&library, &root_id, kept.id, "Kept.mkv");
+    publish(&store, &library, &file);
+    let user = UserId::new();
+    let collection = store.create_collection(user, "fav").unwrap();
+    store
+        .add_collection_item(&collection, &kept.id.to_string())
+        .unwrap();
+
+    store
+        .delete_files(library.id.parse().unwrap(), &[file.file_id])
+        .unwrap();
+
+    assert!(store.get_media(kept.id).unwrap().is_some());
 }
 
 #[test]
@@ -257,7 +360,7 @@ fn derived_delete_failure_rolls_back_every_row() {
 }
 
 #[test]
-fn deleting_every_file_of_a_media_keeps_media_and_playback() {
+fn deleting_every_file_of_a_media_purges_media_and_playback() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let (library, root_id) = create_library(&store, tmp.path());
@@ -285,8 +388,8 @@ fn deleting_every_file_of_a_media_keeps_media_and_playback() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_media(media.id).unwrap().is_some());
-    assert_eq!(store.playback_progress(user, media.id).unwrap(), Some(900));
+    assert!(store.get_media(media.id).unwrap().is_none());
+    assert_eq!(store.playback_progress(user, media.id).unwrap(), None);
 }
 
 #[test]
@@ -313,6 +416,9 @@ fn deleting_a_file_retires_queued_probe_work() {
         )
         .unwrap();
     assert_eq!(store.count_probe_obligations().unwrap(), 1);
+    // A second file keeps the Media (and so its job history) alive.
+    let sibling = make_file(&library, &root_id, media.id, "Matrix.part2.mkv");
+    publish(&store, &library, &sibling);
 
     let unit_id = file.file_id.to_string();
     store
@@ -343,4 +449,10 @@ fn deleting_a_file_retires_queued_probe_work() {
     assert_eq!(job.status, "cancelled");
     assert_eq!(job.error.as_deref(), Some("file_deleted"));
     assert_eq!(store.count_probe_obligations().unwrap(), 0);
+
+    // Deleting the last file purges the orphan Media together with its jobs.
+    store
+        .delete_files(library.id.parse().unwrap(), &[sibling.file_id])
+        .unwrap();
+    assert!(store.get_probe_job("job-delete").unwrap().is_none());
 }

@@ -7,7 +7,7 @@ use domain::MediaKind;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
-async fn prune_preserves_other_library_and_user_facts() {
+async fn prune_purges_orphan_media_with_its_last_file() {
     let fix = PresenceFixture::new();
     let (media_id, row) = fix.insert_media_and_ledger("target.mkv");
 
@@ -48,12 +48,10 @@ async fn prune_preserves_other_library_and_user_facts() {
     let guard = store_arc.lock();
     assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_none());
 
-    // User playback facts and Media record are PRESERVED (S1)
-    assert!(guard.get_media(media_id).unwrap().is_some());
-    assert_eq!(
-        guard.playback_progress(user_id, media_id).unwrap(),
-        Some(3000)
-    );
+    // The Media lost its last file: it and its per-user state are purged
+    // (no orphan rows; 2026-10-29 E2E item 1).
+    assert!(guard.get_media(media_id).unwrap().is_none());
+    assert_eq!(guard.playback_progress(user_id, media_id).unwrap(), None);
 }
 
 #[tokio::test]

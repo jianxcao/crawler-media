@@ -484,7 +484,7 @@ fn incremental_episode_add_refreshes_existing_user_summary() {
 }
 
 #[test]
-fn reimport_restores_sparse_favorites() {
+fn deleting_last_file_purges_favorites_with_orphan_media() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let movie = media(
@@ -552,25 +552,8 @@ fn reimport_restores_sparse_favorites() {
         .unwrap();
     assert!(sum2.is_none());
 
-    // Reimport file
-    store
-        .publish_files(
-            &scope,
-            &[StorePublication {
-                file: &file1,
-                units: &[UnitKey::WHOLE],
-                expected_version: None,
-                nfo_observation: None,
-                probe_required: false,
-            }],
-            4_000,
-        )
-        .unwrap();
-
-    // Restores favorite state
-    let sum3 = store
-        .get_user_library_summary(user_id, lib_id, movie.id)
-        .unwrap()
-        .unwrap();
-    assert!(sum3.favorite);
+    // The orphan Media is purged with its per-user marks (2026-10-29 E2E item 1):
+    // an explicit delete leaves no rows behind, so a later reimport starts clean.
+    assert!(store.get_media(movie.id).unwrap().is_none());
+    assert_eq!(store.playback_marks(user_id, movie.id).unwrap(), None);
 }

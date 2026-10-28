@@ -365,6 +365,23 @@ fn marker_snapshot_cannot_follow_reimported_path_to_a_new_ledger_id() {
     store
         .delete_ledger_path(&row.file.path.display().to_string())
         .unwrap();
+    // Deleting the last file purges the orphan Media; a reimport re-identifies it.
+    assert!(store.get_media(media_id).unwrap().is_none());
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: MediaKind::Tv,
+            title: "喜剧之王".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
     let mut reimported = row.clone();
     reimported.file.file_id = LedgerId::new();
     super::super::test_support::publish_into(&store, &mut reimported);
