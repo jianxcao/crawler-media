@@ -10,7 +10,7 @@ pub(crate) async fn automation_readiness(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<UserId>>,
 ) -> Response {
-    let store = state.store.lock();
+    crate::http::store_wait::store_read(&state, move |store| {
     let sites = store.list_enabled_sites().unwrap_or_default();
     let filters = store.list_filters().unwrap_or_default();
     let downloader = store.default_downloader().ok().flatten();
@@ -56,6 +56,7 @@ pub(crate) async fn automation_readiness(
         "issues": [],
     }))
     .into_response()
+    }).await.unwrap_or_else(|error| error.response())
 }
 
 fn library_readiness(

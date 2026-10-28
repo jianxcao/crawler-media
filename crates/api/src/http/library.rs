@@ -96,8 +96,8 @@ pub(crate) fn browse_response(
 mod assets;
 mod cover;
 pub(crate) use assets::{
-    coverages_in_library, files_in_library, library_facts, library_json, library_json_from_facts,
-    poster_path, poster_path_with, preferred_coverage,
+    coverages_in_library, files_in_library, library_facts, library_json_from_facts, poster_path,
+    poster_path_with, preferred_coverage,
 };
 pub(crate) use cover::{default_cover_options, render_cover_jpeg};
 
@@ -124,16 +124,15 @@ pub(crate) async fn list_libraries(
     // 锁内只收集 owned DB/路径事实（removal / 封面候选路径）；逐 root `is_dir`、
     // 封面 `is_file` 仍在锁外、受 http_work 预算约束，慢挂载不再阻塞共享 Store
     // 和 Tokio worker。
-    let (facts, roster, is_admin) = {
-        let store = state.store.lock();
+    let captured = super::store_wait::store_read(&state, move |store| {
         let libraries = match store.list_libraries() {
             Ok(libraries) => libraries,
             Err(error) => {
-                return err(
+                return Err(err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
-                );
+                ));
             }
         };
         let is_admin = user_id
@@ -156,7 +155,13 @@ pub(crate) async fn list_libraries(
             .iter()
             .map(|library| assets::library_facts(&store, library))
             .collect();
-        (facts, roster, is_admin)
+        Ok((facts, roster, is_admin))
+    })
+    .await;
+    let (facts, roster, is_admin) = match captured {
+        Ok(Ok(captured)) => captured,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let stats = match crate::library_statistics::collect_statistics_for_roster(
         state.clone(),

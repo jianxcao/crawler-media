@@ -40,19 +40,9 @@ pub(crate) fn coverage_json(coverage: &Coverage) -> Value {
     }
 }
 
-pub(crate) fn subscription_json(
-    store: &crate::Store,
-    _catalog: &dyn crate::catalog::Catalog,
-    subscribe: &Subscribe,
-    media: &Media,
-    facts: &subscribe::SubscribeFacts,
-) -> Value {
-    let snapshot = super::snapshot::load_single_subscription_view(store, subscribe, media, facts);
-    render_subscription_snapshot(&snapshot)
-}
-
 pub(crate) fn render_subscription_snapshot(
     snapshot: &super::snapshot::SubscriptionViewSnapshot,
+    files: &dyn crate::file_stat_read::FileStatRead,
 ) -> Value {
     let subscribe = &snapshot.subscribe;
     let media = &snapshot.media;
@@ -77,7 +67,11 @@ pub(crate) fn render_subscription_snapshot(
 
     let poster_choice = super::poster_view::determine_poster_from_candidate(
         media,
-        snapshot.library_poster_candidate,
+        snapshot
+            .library_poster_candidate
+            .as_ref()
+            .filter(|(_, path)| files.is_file(path))
+            .map(|(file, _)| *file),
     );
     let poster_url = super::poster_view::poster_url(poster_choice);
 
@@ -245,33 +239,33 @@ pub(crate) async fn list_subscriptions(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
 ) -> Response {
-    let state_for_read = state.clone();
-    let snapshots = match tokio::task::spawn_blocking(move || {
-        let store = state_for_read.store.lock();
-        super::snapshot::load_visible_subscription_views(&store, user_id)
+    let snapshots = match crate::http::store_wait::store_read(&state, move |store| {
+        super::snapshot::load_visible_subscription_views(store, user_id)
     })
     .await
     {
-        Ok(Ok(views)) => views,
-        Ok(Err(err_msg)) => {
+        Ok(Ok(snapshots)) => snapshots,
+        Ok(Err(error)) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
-                &err_msg.to_string(),
+                &error.to_string(),
             );
         }
-        Err(join_err) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.join",
-                &join_err.to_string(),
-            );
-        }
+        Err(error) => return error.response(),
     };
-
-    let mut rows = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
-        rows.push(render_subscription_snapshot(&snapshot));
+    let files = state.file_stats.clone();
+    match state
+        .http_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            snapshots
+                .iter()
+                .map(|snapshot| render_subscription_snapshot(snapshot, files.as_ref()))
+                .collect()
+        })
+        .await
+    {
+        Ok(rows) => ok_list(rows).into_response(),
+        Err(error) => crate::http::library::browse_work_error(error),
     }
-    ok_list(rows).into_response()
 }

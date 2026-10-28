@@ -42,9 +42,7 @@ impl Store {
         to: &Path,
     ) -> Result<(), StoreError> {
         self.rename_within_root(file_id, expected, from, to)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let now = crate::unix_now();
         let request = self.begin_file_rename(file_id, expected, from, to, now)?;
         let receipt = super::execute_rename_disk(&request).inspect_err(|error| {
             let _ = self.record_rename_refusal(&request.rename_id, now, error);

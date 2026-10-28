@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use domain::{FileCoverage, LibraryFile, Media, MediaId, MediaKind};
@@ -19,6 +20,7 @@ use super::scope::{ScopedRead, coverage_visible, in_scope_folder};
 pub(super) fn selected_light_item(
     reference: &domain::ProtocolItemRef,
     inputs: &store::library_query::page_inputs::ProtocolPageInputs,
+    coverages: &HashMap<domain::LedgerId, Arc<FileCoverage>>,
     units: &UnitIndex<'_>,
     scalar: Option<store::library_query::series_scalar::ProtocolSeriesScalar>,
 ) -> Result<LightItem, String> {
@@ -34,10 +36,8 @@ pub(super) fn selected_light_item(
     if file.version.revision != source.revision || file.library_id != reference.library_id {
         return Err("selected source revision or Library changed".into());
     }
-    let coverage = inputs
-        .coverage
-        .iter()
-        .find(|c| c.file.file_id == file.file_id)
+    let coverage = coverages
+        .get(&file.file_id)
         .ok_or("selected coverage missing")?;
     let media = inputs
         .media
@@ -99,7 +99,7 @@ pub(super) fn selected_light_item(
 pub(super) struct LightItem {
     pub(super) snapshot: MediaItemSnapshot,
     /// 该条目的已发布 coverage：探测与页内重元数据必须看到同一份单元集合。
-    pub(super) coverage: FileCoverage,
+    pub(super) coverage: Arc<FileCoverage>,
     /// series 折叠条目：作用域内可见的分集/季数。
     pub(super) child_counts: Option<(usize, usize)>,
     /// 非 series：DateCreated 用这条路径 stat；series：这些文件取 ingest 最大值。
@@ -331,11 +331,14 @@ fn push_units(
     let Some(file) = scope.files.get(&coverage.file.file_id).cloned() else {
         return;
     };
+    // A pack owns one immutable coverage vector; every logical candidate only
+    // clones this handle, rather than copying the whole pack for each episode.
+    let shared = Arc::new(coverage.clone());
     for unit in coverage_units(coverage) {
         items.push(light_item(
             units,
             show_episodes,
-            coverage,
+            &shared,
             file.clone(),
             unit,
             media,
@@ -350,7 +353,7 @@ fn push_units(
 pub(super) fn light_item(
     units: &UnitIndex<'_>,
     show_episodes: &HashMap<MediaId, HashSet<(u32, u32)>>,
-    coverage: &FileCoverage,
+    coverage: &Arc<FileCoverage>,
     file: LibraryFile,
     unit_coords: (i32, i32),
     media: &Media,
@@ -412,7 +415,7 @@ pub(super) fn light_item(
                 ..Default::default()
             },
         },
-        coverage: coverage.clone(),
+        coverage: Arc::clone(coverage),
         child_counts,
         stat_paths: vec![coverage.file.path.clone()],
         catalog: None,

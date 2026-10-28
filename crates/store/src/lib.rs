@@ -111,9 +111,7 @@ pub(crate) use write_tx::write_tx;
 
 pub mod password;
 pub mod probe_state;
-/// Deterministic statement / full-scan counters for the performance gate. Same seam rules
-/// as `test_support`: `#[doc(hidden)]`, `test-support`-only, no production cost.
-#[cfg(feature = "test-support")]
+/// Explicit SQL diagnostic scopes. No tracer is installed until a caller opts in.
 #[doc(hidden)]
 pub mod stats;
 /// Test-only seams (fixtures, diagnostics, the bounded test gate). Compiled for this

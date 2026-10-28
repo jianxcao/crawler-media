@@ -303,9 +303,12 @@ fn panic_and_sql_error_leave_no_transaction_or_callback() {
 #[test]
 fn same_inode_layout_change_after_checkout_is_rejected() {
     for change in [
-        "PRAGMA user_version=1",
-        "PRAGMA application_id=1",
-        "DROP INDEX library_default",
+        format!(
+            "PRAGMA user_version={}",
+            crate::schema::layout::LIBRARY_USER_VERSION + 1
+        ),
+        "PRAGMA application_id=1".to_string(),
+        "DROP INDEX library_default".to_string(),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -314,7 +317,7 @@ fn same_inode_layout_change_after_checkout_is_rejected() {
             .unwrap();
         let mut lease = pool.try_checkout().unwrap();
         let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
-        writer.execute_batch(change).unwrap();
+        writer.execute_batch(&change).unwrap();
         assert!(
             lease
                 .with_connection(&budget(), |conn| {
@@ -338,7 +341,11 @@ fn layout_change_during_read_is_rejected_before_publication() {
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     let result = lease.with_connection(&budget(), |conn| {
         let value: i64 = conn.query_row("SELECT count(*) FROM libraries", [], |r| r.get(0))?;
-        writer.execute_batch("PRAGMA user_version=1")?;
+        writer.pragma_update(
+            None,
+            "user_version",
+            crate::schema::layout::LIBRARY_USER_VERSION + 1,
+        )?;
         Ok(value)
     });
     assert!(result.is_err());
@@ -376,7 +383,13 @@ fn confirmed_layout_mismatch_closes_pool_after_cancellation() {
         .unwrap();
     let lease = pool.try_checkout().unwrap();
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
-    writer.execute_batch("PRAGMA user_version=1").unwrap();
+    writer
+        .pragma_update(
+            None,
+            "user_version",
+            crate::schema::layout::LIBRARY_USER_VERSION + 1,
+        )
+        .unwrap();
     let (hook_entered, entered) = TimedGate::new("layout validation paused");
     let (hook_release, release) = TimedGate::new("layout validation released");
     // Only the first `application_id` read pauses: the same authorizer also sees

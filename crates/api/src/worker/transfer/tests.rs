@@ -6,7 +6,9 @@ use crate::management::ApiState;
 
 use super::*;
 
+mod deletion_pins;
 mod snapshot;
+use deletion_pins::publication_observation;
 
 struct EmptyFetcher;
 
@@ -442,14 +444,14 @@ fn publication_writes_confirmed_facts_mode_source_and_artwork() {
     let source = tmp.path().join("downloads/The Matrix.mkv");
     let outcome = outcome_of(confirmed, &source);
 
+    let observation = publication_observation(&outcome, "hardlink");
     let published = publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "hardlink",
-        None,
+        &observation,
     )
     .unwrap();
 
@@ -531,14 +533,14 @@ fn publication_refuses_a_reservation_whose_version_moved() {
     );
 
     let outcome = outcome_of(confirmed, &source);
+    let observation = publication_observation(&outcome, "hardlink");
     let error = publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "hardlink",
-        None,
+        &observation,
     )
     .unwrap_err();
     assert_reservation_changed(error);
@@ -556,14 +558,14 @@ fn publication_refuses_a_destination_without_a_reservation() {
     let coverage = candidate(&media, &plan, &source, library::TransferMode::Copy);
     let outcome = outcome_of(coverage, &source);
 
+    let observation = publication_observation(&outcome, "copy");
     let error = publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "copy",
-        None,
+        &observation,
     )
     .unwrap_err();
     assert_reservation_changed(error);
@@ -606,14 +608,14 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
     let mut widened = confirmed;
     widened.units = vec![domain::UnitKey::new(2, 3), domain::UnitKey::new(2, 4)];
     let outcome = outcome_of(widened, &source);
+    let observation = publication_observation(&outcome, "copy");
     publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "copy",
-        None,
+        &observation,
     )
     .unwrap();
     assert_eq!(
@@ -651,14 +653,14 @@ fn publication_keeps_unknown_coverage_unknown() {
         .unwrap();
     confirmed.units = Vec::new();
     let outcome = outcome_of(confirmed, &source);
+    let observation = publication_observation(&outcome, "copy");
     publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "copy",
-        None,
+        &observation,
     )
     .unwrap();
     let units = state
@@ -680,14 +682,14 @@ fn publication_prefers_reserved_units_over_carried_ones() {
     confirmed.units = vec![domain::UnitKey::WHOLE];
     let outcome = outcome_of(confirmed, &source);
 
+    let observation = publication_observation(&outcome, "copy");
     publish_transfer_file(
         &state.store.lock(),
         &plan.library_id,
         plan.config_revision,
         &outcome.files[0],
         Some(&source),
-        "copy",
-        None,
+        &observation,
     )
     .unwrap();
     assert_eq!(

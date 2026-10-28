@@ -169,11 +169,17 @@ async fn stuck_deletions_are_listed() {
         let store = h.state.store();
         let store = store.lock();
         store
-            .enqueue_file_deletion("/nowhere/x.mkv", "wash_replaced")
+            .enqueue_file_deletion_observed("/nowhere/x.mkv", "wash_replaced", None)
+            .unwrap();
+        let intent = store
+            .list_due_file_deletions(0)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == "/nowhere/x.mkv")
             .unwrap();
         for _ in 0..store::MAX_FILE_DELETION_ATTEMPTS {
             store
-                .record_file_deletion_failure("/nowhere/x.mkv", 0, "EACCES")
+                .record_file_deletion_failure(&intent, 0, "EACCES")
                 .unwrap();
         }
     }

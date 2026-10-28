@@ -60,9 +60,12 @@ fn patch_blocking(
     if let Some(auto) = auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, auto);
     }
-    let store = state.store.lock();
-    let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
-    let body = super::subscription_json(&store, state.catalog.as_ref(), &subscribe, &media, &facts);
+    let snapshot = {
+        let store = state.store.lock();
+        let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+        super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
+    };
+    let body = super::views::render_subscription_snapshot(&snapshot, state.file_stats.as_ref());
     ok(body).into_response()
 }
 

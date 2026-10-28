@@ -231,7 +231,7 @@ impl Store {
     fn apply_rename_references(
         &self,
         request: &FileRenameRequest,
-        leftovers: &[PathBuf],
+        leftovers: &[super::rename_completion::ObservedSidecarDeletion],
         now: i64,
     ) -> Result<(), StoreError> {
         let rename_id = request.rename_id.as_str();
@@ -252,11 +252,17 @@ impl Store {
         set_phase(&self.library, rename_id, "references_applied", now)?;
         // Queue left-over sole-owned source bytes (cross-device copy, identical
         // destination). Shared and retained sources are never queued.
-        for path in leftovers {
-            if let Err(error) =
-                self.enqueue_file_deletion(&path.to_string_lossy(), "rename-left-behind-sidecar")
-            {
-                tracing::warn!(rename_id, path = %path.display(), %error, "enqueue left-behind sidecar failed");
+        for leftover in leftovers {
+            let path = &leftover.path;
+            if let Err(error) = self.enqueue_file_deletion_observed(
+                &path.to_string_lossy(),
+                "rename-left-behind-sidecar",
+                leftover.identity,
+            ) {
+                tracing::error!(rename_id, path = %path.display(), %error,
+                    "left-behind sidecar enqueue failed; rename intent kept for retry");
+                self.record_file_rename_failure(rename_id, now, &error.to_string())?;
+                return Err(error);
             }
         }
         self.library.execute(

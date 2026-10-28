@@ -1,4 +1,4 @@
-//! Deterministic work counters for the performance gate (`test-support` seam).
+//! Explicit diagnostic SQL work scopes. Ordinary requests do not install a tracer.
 //!
 //! The gate can only assert what it can count, and wall clock cannot be asserted: a slow
 //! box would fail a healthy tree. Every hot path therefore has to expose two deterministic
@@ -12,24 +12,18 @@
 //! - It is a *closure* seam: the production entry point is called **inside** the closure, so
 //!   the measurement cannot drift from the statements the code actually executes.
 //!
-//! The shape matches the other two measured seams on this branch: `#[doc(hidden)]`,
-//! compiled only under the `test-support` feature, and production builds unchanged
-//! (`Store::publish_files_with_stats` for write-side work, [`PENDING_DISPATCH_SQL`] for a
-//! query the production method itself prepares).
+//! The same scope supports performance gates and explicitly opted-in request diagnostics.
+//! Normal request paths never install it. Progress injection stays test-support-only.
 //!
 //! [`PENDING_DISPATCH_SQL`]: crate::PENDING_DISPATCH_SQL
 
-#[cfg(feature = "test-support")]
 use rusqlite::Connection;
 
-#[cfg(feature = "test-support")]
 use crate::library_query::items::stats::{QueryWorkScope, QueryWorkStats};
 
-#[cfg(feature = "test-support")]
 use crate::Store;
 
 /// Which store connection(s) one measured closure runs on.
-#[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatsScope {
@@ -41,9 +35,9 @@ pub enum StatsScope {
     Both,
 }
 
-#[cfg(feature = "test-support")]
 impl Store {
     /// Install a temporary SQLite progress hook around a test operation.
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn with_library_progress<T>(
         &self,

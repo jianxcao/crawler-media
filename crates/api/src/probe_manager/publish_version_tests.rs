@@ -1,14 +1,20 @@
 use domain::{FileVersion, MediaId, MediaKind};
 use library::Tracks;
 
-
 #[test]
 fn queued_version_rejects_a_result_probed_after_replacement() {
     let tmp = tempfile::tempdir().unwrap();
     let store = crate::Store::open(tmp.path().join("data")).unwrap();
     let media_id = MediaId::new();
     store
-        .create_library(MediaKind::Movie, "Fixture", &[tmp.path().to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     store
         .insert_media(&domain::Media {
@@ -53,8 +59,14 @@ fn queued_version_rejects_a_result_probed_after_replacement() {
         Some(1_000),
     )
     .unwrap();
-    assert!(!published, "a result for the queued version must not land on the replacement");
-    let current = store.get_file_version(unit.row.file.file_id).unwrap().unwrap();
+    assert!(
+        !published,
+        "a result for the queued version must not land on the replacement"
+    );
+    let current = store
+        .get_file_version(unit.row.file.file_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(current, replaced);
     assert_ne!(current.source_version, queued.source_version);
 }
@@ -71,10 +83,15 @@ fn replace_content(
         revision: queued.revision + 1,
         source_version: observed.source_version,
     };
-    let revision = store.library_config_revision(&file.library_id.to_string()).unwrap();
+    let revision = store
+        .library_config_revision(&file.library_id.to_string())
+        .unwrap();
     store
         .publish_files(
-            &store::library_write::WriteScope { library_id: file.library_id, config_revision: revision },
+            &store::library_write::WriteScope {
+                library_id: file.library_id,
+                config_revision: revision,
+            },
             &[store::library_write::FilePublication {
                 file: &file,
                 units: &coverage.units,

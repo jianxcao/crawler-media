@@ -1,18 +1,20 @@
 //! Site connectivity maintenance: verify / login / check-in.
 
 use super::*;
+use crate::http::store_wait::{busy_response, store_read, with_bounded_store};
+
+mod credentials;
+use credentials::AdmittedCredentials;
 
 pub(crate) async fn verify_site(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
     let id = match SiteId::from_str(&id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let site = {
-        let store = state.store.lock();
-        let Some(site) = store.get_site(id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-        };
-        site
+    let site = match store_read(&state, move |store| store.get_site(id).ok().flatten()).await {
+        Ok(Some(site)) => site,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
+        Err(error) => return error.response(),
     };
     let state_for_work = state.clone();
     let outcome = state
@@ -34,93 +36,93 @@ pub(crate) async fn verify_site(State(state): State<ApiState>, Path(id): Path<St
         .next()
         .map(|failure| failure.error)
         .filter(|_| !has_hits);
-    ok(json!({
-        "ok": has_hits || error.is_none(),
-        "error": error,
-        "torrent_count": outcome.torrents.len(),
-    }))
+    ok(json!({ "ok": has_hits || error.is_none(), "error": error,
+        "torrent_count": outcome.torrents.len() }))
     .into_response()
 }
 
-pub(crate) async fn site_login(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
-    let site_id = match SiteId::from_str(&id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
-    };
-    let Some(site) = state.store.lock().get_site(site_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    };
-    // 借用 adapter（StoreSites / AttendanceHttp / LoginPlugin）在闭包内构造，
-    // 避免把没有 Send+Sync 约束的 HttpPost trait object 送进 spawn。
-    let state_for_work = state.clone();
-    let result = state
-        .http_work
-        .run_to_completion(move || -> Result<(), (StatusCode, &'static str, String)> {
-            let _policy = crate::check_in::site_policy(&state_for_work, &site).map_err(|error| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "site.maintenance_unsupported",
-                    error.to_string(),
-                )
-            })?;
-            let bus = hooks::Bus::new();
-            let creds = crate::check_in::store_sites(&state_for_work.store);
-            crate::site_maintenance::perform_login(&state_for_work, &site, &bus, &creds).map_err(
-                |error| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "site.login_failed",
-                        error.to_string(),
-                    )
-                },
-            )
-        })
-        .await;
-    match result {
-        Ok(Ok(())) => ok(json!({ "ok": true })).into_response(),
-        Ok(Err((status, code, message))) => err(status, code, &message),
-        Err(error) => blocking_error(error, "site.login_timeout"),
+#[derive(Clone, Copy)]
+enum Action {
+    Login,
+    CheckIn,
+}
+impl Action {
+    fn failure_code(self) -> &'static str {
+        match self {
+            Self::Login => "site.login_failed",
+            Self::CheckIn => "site.check_in_failed",
+        }
     }
+    fn timeout_code(self) -> &'static str {
+        match self {
+            Self::Login => "site.login_timeout",
+            Self::CheckIn => "site.check_in_timeout",
+        }
+    }
+}
+
+pub(crate) async fn site_login(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
+    maintain_site(state, id, Action::Login).await
 }
 
 pub(crate) async fn site_check_in(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let site_id = match SiteId::from_str(&id) {
+    maintain_site(state, id, Action::CheckIn).await
+}
+
+async fn maintain_site(state: ApiState, id: String, action: Action) -> Response {
+    let id = match SiteId::from_str(&id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let Some(site) = state.store.lock().get_site(site_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    };
-    let state_for_work = state.clone();
+    let worker = state.clone();
     let result = state
         .http_work
-        .run_to_completion(move || -> Result<(), (StatusCode, &'static str, String)> {
-            let _policy = crate::check_in::site_policy(&state_for_work, &site).map_err(|error| {
-                (
+        .run_to_completion(move || {
+            let site = with_bounded_store(worker.store(), |store| {
+                worker.require_writable()?;
+                worker.require_write_admitted()?;
+                store
+                    .get_site(id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"))
+            })
+            .ok_or_else(busy_response)??;
+            let _policy = crate::check_in::site_policy(&worker, &site).map_err(|error| {
+                err(
                     StatusCode::BAD_REQUEST,
                     "site.maintenance_unsupported",
-                    error.to_string(),
+                    &error.to_string(),
                 )
             })?;
             let bus = hooks::Bus::new();
-            let creds = crate::check_in::store_sites(&state_for_work.store);
-            crate::site_maintenance::perform_check_in(&state_for_work, &site, &bus, &creds).map_err(
-                |error| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "site.check_in_failed",
-                        error.to_string(),
-                    )
-                },
-            )
+            let creds = AdmittedCredentials::new(&worker, site.clone());
+            let result = match action {
+                Action::Login => {
+                    crate::site_maintenance::perform_login(&worker, &site, &bus, &creds)
+                }
+                Action::CheckIn => {
+                    crate::site_maintenance::perform_check_in(&worker, &site, &bus, &creds)
+                }
+            };
+            if let Some(response) = creds.take_rejection() {
+                return Err(response);
+            }
+            result.map_err(|error| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    action.failure_code(),
+                    &error.to_string(),
+                )
+            })
         })
         .await;
     match result {
         Ok(Ok(())) => ok(json!({ "ok": true })).into_response(),
-        Ok(Err((status, code, message))) => err(status, code, &message),
-        Err(error) => blocking_error(error, "site.check_in_timeout"),
+        Ok(Err(response)) => response,
+        Err(error) => blocking_error(error, action.timeout_code()),
     }
 }

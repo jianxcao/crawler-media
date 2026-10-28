@@ -3,120 +3,54 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use serde_json::json;
 use std::path::Path as FsPath;
 
-use crate::http::{err, ok, ok_list};
+use crate::http::{err, ok};
 use crate::management::ApiState;
 
 use super::library::missing_library;
 
-/// Physical identity of a present file: hard links share one entity, so a
-/// second path to the same inode is never an independent copy.
-#[cfg(unix)]
-fn file_entity(path: &FsPath) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok()?;
-    meta.is_file().then(|| (meta.dev(), meta.ino()))
+mod listing;
+pub(crate) use listing::duplicates;
+
+struct FileObservation {
+    entity: Option<(u64, u64)>,
+    size: i64,
 }
 
-#[cfg(not(unix))]
-fn file_entity(path: &FsPath) -> Option<(u64, u64)> {
-    let canonical = std::fs::canonicalize(path).ok()?;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    Some((0, hasher.finish()))
-}
-
-/// Only recorded coverage establishes duplicate logical units. Unidentified
-/// files must not become interchangeable whole-work copies.
-fn unit_coordinates(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
-    units
-        .iter()
-        .map(|unit| {
-            if unit.is_whole() {
-                (None, None)
-            } else {
-                (Some(unit.season as u32), Some(unit.episode as u32))
-            }
-        })
-        .collect()
-}
-
-/// Units of a file in the library listing, recorded or not.
-fn units_of(store: &crate::Store, file: &domain::LibraryFile) -> Vec<domain::UnitKey> {
-    match store.get_file_units(file.file_id) {
-        Ok(units) => units,
+fn observe_file(files: &dyn crate::file_stat_read::FileStatRead, path: &FsPath) -> FileObservation {
+    let metadata = match files.metadata(path) {
+        Ok(metadata) => metadata,
         Err(error) => {
-            tracing::warn!(%error, file_id = %file.file_id, "读取文件单元失败");
-            Vec::new()
+            tracing::debug!(path=%path.display(), %error, "重复文件观察不可用");
+            return FileObservation {
+                entity: None,
+                size: 0,
+            };
         }
-    }
-}
-
-fn distinct_present_entities(rows: &[domain::LibraryFile]) -> Vec<(u64, u64)> {
-    let mut entities = Vec::new();
-    for row in rows {
-        let Some(entity) = file_entity(&row.path) else {
-            continue;
-        };
-        if !entities.iter().any(|existing| existing == &entity) {
-            entities.push(entity);
-        }
-    }
-    entities
-}
-
-/// GET /libraries/{id}/duplicates — file rows sharing the same
-/// (media, season, episode) unit, grouped for keep/delete decisions.
-pub(crate) async fn duplicates(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
-    let store = state.store.lock();
-    let Some(library) = store.get_library(&id).ok().flatten() else {
-        return missing_library();
     };
-    let mut units: HashMap<(domain::MediaId, Option<u32>, Option<u32>), Vec<domain::LibraryFile>> =
-        HashMap::new();
-    for row in super::library::files_in_library(&store, &library) {
-        for (season, episode) in unit_coordinates(&units_of(&store, &row)) {
-            units
-                .entry((row.media_id, season, episode))
-                .or_default()
-                .push(row.clone());
-        }
-    }
-    let mut groups = Vec::new();
-    for ((media_id, season, episode), rows) in units {
-        if distinct_present_entities(&rows).len() < 2 {
-            continue;
-        }
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            continue;
-        };
-        let files: Vec<Value> = rows
-            .iter()
-            .map(|row| {
-                json!({
-                    "file_id": row.file_id.to_string(),
-                    "path": row.path.display().to_string(),
-                    "resolution": row.resolution,
-                    "codec": row.codec,
-                    "hdr": row.hdr,
-                    "quality_source": row.quality_source.as_str(),
-                    "size_bytes": std::fs::metadata(&row.path).map(|m| m.len() as i64).unwrap_or(0),
-                })
+    #[cfg(unix)]
+    let entity = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.is_file().then(|| (metadata.dev(), metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let entity = {
+        use std::hash::{Hash, Hasher};
+        std::fs::canonicalize(path)
+            .ok()
+            .filter(|_| metadata.is_file())
+            .map(|canonical| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                canonical.hash(&mut hasher);
+                (0, hasher.finish())
             })
-            .collect();
-        groups.push(json!({
-            "media_item_id": media.id.to_string(),
-            "title": media.title,
-            "season": season,
-            "episode": episode,
-            "files": files,
-        }));
+    };
+    FileObservation {
+        entity,
+        size: metadata.len().min(i64::MAX as u64) as i64,
     }
-    ok_list(groups).into_response()
 }
 
 /// DELETE /libraries/{id}/duplicates/{file_id} — physically delete one duplicate file.
@@ -133,46 +67,60 @@ pub(crate) async fn delete_duplicate(
     let Ok(file_id) = file_id.parse::<domain::LedgerId>() else {
         return err(StatusCode::NOT_FOUND, "file.missing", "文件不存在");
     };
-    let plan = match capture_plan(&state, &library_id, file_id) {
+    let worker = state.clone();
+    match state
+        .fs_work
+        .run_to_completion(move || delete_duplicate_blocking(&worker, &library_id, file_id))
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => super::library::browse_work_error(error),
+    }
+}
+
+fn delete_duplicate_blocking(
+    state: &ApiState,
+    library_id: &str,
+    file_id: domain::LedgerId,
+) -> Response {
+    let plan = match capture_plan(state, library_id, file_id) {
         Ok(plan) => plan,
         Err(response) => return *response,
     };
-    let observed = {
-        let paths: Vec<_> = plan.files.iter().map(|f| f.file.path.clone()).collect();
-        match tokio::task::spawn_blocking(move || {
-            paths.iter().map(|p| file_entity(p)).collect::<Vec<_>>()
-        })
-        .await
-        {
-            Ok(entities) => entities,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "file.delete",
-                    &error.to_string(),
-                );
-            }
-        }
-    };
+    let observed: Vec<_> = plan
+        .files
+        .iter()
+        .map(|file| observe_file(state.file_stats.as_ref(), &file.file.path).entity)
+        .collect();
+    // Capture the durable lstat identity outside Store, before accepting the intent.
+    let path = plan.files[0].file.path.to_string_lossy().into_owned();
+    let identity = store::file_identity(&path);
     if let Err(response) = prove_redundant(&plan, &observed) {
         return *response;
     }
-    let path = plan.files[0].file.path.to_string_lossy().into_owned();
-    {
-        let store = state.store.lock();
-        match capture_plan_locked(&store, &library_id, file_id) {
+    let queued = super::store_wait::with_bounded_store(state.store(), |store| {
+        state.require_writable()?;
+        state.require_write_admitted()?;
+        match capture_plan_locked(store, library_id, file_id) {
             Ok(again) if again.versions() == plan.versions() => {}
-            Ok(_) => return not_duplicate("文件在检查期间已变化，拒绝删除"),
-            Err(response) => return *response,
+            Ok(_) => return Err(not_duplicate("文件在检查期间已变化，拒绝删除")),
+            Err(response) => return Err(*response),
         }
-        if let Err(error) = store.enqueue_file_deletion(&path, "duplicate") {
-            tracing::error!(%error, path = %path, "登记重复文件删除意图失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "file.delete",
-                &error.to_string(),
-            );
-        }
+        store
+            .enqueue_file_deletion_observed(&path, "duplicate", identity)
+            .map_err(|error| {
+                tracing::error!(%error, %path, "登记重复文件删除意图失败");
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "file.delete",
+                    &error.to_string(),
+                )
+            })
+    });
+    match queued {
+        Some(Ok(())) => {}
+        Some(Err(response)) => return response,
+        None => return super::store_wait::busy_response(),
     }
     if let Err(error) = crate::http::file_delete::retry_queued_deletions_for(&state.store, &path) {
         tracing::error!(%error, path = %path, "删除重复文件失败，保留删除意图稍后重试");
@@ -208,8 +156,10 @@ fn capture_plan(
     library_id: &str,
     file_id: domain::LedgerId,
 ) -> Result<DeletePlan, Box<Response>> {
-    let store = state.store.lock();
-    capture_plan_locked(&store, library_id, file_id)
+    super::store_wait::with_bounded_store(state.store(), |store| {
+        capture_plan_locked(store, library_id, file_id)
+    })
+    .unwrap_or_else(|| Err(Box::new(super::store_wait::busy_response())))
 }
 
 fn capture_plan_locked(
@@ -240,11 +190,33 @@ fn capture_plan_locked(
             "文件不属于该媒体库",
         )));
     }
+    if !store.library_accepts_work(library_id).map_err(|error| {
+        Box::new(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ))
+    })? {
+        return Err(Box::new(err(
+            StatusCode::CONFLICT,
+            "library.deleting",
+            "Library 正在删除",
+        )));
+    }
     let mut files = vec![target];
+    let id = files[0].file.library_id;
     files.extend(
-        super::library::coverages_in_library(store, &library)
+        store
+            .file_coverage_in_library(id, Some(media.id), store::FileReadScope::AllRecorded)
+            .map_err(|error| {
+                Box::new(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                ))
+            })?
             .into_iter()
-            .filter(|other| other.file.media_id == media.id && other.file.file_id != file_id),
+            .filter(|other| other.file.file_id != file_id),
     );
     Ok(DeletePlan { files })
 }

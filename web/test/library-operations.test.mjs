@@ -104,6 +104,31 @@ async function loadApi(request) {
 
 const library = { id: "lib", name: "电影", kind: "movie", root_paths: ["/media"] };
 
+test("root consolidation uses the current root operation and waits for completion", async () => {
+  const requests = [];
+  let changed = false;
+  const api = await loadApi(async (path, init = {}) => {
+    const method = init.method ?? "GET";
+    requests.push({ path, method });
+    if (path === "/libraries") {
+      return { ok: true, data: [{ ...library, root_paths: changed ? ["/media"] : ["/media", "/duplicate"] }] };
+    }
+    if (method === "PATCH") {
+      assert.equal(path, "/libraries/lib");
+      assert.deepEqual(JSON.parse(init.body), { root_paths: ["/media"] });
+      return { ok: true, data: operation("planned") };
+    }
+    assert.equal(path, "/libraries/lib/operations/op");
+    changed = true;
+    return { ok: true, data: operation("succeeded") };
+  });
+  const result = await api.applyRootConsolidations("lib", ["/duplicate"], { intervalMs: 0 });
+  assert.deepEqual(result, { consolidated: 1, roots: ["/media"] });
+  assert.deepEqual(requests.map((r) => r.path), [
+    "/libraries", "/libraries/lib", "/libraries/lib/operations/op", "/libraries",
+  ]);
+});
+
 test("PATCH acceptance returns the operation instead of a library", async () => {
   const api = await loadApi(async (path, init) => {
     assert.equal(path, "/libraries/lib");

@@ -35,17 +35,27 @@ pub(crate) fn target_id(
     torrent: &Torrent,
 ) -> Result<Option<DownloaderId>, DownloaderError> {
     let store = state.store.lock();
+    target_id_from_store(&store, subscribe, torrent)
+}
+
+pub(crate) fn target_id_from_store(
+    store: &crate::Store,
+    subscribe: Option<&Subscribe>,
+    torrent: &Torrent,
+) -> Result<Option<DownloaderId>, DownloaderError> {
     if let Some(id) = subscribe.and_then(|sub| sub.downloader_id)
-        && let Some(id) = enabled_id(&store, id)? {
-            return Ok(Some(id));
-        }
+        && let Some(id) = enabled_id(&store, id)?
+    {
+        return Ok(Some(id));
+    }
     if let Some(id) = store
         .get_site(torrent.site_id)
         .map_err(error)?
         .and_then(|site| site.downloader_id)
-        && let Some(id) = enabled_id(&store, id)? {
-            return Ok(Some(id));
-        }
+        && let Some(id) = enabled_id(&store, id)?
+    {
+        return Ok(Some(id));
+    }
     Ok(store.default_downloader().map_err(error)?.map(|row| row.id))
 }
 
@@ -93,15 +103,6 @@ pub(crate) fn frozen_client_for_id(
 ) -> Result<Arc<dyn Downloader>, DownloaderError> {
     let client = client_for_id(state, id)?;
     Ok(client.snapshot_client()?.unwrap_or(client))
-}
-
-/// Used at the public manual-submit seam and by the per-Subscribe adapter.
-pub(crate) fn submit_torrent(
-    state: &ApiState,
-    torrent: &Torrent,
-    id: Option<DownloaderId>,
-) -> Result<(), DownloaderError> {
-    submit_torrent_with_options(state, torrent, id, None)
 }
 
 pub(crate) fn submit_torrent_with_options(
@@ -213,12 +214,9 @@ impl<'a> RoutedDownloader<'a> {
         // Library that is being deleted; the sources are the target Library's
         // recorded files, never the files whose path happens to match. A root
         // rename cannot retarget a delivery this way.
-        let _ = crate::directory::transfer_plan_for_library(
-            &store,
-            media.kind,
-            library_id.as_deref(),
-        )
-        .map_err(error)?;
+        let _ =
+            crate::directory::transfer_plan_for_library(&store, media.kind, library_id.as_deref())
+                .map_err(error)?;
         let target_library = match library_id {
             Some(id) => id.parse::<domain::LibraryId>().map_err(error)?,
             None => store

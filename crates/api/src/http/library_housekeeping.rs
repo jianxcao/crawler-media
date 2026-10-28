@@ -52,13 +52,19 @@ pub(crate) async fn path_reconciliation_preview(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let (library, rows) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        let rows = super::library::files_in_library(&store, &library);
-        (library, rows)
+    let (library, rows) = match super::store_wait::store_read(&state, move |store| {
+        let library = store
+            .get_library(&id)
+            .map_err(housekeeping_store_error)?
+            .ok_or_else(missing_library)?;
+        let rows = super::library::files_in_library(store, &library);
+        Ok::<_, Response>((library, rows))
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
 
     let roots = library.root_paths.clone();
@@ -148,32 +154,23 @@ pub(crate) async fn path_reconciliations(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    let (library, ownership, rows) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        let ownership = match store.library_ownership() {
-            Ok(ownership) => ownership,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        };
-        let rows = match reconciliation_rows(&store, &body) {
-            Ok(rows) => rows,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        };
-        (library, ownership, rows)
+    let capture_id = id.clone();
+    let captured = super::store_wait::store_read(&state, move |store| {
+        let library = store
+            .get_library(&capture_id)
+            .map_err(housekeeping_store_error)?
+            .ok_or_else(missing_library)?;
+        let ownership = store
+            .library_ownership()
+            .map_err(housekeeping_store_error)?;
+        let rows = reconciliation_rows(store, &body).map_err(housekeeping_store_error)?;
+        Ok::<_, Response>((library, ownership, rows))
+    })
+    .await;
+    let (library, ownership, rows) = match captured {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let worker = state.clone();
     let result = state
@@ -409,27 +406,32 @@ pub(crate) async fn root_consolidation_preview(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let library = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        library
+    let library = match super::store_wait::store_read(&state, move |store| {
+        store
+            .get_library(&id)
+            .map_err(housekeeping_store_error)?
+            .ok_or_else(missing_library)
+    })
+    .await
+    {
+        Ok(Ok(library)) => library,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let result = state
         .http_work
         .run(HOUSEKEEPING_DEADLINE, move || {
-            let mut seen: Vec<(String, String)> = Vec::new(); // (canonical, path)
+            let mut seen = std::collections::HashMap::new();
             let mut duplicates = Vec::new();
             for root in &library.root_paths {
                 let Ok(real) = std::fs::canonicalize(root) else {
                     continue;
                 };
                 let real = real.display().to_string();
-                if let Some((keep, _)) = seen.iter().find(|(c, _)| *c == real) {
+                if let Some(keep) = seen.get(&real) {
                     duplicates.push(json!({ "keep": keep, "merge": root }));
                 } else {
-                    seen.push((real, root.display().to_string()));
+                    seen.insert(real, root.display().to_string());
                 }
             }
             duplicates
@@ -444,40 +446,11 @@ pub(crate) async fn root_consolidation_preview(
     }
 }
 
-/// POST /libraries/{id}/root-consolidations — 归并（删重复根，保留第一个）。
-pub(crate) async fn root_consolidations(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    let store = state.store.lock();
-    let Some(library) = store.get_library(&id).ok().flatten() else {
-        return missing_library();
-    };
-    let Some(roots) = body["roots"].as_array() else {
-        return err(StatusCode::BAD_REQUEST, "consolidate.invalid", "缺少 roots");
-    };
-    let to_remove: Vec<String> = roots
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    let remaining: Vec<String> = library
-        .root_paths
-        .iter()
-        .filter(|root| !to_remove.contains(&root.display().to_string()))
-        .map(|root| root.display().to_string())
-        .collect();
-    let refs: Vec<&str> = remaining.iter().map(String::as_str).collect();
-    match store.update_library(&id, None, Some(&refs), None) {
-        Ok(_) => ok(json!({
-            "consolidated": to_remove.len(),
-            "roots": remaining,
-        }))
-        .into_response(),
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+fn housekeeping_store_error(error: store::StoreError) -> Response {
+    tracing::error!(%error,"读取Library核对事实失败");
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store.error",
+        &error.to_string(),
+    )
 }

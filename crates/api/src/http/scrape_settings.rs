@@ -38,9 +38,10 @@ fn validate(setting: &ScrapeConfigSetting) -> Result<(), String> {
         return Err("海报模式必须是 default 或 language".into());
     }
     if let Some(secs) = setting.fingerprint_duration_secs
-        && !(30..=3600).contains(&secs) {
-            return Err("声纹采样时长需要在 30~3600 秒之间".into());
-        }
+        && !(30..=3600).contains(&secs)
+    {
+        return Err("声纹采样时长需要在 30~3600 秒之间".into());
+    }
     if let Some(mode) = &setting.fingerprint_sampling_mode {
         let trimmed = mode.trim();
         if !trimmed.is_empty() && trimmed != "full_window" && trimmed != "adaptive" {
@@ -109,25 +110,28 @@ pub(crate) async fn get_scrape_settings(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let is_admin = store
-        .user_role(user_id)
-        .map(|role| role == "admin")
-        .unwrap_or(false);
-    match store.get_scrape_config() {
-        Ok(mut config) => {
-            if !is_admin {
-                config.setting.theintrodb_api_key = None;
-                config.setting.fanart_api_key = None;
+    super::store_wait::store_read(&state, move |store| {
+        let is_admin = store
+            .user_role(user_id)
+            .map(|role| role == "admin")
+            .unwrap_or(false);
+        match store.get_scrape_config() {
+            Ok(mut config) => {
+                if !is_admin {
+                    config.setting.theintrodb_api_key = None;
+                    config.setting.fanart_api_key = None;
+                }
+                ok(scrape_json(&config)).into_response()
             }
-            ok(scrape_json(&config)).into_response()
+            Err(error) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
         }
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 /// PUT /settings/scrape — save + validate; unknown fields are dropped.
@@ -142,53 +146,59 @@ pub(crate) async fn put_scrape_settings(
     if let Err(message) = validate(&setting) {
         return bad("scrape.invalid", &message);
     }
-    let store = state.store.lock();
-    match store.save_scrape_config(&setting) {
-        Ok(config) => ok(scrape_json(&config)).into_response(),
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    super::store_wait::store_write(&state, move |store| {
+        match store.save_scrape_config(&setting) {
+            Ok(config) => ok(scrape_json(&config)).into_response(),
+            Err(error) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| error)
 }
 
 /// POST /settings/scrape/preview-naming — render both composed patterns with a
 /// sample movie + sample episode so the UI can preview before saving.
 pub(crate) async fn preview_naming(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let config = match store.get_scrape_config() {
-        Ok(config) => config,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    let movie_media = sample_media(MediaKind::Movie);
-    let tv_media = sample_media(MediaKind::Tv);
-    let movie_release = sample_release(MediaKind::Movie);
-    let tv_release = sample_release(MediaKind::Tv);
-    let render = |pattern: &str, media: &Media, release: &Release| {
-        library::render_path(
-            std::path::Path::new(""),
-            pattern,
-            media,
-            release,
-            std::path::Path::new("dummy.mkv"),
-        )
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-    };
-    ok(json!({
+    super::store_wait::store_read(&state, move |store| {
+        let config = match store.get_scrape_config() {
+            Ok(config) => config,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        let movie_media = sample_media(MediaKind::Movie);
+        let tv_media = sample_media(MediaKind::Tv);
+        let movie_release = sample_release(MediaKind::Movie);
+        let tv_release = sample_release(MediaKind::Tv);
+        let render = |pattern: &str, media: &Media, release: &Release| {
+            library::render_path(
+                std::path::Path::new(""),
+                pattern,
+                media,
+                release,
+                std::path::Path::new("dummy.mkv"),
+            )
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+        };
+        ok(json!({
         "movie": render(&config.effective.compose_movie_pattern(), &movie_media, &movie_release),
         "tv": render(&config.effective.compose_tv_pattern(), &tv_media, &tv_release),
         "movie_media_title": movie_media.title,
         "tv_media_title": tv_media.title,
     }))
     .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 fn scrape_json(config: &crate::scrape_config::ScrapeConfig) -> Value {

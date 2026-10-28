@@ -56,6 +56,7 @@ pub(super) async fn authenticate_by_name(
         Ok(Some(res)) => res,
         Ok(None) => return Err(StatusCode::UNAUTHORIZED),
         Err(AuthenticateError::Busy) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(AuthenticateError::ReadOnly) => return Err(StatusCode::CONFLICT),
         Err(AuthenticateError::Internal(message)) => {
             tracing::error!(%message, "Jellyfin 密码登录失败");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);

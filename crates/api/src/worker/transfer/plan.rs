@@ -17,6 +17,9 @@ pub(crate) struct TransferPlan {
     pub(crate) naming: String,
     pub(crate) scrape: bool,
     pub(crate) nfo: bool,
+    pub(super) published_removals: parking_lot::Mutex<
+        std::collections::HashMap<std::path::PathBuf, super::removals::TransferRemovalPin>,
+    >,
 }
 
 /// The enabled root of `library_id` that contains `destination`.
@@ -113,6 +116,7 @@ pub(crate) fn resolve_transfer_plan(
         naming,
         scrape,
         nfo: scrape && cfg.effective.mirror_nfo,
+        published_removals: parking_lot::Mutex::default(),
     })
 }
 

@@ -94,12 +94,34 @@ pub(crate) async fn probe_item(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path((id, item_id)): Path<(String, String)>,
 ) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        probe_item_blocking(state, user_id, id, item_id)
+    })
+    .await
+}
+
+fn probe_item_blocking(
+    state: ApiState,
+    user_id: Option<domain::UserId>,
+    id: String,
+    item_id: String,
+) -> Response {
     let media_id = match domain::MediaId::from_str(&item_id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
     let (rows, media_kind) = {
-        let store = state.store.lock();
+        let handle = state.store();
+        let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+            return crate::http::store_wait::busy_response();
+        };
+        if let Err(response) = state
+            .require_writable()
+            .and_then(|_| state.require_write_admitted())
+        {
+            return response;
+        }
         let library = match require_visible_library(&store, &id, user_id) {
             Ok(library) => library,
             Err(response) => return response,
@@ -137,7 +159,10 @@ pub(crate) async fn probe_item(
             job_id: None,
         })
         .collect();
-    match state.probe.enqueue_forced_item_refresh(units) {
+    match state
+        .probe
+        .enqueue_forced_item_refresh_admitted(units, &state)
+    {
         Ok(queued) => {
             tracing::info!(media_id = %media_id, queued, total, "手动触发探测：已持久化整条目媒体信息与声纹任务");
             ok(json!({ "queued": queued, "already_running": false })).into_response()
@@ -145,6 +170,7 @@ pub(crate) async fn probe_item(
         Err(crate::probe_manager::ProbeEnqueueError::AlreadyRunning) => {
             ok(json!({ "queued": 0, "already_running": true })).into_response()
         }
+        Err(crate::probe_manager::ProbeEnqueueError::Admission(response)) => response,
         Err(crate::probe_manager::ProbeEnqueueError::Persistence) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "library.probe_enqueue_failed",

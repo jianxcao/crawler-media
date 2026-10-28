@@ -339,7 +339,7 @@ export interface UnidentifiedGroup {
 }
 
 // ---------------------------------------------------------------------------
-// 保留的旧领域类型（组件引用；对应端点已删除，仅作类型契约保留）
+// Library 配置类型
 // ---------------------------------------------------------------------------
 
 /** 收藏范围条件：条件间 AND、条件内任一匹配。 */
@@ -377,9 +377,7 @@ export interface LibraryPayload {
  * 改目录会冻结整库并异步迁移文件归属（202 + operation），只改其它字段仍是同步
  * 200；因此更新体必须允许省略 `root_paths`，否则「改名」会被后端当成换根。
  */
-export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths" | "kind"> & {
-  root_paths?: string[];
-};
+export type LibraryUpdatePayload = Partial<Omit<LibraryPayload, "kind">>;
 
 /** 换根/换语言的异步操作（GET /libraries/{id}/operations/{operation_id}）。 */
 export interface LibraryOperation {
@@ -1945,11 +1943,15 @@ export async function previewRootConsolidation(libraryId: string): Promise<{ dup
 export async function applyRootConsolidations(
   libraryId: string,
   roots: string[],
+  options: OperationWaitOptions = {},
 ): Promise<{ consolidated: number; roots: string[] }> {
-  return unwrap(
-    request<ApiEnvelope<{ consolidated: number; roots: string[] }>>(`/libraries/${libraryId}/root-consolidations`, {
-      method: "POST",
-      body: JSON.stringify({ roots }),
-    }),
-  );
+  const before = await getLibrary(libraryId);
+  const removed = new Set(roots);
+  const remaining = before.root_paths.filter((path) => !removed.has(path));
+  if (remaining.length === 0) throw new Error("媒体库至少需要一个目录");
+  const after = await updateLibraryAndWait(libraryId, { root_paths: remaining }, options);
+  return {
+    consolidated: before.root_paths.length - remaining.length,
+    roots: after.root_paths,
+  };
 }

@@ -137,7 +137,10 @@ fn query_layout_fresh_open_and_reopen_preserve_rows() {
         versions.iter().find(|v| v.0 == "library").unwrap().1,
         store::schema::layout::LIBRARY_USER_VERSION
     );
-    assert_eq!(versions.iter().find(|v| v.0 == "subscribe").unwrap().1, 2);
+    assert_eq!(
+        versions.iter().find(|v| v.0 == "subscribe").unwrap().1,
+        store::schema::layout::SUBSCRIBE_USER_VERSION
+    );
     assert!(
         versions
             .iter()

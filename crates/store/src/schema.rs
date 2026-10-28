@@ -1,15 +1,14 @@
 //! Database layout for the Store's SQLite files.
 //!
-//! `Store::open` initializes or validates each file through
-//! [`layout::initialize_or_validate`], which applies the v1 DDL of
-//! `schema/v1/*.sql` to a fresh file and rejects a file that belongs to another
-//! layout. There is no migration ladder: a database is either the current
-//! layout or it is refused.
+//! A single production definition exists for each database. Empty files are
+//! initialized from it; normal open validates that exact current definition.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::StoreError;
 
+#[path = "schema/definitions.rs"]
+mod definitions;
 pub mod layout;
 #[path = "schema/v1/objects.rs"]
 pub mod v1;
@@ -26,7 +25,7 @@ pub fn seed_defaults(
     std::fs::create_dir_all(&movie_root)?;
     std::fs::create_dir_all(&tv_root)?;
     let filter_id = uuid::Uuid::new_v4().to_string();
-    // JSON atom form only (see maps::serialize_atoms): rows in the older DSL shape are refused.
+    // The sole persisted Filter atom form is JSON (see maps::serialize_atoms).
     let atoms = r#"[{"priority":100,"rule":"resolution","exclude":false,"value":"2160p"},{"priority":50,"rule":"resolution","exclude":false,"value":"1080p"}]"#;
     app.execute(
         "INSERT INTO filters (id, name, atoms_json)

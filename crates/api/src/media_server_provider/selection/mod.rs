@@ -9,6 +9,7 @@
 //!   当成硬失败，不能因为「这个人没在库里」缩成更小的一页；
 //! - 任何读取失败都向上抛，绝不退化成「更小的一页」。
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -98,10 +99,16 @@ fn hydrate_page(
     state: &ApiState,
     user_id: UserId,
     query: ServerItemQuery,
-    (page, inputs, series_facts): SelectedFacts,
+    (page, mut inputs, series_facts): SelectedFacts,
     budget: &store::QueryBudget,
 ) -> Result<ServerItemPage, QueryError> {
     let units_started = std::time::Instant::now();
+    // Multiple selected episodes may name the same pack. Move its coverage once,
+    // then share it across the whole page as well as the NextUp/Resume candidates.
+    let coverages = std::mem::take(&mut inputs.coverage)
+        .into_iter()
+        .map(|coverage| (coverage.file.file_id, Arc::new(coverage)))
+        .collect();
     let units = super::items::unit_index(&inputs.user_items);
     state.record_query_phase("selected_facts", units_started.elapsed());
     let total = usize::try_from(page.total).unwrap_or(usize::MAX);
@@ -115,7 +122,7 @@ fn hydrate_page(
     let mut items = Vec::with_capacity(page.items.len());
     for reference in page.items {
         let light_started = std::time::Instant::now();
-        let item = light::selected_light_item(&reference, &inputs, &units,
+        let item = light::selected_light_item(&reference, &inputs, &coverages, &units,
             series_facts.get(&reference.item.media_id()).copied())
             .map_err(|error| {
                 tracing::error!(%error, item = %reference.item.to_wire_string(), "Jellyfin selected item could not be hydrated");
@@ -154,7 +161,7 @@ fn next_up_blocking(
     limit: usize,
 ) -> Result<ServerItemPage, String> {
     let query = next_up_query(series_id);
-    let (scope, items) = {
+    let scope = {
         let store = state.store.lock();
         let scope = match read_scope(&store, user_id, &query) {
             Ok(scope) => scope,
@@ -163,17 +170,15 @@ fn next_up_blocking(
                 return Err(error.to_string());
             }
         };
-        count_candidates(state, scope.rows_read);
-        let items = if scope.unresolved {
-            Vec::new()
-        } else {
-            build_light_items(&scope, &query)
-        };
-        (scope, items)
+        scope
     };
+    count_candidates(state, scope.rows_read);
     if scope.unresolved {
         return Ok(ServerItemPage::default());
     }
+    // The scope owns the captured coverage and Playback facts. Candidate
+    // expansion/grouping/sorting is pure work and never holds the writer mutex.
+    let items = build_light_items(&scope, &query);
     // 一次聚合：候选按 Media 分组（保持候选顺序），每个 Media 取 (季, 集) 最小的
     // 未看条目，再整体分页。显式给了 SeriesId 时按旧语义允许任意 Media（含电影）。
     let restrict_kind = series_id.is_none();

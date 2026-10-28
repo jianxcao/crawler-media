@@ -1,4 +1,6 @@
+use crate::http::store_wait::{busy_response, store_read, with_bounded_store};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -11,18 +13,22 @@ use crate::management::ApiState;
 use crate::pending_reconcile::{absence_is_provable, snapshot_matches_pending};
 
 fn prune_orphan_pending(
+    store: &crate::Store,
     state: &ApiState,
 ) -> (
     Vec<(domain::SubscribeId, i32, store::PendingDownload)>,
     HashSet<Option<DownloaderId>>,
 ) {
-    let store = state.store.lock();
     let rows = store.list_all_pending_routed().unwrap_or_default();
     let mut kept = Vec::with_capacity(rows.len());
     for (subscribe_id, score, item) in rows {
         match store.get_subscribe(subscribe_id) {
             Ok(Some(_)) => kept.push((subscribe_id, score, item)),
             Ok(None) => {
+                if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+                    tracing::debug!(%subscribe_id, "Protected task read skips orphan cleanup");
+                    continue;
+                }
                 if let Err(error) = store.delete_pending(subscribe_id, &item.torrent.enclosure) {
                     tracing::error!(%subscribe_id, %error, "清理孤儿 pending 失败");
                 } else {
@@ -48,7 +54,7 @@ async fn load_task_snapshots(
     HashSet<Option<DownloaderId>>,
 ) {
     let snapshot_state = state.clone();
-    tokio::task::spawn_blocking(move || {
+    state.http_work.run(std::time::Duration::from_secs(12), move || {
         let mut by_dl: HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>> = HashMap::new();
         let mut reachable = HashSet::new();
         for id in targets {
@@ -67,7 +73,10 @@ async fn load_task_snapshots(
         (by_dl, reachable)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "Downloader task snapshots unavailable; pending rows retained");
+        Default::default()
+    })
 }
 
 fn prune_absent_pending(
@@ -75,7 +84,7 @@ fn prune_absent_pending(
     pending: Vec<(domain::SubscribeId, i32, store::PendingDownload)>,
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
-) -> Vec<(domain::SubscribeId, i32, store::PendingDownload)> {
+) -> Result<Vec<(domain::SubscribeId, i32, store::PendingDownload)>, Response> {
     let now = crate::job_loop::unix_now();
     let mut hashes: HashMap<domain::SubscribeId, HashMap<String, String>> = HashMap::new();
     let mut kept = Vec::with_capacity(pending.len());
@@ -86,13 +95,16 @@ fn prune_absent_pending(
             .unwrap_or(&[]);
         // Review M-1: same rule as the background reconcile, including the
         // persisted info hash (D-M3).
-        let sub_hashes = hashes.entry(subscribe_id).or_insert_with(|| {
-            state
-                .store
-                .lock()
-                .load_pending_info_hashes(subscribe_id)
-                .unwrap_or_default()
-        });
+        if !hashes.contains_key(&subscribe_id) {
+            let rows = with_bounded_store(state.store(), |store| {
+                store
+                    .load_pending_info_hashes(subscribe_id)
+                    .unwrap_or_default()
+            })
+            .ok_or_else(busy_response)?;
+            hashes.insert(subscribe_id, rows);
+        }
+        let sub_hashes = &hashes[&subscribe_id];
         let hash = sub_hashes.get(&item.torrent.enclosure).map(String::as_str);
         let reachable_list = reachable.contains(&item.downloader_id).then_some(snapshots);
         let matched = snapshots.iter().any(|s| {
@@ -108,12 +120,12 @@ fn prune_absent_pending(
             reachable_list,
             now,
         );
-        if absent && delete_absent_pending(state, subscribe_id, &item) {
+        if absent && delete_absent_pending(state, subscribe_id, &item)? {
             continue;
         }
         kept.push((subscribe_id, score, item));
     }
-    kept
+    Ok(kept)
 }
 
 /// Delete one absent pending row under its Subscribe guard (lock order:
@@ -123,13 +135,17 @@ fn delete_absent_pending(
     state: &ApiState,
     subscribe_id: domain::SubscribeId,
     item: &store::PendingDownload,
-) -> bool {
+) -> Result<bool, Response> {
     let guard = state.subscribe_guard(subscribe_id);
     let Some(_held) = guard.try_lock() else {
         tracing::debug!(%subscribe_id, "订阅正在搜索/转存，本轮跳过缺失任务清理");
-        return false;
+        return Ok(false);
     };
-    let store = state.store.lock();
+    with_bounded_store(state.store(), |store| {
+    if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+        tracing::debug!(%subscribe_id, "Protected task read skips absent pending cleanup");
+        return false;
+    }
     // Re-check under the guard: Transfer may have imported it meanwhile.
     let still_active = store
         .load_pending(subscribe_id)
@@ -151,6 +167,7 @@ fn delete_absent_pending(
             false
         }
     }
+    }).ok_or_else(busy_response)
 }
 
 fn subscribe_media_index(
@@ -164,16 +181,17 @@ fn subscribe_media_index(
             continue;
         }
         if let Ok(Some(subscribe)) = store.get_subscribe(*subscribe_id)
-            && let Ok(Some(media)) = store.get_media(subscribe.media_id) {
-                subscribe_media.insert(
-                    key,
-                    (
-                        media.title,
-                        media.kind.as_str().to_string(),
-                        media.id.to_string(),
-                    ),
-                );
-            }
+            && let Ok(Some(media)) = store.get_media(subscribe.media_id)
+        {
+            subscribe_media.insert(
+                key,
+                (
+                    media.title,
+                    media.kind.as_str().to_string(),
+                    media.id.to_string(),
+                ),
+            );
+        }
     }
     subscribe_media
 }
@@ -231,12 +249,11 @@ fn task_row_json(
 }
 
 fn map_task_rows(
-    state: &ApiState,
+    store: &crate::Store,
     kept: &[(domain::SubscribeId, i32, store::PendingDownload)],
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
 ) -> Vec<Value> {
-    let store = state.store.lock();
     let subscribe_media = subscribe_media_index(&store, kept);
     kept.iter()
         .map(|(subscribe_id, score, pending)| {
@@ -255,11 +272,55 @@ fn map_task_rows(
 }
 
 pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
-    let (pending, targets) = prune_orphan_pending(&state);
-    let (snapshots_by_downloader, reachable) = load_task_snapshots(&state, targets).await;
-    let kept = prune_absent_pending(&state, pending, &snapshots_by_downloader, &reachable);
-    let items = map_task_rows(&state, &kept, &snapshots_by_downloader, &reachable);
-    ok(json!({ "items": items, "sources": [] })).into_response()
+    let initial_state = state.clone();
+    // This GET may reconcile orphan rows. Keep that whole conditional mutation
+    // owned to completion rather than hiding a late write behind a read timeout.
+    let (pending, targets) = match state
+        .http_work
+        .run_to_completion(move || {
+            with_bounded_store(initial_state.store(), |store| {
+                prune_orphan_pending(store, &initial_state)
+            })
+        })
+        .await
+    {
+        Ok(Some(inputs)) => inputs,
+        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => return busy_response(),
+        Err(error) => {
+            tracing::error!(%error, "Downloader pending capture worker failed");
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "读取失败",
+            );
+        }
+    };
+    let (snapshots, reachable) = load_task_snapshots(&state, targets).await;
+    let snapshots = Arc::new(snapshots);
+    let reachable = Arc::new(reachable);
+    let worker = state.clone();
+    let observed = snapshots.clone();
+    let contacted = reachable.clone();
+    let kept = match state
+        .http_work
+        .run_to_completion(move || prune_absent_pending(&worker, pending, &observed, &contacted))
+        .await
+    {
+        Ok(Ok(kept)) => kept,
+        Ok(Err(response)) => return response,
+        Err(error) => {
+            tracing::warn!(%error, "Downloader pending reconciliation worker unavailable");
+            return busy_response();
+        }
+    };
+    match store_read(&state, move |store| {
+        map_task_rows(store, &kept, &snapshots, &reachable)
+    })
+    .await
+    {
+        Ok(items) => ok(json!({ "items": items, "sources": [] })).into_response(),
+        Err(error) => error.response(),
+    }
 }
 
 #[cfg(test)]

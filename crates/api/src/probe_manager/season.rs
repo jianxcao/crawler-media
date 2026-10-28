@@ -50,6 +50,9 @@ struct SeasonPipelineState {
     templates: TemplateContext,
 }
 
+#[cfg(test)]
+mod tests;
+
 pub async fn run_adaptive_season_pipeline(
     mgr: &ProbeManager,
     job_id: &str,
@@ -342,18 +345,30 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
         super::ledger_id(&member.ledger_id)
             .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
             .is_none_or(|row| {
-                row.file.version.source_version != member.source_version
+                row.file.media_id != pipeline.media_id
+                    || row.file.version.source_version != member.source_version
                     || crate::fingerprint_job::source::ensure_source_recorded(&store, &row).is_err()
             })
     }) {
         tracing::warn!(
             job_id = pipeline.job_id,
+            media_id = %pipeline.media_id,
+            model_id = %model.model_id,
             "cancelled Library season model publication"
         );
         return;
     }
     if let Err(error) = store.put_fingerprint_model(&stored_model, &members) {
-        tracing::warn!(error = %error, "failed to persist fingerprint season model");
+        if matches!(
+            error,
+            store::StoreError::Protected(_) | store::StoreError::Missing(_)
+        ) {
+            tracing::warn!(%error, media_id=%pipeline.media_id, model_id=%model.model_id,
+                "cancelled stale fingerprint season model publication");
+        } else {
+            tracing::error!(%error, media_id=%pipeline.media_id, model_id=%model.model_id,
+                "failed to persist fingerprint season model");
+        }
     }
 }
 

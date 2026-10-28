@@ -11,7 +11,12 @@ pub struct RenameCompletionPlan {
 pub struct ObservedRenameCompletion {
     pub(super) request: FileRenameRequest,
     pub(super) source: Option<library::SourceObservation>,
-    pub(super) leftovers: Vec<PathBuf>,
+    pub(super) leftovers: Vec<ObservedSidecarDeletion>,
+}
+
+pub(super) struct ObservedSidecarDeletion {
+    pub path: PathBuf,
+    pub identity: Option<(u64, Option<u64>)>,
 }
 
 impl RenameCompletionPlan {
@@ -41,7 +46,10 @@ impl RenameCompletionPlan {
             .filter(|side| {
                 side.action.deletes_source() && side.from != side.to && side.from.is_file()
             })
-            .map(|side| side.from.clone())
+            .map(|side| ObservedSidecarDeletion {
+                path: side.from.clone(),
+                identity: crate::file_identity(&side.from.to_string_lossy()),
+            })
             .collect();
         Ok(ObservedRenameCompletion {
             request,

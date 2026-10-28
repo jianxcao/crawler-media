@@ -45,7 +45,7 @@ docker compose up --build
 
 回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器全局并发默认 3，同一可注册域按公共后缀表串行。每个会话创建独立 BrowserContext，结束时 dispose；不发送 cookie 删除/清空命令，也不修改第三方浏览器的默认上下文。Site cookie 以当前 URL 经 `Network.setCookies` 做 host-only 注入，并经 `Network.getCookies{urls}` 定向回读；当前 Obscura 的回读另限制 path=`/`。不支持 BrowserContext 的端点在导航前失败并回退 HTTP。公共后缀 cookie 拒收能力的实测仍未完成，不能宣称该项已验证。浏览器会话不使用 Site 代理，`maintenance_via = browser` 与 Site 代理在保存时互斥。实现见 `crates/indexer/src/cdp_page.rs`，历史实测见 ADR-0007。
 
-**数据库启动边界（不迁移旧布局）**：当前 Store 只初始化空数据库或重开当前布局，不能将旧版本数据目录原地升级。启动先只读检查已存在的四个 Store 文件的 `application_id` / `user_version` 和必需表/索引（cache 另校验自己的结构），不匹配时报 layout mismatch；错误不等于应用已重置目录。当前 `library.db` 的 `application_id=1129139249`、`user_version=8`，包含查询投影列、协议成员、边际计数、Integrity 计数暂存和查询语言配置单例；各文件版本见[数据库字典](database/README.md)。非当前版本的 `library.db` 在创建或改写其他 Store 文件之前拒绝，不能只删一张表、重建一个索引或移动 cache 来绕过。不要删除现有实例数据来试错：先停机、一致备份并保留原目录，使用独立的新目录评估；实际生产切换须另行批准。应用不会自动删除旧数据，也没有旧库导入器或迁移阶梯。当前布局可正常重启，并非每次启动都要求空目录。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；旧 `cdp.sync.enabled`、`obscura.enabled/url` 不作为新开关使用，Profile `render` 不再控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema.rs`。
+**数据库启动边界**：代码只保留五文件当前定义，Store 初始化空文件并重开相同定义。启动在写入前只读核对文件身份与生产 DDL 的表/索引/视图定义（含约束），不导入数据、不迁移、不自动修复不同定义。当前 `library.db` 为 `application_id=1129139249`、`user_version=1`，其余身份见[数据库字典](database/README.md)。首次评估使用独立空数据目录；已有目录不被启动过程重置。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；Profile `render` 不控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema/definitions.rs`。
 
 新布局仅在独立新目录验证。停写并一致备份后保留原目录，在仓库根目录指定一个尚未用于实例的路径启动，例如：
 
@@ -123,13 +123,13 @@ CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE=/run/secrets/proxy_pass
 
 Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-site-credentials.md>) 明文持久化于 SQLite，须保护数据目录与一致备份。部署 secret 文件／env 必须不进入 Git 或 Docker 构建上下文；“不进版本库”不等于“不进数据库”。
 
-## 数据库维护与升级注意
+## 数据库维护与当前定义
 
 当前默认文件共五个：Store 管理 `<data>/app.db`（User/token、Site、Downloader、Filter、设置）、`cache.db`（按来源分表的 HTTP 响应缓存）、`library.db`（Media/别名/采用元数据、Library/根、文件/覆盖/摘要、Playback、Probe/Scan）、`subscribe.db`（Subscribe）；另有独立队列 `<data>/jobs.db`（定义、调度配置、在途任务与历史）。`catalog.db`、`fanart.db` 是旧布局名称，不是当前另需创建的库。`jobs.db` 不是可丢弃缓存。连接间无跨文件原子事务，备份需保持整体一致。DDL 与布局入口见 `crates/store/src/schema/layout.rs`、`crates/store/src/schema/v1/*.sql`，队列入口见 `crates/api/src/management/state.rs`。
 
 默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
 
-维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；当前存储切换验收与优化顺序见 [复审与剩余方案](<audits/2026-10-28-storage-main-rereview.md>)。
+维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；当前存储修复与验收见 [修复记录](audits/2026-10-28-storage-remediation-verification.md)及[任务对账](superpowers/plans/2026-10-28-storage-head-remediation.md)。
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 
@@ -138,29 +138,6 @@ Library items/gallery/facets 与覆盖的 Jellyfin Items/Latest/Episodes 查询�
 R6 修复后，metadata/discovery/Playback 和 Jellyfin/Emby 的 mutation 统一经过实例只读与维护门禁，受保护的 ledger 删除拒绝且保留数据库事实和视频字节；安全读与显式只读预览保持可用。[当前复审 R6](audits/2026-10-28-storage-main-rereview.md#r6metadata-路由绕过写门禁)记录公开 HTTP 回归。门禁是准入检查，不能代替停写、等待在途 worker 完成及关闭连接。
 
 HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 [Library 读取隔离记录](benchmarks/2026-10-25-library-read-isolation.md)。读池减少查询执行期间的 Store 锁占用，不承诺消除认证/准备/重验与 writer 的锁争用，也不提升单条 SQL 自身速度。
-
-
-### 干净切换：旧 `cache.db` 的停机重建（不导入旧数据）
-
-**症状**：启动直接失败，日志末尾为 `invalid argument: cache database schema mismatch: legacy format error: cache schema is missing required index idx_*_cache_retention`。
-
-**原因**：`bd6c3c8` 把 per-source cache 的索引名从 `*_cache_recent_idx` / `*_cache_retention_idx` 收敛为 `idx_*_cache_fetched` / `idx_*_cache_retention`。切换前创建的 `cache.db` 主体身份（`application_id=1129139251`、`user_version=1`）与六张源表都在，只有索引名是旧布局；Store 启动按计划**拒绝**旧布局——不提供兼容视图、双读或旧数据导入器，所以不会自动修复。
-
-**处置**（只重建派生缓存）：
-
-```bash
-./stop-test.sh 2>/dev/null || true          # 先停服
-bash scripts/storage-cutover-rebuild.sh --data-dir data/live
-./start-test.sh start                       # 必须带子命令；裸执行只打印用法
-```
-
-脚本把 `cache.db`（含 `-wal`/`-shm`）整体移到 `<data>/backups/cache-cutover-<时间戳>/`，**不删除**；重启后 Store 以当前 DDL 新建 `cache.db`。回滚即把备份目录里的文件移回原位。
-
-有 `sqlite3` 时脚本先通过读写打开探测布局，打开可能触发 WAL 恢复，探测也可能失败；不能保证 WAL 已折叠。脚本随后移动当时存在的 `cache.db`、`cache.db-wal` 和 `cache.db-shm`，回滚时应保持备份组完整并恢复其中所有文件。历史样本曾观察到 `1429504 + 16512` 字节折叠为单个 `1433600` 字节文件；没有 `sqlite3` 的样本三个文件一并移入备份、事实库 sha256/mtime 不变。这些观察不保证其他实例具有相同文件状态。
-
-**为什么无损**：`cache.db` 只有外部响应体，清空/重建后 Library 列表、筛选、采用图片、播放与观看进度仍离线可用（见 [cache 规范](<superpowers/specs/2026-10-18-source-separated-cache.md>)）。事实库 `library.db` / `app.db` / `subscribe.db` / `jobs.db` **不要**重建，脚本也不触碰它们；它们的布局失配属于存储迁移问题，须按执行计划另行处理并先备份。
-
-**注意**：脚本在检测到该文件仍被进程持有（`lsof`）时默认拒绝执行（确需继续可加 `--force`）；缺少 `sqlite3` 时无法确认布局，会直接按“需重建”处理并连 `-wal`/`-shm` 一起备份（仅影响派生缓存）。脚本按与 `media::response_cache::CACHE_INDEXES` 相同的 12 条声明索引（6 表 × fetched/retention）判定“已是当前布局”，只查一族会误判为无需重建。`app.db` 等事实库若报 `database layout mismatch`，本脚本不适用。
 
 
 ### Obscura 受管浏览器补充（r9）

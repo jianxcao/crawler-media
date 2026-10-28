@@ -10,7 +10,7 @@ pub(crate) struct SubscriptionViewSnapshot {
     pub pending: Vec<(i32, crate::store::PendingDownload)>,
     pub created_at: String,
     pub updated_at: String,
-    pub library_poster_candidate: Option<LedgerId>,
+    pub library_poster_candidate: Option<(LedgerId, std::path::PathBuf)>,
     pub total: i64,
     pub imported: i64,
     pub target_library_status: &'static str,
@@ -84,6 +84,11 @@ pub(crate) fn load_visible_subscription_views(
             .push(coverage);
     }
 
+    let posters: HashMap<_, _> = ledger_by_media
+        .into_iter()
+        .map(|(media, rows)| (media, select_preferred_library_poster(&rows)))
+        .collect();
+
     // Two batched reads, independent of the number of subscriptions.
     let target_libraries = load_target_libraries(store)?;
     let mut snapshots = Vec::with_capacity(subscribes.len());
@@ -99,9 +104,7 @@ pub(crate) fn load_visible_subscription_views(
 
         let (total, imported) = super::views::progress(store, &sub, &media, &facts);
 
-        let library_poster_candidate = ledger_by_media
-            .get(&media.id)
-            .and_then(|rows| select_preferred_library_poster(rows));
+        let library_poster_candidate = posters.get(&media.id).cloned().flatten();
 
         let (target_library_status, target_library_error) =
             target_library_state(&sub, &target_libraries);
@@ -172,7 +175,9 @@ pub(crate) fn load_single_subscription_view(
 /// coverage 展开回它的 unit 再取最大，整片用 `WHOLE = (-1, -1)` 夹到 `(0, 0)`。
 /// 平局仍按旧 `row.path: String` 的**逐字节**序（`PathBuf` 是分量序，不能直接用），
 /// 选中后返回该文件自己的 `file_id`。
-fn select_preferred_library_poster(rows: &[FileCoverage]) -> Option<LedgerId> {
+fn select_preferred_library_poster(
+    rows: &[FileCoverage],
+) -> Option<(LedgerId, std::path::PathBuf)> {
     let selected = rows
         .iter()
         .flat_map(|coverage| coverage.units.iter().map(move |unit| (coverage, unit)))
@@ -190,9 +195,5 @@ fn select_preferred_library_poster(rows: &[FileCoverage]) -> Option<LedgerId> {
         .path
         .parent()
         .map(|d| d.join("poster.jpg"))?;
-    if poster.is_file() {
-        Some(selected.0.file.file_id)
-    } else {
-        None
-    }
+    Some((selected.0.file.file_id, poster))
 }

@@ -70,6 +70,12 @@ pub enum ChapterRefreshError {
         "unit_time_mapping_unsupported: automatic multiunit chapter refresh requires unit time mapping"
     )]
     UnitTimeMappingUnsupported,
+    #[error("chapter refresh is unavailable ({0})")]
+    Unavailable(axum::http::StatusCode),
+    #[error("chapter source changed: {0}")]
+    SourceChanged(String),
+    #[error("chapter storage failed: {0}")]
+    Storage(String),
 }
 
 /// Clear persisted results for one mapped unit, then resolve it again.
@@ -85,18 +91,68 @@ pub async fn force_refresh_item_chapters(
             error_kind = "unit_time_mapping_unsupported", "chapter refresh requires unit time mapping");
         return Err(ChapterRefreshError::UnitTimeMappingUnsupported);
     }
-    {
-        let store = state.store.lock();
-        let _ = store.clear_cached_chapters(&row.file.file_id.to_string());
-        if let Some((season, episode)) = marker_coordinates(media.kind, unit, row.units.len()) {
-            let locked = unit_marker(&store, media, unit, row.units.len())
-                .is_some_and(|marker| marker.locked);
-            if !locked {
-                let _ = store.delete_media_marker(media.id, Some(season), Some(episode));
-            }
-        }
-    }
+    let expected = row.clone();
+    let expected_media = media.clone();
+    let worker = state.clone();
+    state
+        .http_work
+        .run_to_completion(move || clear_for_refresh(&worker, &expected, unit, &expected_media))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "chapter refresh worker failed");
+            ChapterRefreshError::Unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+        })??;
     Ok(resolve_item_chapters(state, row, unit, media, theintrodb).await)
+}
+
+fn clear_for_refresh(
+    state: &ApiState,
+    row: &FileCoverage,
+    unit: UnitKey,
+    media: &Media,
+) -> Result<(), ChapterRefreshError> {
+    let lease = state
+        .library_work
+        .acquire_bounded(&state.store, &row.file.library_id.to_string())
+        .map_err(|error| {
+            tracing::warn!(%error, file_id=%row.file.file_id, "chapter refresh lease was rejected");
+            ChapterRefreshError::Unavailable(axum::http::StatusCode::CONFLICT)
+        })?;
+    lease
+        .publish(|| {
+            Ok(crate::http::store_wait::with_bounded_store(
+                state.store(),
+                |store| {
+                    state
+                        .require_writable()
+                        .map_err(|response| ChapterRefreshError::Unavailable(response.status()))?;
+                    state
+                        .require_write_admitted()
+                        .map_err(|response| ChapterRefreshError::Unavailable(response.status()))?;
+                    crate::fingerprint_job::source::ensure_source_recorded(store, row)
+                        .map_err(ChapterRefreshError::SourceChanged)?;
+                    store
+                        .clear_cached_chapters(&row.file.file_id.to_string())
+                        .map_err(|error| ChapterRefreshError::Storage(error.to_string()))?;
+                    if let Some((season, episode)) =
+                        marker_coordinates(media.kind, unit, row.units.len())
+                    {
+                        let locked = unit_marker(store, media, unit, row.units.len())
+                            .is_some_and(|marker| marker.locked);
+                        if !locked {
+                            store
+                                .delete_media_marker(media.id, Some(season), Some(episode))
+                                .map_err(|error| ChapterRefreshError::Storage(error.to_string()))?;
+                        }
+                    }
+                    Ok(())
+                },
+            ))
+        })
+        .map_err(ChapterRefreshError::SourceChanged)?
+        .ok_or(ChapterRefreshError::Unavailable(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        ))?
 }
 
 /// Return persisted markers when source detection is disabled, but do not run
@@ -109,7 +165,45 @@ pub async fn resolve_item_chapters(
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Vec<ChapterMarker> {
-    let _lease = match state.acquire_path_work(&row.file.path, media.kind) {
+    let reservation = match state
+        .http_work
+        .reserve(std::time::Duration::from_secs(5))
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            tracing::warn!(%error, file_id=%row.file.file_id, "chapter resolver capacity unavailable");
+            return Vec::new();
+        }
+    };
+    let state = state.clone();
+    let row = row.clone();
+    let media = media.clone();
+    match reservation
+        .run_to_completion(move || {
+            resolve_item_chapters_blocking(&state, &row, unit, &media, theintrodb)
+        })
+        .await
+    {
+        Ok(chapters) => chapters,
+        Err(error) => {
+            tracing::error!(%error, "chapter resolver worker failed");
+            Vec::new()
+        }
+    }
+}
+
+fn resolve_item_chapters_blocking(
+    state: &ApiState,
+    row: &FileCoverage,
+    unit: UnitKey,
+    media: &Media,
+    theintrodb: Option<TheIntroDbClient>,
+) -> Vec<ChapterMarker> {
+    let _lease = match state
+        .library_work()
+        .acquire_bounded(&state.store, &row.file.library_id.to_string())
+    {
         Ok(lease) => lease,
         Err(_) => return Vec::new(),
     };
@@ -117,7 +211,9 @@ pub async fn resolve_item_chapters(
         tracing::error!(file_id = %row.file.file_id, ?unit, "requested chapter unit is not covered by file");
         return Vec::new();
     }
-    let snapshot = snapshot(state, row, unit, media, theintrodb);
+    let Some(snapshot) = snapshot(state, row, unit, media, theintrodb) else {
+        return Vec::new();
+    };
     if let Some(mut cached) = snapshot.cached.clone() {
         append_marker_chapters(
             &mut cached,
@@ -127,30 +223,35 @@ pub async fn resolve_item_chapters(
         return cached;
     }
     let cache_key = row.file.file_id.to_string();
-    let output = tokio::task::spawn_blocking(move || resolve_without_store(snapshot))
-        .await
-        .unwrap_or_else(|error| {
-            tracing::error!(%error, "章节标记解析任务失败");
-            ResolveOutput {
-                chapters: Vec::new(),
-                markers: Vec::new(),
-                cacheable: false,
-            }
-        });
+    let output = resolve_without_store(snapshot);
     let mut chapters = output.chapters;
     if crate::fingerprint_job::source::observe_source(row).is_err() {
         return Vec::new();
     }
     {
-        let store = state.store.lock();
+        let handle = state.store();
+        let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+            tracing::warn!(file_id=%row.file.file_id, "chapter publication Store busy");
+            return Vec::new();
+        };
         if crate::fingerprint_job::source::ensure_source_recorded(&store, row).is_err() {
             return Vec::new();
         }
-        for marker in &output.markers {
-            let _ = store.put_media_marker(marker);
-        }
-        if output.cacheable {
-            let _ = store.put_cached_chapters(&cache_key, &chapters);
+        if state.require_writable().is_ok() && state.require_write_admitted().is_ok() {
+            let mut published = true;
+            for marker in &output.markers {
+                if let Err(error) = store.put_media_marker(marker) {
+                    tracing::error!(%error, file_id=%row.file.file_id, "chapter marker publication failed");
+                    published = false;
+                    break;
+                }
+            }
+            if published
+                && output.cacheable
+                && let Err(error) = store.put_cached_chapters(&cache_key, &chapters)
+            {
+                tracing::error!(%error, file_id=%row.file.file_id, "chapter cache publication failed");
+            }
         }
         if let Some(latest) = unit_marker(&store, media, unit, row.units.len()) {
             let duration_ms = store
@@ -172,8 +273,16 @@ fn snapshot(
     unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
-) -> ResolveSnapshot {
-    let store = state.store.lock();
+) -> Option<ResolveSnapshot> {
+    let handle = state.store();
+    let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_READ_WAIT) else {
+        tracing::warn!(file_id=%row.file.file_id, "chapter snapshot Store busy");
+        return None;
+    };
+    if let Err(error) = crate::fingerprint_job::source::ensure_source_recorded(&store, row) {
+        tracing::warn!(%error, file_id=%row.file.file_id, "discarded stale chapter snapshot before cache lookup");
+        return None;
+    }
     let cached = store
         .get_cached_chapters(&row.file.file_id.to_string())
         .ok()
@@ -193,7 +302,7 @@ fn snapshot(
     // 任务**（ProbeManager）执行——一次拉流同时采 streamdetails 与指纹，
     // 同季 ≥2 集后自动比对识别片头。这里同步链路只走内嵌章节 + TheIntroDB。
     // 仅构造快照，杜绝在每次查询缓存时都刷屏输出「开始解析」日志。
-    ResolveSnapshot {
+    Some(ResolveSnapshot {
         row: row.clone(),
         unit,
         media: media.clone(),
@@ -203,7 +312,7 @@ fn snapshot(
         detect_intros,
         theintrodb,
         probe: state.chapter_probe.clone(),
-    }
+    })
 }
 
 fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {

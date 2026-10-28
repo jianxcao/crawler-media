@@ -285,32 +285,24 @@ fn p5_primary_key_order_scan_is_clustered() {
 }
 
 /// Review Focus 5: an existing `library.db` at the previous layout must be
-/// refused with a typed error and a runnable rebuild hint, before any of the
-/// other files are touched. The v5 round is the current layout, so the file that
-/// must be refused is a **v4** one (the layout `d14f3c2a` shipped), not an
-/// arbitrary older stamp: the cutover policy is rebuild-on-cutover, never
-/// migrate.
+/// An unknown file identity is refused before any other file is touched.
 #[test]
-fn v4_library_db_is_rejected() {
+fn a_different_library_header_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
     {
         let conn = Connection::open(data.join("library.db")).unwrap();
-        // A v4 file: the exact layout stamp the previous release wrote, plus the
-        // objects v4 had and v5 does not (`terms_media` and `playback_metrics_media`).
         conn.pragma_update(None, "application_id", 1129139249_i64)
             .unwrap();
-        conn.pragma_update(None, "user_version", 4_i64).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE library_item_terms(media_id TEXT NOT NULL);
-             CREATE INDEX terms_media ON library_item_terms(media_id);
-             CREATE TABLE playback_metrics(media_id TEXT NOT NULL);
-             CREATE INDEX playback_metrics_media ON playback_metrics(media_id);",
+        conn.pragma_update(
+            None,
+            "user_version",
+            store::schema::layout::LIBRARY_USER_VERSION + 1,
         )
         .unwrap();
     }
-    let error = Store::open(&data).expect_err("a v4 library layout must be refused");
+    let error = Store::open(&data).expect_err("an unknown identity must be refused");
     let StoreError::LayoutMismatch(message) = &error else {
         panic!("expected LayoutMismatch, got {error:?}");
     };
@@ -321,7 +313,7 @@ fn v4_library_db_is_rejected() {
     for required in [
         "library".to_string(),
         expected,
-        "scripts/storage-cutover-rebuild.sh".to_string(),
+        "separate empty directory".to_string(),
     ] {
         assert!(message.contains(&required), "missing {required}: {message}");
     }

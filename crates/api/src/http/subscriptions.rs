@@ -30,7 +30,7 @@ mod removal;
 pub(crate) mod poster_view;
 pub(crate) mod snapshot;
 mod views;
-pub(crate) use views::{coverage_json, list_subscriptions, subscription_json};
+pub(crate) use views::{coverage_json, list_subscriptions};
 mod patch_jobs;
 
 /// 用户隔离：成员只能看到/操作自己的订阅；admin 可见全部。
@@ -316,7 +316,7 @@ pub(crate) fn resolve_subscribe(
     raw: &str,
     user_id: UserId,
 ) -> Result<(Subscribe, Media), Response> {
-    let id = match SubscribeId::from_str(raw) {
+    let _id = match SubscribeId::from_str(raw) {
         Ok(id) => id,
         Err(_) => {
             return Err(err(
@@ -326,7 +326,25 @@ pub(crate) fn resolve_subscribe(
             ));
         }
     };
-    let store = state.store.lock();
+    let store = state
+        .store
+        .try_lock_for(super::store_wait::STORE_READ_WAIT)
+        .ok_or_else(super::store_wait::busy_response)?;
+    resolve_subscribe_on(&store, raw, user_id)
+}
+
+pub(crate) fn resolve_subscribe_on(
+    store: &crate::Store,
+    raw: &str,
+    user_id: UserId,
+) -> Result<(Subscribe, Media), Response> {
+    let id = SubscribeId::from_str(raw).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "subscription.invalid",
+            "订阅 id 无效",
+        )
+    })?;
     let Some(subscribe) = store.get_subscribe(id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -350,49 +368,81 @@ pub(crate) async fn get_subscription(
     axum::Extension(user_id): axum::Extension<UserId>,
     Path(id): Path<String>,
 ) -> Response {
-    let (subscribe, media) = match resolve_subscribe(&state, &id, user_id) {
-        Ok(pair) => pair,
-        Err(response) => return response,
+    let capture_id = id.clone();
+    let captured = super::store_wait::store_read(&state, move |store| {
+        let (subscribe, media) = resolve_subscribe_on(store, &capture_id, user_id)?;
+        let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+        let wanted = crate::http::subscription_depth::wanted::capture(store, &media, &subscribe)
+            .map_err(|error| { tracing::error!(%error, subscribe_id=%subscribe.id, "Subscribe detail capture failed");
+                err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()) })?;
+        Ok((
+            snapshot::load_single_subscription_view(store, &subscribe, &media, &facts),
+            wanted,
+        ))
+    })
+    .await;
+    let (snapshot, wanted) = match captured {
+        Ok(Ok(captured)) => captured,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
-    let facts = {
-        let store = state.store.lock();
-        store.load_subscribe_facts(subscribe.id).unwrap_or_default()
+    let media_id = snapshot.media.id;
+    let files = state.file_stats.clone();
+    let catalog = state.catalog.clone();
+    let body = match state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            let air_dates = match (
+                snapshot.media.kind,
+                snapshot.media.tmdb_id.as_deref(),
+                &snapshot.subscribe.coverage,
+            ) {
+                (domain::MediaKind::Tv, Some(tmdb), domain::Coverage::Tv { season, .. }) => catalog
+                    .season_episodes(tmdb, *season)
+                    .map(|episodes| {
+                        episodes
+                            .into_iter()
+                            .map(|ep| (ep.episode_number, ep.air_date))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                _ => std::collections::HashMap::new(),
+            };
+            let mut body = views::render_subscription_snapshot(&snapshot, files.as_ref());
+            let wanted = crate::http::subscription_depth::wanted::render(
+                wanted,
+                &snapshot.media,
+                &snapshot.subscribe,
+                &snapshot.facts,
+                air_dates,
+            );
+            if let Some(object) = body.as_object_mut() {
+                object.insert("wanted".into(), Value::Array(wanted));
+            }
+            body
+        })
+        .await
+    {
+        Ok(body) => body,
+        Err(error) => return super::library::browse_work_error(error),
     };
-    let mut body = {
-        let store = state.store.lock();
-        subscription_json(&store, state.catalog.as_ref(), &subscribe, &media, &facts)
-    };
-
-    // 核心死锁根因：wanted_json 内部会调用 catalog.season_episodes()，
-    // 底层的 TmdbHttp 需要实时读取 store.api_key() (即 state.store.lock())。
-    // 如果这里在持有着 store 锁的同时调用 catalog，同一线程或跨线程发生锁竞争，必定产生死锁！
-    // 因此在调用 catalog 之前，绝对不能持有 store.lock()。
-    let air_dates: std::collections::HashMap<u32, Option<String>> =
-        match (media.kind, media.tmdb_id.as_deref(), &subscribe.coverage) {
-            (domain::MediaKind::Tv, Some(tmdb_id), domain::Coverage::Tv { season, .. }) => state
-                .catalog
-                .season_episodes(tmdb_id, *season)
-                .map(|episodes| {
-                    episodes
-                        .into_iter()
-                        .map(|ep| (ep.episode_number, ep.air_date))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            _ => std::collections::HashMap::new(),
-        };
-
-    let wanted = {
-        let store = state.store.lock();
-        crate::http::subscription_depth::wanted_json_with_air_dates(
-            &store, &media, &subscribe, &facts, air_dates,
-        )
-    };
-    // 详情接口带工单明细（单元状态现算 + 履历历史）。
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert("wanted".into(), Value::Array(wanted));
+    match super::store_wait::store_read(&state, move |store| {
+        let (current, _) = resolve_subscribe_on(store, &id, user_id)?;
+        if current.media_id != media_id {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "subscription.changed",
+                "订阅身份在读取期间变化，请刷新重试",
+            ));
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(Ok(())) => ok(body).into_response(),
+        Ok(Err(response)) => response,
+        Err(error) => error.response(),
     }
-    ok(body).into_response()
 }
 
 /// Run a handler body that takes the Subscribe guard (a parking_lot lock that a
@@ -404,11 +454,7 @@ pub(crate) async fn guarded_blocking(
 ) -> Response {
     match state.http_work.run_to_completion(work).await {
         Ok(response) => response,
-        Err(crate::blocking_budget::BlockingError::Busy) => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "runtime.busy",
-            "服务繁忙，请重试",
-        ),
+        Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
         Err(error) => {
             tracing::error!(%error, "订阅操作的阻塞工作失败");
             err(

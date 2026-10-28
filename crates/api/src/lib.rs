@@ -7,7 +7,6 @@
     clippy::unnecessary_to_owned
 )]
 
-pub mod auth;
 pub mod compact_time;
 pub mod file_stat_read;
 mod http_fetcher;

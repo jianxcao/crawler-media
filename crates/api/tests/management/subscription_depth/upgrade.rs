@@ -3,11 +3,12 @@
 use super::support::*;
 
 async fn assert_upgrade_report_with_pending(app: &axum::Router, id: &str, tmp: &tempfile::TempDir) {
-    let conn = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
-    conn.execute(
-        "INSERT INTO pending_downloads (subscribe_id, enclosure, title, score, torrent_json) VALUES (?1, 'https://example.com/e2.torrent', 'The.Long.Watch.S01E02.1080p.mkv', 100, '{}')",
-        rusqlite::params![id],
-    ).unwrap();
+    seed_pending_torrent(
+        tmp,
+        id,
+        "The.Long.Watch.S01E02.1080p.mkv",
+        "https://example.com/e2.torrent",
+    );
 
     let report3 = json_body(
         app.clone()
@@ -230,4 +231,3 @@ async fn run_upgrade_applies_new_ruleset_and_activates_wash_cut() {
     assert_eq!(updated["data"]["wash_cut"], true);
     assert_eq!(updated["data"]["wash_cut_filter_id"], rule_id);
 }
-

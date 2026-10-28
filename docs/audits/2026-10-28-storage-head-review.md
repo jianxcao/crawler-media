@@ -1,4 +1,6 @@
-# 存储重构对 main 的当前 HEAD 审查
+# 存储重构对 main 的审查基线（7030c1dd）
+
+> 本文固定记录修复前的审查与反例。用户随后授权实施修复，当前状态见[修复与验证记录](2026-10-28-storage-remediation-verification.md)，不要把下文“暂不合并”或结构数字当作修复后结论。
 
 日期：2026-10-28。审查对象 `feat/storage-redesign@7030c1ddc8b6e28e457fdd309d00bbc5a21c09d6`；执行 `git fetch origin main` 后，本地 main、origin/main 与 merge base 均为 `756444f76bef53f5fabed6d0ef53e9f280e005e9`。开始时工作区干净。差异为 1,540 文件、187,136 行新增、65,496 行删除；这是重点调用链审查，不是全部差异逐行穷尽证明。
 
@@ -9,7 +11,7 @@
 - 五文件按生命周期划分仍合理：app 保存配置/凭证，library 保存 Media、Library、Playback 权威事实及事务摘要，subscribe 保存策略/下载事实，jobs 保存执行事实，cache 保存可重建外部响应。无需因为表多而重拆数据库或换数据库。
 - Media、文件覆盖、采用元数据、用户事实和查询摘要同库，比 main 的跨文件更新更容易保持一致。跨文件没有原子提交，必须依靠持久阶段、身份冻结与恢复；H1 证明目前并非所有后台发布入口都遵守屏障。
 - library v8 的 53 表、594 字段、81 命名索引、37 组 FK，与[生产 DDL 字典](../database/README.md)一致。冷详情、覆盖摘要、协议成员和边际计数有明确读写用途。当前问题主要是入口校验和算法，不需要先改 DDL。
-- 旧布局拒绝、没有导入或双读写，方向符合本次要求。前端受审调用已切换到 Transfer revision CAS、Library operation、文件游标、版本化重新识别和签发 Playback session；但 H5 表明后端旧输入兼容尚未清零。
+- 当时实现没有导入或双读写，但仍带有开发中间结构标记及切换提示；用户随后要求只保留最终当前定义。前端受审调用已切换到 Transfer revision CAS、Library operation、文件游标、版本化重新识别和签发 Playback session；但 H5 表明后端旧输入兼容尚未清零。
 
 ## H1 · P1：迟到指纹模型使 Media 合并恢复不能收敛
 

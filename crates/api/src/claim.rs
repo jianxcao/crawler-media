@@ -12,9 +12,10 @@ use crate::directory::transfer_plan;
 use crate::management::{ApiError, ApiState};
 use crate::scrape_store::ScrapeStoreExt;
 
+mod bind;
 mod publication;
-#[allow(unused_imports)]
-pub(crate) use publication::{publish_claimed_file, publish_unidentified};
+#[cfg(test)]
+pub(crate) use publication::publish_claimed_file;
 
 /// The only claim body: the unidentified path plus one explicit action.
 #[derive(Deserialize)]
@@ -122,16 +123,30 @@ fn plan_claim(
     body: &IdentifyClaim,
     kind: MediaKind,
     src: &Path,
-) -> Result<ClaimPlan, ApiError> {
-    let source = state
-        .store
-        .lock()
-        .get_unidentified(&body.path)?
-        .ok_or_else(|| {
-            ApiError::missing("unidentified.missing", "Unidentified not found".into())
-        })?;
+) -> Result<ClaimPlan, axum::response::Response> {
+    use axum::response::IntoResponse;
+    let (source, root, mode, scrape, mirror_nfo, naming) = admitted_store(state, |store| {
+        let source = store
+            .get_unidentified(&body.path)
+            .map_err(store_response)?
+            .ok_or_else(|| {
+                ApiError::missing("unidentified.missing", "Unidentified not found".into())
+                    .into_response()
+            })?;
+        let (root, mode, scrape) = transfer_plan(store, kind).map_err(store_response)?;
+        let mirror_nfo = scrape
+            && store
+                .get_scrape_config()
+                .map_err(store_response)?
+                .effective
+                .mirror_nfo;
+        let naming = store.naming_pattern(kind).map_err(store_response)?;
+        Ok((source, root, mode, scrape, mirror_nfo, naming))
+    })?;
     let source_version = library::observe_source(src)
-        .map_err(|error| ApiError::invalid("unidentified.source", error.to_string()))?
+        .map_err(|error| {
+            ApiError::invalid("unidentified.source", error.to_string()).into_response()
+        })?
         .source_version;
     let media = Media {
         id: MediaId::new(),
@@ -157,25 +172,9 @@ fn plan_claim(
         confidence: Confidence::High,
         ..parsed
     };
-    let (root, mode, scrape) = {
-        let store = state.store.lock();
-        transfer_plan(&store, kind)?
-    };
-    let mirror_nfo = {
-        let store = state.store.lock();
-        let cfg = store
-            .get_scrape_config()
-            .map_err(|e| ApiError::invalid("unidentified.invalid", e.to_string()))?;
-        scrape && cfg.effective.mirror_nfo
-    };
-    let naming = {
-        let store = state.store.lock();
-        store
-            .naming_pattern(kind)
-            .map_err(|e| ApiError::invalid("unidentified.invalid", e.to_string()))?
-    };
-    let dest = library::render_path(&root, &naming, &media, &release, src)
-        .map_err(|err| ApiError::invalid("unidentified.invalid", err.to_string()))?;
+    let dest = library::render_path(&root, &naming, &media, &release, src).map_err(|err| {
+        ApiError::invalid("unidentified.invalid", err.to_string()).into_response()
+    })?;
     // 没进台账不等于可以覆盖：未扫描、识别失败，或上次提交失败留下的视频
     // 都还在磁盘上。源和目标是同一文件（原地认领）才允许继续。
     if dest.exists() && dest != src {
@@ -183,7 +182,8 @@ fn plan_claim(
             StatusCode::CONFLICT,
             "unidentified.destination_exists",
             "媒体库中已存在相同目标文件，禁止覆盖已有文件".to_string(),
-        ));
+        )
+        .into_response());
     }
     let requested = library::resolve_mode(src, dest.parent().unwrap_or(Path::new(".")), mode);
     Ok(ClaimPlan {
@@ -251,25 +251,27 @@ fn commit_claim(
     plan: &ClaimPlan,
     src: &Path,
     staged: &StagedClaim,
-) -> Result<LibraryFile, ApiError> {
-    check_claim_source(plan, src)?;
+) -> Result<LibraryFile, axum::response::Response> {
+    use axum::response::IntoResponse;
+    check_claim_source(plan, src).map_err(IntoResponse::into_response)?;
     let facts = ClaimedFacts::from_release(plan.media.kind, &plan.release);
-    Ok(publication::publish_staged_unidentified(
-        &state.store,
+    publication::publish_http_unidentified(
+        state,
         media,
         &plan.dest,
         &facts,
         &plan.source,
-        &staged.destination_version,
-    )?)
+        Some(&staged.destination_version),
+    )
 }
 
 fn discard_rollback(staged: &StagedClaim) {
     if let Some(path) = &staged.rollback_dest
         && library::current_source_version(path) == staged.destination_version
-            && let Err(error) = std::fs::remove_file(path) {
-                tracing::warn!(path=%path.display(),%error,"Claim staged Copy cleanup failed");
-            }
+        && let Err(error) = std::fs::remove_file(path)
+    {
+        tracing::warn!(path=%path.display(),%error,"Claim staged Copy cleanup failed");
+    }
 }
 
 fn remove_moved_source(state: &ApiState, plan: &ClaimPlan, src: &Path) {
@@ -291,33 +293,40 @@ fn remove_moved_source(state: &ApiState, plan: &ClaimPlan, src: &Path) {
     }
 }
 
-async fn identify_and_transfer(
+fn identify_and_transfer(
     State(state): State<ApiState>,
     Json(body): Json<IdentifyClaim>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, axum::response::Response> {
+    use axum::response::IntoResponse;
     if body.title.trim().is_empty() {
-        return Err(ApiError::invalid(
-            "unidentified.invalid",
-            "title is required".into(),
-        ));
+        return Err(
+            ApiError::invalid("unidentified.invalid", "title is required".into()).into_response(),
+        );
     }
     let kind = MediaKind::from_str(&body.kind).map_err(|_| {
-        ApiError::invalid("unidentified.invalid", "kind must be movie or tv".into())
+        ApiError::invalid("unidentified.invalid", "kind must be movie or tv".into()).into_response()
     })?;
     let src = PathBuf::from(&body.path);
     if !src.is_file() {
         return Err(ApiError::invalid(
             "unidentified.invalid",
             "Unidentified file is missing".into(),
-        ));
+        )
+        .into_response());
     }
+    admitted_store(&state, |_| Ok(()))?;
     let plan = plan_claim(&state, &body, kind, &src)?;
-    let staged = stage_claim_file(&state, &plan, &src)?;
-    let media = match state.store.lock().ensure_media(plan.media.clone()) {
+    admitted_store(&state, |_| Ok(()))?;
+    let staged = stage_claim_file(&state, &plan, &src).map_err(IntoResponse::into_response)?;
+    let media = match admitted_store(&state, |store| {
+        store
+            .ensure_media(plan.media.clone())
+            .map_err(store_response)
+    }) {
         Ok(media) => media,
         Err(error) => {
             discard_rollback(&staged);
-            return Err(error.into());
+            return Err(error);
         }
     };
     let file = match commit_claim(&state, &media, &plan, &src, &staged) {
@@ -350,9 +359,19 @@ pub async fn claim_unidentified(
                 .into_response();
         }
     };
+    let blocking = state.0.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || claim_blocking(state, body))
+        .await
+}
+
+fn claim_blocking(state: State<ApiState>, body: ClaimBody) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(response) = admitted_store(&state.0, |_| Ok(())) {
+        return response;
+    }
     match body.action {
         ClaimAction::BindExisting { media_id } => {
-            crate::http::library_admin::bind_existing(&state.0, &media_id, &body.path)
+            bind::bind_existing(&state.0, &media_id, &body.path)
         }
         ClaimAction::IdentifyAndTransfer {
             title,
@@ -367,7 +386,7 @@ pub async fn claim_unidentified(
                 year,
                 tmdb_id,
             };
-            match identify_and_transfer(state, Json(claim)).await {
+            match identify_and_transfer(state, Json(claim)) {
                 Ok(Json(data)) => crate::http::ok(data).into_response(),
                 Err(error) => error.into_response(),
             }
@@ -661,4 +680,22 @@ mod tests {
             vec![UnitKey::WHOLE]
         );
     }
+}
+
+fn admitted_store<T>(
+    state: &ApiState,
+    work: impl FnOnce(&store::Store) -> Result<T, axum::response::Response>,
+) -> Result<T, axum::response::Response> {
+    crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        state.require_writable()?;
+        state.require_write_admitted()?;
+        work(store)
+    })
+    .ok_or_else(crate::http::store_wait::busy_response)?
+}
+
+fn store_response(error: store::StoreError) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    tracing::error!(%error, "Claim Store access failed");
+    ApiError::from(error).into_response()
 }

@@ -13,52 +13,123 @@ pub(super) async fn resolve_person_image_url(
 ) -> Result<Option<String>, String> {
     if let Some(user_id) = user_id
         && let Some(person) = resolve_person(provider, user_id, query).await?
-            && let Some(image_url) = person.primary_image_url
-        {
-            return Ok(Some(image_url));
-        }
+        && let Some(image_url) = person.primary_image_url
+    {
+        return Ok(Some(image_url));
+    }
 
+    let captured = crate::http::store_wait::store_read(&provider.state, move |store| {
+        capture_visible_files(store, user_id)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let query_owned = query.to_string();
+    let local = provider
+        .state
+        .fs_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            observe_people(captured, &query_owned)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    if local.image.is_some() {
+        return Ok(local.image);
+    }
+    Ok(resolve_catalog_person_image(provider, query, local.candidates).await)
+}
+
+type PersonSource = (domain::FileCoverage, domain::Media);
+type CatalogCandidate = (MediaKind, String, Option<String>);
+
+struct LocalPeople {
+    image: Option<String>,
+    candidates: Vec<CatalogCandidate>,
+}
+
+fn capture_visible_files(
+    store: &crate::Store,
+    user: Option<UserId>,
+) -> Result<Vec<PersonSource>, String> {
+    let ownership = store
+        .library_ownership()
+        .map_err(|error| error.to_string())?;
+    let is_admin = user
+        .map(|user| store.user_role(user))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .is_some_and(|role| role == "admin");
+    let visible: HashSet<_> = ownership
+        .libraries()
+        .iter()
+        .filter(|library| {
+            ownership.accepts_work(&library.id)
+                && match user {
+                    None => true,
+                    Some(_) if is_admin => library.admin_visible,
+                    Some(user) => {
+                        library.access_mode == "everyone" || library.member_ids.contains(&user)
+                    }
+                }
+        })
+        .map(|library| library.id.clone())
+        .collect();
+    let files: Vec<_> = store
+        .list_file_coverage()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|row| visible.contains(&row.file.library_id.to_string()))
+        .collect();
+    let ids: HashSet<_> = files.iter().map(|row| row.file.media_id).collect();
+    let media = store
+        .media_batch(&ids.into_iter().collect::<Vec<_>>())
+        .map_err(|error| error.to_string())?;
+    Ok(files
+        .into_iter()
+        .filter_map(|row| {
+            media
+                .get(&row.file.media_id)
+                .cloned()
+                .map(|media| (row, media))
+        })
+        .collect())
+}
+
+fn observe_people(files: Vec<PersonSource>, query: &str) -> LocalPeople {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
-    {
-        let store = provider.state.store.lock();
-        for coverage in store
-            .list_file_coverage()
-            .map_err(|error| error.to_string())?
-        {
-            let file = &coverage.file;
-            let Some(media) = store.get_media(file.media_id).ok().flatten() else {
+    let query_is_id = uuid::Uuid::parse_str(query).is_ok();
+    for (coverage, media) in files {
+        let file = &coverage.file;
+        // Native NFO reads run on the filesystem worker after the database snapshot is released.
+        for unit in super::items::coverage_units(&coverage) {
+            if let Some(image) = person_image_url(file, unit, &media, query) {
+                return LocalPeople {
+                    image: Some(image),
+                    candidates,
+                };
+            }
+            let Some(media_id) = media.tmdb_id.clone() else {
                 continue;
             };
-            if !crate::http::library::file_visible_to_user(&store, file, &media, user_id) {
-                continue;
-            }
-            // 旧台账一个 `(file, unit)` 一行；现在一个 coverage 覆盖该文件的全部观看
-            // 单元，所以要在单元上展开，且保持「先主图、再 tmdb 候选」的旧顺序。
-            for unit in super::items::coverage_units(&coverage) {
-                if let Some(image_url) = person_image_url(file, unit, &media, query) {
-                    return Ok(Some(image_url));
-                }
-                let Some(media_id) = media.tmdb_id.clone() else {
-                    continue;
-                };
-                let person_id = if uuid::Uuid::parse_str(query).is_ok() {
-                    Some(query.to_string())
-                } else {
-                    person_tmdb_id(file, unit, &media, query).flatten()
-                };
-                let key = (
-                    media.kind.as_str().to_string(),
-                    media_id.clone(),
-                    person_id.clone(),
-                );
-                if seen.insert(key) {
-                    candidates.push((media.kind, media_id, person_id));
-                }
+            let person_id = if query_is_id {
+                Some(query.to_string())
+            } else {
+                person_tmdb_id(file, unit, &media, query).flatten()
+            };
+            let key = (
+                media.kind.as_str().to_string(),
+                media_id.clone(),
+                person_id.clone(),
+            );
+            if seen.insert(key) {
+                candidates.push((media.kind, media_id, person_id));
             }
         }
     }
-    Ok(resolve_catalog_person_image(provider, query, candidates).await)
+    LocalPeople {
+        image: None,
+        candidates,
+    }
 }
 
 pub(super) async fn resolve_person(
@@ -101,15 +172,18 @@ pub(super) async fn resolve_person(
 async fn resolve_catalog_person_image(
     provider: &ApiServerProvider,
     query: &str,
-    candidates: Vec<(MediaKind, String, Option<String>)>,
+    candidates: Vec<CatalogCandidate>,
 ) -> Option<String> {
     for (kind, media_id, person_id) in candidates {
         let state = provider.state.clone();
         let lookup_id = media_id.clone();
-        let image_metadata = tokio::task::spawn_blocking(move || {
-            crate::scrape_metadata::fetch_tmdb_metadata(&state, kind, &lookup_id)
-        })
-        .await;
+        let image_metadata = provider
+            .state
+            .http_work
+            .run(crate::http::library::BROWSE_DEADLINE, move || {
+                crate::scrape_metadata::fetch_tmdb_metadata(&state, kind, &lookup_id)
+            })
+            .await;
         let metadata = match image_metadata {
             Ok(Ok(Some(metadata))) => metadata,
             Ok(Ok(None)) => continue,

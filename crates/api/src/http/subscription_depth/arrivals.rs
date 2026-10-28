@@ -14,7 +14,7 @@ use crate::http::subscriptions::{coverage_json, parse_upload_time};
 use crate::http::{err, ok_list};
 use crate::management::ApiState;
 
-use super::forecast::forecast_for_unit;
+use super::forecast::ForecastBasis;
 
 /// 锁内读到的 owned 快照；此后不再需要 Store 锁。
 pub(crate) struct ArrivalSnapshot {
@@ -88,6 +88,7 @@ pub(crate) fn build_arrivals(
             facts,
             rows,
         } = snapshot;
+        let forecast_basis = ForecastBasis::new(&pending);
         // 在途（grabbing）：有 pending 种子的订阅，status=grabbed。
         for _ in &pending {
             items.push(json!({
@@ -143,7 +144,7 @@ pub(crate) fn build_arrivals(
             if air_unix < now - day_secs || air_unix > now + 7 * day_secs {
                 continue;
             }
-            let forecast = forecast_for_unit(&subscribe, &pending, air_date).unwrap_or(Value::Null);
+            let forecast = forecast_basis.for_date(air_date).unwrap_or(Value::Null);
             items.push(json!({
                 "subscription_id": subscribe.id.to_string(),
                 "title": media.title,
@@ -203,9 +204,13 @@ pub(crate) async fn today_arrivals(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let snapshots = {
-        let store = state.store.lock();
-        load_arrivals(&store, user_id)
+    let snapshots = match crate::http::store_wait::store_read(&state, move |store| {
+        load_arrivals(store, user_id)
+    })
+    .await
+    {
+        Ok(snapshots) => snapshots,
+        Err(error) => return error.response(),
     };
     let snapshots = match snapshots {
         Ok(snapshots) => snapshots,

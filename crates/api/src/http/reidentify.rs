@@ -2,11 +2,10 @@
 //! 为「非独立作品」（extras）。前端契约对齐 ReidentifyDialog / ClaimPanels。
 
 use std::collections::HashSet;
-use std::path::Path as FsPath;
 use std::str::FromStr;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use domain::{FileVersion, LedgerId, Media, MediaAlias, MediaId, MediaKind};
@@ -14,7 +13,6 @@ use serde_json::{Value, json};
 use store::library_write::ReassignFiles;
 
 use crate::blocking_budget::BlockingError;
-use crate::http::library::{poster_path, preferred_coverage};
 use crate::http::title_ref::resolve_title;
 use crate::http::{err, ok};
 use crate::library_lifecycle::LibraryWorkLease;
@@ -46,105 +44,8 @@ fn review_item(media: &domain::Media, poster_url: Option<String>) -> Value {
     })
 }
 
-/// POST /libraries/{id}/items/{item_id}/reidentification-preview —
-/// 当前身份 + 文件名解析出的搜索种子（前端据此给候选）。
-pub(crate) async fn preview(
-    State(state): State<ApiState>,
-    Path((library_id, item_id)): Path<(String, String)>,
-) -> Response {
-    let store = state.store.lock();
-    let Ok(library_id) = domain::LibraryId::from_str(&library_id) else {
-        return err(StatusCode::BAD_REQUEST, "library.invalid", "媒体库 id 无效");
-    };
-    let media_id = match MediaId::from_str(&item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
-    };
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-    };
-    let coverages = match store.file_coverage_in_library(
-        library_id,
-        Some(media_id),
-        store::FileReadScope::Published,
-    ) {
-        Ok(coverages) => coverages,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &e.to_string(),
-            );
-        }
-    };
-    let source_revision = match store.media_revision(media_id) {
-        Ok(Some(revision)) => revision,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &e.to_string(),
-            );
-        }
-    };
-    let search_seed = coverages
-        .iter()
-        .filter_map(|coverage| {
-            FsPath::new(&coverage.file.path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| release::parse(name).title)
-        })
-        .next()
-        .unwrap_or_else(|| media.title.clone());
-    let selected = preferred_coverage(&coverages);
-    let poster = selected.and_then(|coverage| poster_path(&coverage.file));
-    let poster_url = selected
-        .filter(|_| poster.is_some())
-        .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id));
-    let groups: Vec<Value> = if coverages.is_empty() {
-        Vec::new()
-    } else {
-        vec![json!({
-            "key": media.id.to_string(),
-            "outcome": {
-                "media_item_id": media.id.to_string(),
-                "tmdb_id": media.tmdb_id,
-                "title": media.title,
-                "year": media.year,
-                "poster_url": poster_url.clone(),
-                "source": "current",
-                "same_as_current": true,
-                "reason": null,
-                "code": null,
-                "candidates": [],
-            },
-            "files": coverages.iter().map(|coverage| json!({
-                "file_id": coverage.file.file_id.to_string(),
-                "revision": coverage.file.version.revision,
-                "source_version": coverage.file.version.source_version,
-            })).collect::<Vec<_>>(),
-            "file_count": coverages.len(),
-            "total_size_bytes": 0,
-            "sample_names": coverages.iter().take(3).filter_map(|coverage| {
-                FsPath::new(&coverage.file.path).file_name().and_then(|n| n.to_str()).map(str::to_string)
-            }).collect::<Vec<_>>(),
-        })]
-    };
-    ok(json!({
-        "current": review_item(&media, poster_url),
-        "movie": media.kind == MediaKind::Movie,
-        "groups": groups,
-        "skipped_missing": 0,
-        "pinned_identity": false,
-        "unreachable": false,
-        "search_seed": search_seed,
-        "media_item_id": media.id.to_string(),
-        "source_revision": source_revision,
-    }))
-    .into_response()
-}
+mod preview;
+pub(crate) use preview::preview;
 
 /// POST /libraries/{id}/items/{item_id}/reidentifications —
 /// 把条目指定文件改挂到 `title_ref` 指向的作品并重刷元数据。
@@ -270,25 +171,40 @@ fn acquire_file_leases(
     state: &ApiState,
     file_ids: &[LedgerId],
 ) -> Result<Vec<LibraryWorkLease>, Response> {
-    let library_ids = {
-        let store = state.store.lock();
-        let mut ids: Vec<String> = Vec::new();
+    let library_ids = super::store_wait::with_bounded_store(state.store(), |store| {
+        let mut ids = HashSet::new();
         for file_id in file_ids {
-            if let Some((_, library_id)) = store.get_file_path_and_library(*file_id).ok().flatten()
-                && !ids.contains(&library_id)
+            if let Some((_, library_id)) =
+                store.get_file_path_and_library(*file_id).map_err(|error| {
+                    tracing::error!(%error, %file_id, "Reidentify lease context read failed");
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    )
+                })?
             {
-                ids.push(library_id);
+                ids.insert(library_id);
             }
         }
-        ids
-    };
+        Ok::<_, Response>(ids)
+    })
+    .ok_or_else(super::store_wait::busy_response)??;
     let mut leases = Vec::with_capacity(library_ids.len());
     for library_id in &library_ids {
-        match state.acquire_library_work(library_id) {
+        match state.library_work.acquire_bounded(&state.store, library_id) {
             Ok(lease) => leases.push(lease),
+            Err(
+                crate::library_lifecycle::BoundedLeaseError::RegistryBusy
+                | crate::library_lifecycle::BoundedLeaseError::StoreBusy,
+            ) => return Err(super::store_wait::busy_response()),
             Err(error) => {
                 tracing::info!(%library_id, %error, "Library 冻结或删除中，拒绝重新识别写操作");
-                return Err(err(StatusCode::CONFLICT, "library.frozen", &error));
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "library.frozen",
+                    &error.to_string(),
+                ));
             }
         }
     }
@@ -478,50 +394,5 @@ fn refresh_sidecars_for_reassigned(
     }
 }
 
-/// POST /libraries/{id}/items/{item_id}/reidentifications/extras —
-/// 把条目文件标为「非独立作品」：从台账拆出进未识别清单。
-pub(crate) async fn extras(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let target_ids: HashSet<String> = body["file_ids"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.replace('-', ""))
-                .collect()
-        })
-        .unwrap_or_default();
-    if target_ids.is_empty() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "reidentify.invalid",
-            "缺少 file_ids",
-        );
-    }
-    // 拆出 extras 也是改库：冻结/删除中的 Library 必须在任何台账写入前拒绝。
-    let file_ids: Vec<LedgerId> = target_ids
-        .iter()
-        .filter_map(|id| LedgerId::from_str(id).ok())
-        .collect();
-    let _leases = match acquire_file_leases(&state, &file_ids) {
-        Ok(leases) => leases,
-        Err(response) => return response,
-    };
-    let store = state.store.lock();
-    let mut detached = 0usize;
-    for file_id in target_ids {
-        let Ok(file_id) = LedgerId::from_str(&file_id) else {
-            continue;
-        };
-        if let Some(coverage) = store.file_coverage_by_id(file_id).ok().flatten() {
-            let path = coverage.file.path.to_string_lossy().into_owned();
-            if store
-                .insert_unidentified(path.clone(), coverage.file.confidence)
-                .is_ok()
-                && store.delete_ledger_path(&path).is_ok()
-            {
-                detached += 1;
-            }
-        }
-    }
-    ok(json!({ "detached": detached })).into_response()
-}
+mod extras;
+pub(crate) use extras::extras;

@@ -47,14 +47,23 @@ impl Store {
 
     /// 先计算哈希，并在单一事务中原子插入用户及其密码；失败则全部回滚。
     pub fn insert_user_with_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
-        let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
+        let prepared =
+            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
+        self.insert_user_with_prepared_password(user, &prepared)
+    }
+
+    pub fn insert_user_with_prepared_password(
+        &self,
+        user: &User,
+        prepared: &crate::password::PreparedPassword,
+    ) -> Result<(), StoreError> {
         let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 user.id.to_string(),
                 user.login,
-                hashed,
+                prepared.encoded,
                 user.enabled,
                 user.role.as_str()
             ],
@@ -65,7 +74,16 @@ impl Store {
 
     /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
     pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
-        let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
+        let prepared =
+            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
+        self.update_user_with_prepared_password(user, &prepared)
+    }
+
+    pub fn update_user_with_prepared_password(
+        &self,
+        user: &User,
+        prepared: &crate::password::PreparedPassword,
+    ) -> Result<(), StoreError> {
         let tx = crate::write_tx(&self.app)?;
         let cli_token: Option<String> = tx
             .query_row(
@@ -74,7 +92,11 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        if user.role == UserRole::Admin && cli_token.as_deref() == Some(password) {
+        if user.role == UserRole::Admin
+            && cli_token
+                .as_deref()
+                .is_some_and(|token| prepared.matches(token))
+        {
             return Err(StoreError::CredentialConflict(
                 "管理员密码不得与当前配置的系统 CLI Token 相同".into(),
             ));
@@ -85,7 +107,7 @@ impl Store {
                 user.login,
                 user.enabled,
                 user.role.as_str(),
-                hashed,
+                prepared.encoded,
                 user.id.to_string()
             ],
         )?;
@@ -522,12 +544,13 @@ fn apply_cli_token_tx(
         )
         .optional()?;
     if let Some(owner) = existing_owner
-        && owner != admin_id.to_string() {
-            tracing::error!(%admin_id, "待登记的 CLI Token 与现有其他用户会话碰撞，拒绝提升权限");
-            return Err(StoreError::CredentialConflict(
-                "待配置的系统 CLI Token 与现有其他用户的会话凭据碰撞".into(),
-            ));
-        }
+        && owner != admin_id.to_string()
+    {
+        tracing::error!(%admin_id, "待登记的 CLI Token 与现有其他用户会话碰撞，拒绝提升权限");
+        return Err(StoreError::CredentialConflict(
+            "待配置的系统 CLI Token 与现有其他用户的会话凭据碰撞".into(),
+        ));
+    }
     let old_token: Option<String> = tx
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",

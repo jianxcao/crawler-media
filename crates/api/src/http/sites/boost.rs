@@ -15,52 +15,54 @@ pub(crate) async fn patch_boost(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let store = state.store.lock();
-    if store.get_site(id).ok().flatten().is_none() {
-        return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    }
-    let key = boost_key(&id.to_string());
-    let current = store
-        .get_setting(&key)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    let mut next = current;
-    if let Some(enabled) = body.enabled {
-        next["enabled"] = json!(enabled);
-    }
-    if let Some(budget) = body.budget_bytes {
-        next["budget_bytes"] = json!(budget);
-    }
-    if let Some(hold) = body.hold_days {
-        next["hold_days"] = json!(hold);
-    }
-    if let Err(error) = store.put_setting(&key, &next.to_string()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(json!({
-        "site_id": id.to_string(),
-        "boost": next,
-    }))
-    .into_response()
+    crate::http::store_wait::store_write(&state, move |store| {
+        if store.get_site(id).ok().flatten().is_none() {
+            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
+        }
+        let key = boost_key(&id.to_string());
+        let current = store
+            .get_setting(&key)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut next = current;
+        if let Some(enabled) = body.enabled {
+            next["enabled"] = json!(enabled);
+        }
+        if let Some(budget) = body.budget_bytes {
+            next["budget_bytes"] = json!(budget);
+        }
+        if let Some(hold) = body.hold_days {
+            next["hold_days"] = json!(hold);
+        }
+        if let Err(error) = store.put_setting(&key, &next.to_string()) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(json!({
+            "site_id": id.to_string(),
+            "boost": next,
+        }))
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn boost_stats(State(state): State<ApiState>) -> Response {
-    let (rows, category) = {
-        let store = state.store.lock();
+    let (rows, category) = match crate::http::store_wait::store_read(&state, |store| {
         let sites = match store.list_sites() {
             Ok(sites) => sites,
             Err(error) => {
-                return err(
+                return Err(err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
-                );
+                ));
             }
         };
         let rows: Vec<Value> = sites
@@ -86,7 +88,13 @@ pub(crate) async fn boost_stats(State(state): State<ApiState>) -> Response {
             .flatten()
             .and_then(|d| d.category)
             .unwrap_or_default();
-        (rows, category)
+        Ok((rows, category))
+    })
+    .await
+    {
+        Ok(Ok(inputs)) => inputs,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     // 上传统计是 best-effort telemetry：worker 忙/超时/上游失败都按 0 处理，
     // 不让 /boost-stats 因为遥测而改变响应契约。

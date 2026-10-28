@@ -3,12 +3,15 @@
 use std::path::Path;
 
 use domain::{FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId, Media};
+#[cfg(test)]
 use parking_lot::Mutex;
 use store::library_write::{FilePublication as PublicationRequest, WriteScope};
 use store::metadata::nfo_input::NfoInputObserver;
 use store::{Store, StoreError};
 
 use super::ClaimedFacts;
+mod access;
+use access::{Access, Error};
 
 struct PreparedClaim {
     file: LibraryFile,
@@ -18,64 +21,70 @@ struct PreparedClaim {
     observer: NfoInputObserver,
 }
 
-/// All canonicalization, source stat/read, NFO reads and artwork discovery happen
-/// outside the shared Store mutex. The final write retains the original context.
-#[allow(dead_code)]
+/// Test fixture publication shares the production context/CAS writer.
+#[cfg(test)]
 pub(crate) fn publish_claimed_file(
     shared: &Mutex<Store>,
     media: &Media,
     dest: &Path,
     facts: &ClaimedFacts,
 ) -> Result<LibraryFile, StoreError> {
-    publish_claim(shared, media, dest, facts, None, None)
-}
-
-pub(crate) fn publish_unidentified(
-    shared: &Mutex<Store>,
-    media: &Media,
-    dest: &Path,
-    facts: &ClaimedFacts,
-    source: &store::UnidentifiedRow,
-) -> Result<LibraryFile, StoreError> {
-    publish_claim(shared, media, dest, facts, Some(source), None)
-}
-
-pub(crate) fn publish_staged_unidentified(
-    shared: &Mutex<Store>,
-    media: &Media,
-    dest: &Path,
-    facts: &ClaimedFacts,
-    source: &store::UnidentifiedRow,
-    destination_version: &str,
-) -> Result<LibraryFile, StoreError> {
     publish_claim(
-        shared,
+        &Access {
+            shared,
+            state: None,
+        },
+        media,
+        dest,
+        facts,
+        None,
+        None,
+    )
+    .map_err(|error| match error {
+        Error::Store(error) => error,
+        Error::Admission(_) => StoreError::Protected("Claim Store is busy".into()),
+    })
+}
+
+pub(crate) fn publish_http_unidentified(
+    state: &crate::ApiState,
+    media: &Media,
+    dest: &Path,
+    facts: &ClaimedFacts,
+    source: &store::UnidentifiedRow,
+    destination_version: Option<&str>,
+) -> Result<LibraryFile, axum::response::Response> {
+    publish_claim(
+        &Access {
+            shared: &state.store,
+            state: Some(state),
+        },
         media,
         dest,
         facts,
         Some(source),
-        Some(destination_version),
+        destination_version,
     )
+    .map_err(Error::response)
 }
 
 fn publish_claim(
-    shared: &Mutex<Store>,
+    access: &Access<'_>,
     media: &Media,
     dest: &Path,
     facts: &ClaimedFacts,
     source: Option<&store::UnidentifiedRow>,
     destination_version: Option<&str>,
-) -> Result<LibraryFile, StoreError> {
+) -> Result<LibraryFile, Error> {
     let result = (|| {
         let path = std::fs::canonicalize(dest)?;
         let observed = library::observe_source(&path)
             .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
         if destination_version.is_some_and(|expected| expected != observed.source_version) {
-            return Err(StoreError::Protected(
-                "staged Claim destination changed".into(),
-            ));
+            return Err(StoreError::Protected("staged Claim destination changed".into()).into());
         }
-        let mut prepared = prepare_claim(&shared.lock(), media, &path, &observed, facts)?;
+        let mut prepared =
+            access.with_store(|store| prepare_claim(store, media, &path, &observed, facts))?;
         let observations = prepared.observer.observe(
             &path,
             media.kind,
@@ -89,11 +98,10 @@ fn publish_claim(
         prepared.file.backdrop_path = artwork.backdrop;
         prepared.file.still_path = artwork.still;
         if library::current_source_version(&path) != prepared.file.version.source_version {
-            return Err(StoreError::Protected(
-                "claim source changed during observation".into(),
-            ));
+            return Err(
+                StoreError::Protected("claim source changed during observation".into()).into(),
+            );
         }
-        let store = shared.lock();
         let publication = PublicationRequest {
             file: &prepared.file,
             units: &facts.units,
@@ -101,27 +109,30 @@ fn publish_claim(
             nfo_observation: Some(&observations),
             probe_required: false,
         };
-        if let Some(source) = source {
-            store.publish_unidentified_checked_context(
-                &prepared.scope,
-                &publication,
-                prepared.expected.as_ref(),
-                source,
-                store::unix_now() * 1000,
-            )?;
-        } else {
-            store.publish_file_checked_context(
-                &prepared.scope,
-                &publication,
-                prepared.expected.as_ref(),
-                store::unix_now() * 1000,
-            )?;
-        }
+        access.with_store(|store| {
+            if let Some(source) = source {
+                store.publish_unidentified_checked_context(
+                    &prepared.scope,
+                    &publication,
+                    prepared.expected.as_ref(),
+                    source,
+                    store::unix_now() * 1000,
+                )?;
+            } else {
+                store.publish_file_checked_context(
+                    &prepared.scope,
+                    &publication,
+                    prepared.expected.as_ref(),
+                    store::unix_now() * 1000,
+                )?;
+            }
+            Ok(())
+        })?;
         tracing::info!(file_id = %prepared.file.file_id, path = %path.display(), "Published claimed file");
         Ok(prepared.file)
     })();
     if let Err(error) = &result {
-        tracing::error!(path = %dest.display(), %error, "Claim publication rejected");
+        tracing::error!(path = %dest.display(), error = ?match error { Error::Store(error) => error.to_string(), Error::Admission(response) => response.status().to_string() }, "Claim publication rejected");
     }
     result
 }

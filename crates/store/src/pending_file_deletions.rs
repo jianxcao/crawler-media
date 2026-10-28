@@ -5,6 +5,27 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
+/// The durable deletion owns this path until it is completed or explicitly
+/// abandoned. Source writers check this in their own write transaction.
+pub(crate) fn ensure_path_not_pending_deletion(
+    conn: &rusqlite::Connection,
+    path: &str,
+) -> Result<(), StoreError> {
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_file_deletions
+                WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1)))",
+        [path],
+        |row| row.get(0),
+    )?;
+    if pending {
+        tracing::warn!(path, "拒绝修改由持久删除意图持有的路径");
+        return Err(StoreError::Protected(format!(
+            "path {path} has a deletion owner"
+        )));
+    }
+    Ok(())
+}
+
 /// Review L-10: after this many failed attempts a deletion is no longer
 /// retried automatically; it stays listed (with its last error) for the user.
 pub const MAX_FILE_DELETION_ATTEMPTS: i64 = 20;
@@ -14,6 +35,8 @@ pub const MAX_FILE_DELETION_ATTEMPTS: i64 = 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedFileDeletion {
     pub path: String,
+    pub path_key: String,
+    pub deletion_id: String,
     pub file_id: Option<String>,
     pub file_size: Option<u64>,
     pub file_inode: Option<u64>,
@@ -37,12 +60,47 @@ pub fn file_identity(path: &str) -> Option<(u64, Option<u64>)> {
 }
 
 impl Store {
-    /// Queue `path` for deletion (idempotent). Records the file id and the
-    /// file's size/inode so a later retry never deletes a different file that
-    /// was placed at the same path (review M-3).
-    pub fn enqueue_file_deletion(&self, path: &str, reason: &str) -> Result<(), StoreError> {
-        let file_id: Option<String> = self
-            .library
+    /// Read exactly one due intent; draining one path must not scan the queue.
+    pub fn due_file_deletion(
+        &self,
+        path: &str,
+        now: i64,
+    ) -> Result<Option<QueuedFileDeletion>, StoreError> {
+        Ok(self.library.query_row(
+            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
+             WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1))
+               AND next_retry_at<=?2 AND attempts<?3",
+            params![path,now,MAX_FILE_DELETION_ATTEMPTS],
+            |row| Ok(QueuedFileDeletion {
+                path:row.get(0)?, file_id:row.get(1)?,
+                file_size:row.get::<_,Option<i64>>(2)?.map(|v| v as u64),
+                file_inode:row.get::<_,Option<i64>>(3)?.map(|v| v as u64),
+                path_key:row.get(4)?,
+                deletion_id:row.get(5)?,
+            }),
+        ).optional()?)
+    }
+
+    pub fn file_deletion_pending(&self, path: &str) -> Result<bool, StoreError> {
+        Ok(self.library.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_file_deletions
+                WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1)))",
+            [path],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Publish an identity captured without the process-wide Store lock. Callers
+    /// must revalidate their file version/ownership before accepting the intent.
+    /// This stage performs SQL only and never refreshes the disk observation.
+    pub fn enqueue_file_deletion_observed(
+        &self,
+        path: &str,
+        reason: &str,
+        identity: Option<(u64, Option<u64>)>,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        let file_id: Option<String> = tx
             .query_row(
                 "SELECT file_id FROM library_files
                  WHERE path_key = norm_path_key(?1)
@@ -51,19 +109,43 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let identity = file_identity(path);
-        self.library.execute(
-            "INSERT INTO pending_file_deletions (path, reason, file_id, file_size, file_inode)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(path) DO NOTHING",
+        if let Some(file_id) = &file_id {
+            let placing: bool = tx.query_row(
+                "SELECT publication_state='pending' FROM library_files WHERE file_id=?1",
+                [file_id],
+                |row| row.get(0),
+            )?;
+            let renaming: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_file_renames WHERE file_id=?1)",
+                [file_id],
+                |row| row.get(0),
+            )?;
+            if renaming || placing {
+                tracing::warn!(
+                    file_id,
+                    renaming,
+                    placing,
+                    "拒绝删除仍有文件发布所有者的路径"
+                );
+                return Err(StoreError::Protected(format!(
+                    "file {file_id} has a rename or placement owner"
+                )));
+            }
+        }
+        tx.execute(
+            "INSERT INTO pending_file_deletions (path, path_key, reason, file_id, file_size, file_inode, deletion_id)
+             VALUES (?1, norm_path_key(?1), ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT DO NOTHING",
             params![
                 path,
                 reason,
                 file_id,
                 identity.map(|(size, _)| size as i64),
                 identity.and_then(|(_, ino)| ino).map(|ino| ino as i64),
+                uuid::Uuid::new_v4().to_string(),
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -76,12 +158,14 @@ impl Store {
     /// scan of the queue; `tests/library_query_plans.rs` pins the plan.
     pub fn list_due_file_deletions(&self, now: i64) -> Result<Vec<QueuedFileDeletion>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT path, file_id, file_size, file_inode FROM pending_file_deletions
+            "SELECT path, file_id, file_size, file_inode, path_key, deletion_id FROM pending_file_deletions
              WHERE next_retry_at <= ?1 AND attempts < ?2 ORDER BY next_retry_at",
         )?;
         let rows = stmt.query_map(params![now, MAX_FILE_DELETION_ATTEMPTS], |row| {
             Ok(QueuedFileDeletion {
                 path: row.get(0)?,
+                path_key: row.get(4)?,
+                deletion_id: row.get(5)?,
                 file_id: row.get(1)?,
                 file_size: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                 file_inode: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
@@ -90,11 +174,55 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The queued identity no longer matches what is at the path (the path
-    /// was reused): drop the queue row and keep the file and its file row.
-    pub fn abandon_file_deletion(&self, path: &str) -> Result<(), StoreError> {
-        self.library
-            .execute("DELETE FROM pending_file_deletions WHERE path = ?1", [path])?;
+    /// Reload the exact durable generation without resolving a retired root alias.
+    pub fn due_file_deletion_intent(
+        &self,
+        entry: &QueuedFileDeletion,
+        now: i64,
+    ) -> Result<Option<QueuedFileDeletion>, StoreError> {
+        Ok(self.library.query_row(
+            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
+             WHERE path_key=?1 AND deletion_id=?2 AND next_retry_at<=?3 AND attempts<?4",
+            params![entry.path_key,entry.deletion_id,now,MAX_FILE_DELETION_ATTEMPTS],
+            |row| Ok(QueuedFileDeletion {
+                path:row.get(0)?, file_id:row.get(1)?,
+                file_size:row.get::<_,Option<i64>>(2)?.map(|v|v as u64),
+                file_inode:row.get::<_,Option<i64>>(3)?.map(|v|v as u64),
+                path_key:row.get(4)?, deletion_id:row.get(5)?,
+            }),
+        ).optional()?)
+    }
+
+    pub fn file_deletion_intent_pending(
+        &self,
+        entry: &QueuedFileDeletion,
+    ) -> Result<bool, StoreError> {
+        Ok(self.library.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2)",
+            params![entry.path_key,entry.deletion_id], |row| row.get(0),
+        )?)
+    }
+
+    pub fn file_id_at_deletion_path(
+        &self,
+        entry: &QueuedFileDeletion,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .library
+            .query_row(
+                "SELECT file_id FROM library_files WHERE path_key=?1",
+                [&entry.path_key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Drop only this stale generation; a replacement intent and file stay intact.
+    pub fn abandon_file_deletion(&self, entry: &QueuedFileDeletion) -> Result<(), StoreError> {
+        self.library.execute(
+            "DELETE FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
+            params![entry.path_key, entry.deletion_id],
+        )?;
         Ok(())
     }
 
@@ -113,7 +241,8 @@ impl Store {
     /// Make a queued deletion due now (manual "retry now").
     pub fn reset_file_deletion_backoff(&self, path: &str) -> Result<(), StoreError> {
         self.library.execute(
-            "UPDATE pending_file_deletions SET next_retry_at = 0, attempts = 0 WHERE path = ?1",
+            "UPDATE pending_file_deletions SET next_retry_at = 0, attempts = 0
+             WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1))",
             [path],
         )?;
         Ok(())
@@ -143,26 +272,56 @@ impl Store {
     /// Record a failed attempt with exponential backoff (capped at one day).
     pub fn record_file_deletion_failure(
         &self,
-        path: &str,
+        entry: &QueuedFileDeletion,
         now: i64,
         error: &str,
     ) -> Result<(), StoreError> {
         self.library.execute(
             "UPDATE pending_file_deletions
              SET attempts = attempts + 1,
-                 next_retry_at = ?2 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
-                 last_error = ?3
-             WHERE path = ?1",
-            params![path, now, error],
+                 next_retry_at = ?3 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
+                 last_error = ?4
+             WHERE path_key = ?1 AND deletion_id = ?2",
+            params![entry.path_key, entry.deletion_id, now, error],
         )?;
         Ok(())
     }
 
-    /// The file is gone: drop the queue row and its file row.
-    pub fn complete_file_deletion(&self, path: &str) -> Result<(), StoreError> {
-        self.delete_ledger_path(path)?;
-        self.library
-            .execute("DELETE FROM pending_file_deletions WHERE path = ?1", [path])?;
+    /// Complete only this generation, atomically removing its file facts and intent.
+    /// The persisted key keeps recovery independent of the current root registry.
+    pub fn complete_file_deletion(&self, entry: &QueuedFileDeletion) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        let queued_file_id: Option<Option<String>> = tx
+            .query_row(
+                "SELECT file_id FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
+                params![entry.path_key, entry.deletion_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(queued_file_id) = queued_file_id else {
+            return Ok(());
+        };
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT file_id,library_id FROM library_files WHERE path_key=?1",
+                [&entry.path_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((file_id, library_id)) = current
+            && Some(file_id.as_str()) == queued_file_id.as_deref()
+        {
+            crate::library_write::delete::delete_files_in_tx(
+                &tx,
+                library_id.parse()?,
+                &[file_id.parse()?],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
+            params![entry.path_key, entry.deletion_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }

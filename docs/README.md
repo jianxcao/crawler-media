@@ -1,13 +1,13 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。当前复审对象 `feat/storage-redesign@7030c1dd`，fetch 后 main/origin/main 均为 `756444f7`。本轮只审查与整理文档：确认迟到模型恢复、剩余执行器阻塞、Series 查询与覆盖复制二次增长、重复文件重读、旧 Filter 输入残留；暂不建议合并。验证结果与边界见当前审查，不沿用历史绿灯。
+更新：2026-10-28。当前分支 `feat/storage-redesign` 基于 main `756444f7`。本轮已按用户后续授权实施存储复审修复，当前修复范围、验证及尚未运行的边界集中在[修复记录](audits/2026-10-28-storage-remediation-verification.md)。历史审查保留固定提交的反例，不再作为当前待办入口。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
-2. **当前复审与技术方案：** [7030c1dd 对 main 审查](audits/2026-10-28-storage-head-review.md)、[H1–H6 待实施方案](superpowers/plans/2026-10-28-storage-head-remediation.md)、[复现证据](audits/2026-10-28-storage-head-review-evidence.md)。[前次修复验收](audits/2026-10-28-storage-final-review.md)与[更早修复](audits/2026-10-28-storage-main-rereview.md)只对各自版本负责；旧计划 unchecked 不代表当前待办。
+2. **当前修复与验证：** [修复记录](audits/2026-10-28-storage-remediation-verification.md)、[任务对账](superpowers/plans/2026-10-28-storage-head-remediation.md)。原[7030c1dd 对 main 审查](audits/2026-10-28-storage-head-review.md)及[复现证据](audits/2026-10-28-storage-head-review-evidence.md)为历史基线。[前次修复验收](audits/2026-10-28-storage-final-review.md)与[更早修复](audits/2026-10-28-storage-main-rereview.md)只对各自版本负责；旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
-4. **现行结构：** [五文件数据库字典](database/README.md)，library v8。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
+4. **现行结构：** [五文件数据库字典](database/README.md)；各文件只保留一份当前定义。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
 6. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
 7. **验收清单：** [system regression](testing/system-regression-cases.md) 是场景清单，不是已运行证明；设备、NAS、完整容量未测须明确 Not run。
@@ -128,6 +128,13 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 
 用户授权后，将四项确认缺陷落实为公开 Store/Router 回归和代码修复，并同步当前合同。原只读报告保留在 `b7992d7d`；最终验证结果和未运行边界集中在[复审验收](audits/2026-10-28-storage-main-rereview.md#本轮验证与边界)，不再用旧反例描述当前代码。
 
-## 2026-10-28 当前 HEAD 只读审查
+## 2026-10-28 7030c1dd 只读审查（历史）
 
-本次当前入口收敛至7030c1dd审查及其未执行方案。删除过时的10-27 Codex概括报告，其有效永久删除根结论、提交来源和Git取回路径迁入当前报告；保留历史审计和benchmark的独有证据。更新ADR/主Spec/数据库/API导航，未改业务源码、测试或DDL。
+该轮入口收敛至7030c1dd审查及当时未执行的方案。删除过时的10-27 Codex概括报告，其有效永久删除根结论、提交来源和Git取回路径迁入该轮报告；保留历史审计和benchmark的独有证据。该轮更新ADR/主Spec/数据库/API导航，未改业务源码、测试或DDL。后续授权修复与当前门禁见本页“当前先读”。
+
+## 2026-10-28 当前定义清理
+
+- 本次未合并的存储重构统一为最终生产 DDL；不保留开发中间布局、迁移阶梯或历史 schema fixture。结构头仅标识当前定义。
+- 删除 `scripts/storage-cutover-rebuild.sh` 及部署页的旧 cache 切换步骤。该脚本只搬 cache，不能兑现旧启动提示中“重建事实库”的说法；当前启动不再指向它。
+- 原 subscribe schema fixture 已删除；结构拒绝测试只构造当前定义缺失/篡改或未知身份，不维护历史布局。
+- 数据库字典更新至 76 表 / 750 字段，library 53 表 / 596 字段 / 83 命名索引。历史结构测量仍保留其原日期和版本，不作为运行操作指南。

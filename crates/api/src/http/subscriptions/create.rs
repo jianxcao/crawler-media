@@ -8,7 +8,6 @@ use domain::{
 };
 
 use super::types::*;
-use super::views::subscription_json;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
@@ -19,6 +18,14 @@ pub(crate) async fn create_subscription(
         CreateSubscriptionInput,
     >,
 ) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        create_blocking(state, user_id, body)
+    })
+    .await
+}
+
+fn create_blocking(state: ApiState, user_id: UserId, body: CreateSubscriptionInput) -> Response {
     let (media_input, kind_hint) = match resolve_media_input(&state, &body) {
         Ok(result) => result,
         Err(response) => return response,
@@ -192,14 +199,12 @@ fn persist_subscription(
     if auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, true);
     }
-    let facts = {
+    let snapshot = {
         let store = state.store.lock();
-        store.load_subscribe_facts(subscribe.id).unwrap_or_default()
+        let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+        super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
     };
-    let body = {
-        let store = state.store.lock();
-        subscription_json(&store, state.catalog.as_ref(), &subscribe, &media, &facts)
-    };
+    let body = super::views::render_subscription_snapshot(&snapshot, state.file_stats.as_ref());
     (StatusCode::CREATED, ok(body)).into_response()
 }
 

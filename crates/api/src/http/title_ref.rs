@@ -87,6 +87,24 @@ pub(crate) async fn preview(
     user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Json(body): Json<TitlePreviewInput>,
 ) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            preview_blocking(&worker, user_id, body)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => super::library::browse_work_error(error),
+    }
+}
+
+fn preview_blocking(
+    state: &ApiState,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
+    body: TitlePreviewInput,
+) -> Response {
     if body.title_ref.trim().is_empty() {
         return err(
             StatusCode::BAD_REQUEST,
@@ -94,9 +112,50 @@ pub(crate) async fn preview(
             "title_ref 必填",
         );
     }
+    let resolved = match resolve_preview(state, &body.title_ref) {
+        Ok(Some(media)) => media,
+        Ok(None) => {
+            return ok(json!({
+                "status": "not_found", "media": Value::Null, "seasons": [],
+                "existing_subscription_id": Value::Null, "movie_owned": false,
+                "suggested_seasons": [], "candidates": [],
+            }))
+            .into_response();
+        }
+        Err(response) => return response,
+    };
+    let Some((media, existing, owned_seasons, movie_owned)) =
+        preview_facts(state, resolved, user_id.and_then(|u| u.0), body.season)
+    else {
+        return super::store_wait::busy_response();
+    };
+    let seasons = preview_seasons(state, &media, &owned_seasons);
+    ok(json!({
+        "status": "ready",
+        "media": {
+            "media_item_id": media.id.to_string(),
+            "kind": media.kind.as_str(),
+            "tmdb_id": media.tmdb_id,
+            "douban_id": media.douban_id,
+            "title": media.title,
+            "original_title": media.original_title,
+            "year": media.year,
+            "poster_url": media.tmdb_id.as_ref().map(|_| TMDB_POSTER.to_string()),
+            "status": Value::Null,
+        },
+        "seasons": seasons,
+        "existing_subscription_id": existing,
+        "movie_owned": movie_owned,
+        "suggested_seasons": [],
+        "candidates": [],
+    }))
+    .into_response()
+}
+
+fn resolve_preview(state: &ApiState, raw: &str) -> Result<Option<Media>, Response> {
     // 裸标题多命中 → ambiguous（候选墙）；单命中/精确引用 → ready。
     let catalog: &dyn Catalog = state.catalog.as_ref();
-    let resolved = match parse_title_ref(&body.title_ref) {
+    let resolved = match parse_title_ref(raw) {
         TitleRef::Tmdb { kind, id } => catalog.details(kind, &id).unwrap_or(None),
         TitleRef::Douban(id) => catalog
             .source("douban")
@@ -126,7 +185,7 @@ pub(crate) async fn preview(
                         })
                     })
                     .collect();
-                return ok(json!({
+                return Err(ok(json!({
                     "status": "ambiguous",
                     "media": Value::Null,
                     "seasons": [],
@@ -135,26 +194,28 @@ pub(crate) async fn preview(
                     "suggested_seasons": [],
                     "candidates": candidates,
                 }))
-                .into_response();
+                .into_response());
             }
             hits.first().map(|hit| hit.media.clone())
         }
     };
-    let Some(resolved) = resolved else {
-        return ok(json!({
-            "status": "not_found",
-            "media": Value::Null,
-            "seasons": [],
-            "existing_subscription_id": Value::Null,
-            "movie_owned": false,
-            "suggested_seasons": [],
-            "candidates": [],
-        }))
-        .into_response();
-    };
-    let current_user_id = user_id.and_then(|u| u.0);
-    let (media, existing, owned_seasons, movie_owned) = {
-        let store = state.store.lock();
+    Ok(resolved)
+}
+
+type PreviewFacts = (
+    Media,
+    Option<String>,
+    std::collections::HashMap<u32, usize>,
+    bool,
+);
+
+fn preview_facts(
+    state: &ApiState,
+    resolved: Media,
+    current_user_id: Option<domain::UserId>,
+    season: Option<u32>,
+) -> Option<PreviewFacts> {
+    super::store_wait::with_bounded_store(state.store(), |store| {
         // 收敛到库内已有 Media 行（按 tmdb 别名 **带 kind**）：相同数字的
         // movie/TV id 不得互相顶替（P2：preview tmdb:tv:123 不应命中 movie:123）。
         let media = resolved
@@ -180,7 +241,7 @@ pub(crate) async fn preview(
                 }
             })
             .filter(|s| s.media_id == media_id)
-            .find(|s| match (&s.coverage, body.season) {
+            .find(|s| match (&s.coverage, season) {
                 (domain::Coverage::Tv { season, .. }, Some(target_season)) => {
                     *season == target_season
                 }
@@ -192,11 +253,17 @@ pub(crate) async fn preview(
         let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
         let movie_owned = media.kind == MediaKind::Movie && has_owned;
         (media, existing, owned_seasons, movie_owned)
-    };
+    })
+}
 
+fn preview_seasons(
+    state: &ApiState,
+    media: &Media,
+    owned_seasons: &std::collections::HashMap<u32, usize>,
+) -> Vec<Value> {
     // TV：季总览（TMDB seasons + 已播/已有计数）
     // 关键（D15）：在调用 external catalog 之前已完全释放 store 锁，杜绝后台 try_lock_for 超时退化
-    let seasons: Vec<Value> = if media.kind == MediaKind::Tv {
+    if media.kind == MediaKind::Tv {
         let tmdb_id = media.tmdb_id.clone().unwrap_or_default();
         let rows = state.catalog.tv_seasons(&tmdb_id).unwrap_or_default();
         tracing::info!(tmdb_id = %tmdb_id, rows_count = rows.len(), "title-preview 正在拉取 TV seasons");
@@ -224,28 +291,7 @@ pub(crate) async fn preview(
             .collect()
     } else {
         Vec::new()
-    };
-
-    ok(json!({
-        "status": "ready",
-        "media": {
-            "media_item_id": media.id.to_string(),
-            "kind": media.kind.as_str(),
-            "tmdb_id": media.tmdb_id,
-            "douban_id": media.douban_id,
-            "title": media.title,
-            "original_title": media.original_title,
-            "year": media.year,
-            "poster_url": media.tmdb_id.as_ref().map(|_| TMDB_POSTER.to_string()),
-            "status": Value::Null,
-        },
-        "seasons": seasons,
-        "existing_subscription_id": existing,
-        "movie_owned": movie_owned,
-        "suggested_seasons": [],
-        "candidates": [],
-    }))
-    .into_response()
+    }
 }
 
 /// Count already-owned episodes per season for `media_id`, plus whether any file

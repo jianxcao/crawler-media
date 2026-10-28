@@ -2,16 +2,16 @@
 //! 在 store 的一次短读里收敛成「完整条数 + 请求页」，只有返回页那几条才建重元数据。
 //!
 //! 候选实体来自 `user_resumable_units`（索引化的用户观看单元），作用域读只覆盖这些
-//! Media 的台账行，不再整库枚举；过滤/去重/排序/分页都在锁内完成，锁外只做页内
-//! tracks/chapters/NFO/stat。
+//! Media 的台账行，不再整库枚举；锁内捕获 owned 事实，过滤/去重/排序/分页与
+//! 页内 tracks/chapters/NFO/stat 都在锁外执行。
 
 use std::collections::{HashMap, HashSet};
 
 use domain::{MediaId, TypedItemId};
 use media_server::provider::{ServerItemPage, ServerItemQuery};
 
+use super::super::items::{effective_played, unit_index};
 use super::super::resume_item_id;
-use super::super::user_marks::unit_played;
 use super::light::{LightItem, build_light_items};
 use super::scope::{ScopedRead, read_media_scope};
 use super::*;
@@ -19,7 +19,7 @@ use super::*;
 /// `user_resumable_units` 的一行：`(media, season, episode, position_ms, watch_activity_at)`。
 type ResumeTarget = (MediaId, i32, i32, i64, i64);
 
-/// 锁内选出的续播页：`total` 是完整过滤后的续播条数，`page` 是请求窗口内的轻条目。
+/// 同一份 owned 事实选出的续播页：`total` 是完整过滤后的续播条数，`page` 是请求窗口内的轻条目。
 struct ResumeSelection {
     total: usize,
     page: Vec<LightItem>,
@@ -44,14 +44,14 @@ pub(in crate::media_server_provider) async fn resumable_items(
         })?
 }
 
-/// 锁内：候选 → 目标 Media 的台账 → 过滤/去重/分页；锁外只为本页建重元数据。
+/// 锁内捕获候选与目标 Media 的事实，释放锁后过滤/去重/分页并水合返回页。
 fn resume_page_blocking(
     state: &ApiState,
     user_id: UserId,
     offset: usize,
     limit: usize,
 ) -> Result<ServerItemPage, String> {
-    let selection = {
+    let (targets, scope) = {
         let store = state.store.lock();
         let targets = store.user_resumable_units(user_id).map_err(|error| {
             tracing::error!(%error, %user_id, "Jellyfin 续播候选读取失败");
@@ -70,9 +70,10 @@ fn resume_page_blocking(
                 return Err(error.to_string());
             }
         };
-        count_candidates(state, scope.rows_read);
-        resume_selection(&store, &scope, user_id, &targets, offset, limit)
+        (targets, scope)
     };
+    count_candidates(state, scope.rows_read);
+    let selection = resume_selection(&scope, user_id, &targets, offset, limit);
     let total = selection.total;
     let mut items = Vec::with_capacity(selection.page.len());
     for item in selection.page {
@@ -98,7 +99,6 @@ fn resume_media_ids(targets: &[ResumeTarget]) -> Vec<MediaId> {
 /// 续播语义（与旧 `list_resumable_items` 一致）：同一 Media 只出第一条，被更晚的
 /// 已看标记覆盖的候选跳过，水合后仍为已看的候选跳过。
 fn resume_selection(
-    store: &crate::Store,
     scope: &ScopedRead,
     user_id: UserId,
     targets: &[ResumeTarget],
@@ -116,13 +116,14 @@ fn resume_selection(
             index.insert(item.snapshot.item_identity(), position);
         }
     }
+    let units = unit_index(&scope.units);
     let mut seen_media: HashSet<MediaId> = HashSet::new();
     let mut survivors: Vec<LightItem> = Vec::new();
     for (media_id, season, episode, _position_ms, _updated_at) in targets {
         if seen_media.contains(media_id) {
             continue;
         }
-        if unit_played(store, user_id, *media_id, *season, *episode) {
+        if effective_played(&units, *media_id, *season, *episode) {
             tracing::debug!(%user_id, %media_id, season, episode, "跳过被更晚已看标记覆盖的续播候选");
             continue;
         }

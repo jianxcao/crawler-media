@@ -6,6 +6,13 @@ use std::collections::HashMap;
 use crate::http::ok_list;
 use crate::management::ApiState;
 
+struct MediaGalleryCandidate {
+    media: domain::Media,
+    library_id: String,
+    preferred_coverage: Option<domain::FileCoverage>,
+    owned_rows: Vec<domain::FileCoverage>,
+}
+
 /// GET /playback/favorites/gallery — 收藏图廊：每部作品的海报/背景/剧照，
 /// 形状对齐前端 LibraryGalleryGroup（listFavoritesGallery 直读）。
 pub(crate) async fn favorites_gallery(
@@ -33,20 +40,13 @@ pub(crate) async fn favorites_gallery(
         .unwrap_or_else(|| sort_key != "title");
 
     // Phase 1: In-lock DB reads only (media, ledger rows, favorites)
-    struct MediaGalleryCandidate {
-        media: domain::Media,
-        library_id: String,
-        preferred_coverage: Option<domain::FileCoverage>,
-        owned_rows: Vec<domain::FileCoverage>,
-    }
 
     let order = if sort_key == "title" {
         store::FavoriteOrder::Title
     } else {
         store::FavoriteOrder::FavoritedAt
     };
-    let selected = {
-        let store = state.store.lock();
+    let selected = match crate::http::store_wait::store_read(&state, move |store| {
         (|| -> Result<Vec<MediaGalleryCandidate>, store::StoreError> {
             let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))?;
             let page = store.playback_favorite_page(&store::PlaybackViewQuery {
@@ -76,6 +76,11 @@ pub(crate) async fn favorites_gallery(
             }
             Ok(out)
         })()
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return error.response(),
     };
     let candidates = match selected {
         Ok(candidates) => candidates,
@@ -93,74 +98,81 @@ pub(crate) async fn favorites_gallery(
     let groups_res = state
         .http_work
         .run(std::time::Duration::from_secs(30), move || {
-            let mut groups = Vec::new();
-            for cand in candidates {
-                let mut images = Vec::new();
-                if let Some(ref cov) = cand.preferred_coverage {
-                    let dir = cov.file.path
-                        .parent()
-                        .map(|p| p.to_path_buf());
-                    if let Some(dir) = dir {
-                        if files.is_file(&dir.join("poster.jpg")) {
-                            images.push(json!({
-                                "kind": "poster",
-                                "url": crate::http::library::artwork_url("posters", cov.file.file_id),
-                                "aspect": 0.667,
-                                "label": "海报",
-                                "season": null,
-                                "episode": null,
-                                "t_seconds": null,
-                            }));
-                        }
-                        if files.is_file(&dir.join("fanart.jpg")) {
-                            images.push(json!({
-                                "kind": "backdrop",
-                                "url": crate::http::library::artwork_url("fanart", cov.file.file_id),
-                                "aspect": 1.778,
-                                "label": "背景",
-                                "season": null,
-                                "episode": null,
-                                "t_seconds": null,
-                            }));
-                        }
-                        for cov in &cand.owned_rows {
-                            for unit in &cov.units {
-                                if !unit.is_whole()
-                                    && crate::episode_still::existing_with(
-                                        &cov.file.path,
-                                        files.as_ref(),
-                                    )
-                                    .is_some()
-                                {
-                                    images.push(json!({
-                                        "kind": "still",
-                                        "url": crate::http::library::artwork_url("stills", cov.file.file_id),
-                                        "aspect": 1.778,
-                                        "label": "剧照",
-                                        "season": unit.season,
-                                        "episode": unit.episode,
-                                        "t_seconds": null,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-                groups.push(json!({
-                    "media_item_id": cand.media.id.to_string(),
-                    "library_id": cand.library_id,
-                    "kind": cand.media.kind.as_str(),
-                    "title": cand.media.title,
-                    "year": cand.media.year,
-                    "is_favorite": true,
-                    "images": images,
-                }));
-            }
-            groups
+            render_gallery(candidates, files.as_ref())
         })
         .await;
 
-    let groups = match groups_res {
+    gallery_response(groups_res)
+}
+
+fn render_gallery(
+    candidates: Vec<MediaGalleryCandidate>,
+    files: &dyn crate::file_stat_read::FileStatRead,
+) -> Vec<serde_json::Value> {
+    let mut groups = Vec::new();
+    for cand in candidates {
+        let mut images = Vec::new();
+        if let Some(ref cov) = cand.preferred_coverage {
+            let dir = cov.file.path.parent().map(|p| p.to_path_buf());
+            if let Some(dir) = dir {
+                if files.is_file(&dir.join("poster.jpg")) {
+                    images.push(json!({
+                        "kind": "poster",
+                        "url": crate::http::library::artwork_url("posters", cov.file.file_id),
+                        "aspect": 0.667,
+                        "label": "海报",
+                        "season": null,
+                        "episode": null,
+                        "t_seconds": null,
+                    }));
+                }
+                if files.is_file(&dir.join("fanart.jpg")) {
+                    images.push(json!({
+                        "kind": "backdrop",
+                        "url": crate::http::library::artwork_url("fanart", cov.file.file_id),
+                        "aspect": 1.778,
+                        "label": "背景",
+                        "season": null,
+                        "episode": null,
+                        "t_seconds": null,
+                    }));
+                }
+                for cov in &cand.owned_rows {
+                    for unit in &cov.units {
+                        if !unit.is_whole()
+                            && crate::episode_still::existing_with(&cov.file.path, files).is_some()
+                        {
+                            images.push(json!({
+                                "kind": "still",
+                                "url": crate::http::library::artwork_url("stills", cov.file.file_id),
+                                "aspect": 1.778,
+                                "label": "剧照",
+                                "season": unit.season,
+                                "episode": unit.episode,
+                                "t_seconds": null,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        groups.push(json!({
+            "media_item_id": cand.media.id.to_string(),
+            "library_id": cand.library_id,
+            "kind": cand.media.kind.as_str(),
+            "title": cand.media.title,
+            "year": cand.media.year,
+            "is_favorite": true,
+            "images": images,
+        }));
+    }
+    groups
+}
+
+fn gallery_response(
+    result: Result<Vec<serde_json::Value>, crate::blocking_budget::BlockingError>,
+) -> Response {
+    let groups = match result {
         Ok(groups) => groups,
         Err(crate::blocking_budget::BlockingError::Busy) => {
             return crate::http::err(

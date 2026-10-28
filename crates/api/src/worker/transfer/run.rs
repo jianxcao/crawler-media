@@ -1,13 +1,13 @@
 use domain::{FileCoverage, LedgerId, Media, Subscribe, SubscribeId};
 use filter::ScoredTorrent;
-use store::StoreError;
-use store::library_write::{FilePublication as PublicationRequest, WriteScope};
 use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed_recorded};
 
 use crate::management::ApiState;
 
 use super::plan::{TransferPlan, resolve_transfer_plan, validate_committed_transfer_plan};
+use super::publication::{observe_transfer_files, publish_transfer_file};
 use super::recorder::{PlannedPublicationRecorder, PublicationRecorder};
+use super::removals::{observe_transfer_removals, queue_transfer_removals};
 
 fn attach_metadata_and_chapters(state: &ApiState, media: &Media, files: &[FileCoverage]) {
     for coverage in files {
@@ -16,36 +16,6 @@ fn attach_metadata_and_chapters(state: &ApiState, media: &Media, files: &[FileCo
         crate::poster_fetch::attach_backdrop(state, media, path);
         crate::http::library_chapters::auto_generate_chapters(state, path);
     }
-}
-
-/// The transfer mode a placed file actually ended up with: a file that shares an
-/// inode with its download source came in as a hardlink, everything else kept the
-/// configured mode. `library_files.transfer_mode` only accepts the three real
-/// transfer modes, so the observation never invents a fourth one.
-pub(crate) fn observe_transfer_modes(files: &[FileCoverage], default_mode: &str) -> Vec<String> {
-    files
-        .iter()
-        .map(|coverage| {
-            let is_hardlink = std::fs::metadata(&coverage.file.path)
-                .map(|meta| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        meta.nlink() > 1
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        false
-                    }
-                })
-                .unwrap_or(false);
-            if is_hardlink {
-                "hardlink".to_string()
-            } else {
-                default_mode.to_string()
-            }
-        })
-        .collect()
 }
 
 /// The download source this round recorded for a published file, if any. The
@@ -77,102 +47,6 @@ fn wanted_slots(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
         .collect()
 }
 
-/// Publish one reserved Transfer file: the reservation owns the file identity,
-/// so this is a version-checked publish of the confirmed coverage of that same
-/// file, never a second identity creation. The transfer mode a placed file
-/// actually ended up with (a hardlink is only visible here), its source path and
-/// the sidecar artwork beside it are written with the file.
-pub(crate) fn publish_transfer_file(
-    store: &store::Store,
-    library_id: &str,
-    config_revision: i64,
-    coverage: &FileCoverage,
-    source_path: Option<&std::path::Path>,
-    mode: &str,
-    observed_source: Option<&library::SourceObservation>,
-) -> Result<domain::LibraryFile, StoreError> {
-    let file_id = coverage.file.file_id;
-    let observed = &coverage.file.version;
-    let committed = store.get_file_version(file_id)?.ok_or_else(|| {
-        StoreError::Protected("Transfer reservation changed or was detached".into())
-    })?;
-    if committed.revision != observed.revision
-        || committed.source_version != observed.source_version
-    {
-        return Err(StoreError::Protected(
-            "Transfer reservation changed or was detached".into(),
-        ));
-    }
-    // The reservation already wrote this file's units; the collected coverage is
-    // the fallback so a span is never narrowed back to its first episode. With
-    // neither, the coverage is unknown and is published as such (never WHOLE).
-    let stored_units = store.get_file_units(file_id)?;
-    let units: Vec<domain::UnitKey> = if !stored_units.is_empty() {
-        stored_units
-    } else {
-        coverage.units.clone()
-    };
-    let mut file = coverage.file.clone();
-    let artwork = store::files::DiscoveredArtwork::discover(&file.path);
-    file.presence = domain::FilePresence::Present;
-    file.publication = domain::FilePublication::Published;
-    file.source_path = source_path.map(std::path::PathBuf::from);
-    file.transfer_mode = Some(mode.to_string());
-    file.poster_path = artwork.poster;
-    file.backdrop_path = artwork.backdrop;
-    file.still_path = artwork.still;
-    // Placement stat is the persisted evidence `bind_placed_file_source` checks
-    // to keep facts probed from these very bytes.
-    if let Some(observation) = observed_source {
-        file.size_bytes = observation.size_bytes;
-        file.modified_ns = observation.modified_ns;
-        file.stat_known = true;
-    }
-    store.publish_files(
-        &WriteScope {
-            library_id: library_id.parse::<domain::LibraryId>()?,
-            config_revision,
-        },
-        &[PublicationRequest {
-            file: &file,
-            units: &units,
-            expected_version: Some(observed),
-            nfo_observation: None,
-            probe_required: false,
-        }],
-        store::unix_now() * 1000,
-    )?;
-    // The reservation version is a placeholder for bytes that did not exist yet;
-    // the source observed (outside the Store lock) after placement advances it to
-    // the real production encoding by CAS, so Probe/fingerprints bind real bytes.
-    if let Some(observation) = observed_source
-        && observation.source_version != observed.source_version
-    {
-        file.version = store.bind_placed_file_source(
-            &WriteScope {
-                library_id: library_id.parse::<domain::LibraryId>()?,
-                config_revision,
-            },
-            file_id,
-            observed,
-            observation,
-            store::unix_now() * 1000,
-        )?;
-    }
-    tracing::info!(file_id = %file_id, path = %coverage.file.path.display(), "Published Transfer file");
-    Ok(file)
-}
-
-/// Observe each placed Transfer file's source outside the Store lock.
-pub(crate) fn observe_transfer_sources(
-    files: &[FileCoverage],
-) -> Vec<Option<library::SourceObservation>> {
-    files
-        .iter()
-        .map(|coverage| crate::fingerprint_job::observe_source(&coverage.file.path))
-        .collect()
-}
-
 fn commit_transfer_outcome(
     state: &ApiState,
     subscribe: &Subscribe,
@@ -186,8 +60,8 @@ fn commit_transfer_outcome(
     };
 
     // Observe transfer modes outside Store lock
-    let observed_modes = observe_transfer_modes(&outcome.files, &default_transfer_mode);
-    let observed_sources = observe_transfer_sources(&outcome.files);
+    let observations = observe_transfer_files(state, &outcome.files, &default_transfer_mode);
+    let removed = observe_transfer_removals(state, plan, &outcome.removed_paths)?;
 
     // Commit replacement file/source mapping and facts in a short Store section
     let mut published = Vec::with_capacity(outcome.files.len());
@@ -197,12 +71,7 @@ fn commit_transfer_outcome(
         // each reservation; the scoped fingerprint now reflects this round's
         // own published rows, so only the untouched plan parts are re-checked.
         validate_committed_transfer_plan(&store, subscribe, lease, plan)?;
-        for ((coverage, mode), observed_source) in outcome
-            .files
-            .iter()
-            .zip(observed_modes.iter())
-            .zip(observed_sources.iter())
-        {
+        for (coverage, observation) in outcome.files.iter().zip(&observations) {
             let path = coverage.file.path.to_string_lossy().to_string();
             let source_path = recorded_file_source(outcome, coverage.file.file_id)
                 .map(|source| source.display().to_string());
@@ -226,21 +95,12 @@ fn commit_transfer_outcome(
                     plan.config_revision,
                     coverage,
                     source_path.as_deref().map(std::path::Path::new),
-                    mode,
-                    observed_source.as_ref(),
+                    observation,
                 )
                 .map_err(|e| e.to_string())?,
             );
         }
-        for path in &outcome.removed_paths {
-            if store
-                .file_coverage_by_path(path)
-                .map_err(|e| e.to_string())?
-                .is_some_and(|existing| existing.file.media_id != subscribe.media_id)
-            {
-                return Err("待替换路径已被其他媒体占用，放弃本轮提交".into());
-            }
-        }
+        queue_transfer_removals(state, &store, &removed)?;
 
         store
             .save_subscribe_facts(subscribe.id, &outcome.facts)
@@ -276,11 +136,6 @@ fn commit_transfer_outcome(
     // must not abort the commit and is retried later (outside the Store lock).
     {
         let store = state.store.lock();
-        for path in &outcome.removed_paths {
-            store
-                .enqueue_file_deletion(path, "wash_replaced")
-                .map_err(|e| e.to_string())?;
-        }
         store
             .mark_pending_rejected(subscribe.id, &outcome.rejected_enclosures)
             .map_err(|e| e.to_string())?;

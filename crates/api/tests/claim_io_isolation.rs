@@ -311,3 +311,76 @@ fn updated_parked_identity_during_claim_keeps_new_record_and_rejects_file() {
             .is_none()
     );
 }
+
+#[test]
+fn slow_claim_nfo_keeps_same_runtime_timer_and_store_responsive() {
+    let fixture = fixture();
+    let mut gate = NfoGate::new(&fixture.path);
+    let shared = fixture.state.store();
+    let release = std::thread::spawn(move || {
+        gate.wait_for_reader();
+        let readable = shared.try_lock_for(Duration::from_millis(100)).is_some();
+        std::thread::sleep(Duration::from_millis(500));
+        gate.release().unwrap();
+        readable
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/unidentified/claim")
+        .header("Authorization", "Bearer management-secret")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"path":fixture.path,"action":{
+                "type":"bind_existing","media_id":fixture.media.id
+            }})
+            .to_string(),
+        ))
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (response, elapsed) = runtime.block_on(async {
+        let started = Instant::now();
+        tokio::join!(router(fixture.state).oneshot(request), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            started.elapsed()
+        })
+    });
+    assert!(release.join().unwrap(), "slow NFO must not hold Store");
+    assert_eq!(response.unwrap().status(), StatusCode::OK);
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "NFO blocked runtime: {elapsed:?}"
+    );
+}
+
+#[test]
+fn claim_rechecks_maintenance_after_nfo_read_before_publication() {
+    let fixture = fixture();
+    let mut nfo = NfoGate::new(&fixture.path);
+    let result = start_claim(&fixture);
+    nfo.wait_for_reader();
+    let gate = fixture.state.write_gate();
+    let _closed = gate.close();
+    nfo.release().unwrap();
+    assert_eq!(
+        result.recv_timeout(Duration::from_secs(5)).unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let handle = fixture.state.store();
+    let store = handle.lock();
+    assert!(
+        store
+            .file_coverage_by_path(fixture.path.to_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_unidentified(fixture.path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+    assert!(fixture.path.is_file());
+}

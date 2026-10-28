@@ -3,8 +3,6 @@
 //! today-arrivals. Split out of `subscriptions.rs` (CRUD + JSON) to keep both
 //! files under the repo size budget.
 
-use std::str::FromStr;
-
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -18,12 +16,19 @@ use crate::management::ApiState;
 
 mod activity;
 mod arrivals;
+mod cleanup;
 mod forecast;
+mod removal_preview;
+mod upgrade;
+pub(crate) use cleanup::season_cleanup;
+pub(crate) use removal_preview::removal_preview;
+pub(crate) use upgrade::run_upgrade;
+pub(crate) mod wanted;
 
 pub(crate) use activity::activities;
 pub(crate) use arrivals::today_arrivals;
 
-use super::subscriptions::{remove_torrents_from_client, resolve_subscribe, user_is_admin};
+use super::subscriptions::{remove_torrents_from_client, user_is_admin};
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -32,115 +37,6 @@ pub(crate) struct RunUpgradeInput {
     pub(crate) filter_id: Option<String>,
     #[serde(default)]
     pub(crate) wash_cut: Option<bool>,
-}
-
-pub(crate) async fn run_upgrade(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Path(id): Path<String>,
-    body_bytes: axum::body::Bytes,
-) -> Response {
-    let (mut subscribe, media) = match resolve_subscribe(&state, &id, user_id) {
-        Ok(pair) => pair,
-        Err(response) => return response,
-    };
-    let (input, has_body) = if body_bytes.is_empty() || body_bytes.as_ref() == b"null" {
-        (RunUpgradeInput::default(), false)
-    } else {
-        match serde_json::from_slice(&body_bytes) {
-            Ok(input) => (input, true),
-            Err(error) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "subscription.invalid",
-                    &error.to_string(),
-                );
-            }
-        }
-    };
-    let new_filter_str = input.filter_id;
-    let mut dirty = false;
-    if let Some(fid_str) = new_filter_str
-        && let Ok(fid) = domain::FilterId::from_str(&fid_str) {
-            let filter_exists = state.store.lock().get_filter(fid).ok().flatten().is_some();
-            if filter_exists {
-                subscribe.wash_cut_filter_id = Some(fid);
-                dirty = true;
-            }
-        }
-    if has_body && input.wash_cut.unwrap_or(true) && !subscribe.wash_cut {
-        subscribe.wash_cut = true;
-        dirty = true;
-    }
-    if dirty {
-        let _ = state.store.lock().update_subscribe(&subscribe);
-    }
-
-    let store = state.store.lock();
-    let (target_score, target_label) = wash_target(&store, &subscribe);
-    let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
-    let pending = store.load_pending(subscribe.id).unwrap_or_default();
-    let history = store.load_wanted_history(subscribe.id).unwrap_or_default();
-
-    let mut units: Vec<Value> = Vec::new();
-    let mut counts: std::collections::HashMap<&str, i64> = [
-        ("upgradable", 0),
-        ("at_cutoff", 0),
-        ("in_flight", 0),
-        ("not_comparable", 0),
-        ("missing", 0),
-    ]
-    .into_iter()
-    .collect();
-    for (season, episode) in
-        crate::open_coverage::units(&subscribe, &media, &facts, &pending, &history, [])
-    {
-        let fact = facts.get(season, episode);
-        let in_flight = pending
-            .iter()
-            .any(|(_, p)| release_covers_unit(&p.torrent.title, season, episode));
-        let state = unit_wash_state(&subscribe, fact, in_flight, target_score);
-        *counts.get_mut(state).unwrap() += 1;
-        units.push(json!({
-            "season_number": season.unwrap_or(0) as i64,
-            "episode_number": episode.unwrap_or(0) as i64,
-            "state": state,
-            "current_label": null,
-            "target_label": if target_label.is_empty() { Value::Null } else { json!(target_label) },
-        }));
-    }
-    let summary = upgrade_summary(&counts, &target_label, subscribe.wash_cut);
-    let counts = json!({
-        "upgradable": counts["upgradable"],
-        "at_cutoff": counts["at_cutoff"],
-        "in_flight": counts["in_flight"],
-        "not_comparable": counts["not_comparable"],
-        "missing": counts["missing"],
-    });
-    drop(store);
-    // 可升级/缺失的单元排入立即搜索；其余保持现状。
-    let queued_upgrade = counts["upgradable"].as_i64().unwrap_or(0) > 0;
-    let queued_missing = counts["missing"].as_i64().unwrap_or(0) > 0;
-    if (queued_upgrade || queued_missing)
-        && let Err(error) = crate::jobs_api::seed_subscribe_search(
-            &state.jobs.lock(),
-            &subscribe.id.to_string(),
-            Some(&media.title),
-        ) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "job.seed_failed",
-                &error.to_string(),
-            );
-        }
-    ok(json!({
-        "summary": summary,
-        "target_label": target_label,
-        "filter_id": subscribe.wash_cut_filter_id.or(Some(subscribe.filter_id)).map(|id| id.to_string()),
-        "counts": counts,
-        "units": units,
-    }))
-    .into_response()
 }
 
 /// 洗版目标：(最高优先级原子分数, 人类标签)。来源 = wash_cut_filter_id（缺省
@@ -158,9 +54,9 @@ pub(crate) fn wash_target(store: &crate::Store, subscribe: &Subscribe) -> (i32, 
                 _ => None,
             })
             .max_by_key(|(_, priority)| *priority)
-        {
-            return (target.1, target.0);
-        }
+    {
+        return (target.1, target.0);
+    }
     let label = filter.as_ref().map(filter_label).unwrap_or_default();
     let score = filter
         .as_ref()
@@ -209,223 +105,6 @@ pub(crate) fn release_covers_unit(title: &str, season: Option<u32>, episode: Opt
         },
         Some(_) => false,
         None => season.is_none() && episode.is_none(),
-    }
-}
-
-/// `wanted_json_with_air_dates` 逐单元映射所需的只读上下文（纯数据视图，不持有 store）。
-struct WantedUnitContext<'a> {
-    media: &'a domain::Media,
-    subscribe: &'a Subscribe,
-    facts: &'a subscribe::SubscribeFacts,
-    pending: &'a [(i32, crate::store::PendingDownload)],
-    history: &'a std::collections::HashMap<(Option<u32>, Option<u32>), crate::store::WantedHistory>,
-    ledger: &'a [domain::FileCoverage],
-    air_dates: &'a std::collections::HashMap<u32, Option<String>>,
-    target_score: i32,
-    target_label: &'a str,
-}
-
-pub(crate) fn wanted_json_with_air_dates(
-    store: &crate::Store,
-    media: &domain::Media,
-    subscribe: &Subscribe,
-    facts: &subscribe::SubscribeFacts,
-    air_dates: std::collections::HashMap<u32, Option<String>>,
-) -> Vec<Value> {
-    let pending = store.load_pending(subscribe.id).unwrap_or_default();
-    let history = store.load_wanted_history(subscribe.id).unwrap_or_default();
-    let (target_score, target_label) = wash_target(store, subscribe);
-    let ledger = store.file_coverage_for_media(media.id).unwrap_or_default();
-    let context = WantedUnitContext {
-        media,
-        subscribe,
-        facts,
-        pending: &pending,
-        history: &history,
-        ledger: &ledger,
-        air_dates: &air_dates,
-        target_score,
-        target_label: &target_label,
-    };
-    crate::open_coverage::units(
-        subscribe,
-        media,
-        facts,
-        &pending,
-        &history,
-        air_dates.keys().copied(),
-    )
-    .into_iter()
-    .map(|(season, episode)| wanted_unit_json(season, episode, &context))
-    .collect()
-}
-
-/// 一个 wanted 单元的详情 JSON（原 `wanted_json_with_air_dates` 的内联映射体，逐字搬移）。
-fn wanted_unit_json(
-    season: Option<u32>,
-    episode: Option<u32>,
-    context: &WantedUnitContext<'_>,
-) -> Value {
-    let fmt = crate::store::rfc3339_from_secs;
-    let fact = context.facts.get(season, episode);
-    let in_flight = context
-        .pending
-        .iter()
-        .any(|(_, p)| release_covers_unit(&p.torrent.title, season, episode));
-    let h = context
-        .history
-        .get(&(season, episode))
-        .cloned()
-        .unwrap_or_default();
-    let status = if fact.is_some() {
-        "imported"
-    } else if in_flight || h.grabbed_at.is_some() {
-        "grabbed"
-    } else {
-        "wanted"
-    };
-    let state = unit_wash_state(context.subscribe, fact, in_flight, context.target_score);
-    let current_label = current_coverage_label(context.ledger, context.subscribe, season, episode);
-    let upgrade = if status == "wanted" {
-        Value::Null
-    } else {
-        json!({
-            "active": state == "upgradable" || state == "in_flight",
-            "current_label": current_label,
-            "target_label": if context.target_label.is_empty() { Value::Null } else { json!(context.target_label) },
-            "search_attempts": h.search_attempts,
-            "indeterminate": state == "not_comparable",
-        })
-    };
-    let air_date = match (context.media.kind, episode) {
-        (domain::MediaKind::Tv, Some(ep)) => context.air_dates.get(&ep).cloned().flatten(),
-        _ => None,
-    };
-    let release_forecast = air_date
-        .as_deref()
-        .and_then(|date| forecast::forecast_for_unit(context.subscribe, context.pending, date))
-        .unwrap_or(Value::Null);
-    let resource_timing = wanted_unit_resource_timing(context.pending, season, episode, status);
-    let next_search = wanted_unit_next_search(context.subscribe, status, &air_date, &h);
-    json!({
-        "id": format!("{}-{}-{}", context.subscribe.id, season.unwrap_or(0), episode.unwrap_or(0)),
-        "season_number": season.unwrap_or(0) as i64,
-        "episode_number": episode.unwrap_or(0) as i64,
-        "status": status,
-        "air_date": air_date,
-        "priority": 0,
-        "next_search_at": next_search.map(fmt),
-        "search_attempts": h.search_attempts,
-        "last_search_at": h.last_search_at.map(fmt),
-        "release_forecast": release_forecast,
-        "resource_timing": resource_timing,
-        "grabbed_at": h.grabbed_at.map(fmt),
-        "downloaded_at": Value::Null,
-        "imported_at": h.imported_at.map(fmt),
-        "info_hash": Value::Null,
-        "last_reject_reason": h.last_reject_reason,
-        "grab_title": h.grab_title,
-        "upgrade": upgrade,
-    })
-}
-
-/// 该单元在文件覆盖视图里的现况标签（分辨率 + 编码）；无匹配覆盖时为 `None`。
-fn current_coverage_label(
-    ledger: &[domain::FileCoverage],
-    subscribe: &Subscribe,
-    season: Option<u32>,
-    episode: Option<u32>,
-) -> Option<String> {
-    ledger
-        .iter()
-        .find(|row| {
-            row.file.media_id == subscribe.media_id
-                && row.units.iter().any(|u| {
-                    u32::try_from(u.season).ok() == season
-                        && u32::try_from(u.episode).ok() == episode
-                })
-        })
-        .and_then(
-            |row| match (row.file.resolution.as_deref(), row.file.codec.as_deref()) {
-                (Some(r), Some(c)) => Some(format!("{r} {c}")),
-                (Some(r), None) => Some(r.to_string()),
-                (None, Some(c)) => Some(c.to_string()),
-                (None, None) => None,
-            },
-        )
-}
-
-/// `status == "grabbed"` 时的下载器投递时点快照；其余状态为 `null`。
-fn wanted_unit_resource_timing(
-    pending: &[(i32, crate::store::PendingDownload)],
-    season: Option<u32>,
-    episode: Option<u32>,
-    status: &str,
-) -> Value {
-    if status != "grabbed" {
-        return Value::Null;
-    }
-    let fmt = crate::store::rfc3339_from_secs;
-    pending
-        .iter()
-        .find(|(_, p)| release_covers_unit(&p.torrent.title, season, episode))
-        .map(|(_, p)| {
-            let publish_unix = p
-                .torrent
-                .upload_time
-                .as_deref()
-                .and_then(super::subscriptions::parse_upload_time);
-            let submitted = p.submitted_at;
-            json!({
-                "site_id": p.torrent.site_id.to_string(),
-                "torrent_id": p.torrent.id.clone(),
-                "publish_time": p.torrent.upload_time,
-                "first_seen_at": submitted.map(fmt),
-                "submitted_at": submitted.map(fmt),
-                "publish_to_seen_seconds": Value::Null,
-                "seen_to_submit_seconds": Value::Null,
-                "publish_to_submit_seconds": match (publish_unix, submitted) {
-                    (Some(publish), Some(submit)) if submit >= publish => {
-                        json!(submit - publish)
-                    }
-                    _ => Value::Null,
-                },
-                "dry_run": false,
-            })
-        })
-        .unwrap_or(Value::Null)
-}
-
-/// `status == "wanted"` 时的下次搜索时间戳；其余状态为 `None`。
-fn wanted_unit_next_search(
-    subscribe: &Subscribe,
-    status: &str,
-    air_date: &Option<String>,
-    h: &crate::store::WantedHistory,
-) -> Option<i64> {
-    let now = crate::job_loop::unix_now();
-    if status != "wanted" {
-        return None;
-    }
-    match air_date {
-        Some(date_str) => {
-            let today_str = crate::store::now_rfc3339();
-            let today = today_str.split('T').next().unwrap_or(&today_str);
-            if date_str.as_str() > today {
-                // 播出日在未来：到期日 = 播出日（按当天 0 点估算 unix 时间戳）
-                crate::http::subscriptions::parse_upload_time(date_str)
-            } else {
-                h.last_search_at
-                    .map(|ts| ts + subscribe.search_interval_secs as i64)
-                    .or(Some(now))
-            }
-        }
-        None => {
-            // 未定档但处于订阅周期搜索中：下次搜索 = 上次搜索 + 搜索间隔
-            h.last_search_at
-                .map(|ts| ts + subscribe.search_interval_secs as i64)
-                .or(Some(now))
-        }
     }
 }
 
@@ -490,199 +169,13 @@ fn filter_label(filter: &domain::Filter) -> String {
     }
 }
 
-pub(crate) async fn removal_preview(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Path(id): Path<String>,
-) -> Response {
-    let (subscribe, media) = match resolve_subscribe(&state, &id, user_id) {
-        Ok(pair) => pair,
-        Err(response) => return response,
-    };
-    let store = state.store.lock();
-    let ledger = store
-        .file_coverage_for_media(subscribe.media_id)
-        .unwrap_or_default();
-    // 读 shape 就是每文件一条 `FileCoverage`，不再投影回旧的 `(file × unit)` 行：
-    // `library_file_count` 因此是**文件数**（与 `file_delete::remove_rows` 的落地口径一致，
-    // preview 与 apply 必须同口径）。`library_bytes` 相应按文件路径累加一次；只有「同一
-    // 文件带多个 unit」时旧读数才会把同一 path 的大小重复累加，活库当前没有这种文件。
-    let files: Vec<&domain::FileCoverage> = ledger
-        .iter()
-        .filter(|coverage| coverage.file.media_id == subscribe.media_id)
-        .collect();
-    let bytes: u64 = files
-        .iter()
-        .map(|coverage| coverage.file.size_bytes.unwrap_or(0))
-        .sum();
-    // In-flight torrents this Subscribe is still waiting on.
-    let pending = store.load_pending(subscribe.id).unwrap_or_default();
-    let mut torrent_titles: Vec<String> = pending
-        .iter()
-        .map(|(_, p)| p.torrent.title.clone())
-        .collect();
-
-    // 如果 pending 中由于误判等原因已空，尝试从下载器快照中兜底匹配属于本订阅媒体的任务
-    // D-L3: such matches are inferred by title only and flagged as such.
-    let torrents_inferred = torrent_titles.is_empty();
-    if torrents_inferred {
-        drop(store);
-        match state.downloader.task_snapshots() {
-            Ok(snapshots) => {
-                tracing::info!(
-                    snapshots_len = snapshots.len(),
-                    "检查下载器快照以兜底匹配订阅任务"
-                );
-                for s in snapshots {
-                    tracing::debug!(snapshot_name = %s.name, snapshot_tag = %s.tag, "下载器快照");
-                    if !s.tag.is_empty()
-                        && (downloader::names_match(&s.name, &media.title)
-                            || media
-                                .original_title
-                                .as_deref()
-                                .is_some_and(|orig| downloader::names_match(&s.name, orig)))
-                    {
-                        torrent_titles.push(s.name);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "获取下载器任务快照失败");
-            }
-        }
-    } else {
-        drop(store);
-    }
-
-    let torrent_count = torrent_titles.len();
-    ok(json!({
-        "library_file_count": files.len(),
-        "library_bytes": bytes,
-        "torrent_count": torrent_count,
-        "torrent_count_inferred": torrents_inferred && torrent_count > 0,
-        "torrent_titles": torrent_titles,
-    }))
-    .into_response()
-}
-
 #[derive(Deserialize)]
 
 pub(crate) struct SeasonCleanupInput {
     #[serde(default)]
-    seasons: Vec<u32>,
+    pub(super) seasons: Vec<u32>,
     #[serde(default)]
-    delete_torrents: bool,
+    pub(super) delete_torrents: bool,
     #[serde(default)]
-    delete_library_files: bool,
-}
-
-pub(crate) async fn season_cleanup(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Path(id): Path<String>,
-    Json(body): Json<SeasonCleanupInput>,
-) -> Response {
-    let (subscribe, _media) = match resolve_subscribe(&state, &id, user_id) {
-        Ok(pair) => pair,
-        Err(response) => return response,
-    };
-    if body.seasons.is_empty() {
-        return ok(json!({ "queued": true, "binned": 0, "pending_cleared": 0 })).into_response();
-    }
-    let (rows, pending) = {
-        let store = state.store.lock();
-        if (body.delete_library_files || body.delete_torrents) && !user_is_admin(&store, user_id) {
-            return err(
-                StatusCode::FORBIDDEN,
-                "subscription.cleanup_forbidden",
-                "只有管理员可以联动清理下载任务或媒体库文件",
-            );
-        }
-        let rows = if body.delete_library_files {
-            store
-                .file_coverage_for_media(subscribe.media_id)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|coverage| {
-                    coverage.units.iter().any(|unit| {
-                        !unit.is_whole() && body.seasons.contains(&(unit.season as u32))
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let pending = if body.delete_torrents {
-            let mut pending = match store.load_pending(subscribe.id) {
-                Ok(p) => p,
-                Err(error) => {
-                    tracing::error!(%error, subscribe_id = %subscribe.id, "读取在途下载任务失败");
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &error.to_string(),
-                    );
-                }
-            };
-            match store.load_pending_state(subscribe.id, "imported") {
-                Ok(imported) => pending.extend(imported),
-                Err(error) => {
-                    tracing::error!(%error, subscribe_id = %subscribe.id, "读取已入库下载任务失败");
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &error.to_string(),
-                    );
-                }
-            }
-            pending
-        } else {
-            Vec::new()
-        };
-        (rows, pending)
-    };
-    let (binned, file_errors) = crate::http::file_delete::remove_rows(&state, rows).await;
-    if !file_errors.is_empty() {
-        return err(
-            StatusCode::CONFLICT,
-            "subscription.file_cleanup_failed",
-            &file_errors.join("；"),
-        );
-    }
-
-    let subscribe_id = subscribe.id;
-    let selected: Vec<_> = pending
-        .into_iter()
-        .filter_map(|(_, pending)| {
-            let season = pending
-                .release_override
-                .as_ref()
-                .and_then(|release| release.season)
-                .or_else(|| release::parse(&pending.torrent.title).season);
-            season
-                .is_some_and(|season| body.seasons.contains(&season))
-                .then_some(super::subscriptions::TorrentRemovalTarget {
-                    subscribe_id,
-                    torrent: pending.torrent,
-                    downloader_id: pending.downloader_id,
-                })
-        })
-        .collect();
-    let (removed, pending_cleared, torrent_errors) =
-        remove_torrents_from_client(&state, selected).await;
-    if !torrent_errors.is_empty() {
-        return err(
-            StatusCode::BAD_GATEWAY,
-            "subscription.downloader_cleanup_failed",
-            &torrent_errors.join("；"),
-        );
-    }
-    ok(json!({
-        "queued": true,
-        "binned": binned,
-        "file_errors": [],
-        "pending_cleared": pending_cleared,
-        "removed_from_client": removed.len(),
-    }))
-    .into_response()
+    pub(super) delete_library_files: bool,
 }

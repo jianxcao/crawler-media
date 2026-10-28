@@ -324,3 +324,89 @@ async fn jellyfin_busy_maps_to_503_not_401() {
     gate.release();
     assert_eq!(first.await.unwrap().status(), StatusCode::OK);
 }
+
+struct ImmediateEngine;
+impl PasswordEngine for ImmediateEngine {
+    fn verify(&self, _: &str, _: &str) -> bool {
+        true
+    }
+}
+
+#[test]
+fn both_password_protocols_keep_executor_responsive_while_waiting_for_store() {
+    for protocol in [Protocol::Rest, Protocol::Jellyfin] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _, _) = setup(tmp.path(), Arc::new(Gate::new()), 1);
+        let state =
+            state.with_password_login(Arc::new(PasswordLogin::new(Arc::new(ImmediateEngine), 1)));
+        let store = state.store();
+        let app = router(state);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held = std::thread::spawn(move || {
+            let _guard = store.lock();
+            tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (response, elapsed) = runtime.block_on(async {
+            let started = std::time::Instant::now();
+            tokio::join!(
+                app.oneshot(login_request(protocol, "member", "original-secret")),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    started.elapsed()
+                }
+            )
+        });
+        held.join().unwrap();
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "{protocol:?} blocked timer: {elapsed:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_password_protocols_recheck_write_admission_after_verification() {
+    for protocol in [Protocol::Rest, Protocol::Jellyfin] {
+        for maintenance in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let gate = Arc::new(Gate::new());
+            let (state, app, member) = setup(tmp.path(), gate.clone(), 1);
+            let login = tokio::spawn(async move {
+                app.oneshot(login_request(protocol, "member", "original-secret"))
+                    .await
+                    .unwrap()
+            });
+            gate.wait_entered();
+            let write_gate = state.write_gate();
+            let closed = if maintenance {
+                Some(write_gate.close())
+            } else {
+                let _ = state.clone().with_instance_writable(false);
+                None
+            };
+            gate.release();
+            let response = login.await.unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                if maintenance { 503 } else { 409 },
+                "{protocol:?}"
+            );
+            assert!(
+                state
+                    .store()
+                    .lock()
+                    .latest_token_for_user(member)
+                    .unwrap()
+                    .is_none()
+            );
+            drop(closed);
+        }
+    }
+}

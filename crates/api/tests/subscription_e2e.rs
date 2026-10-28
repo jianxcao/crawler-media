@@ -114,3 +114,6 @@ pub(crate) fn is_video(path: &std::path::Path) -> bool {
         Some("mkv" | "mp4" | "avi" | "ts" | "m2ts")
     )
 }
+
+#[path = "subscription_e2e/m6_deletion_source_cas.rs"]
+mod m6_deletion_source_cas;

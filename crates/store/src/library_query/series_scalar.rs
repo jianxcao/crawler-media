@@ -58,6 +58,8 @@ pub(crate) fn series_scalar_on(
         }
         _ => String::new(),
     };
+    // Separate full-key seeks prevent an unanalysed database from scanning all
+    // of this User/Media's assertions once for every owned episode.
     let sql = format!(
         "WITH scoped_files AS (
                SELECT f.file_id, f.created_ns FROM library_files f
@@ -73,12 +75,20 @@ pub(crate) fn series_scalar_on(
                WHERE u.season>=0 AND u.episode>=0
              ), marks AS (
                SELECT o.season,o.episode,
-                 (SELECT p.played FROM playback_units p
-                  WHERE p.user_id=?1 AND p.media_id=?2 AND
-                    ((p.season=o.season AND p.episode=o.episode) OR
-                     (p.season=o.season AND p.episode=-1) OR
-                     (p.season=-1 AND p.episode=-1)) AND p.has_played_assertion=1
-                  ORDER BY p.played_changed_at_ms DESC, p.season DESC, p.episode DESC
+                 (SELECT candidate.played FROM (
+                    SELECT p.played,p.played_changed_at_ms,p.season,p.episode
+                    FROM playback_units p WHERE p.user_id=?1 AND p.media_id=?2
+                      AND p.season=o.season AND p.episode=o.episode AND p.has_played_assertion=1
+                    UNION ALL
+                    SELECT p.played,p.played_changed_at_ms,p.season,p.episode
+                    FROM playback_units p WHERE p.user_id=?1 AND p.media_id=?2
+                      AND p.season=o.season AND p.episode=-1 AND p.has_played_assertion=1
+                    UNION ALL
+                    SELECT p.played,p.played_changed_at_ms,p.season,p.episode
+                    FROM playback_units p WHERE p.user_id=?1 AND p.media_id=?2
+                      AND p.season=-1 AND p.episode=-1 AND p.has_played_assertion=1
+                  ) candidate
+                  ORDER BY candidate.played_changed_at_ms DESC, candidate.season DESC, candidate.episode DESC
                   LIMIT 1) AS asserted,
                  (SELECT p.played FROM playback_units p WHERE p.user_id=?1 AND p.media_id=?2
                   AND p.season=o.season AND p.episode=o.episode) AS own

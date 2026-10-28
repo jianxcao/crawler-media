@@ -56,23 +56,39 @@ pub(crate) async fn preview(
         Ok(kind) => kind,
         Err(response) => return response,
     };
-    let snapshot = match load_snapshot(&state, kind, body.downloader_id.as_deref()) {
-        Ok(snapshot) => snapshot,
-        Err(response) => return response,
+    let downloader = body.downloader_id.clone();
+    let snapshot = match super::store_wait::store_read(&state, move |store| {
+        load_snapshot(store, kind, downloader.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
-    let meta = match_metadata(
-        &state,
-        kind,
-        body.library_id.as_deref(),
-        body.tmdb_id.as_deref(),
-    );
-    let (library, route_matched, route_reason) = select_library(
-        &snapshot.libraries,
-        kind,
-        body.library_id.as_deref(),
-        meta.as_ref(),
-    );
-    render_preview(kind, &body, &snapshot, library, route_matched, route_reason)
+    let worker = state.clone();
+    match state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            let meta = match_metadata(
+                &worker,
+                kind,
+                body.library_id.as_deref(),
+                body.tmdb_id.as_deref(),
+            );
+            let (library, matched, reason) = select_library(
+                &snapshot.libraries,
+                kind,
+                body.library_id.as_deref(),
+                meta.as_ref(),
+            );
+            render_preview(kind, &body, &snapshot, library, matched, reason)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => super::library::browse_work_error(error),
+    }
 }
 
 fn parse_preview_kind(kind: &str) -> Result<MediaKind, Response> {
@@ -89,11 +105,10 @@ fn parse_preview_kind(kind: &str) -> Result<MediaKind, Response> {
 /// 一次锁快照后续渲染所需的库/下载器/命名/监听配置，再释放。
 /// metadata IO 必须在锁外，否则 scrape 配置会再次 `store.lock()` 自锁。
 fn load_snapshot(
-    state: &ApiState,
+    store: &crate::Store,
     kind: MediaKind,
     downloader_id: Option<&str>,
 ) -> Result<RoutingSnapshot, Response> {
-    let store = state.store.lock();
     let libraries = match store.list_libraries() {
         Ok(list) => list,
         Err(error) => {
@@ -150,9 +165,9 @@ fn select_library<'a>(
             .iter()
             .filter(|lib| lib.kind == kind && !lib.match_rules.is_empty())
             .find_map(|lib| library_match_reason(lib, meta).map(|reason| (lib, reason)))
-        {
-            return (Some(library), true, Some(reason));
-        }
+    {
+        return (Some(library), true, Some(reason));
+    }
     (
         libraries
             .iter()

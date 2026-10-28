@@ -21,50 +21,53 @@ pub(crate) fn mask_proxy_url(url: &str) -> String {
 
 /// GET /settings/proxy — Read current metadata proxy configuration.
 pub(crate) async fn get_proxy(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let proxy_url = store
-        .get_setting(settings_keys::PROXY_METADATA)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let username = store
-        .get_setting(settings_keys::PROXY_USERNAME)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let has_password = store
-        .get_setting(settings_keys::PROXY_PASSWORD)
-        .ok()
-        .flatten()
-        .is_some_and(|p| !p.is_empty());
-    let douban_bypass = store
-        .get_setting(settings_keys::PROXY_DOUBAN_BYPASS)
-        .ok()
-        .flatten()
-        .and_then(|v| crate::config::parse_bool(&v))
-        .unwrap_or(true);
-    let allowed_domains = store
-        .get_setting(settings_keys::PROXY_ALLOWED_DOMAINS)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    // 非空才算 override，且与 http_agent 用同一组 env 变量（空串不生效）。
-    let env_override = crate::config::proxy_env(&crate::config::ProcessEnv)
-        .url
-        .is_some();
+    super::store_wait::store_read(&state, move |store| {
+        let proxy_url = store
+            .get_setting(settings_keys::PROXY_METADATA)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let username = store
+            .get_setting(settings_keys::PROXY_USERNAME)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let has_password = store
+            .get_setting(settings_keys::PROXY_PASSWORD)
+            .ok()
+            .flatten()
+            .is_some_and(|p| !p.is_empty());
+        let douban_bypass = store
+            .get_setting(settings_keys::PROXY_DOUBAN_BYPASS)
+            .ok()
+            .flatten()
+            .and_then(|v| crate::config::parse_bool(&v))
+            .unwrap_or(true);
+        let allowed_domains = store
+            .get_setting(settings_keys::PROXY_ALLOWED_DOMAINS)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        // 非空才算 override，且与 http_agent 用同一组 env 变量（空串不生效）。
+        let env_override = crate::config::proxy_env(&crate::config::ProcessEnv)
+            .url
+            .is_some();
 
-    let active_masked = crate::http_agent::current_proxy().map(|p| mask_proxy_url(&p));
+        let active_masked = crate::http_agent::current_proxy().map(|p| mask_proxy_url(&p));
 
-    ok(json!({
-        "proxy_url": proxy_url,
-        "username": username,
-        "has_password": has_password,
-        "douban_bypass": douban_bypass,
-        "allowed_domains": allowed_domains,
-        "active_proxy": active_masked,
-        "env_override": env_override,
-    }))
-    .into_response()
+        ok(json!({
+            "proxy_url": proxy_url,
+            "username": username,
+            "has_password": has_password,
+            "douban_bypass": douban_bypass,
+            "allowed_domains": allowed_domains,
+            "active_proxy": active_masked,
+            "env_override": env_override,
+        }))
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 /// PUT /settings/proxy — Save metadata proxy configuration and reload immediately.
@@ -78,48 +81,14 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
         ("password", settings_keys::PROXY_PASSWORD),
     ] {
         if body[field].as_str().is_some()
-            && let Some(message) = crate::config::env_pinned_message(key) {
-                return err(StatusCode::CONFLICT, "settings.env_pinned", &message);
-            }
-    }
-    let store = state.store.lock();
-    if let Some(proxy_url) = body["proxy_url"].as_str()
-        && let Err(error) = store.put_setting(settings_keys::PROXY_METADATA, proxy_url.trim()) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    if let Some(username) = body["username"].as_str()
-        && let Err(error) = store.put_setting(settings_keys::PROXY_USERNAME, username.trim()) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    if let Some(password) = body["password"].as_str()
-        && let Err(error) = store.put_setting(settings_keys::PROXY_PASSWORD, password.trim()) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    if let Some(douban_bypass) = body["douban_bypass"].as_bool() {
-        let val_str = if douban_bypass { "true" } else { "false" };
-        if let Err(error) = store.put_setting(settings_keys::PROXY_DOUBAN_BYPASS, val_str) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+            && let Some(message) = crate::config::env_pinned_message(key)
+        {
+            return err(StatusCode::CONFLICT, "settings.env_pinned", &message);
         }
     }
-    if let Some(allowed_domains) = body["allowed_domains"].as_str()
-        && let Err(error) =
-            store.put_setting(settings_keys::PROXY_ALLOWED_DOMAINS, allowed_domains.trim())
+    super::store_wait::store_write(&state, move |store| {
+        if let Some(proxy_url) = body["proxy_url"].as_str()
+            && let Err(error) = store.put_setting(settings_keys::PROXY_METADATA, proxy_url.trim())
         {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -127,40 +96,81 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
                 &error.to_string(),
             );
         }
-    crate::http_agent::sync_from_store(&store);
+        if let Some(username) = body["username"].as_str()
+            && let Err(error) = store.put_setting(settings_keys::PROXY_USERNAME, username.trim())
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        if let Some(password) = body["password"].as_str()
+            && let Err(error) = store.put_setting(settings_keys::PROXY_PASSWORD, password.trim())
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        if let Some(douban_bypass) = body["douban_bypass"].as_bool() {
+            let val_str = if douban_bypass { "true" } else { "false" };
+            if let Err(error) = store.put_setting(settings_keys::PROXY_DOUBAN_BYPASS, val_str) {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        }
+        if let Some(allowed_domains) = body["allowed_domains"].as_str()
+            && let Err(error) =
+                store.put_setting(settings_keys::PROXY_ALLOWED_DOMAINS, allowed_domains.trim())
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        crate::http_agent::sync_from_store(&store);
 
-    let proxy_url = store
-        .get_setting(settings_keys::PROXY_METADATA)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let username = store
-        .get_setting(settings_keys::PROXY_USERNAME)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let has_password = store
-        .get_setting(settings_keys::PROXY_PASSWORD)
-        .ok()
-        .flatten()
-        .is_some_and(|p| !p.is_empty());
-    let douban_bypass = store
-        .get_setting(settings_keys::PROXY_DOUBAN_BYPASS)
-        .ok()
-        .flatten()
-        .and_then(|v| crate::config::parse_bool(&v))
-        .unwrap_or(true);
+        let proxy_url = store
+            .get_setting(settings_keys::PROXY_METADATA)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let username = store
+            .get_setting(settings_keys::PROXY_USERNAME)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let has_password = store
+            .get_setting(settings_keys::PROXY_PASSWORD)
+            .ok()
+            .flatten()
+            .is_some_and(|p| !p.is_empty());
+        let douban_bypass = store
+            .get_setting(settings_keys::PROXY_DOUBAN_BYPASS)
+            .ok()
+            .flatten()
+            .and_then(|v| crate::config::parse_bool(&v))
+            .unwrap_or(true);
 
-    let active_masked = crate::http_agent::current_proxy().map(|p| mask_proxy_url(&p));
+        let active_masked = crate::http_agent::current_proxy().map(|p| mask_proxy_url(&p));
 
-    ok(json!({
-        "proxy_url": proxy_url,
-        "username": username,
-        "has_password": has_password,
-        "douban_bypass": douban_bypass,
-        "active_proxy": active_masked,
-    }))
-    .into_response()
+        ok(json!({
+            "proxy_url": proxy_url,
+            "username": username,
+            "has_password": has_password,
+            "douban_bypass": douban_bypass,
+            "active_proxy": active_masked,
+        }))
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error)
 }
 
 /// POST /settings/proxy/test — Probe connection through specified proxy.
@@ -227,18 +237,23 @@ pub(crate) async fn test_proxy(
 
 /// POST /settings/proxy/diagnose — Check routing and connectivity for all major metadata domains.
 pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
-    let (active_proxy, douban_bypass, tmdb_key) = {
-        let store = state.store.lock();
-        let key = store
-            .get_setting(settings_keys::TMDB_API_KEY)
-            .ok()
-            .flatten();
-        (
-            crate::http_agent::current_proxy(),
-            crate::http_agent::douban_bypass(),
-            key,
-        )
-    };
+    let (active_proxy, douban_bypass, tmdb_key) =
+        match super::store_wait::store_read(&state, |store| {
+            let key = store
+                .get_setting(settings_keys::TMDB_API_KEY)
+                .ok()
+                .flatten();
+            (
+                crate::http_agent::current_proxy(),
+                crate::http_agent::douban_bypass(),
+                key,
+            )
+        })
+        .await
+        {
+            Ok(config) => config,
+            Err(error) => return error.response(),
+        };
 
     let targets = build_diagnose_targets(tmdb_key.as_deref());
     let mut set = tokio::task::JoinSet::new();
@@ -260,7 +275,10 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
             "直连 (未配置代理)".to_string()
         };
 
-        set.spawn(async move { run_single_probe(target, proxy, is_proxied, route_label).await });
+        let budget = state.http_work.clone();
+        set.spawn(
+            async move { run_single_probe(budget, target, proxy, is_proxied, route_label).await },
+        );
     }
 
     let mut results = Vec::new();
@@ -358,6 +376,7 @@ fn build_diagnose_targets(tmdb_key: Option<&str>) -> Vec<TargetProbe> {
 }
 
 async fn run_single_probe(
+    budget: std::sync::Arc<crate::blocking_budget::BlockingBudget>,
     target: TargetProbe,
     proxy: Option<String>,
     is_proxied: bool,
@@ -367,26 +386,27 @@ async fn run_single_probe(
     let probe_url = target.probe_url.to_string();
     let proxy_for_block = proxy;
 
-    let probe_res = tokio::task::spawn_blocking(move || {
-        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
-            match target.method {
-                ProbeMethod::Get { ua, referer } => {
-                    let mut req = agent.get(&probe_url).header("User-Agent", ua);
-                    if let Some(ref_val) = referer {
-                        req = req.header("Referer", ref_val);
+    let probe_res = budget
+        .run(super::library::BROWSE_DEADLINE, move || {
+            crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
+                match target.method {
+                    ProbeMethod::Get { ua, referer } => {
+                        let mut req = agent.get(&probe_url).header("User-Agent", ua);
+                        if let Some(ref_val) = referer {
+                            req = req.header("Referer", ref_val);
+                        }
+                        req.call()
                     }
-                    req.call()
+                    ProbeMethod::PostJson { ua, body } => agent
+                        .post(&probe_url)
+                        .header("User-Agent", ua)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .send(body),
                 }
-                ProbeMethod::PostJson { ua, body } => agent
-                    .post(&probe_url)
-                    .header("User-Agent", ua)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .send(body),
-            }
+            })
         })
-    })
-    .await;
+        .await;
 
     let latency_ms = started.elapsed().as_millis() as i64;
     let (ok, error) = match probe_res {

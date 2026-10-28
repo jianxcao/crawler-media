@@ -159,9 +159,7 @@ impl ProbeManager {
                 // A marker refresh publishes one atomic season snapshot: losing any member
                 // retires the whole snapshot, exactly like the removed-library repair.
                 let result = if kind.as_deref() == Some("marker_refresh") {
-                    self.store
-                        .lock()
-                        .cancel_probe_job(job_id, "file_missing")
+                    self.store.lock().cancel_probe_job(job_id, "file_missing")
                 } else {
                     self.store
                         .lock()

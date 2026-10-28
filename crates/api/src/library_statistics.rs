@@ -36,30 +36,24 @@ pub(crate) async fn collect_statistics_for_roster(
     roster: &[Library],
     _is_admin: bool,
 ) -> Result<HashMap<String, LibraryStatistics>, Response> {
-    let mut map = HashMap::new();
-    let store = state.store.lock();
-
-    for lib in roster {
-        let stats = store.library_roster_stats(&lib.id).map_err(|e| {
-            crate::http::err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &e.to_string(),
-            )
-        })?;
-
-        map.insert(
-            lib.id.clone(),
-            LibraryStatistics {
-                item_count: stats.item_count,
-                file_count: stats.file_count,
-                total_size_bytes: stats.total_size_bytes,
-                strm_file_count: stats.strm_file_count,
-                refreshed_at_ms: 0,
-                stale: false,
-            },
-        );
-    }
-
-    Ok(map)
+    let roster = roster.to_vec();
+    crate::http::store_wait::store_read(&state, move |store| {
+        roster
+            .into_iter()
+            .map(|library| {
+                statistics_for(store, &library)
+                    .map(|stats| (library.id, stats))
+                    .map_err(|error| {
+                        tracing::error!(%error, "Library roster statistics failed");
+                        crate::http::err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "store.error",
+                            &error.to_string(),
+                        )
+                    })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| error.response())?
 }

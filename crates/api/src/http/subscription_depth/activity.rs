@@ -15,6 +15,25 @@ pub(crate) async fn activities(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            activities_blocking(worker, user_id, id, query)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => crate::http::library::browse_work_error(error),
+    }
+}
+
+fn activities_blocking(
+    state: ApiState,
+    user_id: domain::UserId,
+    id: String,
+    query: HashMap<String, String>,
+) -> Response {
     let (subscribe, _media) = match resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,
@@ -23,12 +42,31 @@ pub(crate) async fn activities(
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
-    let jobs = state
-        .jobs
-        .lock()
-        .jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit);
-    let store = state.store.lock();
-    let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+    let jobs = {
+        let Some(queue) = state
+            .jobs
+            .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+        else {
+            return crate::http::store_wait::busy_response();
+        };
+        queue.jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit)
+    };
+    let Some(store) = state
+        .store
+        .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+    else {
+        return crate::http::store_wait::busy_response();
+    };
+    let facts_count = store
+        .load_subscribe_facts(subscribe.id)
+        .unwrap_or_default()
+        .entries()
+        .count();
+    let created = store
+        .subscribe_times(subscribe.id)
+        .map(|(created, _)| created)
+        .unwrap_or_default();
+    drop(store);
     let fmt = crate::store::rfc3339_from_secs;
     let mut items: Vec<Value> = jobs
         .iter()
@@ -63,11 +101,6 @@ pub(crate) async fn activities(
         })
         .collect();
     // 最近一次入库事实也作为一条 imported 活动（facts 是权威来源，job 记录可能缺）。
-    let created = store
-        .subscribe_times(subscribe.id)
-        .map(|(c, _)| c)
-        .unwrap_or_default();
-    let facts_count = facts.entries().count();
     if facts_count > 0 {
         items.push(json!({
             "id": format!("facts-{}", subscribe.id),

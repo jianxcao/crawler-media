@@ -54,10 +54,11 @@ pub(crate) async fn clear_logs(State(state): State<ApiState>) -> Response {
 /// 目录选择放在 blocking 线程（保持既有「最新日志文件 + 缓冲回退」语义），
 /// 命中的文件用流式读取返回，不再把整个文件读进内存。
 pub(crate) async fn export_logs(State(state): State<ApiState>) -> Response {
-    let data_dir = {
-        let store = state.store.lock();
-        store.data_dir().to_path_buf()
-    };
+    let data_dir =
+        match super::store_wait::store_read(&state, |store| store.data_dir().to_path_buf()).await {
+            Ok(path) => path,
+            Err(error) => return error.response(),
+        };
     let logs_dir = data_dir.join("logs");
     let selected = tokio::task::spawn_blocking(move || latest_log_file(&logs_dir))
         .await

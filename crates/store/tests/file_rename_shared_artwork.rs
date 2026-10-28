@@ -433,3 +433,90 @@ fn failed_rename_waits_for_its_retry_time_in_seconds() {
         vec![req.rename_id.clone()]
     );
 }
+
+#[test]
+fn failed_leftover_enqueue_keeps_rename_resumable_until_all_sidecars_are_queued() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    for name in ["poster.jpg", "fanart.jpg"] {
+        std::fs::write(src.join(name), b"same").unwrap();
+        std::fs::write(dest.join(name), b"same").unwrap();
+    }
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    let receipt = execute(&fx, &req.rename_id);
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+    let db = rusqlite::Connection::open(fx._tmp.path().join("data/library.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_leftover_enqueue BEFORE INSERT ON pending_file_deletions
+         WHEN NEW.path LIKE '%fanart.jpg'
+         BEGIN SELECT RAISE(ABORT, 'injected sidecar enqueue failure'); END;",
+    )
+    .unwrap();
+    let result = fx.store.complete_file_rename(&req.rename_id, 3);
+    assert!(
+        result.is_err(),
+        "failed durable enqueue was acknowledged: {result:?}"
+    );
+    let pending = fx.store.load_file_rename(&req.rename_id).unwrap();
+    assert_eq!(pending.phase, "references_applied");
+    assert!(src.join("poster.jpg").is_file());
+    assert!(src.join("fanart.jpg").is_file());
+    assert!(fx.store.list_due_file_rename_ids(3).unwrap().is_empty());
+
+    db.execute_batch("DROP TRIGGER fail_leftover_enqueue")
+        .unwrap();
+    assert_eq!(fx.store.resume_pending_file_renames(100).unwrap(), 1);
+    assert!(fx.store.load_file_rename(&req.rename_id).is_err());
+    let queued = fx.store.list_pending_file_deletions().unwrap();
+    for name in ["poster.jpg", "fanart.jpg"] {
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|path| **path == src.join(name).to_string_lossy())
+                .count(),
+            1
+        );
+    }
+    let moved = fx.store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(moved.file.path, dest.join("S01E01.mkv"));
+}
+
+#[test]
+fn synchronous_rename_failure_becomes_due_in_unix_seconds() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let dest = fx.a.join("Renamed Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    for directory in [&src, &dest] {
+        std::fs::write(directory.join("fanart.jpg"), b"same").unwrap();
+    }
+    let db = rusqlite::Connection::open(fx._tmp.path().join("data/library.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_sync_leftover BEFORE INSERT ON pending_file_deletions
+         BEGIN SELECT RAISE(ABORT, 'injected sidecar enqueue failure'); END;",
+    )
+    .unwrap();
+    let result = fx.store.rename_file_within_root(
+        file.file_id,
+        &file.version,
+        &file.path,
+        &dest.join("S01E01.mkv"),
+    );
+    assert!(result.is_err(), "{result:?}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!(fx.store.list_due_file_rename_ids(now).unwrap().is_empty());
+    assert_eq!(
+        fx.store.list_due_file_rename_ids(now + 120).unwrap().len(),
+        1
+    );
+    db.execute_batch("DROP TRIGGER fail_sync_leftover").unwrap();
+    assert_eq!(fx.store.resume_pending_file_renames(now + 120).unwrap(), 1);
+    assert_eq!(fx.store.list_pending_file_deletions().unwrap().len(), 1);
+}

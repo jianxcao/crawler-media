@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, thiserror::Error)]
 pub enum BlockingError {
     #[error("blocking capacity exhausted")]
@@ -44,6 +47,18 @@ impl BlockingBudget {
             .try_acquire_owned()
             .map(|permit| Reservation { permit })
             .map_err(|_| BlockingError::Busy)
+    }
+
+    /// Await capacity without parking a runtime worker. Native image requests
+    /// arrive in bursts and should queue briefly instead of losing most images
+    /// to immediate 503s. Dropping this future cancels its semaphore wait; an
+    /// acquired reservation must be moved into the actual blocking worker.
+    pub async fn reserve(&self, wait: Duration) -> Result<Reservation, BlockingError> {
+        match tokio::time::timeout(wait, self.permits.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(Reservation { permit }),
+            Ok(Err(_)) => Err(BlockingError::Busy),
+            Err(_) => Err(BlockingError::Timeout),
+        }
     }
 
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。

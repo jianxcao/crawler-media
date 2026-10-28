@@ -3,6 +3,26 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 
+/// A password prepared off the Store lock. No Debug/Serialize: it carries PHC
+/// material plus an ephemeral digest used only to compare the current CLI token.
+pub struct PreparedPassword {
+    pub(crate) encoded: String,
+    candidate_digest: [u8; 32],
+}
+impl PreparedPassword {
+    pub fn new(password: &str) -> Result<Self, String> {
+        use sha2::{Digest, Sha256};
+        Ok(Self {
+            encoded: hash_password(password)?,
+            candidate_digest: Sha256::digest(password.as_bytes()).into(),
+        })
+    }
+    pub(crate) fn matches(&self, value: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        self.candidate_digest == <[u8; 32]>::from(Sha256::digest(value.as_bytes()))
+    }
+}
+
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

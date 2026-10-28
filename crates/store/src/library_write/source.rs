@@ -60,18 +60,19 @@ impl Store {
         ensure_config_revision(&tx, scope)?;
 
         let file_id_str = file_id.to_string();
-        let current: Option<(String, String, i64, String)> = tx
+        let current: Option<(String, String, i64, String, String)> = tx
             .query_row(
-                "SELECT library_id, media_id, file_revision, source_version
+                "SELECT library_id, media_id, file_revision, source_version, path_key
                  FROM library_files WHERE file_id = ?1",
                 params![file_id_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
 
-        let Some((lib_id, media_id_str, cur_rev, cur_source)) = current else {
+        let Some((lib_id, media_id_str, cur_rev, cur_source, path_key)) = current else {
             return Err(StoreError::Missing(format!("file {file_id_str}")));
         };
+        crate::pending_file_deletions::ensure_path_not_pending_deletion(&tx, &path_key)?;
 
         if lib_id != scope.library_id.to_string() {
             return Err(StoreError::Invalid(

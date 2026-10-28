@@ -37,7 +37,8 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let unavailable = self.status == StatusCode::SERVICE_UNAVAILABLE;
+        let mut response = (
             self.status,
             Json(json!({
                 "ok": false,
@@ -47,7 +48,14 @@ impl IntoResponse for ApiError {
                 }
             })),
         )
-            .into_response()
+            .into_response();
+        if unavailable {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 

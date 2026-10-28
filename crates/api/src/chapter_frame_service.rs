@@ -253,10 +253,12 @@ impl ChapterFrameService {
             inner.running = 0;
         }
         self.started.store(false, Ordering::SeqCst);
-        self.store
-            .lock()
-            .recover_chapter_frame_tasks()
-            .map_err(|error| error.to_string())?;
+        crate::http::store_wait::store_blocking(self.store.clone(), |store| {
+            store.recover_chapter_frame_tasks()
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 

@@ -535,7 +535,21 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         }
         Err(_) => return owns_running,
     };
-    let outcome = probe::probe_fingerprint_detailed(&manager, &work).await;
+    // The full-window and adaptive pipelines include synchronous source reads
+    // and SQL between awaits. Drive the whole future on one bounded worker;
+    // the permit stays with it until its final publication has really finished.
+    let runtime = tokio::runtime::Handle::current();
+    let outcome = match step(manager, move |manager| {
+        runtime.block_on(probe::probe_fingerprint_detailed(manager, &work))
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(%error, "声纹流水线 worker 失败，保留持久单元供重试");
+            return owns_running;
+        }
+    };
     let _ = step(&manager, move |manager| {
         if !source_ready(manager, &unit) {
             return;
@@ -717,3 +731,7 @@ fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "worker_runtime_tests.rs"]
+mod runtime_tests;

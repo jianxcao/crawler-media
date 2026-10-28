@@ -1,5 +1,8 @@
 use axum::Json;
 use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+
+mod delivery;
 use domain::SubscribeId;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -84,12 +87,38 @@ fn load_admit_context(
 pub async fn admit_torrent(
     State(state): State<ApiState>,
     Json(body): Json<AdmitBody>,
-) -> Result<Json<Value>, ApiError> {
-    let subscribe_id = body
-        .subscribe_id
-        .parse::<SubscribeId>()
-        .map_err(|_| ApiError::invalid("subscribe.invalid", "invalid Subscribe id".into()))?;
-    let (subscribe, media, filter, sites) = load_admit_context(&state.store.lock(), subscribe_id)?;
+) -> Result<Json<Value>, Response> {
+    let budget = state.http_work.clone();
+    budget
+        .run_to_completion(move || admit_blocking(state, body))
+        .await
+        .map_err(|error| match error {
+            crate::blocking_budget::BlockingError::Busy => crate::http::store_wait::busy_response(),
+            error => {
+                tracing::error!(%error, "Manual Torrent admission worker failed");
+                ApiError::internal(error.to_string()).into_response()
+            }
+        })?
+}
+
+fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Response> {
+    let subscribe_id = body.subscribe_id.parse::<SubscribeId>().map_err(|_| {
+        ApiError::invalid("subscribe.invalid", "invalid Subscribe id".into()).into_response()
+    })?;
+    let guard = state.subscribe_guard(subscribe_id);
+    let Some(_lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        return Err(crate::http::store_wait::busy_response());
+    };
+    if state.subscribe_is_deleting(subscribe_id) {
+        return Err(ApiError::with(
+            axum::http::StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除".into(),
+        )
+        .into_response());
+    }
+    let (subscribe, media, filter, sites) =
+        admitted_store(&state, |store| load_admit_context(store, subscribe_id))?;
     let keyword = media
         .original_title
         .as_deref()
@@ -100,10 +129,9 @@ pub async fn admit_torrent(
         .into_iter()
         .find(|torrent| torrent.enclosure == body.enclosure)
     else {
-        return Err(ApiError::invalid(
-            "torrent.missing",
-            "Torrent not found".into(),
-        ));
+        return Err(
+            ApiError::invalid("torrent.missing", "Torrent not found".into()).into_response(),
+        );
     };
     let mut corrected = release::parse(&chosen.title);
     if let Some(override_release) = &body.release {
@@ -112,27 +140,46 @@ pub async fn admit_torrent(
     let override_for_pending = body.release.as_ref().map(|_| corrected.clone());
     let admitted = filter::admit_scored(vec![(chosen.clone(), Some(corrected))], &filter).admitted;
     let Some(scored) = admitted.into_iter().next() else {
-        return Err(ApiError::invalid(
-            "subscribe.rejected",
-            "Torrent rejected by Filter".into(),
-        ));
+        return Err(
+            ApiError::invalid("subscribe.rejected", "Torrent rejected by Filter".into())
+                .into_response(),
+        );
     };
-    let downloader_id = crate::delivery::target_id(&state, Some(&subscribe), &scored.torrent)
-        .map_err(|err| ApiError::invalid("subscribe.invalid", err.to_string()))?;
-    crate::delivery::submit_torrent(&state, &scored.torrent, downloader_id)
-        .map_err(|err| ApiError::invalid("subscribe.invalid", err.to_string()))?;
-    state.store.lock().record_manual_pending_submissions(
-        subscribe.id,
-        &[(
-            scored.score,
-            crate::store::PendingDownload {
-                submitted_at: None,
-                torrent: scored.torrent.clone(),
-                release_override: override_for_pending,
-                downloader_id,
-            },
-        )],
-    )?;
+    let delivery = delivery::prepare(&state, &subscribe, &scored.torrent)?;
+    let url = delivery.resolve_url(&state, &scored.torrent)?;
+    let pending = crate::store::PendingDownload {
+        // Existing pending representation: zero means the remote outcome is unconfirmed.
+        submitted_at: Some(0),
+        torrent: scored.torrent.clone(),
+        release_override: override_for_pending,
+        downloader_id: delivery.id,
+    };
+    admitted_store(&state, |store| {
+        store
+            .record_manual_pending_submissions(subscribe.id, &[(scored.score, pending)])
+            .map_err(ApiError::from)
+    })?;
+    delivery.submit(&scored.torrent, &url)?;
+    // This closes an already admitted side effect. A new maintenance/readonly gate
+    // must not discard its result; the persisted intent survives any confirmation failure.
+    match crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        store.confirm_pending_submission(
+            subscribe.id,
+            &scored.torrent.enclosure,
+            crate::job_loop::unix_now(),
+        )
+    }) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            tracing::error!(%error, subscribe_id=%subscribe.id, enclosure=%scored.torrent.enclosure, "Submitted manual Torrent retains unconfirmed pending intent");
+            return Err(ApiError::from(error).into_response());
+        }
+        None => {
+            tracing::error!(subscribe_id=%subscribe.id, enclosure=%scored.torrent.enclosure, "Submitted manual Torrent confirmation busy; pending intent retained");
+            return Err(crate::http::store_wait::busy_response());
+        }
+    }
+    tracing::info!(subscribe_id=%subscribe.id, title=%scored.torrent.title, score=scored.score, "Manual Torrent admitted and submitted");
     Ok(Json(json!({
         "subscribe_id": subscribe.id.to_string(),
         "title": scored.torrent.title,
@@ -150,4 +197,16 @@ pub async fn admit_torrent_v1(
         Ok(Json(data)) => crate::http::ok(data).into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+fn admitted_store<T>(
+    state: &ApiState,
+    work: impl FnOnce(&crate::Store) -> Result<T, ApiError>,
+) -> Result<T, Response> {
+    crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        state.require_writable()?;
+        state.require_write_admitted()?;
+        work(store).map_err(IntoResponse::into_response)
+    })
+    .ok_or_else(crate::http::store_wait::busy_response)?
 }

@@ -132,6 +132,8 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "operations_library_kind",
     "playback_session_file",
     "pending_deletions_due",
+    "pending_deletions_path_key",
+    "pending_file_renames_file",
     "metadata_inputs_media",
     "root_reassignment_dispatch",
     "root_reassignment_library",

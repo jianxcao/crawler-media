@@ -211,6 +211,11 @@ impl Store {
         let tx = crate::write_tx(&self.library)?;
         let id = file_id.to_string();
         let from_str = from.to_string_lossy().into_owned();
+        crate::pending_file_deletions::ensure_path_not_pending_deletion(&tx, &from_str)?;
+        crate::pending_file_deletions::ensure_path_not_pending_deletion(
+            &tx,
+            &to.to_string_lossy(),
+        )?;
         let owned = load_owned(&tx, &id, &from_str)?;
         classify_shared_sidecars(&tx, &id, from, &mut sidecars)?;
         if owned.revision != expected.revision || owned.source_version != expected.source_version {
@@ -263,6 +268,11 @@ impl Store {
         // Destination sidecar targets must also be free of recorded files.
         for side in &sidecars {
             let side_to = side.to.to_string_lossy().into_owned();
+            crate::pending_file_deletions::ensure_path_not_pending_deletion(&tx, &side_to)?;
+            crate::pending_file_deletions::ensure_path_not_pending_deletion(
+                &tx,
+                &side.from.to_string_lossy(),
+            )?;
             refuse_occupied(&tx, &side_to, &id)?;
         }
         let rename_id = uuid::Uuid::new_v4().to_string();

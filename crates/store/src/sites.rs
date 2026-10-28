@@ -78,6 +78,18 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Publish a maintenance result only against the exact Site it observed.
+    /// The IMMEDIATE transaction also excludes writers using another connection.
+    pub fn save_site_if_current(&self, site: &Site, expected: &Site) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(&self.app)?;
+        if site.id != expected.id || self.get_site(expected.id)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        let updated = self.save_site(site)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     pub fn save_site(&self, site: &Site) -> Result<bool, StoreError> {
         let n = self.app.execute(
             "UPDATE sites SET name = ?2, url = ?3, profile_id = ?4, cookie = ?5, api_key = ?6,

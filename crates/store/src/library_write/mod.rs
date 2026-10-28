@@ -2,6 +2,7 @@ use domain::{FileVersion, LibraryFile, LibraryId, UnitKey};
 
 pub mod artwork;
 pub mod delete;
+pub mod demote;
 pub(crate) mod presence;
 pub mod probe;
 pub mod publish;

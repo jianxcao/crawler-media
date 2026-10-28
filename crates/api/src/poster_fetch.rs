@@ -452,22 +452,47 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
 /// reference. The version check keeps a late worker from attaching artwork to a file
 /// that was replaced while the download ran.
 pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
-    let store = state.store.lock();
-    let Ok(Some((file_id, version))) = store.file_version_for_path(&video.to_string_lossy()) else {
-        return;
+    let captured = crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        store.file_version_for_path(&video.to_string_lossy())
+    });
+    let (file_id, version) = match captured {
+        Some(Ok(Some(version))) => version,
+        Some(Ok(None)) => return,
+        Some(Err(error)) => {
+            tracing::error!(%error, video=%video.display(), "failed to capture artwork owner");
+            return;
+        }
+        None => {
+            tracing::warn!(video=%video.display(), "artwork owner capture is busy");
+            return;
+        }
     };
-    let discovered = store::files::DiscoveredArtwork::discover(video);
-    let artwork = store::library_write::FileArtwork {
-        poster: discovered.poster.as_deref(),
-        backdrop: discovered.backdrop.as_deref(),
-        still: discovered.still.as_deref(),
-    };
-    if let Err(error) = store.record_file_artwork(file_id, &version, &artwork) {
-        tracing::warn!(
-            %error,
-            video = %video.display(),
-            "记录文件封面失败：封面不会出现在卡片上"
-        );
+    let discovered = store::files::DiscoveredArtwork::discover_with(video, |path| {
+        state.file_stats.is_file(path)
+    });
+    let result = crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        state
+            .require_writable()
+            .map_err(|_| store::StoreError::Protected("instance.read_only".into()))?;
+        state
+            .require_write_admitted()
+            .map_err(|_| store::StoreError::Protected("runtime.busy".into()))?;
+        store.record_file_artwork(
+            file_id,
+            &version,
+            &store::library_write::FileArtwork {
+                poster: discovered.poster.as_deref(),
+                backdrop: discovered.backdrop.as_deref(),
+                still: discovered.still.as_deref(),
+            },
+        )
+    });
+    match result {
+        Some(Ok(_)) => {}
+        Some(Err(error)) => {
+            tracing::warn!(%error, video=%video.display(), "记录文件封面失败：封面不会出现在卡片上")
+        }
+        None => tracing::warn!(video=%video.display(), "artwork publication is busy"),
     }
 }
 

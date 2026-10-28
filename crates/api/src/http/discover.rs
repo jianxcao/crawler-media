@@ -102,14 +102,18 @@ pub(crate) async fn discover_kind(
         }
         Err(error) => return blocking_error(error),
     };
-    let tmdb_configured = state
-        .store
-        .lock()
-        .get_setting(crate::settings_keys::TMDB_API_KEY)
-        .ok()
-        .flatten()
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
+    let tmdb_configured = match super::store_wait::store_read(&state, |store| {
+        store
+            .get_setting(crate::settings_keys::TMDB_API_KEY)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.is_empty())
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return error.response(),
+    };
     ok(json!({
         "kind": kind,
         "tmdb_configured": tmdb_configured,
@@ -369,9 +373,10 @@ pub(crate) async fn discover_collection(
         .run(DISCOVER_DEADLINE, move || {
             let mut catalog: &dyn Catalog = state_clone.catalog.as_ref();
             if let Some(source) = source_clone.as_deref().filter(|source| !source.is_empty())
-                && let Some(found) = catalog.source(source) {
-                    catalog = found;
-                }
+                && let Some(found) = catalog.source(source)
+            {
+                catalog = found;
+            }
             catalog.collection_paged(media_kind_clone, &section_query, page)
         })
         .await;

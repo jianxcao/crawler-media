@@ -1,18 +1,16 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
-> 当前运行风险见[7030c1dd审查](../audits/2026-10-28-storage-head-review.md)：指纹模型迟到发布、Series断言查询与多单元候选复制仍待修；结构字典不等于这些路径已通过验收。
+> 当前行为修复及验证边界见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)。历史审查保留固定版本的反例与测量。
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-28，当前生产 DDL（library v8）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=8`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。
+结构核对：2026-10-28。唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=1`。不可按缓存清空。代码没有历史布局或升级步骤。
 
-结构为 **53张业务表、594字段、81个显式命名索引、37组FK、0触发器**，不计SQLite自动索引。v4 删除 `media_seasons`（整表）、`library_item_terms.terms_media`、`library_items.aliases_json`/`added_at_ns`/`has_nfo`、`library_units.quality_json`，并重排 `library_item_terms` 主键；v5 删除 `playback_{sessions,logs,metrics}_media`（唯一消费者 `delete_playback_for_media` 已移入 `test_support`，生产没有任何按 `media_id` 删除播放行的路径），并按 DDL 补齐 `LIBRARY_INDEXES` 的两个漏项、把索引侧的布局校验改成双向。每项的理由见审计文档的逐项裁决。历史 49 表/580 字段/63 索引描述已撤下；当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
+结构为 **53张业务表、596字段、83个显式命名索引、37组FK、0生产触发器**，不计SQLite自动索引。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
 
-v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；活跃路径唯一性与 pending 查询已有回归，前轮 F4/F8 对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。失败退出、路径释放与重启恢复已在 `9f6126d3` 实现，本轮既有 owner 回归通过；这不等于完整写入成本或真实设备验收。
+`library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
 
-v8 增加 `library_integrity_owner` 部分索引，供按 Library 和 Media 检查未成功 Integrity 的写屏障使用。`failed` 仍在索引内，保持可恢复操作的冻结语义。固定 1,000 个活跃 Integrity 的内存测试中，索引占 20,480 字节；1,000 次插入和完成分别增加 10,000 和 13,000 SQLite VM 步。这是指定数据集的工作量，不是磁盘延迟承诺。
-
-v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件清理 attempts、关闭存活 session，以及三类终态 operation 的年龄窗口索引；生产公共清理路径的工作量测试覆盖 100/1,000/10,000 条无关历史。旧布局继续拒绝，不导入或原地升级。
+删除意图保存 `path_key` 和 `deletion_id`，分别标识固定规范路径与本次删除；`pending_deletions_path_key` 保证每个路径最多一个意图，`pending_file_renames_file` 支持检查文件已有改名工作。它们属于当前 DDL，不需要经过结构升级。
 
 ## 实现边界
 
@@ -67,7 +65,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
 - [media_metadata_sources](#media_metadata_sources) — 14 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
 - [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
-- [pending_file_deletions](#pending_file_deletions) — 8 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
+- [pending_file_deletions](#pending_file_deletions) — 10 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
 - [playback_logs](#playback_logs) — 23 字段；终态会话历史；按稳定会话/generation 去重，不依赖文件仍存在。
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
@@ -1199,6 +1197,8 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
 | `path` | `TEXT` | 1 | 是 | 无 |
+| `path_key` | `TEXT` | — | 是 | 无 |
+| `deletion_id` | `TEXT` | — | 是 | 无 |
 | `reason` | `TEXT` | — | 是 | 无 |
 | `attempts` | `INTEGER` | — | 是 | `0` |
 | `next_retry_at` | `INTEGER` | — | 是 | `0` |
@@ -1216,9 +1216,10 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 
 ```sql
 CREATE INDEX pending_deletions_due ON pending_file_deletions(next_retry_at);
+CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_key);
 ```
 
-`list_due_file_deletions` 读到期窗口并按 `next_retry_at` 排序，索引同时给出窗口与顺序（按 `rowid` 排序会让 SQLite 宁可全表扫描）。主键 `path` 的自动索引不重复列出。
+`list_due_file_deletions` 读到期窗口并按 `next_retry_at` 排序，索引同时给出窗口与顺序（按 `rowid` 排序会让 SQLite 宁可全表扫描）。内部重试使用持久化 path_key/deletion_id 做比较与更新，不因根别名变化重新推导身份。主键 `path` 的自动索引不重复列出。
 
 ## playback_logs
 
@@ -1756,6 +1757,7 @@ CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id)
 
 ```sql
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
+CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 ```
 
 ## pending_root_reassignments

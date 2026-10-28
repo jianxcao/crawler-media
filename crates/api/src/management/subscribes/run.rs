@@ -507,14 +507,20 @@ fn persist(
         let store = state.store.lock();
         store.transfer_mode().unwrap_or_else(|_| "copy".into())
     };
-    let modes =
-        crate::worker::transfer::observe_transfer_modes(&outcome.files, &default_transfer_mode);
-    let sources = crate::worker::transfer::observe_transfer_sources(&outcome.files);
+    let observations = crate::worker::transfer::observe_transfer_files(
+        state,
+        &outcome.files,
+        &default_transfer_mode,
+    );
     // Review N-1: capped wait for a source probe (outside the Store lock).
     let mut outcome = outcome;
     let exhausted =
         crate::probe_wait::exhausted_probe_waits(state, id, &outcome.awaiting_probe_enclosures);
     outcome.rejected_enclosures.extend(exhausted);
+
+    let removed =
+        crate::worker::transfer::observe_transfer_removals(state, plan, &outcome.removed_paths)
+            .map_err(ApiError::internal)?;
 
     let store = state.store.lock();
     lease
@@ -539,7 +545,7 @@ fn persist(
     )
     .map_err(ApiError::internal)?;
     let mut published = Vec::with_capacity(outcome.files.len());
-    for ((coverage, mode), source) in outcome.files.iter().zip(modes.iter()).zip(sources.iter()) {
+    for (coverage, observation) in outcome.files.iter().zip(&observations) {
         let path = coverage.file.path.to_string_lossy().to_string();
         let source_path =
             crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
@@ -565,16 +571,31 @@ fn persist(
             plan.config_revision,
             coverage,
             source_path.as_deref().map(std::path::Path::new),
-            mode,
-            source.as_ref(),
+            observation,
         )?);
     }
+    crate::worker::transfer::queue_transfer_removals(state, &store, &removed)
+        .map_err(ApiError::internal)?;
+    persist_pending(&store, id, &outcome, routed)?;
+    drop(store);
+    crate::http::file_delete::retry_queued_deletions(&state.store)?;
+    crate::http::library::enqueue_probes_for_files(state, &published);
+    Ok(())
+}
+
+fn persist_pending(
+    store: &crate::Store,
+    id: SubscribeId,
+    outcome: &subscribe::RunOutcome,
+    routed: &RoutedDownloader<'_>,
+) -> Result<(), ApiError> {
     let now = crate::job_loop::unix_now();
-    let transferred = outcome.transferred_enclosures;
-    let rejected = outcome.rejected_enclosures;
+    let transferred = &outcome.transferred_enclosures;
+    let rejected = &outcome.rejected_enclosures;
     let pending_items: Vec<_> = outcome
         .torrents_added
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|(score, torrent)| {
             let downloader_id = routed.used_id(&torrent);
             (
@@ -615,12 +636,5 @@ fn persist(
     store.mark_pending_rejected(id, &rejected)?;
     store.mark_pending_rejected(id, &broken_enclosures)?;
     store.save_subscribe_facts(id, &outcome.facts)?;
-    // M6: same queue as the Transfer job; deletion failures are retried later.
-    for path in &outcome.removed_paths {
-        store.enqueue_file_deletion(path, "wash_replaced")?;
-    }
-    drop(store);
-    crate::http::file_delete::retry_queued_deletions(&state.store)?;
-    crate::http::library::enqueue_probes_for_files(state, &published);
     Ok(())
 }

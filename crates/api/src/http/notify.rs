@@ -98,33 +98,38 @@ pub(crate) async fn get_config(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
 ) -> Response {
-    let store = state.store.lock();
-    let is_admin = user_id
-        .and_then(|uid| store.get_user(uid).ok().flatten())
-        .map(|u| u.role == domain::UserRole::Admin)
-        .unwrap_or(false);
-    ok(get_config_json(&store, is_admin)).into_response()
+    super::store_wait::store_read(&state, move |store| {
+        let is_admin = user_id
+            .and_then(|uid| store.get_user(uid).ok().flatten())
+            .map(|u| u.role == domain::UserRole::Admin)
+            .unwrap_or(false);
+        ok(get_config_json(&store, is_admin)).into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 pub(crate) async fn put_config(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let url = body["notify_url"].as_str().unwrap_or_default();
-    let token = body["notify_token"].as_str().unwrap_or_default();
-    let store = state.store.lock();
-    if let Err(error) = save_config(&store, url, token) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(get_config_json(&store, true)).into_response()
+    super::store_wait::store_write(&state, move |store| {
+        let url = body["notify_url"].as_str().unwrap_or_default();
+        let token = body["notify_token"].as_str().unwrap_or_default();
+        if let Err(error) = save_config(&store, url, token) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(get_config_json(&store, true)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn test(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let url = body["notify_url"].as_str().unwrap_or_default();
-    let token = body["notify_token"].as_str().unwrap_or_default();
-    let (base, token) = {
-        let store = state.store.lock();
+    let (base, token) = match super::store_wait::store_read(&state, move |store| {
+        let url = body["notify_url"].as_str().unwrap_or_default();
+        let token = body["notify_token"].as_str().unwrap_or_default();
         let base = if url.is_empty() {
             notify_url(&store).unwrap_or_default()
         } else {
@@ -136,6 +141,11 @@ pub(crate) async fn test(State(state): State<ApiState>, Json(body): Json<Value>)
             token.to_string()
         };
         (base, token)
+    })
+    .await
+    {
+        Ok(config) => config,
+        Err(error) => return error.response(),
     };
     if base.is_empty() || token.is_empty() {
         return err(

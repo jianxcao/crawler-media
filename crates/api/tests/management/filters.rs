@@ -11,6 +11,129 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+
+#[tokio::test]
+async fn obsolete_filter_atoms_are_rejected_without_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let current = json!({
+        "name": "canonical",
+        "atoms": [{"kind":"hdr", "value":"DV", "priority":71, "exclude":true}],
+    });
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/rule-sets",
+            Some("management-secret"),
+            current,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = json_data(created).await["id"].as_str().unwrap().to_string();
+    let before = json_data(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/rule-sets",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for kind in ["platforms_block", "hdr_block", "release_group_block"] {
+        for (method, uri) in [
+            ("POST", "/api/v1/rule-sets".to_string()),
+            ("PATCH", format!("/api/v1/rule-sets/{id}")),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    method,
+                    &uri,
+                    Some("management-secret"),
+                    json!({
+                        "name":"must-not-write",
+                        "atoms":[
+                            {"kind":"free", "priority":5},
+                            {"kind":kind, "value":"DV", "priority":99, "exclude":true},
+                        ],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{method} {kind}"
+            );
+            assert_eq!(json_error(response).await["code"], "rule_set.invalid");
+            let after = json_data(
+                app.clone()
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/rule-sets",
+                        Some("management-secret"),
+                        Value::Null,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                after, before,
+                "invalid {method} must not change Filter facts"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn canonical_exclusion_atoms_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let atoms = json!([
+        {"kind":"title_match", "value":"GROUP", "priority":42, "exclude":true},
+        {"kind":"hdr", "value":"DV", "priority":73, "exclude":true},
+    ]);
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/rule-sets",
+            Some("management-secret"),
+            json!({"name":"current", "atoms":atoms}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let data = json_data(response).await;
+    assert_eq!(data["atoms"], atoms);
+    let uri = format!("/api/v1/rule-sets/{}", data["id"].as_str().unwrap());
+    let patched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &uri,
+            Some("management-secret"),
+            json!({"name":"updated", "atoms":atoms}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    assert_eq!(json_data(patched).await["atoms"], atoms);
+    let read = app
+        .oneshot(request("GET", &uri, Some("management-secret"), Value::Null))
+        .await
+        .unwrap();
+    let read = json_data(read).await;
+    assert_eq!(read["name"], "updated");
+    assert_eq!(read["atoms"], atoms);
+}
+
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(
         tmp.path(),

@@ -40,10 +40,10 @@ mod refresh;
 mod retry;
 pub mod season;
 pub mod stages;
+mod store_lease;
 pub(crate) mod timings;
 mod tracks;
 mod worker;
-mod store_lease;
 pub use tracks::TracksProbe;
 
 #[cfg(test)]
@@ -72,6 +72,7 @@ pub struct ProbeUnit {
 pub(crate) enum ProbeEnqueueError {
     AlreadyRunning,
     Persistence,
+    Admission(axum::response::Response),
 }
 
 pub struct ProbeManager {
@@ -138,7 +139,8 @@ impl ProbeManager {
         let (shutdown_signal, _) = tokio::sync::watch::channel(false);
         let store_key = {
             let store = store.lock();
-            std::fs::canonicalize(store.data_dir()).unwrap_or_else(|_| store.data_dir().to_path_buf())
+            std::fs::canonicalize(store.data_dir())
+                .unwrap_or_else(|_| store.data_dir().to_path_buf())
         };
         let manager = Self {
             store,

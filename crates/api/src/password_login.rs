@@ -8,10 +8,9 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::Store;
+use crate::ApiState;
 
 /// 可注入的密码原语；测试用它阻塞或观测校验过程。
 pub trait PasswordEngine: Send + Sync {
@@ -35,6 +34,8 @@ pub enum LoginError {
     Store(#[from] store::StoreError),
     #[error("password worker failed: {0}")]
     Worker(String),
+    #[error("login write admission changed")]
+    Admission(axum::response::Response),
 }
 
 pub struct PasswordLogin {
@@ -56,7 +57,7 @@ impl PasswordLogin {
     /// 调用方必须映射为 401 且不签发任何 token。`Err(Busy)` 表示并发已满。
     pub async fn authenticate(
         &self,
-        store: Arc<Mutex<Store>>,
+        state: ApiState,
         username: String,
         password: String,
     ) -> Result<Option<(String, domain::User)>, LoginError> {
@@ -68,18 +69,35 @@ impl PasswordLogin {
             .clone()
             .try_acquire_owned()
             .map_err(|_| LoginError::Busy)?;
-        let credential = store.lock().login_credential(&username)?;
-        let Some(credential) = credential else {
-            return Ok(None);
-        };
         let engine = self.engine.clone();
         tokio::task::spawn_blocking(move || {
             // permit 必须活到 CAS 结束：闭包返回前不得让出并发槽位。
             let _permit: OwnedSemaphorePermit = permit;
+            let credential = {
+                let store = state
+                    .store
+                    .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+                    .ok_or(LoginError::Busy)?;
+                state
+                    .require_writable()
+                    .and_then(|_| state.require_write_admitted())
+                    .map_err(LoginError::Admission)?;
+                store.login_credential(&username)?
+            };
+            let Some(credential) = credential else {
+                return Ok(None);
+            };
             if !engine.verify(&password, &credential.observed_password) {
                 return Ok(None);
             }
-            let store = store.lock();
+            let store = state
+                .store
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or(LoginError::Busy)?;
+            state
+                .require_writable()
+                .and_then(|_| state.require_write_admitted())
+                .map_err(LoginError::Admission)?;
             let token = store.finish_verified_login(
                 &credential.user_id.to_string(),
                 &credential.observed_password,

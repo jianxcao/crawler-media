@@ -14,6 +14,11 @@ pub trait FileStatRead: Send + Sync {
     /// 文件元数据（排序用的 added_at / size）。
     fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata>;
 
+    /// 不跟随符号链接的文件身份；删除观察必须保留 unlink 目标的身份。
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        std::fs::symlink_metadata(path)
+    }
+
     /// 普通文件存在性判断（海报 / 背景 / 剧照探测）。
     ///
     /// 投影构建与浏览回退路径都走这里，测试可注入计数实现。

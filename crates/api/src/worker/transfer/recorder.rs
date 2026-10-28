@@ -112,6 +112,11 @@ impl PublicationRecorder<'_> {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error))
         };
+        // Capture the just-placed bytes before the Store guard. Vetoed arrivals
+        // are absent from RunOutcome.files, so their deletion authority must be
+        // retained by the recorder that actually published this reservation.
+        let source = library::observe_source(&candidate.file.path)
+            .map_err(|error| fail(error.to_string()))?;
         {
             let store = self.state.store.lock();
             let config_revision = match plan {
@@ -133,6 +138,12 @@ impl PublicationRecorder<'_> {
                 )
                 .map_err(|error| fail(error.to_string()))
         }?;
+        if let Some(plan) = plan {
+            plan.published_removals.lock().insert(
+                candidate.file.path.clone(),
+                super::removals::TransferRemovalPin::published(candidate, &source),
+            );
+        }
         Ok(())
     }
 }

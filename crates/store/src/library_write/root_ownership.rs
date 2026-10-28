@@ -53,17 +53,25 @@ pub(crate) fn ensure_root_owns_path(
     }
     // A nested root created after this scope was prepared owns the path now.
     // The declared root still contains it, but publication must follow the longest one.
-    let mut statement = tx.prepare(
-        "SELECT r.path_key FROM library_roots r JOIN libraries l ON l.library_id=r.library_id
-         WHERE r.enabled=1 AND l.kind=?2 AND length(r.path_key)>length(?1)",
+    // Both ownership barriers share one statement. The deletion lookup is an
+    // exact unique-index seek, so a publication batch does not add a SQL round
+    // trip per file or scan unrelated deletion intents.
+    let (deleting, nested): (bool, bool) = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_file_deletions WHERE path_key=?3),
+                EXISTS(SELECT 1 FROM library_roots r JOIN libraries l USING(library_id)
+                  WHERE r.enabled=1 AND l.kind=?2 AND length(r.path_key)>length(?1)
+                    AND (?3=r.path_key OR substr(?3,1,length(r.path_key)+1)=r.path_key||'/'))",
+        params![root_key, file.kind.as_str(), file_key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let longer: Vec<String> = statement
-        .query_map(params![root_key, file.kind.as_str()], |row| row.get(0))?
-        .collect::<Result<_, _>>()?;
-    if longer
-        .iter()
-        .any(|candidate| file_key == *candidate || file_key.starts_with(&(candidate.clone() + "/")))
-    {
+    if deleting {
+        tracing::warn!(path = %file.path.display(), "拒绝修改由持久删除意图持有的路径");
+        return Err(StoreError::Protected(format!(
+            "path {} has a deletion owner",
+            file.path.display()
+        )));
+    }
+    if nested {
         tracing::error!(file_id = %file.file_id, path = %file.path.display(),
             root_id = %file.root_id, "file publication rejected: a nested root owns the path");
         return Err(StoreError::Protected(format!(

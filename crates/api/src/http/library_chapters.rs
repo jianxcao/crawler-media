@@ -13,6 +13,9 @@ use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 use std::str::FromStr;
 
+mod refresh;
+pub(crate) use refresh::{probe_status, refresh_item_chapters};
+
 /// 自动生成：文件有内嵌章节且尚无章节帧时，逐章抽一帧（跳过已有）。
 /// 供整库刷新与入库链路调用；失败静默（不影响主流程）。
 pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
@@ -121,28 +124,6 @@ fn chapter_image_path(video: &std::path::Path, index: usize) -> std::path::PathB
     crate::chapter_frame_service::chapter_frame_path(video, index)
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn manual_tv_refresh_always_queues_voiceprint() {
-        assert!(
-            super::should_queue_voiceprint_refresh(domain::MediaKind::Tv),
-            "manual TV refresh must queue a complete voiceprint pass regardless of prior markers"
-        );
-    }
-
-    #[test]
-    fn manual_movie_refresh_does_not_queue_tv_voiceprint() {
-        assert!(!super::should_queue_voiceprint_refresh(
-            domain::MediaKind::Movie
-        ));
-    }
-}
-
-fn should_queue_voiceprint_refresh(media_kind: domain::MediaKind) -> bool {
-    media_kind == domain::MediaKind::Tv
-}
-
 #[derive(Clone, Copy, Default, Deserialize)]
 pub(crate) struct ChapterQuery {
     season: Option<u32>,
@@ -191,12 +172,111 @@ fn covers_season(row: &domain::FileCoverage, season: u32) -> bool {
     })
 }
 
-fn theintrodb_client(state: &ApiState) -> Option<crate::theintrodb::TheIntroDbClient> {
-    let store = state.store.lock();
+fn theintrodb_client(store: &crate::Store) -> Option<crate::theintrodb::TheIntroDbClient> {
     let config = store.get_scrape_config().ok()?;
     let effective = &config.effective;
     (effective.theintrodb_enabled && effective.theintrodb_api_key.is_some())
         .then(|| crate::theintrodb::TheIntroDbClient::new(effective.theintrodb_api_key.clone()))
+}
+
+struct ChapterTarget {
+    row: domain::FileCoverage,
+    unit: domain::UnitKey,
+    media: domain::Media,
+    rows: Vec<domain::FileCoverage>,
+    theintrodb: Option<crate::theintrodb::TheIntroDbClient>,
+}
+
+async fn capture_target(
+    state: &ApiState,
+    id: String,
+    media_id: domain::MediaId,
+    user: Option<domain::UserId>,
+    query: ChapterQuery,
+) -> Result<ChapterTarget, Response> {
+    super::store_wait::store_read(state, move |store| {
+        let library = require_visible_library(store, &id, user)?;
+        let media = store
+            .get_media(media_id)
+            .map_err(chapter_store_error)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"))?;
+        let rows = store
+            .file_coverage_in_library(
+                library
+                    .id
+                    .parse()
+                    .map_err(|error: uuid::Error| chapter_store_error(error.into()))?,
+                Some(media_id),
+                store::FileReadScope::AllRecorded,
+            )
+            .map_err(chapter_store_error)?;
+        let (row, unit) = selected_target(&rows, query).ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "library.item_missing",
+                "条目没有在位文件",
+            )
+        })?;
+        let theintrodb = theintrodb_client(store);
+        Ok(ChapterTarget {
+            row,
+            unit,
+            media,
+            rows,
+            theintrodb,
+        })
+    })
+    .await
+    .map_err(|error| error.response())?
+}
+
+fn chapter_store_error(error: store::StoreError) -> Response {
+    tracing::error!(%error, "读取章节事实失败");
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store.error",
+        &error.to_string(),
+    )
+}
+
+async fn bounded_library_lease(
+    state: &ApiState,
+    id: String,
+) -> Result<std::sync::Arc<crate::library_lifecycle::LibraryWorkLease>, Response> {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || worker.library_work().acquire_bounded(&worker.store, &id))
+        .await
+    {
+        Ok(Ok(lease)) => Ok(std::sync::Arc::new(lease)),
+        Ok(Err(
+            crate::library_lifecycle::BoundedLeaseError::StoreBusy
+            | crate::library_lifecycle::BoundedLeaseError::RegistryBusy,
+        )) => Err(super::store_wait::busy_response()),
+        Ok(Err(error)) => Err(err(
+            StatusCode::CONFLICT,
+            "library.frozen",
+            &error.to_string(),
+        )),
+        Err(error) => Err(super::library::browse_work_error(error)),
+    }
+}
+
+async fn chapter_items_off_executor(
+    state: &ApiState,
+    row: domain::FileCoverage,
+    chapters: Vec<library::ChapterMarker>,
+) -> Result<Vec<Value>, Response> {
+    let files = state.file_stats.clone();
+    state
+        .fs_work
+        .reserve(std::time::Duration::from_secs(5))
+        .await
+        .map_err(|_| super::store_wait::busy_response())?
+        .run_to_completion(move || chapter_items(&row, &chapters, files.as_ref()))
+        .await
+        .map_err(super::library::browse_work_error)
 }
 
 /// GET /libraries/{id}/items/{item_id}/chapters — probe chapters, with
@@ -211,31 +291,16 @@ pub(crate) async fn chapters(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (row, unit, media) = {
-        let store = state.store.lock();
-        let library = match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let rows: Vec<domain::FileCoverage> = store
-            .file_coverage_for_media(media_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| row.file.library_id.to_string() == library.id)
-            .collect();
-        let Some((row, unit)) = selected_target(&rows, query) else {
-            return err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "条目没有在位文件",
-            );
-        };
-        (row, unit, media)
+    let ChapterTarget {
+        row,
+        unit,
+        media,
+        theintrodb: theintrodb_client,
+        ..
+    } = match capture_target(&state, id, media_id, user_id, query).await {
+        Ok(target) => target,
+        Err(response) => return response,
     };
-    let theintrodb_client = theintrodb_client(&state);
     let resolved = crate::marker_resolver::resolve_item_chapters(
         &state,
         &row,
@@ -248,17 +313,23 @@ pub(crate) async fn chapters(
     if resolved.is_empty() {
         return ok_list(Vec::new()).into_response();
     }
-    let items = chapter_items(&row, &resolved);
-    ok_list(items).into_response()
+    match chapter_items_off_executor(&state, row, resolved).await {
+        Ok(items) => ok_list(items).into_response(),
+        Err(response) => response,
+    }
 }
 
-fn chapter_items(row: &domain::FileCoverage, chapters: &[library::ChapterMarker]) -> Vec<Value> {
+fn chapter_items(
+    row: &domain::FileCoverage,
+    chapters: &[library::ChapterMarker],
+    files: &dyn crate::file_stat_read::FileStatRead,
+) -> Vec<Value> {
     chapters
         .iter()
         .enumerate()
         .map(|(index, chapter)| {
             let image_url = (row.units.len() == 1
-                && chapter_image_path(&row.file.path, index).is_file())
+                && files.is_file(&chapter_image_path(&row.file.path, index)))
             .then(|| format!("/chapters/{}/{index}", row.file.file_id));
             let mut obj = json!({
                 "start_ms": chapter.start_ms,
@@ -279,252 +350,6 @@ fn chapter_items(row: &domain::FileCoverage, chapters: &[library::ChapterMarker]
         .collect()
 }
 
-/// POST /libraries/{id}/items/{item_id}/chapters/refresh — force clear cached
-/// chapters and persistent markers, then re-resolve from TheIntroDB / ffprobe.
-pub(crate) async fn refresh_item_chapters(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
-    Path((id, item_id)): Path<(String, String)>,
-    Query(query): Query<ChapterQuery>,
-) -> Response {
-    let media_id = match domain::MediaId::from_str(&item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
-    };
-    let (row, unit, media, rows) = {
-        let store = state.store.lock();
-        let library = match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let rows: Vec<domain::FileCoverage> = store
-            .file_coverage_for_media(media_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| row.file.library_id.to_string() == library.id)
-            .collect();
-        let Some((row, unit)) = selected_target(&rows, query) else {
-            return err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "条目没有在位文件",
-            );
-        };
-        (row, unit, media, rows)
-    };
-
-    let requested_season = unit
-        .episode_coordinates()
-        .map_or(1, |coordinates| coordinates.0);
-    if row.units.len() != 1
-        || rows.iter().any(|candidate| {
-            covers_season(candidate, requested_season) && candidate.units.len() != 1
-        })
-    {
-        tracing::error!(%media_id, season = requested_season, error_kind = "unit_time_mapping_unsupported",
-            "chapter refresh rejected: multiunit file needs unit time mapping");
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "chapters.unit_time_mapping_unsupported",
-            "多单元文件缺少分集时间映射，保留现有片头片尾标记",
-        );
-    }
-
-    let theintrodb_client = theintrodb_client(&state);
-    let refreshed = if media.kind == domain::MediaKind::Tv {
-        crate::marker_resolver::resolve_item_chapters(&state, &row, unit, &media, theintrodb_client)
-            .await
-    } else {
-        match crate::marker_resolver::force_refresh_item_chapters(
-            &state,
-            &row,
-            unit,
-            &media,
-            theintrodb_client,
-        )
-        .await
-        {
-            Ok(chapters) => chapters,
-            Err(error) => {
-                return err(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "chapters.unit_time_mapping_unsupported",
-                    &error.to_string(),
-                );
-            }
-        }
-    };
-
-    let season = unit
-        .episode_coordinates()
-        .map_or(1, |coordinates| coordinates.0);
-    let fingerprint_rows: Vec<_> = rows
-        .iter()
-        .filter(|candidate| covers_season(candidate, season))
-        .cloned()
-        .collect();
-    let (probe_queued, season_probe_was_active) =
-        enqueue_season_refresh(&state, &media, &fingerprint_rows, season);
-    let items = chapter_items(&row, &refreshed);
-    let marker_job = match state.probe.marker_refresh_job(media_id, season) {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::error!(%error, %media_id, season, "读取片头片尾刷新任务状态失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.probe_status_failed",
-                "读取片头片尾任务状态失败，请稍后重试",
-            )
-            .into_response();
-        }
-    };
-    let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
-    let active_after_enqueue = fingerprint_rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
-    let already_running =
-        probe_queued == 0 && (marker_job_active || season_probe_was_active || active_after_enqueue);
-    let enqueue_failed =
-        should_queue_voiceprint_refresh(media.kind) && probe_queued == 0 && !already_running;
-    ok(json!({
-        "chapters": items,
-        "fingerprint_refresh_queued": probe_queued > 0 || marker_job_active,
-        "fingerprint_refresh_already_running": already_running,
-        "fingerprint_refresh_error": enqueue_failed.then_some("声纹刷新任务未能入队"),
-        "fingerprint_refresh_job": marker_job.as_ref().map(probe_job_json),
-    }))
-    .into_response()
-}
-
-fn enqueue_season_refresh(
-    state: &ApiState,
-    media: &domain::Media,
-    fingerprint_rows: &[domain::FileCoverage],
-    season: u32,
-) -> (usize, bool) {
-    let season_probe_was_active = fingerprint_rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
-    let mut probe_queued = 0;
-    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
-        let units = fingerprint_rows
-            .iter()
-            .map(|candidate_row| crate::probe_manager::ProbeUnit {
-                row: candidate_row.clone(),
-                kind: media.kind,
-                force_fingerprint: true,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: true,
-                reuse_media_info_cache: true,
-                marker_refresh_id: None,
-                job_id: None,
-            })
-            .collect();
-        probe_queued = state.probe.enqueue_marker_refresh(units);
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = fingerprint_rows.len(),
-            queued = probe_queued,
-            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
-        );
-    } else if season_probe_was_active {
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = fingerprint_rows.len(),
-            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
-        );
-    }
-
-    (probe_queued, season_probe_was_active)
-}
-
-/// GET /libraries/{id}/items/{item_id}/probe-status?season=N — persistent
-/// progress for the latest forced marker refresh in this season.
-pub(crate) async fn probe_status(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
-    Path((id, item_id)): Path<(String, String)>,
-    Query(query): Query<ChapterQuery>,
-) -> Response {
-    let media_id = match domain::MediaId::from_str(&item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
-    };
-    let season = query.season.unwrap_or(1);
-    {
-        let store = state.store.lock();
-        let library = match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        };
-        let Some(_media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let visible = store
-            .file_coverage_for_media(media_id)
-            .unwrap_or_default()
-            .iter()
-            .any(|row| covers_season(row, season) && row.file.library_id.to_string() == library.id);
-        if !visible {
-            return err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "该季没有在位文件",
-            );
-        }
-    }
-    let job = match state.probe.marker_refresh_job(media_id, season) {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.probe_status_failed",
-                "读取片头片尾任务状态失败，请稍后重试",
-            )
-            .into_response();
-        }
-    };
-    let active = job.as_ref().is_some_and(|job| job.is_active());
-    ok(json!({
-        "active": active,
-        "job": job.as_ref().map(probe_job_json),
-    }))
-    .into_response()
-}
-
-fn probe_job_json(job: &crate::store::ProbeJob) -> Value {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default();
-    json!({
-        "id": job.id,
-        "kind": job.kind,
-        "season": job.season,
-        "status": job.status,
-        "total": job.total,
-        "completed": job.completed,
-        "succeeded": job.succeeded,
-        "failed": job.failed,
-        "error": job.error,
-        "elapsed_ms": job.elapsed_ms(now_ms),
-        "phase": Value::Null,
-        "sampling_mode": Value::Null,
-        "queue_wait_ms": Value::Null,
-        "priority_wait_ms": Value::Null,
-        "metrics": {
-            "input_bytes": Value::Null,
-            "measurement_complete": false,
-        },
-    })
-}
-
 /// POST /libraries/{id}/items/{item_id}/chapters/generate — extract one scene
 /// frame per chapter beside the file.
 pub(crate) async fn generate_chapters(
@@ -532,36 +357,23 @@ pub(crate) async fn generate_chapters(
     Path((id, item_id)): Path<(String, String)>,
     Query(query): Query<ChapterQuery>,
 ) -> Response {
-    let _lease = match state.acquire_library_work(&id) {
+    let lease = match bounded_library_lease(&state, id.clone()).await {
         Ok(lease) => lease,
-        Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
+        Err(response) => return response,
     };
     let media_id = match domain::MediaId::from_str(&item_id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (row, unit, media) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let rows: Vec<domain::FileCoverage> = store
-            .file_coverage_for_media(media_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| row.file.library_id.to_string() == library.id)
-            .collect();
-        let Some((row, unit)) = selected_target(&rows, query) else {
-            return err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "条目没有在位文件",
-            );
-        };
-        (row, unit, media)
+    let ChapterTarget {
+        row,
+        unit,
+        media,
+        theintrodb: theintrodb_client,
+        ..
+    } = match capture_target(&state, id, media_id, None, query).await {
+        Ok(target) => target,
+        Err(response) => return response,
     };
     if row.units.len() != 1 {
         return err(
@@ -571,21 +383,27 @@ pub(crate) async fn generate_chapters(
         );
     }
     let path = row.file.path.clone();
-    let probe_lease = match state.acquire_library_work(&id) {
-        Ok(lease) => lease,
-        Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
+    let probe_lease = lease.clone();
+    let reservation = match state
+        .fs_work
+        .reserve(std::time::Duration::from_secs(5))
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(_) => return super::store_wait::busy_response(),
     };
-    let mut targets: Vec<(i64, i64)> = tokio::task::spawn_blocking({
-        let path = path.clone();
-        move || probe_chapter_targets(&path, probe_lease.control())
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    let mut targets = match reservation
+        .run_to_completion({
+            let path = path.clone();
+            move || probe_chapter_targets(&path, probe_lease.control())
+        })
+        .await
+    {
+        Ok(targets) => targets.unwrap_or_default(),
+        Err(error) => return super::library::browse_work_error(error),
+    };
 
     if targets.is_empty() {
-        let theintrodb_client = theintrodb_client(&state);
         let resolved = crate::marker_resolver::resolve_item_chapters(
             &state,
             &row,
@@ -606,13 +424,30 @@ pub(crate) async fn generate_chapters(
     }
 
     let total = targets.len();
-    if let Err(error) = state.chapter_frames.enqueue_path(&path, targets) {
-        tracing::warn!(%error, path = %path.display(), "章节帧任务入队失败");
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chapters.enqueue_failed",
-            "章节帧任务入队失败，请稍后重试",
-        );
+    let worker = state.clone();
+    let queued = state
+        .http_work
+        .run_to_completion(move || {
+            let _lease = lease;
+            worker.require_writable()?;
+            worker.require_write_admitted()?;
+            worker
+                .chapter_frames
+                .enqueue_path(&path, targets)
+                .map_err(|error| {
+                    tracing::warn!(%error, path=%path.display(), "章节帧任务入队失败");
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "chapters.enqueue_failed",
+                        "章节帧任务入队失败，请稍后重试",
+                    )
+                })
+        })
+        .await;
+    match queued {
+        Ok(Ok(_)) => {}
+        Ok(Err(response)) => return response,
+        Err(error) => return super::library::browse_work_error(error),
     }
     ok(json!({ "generated": 0, "total": total, "queued": true })).into_response()
 }
@@ -625,26 +460,36 @@ pub(crate) async fn chapter_image(
     let Ok(file_id) = domain::LedgerId::from_str(&ledger_id) else {
         return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在");
     };
-    let row = {
-        let store = state.store.lock();
-        match store.file_coverage_by_id(file_id) {
-            Ok(Some(row)) => row,
-            _ => return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在"),
-        }
+    let row = match super::store_wait::store_read(&state, move |store| {
+        store.file_coverage_by_id(file_id)
+    })
+    .await
+    {
+        Ok(Ok(Some(row))) => row,
+        Err(error) => return error.response(),
+        _ => return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在"),
     };
     let index: usize = match index.parse() {
         Ok(index) => index,
         Err(_) => return err(StatusCode::BAD_REQUEST, "chapters.invalid", "章节下标无效"),
     };
     let frame = chapter_image_path(&row.file.path, index);
-    let frame = frame.is_file().then_some(frame);
-    let Some(frame) = frame else {
-        return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在");
+    let reservation = match state
+        .fs_work
+        .reserve(std::time::Duration::from_secs(5))
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(_) => return super::store_wait::busy_response(),
     };
-    match tokio::task::spawn_blocking(move || std::fs::read(frame)).await {
+    match reservation
+        .run_to_completion(move || std::fs::read(frame))
+        .await
+    {
         Ok(Ok(bytes)) => {
             ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
         }
+        Err(error) => super::library::browse_work_error(error),
         _ => err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在"),
     }
 }

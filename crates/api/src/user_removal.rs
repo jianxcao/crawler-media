@@ -57,7 +57,15 @@ impl UserRemovalService {
         if record.phase != "disabling" {
             return Ok(record);
         }
-        let store = self.state.store.lock();
+        let store = self
+            .state
+            .store
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            .ok_or("User removal Store busy")?;
+        self.state
+            .require_writable()
+            .and_then(|_| self.state.require_write_admitted())
+            .map_err(|response| format!("User removal admission changed: {}", response.status()))?;
         let mut record = record;
         match run_phase(&store, user_id, "disabling") {
             Ok(Some(next)) => {
@@ -84,7 +92,17 @@ impl UserRemovalService {
 
     fn accept_record(&self, user_id: UserId) -> Result<UserRemovalRecord, String> {
         let record = {
-            let store = self.state.store.lock();
+            let store = self
+                .state
+                .store
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or("User removal Store busy")?;
+            self.state
+                .require_writable()
+                .and_then(|_| self.state.require_write_admitted())
+                .map_err(|response| {
+                    format!("User removal admission changed: {}", response.status())
+                })?;
             let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
             if user_id == admin_id {
                 return Err("Cannot delete admin user".into());

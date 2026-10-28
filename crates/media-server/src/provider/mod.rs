@@ -199,12 +199,14 @@ pub struct MediaPerson {
     pub primary_image_url: Option<String>,
 }
 
-/// 密码登录失败原因。`Busy` 由协议层映射 503，`Internal` 映射 500；
+/// 密码登录失败原因。`Busy` 映射 503，`ReadOnly` 映射 409，`Internal` 映射 500；
 /// 内部故障绝不能退化成“密码错误”(401) 返回给客户端。
 #[derive(Debug, thiserror::Error)]
 pub enum AuthenticateError {
     #[error("authentication service busy")]
     Busy,
+    #[error("instance is read-only")]
+    ReadOnly,
     #[error("{0}")]
     Internal(String),
 }

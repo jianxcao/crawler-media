@@ -53,13 +53,14 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         );
     }
     if let Some(cdp_url) = body.cdp_url.as_deref().filter(|u| !u.trim().is_empty())
-        && let Err(e) = indexer::BrowserConfig::validate_endpoint(cdp_url.trim()) {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "site.invalid_endpoint",
-                &e.to_string(),
-            );
-        }
+        && let Err(e) = indexer::BrowserConfig::validate_endpoint(cdp_url.trim())
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "site.invalid_endpoint",
+            &e.to_string(),
+        );
+    }
     let site = Site {
         id: SiteId::new(),
         name: body.name,
@@ -75,26 +76,29 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         enabled: body.enabled,
         maintenance_via,
     };
-    let store = state.store.lock();
-    if let Err(error) = store.insert_site(&site) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    let mut view = site_public(&site, auth_type(&site), true);
-    view["cookie"] = site
-        .cookie
-        .clone()
-        .map(Value::String)
-        .unwrap_or(Value::Null);
-    view["api_key"] = site
-        .api_key
-        .clone()
-        .map(Value::String)
-        .unwrap_or(Value::Null);
-    (StatusCode::CREATED, ok(view)).into_response()
+    crate::http::store_wait::store_write(&state, move |store| {
+        if let Err(error) = store.insert_site(&site) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        let mut view = site_public(&site, auth_type(&site), true);
+        view["cookie"] = site
+            .cookie
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        view["api_key"] = site
+            .api_key
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        (StatusCode::CREATED, ok(view)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 async fn put_site_inner(
@@ -123,30 +127,33 @@ async fn put_site_inner(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "下载器 id 无效"),
     };
-    let store = state.store.lock();
-    let current = match store.get_site(site_id) {
-        Ok(Some(site)) => site,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
-        Err(error) => return site_store_error(&error),
-    };
-    let site = match replacement_site(current, body, downloader_id) {
-        Ok(site) => site,
-        Err((status, code, msg)) => return err(status, code, msg),
-    };
-    let updated = match store.save_site(&site) {
-        Ok(updated) => updated,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+    crate::http::store_wait::store_write(&state, move |store| {
+        let current = match store.get_site(site_id) {
+            Ok(Some(site)) => site,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
+            Err(error) => return site_store_error(&error),
+        };
+        let site = match replacement_site(current, body, downloader_id) {
+            Ok(site) => site,
+            Err((status, code, msg)) => return err(status, code, msg),
+        };
+        let updated = match store.save_site(&site) {
+            Ok(updated) => updated,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        if !updated {
+            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
         }
-    };
-    if !updated {
-        return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    }
-    ok(site_json(&site)).into_response()
+        ok(site_json(&site)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 /// Null/absent masked credentials mean unchanged; an explicit empty string clears them.
@@ -180,13 +187,14 @@ fn replacement_site(
     }
     let cdp_url = replacement_credential(body.cdp_url, current.cdp_url);
     if let Some(endpoint) = cdp_url.as_deref().filter(|u| !u.trim().is_empty())
-        && let Err(_) = indexer::BrowserConfig::validate_endpoint(endpoint.trim()) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "site.invalid_endpoint",
-                "无效的 CDP discovery 端点",
-            ));
-        }
+        && let Err(_) = indexer::BrowserConfig::validate_endpoint(endpoint.trim())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "site.invalid_endpoint",
+            "无效的 CDP discovery 端点",
+        ));
+    }
     Ok(Site {
         id: current.id,
         name: body.name,
@@ -229,80 +237,84 @@ async fn patch_site_inner(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let store = state.store.lock();
-    let Some(mut site) = store.get_site(id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    };
-    if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
-        site.name = name;
-    }
-    if let Some(url) = body.url.filter(|u| !u.trim().is_empty()) {
-        site.url = url;
-    }
-    if let Some(cookie) = body.cookie {
-        site.cookie = (!cookie.is_empty()).then_some(cookie);
-    }
-    if let Some(api_key) = body.api_key {
-        site.api_key = (!api_key.is_empty()).then_some(api_key);
-    }
-    if let Some(rss_url) = body.rss_url {
-        site.rss_url = (!rss_url.is_empty()).then_some(rss_url);
-    }
-    if let Some(proxy) = body.proxy {
-        site.proxy = (!proxy.is_empty()).then_some(proxy);
-    }
-    if let Some(rate) = body.rate_limit_per_minute {
-        site.rate_limit_per_minute = (rate > 0).then_some(rate);
-    }
-    if let Some(cdp_url) = body.cdp_url {
-        let trimmed = cdp_url.trim();
-        if !trimmed.is_empty()
-            && let Err(_) = indexer::BrowserConfig::validate_endpoint(trimmed) {
+    crate::http::store_wait::store_write(&state, move |store| {
+        let Some(mut site) = store.get_site(id).ok().flatten() else {
+            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
+        };
+        if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
+            site.name = name;
+        }
+        if let Some(url) = body.url.filter(|u| !u.trim().is_empty()) {
+            site.url = url;
+        }
+        if let Some(cookie) = body.cookie {
+            site.cookie = (!cookie.is_empty()).then_some(cookie);
+        }
+        if let Some(api_key) = body.api_key {
+            site.api_key = (!api_key.is_empty()).then_some(api_key);
+        }
+        if let Some(rss_url) = body.rss_url {
+            site.rss_url = (!rss_url.is_empty()).then_some(rss_url);
+        }
+        if let Some(proxy) = body.proxy {
+            site.proxy = (!proxy.is_empty()).then_some(proxy);
+        }
+        if let Some(rate) = body.rate_limit_per_minute {
+            site.rate_limit_per_minute = (rate > 0).then_some(rate);
+        }
+        if let Some(cdp_url) = body.cdp_url {
+            let trimmed = cdp_url.trim();
+            if !trimmed.is_empty()
+                && let Err(_) = indexer::BrowserConfig::validate_endpoint(trimmed)
+            {
                 return err(
                     StatusCode::BAD_REQUEST,
                     "site.invalid_endpoint",
                     "无效的 CDP discovery 端点",
                 );
             }
-        site.cdp_url = (!cdp_url.is_empty()).then_some(cdp_url);
-    }
-    if let Some(downloader_id) = body.downloader_id {
-        site.downloader_id = (!downloader_id.is_empty())
-            .then(|| domain::DownloaderId::from_str(&downloader_id).ok())
-            .flatten();
-    }
-    if let Some(mv_str) = body.maintenance_via {
-        match mv_str.parse::<domain::MaintenanceVia>() {
-            Ok(v) => site.maintenance_via = v,
-            Err(_) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "site.invalid_maintenance_via",
-                    "无效的 maintenance_via",
-                );
+            site.cdp_url = (!cdp_url.is_empty()).then_some(cdp_url);
+        }
+        if let Some(downloader_id) = body.downloader_id {
+            site.downloader_id = (!downloader_id.is_empty())
+                .then(|| domain::DownloaderId::from_str(&downloader_id).ok())
+                .flatten();
+        }
+        if let Some(mv_str) = body.maintenance_via {
+            match mv_str.parse::<domain::MaintenanceVia>() {
+                Ok(v) => site.maintenance_via = v,
+                Err(_) => {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "site.invalid_maintenance_via",
+                        "无效的 maintenance_via",
+                    );
+                }
             }
         }
-    }
-    if let Some(enabled) = body.enabled {
-        site.enabled = enabled;
-    }
-    if site.maintenance_via == domain::MaintenanceVia::Browser
-        && site.proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
-    {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "site.browser_proxy_unsupported",
-            "浏览器维护方式不支持配置代理",
-        );
-    }
-    if let Err(error) = store.save_site(&site) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(site_public(&site, auth_type(&site), true)).into_response()
+        if let Some(enabled) = body.enabled {
+            site.enabled = enabled;
+        }
+        if site.maintenance_via == domain::MaintenanceVia::Browser
+            && site.proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
+        {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "site.browser_proxy_unsupported",
+                "浏览器维护方式不支持配置代理",
+            );
+        }
+        if let Err(error) = store.save_site(&site) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(site_public(&site, auth_type(&site), true)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 async fn delete_site_inner(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
@@ -310,8 +322,7 @@ async fn delete_site_inner(State(state): State<ApiState>, Path(id): Path<String>
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let store = state.store.lock();
-    match store.delete_site(id) {
+    crate::http::store_wait::store_write(&state, move |store| match store.delete_site(id) {
         Ok(true) => {
             tracing::info!(site_id = %id, "已删除索引站点");
             ok(json!({ "deleted": true })).into_response()
@@ -320,7 +331,9 @@ async fn delete_site_inner(State(state): State<ApiState>, Path(id): Path<String>
             tracing::warn!(site_id = %id, "待删除的站点不存在");
             err(StatusCode::NOT_FOUND, "site.missing", "站点不存在")
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn create_site(

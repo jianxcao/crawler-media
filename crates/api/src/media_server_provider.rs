@@ -135,7 +135,7 @@ impl MediaServerProvider for ApiServerProvider {
             .state
             .password_login
             .authenticate(
-                self.state.store(),
+                self.state.clone(),
                 username.to_string(),
                 password.to_string(),
             )
@@ -144,6 +144,13 @@ impl MediaServerProvider for ApiServerProvider {
             Ok(Some(authenticated)) => authenticated,
             Ok(None) => return Ok(None),
             Err(crate::password_login::LoginError::Busy) => return Err(AuthenticateError::Busy),
+            Err(crate::password_login::LoginError::Admission(response)) => {
+                return Err(if response.status() == axum::http::StatusCode::CONFLICT {
+                    AuthenticateError::ReadOnly
+                } else {
+                    AuthenticateError::Busy
+                });
+            }
             Err(error) => {
                 tracing::error!(%error, "Jellyfin 密码登录失败");
                 return Err(AuthenticateError::Internal(error.to_string()));

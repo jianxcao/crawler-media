@@ -4,7 +4,7 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DownloaderRow {
     pub id: DownloaderId,
     pub name: String,
@@ -83,6 +83,33 @@ fn maps_json(maps: &[PathMap]) -> String {
 }
 
 impl Store {
+    /// Verify status and error are one result of one exact observed configuration.
+    /// An IMMEDIATE transaction prevents another connection changing config between
+    /// the comparison and status publication; any second-statement failure rolls back.
+    pub fn record_downloader_verification(
+        &self,
+        expected: &DownloaderRow,
+        outcome: Result<(), &str>,
+    ) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(&self.app)?;
+        if self.get_downloader(expected.id)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.put_setting(
+            &format!("downloader.{}.verified", expected.id),
+            if outcome.is_ok() { "true" } else { "false" },
+        )?;
+        let error_key = format!("downloader.{}.last_error", expected.id);
+        match outcome {
+            Ok(()) => {
+                self.delete_setting(&error_key)?;
+            }
+            Err(error) => self.put_setting(&error_key, error)?,
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn insert_downloader(&self, row: &DownloaderRow) -> Result<(), StoreError> {
         if row.is_default {
             self.app

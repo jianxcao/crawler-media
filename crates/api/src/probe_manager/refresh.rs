@@ -93,11 +93,32 @@ impl ProbeManager {
         queued
     }
 
-    /// Reserve every file for a manual item refresh in one database transaction.
-    /// For TV, retain old markers until all files finish and compare each season once.
+    #[cfg(test)]
     pub(crate) fn enqueue_forced_item_refresh(
         &self,
+        units: Vec<ProbeUnit>,
+    ) -> Result<usize, ProbeEnqueueError> {
+        self.enqueue_forced_item_refresh_checked(units, || Ok(()))
+    }
+
+    pub(crate) fn enqueue_forced_item_refresh_admitted(
+        &self,
+        units: Vec<ProbeUnit>,
+        state: &crate::ApiState,
+    ) -> Result<usize, ProbeEnqueueError> {
+        self.enqueue_forced_item_refresh_checked(units, || {
+            state
+                .require_writable()
+                .and_then(|_| state.require_write_admitted())
+                .map_err(ProbeEnqueueError::Admission)
+        })
+    }
+
+    /// Persist the whole item after admission is rechecked under the Store lock.
+    fn enqueue_forced_item_refresh_checked(
+        &self,
         mut units: Vec<ProbeUnit>,
+        admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<usize, ProbeEnqueueError> {
         let Some(first) = units.first() else {
             return Ok(0);
@@ -154,36 +175,9 @@ impl ProbeManager {
                 reuse_media_info_cache: false,
             })
             .collect::<Vec<_>>();
-        let created = self.store.lock().create_probe_job(
-            &job_id,
-            job_kind,
-            &media_id.to_string(),
-            season,
-            &scope,
-            &specs,
-        );
-        match created {
-            Ok(true) => {}
-            Ok(false) => {
-                let conflict = ledger_ids.iter().any(|ledger_id| {
-                    self.store
-                        .lock()
-                        .active_probe_unit_for_ledger(ledger_id)
-                        .ok()
-                        .flatten()
-                        .is_some()
-                });
-                return Err(if conflict {
-                    ProbeEnqueueError::AlreadyRunning
-                } else {
-                    ProbeEnqueueError::Persistence
-                });
-            }
-            Err(error) => {
-                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                return Err(ProbeEnqueueError::Persistence);
-            }
-        }
+        self.persist_item_refresh(
+            &job_id, job_kind, media_id, season, &scope, &specs, admitted,
+        )?;
 
         let refresh_id = is_tv.then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed));
         let mut queued = 0;
@@ -211,5 +205,53 @@ impl ProbeManager {
             "【媒体探测】手动整条目刷新已持久化入队，旧结果保持可见"
         );
         Ok(queued)
+    }
+    fn persist_item_refresh(
+        &self,
+        job_id: &str,
+        job_kind: &str,
+        media_id: domain::MediaId,
+        season: Option<u32>,
+        scope: &str,
+        specs: &[crate::store::ProbeJobUnitSpec<'_>],
+        admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
+    ) -> Result<(), ProbeEnqueueError> {
+        let Some(store) = self
+            .store
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+        else {
+            return Err(ProbeEnqueueError::Admission(
+                crate::http::store_wait::busy_response(),
+            ));
+        };
+        admitted()?;
+        match store.create_probe_job(
+            job_id,
+            job_kind,
+            &media_id.to_string(),
+            season,
+            scope,
+            specs,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let conflict = specs.iter().any(|spec| {
+                    store
+                        .active_probe_unit_for_ledger(spec.ledger_id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                });
+                Err(if conflict {
+                    ProbeEnqueueError::AlreadyRunning
+                } else {
+                    ProbeEnqueueError::Persistence
+                })
+            }
+            Err(error) => {
+                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
+                Err(ProbeEnqueueError::Persistence)
+            }
+        }
     }
 }

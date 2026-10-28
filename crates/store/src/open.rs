@@ -73,8 +73,8 @@ impl Store {
         // Create path only: `auto_vacuum` lives in the database header and SQLite
         // only rewrites it while the file still has no tables *and* is not in WAL
         // mode. Both hold exactly here, before `apply_connection_policy` turns on
-        // WAL and before `migrate()` runs any DDL, so a later `VACUUM` never has to
-        // pay for the change (the layout is rebuild-on-cutover anyway).
+        // WAL and before `initialize_layout()` runs any DDL, so a later `VACUUM` never has to
+        // pay for the change. Existing files are validated without applying DDL.
         for conn in [&app, &cache, &library, &subscribe] {
             apply_auto_vacuum_on_create(conn)?;
         }
@@ -98,7 +98,7 @@ impl Store {
             library,
             subscribe,
         };
-        store.migrate()?;
+        store.initialize_layout()?;
         Ok(store)
     }
 
@@ -146,7 +146,7 @@ impl Store {
         .collect()
     }
 
-    fn migrate(&self) -> Result<(), StoreError> {
+    fn initialize_layout(&self) -> Result<(), StoreError> {
         schema::layout::initialize_or_validate(
             "app",
             &self.app,

@@ -192,6 +192,31 @@ impl Store {
         Ok(())
     }
 
+    /// Confirm only an existing unconfirmed delivery intent; never recreate or revive it.
+    pub fn confirm_pending_submission(
+        &self,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+        submitted_at: i64,
+    ) -> Result<(), StoreError> {
+        if submitted_at <= 0 {
+            return Err(StoreError::Invalid(
+                "submission timestamp must be positive".into(),
+            ));
+        }
+        let changed = self.subscribe.execute(
+            "UPDATE pending_downloads SET submitted_at=?3
+            WHERE subscribe_id=?1 AND enclosure=?2 AND state='active' AND submitted_at=0",
+            params![subscribe_id.to_string(), enclosure, submitted_at],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Protected(
+                "pending submission intent changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Mark wash-cut arrivals vetoed by their probed quality (H2).
     pub fn mark_pending_rejected(
         &self,
@@ -503,12 +528,13 @@ impl Store {
             )
             .optional()?;
         if let Some(state) = state.as_deref()
-            && (state == "merging" || state == "retired") {
-                return Err(StoreError::Protected(format!(
-                    "media {} identity is frozen ({state})",
-                    subscribe.media_id
-                )));
-            }
+            && (state == "merging" || state == "retired")
+        {
+            return Err(StoreError::Protected(format!(
+                "media {} identity is frozen ({state})",
+                subscribe.media_id
+            )));
+        }
         let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
             Coverage::Movie => ("movie", None, None, None),
             Coverage::Tv {
@@ -686,9 +712,10 @@ impl Store {
         for row in rows {
             let (season, episode, fact) = row?;
             if let Some(path) = fact.path.as_deref()
-                && let Some(coverage) = self.file_coverage_by_path(path)? {
-                    facts.set_quality(path.to_string(), self.owned_quality(&coverage)?);
-                }
+                && let Some(coverage) = self.file_coverage_by_path(path)?
+            {
+                facts.set_quality(path.to_string(), self.owned_quality(&coverage)?);
+            }
             facts.upsert(season, episode, fact);
         }
         Ok(facts)

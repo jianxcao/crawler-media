@@ -29,7 +29,7 @@ fn open_creates_four_sqlite_files() {
     );
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "subscribe").unwrap().1,
-        2,
-        "subscribe schema version should be 2"
+        store::schema::layout::SUBSCRIBE_USER_VERSION,
+        "subscribe schema version should match the current definition"
     );
 }

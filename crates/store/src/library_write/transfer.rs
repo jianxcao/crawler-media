@@ -52,31 +52,7 @@ impl Store {
         let dest_path_str = candidate.file.path.to_string_lossy().to_string();
         let dest_key = crate::path_key::canonical_recorded_key(&tx, &dest_path_str);
 
-        let existing: Option<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = tx
-            .query_row(
-                "SELECT file_id, media_id, root_id, publication_state, source_path, transfer_mode
-                 FROM library_files
-                 WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
-                params![scope.library_id.to_string(), dest_key],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let existing = load_reservation(&tx, scope.library_id, &dest_key)?;
 
         let mut reserved = candidate.clone();
 
@@ -151,6 +127,10 @@ impl Store {
         now_ms: i64,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(&self.library)?;
+        crate::pending_file_deletions::ensure_path_not_pending_deletion(
+            &tx,
+            &coverage.file.path.to_string_lossy(),
+        )?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
 
@@ -231,4 +211,38 @@ fn ensure_same_reservation(
         )));
     }
     Ok(())
+}
+
+type ExistingReservation = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn load_reservation(
+    conn: &rusqlite::Connection,
+    library_id: domain::LibraryId,
+    dest_key: &str,
+) -> Result<Option<ExistingReservation>, StoreError> {
+    conn.query_row(
+        "SELECT file_id, media_id, root_id, publication_state, source_path, transfer_mode
+                 FROM library_files
+                 WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
+        params![library_id.to_string(), dest_key],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }

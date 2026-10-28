@@ -1,8 +1,4 @@
--- library.db layout v6 (measured file cleanup and operation-retention indexes).
---
--- A DDL change *is* a layout change: this file and `LIBRARY_USER_VERSION` in
--- `schema/layout.rs` move together, and an older file is refused and rebuilt
--- (`scripts/storage-cutover-rebuild.sh`), never migrated.
+-- Sole current Library database definition. No historical layouts or upgrades.
 --
 -- `auto_vacuum = INCREMENTAL` is part of this layout, but it cannot be declared
 -- here: SQLite only rewrites that header flag while the file has no tables *and*
@@ -54,11 +50,8 @@ CREATE TABLE media_metadata (
  field_origins_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(field_origins_json)),
  revision INTEGER NOT NULL CHECK(revision>=0), PRIMARY KEY(media_id,locale)
 );
--- `media_seasons` was deleted by the v4 round (2026-10-26 schema audit): every
--- metadata adoption wrote a wide season row per season x locale and *nothing*
--- read it. Season display comes from `library_units` + `library_files`, episode
--- display from `media_episodes`. See
--- docs/audits/2026-10-26-library-schema-audit.md (finding H1).
+-- Season display derives from library_units/library_files; episode display
+-- uses media_episodes. There is no separate wide season projection.
 CREATE TABLE media_episodes (
  media_id TEXT NOT NULL REFERENCES media(media_id), season INTEGER NOT NULL CHECK(season>=0),
  episode INTEGER NOT NULL CHECK(episode>=0), locale TEXT NOT NULL, title TEXT, overview TEXT, air_date TEXT,
@@ -163,15 +156,8 @@ CREATE INDEX metadata_input_path ON library_metadata_inputs(root_id,path_key);
 -- `media_id` is an FK to media(media_id) but the PK starts with library_id, so
 -- deleting a media row could not reach its NFO inputs through the PK prefix.
 CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);
--- v4 (2026-10-26 schema audit) deleted three write-only columns, each of which
--- had a production writer and no production reader:
---   aliases_json  — a second copy of `media.aliases_display_json`, and the only
---                   reason `reduce::media_identity` ran five per-source queries
---                   on every card reduce. Those queries are gone with it.
---   added_at_ns   — a second copy of `added_at_sort` in nanoseconds; the sort key
---                   is what every ORDER BY reads.
---   has_nfo       — computed from `library_metadata_inputs` on every reduce, read
---                   only by tests.
+-- Cards store only consumed identity/sort/display fields. Alias membership and
+-- NFO inputs remain in their authoritative tables instead of copied columns.
 CREATE TABLE library_items (
  library_id TEXT NOT NULL REFERENCES libraries(library_id), media_id TEXT NOT NULL REFERENCES media(media_id), kind TEXT NOT NULL,
  title TEXT NOT NULL, title_sort TEXT NOT NULL, year INTEGER, identity_state TEXT NOT NULL,
@@ -328,12 +314,8 @@ CREATE TABLE playback_sessions (
  tracks_version INTEGER, play_session_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0),
  last_report_at_ms INTEGER NOT NULL DEFAULT 0, last_event_sequence INTEGER, PRIMARY KEY(user_id,device_id)
 );
--- v5 dropped `playback_{sessions,logs,metrics}_media`. v3 added them because
--- `Store::delete_playback_for_media` deleted by `media_id` while holding the playback
--- write lock; that helper is now test-only (`src/test_support.rs`) and **no production
--- path deletes playback rows by `media_id`** — media rows are retired, never deleted,
--- and production deletes go by `file_id`/`user_id`/`id`. They were an index maintained
--- on every playback write, serving nothing. See docs/audits/2026-10-26-library-schema-audit.md.
+-- Media identity survives file cleanup. Playback cleanup uses file/user/session
+-- keys; no production path deletes playback facts by Media id.
 CREATE TABLE playback_logs (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, media_id TEXT NOT NULL, season INTEGER, episode INTEGER,
  client TEXT, device_name TEXT, device_id TEXT NOT NULL, play_method TEXT NOT NULL DEFAULT 'local',
@@ -395,7 +377,8 @@ CREATE TABLE library_removal_files (
  PRIMARY KEY(operation_id,file_id)
 );
 CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
-CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_key);
 -- Store::list_due_file_deletions reads the retry window; the caller orders by
 -- next_retry_at so the index supplies both the window and the order.
 CREATE INDEX pending_deletions_due ON pending_file_deletions(next_retry_at);
@@ -441,6 +424,7 @@ CREATE TABLE pending_file_renames (
  CHECK((dest_device IS NULL) = (dest_inode IS NULL))
 );
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
+CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
 CREATE TABLE unidentified (unidentified_id TEXT NOT NULL,library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,confidence TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(library_id,path_key),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
 CREATE UNIQUE INDEX unidentified_identity ON unidentified(unidentified_id);

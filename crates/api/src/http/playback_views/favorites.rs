@@ -7,6 +7,17 @@ use crate::http::library;
 use crate::http::ok;
 use crate::management::ApiState;
 
+struct FavoriteCandidate {
+    media: domain::Media,
+    library_id: String,
+    preferred_coverage: Option<domain::FileCoverage>,
+    file_count: usize,
+    seasons: std::collections::BTreeSet<u32>,
+    episode_count: i64,
+    favorite_season_number: Option<i32>,
+    favorite_episode_number: Option<i32>,
+}
+
 /// GET /playback/favorites?limit&offset&unwatched_first&sort&order
 /// — distinct favorited media from `playback_units`, level = most recent unit.
 pub(crate) async fn favorites(
@@ -36,24 +47,13 @@ pub(crate) async fn favorites(
     let unwatched_first = query
         .get("unwatched_first")
         .is_some_and(|v| v == "true" || v == "1");
-    struct FavoriteCandidate {
-        media: domain::Media,
-        library_id: String,
-        preferred_coverage: Option<domain::FileCoverage>,
-        file_count: usize,
-        seasons: std::collections::BTreeSet<u32>,
-        episode_count: i64,
-        favorite_season_number: Option<i32>,
-        favorite_episode_number: Option<i32>,
-    }
 
     let order = match sort_key {
         "title" => store::FavoriteOrder::Title,
         "release_date" | "year" => store::FavoriteOrder::Year,
         _ => store::FavoriteOrder::FavoritedAt,
     };
-    let selected = {
-        let store = state.store.lock();
+    let selected = match crate::http::store_wait::store_read(&state, move |store| {
         (|| -> Result<_, store::StoreError> {
             let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))?;
             let libraries = visible.ids();
@@ -92,6 +92,11 @@ pub(crate) async fn favorites(
             }
             Ok((cands, page.total))
         })()
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return error.response(),
     };
     let (candidates, total) = match selected {
         Ok(selected) => selected,
@@ -108,37 +113,49 @@ pub(crate) async fn favorites(
     let page_res = state
         .http_work
         .run(std::time::Duration::from_secs(30), move || {
-            let mut items = Vec::new();
-            for cand in candidates {
-                let poster = cand
-                    .preferred_coverage
-                    .as_ref()
-                    .and_then(|cov| {
-                        crate::http::library::poster_path_with(&cov.file, files.as_ref())
-                    })
-                    .map(|_| {
-                        let cov = cand.preferred_coverage.as_ref().expect("checked");
-                        crate::http::library::artwork_url("posters", cov.file.file_id)
-                    });
-                items.push(json!({
-                    "media_item_id": cand.media.id.to_string(),
-                    "kind": cand.media.kind.as_str(),
-                    "library_id": cand.library_id,
-                    "title": cand.media.title,
-                    "year": cand.media.year,
-                    "poster_url": poster,
-                    "file_count": cand.file_count,
-                    "seasons": cand.seasons,
-                    "episode_count": cand.episode_count,
-                    "favorite_season_number": cand.favorite_season_number,
-                    "favorite_episode_number": cand.favorite_episode_number,
-                }));
-            }
-            items
+            render_favorites(candidates, files.as_ref())
         })
         .await;
 
-    let page = match page_res {
+    favorites_response(page_res, total)
+}
+
+fn render_favorites(
+    candidates: Vec<FavoriteCandidate>,
+    files: &dyn crate::file_stat_read::FileStatRead,
+) -> Vec<serde_json::Value> {
+    let mut items = Vec::new();
+    for cand in candidates {
+        let poster = cand
+            .preferred_coverage
+            .as_ref()
+            .and_then(|cov| crate::http::library::poster_path_with(&cov.file, files))
+            .map(|_| {
+                let cov = cand.preferred_coverage.as_ref().expect("checked");
+                crate::http::library::artwork_url("posters", cov.file.file_id)
+            });
+        items.push(json!({
+            "media_item_id": cand.media.id.to_string(),
+            "kind": cand.media.kind.as_str(),
+            "library_id": cand.library_id,
+            "title": cand.media.title,
+            "year": cand.media.year,
+            "poster_url": poster,
+            "file_count": cand.file_count,
+            "seasons": cand.seasons,
+            "episode_count": cand.episode_count,
+            "favorite_season_number": cand.favorite_season_number,
+            "favorite_episode_number": cand.favorite_episode_number,
+        }));
+    }
+    items
+}
+
+fn favorites_response(
+    result: Result<Vec<serde_json::Value>, crate::blocking_budget::BlockingError>,
+    total: usize,
+) -> Response {
+    let page = match result {
         Ok(items) => items,
         Err(crate::blocking_budget::BlockingError::Busy) => {
             return crate::http::err(

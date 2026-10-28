@@ -1,3 +1,6 @@
+mod reconcile_worker;
+pub(crate) use reconcile_worker::ReconcileCoordinator;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -9,24 +12,25 @@ use crate::management::ApiState;
 use crate::runtime_browser::{BrowserSettings, BrowserSettingsError};
 
 pub(crate) async fn get_browser_settings(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    match BrowserSettings::load(&store) {
+    let browser = state.browser.clone();
+    super::store_wait::store_read(&state, move |store| match BrowserSettings::load(store) {
         Ok(settings) => {
-            let mut data = settings.response_with_store(&store);
+            let mut data = settings.response_with_store(store);
             data["incompatible_endpoints"] =
-                serde_json::to_value(state.browser.incompatible_endpoints()).unwrap_or_default();
+                serde_json::to_value(browser.incompatible_endpoints()).unwrap_or_default();
             ok(data).into_response()
         }
         Err(error) => settings_error(error),
-    }
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 pub(crate) async fn put_browser_settings(
     State(state): State<ApiState>,
     Json(body): Json<Value>,
 ) -> Response {
-    let response = {
-        let store = state.store.lock();
+    let response = match super::store_wait::store_write(&state, move |store| {
         match BrowserSettings::save(&store, &body) {
             Ok(settings) => {
                 crate::user_agent::sync_user_agent(&store);
@@ -34,6 +38,11 @@ pub(crate) async fn put_browser_settings(
             }
             Err(error) => Err(error),
         }
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(response) => return response,
     };
 
     match response {
@@ -51,7 +60,20 @@ pub(crate) async fn get_obscura_status(State(state): State<ApiState>) -> Respons
 }
 
 pub(crate) async fn post_obscura_start(State(state): State<ApiState>) -> Response {
-    let policy = install_policy(&state);
+    let policy = match super::store_wait::store_read(&state, |store| {
+        BrowserSettings::load(store).map(|settings| {
+            settings
+                .obscura_install()
+                .parse()
+                .unwrap_or(crate::obscura_manager::InstallPolicy::PreinstalledOnly)
+        })
+    })
+    .await
+    {
+        Ok(Ok(policy)) => policy,
+        Ok(Err(error)) => return settings_error(error),
+        Err(error) => return error.response(),
+    };
     // Install/start may take minutes (download + readiness); never block a
     // tokio worker. Return 202 with the current status immediately.
     let worker = state.clone();
@@ -88,14 +110,6 @@ pub(crate) async fn post_obscura_stop(State(state): State<ApiState>) -> Response
     ok(serde_json::to_value(state.obscura.status()).unwrap_or_default()).into_response()
 }
 
-fn install_policy(state: &ApiState) -> crate::obscura_manager::InstallPolicy {
-    let store = state.store.lock();
-    BrowserSettings::load(&store)
-        .ok()
-        .and_then(|s| s.obscura_install().parse().ok())
-        .unwrap_or(crate::obscura_manager::InstallPolicy::PreinstalledOnly)
-}
-
 /// Inputs for the managed-daemon decision (plan: `ReconcileWant`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconcileWant {
@@ -119,7 +133,11 @@ pub fn not_started_reason(want: ReconcileWant) -> Option<&'static str> {
 
 fn load_want(state: &ApiState) -> (ReconcileWant, crate::obscura_manager::InstallPolicy) {
     let store = state.store.lock();
-    let settings = BrowserSettings::load(&store);
+    load_want_on(&store)
+}
+
+fn load_want_on(store: &crate::Store) -> (ReconcileWant, crate::obscura_manager::InstallPolicy) {
+    let settings = BrowserSettings::load(store);
     if let Err(error) = &settings {
         tracing::error!(%error, "Browser settings unreadable during reconcile; treating switch as off");
     }
@@ -201,51 +219,23 @@ pub fn reconcile_obscura(state: &ApiState) {
 /// a start is detached onto the blocking pool so the request never waits on
 /// a download.
 pub async fn reconcile_off_runtime(state: &ApiState) {
-    let (want, _) = {
-        let s = state.clone();
-        tokio::task::spawn_blocking(move || load_want(&s))
-            .await
-            .unwrap_or((
-                ReconcileWant {
-                    switch_on: false,
-                    instance_endpoint_configured: false,
-                    managed_browser_sites: 0,
-                },
-                crate::obscura_manager::InstallPolicy::PreinstalledOnly,
-            ))
-    };
-    // Stop decision: clear the endpoint and record the reason now (cheap,
-    // lock-free for the daemon), then let the actual stop run detached so the
-    // request never waits on a concurrent download or the TERM grace period.
-    if let Some(reason) = not_started_reason(want) {
-        state.browser.set_managed_endpoint(None);
-        state.obscura.set_not_started_reason(Some(reason));
+    match super::store_wait::store_read(state, load_want_on).await {
+        Ok((want, _)) => {
+            if let Some(reason) = not_started_reason(want) {
+                state.browser.set_managed_endpoint(None);
+                state.obscura.set_not_started_reason(Some(reason));
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Browser reconcile snapshot unavailable; queued for retry")
+        }
     }
-    let worker = state.clone();
-    tokio::task::spawn_blocking(move || reconcile_obscura(&worker));
+    spawn_reconcile(state);
 }
 
 /// Fire-and-forget reconcile usable from sync code (startup, Site writes).
 pub fn spawn_reconcile(state: &ApiState) {
-    let worker = state.clone();
-    // A stop/no-op decision is cheap (settings read, no download): apply it
-    // inline so no background task contends for the store lock. Only a start
-    // (possible download + readiness wait) goes to the blocking pool.
-    // Inline only when nothing must be stopped (stop() can wait on the
-    // lifecycle lock or the TERM grace period): just record the reason.
-    let (want, _) = load_want(state);
-    if let Some(reason) = not_started_reason(want) {
-        state.browser.set_managed_endpoint(None);
-        if !state.obscura.owns_live_daemon() {
-            state.obscura.set_not_started_reason(Some(reason));
-            return;
-        }
-    }
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn_blocking(move || reconcile_obscura(&worker));
-    } else {
-        reconcile_obscura(&worker);
-    }
+    reconcile_worker::schedule(state);
 }
 
 #[cfg(test)]

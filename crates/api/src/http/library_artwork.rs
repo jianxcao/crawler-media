@@ -12,8 +12,12 @@ use axum::response::{IntoResponse, Response};
 #[path = "image_response.rs"]
 pub(crate) mod image_response;
 
+mod images;
+mod writes;
+pub(crate) use images::{fanart, library_cover, poster, stills};
+pub(crate) use writes::{select_artwork, upload_artwork};
+
 use domain::MediaId;
-use image_response::conditional_image;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
@@ -22,6 +26,7 @@ use crate::http::{err, ok};
 use crate::management::ApiState;
 
 use super::library::{poster_path, preferred_coverage, require_visible_library};
+use super::store_wait;
 
 fn artwork_key(media_id: MediaId) -> String {
     format!("artwork.{}", media_id)
@@ -53,7 +58,8 @@ pub(crate) async fn artwork_candidates(
     let result = state
         .http_work
         .run(std::time::Duration::from_secs(10), move || {
-            let store = state_for_blocking.store.lock();
+            let store = state_for_blocking.store.try_lock_for(store_wait::STORE_READ_WAIT)
+                .ok_or_else(store_wait::busy_response)?;
             let library = match require_visible_library(&store, &id, user_id) {
                 Ok(library) => library,
                 Err(response) => return Err(response),
@@ -134,66 +140,6 @@ pub(crate) async fn artwork_candidates(
     }
 }
 
-fn artwork_target(
-    store: &crate::Store,
-    media_id: MediaId,
-    library_id: Option<&str>,
-    is_backdrop: bool,
-) -> Result<std::path::PathBuf, Response> {
-    let all_rows: Vec<domain::FileCoverage> = store
-        .file_coverage_for_media(media_id)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let _media = store.get_media(media_id).ok().flatten();
-    let rows: Vec<domain::FileCoverage> = if let Some(lib_id) = library_id {
-        all_rows
-            .into_iter()
-            .filter(|coverage| coverage.file.library_id.to_string() == lib_id)
-            .collect()
-    } else {
-        all_rows
-    };
-    let Some(target_row) = preferred_coverage(&rows) else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "library.item_missing",
-            "条目没有可用文件",
-        ));
-    };
-    let file_name = if is_backdrop {
-        "fanart.jpg"
-    } else {
-        "poster.jpg"
-    };
-    std::path::Path::new(&target_row.file.path)
-        .parent()
-        .map(|dir| dir.join(file_name))
-        .ok_or_else(|| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "artwork.path",
-                "无法定位封面目录",
-            )
-        })
-}
-
-async fn jpeg_response(
-    path: std::path::PathBuf,
-    headers: &axum::http::HeaderMap,
-    code: &'static str,
-    message: &'static str,
-) -> Response {
-    match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
-        // 可见性判定已在上游完成；这里才做 validator 比较（隐藏资源不会走到 304）。
-        Ok(Ok(bytes)) => {
-            let content_type = image_content_type(&bytes);
-            conditional_image(headers, bytes, content_type, true)
-        }
-        _ => err(StatusCode::NOT_FOUND, code, message),
-    }
-}
-
 pub(crate) fn image_content_type(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
@@ -208,406 +154,6 @@ pub(crate) fn image_content_type(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn visible_coverage(
-    store: &crate::Store,
-    compact_id: &str,
-    user_id: Option<domain::UserId>,
-) -> Option<domain::FileCoverage> {
-    let coverage = store
-        .file_coverage_by_id(domain::LedgerId::from_str(compact_id).ok()?)
-        .ok()
-        .flatten()?;
-    let media = store.get_media(coverage.file.media_id).ok().flatten()?;
-    super::library::file_visible_to_user(store, &coverage.file, &media, user_id).then_some(coverage)
-}
-
-/// POST /libraries/{id}/items/{item_id}/artwork/select — apply a candidate
-/// URL/path, or restore automatic selection (file_path=null).
-pub(crate) async fn select_artwork(
-    State(state): State<ApiState>,
-    Path((id, item_id)): Path<(String, String)>,
-    Json(body): Json<Value>,
-) -> Response {
-    let media_id = match MediaId::from_str(&item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
-    };
-    let lease = match state.acquire_library_work(&id) {
-        Ok(lease) => lease,
-        Err(_) => return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除"),
-    };
-    let is_backdrop = body.get("kind").and_then(Value::as_str) == Some("backdrop");
-    let file_path = body["file_path"].as_str().map(str::to_string);
-    let store = state.store.lock();
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-    };
-    let target = match artwork_target(&store, media_id, Some(&id), is_backdrop) {
-        Ok(target) => target,
-        Err(response) => return response,
-    };
-    let preferred_path = preferred_coverage(
-        &store
-            .file_coverage_for_media(media_id)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>(),
-    )
-    .map(|row| row.file.path.clone());
-
-    match file_path {
-        None => {
-            let _ = store.delete_setting(&artwork_key(media_id));
-            drop(store);
-            if let Some(preferred_path) = preferred_path {
-                if is_backdrop {
-                    let _ = crate::poster_fetch::attach_backdrop(&state, &media, &preferred_path);
-                } else {
-                    let _ = crate::poster_fetch::attach_poster(&state, &media, &preferred_path);
-                }
-            }
-            ok(json!({ "locked": false, "automatic": true })).into_response()
-        }
-        Some(source) => {
-            drop(store);
-            let bytes = if source.starts_with("http://") || source.starts_with("https://") {
-                match state.poster_fetch.get(&source) {
-                    Ok(bytes) if !bytes.is_empty() => bytes,
-                    _ => return err(StatusCode::BAD_GATEWAY, "artwork.fetch", "下载候选图片失败"),
-                }
-            } else {
-                match std::fs::read(&source) {
-                    Ok(bytes) if !bytes.is_empty() => bytes,
-                    _ => {
-                        return err(
-                            StatusCode::BAD_REQUEST,
-                            "artwork.file",
-                            "候选图片文件不存在",
-                        );
-                    }
-                }
-            };
-            if let Err(error) =
-                lease.publish(|| std::fs::write(&target, &bytes).map_err(|e| e.to_string()))
-            {
-                return err(StatusCode::CONFLICT, "library.deleting", &error);
-            }
-            if let Some(path) = preferred_path.as_deref() {
-                crate::poster_fetch::record_discovered_artwork(&state, path);
-            }
-            let store = state.store.lock();
-            let _ = store.put_setting(
-                &artwork_key(media_id),
-                &json!({ "poster_locked": true, "source": source }).to_string(),
-            );
-            drop(store);
-            ok(json!({ "locked": true, "automatic": false })).into_response()
-        }
-    }
-}
-
-/// POST /libraries/{id}/items/{item_id}/artwork/upload — custom JPEG/PNG/WebP
-/// as a base64 data URL.
-pub(crate) async fn upload_artwork(
-    State(state): State<ApiState>,
-    Path((id, item_id)): Path<(String, String)>,
-    Json(body): Json<Value>,
-) -> Response {
-    use base64::Engine;
-    let media_id = match MediaId::from_str(&item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
-    };
-    let lease = match state.acquire_library_work(&id) {
-        Ok(lease) => lease,
-        Err(_) => return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除"),
-    };
-    let is_backdrop = body.get("kind").and_then(Value::as_str) == Some("backdrop");
-    let data_url = body["data_url"].as_str().unwrap_or_default();
-    let (_, encoded) = match data_url.split_once(',') {
-        Some(parts) => parts,
-        None => return err(StatusCode::BAD_REQUEST, "artwork.upload", "图片格式无效"),
-    };
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
-        Ok(bytes) if !bytes.is_empty() && bytes.len() <= 12 * 1024 * 1024 => bytes,
-        Ok(_) => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "artwork.upload",
-                "图片为空或超过 12MB",
-            );
-        }
-        Err(_) => return err(StatusCode::BAD_REQUEST, "artwork.upload", "图片编码无效"),
-    };
-    let (target, preferred_path) = {
-        let store = state.store.lock();
-        let target = match artwork_target(&store, media_id, Some(&id), is_backdrop) {
-            Ok(target) => target,
-            Err(response) => return response,
-        };
-        let preferred = preferred_coverage(
-            &store
-                .file_coverage_for_media(media_id)
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>(),
-        )
-        .map(|row| row.file.path.clone());
-        (target, preferred)
-    };
-    let write_target = target.clone();
-    let write_bytes = bytes.clone();
-    let write = tokio::task::spawn_blocking(move || {
-        lease.publish(|| std::fs::write(write_target, write_bytes).map_err(|e| e.to_string()))
-    })
-    .await;
-    if let Err(error) = write.unwrap_or_else(|error| Err(error.to_string())) {
-        return err(StatusCode::CONFLICT, "library.deleting", &error);
-    }
-    if let Some(path) = preferred_path.as_deref() {
-        crate::poster_fetch::record_discovered_artwork(&state, path);
-    }
-    let _ = state.store.lock().put_setting(
-        &artwork_key(media_id),
-        &json!({ "poster_locked": true, "source": "upload" }).to_string(),
-    );
-    ok(json!({ "locked": true, "bytes": bytes.len() })).into_response()
-}
-
-fn extract_user_id(
-    store: &parking_lot::Mutex<crate::Store>,
-    user_ext: Option<axum::Extension<Option<domain::UserId>>>,
-    headers: &axum::http::HeaderMap,
-) -> Option<domain::UserId> {
-    if let Some(user_id) = user_ext.and_then(|u| u.0) {
-        return Some(user_id);
-    }
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    if let Some(token) = bearer {
-        return store.lock().user_id_by_token(token).ok().flatten();
-    }
-    None
-}
-
-/// GET /fanart/{ledger_id} — the fanart.jpg bytes beside a ledger file.
-pub(crate) async fn fanart(
-    State(state): State<ApiState>,
-    headers: axum::http::HeaderMap,
-    user_id: Option<axum::Extension<Option<domain::UserId>>>,
-    Path(ledger_id): Path<String>,
-) -> Response {
-    let user_id = extract_user_id(&state.store, user_id, &headers);
-    let compact = ledger_id.replace('-', "");
-    let row = {
-        let store = state.store.lock();
-        match visible_coverage(&store, &compact, user_id) {
-            Some(row) => row,
-            _ => return err(StatusCode::NOT_FOUND, "poster.missing", "背景图不存在"),
-        }
-    };
-    let file_dir = row.file.path.parent();
-    let fanart = file_dir.and_then(|dir| {
-        // 兼容平铺（文件旁）与整理后（<show>/Season N → show 根）布局。
-        let here = dir.join("fanart.jpg");
-        let up = dir.parent().map(|p| p.join("fanart.jpg"));
-        [Some(here), up].into_iter().flatten().find(|p| p.is_file())
-    });
-    let fanart = match fanart {
-        Some(f) => Some(f),
-        None => {
-            // 本地尚无背景图时，尝试即时从 TMDB 拉取并落地。抓取+落盘是副作用，
-            // 放在 blocking worker 上跑到结束，async worker 不再被占用。
-            let media = state
-                .store
-                .lock()
-                .get_media(row.file.media_id)
-                .ok()
-                .flatten();
-            if let Some(m) = media {
-                let state_for_work = state.clone();
-                let path = row.file.path.clone();
-                let fetched = state
-                    .http_work
-                    .run_to_completion(move || {
-                        crate::poster_fetch::attach_backdrop(&state_for_work, &m, &path)
-                    })
-                    .await;
-                match fetched {
-                    Ok(_) => {}
-                    Err(BlockingError::Busy) => {
-                        return err(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "runtime.busy",
-                            "服务繁忙，请重试",
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "fanart 即时抓取 worker 未完成");
-                    }
-                }
-            }
-            file_dir.and_then(|dir| {
-                let here = dir.join("fanart.jpg");
-                let up = dir.parent().map(|p| p.join("fanart.jpg"));
-                [Some(here), up].into_iter().flatten().find(|p| p.is_file())
-            })
-        }
-    };
-    let Some(fanart) = fanart else {
-        return err(StatusCode::NOT_FOUND, "poster.missing", "背景图不存在");
-    };
-    jpeg_response(fanart, &headers, "poster.missing", "背景图不存在").await
-}
-
-/// GET /stills/{ledger_id} — the episode-specific still beside a ledger file.
-pub(crate) async fn stills(
-    State(state): State<ApiState>,
-    headers: axum::http::HeaderMap,
-    user_id: Option<axum::Extension<Option<domain::UserId>>>,
-    Path(ledger_id): Path<String>,
-) -> Response {
-    let user_id = extract_user_id(&state.store, user_id, &headers);
-    let compact = ledger_id.replace('-', "");
-    let row = {
-        let store = state.store.lock();
-        match visible_coverage(&store, &compact, user_id) {
-            Some(row) => row,
-            _ => return err(StatusCode::NOT_FOUND, "poster.missing", "剧照不存在"),
-        }
-    };
-    let still = crate::episode_still::existing(row.file.path.as_path());
-    let still = match still {
-        Some(s) => Some(s),
-        None => {
-            // 本地尚无分集剧照时，回退尝试使用同条目的 fanart 作为剧照输出
-            let file_dir = row.file.path.parent();
-            file_dir.and_then(|dir| {
-                let here = dir.join("fanart.jpg");
-                let up = dir.parent().map(|p| p.join("fanart.jpg"));
-                [Some(here), up].into_iter().flatten().find(|p| p.is_file())
-            })
-        }
-    };
-    let Some(still) = still else {
-        return err(StatusCode::NOT_FOUND, "poster.missing", "剧照不存在");
-    };
-    jpeg_response(still, &headers, "poster.missing", "剧照不存在").await
-}
-
-/// GET /posters/{ledger_id} — the poster.jpg bytes beside a ledger file.
-pub(crate) async fn poster(
-    State(state): State<ApiState>,
-    headers: axum::http::HeaderMap,
-    user_id: Option<axum::Extension<Option<domain::UserId>>>,
-    Path(ledger_id): Path<String>,
-) -> Response {
-    let user_id = extract_user_id(&state.store, user_id, &headers);
-    let compact = ledger_id.replace('-', "");
-    let row = {
-        let store = state.store.lock();
-        match visible_coverage(&store, &compact, user_id) {
-            Some(row) => row,
-            _ => return err(StatusCode::NOT_FOUND, "poster.missing", "海报不存在"),
-        }
-    };
-    let file_dir = row.file.path.parent();
-    let poster = file_dir.and_then(|dir| {
-        let here = dir.join("poster.jpg");
-        let up = dir.parent().map(|p| p.join("poster.jpg"));
-        [Some(here), up].into_iter().flatten().find(|p| p.is_file())
-    });
-    let poster = match poster {
-        Some(p) => Some(p),
-        None => {
-            let media = state
-                .store
-                .lock()
-                .get_media(row.file.media_id)
-                .ok()
-                .flatten();
-            if let Some(m) = media {
-                let state_for_work = state.clone();
-                let path = row.file.path.clone();
-                let fetched = state
-                    .http_work
-                    .run_to_completion(move || {
-                        crate::poster_fetch::attach_poster(&state_for_work, &m, &path)
-                    })
-                    .await;
-                if let Err(BlockingError::Busy) = fetched {
-                    return err(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "runtime.busy",
-                        "服务繁忙，请重试",
-                    );
-                }
-            }
-            file_dir.and_then(|dir| {
-                let here = dir.join("poster.jpg");
-                let up = dir.parent().map(|p| p.join("poster.jpg"));
-                [Some(here), up].into_iter().flatten().find(|p| p.is_file())
-            })
-        }
-    };
-    let Some(poster) = poster else {
-        return err(StatusCode::NOT_FOUND, "poster.missing", "海报不存在");
-    };
-    jpeg_response(poster, &headers, "poster.missing", "海报不存在").await
-}
-
-/// GET /libraries/{id}/cover — visible library cover.
-pub(crate) async fn library_cover(
-    State(state): State<ApiState>,
-    headers: axum::http::HeaderMap,
-    user_id: Option<axum::Extension<Option<domain::UserId>>>,
-    Path(id): Path<String>,
-) -> Response {
-    let user_id = extract_user_id(&state.store, user_id, &headers);
-    let (library_id, kind) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        if !crate::http::library::library_visible(&store, &library, user_id) {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        }
-        (library.id, library.kind)
-    };
-    // 自动生成统一走 service（渲染在锁外、CAS 发布）。
-    let cover_path = match state
-        .cover_service()
-        .ensure_cover(&state, &library_id)
-        .await
-    {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(%error, library_id = %library_id, "failed to ensure library cover");
-            let store = state.store.lock();
-            store
-                .get_library(&library_id)
-                .ok()
-                .flatten()
-                .and_then(|library| crate::http::library::library_cover_path(&store, &library))
-        }
-    };
-    let Some(cover) = cover_path else {
-        return match crate::media_server_provider::default_library_cover(kind) {
-            Ok(bytes) => {
-                let content_type = image_content_type(&bytes);
-                conditional_image(&headers, bytes, content_type, true)
-            }
-            Err(error) => {
-                tracing::error!(%error, library_id = %id, "failed to generate default library cover");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        };
-    };
-    jpeg_response(cover, &headers, "cover.missing", "封面读取失败").await
-}
-
 /// POST /libraries/{id}/cover — 用户主动上传/更换媒体库封面（JPEG/PNG/WebP base64 data URL）
 pub(crate) async fn upload_library_cover(
     State(state): State<ApiState>,
@@ -616,15 +162,9 @@ pub(crate) async fn upload_library_cover(
     Json(body): Json<Value>,
 ) -> Response {
     use base64::Engine;
-    let library_id = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        if !crate::http::library::library_visible(&store, &library, user_id) {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        }
-        library.id
+    let library_id = match visible_library(&state, id, user_id).await {
+        Ok(library) => library.id,
+        Err(response) => return response,
     };
 
     let data_url = body["data_url"].as_str().unwrap_or_default();
@@ -651,7 +191,9 @@ pub(crate) async fn upload_library_cover(
     {
         Ok(path) => path,
         Err(error) => {
-            let status = if error.starts_with("cover.stale") {
+            let status = if error.starts_with("runtime.busy") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else if error.starts_with("cover.stale") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -668,21 +210,17 @@ pub(crate) async fn delete_library_cover(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
 ) -> Response {
-    let library_id = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        if !crate::http::library::library_visible(&store, &library, user_id) {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        }
-        library.id
+    let library_id = match visible_library(&state, id, user_id).await {
+        Ok(library) => library.id,
+        Err(response) => return response,
     };
 
     match state.cover_service.remove_cover(&state, &library_id).await {
         Ok(()) => {}
         Err(error) => {
-            let status = if error.starts_with("cover.stale") {
+            let status = if error.starts_with("runtime.busy") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else if error.starts_with("cover.stale") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -703,15 +241,9 @@ pub(crate) async fn generate_library_cover(
     use base64::Engine;
     use cover_generator::{BackgroundOption, CoverOptions, CoverStyle};
 
-    let library = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        if !crate::http::library::library_visible(&store, &library, user_id) {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        }
-        library
+    let library = match visible_library(&state, id, user_id).await {
+        Ok(library) => library,
+        Err(response) => return response,
     };
 
     let title_zh = body["title_zh"]
@@ -751,6 +283,7 @@ pub(crate) async fn generate_library_cover(
         Err(error) if error.starts_with("cover.stale") => {
             return err(StatusCode::CONFLICT, "cover.stale", &error);
         }
+        Err(error) if error.starts_with("runtime.busy") => return store_wait::busy_response(),
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "cover.error", &error),
     };
 
@@ -767,4 +300,16 @@ pub(crate) async fn generate_library_cover(
         "data_url": data_url,
     }))
     .into_response()
+}
+
+async fn visible_library(
+    state: &ApiState,
+    id: String,
+    user: Option<domain::UserId>,
+) -> Result<store::Library, Response> {
+    store_wait::store_read(state, move |store| {
+        require_visible_library(store, &id, user)
+    })
+    .await
+    .map_err(|error| error.response())?
 }

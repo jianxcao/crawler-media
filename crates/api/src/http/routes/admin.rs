@@ -170,10 +170,6 @@ pub(super) fn admin_library_routes() -> Router<ApiState> {
             "/libraries/{id}/path-reconciliations",
             post(library_housekeeping::path_reconciliations),
         )
-        .route(
-            "/libraries/{id}/root-consolidations",
-            post(library_housekeeping::root_consolidations),
-        )
         .route("/libraries/{id}/organize", post(library_organize::organize))
 }
 

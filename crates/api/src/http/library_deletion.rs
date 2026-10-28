@@ -9,7 +9,7 @@ use axum::{
 };
 
 pub(crate) async fn status(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
-    match state.store.lock().library_removal(&id) {
+    super::store_wait::store_read(&state, move |store| match store.library_removal(&id) {
         Ok(Some(operation)) => ok(serde_json::json!(operation)).into_response(),
         Ok(None) => err(
             StatusCode::NOT_FOUND,
@@ -21,5 +21,7 @@ pub(crate) async fn status(State(state): State<ApiState>, Path(id): Path<String>
             "store.error",
             &error.to_string(),
         ),
-    }
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }

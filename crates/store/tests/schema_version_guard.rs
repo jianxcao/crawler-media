@@ -77,12 +77,15 @@ fn fresh_open_and_reopen_are_idempotent() {
 }
 
 #[test]
-fn subscribe_v2_fresh_open_and_reopen_are_idempotent() {
+fn current_subscribe_definition_reopens_idempotently() {
     let tmp = tempfile::tempdir().unwrap();
     for _ in 0..2 {
         let store = Store::open(tmp.path()).unwrap();
         let actual = versions(&store);
-        assert_eq!(actual["subscribe"], 2);
+        assert_eq!(
+            actual["subscribe"],
+            store::schema::layout::SUBSCRIBE_USER_VERSION
+        );
         assert_eq!(actual["app"], 1);
         assert_eq!(actual["cache"], 1);
         assert_eq!(
@@ -109,7 +112,7 @@ fn database_snapshot(dir: &Path) -> std::collections::BTreeMap<std::ffi::OsStrin
 }
 
 #[test]
-fn opening_subscribe_v1_is_rejected_before_any_file_changes() {
+fn a_non_current_subscribe_definition_is_not_adopted() {
     for other_files_exist in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("subscribe.db");
@@ -119,25 +122,23 @@ fn opening_subscribe_v1_is_rejected_before_any_file_changes() {
         }
         {
             let db = rusqlite::Connection::open(&path).unwrap();
-            db.execute_batch(include_str!("fixtures/subscribe_v1.sql"))
+            db.execute_batch("CREATE TABLE subscribes (invalid_column TEXT); INSERT INTO subscribes VALUES ('untouched')")
                 .unwrap();
             db.pragma_update(None, "application_id", 1129139250)
                 .unwrap();
             db.pragma_update(None, "user_version", 1).unwrap();
-            db.execute(
-                "INSERT INTO subscribes
-                 (id, user_id, media_id, coverage_kind, fetch_mode, filter_id)
-                 VALUES ('untouched', 'user', 'media', 'movie', 'search', 'filter')",
-                [],
-            )
-            .unwrap();
         }
         let before = database_snapshot(tmp.path());
-        let error = Store::open(tmp.path()).expect_err("subscribe v1 must be refused");
+        let error =
+            Store::open(tmp.path()).expect_err("a different definition must not be adopted");
         let store::StoreError::LayoutMismatch(message) = error else {
             panic!("expected a typed layout refusal, got {error:?}");
         };
-        for required in ["subscribe", "user_version 2", "storage-cutover-rebuild.sh"] {
+        assert!(
+            !message.contains("storage-cutover-rebuild.sh"),
+            "current layout errors must not suggest historical rebuilds: {message}"
+        );
+        for required in ["subscribe", "user_version 1", "separate empty directory"] {
             assert!(message.contains(required), "missing {required}: {message}");
         }
         assert_eq!(
@@ -298,7 +299,7 @@ fn unknown_object_is_rejected() {
 }
 
 #[test]
-fn opening_library_v1_is_rejected_before_other_files_change() {
+fn a_non_current_library_header_is_rejected_before_other_files_change() {
     use sha2::{Digest, Sha256};
 
     let fresh = tempfile::tempdir().unwrap();
@@ -309,18 +310,24 @@ fn opening_library_v1_is_rejected_before_other_files_change() {
         let file = format!("{name}.db");
         std::fs::copy(fresh.path().join(&file), old_copy.path().join(&file)).unwrap();
     }
-    set_user_version(&old_copy.path().join("library.db"), 1);
+    set_user_version(
+        &old_copy.path().join("library.db"),
+        store::schema::layout::LIBRARY_USER_VERSION + 1,
+    );
     let hashes = || {
         names.map(|name| {
             Sha256::digest(std::fs::read(old_copy.path().join(format!("{name}.db"))).unwrap())
         })
     };
     let before = hashes();
-    let error = Store::open(old_copy.path()).expect_err("old library layout must be refused");
+    let error = Store::open(old_copy.path()).expect_err("a different header must not be adopted");
     let message = error.to_string();
     for required in [
         "library",
-        &format!("user_version {}", store::schema::layout::LIBRARY_USER_VERSION),
+        &format!(
+            "user_version {}",
+            store::schema::layout::LIBRARY_USER_VERSION
+        ),
         "preserve",
         "CRAWLER_MEDIA_DATA",
         "docs/deploy.md",
@@ -377,8 +384,11 @@ fn index_layout_is_strict_in_both_directions() {
         let message = error.to_string();
         for required in [
             named,
-            &format!("user_version {}", store::schema::layout::LIBRARY_USER_VERSION),
-            "scripts/storage-cutover-rebuild.sh",
+            &format!(
+                "user_version {}",
+                store::schema::layout::LIBRARY_USER_VERSION
+            ),
+            "separate empty directory",
         ] {
             assert!(
                 message.contains(required),

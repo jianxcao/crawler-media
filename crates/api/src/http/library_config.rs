@@ -13,7 +13,7 @@ use crate::management::ApiState;
 use crate::storage_operations::StorageOperationError;
 use crate::store::StoreError;
 
-use super::library::{library_json, missing_library};
+use super::library::missing_library;
 
 pub(crate) mod create_input;
 mod patch_input;
@@ -447,16 +447,15 @@ pub(crate) async fn set_default_library(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let store = state.store.lock();
-    match store.set_default_library(&id) {
-        Ok(library) => match library_json(&store, &library) {
-            Ok(j) => ok(j).into_response(),
-            Err(e) => err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &e.to_string(),
-            ),
-        },
+    let result =
+        match super::store_wait::store_write(&state, move |store| store.set_default_library(&id))
+            .await
+        {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
+    match result {
+        Ok(library) => render_library(&state, &library).await,
         Err(StoreError::Missing(_)) => missing_library(),
         Err(error) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -479,20 +478,37 @@ pub(crate) async fn reorder_libraries(
                 .collect()
         })
         .unwrap_or_default();
-    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let store = state.store.lock();
-    match store.reorder_libraries(&refs) {
-        Ok(()) => ok(json!({ "reordered": refs.len() })).into_response(),
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    super::store_wait::store_write(&state, move |store| {
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        match store.reorder_libraries(&refs) {
+            Ok(()) => ok(json!({ "reordered": refs.len() })).into_response(),
+            Err(error) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 /// GET /libraries/routing-options — return TMDB genres, country region presets, and country names.
 pub(crate) async fn routing_options(State(state): State<ApiState>) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            routing_options_blocking(&worker)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => super::library::browse_work_error(error),
+    }
+}
+
+fn routing_options_blocking(state: &ApiState) -> Response {
     let catalog = state.catalog.as_ref();
     let movie_genres: Vec<Value> = catalog
         .genres(MediaKind::Movie)

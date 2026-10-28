@@ -2,13 +2,9 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-27 当前生产 DDL（subscribe v2）。字段、类型、默认值、主键和命名索引逐项来自 [Store subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 2`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不证明运行时调用者已完成切换。
+结构核对：2026-10-28，唯一生产 DDL [subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)。文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是源码字典，不是用户实例 schema。
 
-v2 删除 `subscribes.created_at` / `updated_at` 的默认空串；写入必须显式提供两个非 NULL 时间戳。`Store::open` 只读预检拒绝 v1 等不匹配版本，不迁移、不补时间戳、不自动重置；停写后使用 `scripts/storage-cutover-rebuild.sh` 重建，或保留原目录并使用独立的新目录，见[部署说明](../deploy.md)。
-
-共 **4 张业务表、47 个字段、3 个显式命名索引**。本库只保存 Subscribe 策略、覆盖/搜索事实和 pending 下载记录；不保存 Playback 会话、进度、历史或遥测。Playback 的存储边界见 [library.db](library.md)。Subscribe 是长期策略，不是 Job 执行队列；通用执行记录见 [jobs.db](jobs.md)。本库不可随意清空。
-
-全部主键字段都显式 NOT NULL；没有额外 UNIQUE、CHECK、外键或触发器。下文枚举与 JSON 形状是写入/读取约定，不是 DDL 强制约束；`_id` 不自动获得引用完整性。主键自动索引不重复计入命名索引。
+`subscribes.created_at` / `updated_at` 没有空串默认值；写入必须显式提供非 NULL 时间戳。Store 对当前 DDL 的表/索引定义进行只读预检，不导入数据或改写已有不同定义。没有历史 schema fixture、迁移或字段兼容。
 
 ## 表目录
 

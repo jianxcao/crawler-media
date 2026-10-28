@@ -19,7 +19,7 @@ pub(crate) mod scope;
 pub(crate) mod video;
 use super::library::{
     browse_filter_from_query, browse_order_from_query, coverages_in_library, missing_library,
-    preferred_coverage, require_visible_library,
+    require_visible_library,
 };
 use crate::store::library_query;
 pub(crate) use runner::scan_library_leased_resumable;
@@ -320,74 +320,8 @@ fn resolve_and_scrape_subdir(
 /// POST /libraries/{id}/metadata/refresh — one cover per Media owned under the
 /// library, using the newest owned episode for TV; also writes rich NFO from
 /// TMDB details and episode stills for owned TV episodes.
-pub(crate) async fn refresh_metadata(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Response {
-    let lease = match state.acquire_library_work(&id) {
-        Ok(lease) => lease,
-        Err(error) => return err(StatusCode::CONFLICT, "library.deleting", &error),
-    };
-    let store = state.store.lock();
-    let Some(library) = library_by_id(&store, &id) else {
-        return missing_library();
-    };
-    // 读数口径保持 `list_file_coverage()` + library 归属过滤：这就是 Task 18/19/20
-    // 基线记录的 `root_ledger_scans` 路径，换成 `file_coverage_for_media` 会让已冻结的
-    // store 侧读数与这里的 api 侧读数不可比，并且丢掉 library 归属过滤。
-    let owned_coverages = coverages_in_library(&store, &library);
-    let mut grouped: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
-    for coverage in &owned_coverages {
-        grouped
-            .entry(coverage.file.media_id)
-            .or_default()
-            .push(coverage.clone());
-    }
-    let mut work = Vec::new();
-    for (media_id, media_coverages) in grouped {
-        let Some(media) = media_by_id(&store, media_id) else {
-            continue;
-        };
-        let live_coverages: Vec<_> = media_coverages
-            .iter()
-            .filter(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path))
-            .collect();
-        if let Some(coverage) = preferred_coverage(&live_coverages) {
-            work.push((media, (*coverage).clone()));
-        }
-    }
-    drop(store);
-    let mut refreshed = 0u32;
-    for (media, coverage) in work {
-        if lease.control().is_cancelled()
-            || !state
-                .store
-                .lock()
-                .library_accepts_work(&id)
-                .unwrap_or(false)
-        {
-            return err(
-                StatusCode::CONFLICT,
-                "library.deleting",
-                "Library 正在删除或已冻结",
-            );
-        }
-        let path = coverage.file.path.clone();
-        if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
-            refreshed += 1;
-        }
-        // 真实失败由 poster_fetch 内部记录；None 表示没有可写的图。
-        let _ = crate::poster_fetch::force_attach_backdrop(&state, &media, &path);
-        // TMDB 详情 + 演职员写入 NFO（无 NFO 时也补一份），供条目详情页读取。
-        scrape_library_metadata(&state, &media, &coverage, &path, &owned_coverages);
-        if lease.control().is_cancelled() {
-            return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
-        }
-        // 章节场景图自动生成（有内嵌章节且无帧时）。
-        crate::http::library_chapters::auto_generate_chapters(&state, &path);
-    }
-    ok(json!({ "queued": true, "refreshed": refreshed })).into_response()
-}
+mod refresh;
+pub(crate) use refresh::refresh_metadata;
 
 fn scrape_library_metadata(
     state: &ApiState,
@@ -477,48 +411,52 @@ pub(crate) async fn missing(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
 ) -> Response {
-    let store = state.store.lock();
-    let library = match require_visible_library(&store, &id, user_id) {
-        Ok(library) => library,
-        Err(response) => return response,
-    };
-    let missing_map = store.missing_at_by_path().unwrap_or_default();
-    let mut media_groups: HashMap<domain::MediaId, (domain::Media, Vec<Value>)> = HashMap::new();
-    for coverage in coverages_in_library(&store, &library) {
-        if !missing_map.contains_key(coverage.file.path.to_string_lossy().as_ref()) {
-            continue;
-        }
-        let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
-            continue;
+    super::store_wait::store_read(&state, move |store| {
+        let library = match require_visible_library(&store, &id, user_id) {
+            Ok(library) => library,
+            Err(response) => return response,
         };
-        let entry = media_groups
-            .entry(coverage.file.media_id)
-            .or_insert_with(|| (media, Vec::new()));
-        // 旧读模型里每个 (file × unit) 一条 JSON：整片（旧 season/episode 皆 None）
-        // 记 (0, 0)，其余记 unit 的季/集，逐条展开保持条目集合不变。
-        for unit in &coverage.units {
-            entry.1.push(json!({
-                "id": coverage.file.file_id.to_string(),
-                "file_path": coverage.file.path,
-                "season_number": if unit.is_whole() { 0 } else { unit.season },
-                "episode_number": if unit.is_whole() { 0 } else { unit.episode },
-                "size_bytes": 0,
-            }));
+        let missing_map = store.missing_at_by_path().unwrap_or_default();
+        let mut media_groups: HashMap<domain::MediaId, (domain::Media, Vec<Value>)> =
+            HashMap::new();
+        for coverage in coverages_in_library(&store, &library) {
+            if !missing_map.contains_key(coverage.file.path.to_string_lossy().as_ref()) {
+                continue;
+            }
+            let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
+                continue;
+            };
+            let entry = media_groups
+                .entry(coverage.file.media_id)
+                .or_insert_with(|| (media, Vec::new()));
+            // 旧读模型里每个 (file × unit) 一条 JSON：整片（旧 season/episode 皆 None）
+            // 记 (0, 0)，其余记 unit 的季/集，逐条展开保持条目集合不变。
+            for unit in &coverage.units {
+                entry.1.push(json!({
+                    "id": coverage.file.file_id.to_string(),
+                    "file_path": coverage.file.path,
+                    "season_number": if unit.is_whole() { 0 } else { unit.season },
+                    "episode_number": if unit.is_whole() { 0 } else { unit.episode },
+                    "size_bytes": 0,
+                }));
+            }
         }
-    }
-    let items: Vec<Value> = media_groups
-        .into_values()
-        .map(|(media, files)| {
-            json!({
-                "media_item_id": media.id.to_string(),
-                "kind": media.kind.as_str(),
-                "title": media.title,
-                "year": media.year,
-                "files": files,
+        let items: Vec<Value> = media_groups
+            .into_values()
+            .map(|(media, files)| {
+                json!({
+                    "media_item_id": media.id.to_string(),
+                    "kind": media.kind.as_str(),
+                    "title": media.title,
+                    "year": media.year,
+                    "files": files,
+                })
             })
-        })
-        .collect();
-    ok_list(items).into_response()
+            .collect();
+        ok_list(items).into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 /// GET /libraries/{id}/item-index — first-letter index buckets of owned items.

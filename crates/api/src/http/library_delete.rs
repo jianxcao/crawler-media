@@ -1,59 +1,77 @@
-//! Delete a Library item: remove its file rows and, through the durable deletion
-//! queue, the bytes under library roots.
-//!
-//! Removing the last file of a Library item removes only what that Library derived
-//! from it (`library_items`/`library_units`/`library_item_terms`, reduced inside
-//! `Store::delete_files`). Media identity, user playback facts, collections and
-//! subscriptions are always kept.
+//! Delete one Library item's files through the durable, version-checked queue.
+//! Media, Playback, Collection and Subscribe facts survive the last file.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use domain::{LedgerId, LibraryId, MediaId};
+use domain::{LibraryId, MediaId};
 use serde_json::json;
 use std::str::FromStr;
 
 use crate::http::{err, ok};
 use crate::management::ApiState;
-use store::StoreError;
 
-/// One file of the item being deleted.
-struct ItemFile {
-    file_id: LedgerId,
-    path: String,
+fn item_files(
+    store: &crate::Store,
+    library_id: &str,
+    media_id: MediaId,
+) -> Result<Vec<domain::FileCoverage>, Response> {
+    let missing = || {
+        err(
+            StatusCode::NOT_FOUND,
+            "library.missing",
+            "条目不属于该媒体库",
+        )
+    };
+    let library = store
+        .get_library(library_id)
+        .map_err(store_error)?
+        .ok_or_else(missing)?;
+    if !store
+        .library_accepts_work(library_id)
+        .map_err(store_error)?
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "library.deleting",
+            "Library 正在删除",
+        ));
+    }
+    let media = store
+        .get_media(media_id)
+        .map_err(store_error)?
+        .ok_or_else(missing)?;
+    let library_id = library
+        .id
+        .parse::<LibraryId>()
+        .map_err(|error| store_error(error.into()))?;
+    let rows = store
+        .file_coverage_in_library(
+            library_id,
+            Some(media_id),
+            store::FileReadScope::AllRecorded,
+        )
+        .map_err(store_error)?;
+    let files: Vec<_> = rows
+        .into_iter()
+        .filter(|row| {
+            super::library::library_for_file_strict(store, &row.file, &media)
+                .is_some_and(|owner| owner.id == library.id)
+        })
+        .collect();
+    if files.is_empty() {
+        return Err(missing());
+    }
+    Ok(files)
 }
 
-/// Bytes the path occupies right now (`0` when it is already gone).
-fn observed_size(path: &str) -> u64 {
-    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-}
-
-fn store_error(error: StoreError) -> Response {
+fn store_error(error: store::StoreError) -> Response {
+    tracing::error!(%error, "读取 Library 删除对象失败");
     err(
         StatusCode::INTERNAL_SERVER_ERROR,
         "store.error",
         &error.to_string(),
     )
-}
-
-/// The files this Library owns for the item, newest identity first.
-fn item_files(
-    store: &crate::Store,
-    library_id: &str,
-    media: &domain::Media,
-) -> Result<Vec<ItemFile>, StoreError> {
-    let rows = store.file_coverage_for_media(media.id)?;
-    Ok(rows
-        .into_iter()
-        .filter(|row| {
-            crate::http::library::library_for_file_strict(store, &row.file, media)
-                .is_some_and(|library| library.id == library_id)
-        })
-        .map(|row| ItemFile {
-            file_id: row.file.file_id,
-            path: row.file.path.to_string_lossy().into_owned(),
-        })
-        .collect())
 }
 
 pub(crate) async fn delete_item(
@@ -64,63 +82,27 @@ pub(crate) async fn delete_item(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (files, removed) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&library_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
-        };
-        let accepts_work = match store.library_accepts_work(&library_id) {
-            Ok(accepts) => accepts,
-            Err(error) => return store_error(error),
-        };
-        if !accepts_work {
-            return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
-        }
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.missing", "条目不存在");
-        };
-        let files = match item_files(&store, &library_id, &media) {
-            Ok(files) => files,
-            Err(error) => return store_error(error),
-        };
-        if files.is_empty() {
-            return err(
-                StatusCode::NOT_FOUND,
-                "library.missing",
-                "条目不属于该媒体库",
-            );
-        }
-        // Physical bytes are removed only through the durable queue, so a crash
-        // between the database and the filesystem still leaves a retry behind.
-        for file in &files {
-            if let Err(error) = store.enqueue_file_deletion(&file.path, "library_item_deleted") {
-                return store_error(error);
-            }
-        }
-        let library_id = match library.id.parse::<LibraryId>() {
-            Ok(id) => id,
-            Err(error) => return store_error(error.into()),
-        };
-        let file_ids: Vec<LedgerId> = files.iter().map(|file| file.file_id).collect();
-        let removed = match store.delete_files(library_id, &file_ids) {
-            Ok(removed) => removed,
-            Err(error) => return store_error(error),
-        };
-        (files, removed)
+    let files = match super::store_wait::store_read(&state, move |store| {
+        item_files(store, &library_id, media_id)
+    })
+    .await
+    {
+        Ok(Ok(files)) => files,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
-
-    let freed_bytes: u64 = files.iter().map(|file| observed_size(&file.path)).sum();
-    let mut errors = Vec::new();
-    if let Err(error) = crate::http::file_delete::retry_queued_deletions(&state.store) {
-        tracing::error!(%error, "删除媒体库文件失败，保留在待删除队列等待重试");
-        errors.push(format!("删除文件失败: {error}"));
-    }
-    let removed_paths: Vec<String> = files.into_iter().map(|file| file.path).collect();
+    let report =
+        match super::file_delete::delete_coverages(&state, files, "library_item_deleted").await {
+            Ok(report) => report,
+            Err(response) => return response,
+        };
+    tracing::info!(%media_id, removed=report.removed, pending_errors=report.errors.len(),
+        "Library 条目文件删除执行结束");
     ok(json!({
-        "removed_paths": removed_paths,
-        "rows_deleted": removed,
-        "freed_bytes": freed_bytes,
-        "errors": errors,
+        "removed_paths": report.paths,
+        "rows_deleted": report.removed,
+        "freed_bytes": report.freed_bytes,
+        "errors": report.errors,
     }))
     .into_response()
 }

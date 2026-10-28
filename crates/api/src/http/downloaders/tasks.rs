@@ -15,7 +15,6 @@ use crate::blocking_budget::BlockingError;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
-
 #[derive(Deserialize)]
 pub(crate) struct SubmitInput {
     pub(super) download_url: String,
@@ -58,6 +57,8 @@ pub(super) enum DownloaderWorkError {
     Worker(String),
     /// RPC 已完成，但本地 finalization（如删除 pending 行）失败。
     Finalize(String),
+    /// Admission changed while the blocking worker was waiting for Store/client setup.
+    Admission(Response),
 }
 
 impl DownloaderWorkError {
@@ -65,6 +66,7 @@ impl DownloaderWorkError {
     /// Finalize→500 store.error（remove_task 另行映射 Resolve）。
     pub(super) fn response(self) -> Response {
         match self {
+            Self::Admission(response) => response,
             Self::Resolve(message) => err(StatusCode::BAD_GATEWAY, "downloader.error", &message),
             Self::Operation(message) | Self::Worker(message) => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -106,6 +108,12 @@ where
     let job = move || -> Result<T, DownloaderWorkError> {
         let client = crate::delivery::client_for_id(&state_for_work, downloader_id)
             .map_err(|error| DownloaderWorkError::Resolve(error.to_string()))?;
+        if deadline.is_none() {
+            state_for_work
+                .require_writable()
+                .and_then(|_| state_for_work.require_write_admitted())
+                .map_err(DownloaderWorkError::Admission)?;
+        }
         work(client.as_ref()).map_err(|error| DownloaderWorkError::Operation(error.to_string()))
     };
     let outcome = match deadline {
@@ -172,6 +180,10 @@ where
     let job = move || -> Result<T, DownloaderWorkError> {
         let client = crate::delivery::client_for_id(&state_for_work, downloader_id)
             .map_err(|error| DownloaderWorkError::Resolve(error.to_string()))?;
+        state_for_work
+            .require_writable()
+            .and_then(|_| state_for_work.require_write_admitted())
+            .map_err(DownloaderWorkError::Admission)?;
         let value = work(client.as_ref())
             .map_err(|error| DownloaderWorkError::Operation(error.to_string()))?;
         finalize().map_err(DownloaderWorkError::Finalize)?;
@@ -316,11 +328,11 @@ fn resolve_task(
     let subscribe_id =
         domain::SubscribeId::from_str(subscribe_id).map_err(|_| "任务 id 无效".to_string())?;
     let torrent = store
-        .list_all_pending_routed()
+        .load_pending(subscribe_id)
         .map_err(|error| error.to_string())?
         .into_iter()
-        .find(|(id, _, pending)| *id == subscribe_id && pending.torrent.enclosure == enclosure)
-        .map(|(_, _, pending)| pending)
+        .find(|(_, pending)| pending.torrent.enclosure == enclosure)
+        .map(|(_, pending)| pending)
         .ok_or_else(|| "任务不存在或已入库".to_string())?;
     Ok((subscribe_id, torrent))
 }
@@ -334,12 +346,15 @@ pub(crate) async fn remove_task(
     State(state): State<ApiState>,
     Json(body): Json<TaskInput>,
 ) -> Response {
-    let (subscribe_id, pending) = {
-        let store = state.store.lock();
-        match resolve_task(&store, &body.task_id) {
-            Ok(found) => found,
-            Err(message) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
-        }
+    let task_id = body.task_id.clone();
+    let (subscribe_id, pending) = match crate::http::store_wait::store_read(&state, move |store| {
+        resolve_task(store, &task_id)
+    })
+    .await
+    {
+        Ok(Ok(found)) => found,
+        Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
+        Err(error) => return error.response(),
     };
     let delete_files = body.delete_files;
     let torrent_for_remove = pending.torrent.clone();
@@ -352,12 +367,21 @@ pub(crate) async fn remove_task(
         pending.downloader_id,
         move |client| client.remove_owned(&torrent_for_remove, delete_files),
         move || {
-            state_for_finalize
-                .store
-                .lock()
-                .delete_pending(subscribe_id, &enclosure)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            crate::http::store_wait::with_bounded_store(state_for_finalize.store(), |store| {
+                state_for_finalize
+                    .require_writable()
+                    .and_then(|_| state_for_finalize.require_write_admitted())
+                    .map_err(|response| {
+                        format!(
+                            "pending finalization admission changed: {}",
+                            response.status()
+                        )
+                    })?;
+                store
+                    .delete_pending(subscribe_id, &enclosure)
+                    .map_err(|error| error.to_string())
+            })
+            .ok_or_else(|| "pending finalization Store busy".to_string())?
         },
     )
     .await
@@ -391,46 +415,73 @@ pub(crate) async fn replace_task(
     State(state): State<ApiState>,
     Json(body): Json<TaskInput>,
 ) -> Response {
-    let (subscribe_id, pending) = {
-        let store = state.store.lock();
-        match resolve_task(&store, &body.task_id) {
-            Ok(found) => found,
-            Err(message) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
-        }
+    let task_id = body.task_id.clone();
+    let (subscribe_id, pending) = match crate::http::store_wait::store_read(&state, move |store| {
+        resolve_task(store, &task_id)
+    })
+    .await
+    {
+        Ok(Ok(found)) => found,
+        Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
+        Err(error) => return error.response(),
     };
     let payload = json!({
         "subscribe_id": subscribe_id.to_string(),
         "exclude_enclosure": pending.torrent.enclosure,
     })
     .to_string();
-    let queue = state.jobs.lock();
-    let job = match queue.enqueue_with_key(
-        jobs::JobKind::SubscribeSearch,
-        &payload,
-        crate::job_loop::unix_now(),
-        Some(&format!("subscribe:{subscribe_id}")),
-    ) {
-        Ok(job) => job,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "job.enqueue_failed",
-                &error.to_string(),
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || {
+            let Some(queue) = worker
+                .jobs
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            else {
+                return crate::http::store_wait::busy_response();
+            };
+            if let Err(response) = worker
+                .require_writable()
+                .and_then(|_| worker.require_write_admitted())
+            {
+                return response;
+            }
+            let job = match queue.enqueue_with_key(
+                jobs::JobKind::SubscribeSearch,
+                &payload,
+                crate::job_loop::unix_now(),
+                Some(&format!("subscribe:{subscribe_id}")),
+            ) {
+                Ok(job) => job,
+                Err(error) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "job.enqueue_failed",
+                        &error.to_string(),
+                    );
+                }
+            };
+            tracing::info!(
+                subscribe_id = %subscribe_id,
+                excluded = %pending.torrent.enclosure,
+                job_id = %job.id,
+                "已为卡住的任务排队换源搜索"
             );
+            ok(json!({
+                "ok": true,
+                "subscribe_id": subscribe_id.to_string(),
+                "job_id": job.id.to_string(),
+            }))
+            .into_response()
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "Downloader replacement job could not be admitted");
+            crate::http::store_wait::busy_response()
         }
-    };
-    tracing::info!(
-        subscribe_id = %subscribe_id,
-        excluded = %pending.torrent.enclosure,
-        job_id = %job.id,
-        "已为卡住的任务排队换源搜索"
-    );
-    ok(json!({
-        "ok": true,
-        "subscribe_id": subscribe_id.to_string(),
-        "job_id": job.id.to_string(),
-    }))
-    .into_response()
+    }
 }
 
 #[cfg(test)]

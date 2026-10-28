@@ -28,7 +28,7 @@ pub(crate) async fn login(State(state): State<ApiState>, Json(body): Json<Value>
     }
     let authenticated = state
         .password_login
-        .authenticate(state.store(), username.to_string(), password.to_string())
+        .authenticate(state.clone(), username.to_string(), password.to_string())
         .await;
     let (token, user) = match authenticated {
         Ok(Some(authenticated)) => authenticated,
@@ -40,6 +40,7 @@ pub(crate) async fn login(State(state): State<ApiState>, Json(body): Json<Value>
                 "用户名或密码不正确",
             );
         }
+        Err(crate::password_login::LoginError::Admission(response)) => return response,
         Err(crate::password_login::LoginError::Busy) => {
             tracing::warn!(username = %username, "登录并发已达上限，拒绝请求");
             let mut response = err(
@@ -198,7 +199,11 @@ fn auth_busy_response() -> Response {
 
 /// `auth.error` 只留给真正的读取失败（存储错误、worker panic）。
 fn auth_error_response() -> Response {
-    err(StatusCode::INTERNAL_SERVER_ERROR, "auth.error", "身份读取失败")
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "auth.error",
+        "身份读取失败",
+    )
 }
 
 /// 库浏览端点（自带请求预算）走的 Library 读阶段失败分类。
@@ -286,7 +291,8 @@ pub(crate) async fn authenticate(
         .get::<media_server::provider::QueryTiming>()
         .map(|timing| timing.deadline);
     let owned = token.clone();
-    let deadline = scoped_deadline.unwrap_or_else(|| std::time::Instant::now() + AUTH_READ_DEADLINE);
+    let deadline =
+        scoped_deadline.unwrap_or_else(|| std::time::Instant::now() + AUTH_READ_DEADLINE);
     let lookup = crate::library_read_work::run_app_read_stage_named(
         &state,
         deadline,
@@ -319,7 +325,7 @@ pub(crate) async fn authenticate(
 }
 
 /// 管理员授权层：必须挂在 `authenticate` 之后（内层），读取其注入的身份。
-/// 对两套路由通吃：/api/v1 注入 `UserId`，Jellyfin 协议路由注入 `AuthUser`。
+/// Self API 管理路由使用 authenticate 注入的 UserId。
 ///
 /// Review L2: 角色查询同样不在执行器线程上拿 `store.lock()`；读不到角色时
 /// 区分「稍后重试」（503）与真正的内部错误（500），不再把繁忙误报成 403。
@@ -328,11 +334,7 @@ pub(crate) async fn require_admin(
     request: Request,
     next: Next,
 ) -> Response {
-    let user_id = request
-        .extensions()
-        .get::<crate::auth::AuthUser>()
-        .map(|user| user.id)
-        .or_else(|| request.extensions().get::<domain::UserId>().copied());
+    let user_id = request.extensions().get::<domain::UserId>().copied();
     let Some(user_id) = user_id else {
         return err(
             StatusCode::UNAUTHORIZED,

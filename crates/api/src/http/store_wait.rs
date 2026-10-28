@@ -122,6 +122,55 @@ where
     store_read_handle(state.store(), STORE_READ_WAIT, work).await
 }
 
+/// A bounded off-executor mutation. Admission is rechecked after acquiring the
+/// Store, so a request queued before maintenance/read-only cannot write afterward.
+pub(crate) async fn store_write<T, F>(state: &ApiState, work: F) -> Result<T, Response>
+where
+    F: FnOnce(&crate::Store) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let worker = state.clone();
+    let metrics = media_server::query_metrics::QueryMetrics::current()
+        .filter(media_server::query_metrics::QueryMetrics::diagnostic);
+    let result = state
+        .http_work
+        .run_to_completion(move || {
+            with_bounded_store(worker.store(), |store| {
+                worker.require_writable()?;
+                worker.require_write_admitted()?;
+                Ok(observe_store_work(store, metrics, work))
+            })
+        })
+        .await;
+    match result {
+        Ok(Some(value)) => value,
+        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => Err(busy_response()),
+        Err(error) => Err(StoreCallError::Worker(error.to_string()).response()),
+    }
+}
+
+fn observe_store_work<T>(
+    store: &crate::Store,
+    metrics: Option<media_server::query_metrics::QueryMetrics>,
+    work: impl FnOnce(&crate::Store) -> T,
+) -> T {
+    let Some(metrics) = metrics else {
+        return work(store);
+    };
+    let (value, stats) = store.with_stats(store::stats::StatsScope::Both, || work(store));
+    metrics.update(|snapshot| {
+        snapshot.statements = Some(snapshot.statements.unwrap_or(0) + stats.statements);
+        snapshot.vm_steps = Some(snapshot.vm_steps.unwrap_or(0) + stats.vm_steps);
+        snapshot.fullscan_steps = Some(snapshot.fullscan_steps.unwrap_or(0) + stats.fullscan_steps);
+        snapshot.sort_operations =
+            Some(snapshot.sort_operations.unwrap_or(0) + stats.sort_operations);
+        snapshot.sqlite_profile_ms = Some(
+            snapshot.sqlite_profile_ms.unwrap_or(0.) + stats.sql_duration_ns as f64 / 1_000_000.,
+        );
+    });
+    value
+}
+
 /// [`store_read`] on a bare `Store` handle, for callers (and tests) that hold the
 /// handle rather than the whole `ApiState`.
 pub(crate) async fn store_read_handle<T, F>(
@@ -136,8 +185,10 @@ where
     // 锁等 deadline - slack：这样「锁拿不到」总是先于外层 timeout 报 Busy，
     // `Deadline` 只描述「拿到锁之后 worker 超过了预算」。
     let lock_wait = deadline.saturating_sub(LOCK_SLACK);
+    let metrics = media_server::query_metrics::QueryMetrics::current()
+        .filter(media_server::query_metrics::QueryMetrics::diagnostic);
     let task = tokio::task::spawn_blocking(move || match store.try_lock_for(lock_wait) {
-        Some(guard) => Ok(work(&guard)),
+        Some(guard) => Ok(observe_store_work(&guard, metrics, work)),
         None => Err(StoreCallError::Busy),
     });
     match tokio::time::timeout(deadline, task).await {

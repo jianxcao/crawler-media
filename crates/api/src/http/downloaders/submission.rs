@@ -168,6 +168,8 @@ fn record_submitted_pending(
     score: i32,
 ) -> Result<(), Response> {
     let store = state.store.lock();
+    state.require_writable()?;
+    state.require_write_admitted()?;
     if let Err(error) = store.record_pending_submission(
         subscribe.id,
         score,
@@ -321,6 +323,37 @@ pub(crate) async fn submit(
             );
         }
     };
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || {
+            submit_blocking(worker, user_id, body, torrent, parsed, units, explicit_id)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "Manual Downloader submission worker unavailable");
+            crate::http::store_wait::busy_response()
+        }
+    }
+}
+
+fn submit_blocking(
+    state: ApiState,
+    user_id: Option<UserId>,
+    body: SubmitInput,
+    torrent: Torrent,
+    parsed: Release,
+    units: Vec<Value>,
+    explicit_id: Option<DownloaderId>,
+) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
     let subscribe = match resolve_subscribe_and_check_owner(
         &state,
         body.subscribe_id.as_deref(),
@@ -351,13 +384,37 @@ pub(crate) async fn submit(
         save_path,
         force: body.force,
     };
-    let add_result = tokio::task::spawn_blocking(move || delivery.run())
-        .await
-        .unwrap_or_else(|error| {
-            Err(SubmitFailure::Downloader(
-                downloader::DownloaderError::Message(error.to_string()),
-            ))
-        });
+    finish_manual_submission(
+        &state,
+        PreparedSubmission {
+            delivery,
+            units,
+            response_save_path,
+            category: body.category,
+            auto_route: body.auto_route,
+        },
+    )
+}
+
+struct PreparedSubmission {
+    delivery: SubmissionDelivery,
+    units: Vec<Value>,
+    response_save_path: Option<String>,
+    category: Option<String>,
+    auto_route: bool,
+}
+
+fn finish_manual_submission(state: &ApiState, prepared: PreparedSubmission) -> Response {
+    let PreparedSubmission {
+        delivery,
+        units,
+        response_save_path,
+        category,
+        auto_route,
+    } = prepared;
+    let torrent = delivery.torrent.clone();
+    let downloader_id = delivery.downloader_id;
+    let add_result = delivery.run();
 
     let add_result = match add_result {
         Err(SubmitFailure::Conflict) => {
@@ -373,15 +430,22 @@ pub(crate) async fn submit(
     };
     match add_result {
         Ok(_) => {
-            if let Some(cat) = body.category.as_deref().filter(|c| !c.trim().is_empty()) {
+            if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty()) {
                 let pref = json!({
-                    "kind": if body.auto_route { "smart" } else if response_save_path.is_some() { "dir" } else { "default" },
+                    "kind": if auto_route { "smart" } else if response_save_path.is_some() { "dir" } else { "default" },
                     "save_path": response_save_path,
                     "downloader_id": downloader_id.map(|id| id.to_string()),
                     "downloader_name": Value::Null,
                     "updated_at": crate::store::now_rfc3339(),
                 });
                 let store = state.store.lock();
+                if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+                    tracing::debug!("Protected manual submission skips target preference cache");
+                    return ok(
+                        json!({ "ok": true, "save_path": response_save_path, "units": units }),
+                    )
+                    .into_response();
+                }
                 let raw = store.get_setting("download.target_prefs").ok().flatten();
                 let mut prefs = raw
                     .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -458,6 +522,10 @@ impl SubmissionDelivery {
                 return Err(SubmitFailure::Conflict);
             }
         }
+        self.state
+            .require_writable()
+            .and_then(|_| self.state.require_write_admitted())
+            .map_err(SubmitFailure::Response)?;
         crate::delivery::submit_torrent_with_options(
             &self.state,
             &self.torrent,

@@ -1,3 +1,5 @@
+mod startup;
+
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -35,6 +37,8 @@ pub struct ApiState {
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// 文件目录浏览有界 blocking 预算（默认 2）。
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Instance-owned coalesced Browser reconciliation; no global registry.
+    pub(crate) browser_reconcile: Arc<crate::http::browser_settings::ReconcileCoordinator>,
     /// 后台背景图独立准入，按最终目标路径单飞；不占用交互式请求预算。
     pub(crate) backdrop_enrichment: Arc<crate::backdrop_enrichment::BackdropEnrichment>,
     /// notify 发送 seam（生产为显式超时的 HTTP 实现；测试可注入阻塞实现）。
@@ -312,6 +316,7 @@ impl ApiState {
             http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
+            browser_reconcile: Default::default(),
             backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
             notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),
             subtitle_delivery: Arc::new(crate::subtitle_delivery::SubtitleDelivery::new(
@@ -363,36 +368,7 @@ impl ApiState {
             statistics_phase_barrier: None,
             statistics_role_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
-        if let Some(error) = startup_browser.1 {
-            state.obscura.set_last_error(Some(error));
-        }
-        state.start_runtime()?;
-        // 幂等对账：崩溃可能停在「DB 已提交、封面文件还没删」之间，每次启动重试。
-        crate::library_cover_service::purge_removed_library_covers(&state);
-        Ok(state)
-    }
-
-    fn start_runtime(&self) -> Result<(), ApiStateError> {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return Ok(());
-        }
-        {
-            crate::http::browser_settings::spawn_reconcile(self);
-            crate::library_lifecycle::resume_library_removals(self)
-                .map_err(std::io::Error::other)?;
-            self.probe.try_start_workers();
-            self.chapter_frames.start();
-            crate::scan_probe_dispatch::start_dispatcher(self.clone());
-            // T11: Old browse projection periodic refresh is obsolete with library_items single table
-            match self.store.lock().recover_orphaned_scans() {
-                Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的扫描操作"),
-                Ok(_) => {}
-                Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
-            }
-            crate::root_reassign_work::start(self);
-            crate::rename_work::resume_startup(self.clone());
-        }
-        Ok(())
+        state.finish_initialization(startup_browser.1)
     }
 
     pub fn with_log_buffer(mut self, log_buffer: LogBuffer) -> Self {
