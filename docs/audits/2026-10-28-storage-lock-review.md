@@ -4,6 +4,20 @@
 
 **结论：暂不建议合并。共享 Store 互斥锁把不必要的读写串行化，锁内的重复归约又放大等待；两者均需处理。** 五文件生命周期划分和 Media/Library/Playback 同库事务可以保留。当前没有指数增长或永久死锁的证据，已确认存在二次与三次方工作量。
 
+## 修复状态（2026-10-29，`feat/storage-redesign`）
+
+| 项 | 状态 | 提交 | 验证 / 前后对比 |
+|---|---|---|---|
+| L1 / T1 / T2 | **未修复** | — | 读路径完全脱离共享 Store 锁、按库写连接调度属架构改造（prepare/validate 改用专用读连接、写者调度器），本轮未做；T4 已先消除池满即 503。 |
+| L2 | 已修复 | `8b9999c6` | Probe 发布改为增量归约（仅受影响文件）；首选源子查询限定本 Media。N 次 Probe（debug，无 ANALYZE）：N=100 575.7→60.0 ms，N=400 30,782→196.7 ms，增长 53.5×→3.3×。`store` 全部测试通过。 |
+| L3 | 已修复 | `8da4cd06` | 已播放断言按主键定位（集/季/整片 UNION ALL）。Series IsPlayed 计数+分页 VM steps：E=250 2,015,920→34,919，E=1000 32,062,420→138,419，增长 15.9×→3.96×。 |
+| L4 | 已修复 | `d660ea8f` | Movie 不读覆盖；TV 用 `file_coverage_in_library(lib, Some(media), AllRecorded)`。单元测试 `scrape_coverage_tests`。 |
+| L5 / T5(Web) | 部分修复 | `c20a1947` | 单在途轮询（上一轮结束再调度）、卸载/切换中止请求、过期结果丢弃（`single-flight-poll` 测试）。**未做**：首屏分页 + 按 Season 懒加载 + 轻量 Probe 状态读取（需新后端合同）。 |
+| L6 / T6 | 已修复 | `40831811` | 只接受 `tmdb:movie|tv:<id>`、`douban:<id>`，其余 400 `title_ref.invalid`，删除裸名称搜索回退；reidentify 在租约前解析。 |
+| L7 | **未修复** | — | 卡片就绪状态/`has_poster` 合同需同时改扫描流程、DTO 与 Web，本轮未做。 |
+| T3 | 已覆盖 | L2/L3 | 工作量回归测试见 `crates/store/tests/storage_lock_work.rs`。 |
+| T4 | 已修复 | `3f9b4b80` | `LibraryReadGate`：异步有界等候（每连接 4 个等候位）、共用绝对 deadline、取消即出队、worker 结束才归还 permit。测试：池满时第二个读等待后 200；队列满才 503 并恢复。 |
+
 ## 现场证据与版本边界
 
 已读取用户引用的[测试会话](thread://01a182c8-d27f-78c3-81c0-2561363b7476?hostId=local)，包括更新后的结论：
