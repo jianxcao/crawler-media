@@ -157,6 +157,7 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "session_ids_live_file",
     "media_operations_terminal_age",
     "library_operations_terminal_age",
+    "library_integrity_owner",
     "scan_operations_terminal_age",
     "media_survivor",
     "unidentified_root",

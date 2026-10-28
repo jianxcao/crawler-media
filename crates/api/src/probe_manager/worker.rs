@@ -603,6 +603,7 @@ pub(super) fn work_lease(
     registry
         .acquire_bounded(&manager.store, &library_id)
         .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {

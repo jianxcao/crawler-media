@@ -1,16 +1,15 @@
 use std::str::FromStr;
 
-use domain::{LibraryId, MediaId, MediaKind};
-use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
-use serde::{Deserialize, Serialize};
-
 use super::ITEM_COLUMNS;
+use super::cursor::{self, CursorKey, PageCursor, malformed_cursor};
 use super::query::{Bindings, ItemQuerySql};
 use crate::{
     Store, StoreError,
     library_query::types::{BrowseOrder, BrowsePage, ItemPage, LibraryItem, LibraryQuery},
 };
+use domain::{LibraryId, MediaId, MediaKind};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
 
 pub(crate) const MAX_ITEM_PAGE: usize = 500;
 pub(crate) const ITEM_KEY_OFFSET: usize = 23;
@@ -27,34 +26,6 @@ pub(crate) enum KeyKind {
     Int,
     Real,
     Text,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum CursorKey {
-    Int(i64),
-    Real(f64),
-    Text(String),
-}
-
-impl CursorKey {
-    fn to_sql(&self) -> SqlValue {
-        match self {
-            Self::Int(n) => (*n).into(),
-            Self::Real(f) => (*f).into(),
-            Self::Text(s) => s.clone().into(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct PageCursor {
-    pub(crate) keys: Vec<CursorKey>,
-    pub(crate) media_id: String,
-}
-
-pub(crate) fn malformed_cursor() -> StoreError {
-    StoreError::Invalid("malformed cursor".into())
 }
 
 /// 一个首字母桶：档名、条目数、以及「从这一档第一格开始」的游标。
@@ -75,18 +46,6 @@ fn bucket_initial(title: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().to_string())
         .unwrap_or_else(|| "#".into())
-}
-
-/// 把一行（不含 media_id 的排序键 + media_id）序列化成游标。
-///
-/// 与翻页末尾生成 `next_cursor` 的格式必须**逐字相同**，否则客户端拿它当
-/// `cursor` 传回来会被判成坏游标。
-fn cursor_of(keys: Vec<CursorKey>, media_id: &str) -> Result<String, StoreError> {
-    serde_json::to_string(&PageCursor {
-        keys,
-        media_id: media_id.to_string(),
-    })
-    .map_err(|error| StoreError::Invalid(error.to_string()))
 }
 
 pub(crate) fn order_by_sql(spec: &[OrderTerm]) -> String {
@@ -345,8 +304,7 @@ fn page_statement(
             let limit = (*limit).clamp(1, MAX_ITEM_PAGE);
             let seek = match after.as_deref() {
                 Some(raw) => {
-                    let cursor: PageCursor =
-                        serde_json::from_str(raw).map_err(|_| malformed_cursor())?;
+                    let cursor = cursor::decode(raw, &cursor::scope(query)?, spec)?;
                     format!(" AND {}", seek_clause(spec, &cursor, &mut bindings)?)
                 }
                 None => String::new(),
@@ -439,10 +397,7 @@ pub(crate) fn library_item_page_on(
                 .last()
                 .map(|item| item.media_id.to_string())
                 .ok_or_else(malformed_cursor)?;
-            Some(
-                serde_json::to_string(&PageCursor { keys, media_id })
-                    .map_err(|e| StoreError::Invalid(e.to_string()))?,
-            )
+            Some(cursor::encode(&cursor::scope(query)?, keys, &media_id)?)
         }
         _ => None,
     };
@@ -518,60 +473,8 @@ impl Store {
     /// **上一档最后一格**的游标；第一档没有前驱，`None` 就是首页。这样一次 A-Z
     /// 跳转 = 一个浏览页请求（Task 26），不再需要按 offset 逐页往前走；绝对下标
     /// 留在 store 内部，线上只有不透明游标。
-    pub fn library_item_index(
-        &self,
-        query: &LibraryQuery,
-    ) -> Result<Vec<IndexBucket>, StoreError> {
-        self.ensure_library_query_ready(query.library_id)?;
-        let base = ItemQuerySql::build_for_order(
-            query.library_id,
-            &query.filter,
-            query.user_id,
-            matches!(query.order, BrowseOrder::LastPlayed) || query.filter.unwatched_first,
-        )?;
-        let spec = order_spec(query);
-        let kinds: Vec<KeyKind> = spec.iter().map(|term| term.kind).collect();
-        let keys_sql = spec
-            .iter()
-            .map(|term| term.expr)
-            .collect::<Vec<_>>()
-            .join(", ");
-        // 排序键与 `i.title` 一起取：分档按标题，游标按排序键。
-        let columns = format!("{keys_sql}, i.title");
-        let sql = format!(
-            "{} ORDER BY {}",
-            base.select(&columns),
-            order_by_sql(&spec)
-        );
-        let mut statement = self.library.prepare(&sql)?;
-        let mut rows = statement.query(params_from_iter(base.bindings.iter().cloned()))?;
-        let mut buckets: Vec<IndexBucket> = Vec::new();
-        // 上一行的游标：它就是下一档「从这一格开始」要用的游标。
-        let mut previous_cursor: Option<String> = None;
-        while let Some(row) = rows.next()? {
-            let mut keys = Vec::with_capacity(kinds.len());
-            for (index, kind) in kinds.iter().enumerate() {
-                keys.push(read_key(row, index, *kind)?);
-            }
-            // 顺序定义的最后一项恒为 `i.media_id`（`order_spec` 保证），游标把它
-            // 单独存一份，不再放进 `keys`。
-            let Some(CursorKey::Text(media_id)) = keys.pop() else {
-                return Err(malformed_cursor());
-            };
-            let title: String = row.get(kinds.len())?;
-            let initial = bucket_initial(&title);
-            let this_cursor = cursor_of(keys, &media_id)?;
-            match buckets.last_mut() {
-                Some(last) if last.initial == initial => last.count += 1,
-                _ => buckets.push(IndexBucket {
-                    initial,
-                    count: 1,
-                    cursor: previous_cursor.clone(),
-                }),
-            }
-            previous_cursor = Some(this_cursor);
-        }
-        Ok(buckets)
+    pub fn library_item_index(&self, query: &LibraryQuery) -> Result<Vec<IndexBucket>, StoreError> {
+        library_item_index_on(&self.library, query)
     }
 
     pub fn library_item_count(&self, query: &LibraryQuery) -> Result<u64, StoreError> {
@@ -580,4 +483,57 @@ impl Store {
         tx.commit()?;
         Ok(count)
     }
+}
+
+pub(crate) fn library_item_index_on(
+    conn: &rusqlite::Connection,
+    query: &LibraryQuery,
+) -> Result<Vec<IndexBucket>, StoreError> {
+    ensure_library_query_ready_on(conn, query.library_id)?;
+    let base = ItemQuerySql::build_for_order(
+        query.library_id,
+        &query.filter,
+        query.user_id,
+        matches!(query.order, BrowseOrder::LastPlayed) || query.filter.unwatched_first,
+    )?;
+    let spec = order_spec(query);
+    let cursor_scope = cursor::scope(query)?;
+    let kinds: Vec<KeyKind> = spec.iter().map(|term| term.kind).collect();
+    let keys_sql = spec
+        .iter()
+        .map(|term| term.expr)
+        .collect::<Vec<_>>()
+        .join(", ");
+    // 排序键与 `i.title` 一起取：分档按标题，游标按排序键。
+    let columns = format!("{keys_sql}, i.title");
+    let sql = format!("{} ORDER BY {}", base.select(&columns), order_by_sql(&spec));
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(base.bindings.iter().cloned()))?;
+    let mut buckets: Vec<IndexBucket> = Vec::new();
+    // 上一行的游标：它就是下一档「从这一格开始」要用的游标。
+    let mut previous_cursor: Option<String> = None;
+    while let Some(row) = rows.next()? {
+        let mut keys = Vec::with_capacity(kinds.len());
+        for (index, kind) in kinds.iter().enumerate() {
+            keys.push(read_key(row, index, *kind)?);
+        }
+        // 顺序定义的最后一项恒为 `i.media_id`（`order_spec` 保证），游标把它
+        // 单独存一份，不再放进 `keys`。
+        let Some(CursorKey::Text(media_id)) = keys.pop() else {
+            return Err(malformed_cursor());
+        };
+        let title: String = row.get(kinds.len())?;
+        let initial = bucket_initial(&title);
+        let this_cursor = cursor::encode(&cursor_scope, keys, &media_id)?;
+        match buckets.last_mut() {
+            Some(last) if last.initial == initial => last.count += 1,
+            _ => buckets.push(IndexBucket {
+                initial,
+                count: 1,
+                cursor: previous_cursor.clone(),
+            }),
+        }
+        previous_cursor = Some(this_cursor);
+    }
+    Ok(buckets)
 }

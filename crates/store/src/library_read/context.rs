@@ -24,6 +24,7 @@ impl ReadCredential {
 #[derive(Clone)]
 pub enum LibraryReadRequest {
     Browse(LibraryQuery),
+    ItemIndex(LibraryQuery),
     Facets(FacetRequest),
     Protocol(ProtocolItemQuery),
 }
@@ -57,6 +58,7 @@ impl LibraryReadRequest {
     pub(super) fn explicit_library(&self) -> Option<LibraryId> {
         match self {
             Self::Browse(q) => Some(q.library_id),
+            Self::ItemIndex(q) => Some(q.library_id),
             Self::Facets(q) => Some(q.library_id),
             Self::Protocol(q) => match q.parent {
                 ProtocolParent::Library(id) => Some(id),
@@ -67,6 +69,7 @@ impl LibraryReadRequest {
     fn user(&self) -> Option<UserId> {
         match self {
             Self::Browse(q) => q.user_id,
+            Self::ItemIndex(q) => q.user_id,
             Self::Facets(q) => q.user_id,
             Self::Protocol(q) => Some(q.user_id),
         }
@@ -160,9 +163,11 @@ impl Store {
             }
             let roster = read_roster(&self.library, user.id, user.role)?;
             if let Some(id) = context.request.explicit_library()
-                && context.has_library(id) && !roster.iter().any(|entry| entry.id == id) {
-                    return Err(LibraryReadError::Unauthorized);
-                }
+                && context.has_library(id)
+                && !roster.iter().any(|entry| entry.id == id)
+            {
+                return Err(LibraryReadError::Unauthorized);
+            }
             if roster != context.roster {
                 return Err(LibraryReadError::ContextChanged);
             }
@@ -268,9 +273,11 @@ pub(super) fn verify_roster(
 ) -> Result<(), LibraryReadError> {
     let current = read_roster(conn, context.user, context.role)?;
     if let Some(id) = context.request.explicit_library()
-        && context.has_library(id) && !current.iter().any(|entry| entry.id == id) {
-            return Err(LibraryReadError::Unauthorized);
-        }
+        && context.has_library(id)
+        && !current.iter().any(|entry| entry.id == id)
+    {
+        return Err(LibraryReadError::Unauthorized);
+    }
     if current != context.roster {
         return Err(LibraryReadError::ContextChanged);
     }

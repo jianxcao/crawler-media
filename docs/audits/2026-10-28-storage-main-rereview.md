@@ -2,6 +2,10 @@
 
 日期：2026-10-28。比较基线 `main` / `origin/main`：`756444f76bef53f5fabed6d0ef53e9f280e005e9`；审查代码：`feat/storage-redesign@5730b0320c76992fac3b1517165567c2e6f1bbc6`。已 fetch 核实远端 main；merge base 即该 main。审查开始时工作区干净。
 
+> 后续实施记录：R1–R5 的修复已在本分支实现。扫描认领与执行使用专用线程，item-index 使用带最终权限重验的只读快照；NFO 失败退出和恢复受路径所有权约束；Integrity guard 使用部分索引，Library 布局升为 v8；分集状态按请求键窗口读取；卡片游标绑定版本和查询作用域。下文保留审查时的代码版本、复现和建议，不代表当前实现仍有这些原始缺陷。分集状态及覆盖查询的规模工作量和跨窗口快照已测，但完整 HTTP 请求跨线程的 SQL/解码工作量尚未汇总，不能视为该项规模验收通过。
+
+> 修复验证：`cargo test -p store` 744 passed / 0 failed / 11 ignored；`cargo test -p api` 1,776 passed / 0 failed / 9 ignored；`cargo test --workspace --no-fail-fast` 3,161 passed / 0 failed / 24 ignored。忽略项不计为已验证。扫描恢复持有旧状态副本时使用已配置 Catalog 的回归也已覆盖。
+
 **结论：仍有问题，建议先修复下面 R1–R5 再合并。** 五文件及 library.db 内的事务边界合理；上一轮 F1–F8 大部分修复已经落地，但 F2 的执行器阻塞没有清完，F4 新增的独占路径缺少失败退出。另有已实测的 Integrity guard 历史扫描、分集查询放大，以及未绑定作用域的卡片游标。
 
 本轮只审查、运行现有测试和临时复现、更新文档；不修改 Rust/TS/SQL/测试，不执行修复方案，不操作用户实例或重建数据库，不创建 issue。下文行号固定于上述代码 SHA。相对 main 的范围为 1,524 个文件，183,257 行新增、65,235 行删除；重点追踪存储与消费者链路，不声称逐行穷尽整个 diff。

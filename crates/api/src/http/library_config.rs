@@ -113,15 +113,7 @@ pub(crate) async fn create_library(
         Err(error) => return super::library::browse_work_error(error),
     };
     crate::root_reassign_work::notify(&state);
-    let lib_id = library.id.clone();
-    let scan_state = state.clone();
-    tokio::spawn(async move {
-        let _ = crate::http::library_scan::scan_library(
-            axum::extract::State(scan_state),
-            axum::extract::Path(lib_id),
-        )
-        .await;
-    });
+    state.scan_coordinator.trigger_next(&state);
     render_library(&state, &library).await
 }
 
@@ -162,9 +154,19 @@ fn create_library_record(
         body["exclude_from_home"].as_bool(),
         body["auto_series_collections"].as_bool(),
     )?;
-    store
+    let library = store
         .get_library(&library.id)?
-        .ok_or_else(|| StoreError::Missing(library.id))
+        .ok_or_else(|| StoreError::Missing(library.id))?;
+    let signature = crate::scan_operations::scan_scope_signature(&library);
+    if let Err(error) = store.enqueue_scan(
+        &library.id,
+        &signature,
+        &[],
+        crate::job_loop::unix_now() * 1000,
+    ) {
+        tracing::error!(library_id = %library.id, %error, "初始扫描入队失败");
+    }
+    Ok(library)
 }
 
 async fn render_library(state: &ApiState, library: &crate::store::Library) -> Response {
@@ -212,7 +214,11 @@ pub(crate) async fn patch_library(
     Json(body): Json<Value>,
 ) -> Response {
     if let Err(error) = serde_json::from_value::<patch_input::PatchLibrary>(body.clone()) {
-        return err(StatusCode::BAD_REQUEST, "library.invalid", &error.to_string());
+        return err(
+            StatusCode::BAD_REQUEST,
+            "library.invalid",
+            &error.to_string(),
+        );
     }
     let root_paths = body["root_paths"].is_array().then(|| paths_from(&body));
     if let Some(paths) = &root_paths

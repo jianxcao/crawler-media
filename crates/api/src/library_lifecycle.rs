@@ -91,13 +91,19 @@ pub(crate) fn launch_library_removal(
     handle.spawn(async move {
         if let Err(error) = removal::drain(&state, &operation_id).await {
             tracing::error!(%operation_id, %error, "Library 删除失败，保持冻结");
-            if let Err(persist_error) =
-                state
-                    .store
-                    .lock()
-                    .set_removal_state(&operation_id, "failed", Some(&error))
+            let failed_id = operation_id.clone();
+            match crate::http::store_wait::store_blocking(state.store(), move |store| {
+                store.set_removal_state(&failed_id, "failed", Some(&error))
+            })
+            .await
             {
-                tracing::error!(%operation_id, %persist_error, "保存 Library 删除失败状态失败");
+                Ok(Ok(())) => {}
+                Ok(Err(persist_error)) => {
+                    tracing::error!(%operation_id, %persist_error, "保存 Library 删除失败状态失败")
+                }
+                Err(persist_error) => {
+                    tracing::error!(%operation_id, %persist_error, "保存 Library 删除失败状态失败")
+                }
             }
         }
         state.library_work.removals.lock().remove(&operation_id);
@@ -193,6 +199,20 @@ impl Drop for LibraryWorkLease {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BoundedLeaseError {
+    #[error("Library Registry busy")]
+    RegistryBusy,
+    #[error("Library Store busy")]
+    StoreBusy,
+    #[error("Library 正在重建索引，暂时拒绝新的工作")]
+    Reconfiguring,
+    #[error("Library 正在删除或已不存在")]
+    Unavailable,
+    #[error("{0}")]
+    Store(String),
+}
+
 impl LibraryWorkRegistry {
     pub fn acquire(
         self: &Arc<Self>,
@@ -226,23 +246,23 @@ impl LibraryWorkRegistry {
         self: &Arc<Self>,
         store: &Mutex<store::Store>,
         library_id: &str,
-    ) -> Result<LibraryWorkLease, String> {
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         let mut entries = self
             .entries
             .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or_else(|| "Library Registry busy".to_string())?;
+            .ok_or(BoundedLeaseError::RegistryBusy)?;
         let entry = entries.entry(library_id.to_string()).or_default();
         if entry.blocked_by.is_some() {
-            return Err("Library 正在重建索引，暂时拒绝新的工作".into());
+            return Err(BoundedLeaseError::Reconfiguring);
         }
         if entry.cancelled
             || !store
                 .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or_else(|| "Library Store busy".to_string())?
+                .ok_or(BoundedLeaseError::StoreBusy)?
                 .library_accepts_work(library_id)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| BoundedLeaseError::Store(e.to_string()))?
         {
-            return Err("Library 正在删除或已不存在".into());
+            return Err(BoundedLeaseError::Unavailable);
         }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();

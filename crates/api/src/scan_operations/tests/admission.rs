@@ -1,5 +1,51 @@
-use super::fixture::*;
 use super::super::*;
+use super::fixture::*;
+
+#[test]
+fn cancellation_before_control_registration_prevents_scan() {
+    use std::time::{Duration, Instant};
+    let fix = Fixture::new();
+    std::fs::write(fix.root.join("Movie1 (2024).mkv"), b"video").unwrap();
+    let signature = fix.signature();
+    let op = fix
+        .state
+        .store()
+        .lock()
+        .enqueue_scan(&fix.library_id, &signature, &[], 1000)
+        .unwrap();
+    let controls = fix.state.scan_coordinator.active_controls.lock();
+    fix.state.scan_coordinator.trigger_next(&fix.state);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fix
+        .state
+        .library_work
+        .active_control(&fix.library_id)
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "scan did not acquire its lease");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fix.state.store().lock().cancel_scan(&op.id, 2000).unwrap());
+    drop(controls);
+    fix.state.scan_coordinator.cancel_operation(&op.id);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fix
+        .state
+        .library_work
+        .active_control(&fix.library_id)
+        .is_some()
+    {
+        assert!(Instant::now() < deadline, "scan did not release its lease");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let store = fix.state.store();
+    let store = store.lock();
+    assert_eq!(
+        store.scan_operation(&op.id).unwrap().unwrap().status,
+        ScanOperationStatus::Cancelled
+    );
+    assert!(store.list_file_coverage().unwrap().is_empty());
+}
 
 /// P2-4：scope 指纹必须无歧义——根路径里的逗号不能造成不同配置碰撞。
 #[test]

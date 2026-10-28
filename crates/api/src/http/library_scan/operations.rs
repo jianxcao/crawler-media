@@ -52,9 +52,29 @@ pub(crate) async fn cancel_scan_operation(
     State(state): State<ApiState>,
     Path((lib_id, op_id)): Path<(String, String)>,
 ) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || cancel_scan_blocking(&worker, lib_id, op_id))
+        .await
+    {
+        Ok(response) => response,
+        Err(crate::blocking_budget::BlockingError::Busy) => {
+            super::super::store_wait::busy_response()
+        }
+        Err(error) => super::super::library::browse_work_error(error),
+    }
+}
+
+fn cancel_scan_blocking(state: &ApiState, lib_id: String, op_id: String) -> Response {
     let now_ms = crate::job_loop::unix_now() * 1000;
     let cancel_res = {
-        let store = state.store.lock();
+        let Some(store) = state
+            .store
+            .try_lock_for(super::super::store_wait::STORE_WRITE_WAIT)
+        else {
+            return super::super::store_wait::busy_response();
+        };
         let op_opt = match store.scan_operation(&op_id) {
             Ok(opt) => opt,
             Err(e) => {
@@ -90,7 +110,12 @@ pub(crate) async fn cancel_scan_operation(
         Ok(false) => {
             // 幂等：操作存在但已处于终态（completed/failed/cancelled）时不再改状态，
             // 也不该报 404 —— 重复取消同一个操作是合法请求。
-            let store = state.store.lock();
+            let Some(store) = state
+                .store
+                .try_lock_for(super::super::store_wait::STORE_WRITE_WAIT)
+            else {
+                return super::super::store_wait::busy_response();
+            };
             match store.scan_operation(&op_id) {
                 Ok(Some(op)) if op.library_id == lib_id => ok(json!({
                     "cancelled": false,

@@ -159,7 +159,10 @@ async fn query_timing(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
     ) && path.starts_with("/libraries/")
-        && (path.ends_with("/items") || path.ends_with("/facets") || path.ends_with("/gallery"));
+        && (path.ends_with("/items")
+            || path.ends_with("/item-index")
+            || path.ends_with("/facets")
+            || path.ends_with("/gallery"));
     if covered
         && request
             .extensions()

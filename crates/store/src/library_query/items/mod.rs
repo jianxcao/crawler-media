@@ -1,6 +1,7 @@
 //! Library browse over the `library_items` summary: filter predicates, ordering and
 //! keyset pagination, plus the page-scoped batch reads a poster wall needs.
 
+mod cursor;
 pub(crate) mod filters;
 pub(crate) mod hydration;
 pub(crate) mod page;

@@ -174,7 +174,13 @@ impl Fixture {
     }
 }
 
-fn publish_episode(store: &store::Store, media_id: MediaId, root: &Path, season: u32, episode: u32) {
+fn publish_episode(
+    store: &store::Store,
+    media_id: MediaId,
+    root: &Path,
+    season: u32,
+    episode: u32,
+) {
     let path = root.join(format!("Work S{season:02}E{episode:02}.mkv"));
     std::fs::write(&path, b"video").unwrap();
     publish_fixture_file(
@@ -201,7 +207,12 @@ async fn season_mark_is_visible_in_playback_views() {
     let resume = fixture.resume(1, 1).await;
     assert_eq!(resume["played"], true);
     assert_eq!(resume["resume_status"], "already_played");
-    assert!(fixture.up_next().await["items"].as_array().unwrap().is_empty());
+    assert!(
+        fixture.up_next().await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(fixture.season_marks().await["unplayed_count"], Value::Null);
 }
 
@@ -219,7 +230,12 @@ async fn whole_item_mark_reaches_every_season_of_the_item() {
     assert_eq!(fixture.episodes(1).await["episodes"][0]["played"], true);
     assert_eq!(fixture.episodes(2).await["episodes"][0]["played"], true);
     assert_eq!(fixture.episode_marks(2, 1).await["played"], true);
-    assert!(fixture.up_next().await["items"].as_array().unwrap().is_empty());
+    assert!(
+        fixture.up_next().await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -231,6 +247,28 @@ async fn newer_episode_assertion_cancels_a_season_mark() {
     assert_eq!(fixture.episodes(1).await["episodes"][1]["played"], true);
     let up_next = fixture.up_next().await;
     assert_eq!(up_next["items"][0]["episode_number"], 1);
+}
+
+#[tokio::test]
+async fn missing_season_is_empty_and_other_seasons_keep_their_states() {
+    let fixture = Fixture::new();
+    fixture.mark(1, -1, true).await;
+    assert!(
+        fixture.episodes(9).await["episodes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .library_episodes(9)
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.episodes(1).await["episodes"][0]["played"], true);
+    assert_eq!(fixture.library_episodes(1).await[0]["played"], true);
 }
 
 #[tokio::test]
@@ -251,14 +289,11 @@ async fn equal_change_time_resolves_to_the_episode_scope() {
         let store = handle.lock();
         // Both assertions carry the same change time; the more specific scope wins.
         for (season, episode, played) in [(1, -1, true), (1, 1, false)] {
-            let change = store::playback::PlaybackMutation::marks(
-                user,
-                season,
-                episode,
-                Some(played),
-                None,
-            );
-            store.mutate_playback(fixture.media_id, &change, 5_000).unwrap();
+            let change =
+                store::playback::PlaybackMutation::marks(user, season, episode, Some(played), None);
+            store
+                .mutate_playback(fixture.media_id, &change, 5_000)
+                .unwrap();
         }
     }
     assert_eq!(fixture.episode_marks(1, 1).await["played"], false);

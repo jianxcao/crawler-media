@@ -79,6 +79,12 @@ pub struct ApiState {
     #[allow(dead_code)]
     pub(crate) library_root: Arc<PathBuf>,
     pub(crate) catalog: Arc<dyn Catalog>,
+    pub(super) scan_catalog: Arc<
+        Mutex<(
+            Arc<dyn Catalog>,
+            Arc<dyn crate::media_posters::MediaPosterSource>,
+        )>,
+    >,
     pub(crate) poster_fetch: Arc<dyn PosterFetch>,
     /// Fanart cache connection opened once per service lifetime (C03).
     pub(crate) fanart_cache: Arc<std::sync::OnceLock<Arc<media::cache::CatalogCache>>>,
@@ -288,6 +294,10 @@ impl ApiState {
             library_work.clone(),
         ));
         probe.set_chapter_frames(chapter_frames.clone());
+        let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
+        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
+            crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
+        );
         let state = Self {
             store: store.clone(),
             library_read_shutdown: Arc::new(LibraryReadShutdown(library_reads.clone())),
@@ -326,13 +336,11 @@ impl ApiState {
             indexer: Arc::new(Indexer::new(profiles, fetcher)),
             downloader,
             library_root: Arc::new(library_root),
-            catalog: Arc::new(EmptyCatalog),
+            catalog: catalog.clone(),
+            scan_catalog: Arc::new(Mutex::new((catalog, media_posters.clone()))),
             poster_fetch: Arc::new(HttpPoster),
             fanart_cache: Arc::default(),
-            media_posters: Arc::new(crate::media_posters::service::MediaPosterService::new(
-                store.clone(),
-                Arc::new(EmptyCatalog),
-            )),
+            media_posters,
             log_buffer: LogBuffer::new(DEFAULT_CAPACITY),
             obscura: Arc::new(crate::obscura_manager::ObscuraManager::new(&data_dir)),
             browser: Arc::new(startup_browser.0),
@@ -727,23 +735,6 @@ impl ApiState {
 
     pub fn clear_subscribe_deleting(&self, id: SubscribeId) {
         self.deleting_subscribes.lock().remove(&id);
-    }
-
-    pub fn with_catalog(mut self, catalog: Arc<dyn Catalog>) -> Self {
-        self.catalog = catalog.clone();
-        self.media_posters = Arc::new(crate::media_posters::service::MediaPosterService::new(
-            self.store.clone(),
-            catalog,
-        ));
-        self
-    }
-
-    pub fn with_media_posters(
-        mut self,
-        media_posters: Arc<dyn crate::media_posters::MediaPosterSource>,
-    ) -> Self {
-        self.media_posters = media_posters;
-        self
     }
 
     pub fn with_poster_fetch(mut self, poster_fetch: Arc<dyn PosterFetch>) -> Self {

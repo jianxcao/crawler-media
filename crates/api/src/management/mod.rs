@@ -1,6 +1,7 @@
 mod error;
 mod filters;
 mod query_phase;
+mod scan_catalog;
 mod state;
 mod subscribes;
 

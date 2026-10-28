@@ -23,55 +23,11 @@ pub(crate) async fn episodes(
     // Review L2: episode snapshots are a ledger read; take the lock off-executor.
     let id_for_read = id.clone();
     let (media, visible_cloned, unit_states) = match store_read(&state, move |store| {
-        let Some(media_id) = resolve_media_id(&id_for_read) else {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        };
-        let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
-        let visible_covs = visible_coverages_for_media(store, &media, &all_coverages, user_id);
-        if visible_covs.is_empty() {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        }
-        let visible_cloned: Vec<domain::FileCoverage> = visible_covs.into_iter().cloned().collect();
-        // One assertion snapshot and one unit-row read serve every episode of the
-        // requested season; per-episode effective-state lookups would repeat the
-        // three-layer assertion query for each one.
-        let units = season_units(&visible_cloned, season_number);
-        let unit_states = match user_id {
-            Some(uid) => match store.effective_unit_states(uid, media.id, &units) {
-                Ok(states) => units
-                    .iter()
-                    .zip(states)
-                    .map(|(unit, state)| {
-                        ((unit.season.max(0) as u32, unit.episode.max(0) as u32), state)
-                    })
-                    .collect(),
-                Err(error) => {
-                    tracing::error!(%error, media_id = %media.id, "读取分集播放状态失败");
-                    return Err(err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        "读取播放状态失败",
-                    ));
-                }
-            },
-            None => std::collections::HashMap::new(),
-        };
-        Ok((media, visible_cloned, unit_states))
+        store
+            .library_read_snapshot(|store| {
+                load_episode_snapshot(store, &id_for_read, user_id, season_number)
+            })
+            .map_err(episode_store_error)?
     })
     .await
     {
@@ -121,6 +77,76 @@ pub(crate) async fn episodes(
         }
     };
     ok(json!({ "season_number": season_number, "episodes": rows })).into_response()
+}
+
+type EpisodeSnapshot = (
+    domain::Media,
+    Vec<domain::FileCoverage>,
+    std::collections::HashMap<(u32, u32), Option<UnitState>>,
+);
+
+fn episode_store_error(error: store::StoreError) -> Response {
+    tracing::error!(%error, "读取分集失败");
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store.error",
+        "读取分集失败",
+    )
+}
+
+fn load_episode_snapshot(
+    store: &crate::Store,
+    id: &str,
+    user_id: Option<domain::UserId>,
+    season: Option<u32>,
+) -> Result<EpisodeSnapshot, Response> {
+    let missing = || err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+    let media_id = resolve_media_id(id).ok_or_else(missing)?;
+    let media = store
+        .get_media(media_id)
+        .map_err(episode_store_error)?
+        .ok_or_else(missing)?;
+    let visible = crate::visible_scope::VisibleLibraries::load(store, user_id)
+        .map_err(episode_store_error)?;
+    let mut coverage = Vec::new();
+    let mut has_file = false;
+    for library in visible.ids() {
+        has_file |= store
+            .has_file_in_library(library, media.id)
+            .map_err(episode_store_error)?;
+        let rows = match season {
+            Some(season) => store.file_coverage_in_library_season(library, media.id, season),
+            None => store.file_coverage_in_library(
+                library,
+                Some(media.id),
+                store::FileReadScope::AllRecorded,
+            ),
+        }
+        .map_err(episode_store_error)?;
+        coverage.extend(rows);
+    }
+    if !has_file {
+        return Err(missing());
+    }
+    let units = season_units(&coverage, season);
+    let states = match user_id {
+        Some(user) => units
+            .iter()
+            .zip(
+                store
+                    .effective_unit_states(user, media.id, &units)
+                    .map_err(episode_store_error)?,
+            )
+            .map(|(unit, state)| {
+                (
+                    (unit.season.max(0) as u32, unit.episode.max(0) as u32),
+                    state,
+                )
+            })
+            .collect(),
+        None => std::collections::HashMap::new(),
+    };
+    Ok((media, coverage, states))
 }
 
 /// Deduped episode units in the order they are rendered.

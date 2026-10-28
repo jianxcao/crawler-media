@@ -2,11 +2,13 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-28，代码 `5730b032` 的当前生产 DDL（library v7）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=7`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。
+结构核对：2026-10-28，当前生产 DDL（library v8）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=8`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。
 
-结构为 **53张业务表、594字段、80个显式命名索引、37组FK、0触发器**，不计SQLite自动索引。v4 删除 `media_seasons`（整表）、`library_item_terms.terms_media`、`library_items.aliases_json`/`added_at_ns`/`has_nfo`、`library_units.quality_json`，并重排 `library_item_terms` 主键；v5 删除 `playback_{sessions,logs,metrics}_media`（唯一消费者 `delete_playback_for_media` 已移入 `test_support`，生产没有任何按 `media_id` 删除播放行的路径），并按 DDL 补齐 `LIBRARY_INDEXES` 的两个漏项、把索引侧的布局校验改成双向。每项的理由见审计文档的逐项裁决。历史 49 表/580 字段/63 索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
+结构为 **53张业务表、594字段、81个显式命名索引、37组FK、0触发器**，不计SQLite自动索引。v4 删除 `media_seasons`（整表）、`library_item_terms.terms_media`、`library_items.aliases_json`/`added_at_ns`/`has_nfo`、`library_units.quality_json`，并重排 `library_item_terms` 主键；v5 删除 `playback_{sessions,logs,metrics}_media`（唯一消费者 `delete_playback_for_media` 已移入 `test_support`，生产没有任何按 `media_id` 删除播放行的路径），并按 DDL 补齐 `LIBRARY_INDEXES` 的两个漏项、把索引侧的布局校验改成双向。每项的理由见审计文档的逐项裁决。历史 49 表/580 字段/63 索引描述已撤下；当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
 v7 给 `library_operations` 增加 `resource_key`，让一次 NFO 导出在活跃期间独占其 sidecar 路径（`nfo_export_active_path` 唯一部分索引），并增加 `nfo_export_pending_age` 让待恢复查询不再扫描终态历史；活跃路径唯一性与 pending 查询已有回归，前轮 F4/F8 对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。这不等于完整写入成本实测；NFO 失败退出仍见 R2。
+
+v8 增加 `library_integrity_owner` 部分索引，供按 Library 和 Media 检查未成功 Integrity 的写屏障使用。`failed` 仍在索引内，保持可恢复操作的冻结语义。固定 1,000 个活跃 Integrity 的内存测试中，索引占 20,480 字节；1,000 次插入和完成分别增加 10,000 和 13,000 SQLite VM 步。这是指定数据集的工作量，不是磁盘延迟承诺。
 
 v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件清理 attempts、关闭存活 session，以及三类终态 operation 的年龄窗口索引；生产公共清理路径的工作量测试覆盖 100/1,000/10,000 条无关历史。旧布局继续拒绝，不导入或原地升级。
 
@@ -817,6 +819,7 @@ CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key) W
 CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id) WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
 CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms,operation_id) WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
+CREATE INDEX library_integrity_owner ON library_operations(library_id) WHERE kind='integrity' AND state<>'succeeded';
 CREATE INDEX operations_library_kind ON library_operations(library_id,kind,updated_at_ms DESC);
 ```
 

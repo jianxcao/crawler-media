@@ -20,6 +20,9 @@ use rusqlite::{OptionalExtension, params};
 use super::export::NfoExportRequest;
 use crate::{Store, StoreError};
 
+mod safety;
+use safety::ensure_sidecar_replaceable;
+
 /// What the driver did to the file on this pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NfoExportAction {
@@ -126,8 +129,8 @@ impl Store {
     /// The edits are the sidecar's readable fields that differ from the base
     /// effective fields of the last export (`export_fields_json`), compared after a
     /// render/parse round trip so serialisation noise is not mistaken for an edit.
-    /// `Ok(None)` means there is no baseline (never exported here, or the sidecar is
-    /// gone/unreadable): a hand-written NFO keeps its own sidecar authority.
+    /// Without an export baseline, readable fields belong to the hand-written NFO
+    /// and are carried into the first generated output.
     /// Nothing is written: the edits travel in the export request and are rendered
     /// back into this sidecar only, never promoted to global Media overrides.
     pub fn nfo_local_edits_observed(
@@ -135,12 +138,6 @@ impl Store {
         request: &NfoExportRequest,
         observation: &NfoSidecarObservation,
     ) -> Result<Option<MetadataFields>, StoreError> {
-        let Some(anchor) = self.nfo_export_anchor(request)? else {
-            return Ok(None);
-        };
-        let Some(baseline) = anchor.fields else {
-            return Ok(None);
-        };
         if observation.digest.is_none() {
             return Ok(None);
         }
@@ -151,7 +148,13 @@ impl Store {
             );
             return Ok(None);
         };
-        Ok(Some(local_edits(parsed, &baseline, request.scope)))
+        let baseline = self
+            .nfo_export_anchor(request)?
+            .and_then(|anchor| anchor.fields);
+        Ok(Some(match baseline {
+            Some(baseline) => local_edits(parsed, &baseline, request.scope),
+            None => parsed.clone(),
+        }))
     }
 
     /// Locked phase 1 of an export: render effective metadata and persist the intent.
@@ -247,7 +250,7 @@ impl Store {
     /// the lock was released still registers the bytes that *are* on disk — they
     /// are ours, and an unregistered body would later look like an external edit —
     /// but the operation is failed instead of succeeded.
-    pub fn finish_planned_nfo_export(
+    fn finish_planned_nfo_export(
         &self,
         plan: &NfoExportRequest,
         action: NfoExportAction,
@@ -266,12 +269,20 @@ impl Store {
         if let Some(observed) = observed_inputs {
             self.apply_nfo_input_reconcile(observed)?;
         }
-        self.tag_nfo_export(plan)?;
         if let Err(error) = self.nfo_export_binding_current(plan) {
-            self.fail_nfo_export(&plan.operation_id, &error.to_string(), now_ms)?;
+            self.fail_owned_nfo_export(plan, &error.to_string(), now_ms)?;
             return Err(error);
         }
-        self.complete_nfo_export(&plan.operation_id, &plan.output_digest, now_ms)?;
+        let locale = self.nfo_export_locale(plan)?;
+        let tx = crate::write_tx(&self.library)?;
+        tag_nfo_export(&tx, plan, &locale)?;
+        super::export::complete_nfo_export_on(
+            &tx,
+            &plan.operation_id,
+            &plan.output_digest,
+            now_ms,
+        )?;
+        tx.commit()?;
         tracing::info!(
             path = %plan.path.display(),
             media = %plan.media_id,
@@ -290,9 +301,8 @@ impl Store {
     ///
     /// The file decides which step is missing: it already holds the intended
     /// body (register only), it still holds what the intent saw (retry the
-    /// replacement), or a third party changed it — then the edit is escalated
-    /// into user overrides first and the body is re-derived from the effective
-    /// metadata, so re-rendering cannot silently discard it.
+    /// replacement), or a third party changed it; comparable edits are retained
+    /// locally before rerendering.
     pub fn resume_nfo_export(
         &self,
         request: &NfoExportRequest,
@@ -345,38 +355,41 @@ impl Store {
         };
         Ok(Some(NfoExportAnchor { fields }))
     }
+}
 
-    pub(crate) fn tag_nfo_export(&self, request: &NfoExportRequest) -> Result<bool, StoreError> {
-        let (season, episode) = request.scope.season_episode();
-        let fields_json = serde_json::to_string(&request.fields)?;
-        let key =
-            crate::path_key::canonical_recorded_key(&self.library, &request.path.to_string_lossy());
-        let affected = self.library.execute(
-            "UPDATE library_metadata_inputs
+fn tag_nfo_export(
+    conn: &rusqlite::Connection,
+    request: &NfoExportRequest,
+    locale: &str,
+) -> Result<bool, StoreError> {
+    let (season, episode) = request.scope.season_episode();
+    let fields_json = serde_json::to_string(&request.fields)?;
+    let key = crate::path_key::canonical_recorded_key(conn, &request.path.to_string_lossy());
+    let affected = conn.execute(
+        "UPDATE library_metadata_inputs
              SET export_id = ?1, export_digest = ?2, export_fields_json = ?3
              WHERE library_id = ?4 AND media_id = ?5 AND entity_scope = ?6
                AND season = ?7 AND episode = ?8 AND locale = ?9 AND input_key = ?10",
-            params![
-                request.export_id,
-                request.output_digest,
-                fields_json,
-                request.library_id.to_string(),
-                request.media_id.to_string(),
-                request.scope.as_str(),
-                season,
-                episode,
-                self.nfo_export_locale(request)?,
-                key
-            ],
-        )?;
-        if affected == 0 {
-            tracing::debug!(
-                path = %request.path.display(),
-                "sidecar 输入行不存在，导出标记未落库"
-            );
-        }
-        Ok(affected > 0)
+        params![
+            request.export_id,
+            request.output_digest,
+            fields_json,
+            request.library_id.to_string(),
+            request.media_id.to_string(),
+            request.scope.as_str(),
+            season,
+            episode,
+            locale,
+            key
+        ],
+    )?;
+    if affected == 0 {
+        tracing::debug!(
+            path = %request.path.display(),
+            "sidecar 输入行不存在，导出标记未落库"
+        );
     }
+    Ok(affected > 0)
 }
 
 /// A sidecar as read from disk without the Store: digest plus parsed fields.
@@ -419,7 +432,7 @@ pub fn observe_nfo_sidecar(
 
 /// Off-lock phase of an export: replace the sidecar unless it already holds the
 /// planned body. Refuses a file that changed since the snapshot or is unreadable.
-pub fn write_planned_nfo(plan: &NfoExportRequest) -> Result<NfoExportAction, StoreError> {
+fn write_planned_nfo(plan: &NfoExportRequest) -> Result<NfoExportAction, StoreError> {
     let observation = observe_nfo_sidecar(&plan.path, plan.scope)?;
     if observation.digest.as_deref() == Some(plan.output_digest.as_str()) {
         return Ok(NfoExportAction::Confirmed);
@@ -441,9 +454,30 @@ where
     L: Fn() -> G,
     G: std::ops::Deref<Target = Store>,
 {
-    let inputs = lock().plan_nfo_export_registration(plan)?;
-    let observed = inputs.map(|inputs| inputs.observe());
-    lock().finish_planned_nfo_export(plan, action, observed, now_ms)
+    let mut last_error = None;
+    for attempt in 0..5 {
+        let result = (|| {
+            let inputs = lock().plan_nfo_export_registration(plan)?;
+            let observed = inputs.map(|inputs| inputs.observe());
+            lock().finish_planned_nfo_export(plan, action, observed, now_ms)
+        })();
+        match result {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => {
+                tracing::warn!(%error, operation_id = %plan.operation_id, attempt, "NFO 登记失败");
+                last_error = Some(error);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    fail_export_after_writer(
+        lock,
+        plan,
+        last_error.unwrap_or_else(|| StoreError::Invalid("NFO registration failed".into())),
+        now_ms,
+    )
 }
 
 /// Full export with the Store held only for database phases.
@@ -460,8 +494,12 @@ where
     L: Fn() -> G,
     G: std::ops::Deref<Target = Store>,
 {
+    let _lease = super::export_lease::ExportLease::acquire(&lock(), request)?;
     let plan = lock().plan_nfo_export(request, now_ms)?;
-    let action = write_planned_nfo(&plan)?;
+    let action = match write_planned_nfo(&plan) {
+        Ok(action) => action,
+        Err(error) => return fail_export_after_writer(&lock, &plan, error, now_ms),
+    };
     finish_nfo_export_phased(&lock, &plan, action, now_ms)
 }
 
@@ -469,9 +507,7 @@ where
 ///
 /// The file decides which step is missing: it already holds the intended body
 /// (register only), it still holds what the intent saw (retry the replacement),
-/// or a third party changed it — then the edit is escalated into user overrides
-/// first and the body is re-derived from the effective metadata, so re-rendering
-/// cannot silently discard it.
+/// or a third party changed it; comparable edits remain local to the Library.
 pub fn resume_nfo_export_phased<L, G>(
     lock: L,
     request: &NfoExportRequest,
@@ -481,7 +517,22 @@ where
     L: Fn() -> G,
     G: std::ops::Deref<Target = Store>,
 {
-    let observation = observe_nfo_sidecar(&request.path, request.scope)?;
+    let _lease = super::export_lease::ExportLease::acquire(&lock(), request)?;
+    let current = lock().nfo_export_plan_current(request);
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+    };
+    if !current {
+        return Err(StoreError::Conflict(format!(
+            "nfo export {} no longer owns its plan",
+            request.operation_id
+        )));
+    }
+    let observation = match observe_nfo_sidecar(&request.path, request.scope) {
+        Ok(observation) => observation,
+        Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+    };
     if observation.digest.as_deref() == Some(request.output_digest.as_str()) {
         tracing::info!(
             path = %request.path.display(),
@@ -491,18 +542,33 @@ where
         return finish_nfo_export_phased(&lock, request, NfoExportAction::Registered, now_ms);
     }
     if !request.body.is_empty() && observation.digest == request.expected_digest {
-        ensure_sidecar_replaceable(request, &observation)?;
-        library::nfo::replace_nfo_atomically(&request.path, &request.body)?;
+        let action = match write_planned_nfo(request) {
+            Ok(action) => action,
+            Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+        };
         tracing::info!(
             path = %request.path.display(),
             export_id = %request.export_id,
             "崩溃恢复：sidecar 未替换，重放原子替换"
         );
-        return finish_nfo_export_phased(&lock, request, NfoExportAction::Replaced, now_ms);
+        return finish_nfo_export_phased(&lock, request, action, now_ms);
     }
     // Neither digest matches: the sidecar changed while this export was
     // pending. Escalate that edit into user overrides before re-rendering.
-    let edits = lock().nfo_local_edits_observed(request, &observation)?;
+    let anchor = lock().nfo_export_anchor(request);
+    let has_baseline = match anchor {
+        Ok(anchor) => anchor.and_then(|anchor| anchor.fields).is_some(),
+        Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+    };
+    let edits = if has_baseline {
+        let observed_edits = lock().nfo_local_edits_observed(request, &observation);
+        match observed_edits {
+            Ok(edits) => edits,
+            Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+        }
+    } else {
+        None
+    };
     if let Some(local_edits) = edits {
         tracing::warn!(
             path = %request.path.display(),
@@ -518,22 +584,49 @@ where
         // Same operation, same path, still unfinished. Re-render before persisting:
         // the adopted body and its digest must describe the escalated edit, otherwise
         // the write still expects the pre-edit snapshot and refuses it.
-        let fresh = lock().plan_nfo_export_rerender(&adopted)?;
-        lock().replan_nfo_export(&fresh, now_ms)?;
-        let action = write_planned_nfo(&fresh)?;
+        let rendered = lock().plan_nfo_export_rerender(&adopted);
+        let fresh = match rendered {
+            Ok(fresh) => fresh,
+            Err(error) => return fail_export_after_writer(&lock, request, error, now_ms),
+        };
+        let replanned = lock().replan_nfo_export(&fresh, now_ms);
+        if let Err(error) = replanned {
+            return fail_export_after_writer(&lock, request, error, now_ms);
+        }
+        let action = match write_planned_nfo(&fresh) {
+            Ok(action) => action,
+            Err(error) => return fail_export_after_writer(&lock, &fresh, error, now_ms),
+        };
         return finish_nfo_export_phased(&lock, &fresh, action, now_ms);
     }
     tracing::warn!(
         path = %request.path.display(),
         media = %request.media_id,
         export_id = %request.export_id,
-        "崩溃恢复：sidecar 与意图不符且没有可比较的导出基线，保留原文件等待下次重试"
+        "崩溃恢复：sidecar 与意图不符且没有可比较的导出基线，保留原文件并结束操作"
     );
-    Err(StoreError::Invalid(format!(
+    let error = StoreError::Invalid(format!(
         "nfo export {} refused to overwrite externally changed {}",
         request.export_id,
         request.path.display()
-    )))
+    ));
+    fail_export_after_writer(&lock, request, error, now_ms)
+}
+
+fn fail_export_after_writer<L, G>(
+    lock: &L,
+    plan: &NfoExportRequest,
+    error: StoreError,
+    now_ms: i64,
+) -> Result<NfoExportOutcome, StoreError>
+where
+    L: Fn() -> G,
+    G: std::ops::Deref<Target = Store>,
+{
+    if let Err(record_error) = lock().fail_owned_nfo_export(plan, &error.to_string(), now_ms) {
+        tracing::error!(%record_error, operation_id = %plan.operation_id, "NFO 失败状态保存失败");
+    }
+    Err(error)
 }
 
 /// The last export this library registered for the sidecar.
@@ -695,32 +788,4 @@ fn overlay_fields(target: &mut MetadataFields, diff: &MetadataFields) {
         genres,
         cast,
     );
-}
-
-/// Refuse to replace a sidecar that changed since the export snapshot, or one that is
-/// not a readable NFO: its bytes stay exactly as found (R17).
-fn ensure_sidecar_replaceable(
-    plan: &NfoExportRequest,
-    observation: &NfoSidecarObservation,
-) -> Result<(), StoreError> {
-    let disk = observation.digest.as_deref();
-    if disk != plan.expected_digest.as_deref() {
-        return Err(StoreError::Conflict(format!(
-            "nfo export {} refused: {} changed since the export snapshot",
-            plan.export_id,
-            plan.path.display()
-        )));
-    }
-    if disk.is_none() {
-        return Ok(());
-    }
-    if observation.parsed.is_none() {
-        tracing::warn!(path = %plan.path.display(), "sidecar 不是可读 NFO，保留原字节不覆盖");
-        return Err(StoreError::Conflict(format!(
-            "nfo export {} refused to overwrite unreadable {}",
-            plan.export_id,
-            plan.path.display()
-        )));
-    }
-    Ok(())
 }

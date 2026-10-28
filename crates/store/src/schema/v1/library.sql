@@ -369,6 +369,9 @@ CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key)
 CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id)
  WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
+-- Both write guards must seek only unfinished Integrity owners, including failed work.
+CREATE INDEX library_integrity_owner ON library_operations(library_id)
+ WHERE kind='integrity' AND state<>'succeeded';
 -- Browse paging (library_query/items/page.rs) and item detail
 -- (library_query/details/mod.rs) resolve the latest integrity operation of one
 -- Library. Without this index the plan dispatches by state and sorts the matches.

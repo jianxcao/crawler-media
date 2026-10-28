@@ -10,7 +10,7 @@ use crate::library_query::{
     facets::library_facets_on,
     items::{
         hydration::{library_item_facts_on, library_item_stills_on},
-        page::library_item_page_on,
+        page::{library_item_index_on, library_item_page_on},
     },
     page_inputs::{ProtocolPageInputs, page_inputs_on},
     protocol::select_protocol,
@@ -19,6 +19,7 @@ use crate::library_query::{
 };
 
 pub enum LibraryReadResult {
+    ItemIndex(Vec<crate::library_query::IndexBucket>),
     Browse {
         page: ItemPage,
         facts: HashMap<MediaId, LibraryItemFacts>,
@@ -102,6 +103,14 @@ fn execute_on(
                 facts,
                 stills,
             })
+        }
+        LibraryReadRequest::ItemIndex(request) => {
+            if !context.has_library(request.library_id) {
+                return Err(LibraryReadError::Unauthorized);
+            }
+            Ok(LibraryReadResult::ItemIndex(library_item_index_on(
+                conn, request,
+            )?))
         }
         LibraryReadRequest::Facets(request) => {
             if !context.has_library(request.library_id) {

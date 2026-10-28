@@ -32,6 +32,50 @@ fn coverage_sql(filter: &str) -> String {
 }
 
 impl Store {
+    /// Read related Library facts from a single SQLite snapshot.
+    pub fn library_read_snapshot<T>(&self, read: impl FnOnce(&Self) -> T) -> Result<T, StoreError> {
+        if !self.library.is_autocommit() {
+            return Ok(read(self));
+        }
+        let tx = self.library.unchecked_transaction()?;
+        let value = read(self);
+        tx.commit()?;
+        Ok(value)
+    }
+
+    /// Whether any recorded file of a Media belongs to this Library.
+    pub fn has_file_in_library(
+        &self,
+        library: LibraryId,
+        media: MediaId,
+    ) -> Result<bool, StoreError> {
+        self.library
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM library_files WHERE library_id=?1 AND media_id=?2)",
+                params![library.to_string(), media.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Recorded file coverage restricted to one Library, Media and season.
+    pub fn file_coverage_in_library_season(
+        &self,
+        library: LibraryId,
+        media: MediaId,
+        season: u32,
+    ) -> Result<Vec<FileCoverage>, StoreError> {
+        let sql = format!(
+            "SELECT {LIBRARY_FILE_COLUMNS}, u.season, u.episode
+            FROM library_file_units u JOIN library_files f ON f.file_id=u.file_id
+            WHERE u.library_id=?1 AND u.media_id=?2 AND u.season=?3"
+        );
+        self.read_coverage(
+            &sql,
+            params![library.to_string(), media.to_string(), season as i64],
+        )
+    }
+
     /// One file's coverage, grouped from the file-fact projection.
     fn read_coverage<P: rusqlite::Params>(
         &self,

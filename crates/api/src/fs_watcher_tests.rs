@@ -9,6 +9,164 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct EmptyFetcher;
 
+#[test]
+fn watcher_retry_scans_other_library_while_one_is_frozen() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let movie_root = temp.path().join("movies");
+    let tv_root = temp.path().join("shows");
+    std::fs::create_dir_all(&movie_root).unwrap();
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let path = tv_root.join("Show S01E01.mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &movie_root)
+        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &tv_root).unwrap();
+    let frozen = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let ready = store
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    state.library_work.block(&frozen, "operation");
+    crate::fs_watcher::retry_library_scan(&state, &tracker, frozen.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    crate::fs_watcher::retry_library_scan(&state, &tracker, ready);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if state
+            .store()
+            .lock()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "frozen Library starved another Library"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    state.library_work.release(&frozen, "operation");
+}
+
+#[test]
+fn watcher_retry_scans_after_reconfiguration_releases_library() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("movie");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("Movie (2024).mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &root).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    state.library_work.block(&library, "operation");
+    crate::fs_watcher::retry_library_scan(&state, &tracker, library.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    state.library_work.release(&library, "operation");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if state
+            .store()
+            .lock()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher retry did not ingest the file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn watcher_retry_eventually_scans_after_store_contention() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("movie");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("Movie (2024).mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &root).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    let handle = state.store();
+    let held = handle.lock();
+    crate::fs_watcher::retry_library_scan(&state, &tracker, library.to_string());
+    std::thread::sleep(Duration::from_millis(1200));
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if state
+            .store()
+            .lock()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher retry did not ingest the file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 impl indexer::Fetcher for EmptyFetcher {
     fn fetch(&self, _request: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
         Err(indexer::IndexerError::Fetch("unexpected request".into()))

@@ -59,7 +59,10 @@ async fn create_library(app: &axum::Router, name: &str, kind: &str, roots: &[Str
             .unwrap(),
     )
     .await;
-    created["data"]["id"].as_str().unwrap().to_string()
+    created["data"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("library creation failed: {created}"))
+        .to_string()
 }
 
 #[tokio::test]

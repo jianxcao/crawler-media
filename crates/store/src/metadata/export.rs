@@ -4,7 +4,7 @@
 //! 1. the caller persists the export intent (`begin_nfo_export`) before it
 //!    touches the filesystem, so a crash between the two is recoverable;
 //! 2. the caller replaces the file atomically, then registers the observed
-//!    digest (`complete_nfo_export`);
+//!    digest together with the successful operation;
 //! 3. a restart decides by digest: the registration for an already replaced
 //!    file is written without rewriting it.
 //!
@@ -147,15 +147,26 @@ impl Store {
         ensure_export_binding(&tx, request)?;
         let plan_json = encode_plan(request)?;
         let key = crate::path_key::canonical_recorded_key(&tx, &request.path.to_string_lossy());
-        let existing: Option<(String, String)> = tx.query_row(
-            "SELECT state, plan_json FROM library_operations WHERE operation_id=?1",
-            [&request.operation_id], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT state, plan_json FROM library_operations WHERE operation_id=?1",
+                [&request.operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         if let Some((state, existing_plan)) = existing {
             if state != "succeeded" && state != "failed" && existing_plan == plan_json {
-                return Ok(OperationStatus { operation_id: request.operation_id.clone(), phase: state.clone(), state, error: None });
+                return Ok(OperationStatus {
+                    operation_id: request.operation_id.clone(),
+                    phase: state.clone(),
+                    state,
+                    error: None,
+                });
             }
-            return Err(StoreError::Conflict(format!("nfo export {} already has a different or terminal intent", request.operation_id)));
+            return Err(StoreError::Conflict(format!(
+                "nfo export {} already has a different or terminal intent",
+                request.operation_id
+            )));
         }
         let owner: Option<String> = tx.query_row(
             "SELECT operation_id FROM library_operations WHERE resource_key=?1 AND kind='scrape' AND state NOT IN ('succeeded','failed')",
@@ -163,14 +174,24 @@ impl Store {
         ).optional()?;
         if let Some(owner) = owner {
             tracing::warn!(path=%key, owner=%owner, requested=%request.operation_id, "NFO export path already owned");
-            return Err(StoreError::Conflict(format!("nfo path {key} owned by {owner}")));
+            return Err(StoreError::Conflict(format!(
+                "nfo path {key} owned by {owner}"
+            )));
         }
         tx.execute(
             "INSERT INTO library_operations
                 (operation_id, library_id, kind, state, expected_revision, plan_json,
                  cursor_json, error, created_at_ms, updated_at_ms, resource_key)
              VALUES (?1, ?2, ?3, 'planned', ?4, ?5, NULL, NULL, ?6, ?6, ?7)",
-            params![request.operation_id, library, NFO_EXPORT_KIND, request.config_revision, plan_json, now_ms, key],
+            params![
+                request.operation_id,
+                library,
+                NFO_EXPORT_KIND,
+                request.config_revision,
+                plan_json,
+                now_ms,
+                key
+            ],
         )?;
         tx.commit()?;
         Ok(OperationStatus {
@@ -189,7 +210,7 @@ impl Store {
     /// must still be unfinished, and must own the same canonical path. A different
     /// operation still cannot claim the path (the begin-time uniqueness holds), and a
     /// caller cannot use this to hand the intent to another sidecar.
-    pub fn replan_nfo_export(
+    pub(crate) fn replan_nfo_export(
         &self,
         request: &NfoExportRequest,
         now_ms: i64,
@@ -245,49 +266,6 @@ impl Store {
         Ok(request.clone())
     }
 
-    /// Register the digest the sidecar holds now, completing the export.
-    pub fn complete_nfo_export(
-        &self,
-        operation_id: &str,
-        observed_digest: &str,
-        now_ms: i64,
-    ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let plan_json: Option<String> = tx
-            .query_row(
-                "SELECT plan_json FROM library_operations
-                 WHERE operation_id = ?1 AND kind = ?2",
-                params![operation_id, NFO_EXPORT_KIND],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(plan_json) = plan_json else {
-            return Err(StoreError::Missing(format!(
-                "nfo export operation {operation_id}"
-            )));
-        };
-        let request = decode_plan(&plan_json)?;
-        if request.output_digest != observed_digest {
-            return Err(StoreError::Conflict(format!(
-                "nfo export {operation_id} expected digest {}, observed {observed_digest}",
-                request.output_digest
-            )));
-        }
-        let cursor_json = serde_json::to_string(&NfoExportCursorV1 {
-            version: 1,
-            observed_digest: observed_digest.to_string(),
-        })
-        .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        tx.execute(
-            "UPDATE library_operations
-             SET state = 'succeeded', cursor_json = ?2, error = NULL, updated_at_ms = ?3
-             WHERE operation_id = ?1",
-            params![operation_id, cursor_json, now_ms],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Whether `operation_id` is still an unfinished NFO export.
     pub fn nfo_export_pending(&self, operation_id: &str) -> Result<bool, StoreError> {
         let state: Option<String> = self
@@ -299,6 +277,19 @@ impl Store {
             )
             .optional()?;
         Ok(state.is_some_and(|state| state != "succeeded" && state != "failed"))
+    }
+
+    pub(crate) fn nfo_export_plan_current(
+        &self,
+        request: &NfoExportRequest,
+    ) -> Result<bool, StoreError> {
+        let key =
+            crate::path_key::canonical_recorded_key(&self.library, &request.path.to_string_lossy());
+        let plan = encode_plan(request)?;
+        Ok(self.library.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_operations WHERE operation_id = ?1 AND kind = ?2 AND resource_key = ?3 AND plan_json = ?4 AND state NOT IN ('succeeded', 'failed'))",
+            params![request.operation_id, NFO_EXPORT_KIND, key, plan], |row| row.get(0),
+        )?)
     }
 
     /// Re-check the file/config/Media binding an export was planned against (R17 CAS).
@@ -313,10 +304,50 @@ impl Store {
         error: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        let key: Option<String> = self
+            .library
+            .query_row(
+                "SELECT resource_key FROM library_operations WHERE operation_id = ?1 AND kind = ?2",
+                params![operation_id, NFO_EXPORT_KIND],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(key) = key else {
+            return Ok(());
+        };
+        super::export_lease::while_inactive(self, &key, || {
+            self.library.execute(
+                "UPDATE library_operations SET state = 'failed', error = ?2, updated_at_ms = ?3
+             WHERE operation_id = ?1 AND kind = ?4 AND state NOT IN ('succeeded', 'failed')",
+                params![operation_id, error, now_ms, NFO_EXPORT_KIND],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Release only the still-active intent owned by this exact writer.
+    pub(crate) fn fail_owned_nfo_export(
+        &self,
+        request: &NfoExportRequest,
+        error: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        let plan = encode_plan(request)?;
+        let key =
+            crate::path_key::canonical_recorded_key(&self.library, &request.path.to_string_lossy());
         self.library.execute(
             "UPDATE library_operations SET state = 'failed', error = ?2, updated_at_ms = ?3
-             WHERE operation_id = ?1 AND kind = ?4",
-            params![operation_id, error, now_ms, NFO_EXPORT_KIND],
+             WHERE operation_id = ?1 AND kind = ?4 AND resource_key = ?5
+               AND plan_json = ?6 AND state NOT IN ('succeeded', 'failed')",
+            params![
+                request.operation_id,
+                error,
+                now_ms,
+                NFO_EXPORT_KIND,
+                key,
+                plan
+            ],
         )?;
         Ok(())
     }
@@ -357,6 +388,36 @@ impl Store {
         }
         Ok(requests)
     }
+}
+
+pub(crate) fn complete_nfo_export_on(
+    tx: &rusqlite::Connection,
+    operation_id: &str,
+    observed_digest: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let plan_json: Option<String> = tx.query_row(
+        "SELECT plan_json FROM library_operations WHERE operation_id = ?1 AND kind = ?2 AND state NOT IN ('succeeded', 'failed')",
+        params![operation_id, NFO_EXPORT_KIND], |row| row.get(0),
+    ).optional()?;
+    let Some(plan_json) = plan_json else {
+        return Err(StoreError::Missing(format!(
+            "unfinished nfo export operation {operation_id}"
+        )));
+    };
+    let request = decode_plan(&plan_json)?;
+    if request.output_digest != observed_digest {
+        return Err(StoreError::Conflict(format!(
+            "nfo export {operation_id} expected digest {}, observed {observed_digest}",
+            request.output_digest
+        )));
+    }
+    let cursor_json = serde_json::to_string(&NfoExportCursorV1 {
+        version: 1,
+        observed_digest: observed_digest.to_string(),
+    })?;
+    tx.execute("UPDATE library_operations SET state = 'succeeded', cursor_json = ?2, error = NULL, updated_at_ms = ?3 WHERE operation_id = ?1", params![operation_id, cursor_json, now_ms])?;
+    Ok(())
 }
 
 /// Every unfinished `kind = 'scrape'` operation, oldest first.

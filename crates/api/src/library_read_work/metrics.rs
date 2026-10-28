@@ -119,6 +119,7 @@ impl Drop for StageMetrics {
 
 pub(super) fn page_counts(result: &store::LibraryReadResult) -> (u64, Option<u64>) {
     match result {
+        store::LibraryReadResult::ItemIndex(buckets) => (buckets.len() as u64, None),
         store::LibraryReadResult::Browse { page, .. } => (page.items.len() as u64, page.total),
         store::LibraryReadResult::Facets(facets) => (
             facets.groups.values().map(|v| v.len() as u64).sum(),

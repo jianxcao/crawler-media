@@ -60,7 +60,9 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
             enabled: true,
             role: UserRole::Admin,
         };
-        guard.insert_user_with_password(&user, "admin-pass").unwrap();
+        guard
+            .insert_user_with_password(&user, "admin-pass")
+            .unwrap();
         let token = "jobs-admin-session".to_string();
         guard.set_user_token(user.id, &token).unwrap();
         token
@@ -113,4 +115,156 @@ fn heartbeat_route_responds_while_store_locked() {
         );
     });
     holder.join().unwrap();
+}
+
+#[test]
+fn scan_wakeup_does_not_park_executor_on_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, _) = state_with_admin(tmp.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store = state.store();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = store.lock();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    });
+    locked_rx.recv().unwrap();
+    let elapsed = runtime.block_on(async {
+        let started = Instant::now();
+        state.scan_coordinator.trigger_next(&state);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        started.elapsed()
+    });
+    holder.join().unwrap();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "scan wakeup parked executor for {elapsed:?}"
+    );
+}
+
+#[test]
+fn up_next_does_not_park_executor_on_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, token) = state_with_admin(tmp.path());
+    let app = router(state.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store = state.store();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = store.lock();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    });
+    locked_rx.recv().unwrap();
+    let (elapsed, response) = runtime.block_on(async {
+        let started = Instant::now();
+        let (response, elapsed) = tokio::join!(
+            app.oneshot(request("GET", "/api/v1/playback/up-next", Some(&token))),
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                started.elapsed()
+            },
+        );
+        (elapsed, response.unwrap())
+    });
+    holder.join().unwrap();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "up-next parked executor for {elapsed:?}"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[test]
+fn episode_routes_do_not_park_executor_on_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, token) = state_with_admin(tmp.path());
+    let library = state
+        .store()
+        .lock()
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap()
+        .id;
+    let media = domain::MediaId::new();
+    for uri in [
+        format!("/api/v1/playback/items/{media}/episodes?season_number=1"),
+        format!("/api/v1/libraries/{library}/items/{media}/episodes?season=1"),
+    ] {
+        assert_eq!(
+            assert_request_timer_responsive(&state, &token, "GET", &uri),
+            StatusCode::NOT_FOUND
+        );
+    }
+}
+
+#[test]
+fn scan_write_routes_do_not_park_executor_on_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, token) = state_with_admin(tmp.path());
+    let library = state
+        .store()
+        .lock()
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap()
+        .id;
+    for (uri, expected) in [
+        (
+            format!("/api/v1/libraries/{library}/scan"),
+            StatusCode::ACCEPTED,
+        ),
+        (
+            format!("/api/v1/libraries/{library}/scan-operations/missing/cancel"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            assert_request_timer_responsive(&state, &token, "POST", &uri),
+            expected
+        );
+    }
+}
+
+fn assert_request_timer_responsive(
+    state: &ApiState,
+    token: &str,
+    method: &str,
+    uri: &str,
+) -> StatusCode {
+    let app = router(state.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store = state.store();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = store.lock();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    });
+    locked_rx.recv().unwrap();
+    let (response, elapsed) = runtime.block_on(async {
+        let started = Instant::now();
+        let (response, elapsed) =
+            tokio::join!(app.oneshot(request(method, uri, Some(token))), async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                started.elapsed()
+            });
+        (response.unwrap(), elapsed)
+    });
+    holder.join().unwrap();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "{uri} parked executor for {elapsed:?}"
+    );
+    response.status()
 }

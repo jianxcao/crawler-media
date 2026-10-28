@@ -81,6 +81,80 @@ fn paused_protocol_cold_stage_does_not_hold_writer_store_mutex() {
 
 #[test]
 fn slow_facet_reader_does_not_hold_writer_store_mutex() {
+    slow_library_reader_does_not_hold_writer_store_mutex("facets");
+}
+
+#[test]
+fn slow_item_index_does_not_hold_writer_store_mutex() {
+    slow_library_reader_does_not_hold_writer_store_mutex("item-index");
+}
+
+#[test]
+fn item_index_revalidates_revoked_credentials_and_library_access() {
+    for revoke_token in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("data")).unwrap();
+        let library = store
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id;
+        let user = domain::UserId::new();
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: "index-member".into(),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        store.set_user_token(user, "index-token").unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let state = ApiState::new(
+            store,
+            "management-secret".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+            dir.path().join("library"),
+        )
+        .unwrap()
+        .with_library_read_stage_barrier(Arc::new(move |stage| {
+            if stage == "validate" {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        }));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let request = Request::get(format!("/api/v1/libraries/{library}/item-index"))
+                .header("authorization", "Bearer index-token").body(Body::empty()).unwrap();
+            let reader = tokio::spawn(router(state.clone()).oneshot(request));
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()).await.unwrap();
+            if revoke_token {
+                state.store().lock().revoke_user_tokens(user).unwrap();
+            } else {
+                let conn = rusqlite::Connection::open(dir.path().join("data/library.db")).unwrap();
+                conn.execute("UPDATE libraries SET access_mode='selected', member_ids_json='[]' WHERE library_id=?1", [library.to_string()]).unwrap();
+            }
+            release_tx.send(()).unwrap();
+            let response = reader.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "revoked token: {revoke_token}");
+        });
+    }
+}
+
+fn slow_library_reader_does_not_hold_writer_store_mutex(endpoint: &str) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -105,8 +179,8 @@ fn slow_facet_reader_does_not_hold_writer_store_mutex() {
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         dir.path().join("library"),
     )
-    .unwrap()
-    .with_library_read_progress_observer(Arc::new(move || {
+    .unwrap();
+    let wait = Arc::new(move || {
         if first.swap(false, Ordering::SeqCst) {
             entered_tx.send(()).unwrap();
             release_rx
@@ -115,15 +189,35 @@ fn slow_facet_reader_does_not_hold_writer_store_mutex() {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap();
         }
-    }));
+    });
+    let state = if endpoint == "item-index" {
+        state.with_library_read_stage_barrier(Arc::new(move |stage| {
+            if stage == "validate" {
+                wait();
+            }
+        }))
+    } else {
+        state.with_library_read_progress_observer(wait)
+    };
     runtime.block_on(async {
         let app = router(state);
-        let path = format!("/api/v1/libraries/{library}/facets");
+        let path = format!("/api/v1/libraries/{library}/{endpoint}");
         let reader_request = Request::get(path)
             .header("Authorization", "Bearer management-secret")
             .body(Body::empty())
             .unwrap();
-        let reader = tokio::spawn(app.clone().oneshot(reader_request));
+        let mut reader = tokio::spawn(app.clone().oneshot(reader_request));
+        if endpoint == "item-index" {
+            tokio::select! {
+                response = &mut reader => {
+                    let response = response.unwrap().unwrap();
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    panic!("index returned before validation: {status} {}", String::from_utf8_lossy(&body));
+                },
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
         tokio::task::spawn_blocking(move || {
             entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
         })

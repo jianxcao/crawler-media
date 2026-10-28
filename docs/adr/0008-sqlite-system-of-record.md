@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-状态：接受；五文件边界保留，`library.db` 当前布局为 version 7。当前复审代码 `5730b032`，剩余修复与验收见[再次复审](../audits/2026-10-28-storage-main-rereview.md)，字段/索引见[数据库字典](../database/README.md)。
+状态：接受；五文件边界保留，`library.db` 当前布局为 version 8。复审代码 `5730b032` 的发现与验收见[再次复审](../audits/2026-10-28-storage-main-rereview.md)，字段/索引见[数据库字典](../database/README.md)。
 
 ## 决策
 

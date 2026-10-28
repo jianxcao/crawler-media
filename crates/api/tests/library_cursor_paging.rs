@@ -203,10 +203,19 @@ async fn gallery_cursor_pages_cover_every_group_once() {
 #[tokio::test]
 async fn offset_param_is_rejected_on_both_paths() {
     let (_tmp, app, library_id) = fixture(3);
-    for bad in ["offset=0", "offset=50", "offset=-1", "offset=abc", "offset="] {
+    for bad in [
+        "offset=0",
+        "offset=50",
+        "offset=-1",
+        "offset=abc",
+        "offset=",
+    ] {
         for path in ["items", "gallery"] {
-            let (status, body) =
-                get(&app, &format!("/api/v1/libraries/{library_id}/{path}?{bad}")).await;
+            let (status, body) = get(
+                &app,
+                &format!("/api/v1/libraries/{library_id}/{path}?{bad}"),
+            )
+            .await;
             assert_eq!(
                 status,
                 StatusCode::BAD_REQUEST,
@@ -228,21 +237,43 @@ async fn malformed_cursor_is_rejected() {
                 &format!("/api/v1/libraries/{library_id}/{path}?cursor={bad}"),
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} cursor={bad}: {body}");
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{path} cursor={bad}: {body}"
+            );
             assert_eq!(body["error"]["code"], "library.invalid");
         }
     }
 }
 
 #[tokio::test]
+async fn cursor_from_different_order_is_a_client_error() {
+    let (_tmp, app, library_id) = fixture(3);
+    let (_, first) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/items?limit=1&sort=title"),
+    )
+    .await;
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let (status, body) = get(
+        &app,
+        &format!(
+            "/api/v1/libraries/{library_id}/items?limit=1&sort=rating&cursor={}",
+            urlencode(cursor)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "library.invalid");
+}
+
+#[tokio::test]
 async fn limit_is_still_validated() {
     let (_tmp, app, library_id) = fixture(2);
     for bad in ["limit=0", "limit=501", "limit=abc"] {
-        let (status, body) = get(
-            &app,
-            &format!("/api/v1/libraries/{library_id}/items?{bad}"),
-        )
-        .await;
+        let (status, body) =
+            get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
     }
     let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items")).await;

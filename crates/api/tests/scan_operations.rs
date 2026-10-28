@@ -4,6 +4,64 @@ mod support;
 use axum::http::StatusCode;
 use support::library_presence::PresenceFixture;
 
+#[test]
+fn claimed_scan_finishes_after_runtime_stops_before_task_is_polled() {
+    use std::time::{Duration, Instant};
+    let fix = PresenceFixture::new();
+    std::fs::write(fix.root.join("Movie1 (2024).mkv"), b"video").unwrap();
+    let signature = fix.scope_signature();
+    let op = fix
+        .state
+        .store()
+        .lock()
+        .enqueue_scan(&fix.library_id, &signature, &[], 1000)
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        fix.state.scan_coordinator.trigger_next(&fix.state);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let status = fix
+                .state
+                .store()
+                .lock()
+                .scan_operation(&op.id)
+                .unwrap()
+                .unwrap()
+                .status;
+            if status != store::ScanOperationStatus::Queued {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("scan was not claimed");
+    });
+    drop(runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        let status = fix
+            .state
+            .store()
+            .lock()
+            .scan_operation(&op.id)
+            .unwrap()
+            .unwrap()
+            .status;
+        if !status.is_active() || Instant::now() >= deadline {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status, store::ScanOperationStatus::Completed);
+    assert_eq!(
+        fix.state.store().lock().list_file_coverage().unwrap().len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn scan_returns_202_with_operation_id_and_polls() {
     let fix = PresenceFixture::new();
@@ -334,7 +392,9 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&f1))
+            .unwrap();
         let merged = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1001)
             .unwrap();

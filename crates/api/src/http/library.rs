@@ -108,9 +108,9 @@ pub(crate) use query::{
     browse_work_error,
 };
 pub(crate) use visibility::{
-    artwork_url, backdrop_path_with, clear_library_cover_checked,
-    file_visible_to_user, library_cover_path, library_for_file, library_for_file_strict,
-    library_visible, library_visible_with_role, missing_library, require_visible_library,
+    artwork_url, backdrop_path_with, clear_library_cover_checked, file_visible_to_user,
+    library_cover_path, library_for_file, library_for_file_strict, library_visible,
+    library_visible_with_role, missing_library, require_visible_library,
 };
 
 /// GET /libraries?kind= — one entry per Library entity, defaults first;
@@ -578,38 +578,54 @@ pub(crate) async fn item_episodes(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    let episodes = {
-        let store = state.store.lock();
-        if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return response;
-        }
-        match store.get_library_item(lib_id, media_id) {
-            Ok(Some(_)) => {}
-            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
-            Err(error) => return browse_store_error(error),
-        }
-        match store.library_episodes(lib_id, media_id, season, "") {
-            Ok(episodes) => episodes,
-            Err(error) => return browse_store_error(error),
-        }
+    let read_id = id.clone();
+    let read = super::store_wait::store_read(&state, move |store| {
+        store
+            .library_read_snapshot(|store| {
+                require_visible_library(store, &read_id, user_id)?;
+                match store.get_library_item(lib_id, media_id) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return Err(err(
+                            StatusCode::NOT_FOUND,
+                            "library.item_missing",
+                            "条目不存在",
+                        ));
+                    }
+                    Err(error) => return Err(browse_store_error(error)),
+                }
+                let episodes = store
+                    .library_episodes(lib_id, media_id, season, "")
+                    .map_err(browse_store_error)?;
+                let mut states = HashMap::new();
+                let is_tv = store
+                    .get_media(media_id)
+                    .map_err(browse_store_error)?
+                    .is_none_or(|media| media.kind == domain::MediaKind::Tv);
+                if let Some(user_id) = user_id.filter(|_| is_tv) {
+                    let units: Vec<_> = episodes
+                        .iter()
+                        .map(|episode| {
+                            domain::UnitKey::new(episode.season as i32, episode.episode as i32)
+                        })
+                        .collect();
+                    let resolved = store
+                        .effective_unit_states(user_id, media_id, &units)
+                        .map_err(browse_store_error)?;
+                    for (episode, state) in episodes.iter().zip(resolved) {
+                        states.insert((episode.season, episode.episode), state);
+                    }
+                }
+                Ok((episodes, states))
+            })
+            .map_err(browse_store_error)?
+    })
+    .await;
+    let (episodes, effective_states) = match read {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
-    let mut effective_states = HashMap::new();
-    if let Some(user_id) = user_id {
-        let store = state.store.lock();
-        for episode in &episodes {
-            let unit_state = match crate::http::playback::effective_watch_state(
-                &store,
-                user_id,
-                media_id,
-                episode.season as i32,
-                episode.episode as i32,
-            ) {
-                Ok(state) => state,
-                Err(error) => return browse_store_error(error),
-            };
-            effective_states.insert((episode.season, episode.episode), unit_state);
-        }
-    }
     let rows: Vec<Value> = episodes
         .iter()
         .map(|episode| {

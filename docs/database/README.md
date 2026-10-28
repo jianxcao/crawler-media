@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-结构核对：2026-10-28，代码 `5730b032` 的当前生产 DDL（library v7，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。当前问题、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
+结构核对：2026-10-28，当前生产 DDL（library v8，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。复审发现、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
 
 ## 权威来源
 
@@ -14,12 +14,12 @@
 | 文件 | application_id / user_version | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
 | [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、Naming、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | 1129139249 / 7 | 53 | 594 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、持久工作 | 否 |
+| [library.db](library.md) | 1129139249 / 8 | 53 | 594 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、持久工作 | 否 |
 | [subscribe.db](subscribe.md) | 1129139250 / 2 | 4 | 47 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
 | [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应 | 是，受控清理 |
 | [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 4 | 29 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 
-合计76张业务表、748字段，不计SQLite内部表。Store四文件97个显式命名索引（library80、app2、subscribe3、cache12），37组FK、0触发器；Jobs另9命名索引/6触发器。app/library/subscribe/Jobs统计来自本机 Python SQLite 3.54.0 执行当前生产DDL的内存核对；cache统计与其生产建表声明对账。没有跨文件FK或原子提交。
+合计76张业务表、748字段，不计SQLite内部表。Store四文件98个显式命名索引（library81、app2、subscribe3、cache12），37组FK、0触发器；Jobs另9命名索引/6触发器。app/library/subscribe/Jobs统计来自生产DDL；cache统计与其生产建表声明对账。没有跨文件FK或原子提交。
 
 `Store::open_at`只允许app另选路径；Jobs由Queue打开。正常启动不自动清库、不导入旧layout；错误/未知布局拒绝。连接显式WAL、5000ms busy_timeout、foreign_keys=ON；建库路径在切 WAL **之前**设 `auto_vacuum=INCREMENTAL`（文件头属性，只能在建表前改；WAL 库或事务内设置是静默 no-op）；Store四连接与独立Jobs Queue走同一套连接策略：`cache_size=-16384`（每连接16MiB）、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`（每连接地址空间上限，不是常驻内存），打开时`PRAGMA optimize=0x10002`、关闭时`PRAGMA optimize`；`synchronous`按库区分——cache.db用NORMAL（可重建，容忍掉电丢最近提交），app/library/subscribe与Jobs Queue保持FULL（权威库绝不牺牲已提交事务）；实例租约心跳的专用app连接同样是FULL，但busy_timeout拉长到10000ms；library读池连接使用相同的cache/mmap/temp_store且`query_only=ON`。Jobs已有OFF→实际policy→FULL的连接级回归。独立media ResponseCache连接未显式设置synchronous，保留其构建默认。Store 必需表/索引名称检查不等于逐列约束验证；app 额外表也被拒绝，避免保留退役 Naming 布局；Jobs 由唯一 DDL 验证当前对象定义及单例，不认领旧库。
 

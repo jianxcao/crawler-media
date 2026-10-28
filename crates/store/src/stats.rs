@@ -43,6 +43,25 @@ pub enum StatsScope {
 
 #[cfg(feature = "test-support")]
 impl Store {
+    /// Install a temporary SQLite progress hook around a test operation.
+    #[doc(hidden)]
+    pub fn with_library_progress<T>(
+        &self,
+        interval: i32,
+        callback: impl FnMut() -> bool + Send + 'static,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        struct ProgressGuard<'a>(&'a Connection);
+        impl Drop for ProgressGuard<'_> {
+            fn drop(&mut self) {
+                self.0.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
+        self.library.progress_handler(interval, Some(callback));
+        let _guard = ProgressGuard(&self.library);
+        work()
+    }
+
     /// Runs `work` and reports the deterministic SQL work it did.
     ///
     /// Use it in a test, around the public entry point under test:
@@ -59,7 +78,11 @@ impl Store {
     /// touch contribute nothing. Nested scopes are supported (the trace keeps a per-connection
     /// reference count), so measuring an operation that itself measures something is safe.
     #[doc(hidden)]
-    pub fn with_stats<T>(&self, scope: StatsScope, work: impl FnOnce() -> T) -> (T, QueryWorkStats) {
+    pub fn with_stats<T>(
+        &self,
+        scope: StatsScope,
+        work: impl FnOnce() -> T,
+    ) -> (T, QueryWorkStats) {
         let connections: Vec<&Connection> = match scope {
             StatsScope::Library => vec![&self.library],
             StatsScope::App => vec![&self.app],

@@ -118,7 +118,7 @@ pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest)
             operation_id = %request.operation_id,
             media_id = %request.media_id,
             path = %request.path.display(),
-            "NFO sidecar export failed; startup recovery will retry"
+            "NFO sidecar export failed"
         ),
     }
 }
@@ -150,7 +150,7 @@ pub(crate) fn resume_sidecar_exports(state: &ApiState, now_ms: i64) -> usize {
                 operation_id = %request.operation_id,
                 export_id = %request.export_id,
                 path = %request.path.display(),
-                "NFO 导出恢复失败；操作保持未完成，下一轮继续重试"
+                "NFO 导出恢复失败"
             ),
         }
     }

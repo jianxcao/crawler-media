@@ -84,14 +84,37 @@ pub(crate) async fn up_next(
         .unwrap_or(20)
         .clamp(1, 100);
     // 阶段一：锁内只做快 DB 读，收集每条的 (media_id, season, next_episode)。
-    let Ok(plans) = collect_plans(&state, user_id, limit) else {
-        return store_failed();
+    let plans = match super::super::store_wait::store_read(&state, move |store| {
+        collect_plans(store, user_id, limit)
+    })
+    .await
+    {
+        Ok(Ok(plans)) => plans,
+        Ok(Err(_)) => return store_failed(),
+        Err(error) => return error.response(),
     };
     // 阶段二：本地缓存补集名；未命中后台补全。
-    let titles = cached_episode_titles(&state, &plans);
+    let cache_state = state.clone();
+    let (plans, titles) = match state
+        .http_work
+        .run_to_completion(move || {
+            let titles = cached_episode_titles(&cache_state, &plans);
+            (plans, titles)
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return blocking_failed(error),
+    };
     // 阶段三：锁内物化行与状态（纯 DB 读，无 IO）。
-    let Ok(candidates) = materialize_candidates(&state, user_id, plans, &titles, limit) else {
-        return store_failed();
+    let candidates = match super::super::store_wait::store_read(&state, move |store| {
+        materialize_candidates(store, user_id, plans, &titles, limit)
+    })
+    .await
+    {
+        Ok(Ok(candidates)) => candidates,
+        Ok(Err(_)) => return store_failed(),
+        Err(error) => return error.response(),
     };
     // 阶段四：有界 blocking 观测 artwork
     let files = state.file_stats.clone();
@@ -114,12 +137,11 @@ pub(crate) async fn up_next(
 struct StoreFailed;
 
 fn collect_plans(
-    state: &ApiState,
+    store: &crate::Store,
     user_id: domain::UserId,
     limit: usize,
 ) -> Result<Vec<UpNextPlan>, StoreFailed> {
-    let store = state.store.lock();
-    let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))
         .map_err(|_| StoreFailed)?;
     let mut plans: Vec<UpNextPlan> = Vec::new();
     let mut seen_media: HashSet<domain::MediaId> = HashSet::new();
@@ -211,9 +233,7 @@ fn plan_from_activity(
             candidates.sort_unstable();
             let keys: Vec<domain::UnitKey> = candidates
                 .iter()
-                .map(|(season, episode)| {
-                    domain::UnitKey::new(*season as i32, *episode as i32)
-                })
+                .map(|(season, episode)| domain::UnitKey::new(*season as i32, *episode as i32))
                 .collect();
             let states = store
                 .effective_unit_states(user_id, media.id, &keys)
@@ -226,7 +246,9 @@ fn plan_from_activity(
                     return Ok(Some(plan(
                         season,
                         episode as i32,
-                        latest.is_some_and(|u| (season, episode) != (u.season as u32, u.episode as u32)),
+                        latest.is_some_and(|u| {
+                            (season, episode) != (u.season as u32, u.episode as u32)
+                        }),
                     )));
                 }
             }
@@ -361,14 +383,13 @@ struct UpNextCandidate {
 }
 
 fn materialize_candidates(
-    state: &ApiState,
+    store: &crate::Store,
     user_id: domain::UserId,
     plans: Vec<UpNextPlan>,
     titles: &HashMap<EpisodeTitleKey, Option<String>>,
     limit: usize,
 ) -> Result<Vec<UpNextCandidate>, StoreFailed> {
-    let store = state.store.lock();
-    let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))
         .map_err(|_| StoreFailed)?;
     let mut cands = Vec::new();
     for plan in plans {
@@ -518,11 +539,7 @@ fn render_item(
 fn blocking_failed(error: crate::blocking_budget::BlockingError) -> Response {
     use axum::http::StatusCode;
     match error {
-        crate::blocking_budget::BlockingError::Busy => crate::http::err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "runtime.busy",
-            "服务繁忙，请重试",
-        ),
+        crate::blocking_budget::BlockingError::Busy => super::super::store_wait::busy_response(),
         crate::blocking_budget::BlockingError::Timeout => crate::http::err(
             StatusCode::GATEWAY_TIMEOUT,
             "up_next.timeout",

@@ -18,8 +18,8 @@ pub(crate) mod runner;
 pub(crate) mod scope;
 pub(crate) mod video;
 use super::library::{
-    browse_filter_from_query, browse_order_from_query, browse_store_error, coverages_in_library,
-    missing_library, preferred_coverage, require_visible_library,
+    browse_filter_from_query, browse_order_from_query, coverages_in_library, missing_library,
+    preferred_coverage, require_visible_library,
 };
 use crate::store::library_query;
 pub(crate) use runner::scan_library_leased_resumable;
@@ -31,7 +31,19 @@ pub(crate) async fn scan_library(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    match state.scan_coordinator.enqueue(&state, &id, vec![]) {
+    let worker = state.clone();
+    let result = state
+        .http_work
+        .run_to_completion(move || worker.scan_coordinator.enqueue(&worker, &id, vec![]))
+        .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(crate::blocking_budget::BlockingError::Busy) => {
+            return super::store_wait::busy_response();
+        }
+        Err(error) => return super::library::browse_work_error(error),
+    };
+    match result {
         Ok(op) => (
             StatusCode::ACCEPTED,
             axum::Json(serde_json::json!({
@@ -51,9 +63,15 @@ pub(crate) async fn scan_library(
         Err(crate::scan_operations::ScanEnqueueError::Conflict(e)) => {
             err(StatusCode::CONFLICT, "library.deleting", &e)
         }
+        Err(crate::scan_operations::ScanEnqueueError::Reconfiguring) => err(
+            StatusCode::CONFLICT,
+            "library.deleting",
+            "Library 正在重建索引，暂时拒绝新的工作",
+        ),
         Err(crate::scan_operations::ScanEnqueueError::Internal(e)) => {
             err(StatusCode::INTERNAL_SERVER_ERROR, "library.scan", &e)
         }
+        Err(crate::scan_operations::ScanEnqueueError::Busy) => super::store_wait::busy_response(),
     }
 }
 
@@ -510,6 +528,8 @@ pub(crate) async fn missing(
 pub(crate) async fn item_index(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    axum::Extension(credential): axum::Extension<store::ReadCredential>,
+    axum::Extension(timing): axum::Extension<media_server::provider::QueryTiming>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
@@ -517,12 +537,6 @@ pub(crate) async fn item_index(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    {
-        let store = state.store.lock();
-        if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return response;
-        }
-    }
     let filter = match browse_filter_from_query(&query) {
         Ok(filter) => filter,
         Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
@@ -540,12 +554,24 @@ pub(crate) async fn item_index(
     // 分档与「每档起始游标」一起在 store 里算：游标语义是「严格排在它之后」，
     // 所以每档带的是上一档最后一格的游标（见 `Store::library_item_index`）。
     // 绝对下标不进线上格式——前端按 `count` 前缀和就能还原档位位置。
-    let buckets = {
-        let store = state.store.lock();
-        match store.library_item_index(&lib_q) {
-            Ok(buckets) => buckets,
-            Err(error) => return browse_store_error(error),
+    let buckets = match crate::library_read_work::run_self_library_read(
+        &state,
+        credential,
+        lib_id,
+        store::LibraryReadRequest::ItemIndex(lib_q),
+        timing.deadline,
+    )
+    .await
+    {
+        Ok(store::LibraryReadResult::ItemIndex(buckets)) => buckets,
+        Ok(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.read",
+                "读取失败",
+            );
         }
+        Err(response) => return response,
     };
     let payload: Vec<Value> = buckets
         .into_iter()

@@ -57,15 +57,15 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
         overview: None,
     };
     let catalog = Arc::new(OrbitCatalog(hit));
-    let state = state(
+    let startup_state = state(
         tmp.path(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-    )
-    .with_catalog(catalog);
+    );
+    let state = startup_state.clone().with_catalog(catalog);
 
     // 预存旧的 canonical Media
     state.store().lock().insert_media(&old_canonical).unwrap();
@@ -85,7 +85,8 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
     let video = root.join("Orbit.2022.1080p.mkv");
     std::fs::write(&video, b"fake video bytes").unwrap();
 
-    let app = router(state.clone());
+    // A startup task may still hold a clone made before catalog configuration.
+    let app = router(startup_state);
     scan_and_wait(&app, &lib_id).await;
 
     let store_arc = state.store();

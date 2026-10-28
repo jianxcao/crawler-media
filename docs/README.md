@@ -7,7 +7,7 @@
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
 2. **唯一当前复审与剩余方案：** [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R1–R5、前轮 F1–F8 对账、实施顺序及验证边界。旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
-4. **现行结构：** [五文件数据库字典](database/README.md)，library v7。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
+4. **现行结构：** [五文件数据库字典](database/README.md)，library v8。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
 6. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
 7. **验收清单：** [system regression](testing/system-regression-cases.md) 是场景清单，不是已运行证明；设备、NAS、完整容量未测须明确 Not run。
@@ -118,4 +118,4 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 
 ## 2026-10-28 文档核对
 
-对照当前 DDL、API、备份脚本及历史证据，修正 Library v7、索引清单、Library DTO、操作错误字段、文件续页和 Jobs 初始化说明；备份回滚要求保留实际存在的数据库、WAL 和 SHM 文件。更新过时的当前复审导航及回归场景，并将失效的历史源码链接改为固定版本路径线索。历史审计和 benchmark 保留其反例、数据及版本边界；未删除新的文档，也未修改代码或重跑代码测试。当前仍按[复审](audits/2026-10-28-storage-main-rereview.md)处理 R1–R5，不能因文档整理将问题标为关闭。
+对照当时的 DDL、API、备份脚本及历史证据，修正 Library v7、索引清单、Library DTO、操作错误字段、文件续页和 Jobs 初始化说明；备份回滚要求保留实际存在的数据库、WAL 和 SHM 文件。更新过时的复审导航及回归场景，并将失效的历史源码链接改为固定版本路径线索。历史审计和 benchmark 保留其反例、数据及版本边界；该轮未修改代码或重跑代码测试。R1–R5 的后续实施状态见[复审实施记录](audits/2026-10-28-storage-main-rereview.md)。

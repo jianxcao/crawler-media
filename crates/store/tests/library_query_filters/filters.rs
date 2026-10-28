@@ -338,6 +338,202 @@ fn cursor_pages_round_trip_without_gaps() {
 }
 
 #[test]
+fn cursor_seek_reflects_new_items_after_the_last_key() {
+    let (_tmp, store, library, scope) = seeded();
+    let mut q = query(
+        library.id.parse().unwrap(),
+        BrowseFilter::default(),
+        BrowseOrder::Title,
+        false,
+        BrowsePage::Cursor {
+            after: None,
+            limit: 1,
+        },
+    );
+    let first = store.library_item_page(&q).unwrap();
+    assert_eq!(first.items[0].title, "Alpha");
+    let root = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id == library.id)
+        .unwrap();
+    let entries = [
+        (
+            "00000000-0000-0000-0000-0000000000d4",
+            "Aardvark",
+            "00000000-0000-0000-0001-0000000000d4",
+            "Aardvark.mkv",
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000e5",
+            "Baker",
+            "00000000-0000-0000-0001-0000000000e5",
+            "Baker.mkv",
+        ),
+    ];
+    let mut files = Vec::new();
+    for (media_id, title, file_id, path) in entries {
+        let media = create_media(&store, media_id, title, MediaKind::Movie, None, None);
+        files.push((
+            make_file(
+                &library,
+                &root.id,
+                media.id,
+                FileShape {
+                    file_id,
+                    path,
+                    resolution: None,
+                    hdr: None,
+                    presence: FilePresence::Present,
+                },
+            ),
+            vec![UnitKey::WHOLE],
+        ));
+    }
+    publish(&store, &scope, files);
+    q.page = BrowsePage::Cursor {
+        after: first.next_cursor,
+        limit: 10,
+    };
+    let titles: Vec<_> = store
+        .library_item_page(&q)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.title)
+        .collect();
+    assert_eq!(titles, ["Baker", "Bravo", "Charlie"]);
+}
+
+#[test]
+fn cursor_is_bound_to_query_scope_and_valid_key_types() {
+    let (_tmp, store, library, _scope) = seeded();
+    let library_id = library.id.parse().unwrap();
+    let (other, _) = create_library(&store, "Other", MediaKind::Movie, "/other");
+    let mut base = query(
+        library_id,
+        BrowseFilter::default(),
+        BrowseOrder::Title,
+        false,
+        BrowsePage::Cursor {
+            after: None,
+            limit: 1,
+        },
+    );
+    let cursor = store.library_item_page(&base).unwrap().next_cursor.unwrap();
+    base.page = BrowsePage::Cursor {
+        after: Some(cursor.clone()),
+        limit: 1,
+    };
+    assert_eq!(
+        store.library_item_page(&base).unwrap().items[0].title,
+        "Bravo"
+    );
+
+    let mut different = Vec::new();
+    let mut changed = base.clone();
+    changed.library_id = other.id.parse().unwrap();
+    different.push(changed);
+    let mut changed = base.clone();
+    changed.user_id = Some("00000000-0000-0000-0000-000000000001".parse().unwrap());
+    different.push(changed);
+    let mut changed = base.clone();
+    changed.filter.require_image = true;
+    different.push(changed);
+    let mut changed = base.clone();
+    changed.order = BrowseOrder::Rating;
+    different.push(changed);
+    let mut changed = base.clone();
+    changed.descending = true;
+    different.push(changed);
+    for changed in different {
+        assert!(matches!(
+            store.library_item_page(&changed),
+            Err(store::StoreError::Invalid(_))
+        ));
+    }
+
+    let mut damaged: serde_json::Value = serde_json::from_str(&cursor).unwrap();
+    damaged["keys"][0] = serde_json::json!(42);
+    let mut missing_version: serde_json::Value = serde_json::from_str(&cursor).unwrap();
+    missing_version.as_object_mut().unwrap().remove("version");
+    let mut missing_scope: serde_json::Value = serde_json::from_str(&cursor).unwrap();
+    missing_scope.as_object_mut().unwrap().remove("scope");
+    let mut invalid_id: serde_json::Value = serde_json::from_str(&cursor).unwrap();
+    invalid_id["media_id"] = serde_json::json!("invalid");
+    for raw in [
+        damaged.to_string(),
+        missing_version.to_string(),
+        missing_scope.to_string(),
+        invalid_id.to_string(),
+        "{\"keys\":[\"alpha\"],\"media_id\":\"x\"}".into(),
+    ] {
+        let mut changed = base.clone();
+        changed.page = BrowsePage::Cursor {
+            after: Some(raw),
+            limit: 1,
+        };
+        assert!(matches!(
+            store.library_item_page(&changed),
+            Err(store::StoreError::Invalid(_))
+        ));
+    }
+}
+
+#[test]
+fn item_index_cursor_uses_the_same_scope_as_pages() {
+    let (_tmp, store, library, _scope) = seeded();
+    let mut q = query(
+        library.id.parse().unwrap(),
+        BrowseFilter::default(),
+        BrowseOrder::Title,
+        false,
+        BrowsePage::Cursor {
+            after: None,
+            limit: 1,
+        },
+    );
+    let buckets = store.library_item_index(&q).unwrap();
+    let cursor = buckets
+        .iter()
+        .find(|bucket| bucket.initial == "B")
+        .unwrap()
+        .cursor
+        .clone();
+    q.page = BrowsePage::Cursor {
+        after: cursor,
+        limit: 1,
+    };
+    assert_eq!(store.library_item_page(&q).unwrap().items[0].title, "Bravo");
+}
+
+#[test]
+fn cursor_accepts_equivalent_filter_order_and_case() {
+    let (_tmp, store, library, _scope) = seeded();
+    let mut q = query(
+        library.id.parse().unwrap(),
+        BrowseFilter {
+            languages: vec!["EN".into(), "ja".into()],
+            ..BrowseFilter::default()
+        },
+        BrowseOrder::Title,
+        false,
+        BrowsePage::Cursor {
+            after: None,
+            limit: 1,
+        },
+    );
+    let cursor = store.library_item_page(&q).unwrap().next_cursor.unwrap();
+    q.filter.languages = vec!["JA".into(), "en".into(), "EN".into()];
+    q.page = BrowsePage::Cursor {
+        after: Some(cursor),
+        limit: 1,
+    };
+    assert!(store.library_item_page(&q).is_ok());
+}
+
+#[test]
 fn unwatched_includes_media_without_a_user_row() {
     let (_tmp, store, library, _scope) = seeded();
     let library_id = library.id.parse().unwrap();

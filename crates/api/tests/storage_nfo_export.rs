@@ -608,11 +608,14 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
         store::metadata::export_driver::NfoExportAction::Replaced
     );
     let seen = seen.into_inner();
-    assert!(seen.len() >= 3, "plan, registration plan, finish: {seen:?}");
-    assert!(!seen[0], "the plan phase runs before the write");
+    let first_written = seen
+        .iter()
+        .position(|exists| *exists)
+        .expect("registration follows write");
+    assert!(first_written > 0, "planning precedes write: {seen:?}");
     assert!(
-        seen[1..].iter().all(|exists| *exists),
-        "the write happened between guards: {seen:?}"
+        seen[first_written..].iter().all(|exists| *exists),
+        "write remains visible to registration: {seen:?}"
     );
     assert_eq!(live.load(Ordering::SeqCst), 0);
     assert!(

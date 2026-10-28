@@ -68,7 +68,9 @@ impl MetadataPriorityGate {
         let mut controls = std::collections::HashMap::new();
         for (_, owner) in &owners {
             if !controls.contains_key(owner) {
-                let lease = registry.acquire_bounded(&manager.store, owner)?;
+                let lease = registry
+                    .acquire_bounded(&manager.store, owner)
+                    .map_err(|error| error.to_string())?;
                 controls.insert(owner.clone(), lease.control().signal().clone());
                 leases.push(lease);
             }

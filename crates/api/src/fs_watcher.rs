@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -28,6 +28,21 @@ pub struct StrmGraceTracker {
     known_urls: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// 测试注入的当前时间。0 表示使用系统时间。
     now_override: AtomicI64,
+    scan_retry: Mutex<ScanRetry>,
+}
+
+#[derive(Default)]
+struct ScanRetry {
+    libraries: VecDeque<String>,
+    running: bool,
+}
+
+impl ScanRetry {
+    fn push(&mut self, library_id: String) {
+        if !self.libraries.contains(&library_id) {
+            self.libraries.push_back(library_id);
+        }
+    }
 }
 
 impl StrmGraceTracker {
@@ -36,6 +51,7 @@ impl StrmGraceTracker {
             pending: Arc::new(Mutex::new(HashMap::new())),
             known_urls: Arc::new(Mutex::new(HashMap::new())),
             now_override: AtomicI64::new(0),
+            scan_retry: Mutex::new(ScanRetry::default()),
         }
     }
 
@@ -102,9 +118,10 @@ impl StrmGraceTracker {
         }
         // 如果文件一直在磁盘上且 URL 未曾变化（如仅更新文件时间戳或写同 URL），不应触发标记失效与重刮削
         if let (Some(prev), Some(curr)) = (prev_url, current_url)
-            && prev.trim() == curr.trim() {
-                return false;
-            }
+            && prev.trim() == curr.trim()
+        {
+            return false;
+        }
         true
     }
 
@@ -145,9 +162,10 @@ pub fn spawn_fs_watcher(state: ApiState) {
                 if path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
-                    && let Some(url) = library::read_strm_url(path) {
-                        tracker.on_created_or_modified(path, Some(&url));
-                    }
+                    && let Some(url) = library::read_strm_url(path)
+                {
+                    tracker.on_created_or_modified(path, Some(&url));
+                }
             }
         }
 
@@ -220,7 +238,13 @@ pub fn spawn_fs_watcher(state: ApiState) {
                         paths = ?events.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
                         "fs_watcher 接收到底层文件系统事件"
                     );
-                    handle_fs_events(&state, &tracker, events);
+                    let worker = state.clone();
+                    let worker_tracker = tracker.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        handle_fs_events(&worker, &worker_tracker, events);
+                    }).await {
+                        tracing::error!(%error, "文件系统事件处理失败");
+                    }
                 }
             }
         }
@@ -231,13 +255,15 @@ fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::St
     let store = state.store.lock();
     let mut dirs = HashSet::new();
     if let Some(intake) = store.watch_intake()?
-        && !intake.is_empty() {
-            dirs.insert(PathBuf::from(intake));
-        }
+        && !intake.is_empty()
+    {
+        dirs.insert(PathBuf::from(intake));
+    }
     if let Some(inplace) = store.watch_inplace()?
-        && !inplace.is_empty() {
-            dirs.insert(PathBuf::from(inplace));
-        }
+        && !inplace.is_empty()
+    {
+        dirs.insert(PathBuf::from(inplace));
+    }
     let libraries = store.list_libraries()?;
     for lib in libraries {
         if lib.realtime_watch {
@@ -433,10 +459,10 @@ pub fn handle_fs_events(
             );
             continue;
         };
-        match state
+        let result = state
             .scan_coordinator
-            .enqueue(state, &library_id, vec![target_dir.clone()])
-        {
+            .enqueue(state, &library_id, vec![target_dir.clone()]);
+        match result {
             Ok(op) => tracing::info!(
                 library_id = %library_id,
                 op_id = %op.id,
@@ -444,6 +470,12 @@ pub fn handle_fs_events(
                 target_dir = %target_dir.display(),
                 "增量扫描目标已并入扫描 operation"
             ),
+            Err(crate::scan_operations::ScanEnqueueError::Busy) => {
+                retry_library_scan(state, tracker, library_id);
+            }
+            Err(crate::scan_operations::ScanEnqueueError::Reconfiguring) => {
+                retry_library_scan(state, tracker, library_id);
+            }
             Err(error) => tracing::error!(
                 library_id = %library_id,
                 root = %root.display(),
@@ -477,6 +509,59 @@ pub fn handle_fs_events(
                 }
             }
         }
+    }
+}
+
+pub(crate) fn retry_library_scan(
+    state: &ApiState,
+    tracker: &Arc<StrmGraceTracker>,
+    library_id: String,
+) {
+    {
+        let mut retry = tracker.scan_retry.lock();
+        retry.push(library_id);
+        if retry.running {
+            return;
+        }
+        retry.running = true;
+    }
+    let tracker_ref = Arc::downgrade(tracker);
+    let worker_state = state.clone();
+    let worker_tracker = tracker_ref.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("watch-scan-retry".into())
+        .spawn(move || {
+            while let Some(tracker) = worker_tracker.upgrade() {
+                let library_id = {
+                    let mut retry = tracker.scan_retry.lock();
+                    let Some(library_id) = retry.libraries.pop_front() else {
+                        retry.running = false;
+                        return;
+                    };
+                    library_id
+                };
+                match worker_state
+                    .scan_coordinator
+                    .enqueue(&worker_state, &library_id, vec![])
+                {
+                    Ok(_) => {}
+                    Err(crate::scan_operations::ScanEnqueueError::Busy) => {
+                        tracker.scan_retry.lock().push(library_id);
+                        drop(tracker);
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(crate::scan_operations::ScanEnqueueError::Reconfiguring) => {
+                        tracker.scan_retry.lock().push(library_id);
+                        drop(tracker);
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => tracing::error!(%library_id, ?error, "Watcher 扫描重试失败"),
+                }
+            }
+        })
+    {
+        tracker.scan_retry.lock().running = false;
+        tracing::error!(%error, "无法启动 Watcher 扫描重试线程");
     }
 }
 
