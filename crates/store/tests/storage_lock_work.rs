@@ -3,10 +3,13 @@
 //! Both gates compare the same public operation at two sizes. A quadratic or cubic
 //! implementation fails the ratio; the linear one passes with room for timer noise.
 
+use std::time::Instant;
+
 use domain::{
-    Confidence, LedgerId, Media, MediaId, MediaKind, ProtocolItemQuery, ProtocolItemType,
-    ProtocolParent, QualitySource, UnitKey, UserId,
+    Confidence, FileVersion, LedgerId, Media, MediaId, MediaKind, ProtocolItemQuery,
+    ProtocolItemType, ProtocolParent, QualitySource, UnitKey, UserId,
 };
+use store::library_write::probe::{Observed, ProbePublication};
 use store::{ScannedLedger, Store};
 
 fn tv_media(store: &Store) -> MediaId {
@@ -49,6 +52,69 @@ fn ledger(media: MediaId, path: String, units: Vec<UnitKey>) -> ScannedLedger {
         artwork: Default::default(),
         observations: vec![],
     }
+}
+
+/// Cumulative ms for probing every file of an `n`-episode TV Media once.
+fn probe_all(n: i32) -> f64 {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let media = tv_media(&store);
+    let lib = store
+        .create_library(MediaKind::Tv, "Work", &["/work"], "everyone", true, &[])
+        .unwrap();
+    let rows: Vec<_> = (0..n)
+        .map(|i| {
+            ledger(
+                media,
+                format!("/work/e{i:05}.strm"),
+                vec![UnitKey::new(1, i)],
+            )
+        })
+        .collect();
+    for batch in rows.chunks(100) {
+        store.insert_scanned_files(batch, 1000).unwrap();
+    }
+    let expected = FileVersion {
+        revision: 1,
+        source_version: "v1".into(),
+    };
+    let publication = ProbePublication {
+        expected: &expected,
+        tracks_version: 1,
+        resolution: Some("2160p"),
+        codec: Some("h264"),
+        hdr: Observed::Value(Some("HDR10")),
+        duration_ms: Some(120_000),
+        details: None,
+    };
+    let start = Instant::now();
+    for row in &rows {
+        assert!(
+            store
+                .publish_probe_result(row.file_id, &publication, 1001)
+                .unwrap()
+        );
+    }
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    let item = store
+        .get_library_item(lib.id.parse().unwrap(), media)
+        .unwrap()
+        .unwrap();
+    assert_eq!(item.distinct_episode_count, n as usize);
+    elapsed
+}
+
+#[test]
+fn per_file_probe_publication_does_not_rereduce_the_whole_media() {
+    let small = probe_all(100);
+    let large = probe_all(400);
+    let ratio = large / small;
+    eprintln!("probe_all: n=100 {small:.1}ms n=400 {large:.1}ms ratio={ratio:.2}");
+    // Linear is ~4x; the full per-probe reduction measured ~57x.
+    assert!(
+        ratio < 10.0,
+        "4x files cost {ratio:.1}x ({small:.1}ms -> {large:.1}ms)"
+    );
 }
 
 fn played_series_vm_steps(episodes: i32) -> u64 {

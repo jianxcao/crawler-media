@@ -243,7 +243,8 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
                 (SELECT u2.file_id
                  FROM library_file_units u2
                  JOIN library_files f2 ON f2.file_id = u2.file_id
-                 WHERE f2.library_id = ?1 AND f2.media_id = ?2
+                 WHERE u2.library_id = ?1 AND u2.media_id = ?2
+                   AND f2.library_id = ?1 AND f2.media_id = ?2
                    AND u2.season = g.season AND u2.episode = g.episode
                    AND f2.publication_state = 'published'
                    AND +f2.presence_state = 'present'
