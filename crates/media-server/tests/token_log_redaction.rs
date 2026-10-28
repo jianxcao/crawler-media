@@ -44,7 +44,6 @@ impl RecordingProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for RecordingProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -174,7 +173,7 @@ impl MediaServerProvider for RecordingProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
 

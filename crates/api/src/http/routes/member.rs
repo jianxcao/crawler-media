@@ -5,11 +5,10 @@ use axum::routing::{delete, get, post, put};
 
 use crate::http::{
     auth, collections, discover, downloaders, jobs, jobs_read, library, library_artwork,
-    library_chapters,
-    library_gallery, library_organize, library_scan, media, notify, playback, playback_activity,
-    playback_logs, playback_stats, playback_views, routing_preview, rule_sets, scrape_settings,
-    search, sites, subscription_depth, subscription_missing, subscriptions, title_ref,
-    transfer_settings,
+    library_chapters, library_gallery, library_organize, library_scan, media, notify, playback,
+    playback_activity, playback_logs, playback_stats, playback_views, routing_preview, rule_sets,
+    scrape_settings, search, sites, subscription_depth, subscription_missing, subscriptions,
+    title_ref, transfer_settings,
 };
 use crate::management::ApiState;
 
@@ -111,11 +110,6 @@ pub(super) fn member_subscriptions_routes() -> Router<ApiState> {
             "/subscriptions/automation-readiness",
             get(subscriptions::automation_readiness),
         )
-        .route("/subscriptions/title-preview", post(title_ref::preview))
-        .route(
-            "/subscriptions/download-routing-preview",
-            post(routing_preview::preview),
-        )
         // downloaders（只读 + 投递；变更在 admin 层）
         .route("/downloaders", get(downloaders::list_downloaders))
         .route("/downloaders/{id}", get(downloaders::get_downloader))
@@ -199,10 +193,6 @@ pub(super) fn member_library_routes() -> Router<ApiState> {
             "/settings/scrape",
             get(scrape_settings::get_scrape_settings),
         )
-        .route(
-            "/settings/scrape/preview-naming",
-            post(scrape_settings::preview_naming),
-        )
         .route("/settings/languages", get(scrape_settings::languages))
         .route("/settings/countries", get(scrape_settings::countries))
 }
@@ -210,7 +200,6 @@ pub(super) fn member_library_routes() -> Router<ApiState> {
 pub(super) fn member_playback_routes() -> Router<ApiState> {
     Router::new()
         // playback views (read playback_progress + ledger)
-        .route("/playback/decide", post(playback::decide))
         .route("/playback/sessions", post(playback::start_session))
         .route(
             "/playback/sessions/{play_session_id}/stream",
@@ -253,5 +242,20 @@ pub(super) fn member_playback_routes() -> Router<ApiState> {
         .route(
             "/playback/devices/{device_id}",
             delete(playback_activity::revoke_device),
+        )
+}
+
+/// Read computations use POST for their input, but do not admit mutations.
+pub(super) fn member_readonly_post_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/playback/decide", post(playback::decide))
+        .route("/subscriptions/title-preview", post(title_ref::preview))
+        .route(
+            "/subscriptions/download-routing-preview",
+            post(routing_preview::preview),
+        )
+        .route(
+            "/settings/scrape/preview-naming",
+            post(scrape_settings::preview_naming),
         )
 }

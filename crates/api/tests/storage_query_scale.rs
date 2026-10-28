@@ -297,11 +297,7 @@ async fn api_items(app: &axum::Router, token: &str, uri: &str) -> Vec<Value> {
 }
 
 /// 本页条目 + 下一页游标（`data` 是数组，游标挂在信封上）。
-async fn api_page(
-    app: &axum::Router,
-    token: &str,
-    uri: &str,
-) -> (Vec<Value>, Option<String>) {
+async fn api_page(app: &axum::Router, token: &str, uri: &str) -> (Vec<Value>, Option<String>) {
     let response = app
         .clone()
         .oneshot(common::request("GET", uri, Some(token), Value::Null))
@@ -574,10 +570,8 @@ async fn api_watch_filters_and_unwatched_first_over_http() {
     let base = format!("/api/v1/libraries/{}/items", coords.library_id);
     for (watch, expected) in [
         ("unwatched", &members.unwatched),
-        ("unseen", &members.unwatched),
         ("seen", &members.seen),
         ("played", &members.played),
-        ("watched", &members.played),
         ("watching", &members.watching),
         ("favorite", &members.favorite),
     ] {

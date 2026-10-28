@@ -21,7 +21,13 @@ pub fn router(state: ApiState) -> Router {
     let ms_routes = media_server::routes(media_server_provider.clone());
     let ms_media_routes = media_server::media_routes(media_server_provider);
 
-    let jellyfin = Router::new().merge(ms_routes).merge(ms_media_routes);
+    let jellyfin = Router::new()
+        .merge(ms_routes)
+        .merge(ms_media_routes)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::protocol_write_gate,
+        ));
 
     Router::new()
         .nest("/api/v1", crate::http::router(state))

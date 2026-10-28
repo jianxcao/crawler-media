@@ -68,6 +68,7 @@ pub(crate) mod users;
 
 mod request_logging;
 mod routes;
+pub(crate) use routes::protocol_write_gate;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

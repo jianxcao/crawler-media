@@ -168,8 +168,7 @@ fn deletes_only_logs_ended_strictly_before_cutoff() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "cutoff").1;
+    let (media, file) = support::seed_published_file(&store, &tmp.path().join("library"), "cutoff");
     let cutoff = 1_700_000_000i64;
     let expired = log_fixture(
         &store,
@@ -202,8 +201,8 @@ fn repeated_prune_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "idempotent").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "idempotent");
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
         log_fixture(
@@ -303,8 +302,8 @@ fn history_and_stats_only_cover_the_retention_window() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "history").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "history");
     let now = 1_700_000_000i64;
     let cutoff = now - 30 * DAY;
     let mut expired = Vec::new();
@@ -363,8 +362,8 @@ fn dry_run_reports_candidates_without_writing() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "dry-run").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "dry-run");
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
         log_fixture(
@@ -417,11 +416,11 @@ fn batch_size_caps_each_run_and_reports_remaining_candidates() {
 fn delete_failure_rolls_back_the_whole_batch() {
     let tmp = tempfile::tempdir().unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
     let cutoff = 1_700_000_000i64;
     {
         let store = Store::open(tmp.path()).unwrap();
-        let file = support::seed_published_file(&store, &tmp.path().join("library"), "rollback").1;
+        let (media, file) =
+            support::seed_published_file(&store, &tmp.path().join("library"), "rollback");
         for index in 0..3 {
             log_fixture(
                 &store,

@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-结构核对：2026-10-28，代码 `9f6126d3` 的生产 DDL（library v8，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。写门禁、Media 身份屏障与执行器的剩余缺口、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
+结构核对：2026-10-28，代码 `9f6126d3` 的生产 DDL（library v8，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。写门禁、Media 身份屏障与执行器的修复、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
 
 ## 权威来源
 
@@ -54,6 +54,6 @@ flowchart TD
 
 - 当前无 ledger/file_meta/browse journal 持久表、旧布局导入器或兼容视图。旧 `/directory` 聚合/roots 写、旧 Naming 表和反拆、自有无签发 session Playback、Downloader settings JSON 回读均删除；Web/CLI 使用当前合同。
 - kind 先收窄授权 Library，查询使用同库精确成员、边际计数和页内选源；QueryWorkStats 纳入 exact count/辅助 SQL。新模型的实测与未运行范围见[2026-10-25 验收记录](../benchmarks/2026-10-25-large-hit-query-read-model.md)；[2026-10-24 历史测量](../benchmarks/2026-10-24-storage-query-rereview.md)保留原版本。
-- Probe/Claim/Watch/fs watcher/根配置的 filesystem 观察使用 owned 快照移出 Store；最终发布校验原归属、配置和源版本。原 NFO 失败退出已修；当前仍有 metadata 写门禁遗漏、Playback mark 绕过 Media 冻结/退役、补图和操作接口阻塞执行器，见复审 R6–R8。未确认新的 SQLite 永久锁环，不能由已有 offload 推断全部安全。
+- Probe/Claim/Watch/fs watcher/根配置的 filesystem 观察使用 owned 快照移出 Store；最终发布校验原归属、配置和源版本。原 NFO 失败退出已修；R6–R8 补齐 mutation 门禁、Playback 同事务身份屏障，以及有界 operation/补图执行，见复审与正式回归。未确认新的 SQLite 永久锁环，不能由已有 offload 推断全部安全。
 - cache清空只允许连接内受控删除，或停写关闭全部连接后重建；备份不能直接复制活跃文件冒充跨文件一致快照。`request_visible_media`是TEMP表，WAL/SHM不是额外业务分区。
 - 本轮不访问真实实例，不部署、不重建数据库。媒体/字幕/NFO/图片/下载目录保留；NAS、真实Jellyfin客户端、100k Media/1M文件完整规模尚未在本轮运行。

@@ -186,10 +186,7 @@ impl Store {
     ) -> Result<UnitState, StoreError> {
         let (season, episode) = (unit.season, unit.episode);
         self.playback_write(|store| {
-            crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                &store.library,
-                media_id,
-            )?;
+            crate::library_write::publish::ensure_media_writable(&store.library, media_id)?;
             let state = store.upsert_unit_internal(
                 user_id,
                 media_id,
@@ -451,10 +448,7 @@ impl Store {
                 None => store.user_playback_media_ids(user_id, since_ms)?,
             };
             for media in &affected {
-                crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                    &store.library,
-                    *media,
-                )?;
+                crate::library_write::publish::ensure_media_writable(&store.library, *media)?;
             }
             // Clearing history drops the whole resume package and the played assertion; the
             // favourite is the user's library decision and survives it.

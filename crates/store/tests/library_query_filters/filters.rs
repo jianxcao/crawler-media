@@ -57,112 +57,9 @@ fn filters_restrict_items_and_total_agrees() {
     assert!(strict.items.is_empty());
 
     // Every dimension restricts, and the page count always matches the total.
-    let cases: Vec<(&str, BrowseFilter, Vec<&str>)> = vec![
-        (
-            "genre",
-            BrowseFilter {
-                genres: vec!["28".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Alpha"],
-        ),
-        (
-            "resolution",
-            BrowseFilter {
-                resolutions: vec!["720p".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Charlie"],
-        ),
-        (
-            "decade",
-            BrowseFilter {
-                decades: vec!["2020s".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Alpha"],
-        ),
-        (
-            "earlier",
-            BrowseFilter {
-                decades: vec!["earlier".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Charlie"],
-        ),
-        (
-            "2010s",
-            BrowseFilter {
-                decades: vec!["2010s".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Bravo"],
-        ),
-        (
-            "empty decade bucket",
-            BrowseFilter {
-                decades: vec!["1990s".into()],
-                ..BrowseFilter::default()
-            },
-            vec![],
-        ),
-        (
-            "runtime",
-            BrowseFilter {
-                runtimes: vec!["gt120".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Alpha"],
-        ),
-        (
-            "language",
-            BrowseFilter {
-                languages: vec!["JA".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Bravo"],
-        ),
-        (
-            "hdr",
-            BrowseFilter {
-                hdr: Some(true),
-                ..BrowseFilter::default()
-            },
-            vec!["Alpha"],
-        ),
-        (
-            "missing",
-            BrowseFilter {
-                stock: vec!["missing".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Charlie"],
-        ),
-        (
-            "unscraped",
-            BrowseFilter {
-                stock: vec!["unscraped".into()],
-                ..BrowseFilter::default()
-            },
-            vec!["Charlie"],
-        ),
-        (
-            "confirmed",
-            BrowseFilter {
-                identity: Some("confirmed".into()),
-                ..BrowseFilter::default()
-            },
-            vec!["Alpha", "Bravo"],
-        ),
-        (
-            "provisional",
-            BrowseFilter {
-                identity: Some("provisional".into()),
-                ..BrowseFilter::default()
-            },
-            vec!["Charlie"],
-        ),
-    ];
+    let cases = classification_filter_cases()
+        .into_iter()
+        .chain(date_runtime_filter_cases());
     for (name, filter, expected) in cases {
         let page = store
             .library_item_page(&query(
@@ -540,7 +437,6 @@ fn unwatched_includes_media_without_a_user_row() {
 
     let cases = [
         ("unwatched", 3usize),
-        ("unseen", 3),
         ("played", 0),
         ("watching", 0),
         ("favorite", 0),
@@ -563,4 +459,142 @@ fn unwatched_includes_media_without_a_user_row() {
         let page = store.library_item_page(&request).unwrap();
         assert_eq!(page.total, Some(expected as u64), "watch={watch}");
     }
+}
+
+#[test]
+fn old_watch_values_are_rejected_instead_of_normalized() {
+    let (_tmp, store, library, _scope) = seeded();
+    for watch in ["watched", "unplayed", "unseen"] {
+        let request = query(
+            library.id.parse().unwrap(),
+            BrowseFilter {
+                watch: Some(watch.into()),
+                ..BrowseFilter::default()
+            },
+            BrowseOrder::Title,
+            false,
+            offset(0, 50),
+        );
+        assert!(
+            matches!(
+                store.library_item_page(&request),
+                Err(store::StoreError::Invalid(_))
+            ),
+            "watch={watch}"
+        );
+    }
+}
+
+fn classification_filter_cases() -> Vec<(&'static str, BrowseFilter, Vec<&'static str>)> {
+    vec![
+        (
+            "genre",
+            BrowseFilter {
+                genres: vec!["28".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Alpha"],
+        ),
+        (
+            "resolution",
+            BrowseFilter {
+                resolutions: vec!["720p".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Charlie"],
+        ),
+        (
+            "language",
+            BrowseFilter {
+                languages: vec!["JA".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Bravo"],
+        ),
+        (
+            "hdr",
+            BrowseFilter {
+                hdr: Some(true),
+                ..BrowseFilter::default()
+            },
+            vec!["Alpha"],
+        ),
+        (
+            "missing",
+            BrowseFilter {
+                stock: vec!["missing".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Charlie"],
+        ),
+        (
+            "unscraped",
+            BrowseFilter {
+                stock: vec!["unscraped".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Charlie"],
+        ),
+        (
+            "confirmed",
+            BrowseFilter {
+                identity: Some("confirmed".into()),
+                ..BrowseFilter::default()
+            },
+            vec!["Alpha", "Bravo"],
+        ),
+        (
+            "provisional",
+            BrowseFilter {
+                identity: Some("provisional".into()),
+                ..BrowseFilter::default()
+            },
+            vec!["Charlie"],
+        ),
+    ]
+}
+
+fn date_runtime_filter_cases() -> Vec<(&'static str, BrowseFilter, Vec<&'static str>)> {
+    vec![
+        (
+            "decade",
+            BrowseFilter {
+                decades: vec!["2020s".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Alpha"],
+        ),
+        (
+            "earlier",
+            BrowseFilter {
+                decades: vec!["earlier".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Charlie"],
+        ),
+        (
+            "2010s",
+            BrowseFilter {
+                decades: vec!["2010s".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Bravo"],
+        ),
+        (
+            "empty decade bucket",
+            BrowseFilter {
+                decades: vec!["1990s".into()],
+                ..BrowseFilter::default()
+            },
+            vec![],
+        ),
+        (
+            "runtime",
+            BrowseFilter {
+                runtimes: vec!["gt120".into()],
+                ..BrowseFilter::default()
+            },
+            vec!["Alpha"],
+        ),
+    ]
 }

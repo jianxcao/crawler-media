@@ -375,11 +375,7 @@ pub(crate) async fn set_marks(
             user_id, season, episode, played, favorite,
         );
         if let Err(error) = store.mutate_playback(media_id, &change, now_ms) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+            return mark_error(error);
         }
         let unit = match watch_json(store, user_id, media_id, season, episode) {
             Ok(unit) => unit,
@@ -396,5 +392,25 @@ pub(crate) async fn set_marks(
     {
         Ok(response) => response,
         Err(error) => error.response(),
+    }
+}
+
+fn mark_error(error: crate::store::StoreError) -> Response {
+    match error {
+        crate::store::StoreError::Protected(message) => {
+            tracing::warn!(%message, "Playback mark rejected by write barrier");
+            err(StatusCode::CONFLICT, "playback.protected", &message)
+        }
+        crate::store::StoreError::Missing(message) => {
+            err(StatusCode::NOT_FOUND, "playback.missing", &message)
+        }
+        other => {
+            tracing::error!(error = %other, "Playback mark persistence failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &other.to_string(),
+            )
+        }
     }
 }

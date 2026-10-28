@@ -205,19 +205,13 @@ async fn library_gallery_supports_stable_pagination_and_complete_dto() {
     let (api_state, app) = gallery_app(&tmp);
     let lib_id = seed_gallery(&api_state, &app).await;
 
-    let page1_envelope = fetch_gallery_envelope(
-        &app,
-        &format!("/api/v1/libraries/{lib_id}/gallery?limit=2"),
-    )
-    .await;
+    let page1_envelope =
+        fetch_gallery_envelope(&app, &format!("/api/v1/libraries/{lib_id}/gallery?limit=2")).await;
     let cursor = page1_envelope["next_cursor"]
         .as_str()
         .expect("还有下一组时应给出 next_cursor")
         .to_string();
-    let page1 = page1_envelope
-        .get("data")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let page1 = page1_envelope.get("data").cloned().unwrap_or(Value::Null);
     let groups1 = page1.as_array().unwrap();
     assert_eq!(groups1.len(), 2, "Page 1 must have 2 groups");
     let g0 = &groups1[0];
@@ -378,7 +372,7 @@ async fn library_gallery_skips_empty_artwork_groups() {
     );
 }
 
-/// 海报墙能选的每一档排序都必须被服务端接受：未知档回退标题序，不能 400。
+/// 海报墙能选的每一档排序都必须被服务端接受。
 #[tokio::test]
 async fn library_browse_accepts_every_wall_sort_key() {
     let tmp = tempfile::tempdir().unwrap();
@@ -388,7 +382,6 @@ async fn library_browse_accepts_every_wall_sort_key() {
         "title",
         "added_at",
         "release_date",
-        "release_date_asc",
         "probing",
         "rating",
         "runtime",

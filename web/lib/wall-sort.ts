@@ -74,9 +74,7 @@ export const SORT_DIRECTIONS: Record<
   runtime: { naturalAsc: true, asc: "短→长", desc: "长→短" },
   size: { naturalAsc: false, asc: "小→大", desc: "大→小" },
   last_played: { naturalAsc: false, asc: "远→近", desc: "近→远" },
-  // 下面两档不进墙的排序下拉（上映正序只作系列合集的 sort；随机只作首页自定义行的
-  // 排序，按天换一批），这里补上只是让 Record 完整；方向文案不会被读到
-  release_date_asc: { naturalAsc: true, asc: "旧→新", desc: "新→旧" },
+  // 随机只作首页自定义行的排序，按天换一批，不进墙的排序下拉。
   random: { naturalAsc: true, asc: "随机", desc: "随机" },
 };
 

@@ -18,7 +18,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
 - 根迁移每窗口≤100文件/Unidentified 候选，持久游标、公平轮转和状态可查询；API driver 批间放锁并在解冻后自动继续。关联 NFO 与文件同批迁移。Unidentified 的索引 seek 不重扫游标前记录。
-- 当前剩余问题与前轮对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。[10-24 复审](../audits/2026-10-24-storage-rereview.md)和[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)保留历史版本证据。
+- 当前修复验收与前轮对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。[10-24 复审](../audits/2026-10-24-storage-rereview.md)和[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)保留历史版本证据。
 
 ## 字段阅读规则
 

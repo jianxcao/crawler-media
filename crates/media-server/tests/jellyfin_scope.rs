@@ -188,7 +188,6 @@ impl FakeProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for FakeProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -371,7 +370,7 @@ impl MediaServerProvider for FakeProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
 

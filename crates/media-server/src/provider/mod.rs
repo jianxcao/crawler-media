@@ -226,6 +226,23 @@ pub enum SubtitleDeliveryError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum UserMarksError {
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl UserMarksError {
+    pub fn status_code(&self) -> axum::http::StatusCode {
+        match self {
+            Self::Conflict(_) => axum::http::StatusCode::CONFLICT,
+            Self::Internal(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum QueryError {
     #[error("unauthorized query")]
     Unauthorized,
@@ -519,7 +536,7 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         id: &str,
         played: Option<bool>,
         favorite: Option<bool>,
-    ) -> Result<bool, String>;
+    ) -> Result<bool, UserMarksError>;
 
     async fn issue_play_session(
         &self,

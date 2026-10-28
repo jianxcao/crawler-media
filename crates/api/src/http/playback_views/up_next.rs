@@ -485,12 +485,11 @@ fn render_item(
     if observed_backdrop.is_none()
         && let Some(preferred) = preferred
     {
-        let state_clone = state.clone();
-        let media_clone = cand.media.clone();
-        let pref_path = preferred.file.path.clone();
-        tokio::spawn(async move {
-            let _ = crate::poster_fetch::attach_backdrop(&state_clone, &media_clone, &pref_path);
-        });
+        state.backdrop_enrichment.schedule(
+            state.clone(),
+            cand.media.clone(),
+            preferred.file.path.clone(),
+        );
     }
     let fanart_fallback = preferred.map(|row| artwork_url("fanart", row.file.file_id));
     let still = cand

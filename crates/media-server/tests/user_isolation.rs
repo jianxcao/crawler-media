@@ -276,7 +276,7 @@ impl MediaServerProvider for FakeProvider {
         id: &str,
         _played: Option<bool>,
         favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         let target = if user_id == self.user_a {
             Some((self.media_a.id, self.file_a.file_id, &self.favorite_a))
         } else if user_id == self.user_b {

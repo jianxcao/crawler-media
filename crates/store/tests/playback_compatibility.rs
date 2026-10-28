@@ -403,8 +403,8 @@ fn only_admin_end_records_admin_ended_in_playback_log() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "admin-end").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "admin-end");
 
     store
         .upsert_session(&closed_session(

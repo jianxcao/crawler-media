@@ -81,11 +81,6 @@ pub(super) fn scope(query: &LibraryQuery) -> Result<String, StoreError> {
     ] {
         normalize(values);
     }
-    filter.watch = filter.watch.map(|v| match v.as_str() {
-        "watched" => "played".into(),
-        "unplayed" | "unseen" => "unwatched".into(),
-        _ => v,
-    });
     if filter.min_rating == Some(0.0) {
         filter.min_rating = Some(0.0);
     }

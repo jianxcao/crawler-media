@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use media_server::provider::{
     AuthenticateError, MediaItemSnapshot, MediaPerson, MediaServerProvider, PlaybackClientInfo,
     PlaybackEvent, ServerItemPage, ServerItemQuery, ServerLibrary, ServerUser,
-    SubtitleDeliveryError,
+    SubtitleDeliveryError, UserMarksError,
 };
 
 use crate::subtitle_delivery::SubtitleServiceError;
@@ -56,15 +56,16 @@ pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> 
 
 fn library_cover_tag(cover_path: Option<&std::path::Path>, kind: MediaKind) -> String {
     if let Some(path) = cover_path
-        && let Ok(meta) = std::fs::metadata(path) {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            return format!("cover-{:x}-{:x}", meta.len(), mtime);
-        }
+        && let Ok(meta) = std::fs::metadata(path)
+    {
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        return format!("cover-{:x}-{:x}", meta.len(), mtime);
+    }
     let bytes = default_library_cover(kind).unwrap_or_default();
     format!("cover-{:x}", Sha256::digest(bytes))
 }
@@ -166,8 +167,9 @@ impl MediaServerProvider for ApiServerProvider {
         // 不再排在进程级 `Store` 锁后面——否则扫描期间 Jellyfin 协议面（Infuse/
         // Emby 客户端）与自有 API 一样每个请求都 503。阶段名仍是 `auth`：
         // `library_read_metrics` 按 `timeout_stage == "auth"` 观察。
-        let deadline = deadline
-            .unwrap_or_else(|| std::time::Instant::now() + crate::http::store_wait::STORE_READ_WAIT);
+        let deadline = deadline.unwrap_or_else(|| {
+            std::time::Instant::now() + crate::http::store_wait::STORE_READ_WAIT
+        });
         let token = token.to_owned();
         crate::library_read_work::run_app_read_stage_named(
             &self.state,
@@ -428,15 +430,16 @@ impl MediaServerProvider for ApiServerProvider {
     ) -> Result<Option<Vec<u8>>, String> {
         let store = self.state.store.lock();
         if let Ok(Some(lib)) = store.get_library(id)
-            && crate::http::library::library_visible(&store, &lib, user_id) {
-                if let Some(cover) = crate::http::library::library_cover_path(&store, &lib) {
-                    drop(store);
-                    return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
-                }
-                let kind = lib.kind;
+            && crate::http::library::library_visible(&store, &lib, user_id)
+        {
+            if let Some(cover) = crate::http::library::library_cover_path(&store, &lib) {
                 drop(store);
-                return default_library_cover(kind).map(Some);
+                return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
             }
+            let kind = lib.kind;
+            drop(store);
+            return default_library_cover(kind).map(Some);
+        }
         Ok(None)
     }
 
@@ -650,9 +653,11 @@ impl MediaServerProvider for ApiServerProvider {
         id: &str,
         played: Option<bool>,
         favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, UserMarksError> {
         let store = self.state.store.lock();
-        let Some((media_id, season, episode)) = resolve_mark_unit(&store, user_id, id)? else {
+        let Some((media_id, season, episode)) =
+            resolve_mark_unit(&store, user_id, id).map_err(UserMarksError::Internal)?
+        else {
             return Ok(false);
         };
         let change = crate::store::playback::PlaybackMutation::marks(
@@ -660,10 +665,7 @@ impl MediaServerProvider for ApiServerProvider {
         );
         store
             .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
-            .map_err(|error| {
-                tracing::error!(%error, %user_id, %media_id, season, episode, "failed to update Jellyfin user marks");
-                error.to_string()
-            })?;
+            .map_err(|error| user_marks::mark_error(error, user_id, media_id))?;
         Ok(true)
     }
 

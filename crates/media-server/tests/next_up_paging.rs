@@ -160,7 +160,6 @@ impl EpisodeListProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for EpisodeListProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -319,7 +318,7 @@ impl MediaServerProvider for EpisodeListProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
 

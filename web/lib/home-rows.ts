@@ -19,12 +19,8 @@
 /**
  * 库行 / 合集行可选的排序档。取值与海报墙的 WallSort 同名（含首页独有的 random）。
  *
- * 方向**不再**合并在取值里：每档有自己的自然方向（见 SORT_PRESETS.naturalAsc），
- * 行上另存一个 `reversed`，与海报墙的 `WallSortState.reversed` 同一语义。
- * 初稿把方向烧进取值（`release_date_asc`），理由是「用户选的是『最近上映』这个
- * 名字，不是『上映时间 + 倒序』」；后来推翻——用户明确要每个指标都能自己定正倒序，
- * 而后端三个取数接口本来就收 `order`，前端没理由替他把这个选项藏起来。
- * 老偏好里存的 `release_date_asc` 在读取时归一成 `release_date` + 反转，不需要迁移。
+ * 每档有自己的自然方向（见 SORT_PRESETS.naturalAsc），行上另存一个 `reversed`，
+ * 与海报墙的 `WallSortState.reversed` 同一语义；持久偏好使用独立的 sort/order。
  */
 export type HomeRowSort =
   "added_at" | "release_date" | "last_played" | "rating" | "random" | "title";
@@ -251,8 +247,6 @@ const FAVORITES_SORTS = new Set<string>(Object.keys(FAVORITES_SORT_PRESETS));
  * 把存下来的（sort, order）认成（档位, 是否反转）。
  *
  * - 认不出的档回落到 `allowed[0]`；
- * - 老偏好与合集表里的 `release_date_asc`（方向烧在取值里的那个年代）归一成
- *   `release_date` + 反转，这样不需要迁移，老数据读出来与从前的行为逐字一样；
  * - `order` 与该档自然方向相同时视作没反转（写回时也不会再存它）；
  * - 没有方向的档（random）永远不反转。
  */
@@ -261,9 +255,6 @@ function asRowSort(
   order: HomeRowOrder | null | undefined,
   allowed: HomeRowSort[],
 ): { sort: HomeRowSort; reversed: boolean } {
-  if (value === "release_date_asc" && allowed.includes("release_date")) {
-    return { sort: "release_date", reversed: true };
-  }
   const sort = allowed.includes(value as HomeRowSort)
     ? (value as HomeRowSort)
     : allowed[0];

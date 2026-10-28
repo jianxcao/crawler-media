@@ -37,7 +37,7 @@ pub(super) async fn mark_favorite(
         .provider
         .set_user_marks(user.id, &id, None, Some(true))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -60,7 +60,7 @@ pub(super) async fn unmark_favorite(
         .provider
         .set_user_marks(user.id, &id, None, Some(false))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -83,7 +83,7 @@ pub(super) async fn mark_played(
         .provider
         .set_user_marks(user.id, &id, Some(true), None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -106,7 +106,7 @@ pub(super) async fn unmark_played(
         .provider
         .set_user_marks(user.id, &id, Some(false), None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }

@@ -72,6 +72,15 @@ impl Store {
         if stale_bound_event(self, &tx, event, &binding, media_id, unit)? {
             return Ok(EventOutcome::IgnoredStale);
         }
+        match crate::library_write::publish::ensure_media_identity_writable(&tx, media_id) {
+            Ok(()) => {}
+            Err(StoreError::Protected(_) | StoreError::Missing(_)) => {
+                tracing::debug!(%media_id, session_id = %event.session_id,
+                    "playback event for a frozen or retired identity ignored");
+                return Ok(EventOutcome::IgnoredStale);
+            }
+            Err(error) => return Err(error),
+        }
         // An admin ended this device's playback: a later event must not resurrect the session
         // nor write unit facts, it archives the live row instead. `Applied` (not
         // `IgnoredStale`) because this event *is* handled — it ends the session, which is a

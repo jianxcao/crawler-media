@@ -1,5 +1,22 @@
 use super::*;
 
+pub(super) fn mark_error(
+    error: crate::store::StoreError,
+    user_id: UserId,
+    media_id: domain::MediaId,
+) -> UserMarksError {
+    match error {
+        crate::store::StoreError::Protected(message) => {
+            tracing::warn!(%message, %user_id, %media_id, "Jellyfin user mark rejected by write barrier");
+            UserMarksError::Conflict(message)
+        }
+        other => {
+            tracing::error!(error = %other, %user_id, %media_id, "failed to update Jellyfin user marks");
+            UserMarksError::Internal(other.to_string())
+        }
+    }
+}
+
 pub(super) fn unit_played(
     store: &crate::Store,
     user_id: UserId,

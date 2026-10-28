@@ -445,7 +445,6 @@ export type LibraryItemSort =
   | "title"
   | "added_at"
   | "release_date"
-  | "release_date_asc"
   | "probing"
   | "rating"
   | "runtime"

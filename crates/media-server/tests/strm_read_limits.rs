@@ -21,7 +21,6 @@ struct TestStrmProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for TestStrmProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -141,7 +140,7 @@ impl MediaServerProvider for TestStrmProvider {
         _id: &str,
         _played: Option<bool>,
         _fav: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
     async fn report_playback_event(

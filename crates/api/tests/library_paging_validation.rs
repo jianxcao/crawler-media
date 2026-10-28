@@ -315,3 +315,41 @@ async fn malformed_json_cursor_is_a_client_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "library.invalid", "{body}");
 }
+
+#[tokio::test]
+async fn browse_uses_only_current_watch_and_sort_values() {
+    let (_tmp, app, library_id) = fixture();
+    for path in ["items", "gallery", "facets", "item-index"] {
+        for watch in ["watched", "unplayed", "unseen"] {
+            let (status, body) = get(
+                &app,
+                &format!("/api/v1/libraries/{library_id}/{path}?w={watch}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {watch}: {body}");
+            assert_eq!(body["error"]["code"], "library.invalid");
+        }
+        for watch in ["unwatched", "watching", "played", "favorite", "seen"] {
+            let (status, body) = get(
+                &app,
+                &format!("/api/v1/libraries/{library_id}/{path}?w={watch}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{path} {watch}: {body}");
+        }
+        for sort in ["release_date_asc", "nonsense"] {
+            let (status, body) = get(
+                &app,
+                &format!("/api/v1/libraries/{library_id}/{path}?sort={sort}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {sort}: {body}");
+        }
+        let (status, body) = get(
+            &app,
+            &format!("/api/v1/libraries/{library_id}/{path}?sort=release_date&order=asc"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+}

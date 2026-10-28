@@ -85,7 +85,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 `POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
 
-当前 `9f6126d3` 的实现缺口：Playback mark 仍能写入 merging/retired Media，跨阶段恢复可能因此卡在 retire；metadata 路由组的变更也未统一经过实例只读/维护写门禁。这两项不满足目标写入合同，已复现行为与技术方案见[复审 R6/R7](../audits/2026-10-28-storage-main-rereview.md#剩余发现与技术方案)。本页的目标屏障不代表这些入口已实现拒绝。
+R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的变更统一经过实例只读/维护写门禁（409 `instance.read_only` / 503 `runtime.busy` + Retry-After）。Playback 同事务拒绝 merging/retired 身份：self mark 为 409 `playback.protected`，错误信息包含可用 survivor；Jellyfin 可见的冻结项为 409，已退役且不可见项为 404。不重定向旧 ID；已签发的迟到事件仍为 IgnoredStale。门禁只控制新准入，不取消或排空已准入 worker。回归与恢复证据见[复审 R6/R7](../audits/2026-10-28-storage-main-rereview.md#r6r9-修复实现)。
 
 ### 浏览列表分页：cursor，没有 offset
 
@@ -168,7 +168,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 `{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
-- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite|seen`，`seen` 为存在真实观看证据的首页语义；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。当前实现仍接受旧 watch 值 `watched/unplayed/unseen`，不符合无兼容目标，删除方案见[复审 R9](../audits/2026-10-28-storage-main-rereview.md#r9无兼容切换尚有旧值转换)。不能把 UI 预设档位当作 handler 全部接受范围（`crates/api/src/http/library/query.rs`）。
+- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite|seen`，`seen` 为存在真实观看证据的首页语义；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。旧 watch 值 `watched/unplayed/unseen` 返回 400；排序只使用当前 sort + 独立 order，`release_date_asc` 及其他未知 sort 返回 400，见[复审 R9](../audits/2026-10-28-storage-main-rereview.md#r9无兼容切换尚有旧值转换)。不能把 UI 预设档位当作 handler 全部接受范围（`crates/api/src/http/library/query.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 

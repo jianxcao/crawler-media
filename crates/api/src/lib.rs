@@ -8,12 +8,13 @@
 )]
 
 pub mod auth;
-pub mod file_stat_read;
 pub mod compact_time;
+pub mod file_stat_read;
 mod http_fetcher;
 pub mod password;
 pub use http_fetcher::HttpFetcher;
 mod air_gate;
+mod backdrop_enrichment;
 mod catalog_refresh;
 mod check_in;
 mod completion;

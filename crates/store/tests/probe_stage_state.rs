@@ -267,14 +267,14 @@ fn deleting_ledger_removes_only_its_stage_state() {
 }
 
 #[test]
-fn v6_database_migrates_without_losing_probe_jobs() {
+fn current_database_reopens_without_losing_probe_jobs() {
     let tmp = tempfile::tempdir().unwrap();
-    // Initialize DB up to schema 6
+    // Initialize the current layout and persist a queued Probe Job.
     let store = Store::open(tmp.path()).unwrap();
     let (_m, r) = create_test_media_and_ledger(&store, "ep1.strm");
     let ledger_id = r.file_id.expect("fixture file id").to_string();
 
-    let job_id = "job-pre-migration";
+    let job_id = "job-before-reopen";
     let spec = ProbeJobUnitSpec {
         ledger_id: &ledger_id,
         kind: "tv",
@@ -290,14 +290,14 @@ fn v6_database_migrates_without_losing_probe_jobs() {
                 "media_probe",
                 &r.media_id.to_string(),
                 Some(1),
-                "scope_v6",
+                "scope_current",
                 &[spec]
             )
             .unwrap()
     );
     drop(store);
 
-    // Reopen (runs migration if version bumped)
+    // Reopening the current layout preserves the Job; no layout migration occurs.
     let reopened = Store::open(tmp.path()).unwrap();
     let job = reopened.get_probe_job(job_id).unwrap().unwrap();
     assert_eq!(job.id, job_id);

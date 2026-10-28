@@ -88,6 +88,23 @@ pub(crate) fn browse_filter_from_query(
     {
         return Err(format!("unknown query key {key}"));
     }
+    const SORTS: [&str; 10] = [
+        "title",
+        "added_at",
+        "release_date",
+        "probing",
+        "rating",
+        "runtime",
+        "size",
+        "resolution",
+        "last_played",
+        "random",
+    ];
+    if let Some(sort) = query.get("sort")
+        && !SORTS.contains(&sort.as_str())
+    {
+        return Err(format!("invalid sort: {sort}"));
+    }
     let rating = match query.get("rating_gte") {
         Some(raw) => {
             let value = raw
@@ -131,7 +148,7 @@ pub(crate) fn browse_order_from_query(
     let order = match query.get("sort").map(String::as_str) {
         Some("title") => library_query::BrowseOrder::Title,
         Some("added_at") => library_query::BrowseOrder::AddedAt,
-        Some("release_date" | "release_date_asc") => library_query::BrowseOrder::ReleaseDate,
+        Some("release_date") => library_query::BrowseOrder::ReleaseDate,
         Some("rating") => library_query::BrowseOrder::Rating,
         Some("runtime") => library_query::BrowseOrder::Runtime,
         Some("size") => library_query::BrowseOrder::Size,
@@ -143,19 +160,14 @@ pub(crate) fn browse_order_from_query(
     let descending = match query.get("order").map(|value| value.as_str()) {
         Some("desc") => true,
         Some("asc") => false,
-        // Same defaults the wall has always used; `release_date_asc` is the explicit
-        // ascending spelling of the release-date sort.
-        _ => {
-            query.get("sort").map(String::as_str) != Some("release_date_asc")
-                && matches!(
-                    order,
-                    library_query::BrowseOrder::AddedAt
-                        | library_query::BrowseOrder::ReleaseDate
-                        | library_query::BrowseOrder::Rating
-                        | library_query::BrowseOrder::Size
-                        | library_query::BrowseOrder::LastPlayed
-                )
-        }
+        _ => matches!(
+            order,
+            library_query::BrowseOrder::AddedAt
+                | library_query::BrowseOrder::ReleaseDate
+                | library_query::BrowseOrder::Rating
+                | library_query::BrowseOrder::Size
+                | library_query::BrowseOrder::LastPlayed
+        ),
     };
     (order, descending)
 }

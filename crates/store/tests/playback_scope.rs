@@ -100,9 +100,10 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let visible = MediaId::new();
-    let hidden = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "cursor").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "cursor");
+    let (hidden, hidden_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "cursor-other");
     let base = 1_700_000_000i64;
     let mut created = Vec::new();
     // 三组：每组一条可见、一条不可见，且组内 started_at 完全相同。
@@ -120,7 +121,7 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
             &store,
             user,
             hidden,
-            file,
+            hidden_file,
             &format!("h{index}"),
             started,
             10,
@@ -155,14 +156,15 @@ fn hidden_count_counts_rows_not_distinct_media() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let visible = MediaId::new();
-    let hidden = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "hidden").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "hidden");
+    let (hidden, hidden_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "hidden-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v0", base, 10);
     // 同一不可见 Media 的两行：hidden_count 应为 2（行数），不是 1（distinct）。
-    log_fixture(&store, user, hidden, file, "h0", base, 10);
-    log_fixture(&store, user, hidden, file, "h1", base - 10, 10);
+    log_fixture(&store, user, hidden, hidden_file, "h0", base, 10);
+    log_fixture(&store, user, hidden, hidden_file, "h1", base - 10, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(vec![visible]), None), 10)
@@ -177,12 +179,12 @@ fn empty_visible_scope_returns_empty_page() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let first = MediaId::new();
-    let second = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "empty").1;
+    let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "empty");
+    let (second, second_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "empty-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
-    log_fixture(&store, user, second, file, "b", base - 10, 10);
+    log_fixture(&store, user, second, second_file, "b", base - 10, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(Vec::new()), None), 10)
@@ -197,12 +199,13 @@ fn none_visible_scope_is_unrestricted() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let first = MediaId::new();
-    let second = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted").1;
+    let (first, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted");
+    let (second, second_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
-    log_fixture(&store, user, second, file, "b", base - 10, 10);
+    log_fixture(&store, user, second, second_file, "b", base - 10, 10);
 
     let page = store
         .playback_log_page(&scope(user, None, None), 10)
@@ -217,14 +220,15 @@ fn since_filters_both_page_and_hidden_count() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let visible = MediaId::new();
-    let hidden = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "since").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "since");
+    let (hidden, hidden_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "since-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v-new", base, 10);
-    log_fixture(&store, user, hidden, file, "h-new", base - 10, 10);
+    log_fixture(&store, user, hidden, hidden_file, "h-new", base - 10, 10);
     log_fixture(&store, user, visible, file, "v-old", base - 100, 10);
-    log_fixture(&store, user, hidden, file, "h-old", base - 200, 10);
+    log_fixture(&store, user, hidden, hidden_file, "h-old", base - 200, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(vec![visible]), Some(base - 50)), 10)
@@ -249,8 +253,8 @@ fn limit_bounds_and_ambiguous_cursor_are_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let visible = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "limit").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "limit");
     log_fixture(&store, user, visible, file, "v", 1_700_000_000, 10);
     let scoped = scope(user, Some(vec![visible]), None);
 
@@ -276,12 +280,12 @@ fn scope_does_not_leak_between_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let first = MediaId::new();
-    let second = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "leak").1;
+    let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "leak");
+    let (second, second_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "leak-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
-    log_fixture(&store, user, second, file, "b", base - 10, 10);
+    log_fixture(&store, user, second, second_file, "b", base - 10, 10);
 
     // 第一次填满大可见集合。
     let filled = store
@@ -315,12 +319,13 @@ fn user_scope_filters_page_and_hidden() {
     let store = Store::open(tmp.path()).unwrap();
     let alice = UserId::new();
     let bob = UserId::new();
-    let visible = MediaId::new();
-    let hidden = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "users").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "users");
+    let (hidden, hidden_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "users-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, alice, visible, file, "alice-v", base, 10);
-    log_fixture(&store, alice, hidden, file, "alice-h", base - 10, 10);
+    log_fixture(&store, alice, hidden, hidden_file, "alice-h", base - 10, 10);
     log_fixture(&store, bob, visible, file, "bob-v", base - 20, 10);
 
     let page = store

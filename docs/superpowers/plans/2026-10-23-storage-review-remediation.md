@@ -1,6 +1,6 @@
 # 存储复审修复执行记录
 
-历史执行记录：以下状态与数字固定于 2026-10-24 阶段；当前代码 `9f6126d3` 的剩余问题与修复对账见[2026-10-28 再次复审](../../audits/2026-10-28-storage-main-rereview.md)，不按本文重做已实现步骤。
+历史执行记录：以下状态与数字固定于 2026-10-24 阶段；代码 `9f6126d3` 的后续发现、R6–R9 修复与验收对账见[2026-10-28 再次复审](../../audits/2026-10-28-storage-main-rereview.md)，不按本文重做已实现步骤。
 
 当时用户在只读复审后明确授权修复。实施基线 `feat/storage-redesign@96f7445`，本文与实现同提交发布；原问题代码基线为 `cf7fb70`。原始发现保留在[固定版本复审](../../audits/2026-10-24-storage-rereview.md)，5k–100k 数据形状和结果见[测量记录](../../benchmarks/2026-10-24-storage-query-rereview.md)。本文件是该历史阶段的执行状态记录，原只读技术方案可用 `git show 96f7445:docs/superpowers/plans/2026-10-23-storage-review-remediation.md` 读取。
 

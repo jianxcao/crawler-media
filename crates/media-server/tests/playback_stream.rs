@@ -20,7 +20,6 @@ struct DirectStreamProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for DirectStreamProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -150,7 +149,7 @@ impl MediaServerProvider for DirectStreamProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
 
@@ -254,7 +253,6 @@ struct MultiVersionStreamProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for MultiVersionStreamProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -380,7 +378,7 @@ impl MediaServerProvider for MultiVersionStreamProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
     async fn report_playback_event(

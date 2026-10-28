@@ -280,21 +280,36 @@ pub(crate) fn ensure_config_revision(
     Ok(())
 }
 
-/// Reject new file facts for a Media whose identity is frozen or retired.
+/// Reject new facts for a Media whose identity is frozen or retired.
 pub(crate) fn ensure_media_writable(tx: &Connection, media_id: MediaId) -> Result<(), StoreError> {
     crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, media_id)?;
-    let state: Option<String> = tx
+    ensure_media_identity_writable(tx, media_id)
+}
+
+pub(crate) fn ensure_media_identity_writable(
+    tx: &Connection,
+    media_id: MediaId,
+) -> Result<(), StoreError> {
+    let identity: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT identity_state FROM media WHERE media_id = ?1",
+            "SELECT identity_state, survivor_id FROM media WHERE media_id = ?1",
             params![media_id.to_string()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    match state.as_deref() {
-        None => Err(StoreError::Missing(format!("media {media_id}"))),
-        Some("merging") | Some("retired") => Err(StoreError::Protected(format!(
-            "media {media_id} identity is frozen"
-        ))),
+    let Some((state, survivor)) = identity else {
+        return Err(StoreError::Missing(format!("media {media_id}")));
+    };
+    match state.as_str() {
+        "merging" | "retired" => {
+            tracing::warn!(%media_id, identity_state = state, ?survivor, "Media write rejected by identity barrier");
+            let survivor = survivor
+                .map(|id| format!("; survivor {id}"))
+                .unwrap_or_default();
+            Err(StoreError::Protected(format!(
+                "media {media_id} identity is {state}{survivor}"
+            )))
+        }
         _ => Ok(()),
     }
 }

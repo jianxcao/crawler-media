@@ -13,10 +13,13 @@ use axum::response::Response;
 use crate::http::{auth, library_operations};
 use crate::management::ApiState;
 
-use admin::{admin_core_routes, admin_library_routes, admin_metadata_routes, admin_ops_routes};
+use admin::{
+    admin_core_routes, admin_library_routes, admin_metadata_routes, admin_ops_routes,
+    admin_readonly_post_routes,
+};
 use member::{
     member_discovery_routes, member_library_routes, member_playback_routes,
-    member_subscriptions_routes,
+    member_readonly_post_routes, member_subscriptions_routes,
 };
 
 /// Review L-9: while another instance holds the data-directory lease, data
@@ -32,7 +35,7 @@ async fn write_gate(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     );
-    if !reads && !request.uri().path().ends_with("preview") {
+    if !reads {
         // 两道独立的门，状态码不合并：
         // - 409：另一个实例持有数据目录租约（只读实例）；
         // - 503 + Retry-After：本实例正在维护（L5 写门禁），稍后重试即可。
@@ -46,6 +49,21 @@ async fn write_gate(
     next.run(request).await
 }
 
+/// The protocol router has one read-only POST: its public Ping. All other
+/// registered non-read methods use the same instance and maintenance admission.
+pub(crate) async fn protocol_write_gate(
+    state: axum::extract::State<ApiState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.method() == axum::http::Method::POST
+        && matches!(request.uri().path(), "/System/Ping" | "/emby/System/Ping")
+    {
+        return next.run(request).await;
+    }
+    write_gate(state, request, next).await
+}
+
 fn write_gated(state: &ApiState, routes: Router<ApiState>) -> Router<ApiState> {
     routes.route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
@@ -55,10 +73,11 @@ fn write_gated(state: &ApiState, routes: Router<ApiState>) -> Router<ApiState> {
 
 pub(super) fn member_routes(state: &ApiState) -> Router<ApiState> {
     Router::new()
-        .merge(member_discovery_routes())
+        .merge(member_readonly_post_routes())
+        .merge(write_gated(state, member_discovery_routes()))
         .merge(write_gated(state, member_subscriptions_routes()))
         .merge(write_gated(state, member_library_routes()))
-        .merge(member_playback_routes())
+        .merge(write_gated(state, member_playback_routes()))
 }
 
 pub(super) fn admin_routes(state: &ApiState) -> Router<ApiState> {
@@ -73,7 +92,8 @@ pub(super) fn admin_routes(state: &ApiState) -> Router<ApiState> {
                 library_operations::reject_conflicting_writes,
             )),
         ))
-        .merge(admin_metadata_routes())
+        .merge(write_gated(state, admin_metadata_routes()))
+        .merge(admin_readonly_post_routes())
         .merge(write_gated(state, admin_ops_routes()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

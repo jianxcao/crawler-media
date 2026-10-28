@@ -564,9 +564,8 @@ fn ordering_and_cursor_agree_across_null_ties_and_unicode() {
 
 /// Expected media-id sets for the `watch` filter vocabulary.
 ///
-/// The store maps `played | watched` to `played = 1` and `seen` to `seen = 1` (see
-/// `library_query/items/filters.rs::watch_clause`), so `watched` is an alias of `played`,
-/// never of `seen`. The fixture asserts both explicitly instead of assuming.
+/// Played means completed; seen includes in-progress viewing. These five current
+/// values select distinct expected sets; old aliases are rejected by separate regressions.
 struct WatchSets {
     unwatched: BTreeSet<String>,
     seen: BTreeSet<String>,
@@ -606,12 +605,10 @@ fn watch_sets(lib: &LibSeed, total: usize) -> WatchSets {
 /// Every `watch` value the HTTP layer can pass through selects exactly its set, and
 /// `library_item_count` agrees with the ids the cursor drain returns.
 fn assert_watch_filters(store: &Store, lib: &LibSeed, user: &str, sets: &WatchSets) {
-    let cases: [(&str, &BTreeSet<String>); 7] = [
+    let cases: [(&str, &BTreeSet<String>); 5] = [
         ("unwatched", &sets.unwatched),
-        ("unseen", &sets.unwatched),
         ("seen", &sets.seen),
         ("played", &sets.played),
-        ("watched", &sets.played),
         ("watching", &sets.watching),
         ("favorite", &sets.favorite),
     ];

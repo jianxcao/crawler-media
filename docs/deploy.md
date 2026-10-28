@@ -135,7 +135,7 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 Library items/gallery/facets 与覆盖的 Jellyfin Items/Latest/Episodes 查询使用实例内两个只读连接：短 Store 锁准备授权，释放后执行单库快照，归还连接后重验原凭据、角色、ACL 与 Library roster。Latest 的全部片段属于同一次授权尝试；配置变化最多重试一次。认证前创建的 30 秒绝对预算覆盖设备凭据绑定、准入、锁等待、SQL、冷详情和最终重验。池满或预算耗尽返回 503；只读实例仍可提供合法读取，写入继续按原合同拒绝。
 
-当前 `9f6126d3` 的 metadata 变更路由遗漏实例只读/维护门禁，`DELETE /ledger/{id}` 在两种受保护状态下仍能删除文件事实；原合同的写入拒绝尚未覆盖这些入口。[当前复审 R6](audits/2026-10-28-storage-main-rereview.md#r6metadata-路由绕过写门禁)记录离线 HTTP 反例与修复验收，不能将“只读模式”说明当作全路由已受保护的证明。
+R6 修复后，metadata/discovery/Playback 和 Jellyfin/Emby 的 mutation 统一经过实例只读与维护门禁，受保护的 ledger 删除拒绝且保留数据库事实和视频字节；安全读与显式只读预览保持可用。[当前复审 R6](audits/2026-10-28-storage-main-rereview.md#r6metadata-路由绕过写门禁)记录公开 HTTP 回归。门禁是准入检查，不能代替停写、等待在途 worker 完成及关闭连接。
 
 HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 [Library 读取隔离记录](benchmarks/2026-10-25-library-read-isolation.md)。读池减少查询执行期间的 Store 锁占用，不承诺消除认证/准备/重验与 writer 的锁争用，也不提升单条 SQL 自身速度。
 

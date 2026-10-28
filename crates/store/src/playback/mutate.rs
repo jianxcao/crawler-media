@@ -5,10 +5,7 @@ use rusqlite::{OptionalExtension, params};
 
 use super::super::{Store, StoreError};
 use super::source::PlaybackSource;
-use super::types::{
-    PlaybackMutation, PlaybackTarget, ResolvedResume,
-    ResumeStatus,
-};
+use super::types::{PlaybackMutation, PlaybackTarget, ResolvedResume, ResumeStatus};
 use super::user_summary::SummaryScope;
 
 /// Resume facts stored on `playback_units`, with the source binding they were
@@ -322,7 +319,7 @@ impl Store {
             return Ok(());
         }
         let tx = crate::write_tx(&self.library)?;
-        crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media)?;
+        crate::library_write::publish::ensure_media_writable(&tx, media)?;
         let (season, episode) = match change.scope {
             UnitScope::Whole => (-1, -1),
             UnitScope::Season(s) => (s as i32, -1),

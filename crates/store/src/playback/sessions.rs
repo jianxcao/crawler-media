@@ -21,18 +21,26 @@ struct SessionBinding {
 
 impl Store {
     pub fn upsert_session(&self, session: &SessionRow) -> Result<(), StoreError> {
+        self.playback_write(|store| {
+            crate::library_write::publish::ensure_media_writable(&store.library, session.media_id)?;
+            store.upsert_session_inner(session)
+        })
+    }
+
+    fn upsert_session_inner(&self, session: &SessionRow) -> Result<(), StoreError> {
         let binding = self.session_binding(
             session.user_id,
             &session.device_id,
             session.play_session_id.as_deref(),
         )?;
         if let Some(ledger_id) = session.ledger_id.as_deref()
-            && ledger_id != binding.file_id {
-                return Err(StoreError::Invalid(format!(
-                    "playback session file_id {ledger_id} does not match issued binding {}",
-                    binding.file_id
-                )));
-            }
+            && ledger_id != binding.file_id
+        {
+            return Err(StoreError::Invalid(format!(
+                "playback session file_id {ledger_id} does not match issued binding {}",
+                binding.file_id
+            )));
+        }
         // Align with schema/v1/library.sql: playback_sessions.
         self.library.execute(
             "INSERT OR REPLACE INTO playback_sessions
@@ -196,6 +204,7 @@ impl Store {
         let Some(session) = self.get_session(user_id, device_id)? else {
             return Ok(None);
         };
+        crate::library_write::publish::ensure_media_writable(&self.library, session.media_id)?;
         let binding =
             self.session_binding(user_id, device_id, session.play_session_id.as_deref())?;
         self.library.execute(

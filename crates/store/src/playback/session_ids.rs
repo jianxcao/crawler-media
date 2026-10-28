@@ -70,6 +70,7 @@ impl Store {
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
 
         let cutoff = now - 2_592_000;
         tx.execute(
@@ -267,11 +268,12 @@ impl Store {
             .flatten();
 
         if let Some(active_gen) = max_active_gen
-            && active_gen >= generation {
-                // 被拒绝的激活是零写入:这一行既不能置 `closed`,也不能有任何别的改动。
-                // 它是否被清理交给后续成功的激活或 `close_play_session_id`。
-                return Ok(false);
-            }
+            && active_gen >= generation
+        {
+            // 被拒绝的激活是零写入:这一行既不能置 `closed`,也不能有任何别的改动。
+            // 它是否被清理交给后续成功的激活或 `close_play_session_id`。
+            return Ok(false);
+        }
 
         conn.execute(
             "UPDATE playback_session_ids SET state = 'closed'

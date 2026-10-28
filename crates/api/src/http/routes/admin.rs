@@ -261,10 +261,6 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
             "/jobs/{id}/maintenance-config",
             put(job_maintenance::update_maintenance_config),
         )
-        .route(
-            "/jobs/{id}/maintenance-preview",
-            post(job_maintenance::preview_maintenance),
-        )
         .route("/jobs/{id}/run", post(jobs::run_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
         .route("/jobs/tick", post(jobs::tick_jobs))
@@ -327,4 +323,13 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
         .route("/system/logs/stream", get(system_logs::stream_logs))
         .route("/system/logs/clear", post(system_logs::clear_logs))
         .route("/system/logs/export", get(system_logs::export_logs))
+}
+
+/// Explicit computations that do not persist business changes. Keep these apart
+/// from mutation routes so a new endpoint cannot bypass admission by its name.
+pub(super) fn admin_readonly_post_routes() -> Router<ApiState> {
+    Router::new().route(
+        "/jobs/{id}/maintenance-preview",
+        post(job_maintenance::preview_maintenance),
+    )
 }

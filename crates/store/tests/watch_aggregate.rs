@@ -76,8 +76,7 @@ fn dedupes_members_and_media_and_zero_fills() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "dedupe").1;
+    let (media, file) = support::seed_published_file(&store, &tmp.path().join("library"), "dedupe");
     let now = 1_700_000_000i64;
     for (index, watched) in [1_000i64, 2_000, 3_000].into_iter().enumerate() {
         log_fixture(
@@ -130,17 +129,26 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let visible = MediaId::new();
-    let hidden = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "hidden").1;
+    let (visible, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "hidden");
+    let (hidden, hidden_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "hidden-other");
     let now = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v0", now - 10, 1_000);
     // 同一不可见 Media 三条 → hidden_titles 仍是 1（distinct），但计数是行数。
-    log_fixture(&store, user, hidden, file, "h0", now - 20, 500);
-    log_fixture(&store, user, hidden, file, "h1", now - 30, 500);
-    log_fixture(&store, user, hidden, file, "h2", now - 40, 500);
+    log_fixture(&store, user, hidden, hidden_file, "h0", now - 20, 500);
+    log_fixture(&store, user, hidden, hidden_file, "h1", now - 30, 500);
+    log_fixture(&store, user, hidden, hidden_file, "h2", now - 40, 500);
     // 上一窗口的不可见日志不计入 hidden_titles。
-    log_fixture(&store, user, hidden, file, "h-old", now - 10 * DAY, 500);
+    log_fixture(
+        &store,
+        user,
+        hidden,
+        hidden_file,
+        "h-old",
+        now - 10 * DAY,
+        500,
+    );
 
     let scope = [visible];
     let report = store
@@ -173,8 +181,8 @@ fn previous_window_boundaries_are_half_open() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "boundary").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "boundary");
     let now = 1_700_000_000i64;
     let days = 7;
     let boundary = now - days * DAY;
@@ -224,8 +232,8 @@ fn timezone_buckets_match_euclid_semantics() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "timezone").1;
+    let (media, file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "timezone");
     let now = DAY;
     // 负 epoch 边界：-1 / 0 / 86399 / 86400。
     for (index, (started, watched)) in [
@@ -324,12 +332,12 @@ fn scope_rows_do_not_leak_between_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let first = MediaId::new();
-    let second = MediaId::new();
-    let file = support::seed_published_file(&store, &tmp.path().join("library"), "scope").1;
+    let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "scope");
+    let (second, second_file) =
+        support::seed_published_file(&store, &tmp.path().join("library"), "scope-other");
     let now = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", now - 10, 1_000);
-    log_fixture(&store, user, second, file, "b", now - 20, 1_000);
+    log_fixture(&store, user, second, second_file, "b", now - 20, 1_000);
 
     let scoped = [first];
     let report = store

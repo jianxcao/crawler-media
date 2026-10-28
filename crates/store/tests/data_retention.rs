@@ -115,7 +115,7 @@ fn qoe_only_deletes_rows_strictly_older_than_cutoff() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
+    let (_, media) = seed_local_movie(&store, tmp.path());
     for recorded_at in [CUTOFF_SECS - 1, CUTOFF_SECS, CUTOFF_SECS + 1] {
         store
             .insert_metric(
@@ -372,7 +372,7 @@ fn dry_run_reports_the_same_window_without_writing() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
+    let (_, media) = seed_local_movie(&store, tmp.path());
     for _ in 0..3 {
         store
             .insert_metric(
@@ -412,7 +412,7 @@ fn keyset_cursor_pages_without_duplicates_and_stops_at_the_end() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
+    let (_, media) = seed_local_movie(&store, tmp.path());
     for index in 0..1200 {
         store
             .insert_metric(
@@ -466,7 +466,7 @@ fn cursor_carries_examined_position_when_the_window_is_full_of_protected_rows() 
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
-    let media = MediaId::new();
+    let (_, media) = seed_local_movie(&store, tmp.path());
     for index in 0..3 {
         store
             .insert_metric(

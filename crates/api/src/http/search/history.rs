@@ -81,6 +81,22 @@ fn record_history_entry(
     }
 }
 
+/// Searches still return their results when persistence is unavailable.
+fn history_write_admitted(state: &ApiState, history_id: &str) -> bool {
+    let writable = state.instance_writable();
+    let admitted = state.write_gate().admit().is_ok();
+    if writable && admitted {
+        return true;
+    }
+    tracing::warn!(
+        history_id,
+        writable,
+        admitted,
+        "搜索历史未保存：实例暂停写入"
+    );
+    false
+}
+
 /// 落盘 torrents 快照并在成功后补写历史条目；失败时不写历史（宁可不记录也不留死链）。
 pub(super) async fn save_torrents_history(
     state: &ApiState,
@@ -93,6 +109,9 @@ pub(super) async fn save_torrents_history(
     partial: bool,
 ) -> bool {
     let Some(target) = target else { return false };
+    if !history_write_admitted(state, &target.id) {
+        return false;
+    }
     let payload = json!({
         "keyword": keyword,
         "snapshot_at": chrono_like_now(),
@@ -109,22 +128,28 @@ pub(super) async fn save_torrents_history(
     let history_id = target.id.clone();
     let user_id = target.user_id;
     let keyword_owned = keyword.to_string();
+    let state_for_write = state.clone();
     match store_read(state, move |store| {
-            store
-                .insert_search_snapshot(
-                    &history_id,
-                    "torrents",
-                    &keyword_owned,
-                    &snapshot,
-                    crate::job_loop::unix_now(),
-                )
-                .map(|()| {
-                    record_history_entry(store, user_id, &keyword_owned, "torrents", &history_id);
-                })
+        // Admission may close while this worker waits for the Store lock.
+        if !history_write_admitted(&state_for_write, &history_id) {
+            return Ok(false);
+        }
+        store
+            .insert_search_snapshot(
+                &history_id,
+                "torrents",
+                &keyword_owned,
+                &snapshot,
+                crate::job_loop::unix_now(),
+            )
+            .map(|()| {
+                record_history_entry(store, user_id, &keyword_owned, "torrents", &history_id);
+                true
+            })
     })
     .await
     {
-        Ok(Ok(())) => true,
+        Ok(Ok(recorded)) => recorded,
         Ok(Err(error)) => {
             tracing::error!(%error, history_id = %target.id, "保存搜索结果快照失败，不写历史条目");
             false
@@ -146,6 +171,9 @@ pub(super) async fn save_titles_history(
     providers: &[Value],
 ) -> bool {
     let Some(target) = target else { return false };
+    if !history_write_admitted(state, &target.id) {
+        return false;
+    }
     let payload = json!({
         "query": keyword,
         "provider": provider,
@@ -159,22 +187,27 @@ pub(super) async fn save_titles_history(
     let history_id = target.id.clone();
     let user_id = target.user_id;
     let keyword_owned = keyword.to_string();
+    let state_for_write = state.clone();
     match store_read(state, move |store| {
-            store
-                .insert_search_snapshot(
-                    &history_id,
-                    "titles",
-                    &keyword_owned,
-                    &snapshot,
-                    crate::job_loop::unix_now(),
-                )
-                .map(|()| {
-                    record_history_entry(store, user_id, &keyword_owned, "titles", &history_id);
-                })
+        if !history_write_admitted(&state_for_write, &history_id) {
+            return Ok(false);
+        }
+        store
+            .insert_search_snapshot(
+                &history_id,
+                "titles",
+                &keyword_owned,
+                &snapshot,
+                crate::job_loop::unix_now(),
+            )
+            .map(|()| {
+                record_history_entry(store, user_id, &keyword_owned, "titles", &history_id);
+                true
+            })
     })
     .await
     {
-        Ok(Ok(())) => true,
+        Ok(Ok(recorded)) => recorded,
         Ok(Err(error)) => {
             tracing::error!(%error, history_id = %target.id, "保存标题搜索快照失败，不写历史条目");
             false
@@ -282,20 +315,20 @@ pub(crate) async fn search_history(
 ) -> Response {
     // Review L2: off the executor; a contended lock answers 503 + Retry-After.
     match store_read(&state, move |store| history_items(store, user_id)).await {
-            Ok(history) => ok(json!({ "items": history })).into_response(),
-            Err(error) => error.response(),
-        }
+        Ok(history) => ok(json!({ "items": history })).into_response(),
+        Err(error) => error.response(),
     }
+}
 
-    pub(crate) async fn get_presets(
-        State(state): State<ApiState>,
-        axum::Extension(user_id): axum::Extension<domain::UserId>,
-    ) -> Response {
-        match store_read(&state, move |store| {
-            store
-                .get_setting(&user_setting_key("search.presets", user_id))
-                .ok()
-                .flatten()
+pub(crate) async fn get_presets(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+) -> Response {
+    match store_read(&state, move |store| {
+        store
+            .get_setting(&user_setting_key("search.presets", user_id))
+            .ok()
+            .flatten()
     })
     .await
     {
@@ -318,43 +351,43 @@ pub(crate) async fn put_presets(
     let key = user_setting_key("search.presets", user_id);
     let value = presets.to_string();
     match store_read(&state, move |store| store.put_setting(&key, &value)).await {
-            Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
-            Ok(Err(error)) => err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            ),
-            Err(error) => error.response(),
-        }
+        Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
+        Ok(Err(error)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
+        Err(error) => error.response(),
     }
+}
 
-    /// GET /search/history/{id}?vertical=torrents|titles — 回放一次历史搜索的结果快照。
-    pub(crate) async fn get_history_snapshot(
-        State(state): State<ApiState>,
-        axum::Extension(user_id): axum::Extension<domain::UserId>,
-        Path(id): Path<String>,
-        Query(query): Query<HashMap<String, String>>,
-    ) -> Response {
-        let id_for_read = id.clone();
-        let (vertical, payload) = match store_read(&state, move |store| {
-            if !history_items(store, user_id)
-                .iter()
-                .any(|item| item["id"].as_str() == Some(&id_for_read))
-            {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "search.history",
-                    "历史快照不存在",
-                ));
-            }
-            match store.get_search_snapshot(&id_for_read).ok().flatten() {
-                Some((vertical, _, payload, _)) => Ok((vertical, payload)),
-                None => Err(err(
-                    StatusCode::NOT_FOUND,
-                    "search.history",
-                    "历史快照不存在",
-                )),
-            }
+/// GET /search/history/{id}?vertical=torrents|titles — 回放一次历史搜索的结果快照。
+pub(crate) async fn get_history_snapshot(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let id_for_read = id.clone();
+    let (vertical, payload) = match store_read(&state, move |store| {
+        if !history_items(store, user_id)
+            .iter()
+            .any(|item| item["id"].as_str() == Some(&id_for_read))
+        {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "search.history",
+                "历史快照不存在",
+            ));
+        }
+        match store.get_search_snapshot(&id_for_read).ok().flatten() {
+            Some((vertical, _, payload, _)) => Ok((vertical, payload)),
+            None => Err(err(
+                StatusCode::NOT_FOUND,
+                "search.history",
+                "历史快照不存在",
+            )),
+        }
     })
     .await
     {
@@ -395,7 +428,7 @@ pub(crate) async fn delete_history_entry_route(
 ) -> Response {
     let id_for_read = id.clone();
     match store_read(&state, move |store| {
-            delete_history_entry(store, user_id, &id_for_read)
+        delete_history_entry(store, user_id, &id_for_read)
     })
     .await
     {
@@ -423,7 +456,7 @@ pub(crate) async fn clear_search_history_route(
 ) -> Response {
     let key = user_setting_key("search.history", user_id);
     match store_read(&state, move |store| {
-            store.delete_search_history(&key, clear_plan)
+        store.delete_search_history(&key, clear_plan)
     })
     .await
     {

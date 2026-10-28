@@ -35,6 +35,8 @@ pub struct ApiState {
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// 文件目录浏览有界 blocking 预算（默认 2）。
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// 后台背景图独立准入，按最终目标路径单飞；不占用交互式请求预算。
+    pub(crate) backdrop_enrichment: Arc<crate::backdrop_enrichment::BackdropEnrichment>,
     /// notify 发送 seam（生产为显式超时的 HTTP 实现；测试可注入阻塞实现）。
     pub(crate) notify_transport: Arc<dyn crate::NotifyTransport>,
     /// 共享 single-flight 字幕交付（生产默认并发 2、受控 ffmpeg runner）。
@@ -310,6 +312,7 @@ impl ApiState {
             http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
+            backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
             notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),
             subtitle_delivery: Arc::new(crate::subtitle_delivery::SubtitleDelivery::new(
                 Arc::new(library::ControlledSubtitleRunner),

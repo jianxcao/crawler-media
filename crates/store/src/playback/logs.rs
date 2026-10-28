@@ -123,29 +123,32 @@ impl Store {
         watched_ms: i64,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.library.execute(
-            "INSERT INTO playback_metrics
+        self.playback_write(|store| {
+            crate::library_write::publish::ensure_media_writable(&store.library, media_id)?;
+            self.library.execute(
+                "INSERT INTO playback_metrics
                 (id, user_id, media_id, tier, engine, ttff_ms, rebuffer_ms,
                  rebuffer_count, seek_count, dropped_frames, total_frames,
                  watched_ms, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                user_id.to_string(),
-                media_id.to_string(),
-                tier,
-                engine,
-                ttff_ms,
-                rebuffer_ms,
-                rebuffer_count,
-                seek_count,
-                dropped_frames,
-                total_frames,
-                watched_ms,
-                now,
-            ],
-        )?;
-        Ok(())
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    user_id.to_string(),
+                    media_id.to_string(),
+                    tier,
+                    engine,
+                    ttff_ms,
+                    rebuffer_ms,
+                    rebuffer_count,
+                    seek_count,
+                    dropped_frames,
+                    total_frames,
+                    watched_ms,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
     }
 }
 

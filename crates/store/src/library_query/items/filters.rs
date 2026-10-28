@@ -1,4 +1,3 @@
-
 use super::query::Bindings;
 use crate::{StoreError, library_query::types::BrowseFilter};
 
@@ -81,8 +80,8 @@ fn watch_clause(watch: &str) -> Option<&'static str> {
         "favorite" => "COALESCE(u.favorite, 0) = 1",
         "seen" => "COALESCE(u.seen, 0) = 1",
         "watching" => "(COALESCE(u.seen, 0) = 1 AND COALESCE(u.played, 0) = 0)",
-        "played" | "watched" => "COALESCE(u.played, 0) = 1",
-        "unwatched" | "unplayed" | "unseen" => "COALESCE(u.seen, 0) = 0",
+        "played" => "COALESCE(u.played, 0) = 1",
+        "unwatched" => "COALESCE(u.seen, 0) = 0",
         _ => return None,
     })
 }
@@ -147,16 +146,7 @@ impl BrowseFilter {
         const DECADES: [&str; 5] = ["2020s", "2010s", "2000s", "1990s", "earlier"];
         const RUNTIMES: [&str; 4] = ["lte60", "60to90", "90to120", "gt120"];
         const STOCK: [&str; 2] = ["missing", "unscraped"];
-        const WATCH: [&str; 8] = [
-            "favorite",
-            "seen",
-            "watching",
-            "played",
-            "watched",
-            "unwatched",
-            "unplayed",
-            "unseen",
-        ];
+        const WATCH: [&str; 5] = ["favorite", "seen", "watching", "played", "unwatched"];
         for decade in &self.decades {
             if !DECADES.contains(&decade.as_str()) {
                 return Err(StoreError::Invalid(format!(
@@ -179,23 +169,26 @@ impl BrowseFilter {
             }
         }
         if let Some(watch) = &self.watch
-            && !WATCH.contains(&watch.as_str()) {
-                return Err(StoreError::Invalid(format!(
-                    "invalid watch filter: {watch}"
-                )));
-            }
+            && !WATCH.contains(&watch.as_str())
+        {
+            return Err(StoreError::Invalid(format!(
+                "invalid watch filter: {watch}"
+            )));
+        }
         if let Some(identity) = &self.identity
-            && !matches!(identity.as_str(), "provisional" | "confirmed") {
-                return Err(StoreError::Invalid(format!(
-                    "invalid identity filter: {identity}"
-                )));
-            }
+            && !matches!(identity.as_str(), "provisional" | "confirmed")
+        {
+            return Err(StoreError::Invalid(format!(
+                "invalid identity filter: {identity}"
+            )));
+        }
         if let Some(rating) = self.min_rating
-            && (!rating.is_finite() || !(0.0..=10.0).contains(&rating)) {
-                return Err(StoreError::Invalid(
-                    "rating_gte must be between 0 and 10".into(),
-                ));
-            }
+            && (!rating.is_finite() || !(0.0..=10.0).contains(&rating))
+        {
+            return Err(StoreError::Invalid(
+                "rating_gte must be between 0 and 10".into(),
+            ));
+        }
         Ok(())
     }
 }

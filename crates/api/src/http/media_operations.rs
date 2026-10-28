@@ -128,16 +128,37 @@ pub(crate) async fn post_merge(State(state): State<ApiState>, Json(body): Json<V
         Err(response) => return response,
     };
     let now_ms = state.playback_clock.now_ms();
-    let started = {
-        let store = state.store.lock();
-        store.begin_media_merge(&request, now_ms)
+    let survivor = request.survivor;
+    let loser = request.loser;
+    let store = state.store();
+    let started = match state
+        .http_work
+        .run_to_completion(move || {
+            super::store_wait::with_bounded_store(store, |store| {
+                store.begin_media_merge(&request, now_ms)
+            })
+        })
+        .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => {
+            return super::store_wait::busy_response();
+        }
+        Err(error) => {
+            tracing::error!(%error, %survivor, %loser, "Media merge blocking worker failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "合并请求执行失败",
+            );
+        }
     };
     match started {
         Ok(operation_id) => {
             tracing::info!(
                 %operation_id,
-                survivor = %request.survivor,
-                loser = %request.loser,
+                %survivor,
+                %loser,
                 "Media merge accepted, both identities frozen"
             );
             (
@@ -155,9 +176,13 @@ pub(crate) async fn get_operation(
     State(state): State<ApiState>,
     Path(operation_id): Path<String>,
 ) -> Response {
-    let status = {
-        let store = state.store.lock();
+    let status = match super::store_wait::store_read(&state, move |store| {
         store.media_operation_status(&operation_id)
+    })
+    .await
+    {
+        Ok(status) => status,
+        Err(error) => return error.response(),
     };
     match status {
         Ok(status) => ok(json!({

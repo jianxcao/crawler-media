@@ -50,7 +50,6 @@ impl FileAssetProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for FileAssetProvider {
-
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -214,7 +213,7 @@ impl MediaServerProvider for FileAssetProvider {
         _id: &str,
         _played: Option<bool>,
         _favorite: Option<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, media_server::provider::UserMarksError> {
         Ok(true)
     }
     async fn report_playback_event(
