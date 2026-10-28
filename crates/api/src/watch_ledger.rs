@@ -122,6 +122,18 @@ fn planned_file(
     parsed: Option<Release>,
 ) -> Result<PlannedFile, String> {
     let units = match (&parsed, media.kind) {
+        (Some(parsed), MediaKind::Tv) if parsed.abnormal_episode_span().is_some() => {
+            let (from, to) = parsed.abnormal_episode_span().unwrap_or_default();
+            tracing::warn!(
+                path = %path.display(),
+                from,
+                to,
+                max = Release::MAX_PLAUSIBLE_FILE_EPISODES,
+                "abnormal episode mapping: file parsed as covering {} episodes; keeping only the first",
+                to - from + 1
+            );
+            vec![UnitKey::new(parsed.season.unwrap_or(1) as i32, from as i32)]
+        }
         (Some(parsed), MediaKind::Tv) => parsed
             .covered_episodes()
             .into_iter()

@@ -155,3 +155,37 @@ fn existing_scan_refuses_observations_of_a_replaced_disk_source() {
         "NFO from unregistered replacement source must not publish"
     );
 }
+
+#[test]
+fn abnormal_episode_range_maps_to_a_single_unit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("shows");
+    let dir = root.join("Xian Ni").join("Season 1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Xian.Ni.S01E90.mkv");
+    std::fs::write(&path, b"ep").unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let mut parsed = release::parse("Xian.Ni.S01E90.mkv");
+    parsed.episode_to = Some(2160);
+    let plan = plan_paths(
+        &store,
+        [library::TransferredFile {
+            path,
+            identified_release: Some(parsed),
+            nfo_identity: None,
+        }],
+    )
+    .unwrap();
+    assert_eq!(plan.files.len(), 1);
+    assert_eq!(plan.files[0].row.units, vec![UnitKey::new(1, 90)]);
+}

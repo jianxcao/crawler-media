@@ -635,6 +635,19 @@ pub struct Release {
 }
 
 impl Release {
+    /// Upper bound of episodes one video file can plausibly carry. Larger
+    /// parsed ranges are almost always mis-parses (e.g. a resolution read as
+    /// the range end) and must be surfaced, not silently fanned out.
+    pub const MAX_PLAUSIBLE_FILE_EPISODES: u32 = 200;
+
+    /// Raw parsed `(from, to)` when it spans more episodes than one file can
+    /// plausibly hold; `None` for single episodes and normal ranges.
+    pub fn abnormal_episode_span(&self) -> Option<(u32, u32)> {
+        let from = self.episode?;
+        let to = self.episode_to?;
+        (to >= from && to - from + 1 > Self::MAX_PLAUSIBLE_FILE_EPISODES).then_some((from, to))
+    }
+
     /// Inclusive episode span after clamping inverted / oversized ranges.
     /// Callers must not iterate `episode..=episode_to` themselves.
     pub fn episode_span(&self) -> Option<(u32, u32)> {
@@ -666,6 +679,41 @@ impl Release {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tv(from: u32, to: Option<u32>) -> Release {
+        Release {
+            season: Some(1),
+            episode: Some(from),
+            episode_to: to,
+            title: "x".into(),
+            year: None,
+            resolution: None,
+            source: None,
+            codec: None,
+            hdr: None,
+            subtitle_language: None,
+            audio_language: None,
+            group: None,
+            confidence: Confidence::High,
+            season_inferred: false,
+        }
+    }
+
+    #[test]
+    fn abnormal_episode_span_is_flagged() {
+        assert_eq!(tv(90, None).abnormal_episode_span(), None);
+        assert_eq!(tv(1, Some(24)).abnormal_episode_span(), None);
+        assert_eq!(
+            tv(1, Some(Release::MAX_PLAUSIBLE_FILE_EPISODES)).abnormal_episode_span(),
+            None
+        );
+        assert_eq!(
+            tv(1, Some(Release::MAX_PLAUSIBLE_FILE_EPISODES + 1)).abnormal_episode_span(),
+            Some((1, Release::MAX_PLAUSIBLE_FILE_EPISODES + 1))
+        );
+        // The 仙逆 shape: E90 with a resolution read as the range end.
+        assert_eq!(tv(90, Some(2160)).abnormal_episode_span(), Some((90, 2160)));
+    }
 
     #[test]
     fn default_entity_ids_are_fresh_v4_uuids() {
