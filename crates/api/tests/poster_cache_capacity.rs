@@ -343,19 +343,21 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     let (_tmp, store, service) = create_store_and_service(Arc::new(SimpleFetcher));
     let service = Arc::new(service);
 
-    // Populate registry with live gates up to 4096
+    // Populate registry with live gates up to 32
     // We hold strong references to keep gates alive
     let mut live_gates = Vec::new();
-    for i in 0..4096 {
+    for i in 0..32 {
         let tmdb = format!("100_{i}");
         let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some(&tmdb));
-        let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
+        let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new(
+            std::time::Instant::now() + Duration::from_secs(30),
+        ));
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push((media_id, inflight));
     }
 
     let counts = service.resource_counts();
-    assert_eq!(counts.registry_entries, 4096);
+    assert_eq!(counts.registry_entries, 32);
 
     // Requesting a NEW key when registry is full of live gates yields Busy (mapped to 503)
     let new_media_id = insert_media(&store.lock(), "new_gate_overflow", Some("200"));
@@ -371,12 +373,12 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     let joined = service.get(*existing_id).await;
     assert!(joined.is_ok());
 
-    // Drop strong references to all 4,096 live gates: they are now dead entries.
+    // Drop strong references to all 32 live gates: they are now dead entries.
     drop(live_gates);
 
     // Note: resource_counts is strictly observational (no retain/prune), so it still
-    // observes 4,096 dead weak entries before any new request.
-    assert_eq!(service.resource_counts().registry_entries, 4096);
+    // observes 32 dead weak entries before any new request.
+    assert_eq!(service.resource_counts().registry_entries, 32);
 
     // Prove admission behaviour directly without any intervening diagnostic call:
     // requesting a NEW key must sweep dead entries during admission and succeed.
@@ -387,7 +389,7 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
         "new key must be admitted after strong references dropped"
     );
 
-    // The admission above is the real proof: with 4,096 dead entries unswept the new
+    // The admission above is the real proof: with 32 dead entries unswept the new
     // key would have been rejected as Busy instead of served. Every entry (including
     // the new one) retires in the worker guard drop after publication, so wait for the
     // registry to drain rather than expecting the fresh entry to still be registered.
@@ -499,12 +501,14 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
         .unwrap(),
     );
 
-    // Fill registry to 4096 live gates
+    // Fill registry to 32 live gates
     let mut live_gates = Vec::new();
-    for i in 0..4096 {
+    for i in 0..32 {
         let tmdb = format!("100_{i}");
         let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some(&tmdb));
-        let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
+        let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new(
+            std::time::Instant::now() + Duration::from_secs(30),
+        ));
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push(inflight);
     }

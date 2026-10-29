@@ -154,14 +154,14 @@ fn no_redirect_agent(url: &str) -> ureq::Agent {
     builder.build().new_agent()
 }
 
-fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
+fn fetch_image(url: &str) -> Result<(String, Vec<u8>), runtime::DeliveryError> {
     let agent = no_redirect_agent(url);
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let mut current = url.to_string();
     // 手动跟随重定向：每一跳都重新过白名单，最多 5 跳。
     for _ in 0..5 {
         if !allowed_url(&current) {
-            return Err(format!("不允许的主机: {current}"));
+            return Err(format!("不允许的主机: {current}").into());
         }
         let referer = if current.contains("douban") {
             "https://movie.douban.com/"
@@ -176,13 +176,16 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
         }
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
-            .ok_or_else(|| "Image fetch deadline elapsed".to_string())?;
+            .ok_or(runtime::DeliveryError::Timeout)?;
         let response = request
             .config()
             .timeout_global(Some(remaining))
             .build()
             .call()
-            .map_err(|err| err.to_string())?;
+            .map_err(|error| match error {
+                ureq::Error::Timeout(_) => runtime::DeliveryError::Timeout,
+                error => runtime::DeliveryError::Upstream(error.to_string()),
+            })?;
         let status = response.status();
         if status.is_redirection() {
             let location = response
@@ -196,7 +199,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
             continue;
         }
         if !status.is_success() {
-            return Err(format!("上游返回 {status}: {current}"));
+            return Err(format!("上游返回 {status}: {current}").into());
         }
         let content_type = response
             .headers()
@@ -205,7 +208,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
             .unwrap_or("image/jpeg")
             .to_string();
         if !content_type.starts_with("image/") {
-            return Err(format!("上游不是图片: {content_type}"));
+            return Err(format!("上游不是图片: {content_type}").into());
         }
         let bytes = read_image_body(response.into_body(), IMAGE_RESPONSE_LIMIT)?;
         return Ok((content_type, bytes));
@@ -213,7 +216,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
     Err("重定向过多".into())
 }
 
-fn read_image_body(body: ureq::Body, limit: u64) -> Result<Vec<u8>, String> {
+fn read_image_body(body: ureq::Body, limit: u64) -> Result<Vec<u8>, runtime::DeliveryError> {
     use std::io::Read;
     // ureq's body limit caps wire bytes before decompression. Also cap decoded bytes,
     // so a small compressed response cannot allocate an unbounded image buffer.
@@ -223,11 +226,22 @@ fn read_image_body(body: ureq::Body, limit: u64) -> Result<Vec<u8>, String> {
         .reader()
         .take(limit + 1);
     let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
+    reader.read_to_end(&mut bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut
+            || matches!(
+                error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<ureq::Error>()),
+                Some(ureq::Error::Timeout(_))
+            )
+        {
+            runtime::DeliveryError::Timeout
+        } else {
+            runtime::DeliveryError::Upstream(error.to_string())
+        }
+    })?;
     if bytes.len() as u64 > limit {
-        return Err(format!("Image response exceeds {limit} bytes"));
+        return Err(format!("Image response exceeds {limit} bytes").into());
     }
     Ok(bytes)
 }

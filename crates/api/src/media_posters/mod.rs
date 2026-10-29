@@ -42,9 +42,6 @@ pub enum PosterError {
 pub trait MediaPosterSource: Send + Sync {
     /// Bounded local cache lookup; never reads a catalog or waits for remote IO.
     async fn cached(&self, media_id: MediaId) -> Result<Option<PosterBytes>, PosterError>;
-    /// Deduplicated background admission. Completion is observed by the worker,
-    /// independently of the HTTP request that discovered the miss.
-    fn warm(self: Arc<Self>, media_id: MediaId) -> Result<(), PosterError>;
-    /// Await background delivery. Native HTTP reads use `cached` and `warm`.
+    /// Join bounded shared delivery and await its terminal result.
     async fn get(&self, media_id: MediaId) -> Result<PosterBytes, PosterError>;
 }

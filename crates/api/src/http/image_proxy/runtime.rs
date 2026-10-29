@@ -1,26 +1,29 @@
-//! Cache reads never queue behind an upstream fetch. Misses warm the cache in
-//! bounded, deduplicated background work; fast fetches get a short response window.
+//! One bounded shared fill per URL; observers receive bytes or a terminal error.
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use parking_lot::Mutex;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 
 use super::cache::{Image, ImageCache};
 use super::{ProxyQuery, allowed_url};
 use crate::http::err;
 use crate::http::library_artwork::image_response::conditional_image;
 
-type FetchImage = Arc<dyn Fn(&str) -> Result<Image, String> + Send + Sync>;
+mod fill;
+pub(super) use fill::DeliveryError;
+use fill::Fill;
+type FetchImage = Arc<dyn Fn(&str) -> Result<Image, DeliveryError> + Send + Sync>;
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(super) struct ImageProxy {
     cache: Arc<ImageCache>,
     reads: crate::blocking_budget::BlockingBudget,
     gate: Arc<Semaphore>,
-    pending: Mutex<HashMap<String, watch::Sender<()>>>,
+    pending: Mutex<HashMap<String, Arc<Fill>>>,
     fetch: FetchImage,
 }
 
@@ -43,118 +46,85 @@ impl ImageProxy {
         if !allowed_url(&query.url) {
             return err(StatusCode::BAD_REQUEST, "image.invalid", "不允许的图床");
         }
+        let deadline = Instant::now() + DELIVERY_DEADLINE;
+        let result = self.deliver(query.url, deadline).await;
+        match result {
+            Ok(image) => {
+                let mut response = conditional_image(&headers, image.1.clone(), &image.0, false);
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=86400"),
+                );
+                response
+            }
+            Err(error) => failure(error),
+        }
+    }
+
+    async fn deliver(
+        self: &Arc<Self>,
+        url: String,
+        deadline: Instant,
+    ) -> Result<Arc<Image>, DeliveryError> {
         let cache = self.cache.clone();
-        let url = query.url.clone();
-        let lookup = async {
-            self.reads
-                .reserve(Duration::from_millis(250))
-                .await?
-                .run(Duration::from_millis(750), move || cache.lookup(&url))
-                .await
-        }
-        .await;
-        match lookup {
-            Ok(Ok(Some((kind, bytes)))) => {
-                let mut response = conditional_image(&headers, bytes, &kind, false);
-                response.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=86400"),
-                );
-                return response;
-            }
-            Ok(Ok(None)) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "Image cache lookup failed"),
-            Err(error) => tracing::error!(%error, "Image cache worker failed"),
-        }
-        let wait_for_fetch = self.gate.available_permits() > 0;
-        let pending = self.start_fetch(query.url.clone());
-        if wait_for_fetch
-            && let Some(mut pending) = pending
-            && tokio::time::timeout(Duration::from_millis(150), pending.changed())
-                .await
-                .is_ok()
-        {
-            let cache = self.cache.clone();
-            let url = query.url;
-            let lookup = async {
-                self.reads
-                    .reserve(Duration::from_millis(250))
-                    .await?
-                    .run(Duration::from_millis(750), move || cache.lookup(&url))
-                    .await
-            }
-            .await;
-            if let Ok(Ok(Some((kind, bytes)))) = lookup {
-                let mut response = conditional_image(&headers, bytes, &kind, false);
-                response.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=86400"),
-                );
-                return response;
-            }
-        }
-        let mut response = err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "image.pending",
-            "图片正在缓存，请稍后重试",
-        );
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
-    }
-
-    fn start_fetch(self: &Arc<Self>, url: String) -> Option<watch::Receiver<()>> {
-        let mut pending = self.pending.lock();
-        if let Some(sender) = pending.get(&url) {
-            return Some(sender.subscribe());
-        }
-        // Keep admission bounded even if a page contains many cold images. The
-        // semaphore queue is fair; a browser retry never has to win a race for a
-        // newly free upstream slot.
-        if pending.len() >= 64 {
-            tracing::warn!("Image cache warmup queue full; retry on next image request");
-            return None;
-        }
-        // Removing the flight drops the sender and wakes all waiting requests.
-        let (sender, receiver) = watch::channel(());
-        pending.insert(url.clone(), sender);
-        let proxy = self.clone();
-        tokio::spawn(async move {
-            let flight = Flight {
-                proxy: proxy.clone(),
-                url: url.clone(),
-            };
-            let Ok(permit) = proxy.gate.clone().acquire_owned().await else {
-                return;
-            };
-            let result = tokio::task::spawn_blocking(move || {
-                let _flight = flight;
-                let _permit = permit;
-                match proxy.cache.get(&url, || (proxy.fetch)(&url)) {
-                    Ok(_) => tracing::debug!(%url, "Image cache warmup finished"),
-                    Err(error) => tracing::warn!(%error, %url, "Image cache warmup failed"),
+        let lookup_url = url.clone();
+        let remaining = || deadline.saturating_duration_since(Instant::now());
+        let reservation = self
+            .reads
+            .reserve(remaining().min(Duration::from_millis(250)))
+            .await
+            .map_err(|error| {
+                if Instant::now() >= deadline {
+                    DeliveryError::Timeout
+                } else {
+                    blocking_error(error)
                 }
+            })?;
+        let lookup = reservation
+            .run(remaining().min(Duration::from_millis(750)), move || {
+                cache.lookup(&lookup_url)
             })
-            .await;
-            if let Err(error) = result {
-                tracing::error!(%error, "Image cache warmup worker failed");
-            }
-        });
-        Some(receiver)
+            .await
+            .map_err(blocking_error)?
+            .map_err(DeliveryError::Cache)?;
+        if Instant::now() >= deadline {
+            return Err(DeliveryError::Timeout);
+        }
+        if let Some(image) = lookup {
+            return Ok(Arc::new(image));
+        }
+        self.start_fill(url, deadline)?.wait(deadline).await
     }
 }
 
-struct Flight {
-    proxy: Arc<ImageProxy>,
-    url: String,
-}
-
-impl Drop for Flight {
-    fn drop(&mut self) {
-        self.proxy.pending.lock().remove(&self.url);
+fn blocking_error(error: crate::blocking_budget::BlockingError) -> DeliveryError {
+    use crate::blocking_budget::BlockingError;
+    match error {
+        BlockingError::Busy => DeliveryError::Busy,
+        BlockingError::Timeout => DeliveryError::Timeout,
+        BlockingError::Worker(message) => DeliveryError::Cache(message),
     }
+}
+fn failure(error: DeliveryError) -> Response {
+    tracing::warn!(%error, "Image delivery failed");
+    let mut response = match error {
+        DeliveryError::Busy => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "image.busy",
+            "图片服务繁忙",
+        ),
+        DeliveryError::Timeout => err(StatusCode::GATEWAY_TIMEOUT, "image.timeout", "图片请求超时"),
+        DeliveryError::Upstream(_) => {
+            err(StatusCode::BAD_GATEWAY, "image.upstream", "图片源请求失败")
+        }
+        DeliveryError::Cache(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "image.cache",
+            "图片缓存读写失败",
+        ),
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }

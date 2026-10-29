@@ -1,3 +1,8 @@
+#[path = "body_tests.rs"]
+mod body;
+#[path = "delivery_tests.rs"]
+mod delivery;
+
 use super::cache::ImageCache;
 use std::sync::{Arc, Barrier};
 
@@ -185,7 +190,7 @@ async fn fast_cold_fetch_is_returned_without_a_pending_response() {
     let proxy = Arc::new(super::runtime::ImageProxy::new(
         Arc::new(ImageCache::new(tmp.path().into(), 1000, 100)),
         Arc::new(tokio::sync::Semaphore::new(1)),
-        Arc::new(|_| image(20)),
+        Arc::new(|_| image(20).map_err(super::runtime::DeliveryError::from)),
     ));
     let response = proxy
         .response(
@@ -206,7 +211,7 @@ async fn fast_cold_fetch_is_returned_without_a_pending_response() {
 }
 
 #[tokio::test]
-async fn saturated_proxy_returns_unavailable_without_fetching() {
+async fn saturated_proxy_expires_without_fetching() {
     let gate = Arc::new(tokio::sync::Semaphore::new(1));
     let _permit = gate.clone().acquire_owned().await.unwrap();
     let response = super::proxy_with_gate(
@@ -216,14 +221,11 @@ async fn saturated_proxy_returns_unavailable_without_fetching() {
         gate,
     )
     .await;
-    assert_eq!(
-        response.status(),
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
-    );
+    assert_eq!(response.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
 }
 
 #[tokio::test]
-async fn uncached_proxy_does_not_wait_for_upstream_capacity() {
+async fn uncached_proxy_waits_only_until_its_queue_deadline() {
     use axum::http::StatusCode;
     let response = super::proxy_with_gate(
         super::ProxyQuery {
@@ -232,13 +234,13 @@ async fn uncached_proxy_does_not_wait_for_upstream_capacity() {
         Arc::new(tokio::sync::Semaphore::new(0)),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
         response
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok()),
-        Some("1")
+        None
     );
     assert_eq!(
         response
@@ -251,11 +253,11 @@ async fn uncached_proxy_does_not_wait_for_upstream_capacity() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["error"]["code"], "image.pending");
+    assert_eq!(body["error"]["code"], "image.timeout");
 }
 
 #[tokio::test]
-async fn proxy_miss_returns_before_fetch_finishes_and_then_serves_conditional_cache_hits() {
+async fn proxy_miss_completes_without_blocking_async_work_then_serves_conditional_hits() {
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::time::Duration;
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
@@ -276,24 +278,40 @@ async fn proxy_miss_returns_before_fetch_finishes_and_then_serves_conditional_ca
                 .lock()
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap();
-            image(20)
+            image(20).map_err(super::runtime::DeliveryError::from)
         }),
     ));
     let url = "https://image.tmdb.org/cache-regression.jpg";
     let query = || super::ProxyQuery { url: url.into() };
-    let response = tokio::time::timeout(
-        Duration::from_millis(300),
-        proxy.response(query(), HeaderMap::new()),
+    let pending_proxy = proxy.clone();
+    let pending = tokio::spawn(async move {
+        pending_proxy
+            .response(super::ProxyQuery { url: url.into() }, HeaderMap::new())
+            .await
+    });
+    started_rx.await.unwrap();
+    let progress = tokio::time::timeout(
+        Duration::from_millis(100),
+        tokio::time::sleep(Duration::from_millis(10)),
     )
     .await;
     release_tx.send(()).unwrap();
-    assert_eq!(
-        response
-            .expect("miss must free the HTTP connection before remote completion")
-            .status(),
-        StatusCode::SERVICE_UNAVAILABLE
+    let response = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        progress.is_ok(),
+        "upstream work must not occupy the async worker"
     );
-    started_rx.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 100)
+            .await
+            .unwrap()
+            .as_ref(),
+        &[42; 20]
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while cache.lookup(url).unwrap().is_none() || gate.available_permits() == 0 {
             tokio::task::yield_now().await;
@@ -336,15 +354,22 @@ async fn saturated_proxy_queues_a_unique_miss_until_upstream_capacity_returns() 
     let proxy = Arc::new(super::runtime::ImageProxy::new(
         cache.clone(),
         gate,
-        Arc::new(|_| image(20)),
+        Arc::new(|_| image(20).map_err(super::runtime::DeliveryError::from)),
     ));
     let url = "https://image.tmdb.org/queued-regression.jpg";
-    let response = proxy
-        .response(super::ProxyQuery { url: url.into() }, HeaderMap::new())
-        .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let pending = tokio::spawn(async move {
+        proxy
+            .response(super::ProxyQuery { url: url.into() }, HeaderMap::new())
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(cache.lookup(url).unwrap().is_none());
     drop(busy);
+    let response = tokio::time::timeout(Duration::from_millis(300), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     tokio::time::timeout(Duration::from_millis(300), async {
         while cache.lookup(url).unwrap().is_none() {
             tokio::task::yield_now().await;
@@ -413,7 +438,7 @@ fn stalled_cache_lookup_has_a_bounded_response_deadline() {
             response
                 .expect("cache worker queueing must not retain a browser connection indefinitely")
                 .status(),
-            StatusCode::SERVICE_UNAVAILABLE
+            StatusCode::GATEWAY_TIMEOUT
         );
     });
 }

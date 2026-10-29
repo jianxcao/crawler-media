@@ -21,7 +21,7 @@ impl ImageFetcher for StalledPoster {
 }
 
 #[tokio::test]
-async fn cold_public_media_poster_frees_http_connection_before_upstream_finishes() {
+async fn cold_public_media_poster_times_out_without_blocking_the_async_worker() {
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
@@ -64,18 +64,24 @@ async fn cold_public_media_poster_frees_http_connection_before_upstream_finishes
                 entered: std::sync::Mutex::new(Some(entered)),
             }),
         )
-        .unwrap(),
+        .unwrap()
+        .with_wait_deadline(Duration::from_millis(80)),
     );
     let app = api::router(state.with_media_posters(service.clone()));
-    let response = tokio::time::timeout(
-        Duration::from_millis(400),
-        app.oneshot(
-            Request::get(format!("/api/v1/media/{media_id}/poster"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
+    let (response, progress) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_millis(400),
+            app.oneshot(
+                Request::get(format!("/api/v1/media/{media_id}/poster"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
         ),
-    )
-    .await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(10))
+        )
+    );
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), started)
         .await
@@ -89,10 +95,14 @@ async fn cold_public_media_poster_frees_http_connection_before_upstream_finishes
     .await
     .unwrap();
     let response = response
-        .expect("cold posters must return before remote reads finish")
+        .expect("a stalled poster must release its HTTP observer at the deadline")
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.headers()["retry-after"], "1");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        progress.is_ok(),
+        "stalled upstream must leave the async worker free"
+    );
+    assert!(!response.headers().contains_key("retry-after"));
     assert_eq!(response.headers()["cache-control"], "no-store");
 }
 
@@ -160,7 +170,7 @@ async fn cached_public_media_poster_returns_etag_and_not_modified() {
 }
 
 #[tokio::test]
-async fn media_poster_warmup_reads_identity_without_the_writer_lock() {
+async fn cold_media_poster_reads_identity_without_the_writer_lock() {
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
@@ -212,23 +222,14 @@ async fn media_poster_warmup_reads_identity_without_the_writer_lock() {
         finish.recv_timeout(Duration::from_secs(3)).unwrap();
     });
     lock_ready.recv_timeout(Duration::from_secs(1)).unwrap();
-    let response = tokio::time::timeout(Duration::from_millis(500), async {
-        loop {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::get(format!("/api/v1/media/{media_id}/poster"))
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            if response.status() == StatusCode::OK {
-                break response;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    let response = tokio::time::timeout(
+        Duration::from_millis(500),
+        app.oneshot(
+            Request::get(format!("/api/v1/media/{media_id}/poster"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        ),
+    )
     .await;
     release.send(()).unwrap();
     holder.join().unwrap();
@@ -241,7 +242,8 @@ async fn media_poster_warmup_reads_identity_without_the_writer_lock() {
     .unwrap();
     assert_eq!(
         response
-            .expect("poster warmup must not wait for the writer")
+            .expect("a cold poster must not wait for the writer")
+            .unwrap()
             .status(),
         StatusCode::OK
     );
