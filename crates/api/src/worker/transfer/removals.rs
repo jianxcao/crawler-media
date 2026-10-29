@@ -139,7 +139,8 @@ pub(crate) fn observe_transfer_removals(
     plan: &super::plan::TransferPlan,
     paths: &[String],
 ) -> Result<Vec<ObservedTransferRemoval>, String> {
-    let requested: std::collections::HashSet<&Path> = paths.iter().map(Path::new).collect();
+    let requested: std::collections::HashSet<&Path> =
+        paths.iter().map(|path| Path::new(path)).collect();
     let mut pins = std::collections::HashMap::new();
     for file in &plan.fingerprint.files {
         if requested.contains(Path::new(&file.path)) {
