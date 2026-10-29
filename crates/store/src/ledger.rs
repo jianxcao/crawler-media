@@ -240,6 +240,38 @@ impl Store {
         Ok(out)
     }
 
+    /// `(media_id, path)` of every file at or below `dir`, by an index range on
+    /// `path_key` — no unit coverage and no whole-Library scan (L1a).
+    pub fn file_media_under(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<Vec<(MediaId, std::path::PathBuf)>, StoreError> {
+        // Same canonical form (root aliases included) the rows were stored with.
+        let key: String = self.library.query_row(
+            "SELECT norm_path_key(?1)",
+            [stored_path_key(&dir.to_string_lossy())],
+            |row| row.get(0),
+        )?;
+        let (low, high) = if key == "/" {
+            ("/".to_string(), "0".to_string())
+        } else {
+            (format!("{key}/"), format!("{key}0"))
+        };
+        let mut stmt = self.library.prepare(
+            "SELECT media_id, display_path FROM library_files
+             WHERE path_key >= ?1 AND path_key < ?2",
+        )?;
+        let rows = stmt.query_map(params![low, high], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (media_id, path) = row?;
+            out.push((media_id.parse::<MediaId>()?, std::path::PathBuf::from(path)));
+        }
+        Ok(out)
+    }
+
     /// Every file with its unit coverage, plus the unfiltered-scan work the read cost.
     pub fn list_file_coverage(&self) -> Result<Vec<FileCoverage>, StoreError> {
         let sql = coverage_sql("");

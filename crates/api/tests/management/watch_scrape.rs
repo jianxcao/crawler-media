@@ -241,6 +241,58 @@ async fn scrape_job_scans_extra_tv_root_for_strm_into_ledger() {
     assert_eq!(row["path"], video.display().to_string());
 }
 
+/// L1a: Scrape records a directory in short batches; a directory spanning
+/// several batches must still land completely, and no step of the round may scan
+/// the whole Library ledger (`list_file_coverage`) under the writer lock.
+/// Local files keep the round free of the serial remote-read gate.
+#[tokio::test]
+async fn scrape_job_records_directories_larger_than_one_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let extra = tmp.path().join("disk2/tv");
+    let season = extra.join("Long Show/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    for episode in 1..=150 {
+        std::fs::write(
+            season.join(format!("Long Show - S01E{episode:03}.mkv")),
+            b"x",
+        )
+        .unwrap();
+    }
+    let state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    );
+    let app = router(state.clone());
+    let saved =
+        set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true})).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    add_default_root(&app, "tv", &extra).await;
+    state.store().lock().reset_root_ledger_scans();
+    tick(&app, 1).await;
+    assert_eq!(
+        state.store().lock().root_ledger_scans(),
+        0,
+        "a Scrape round must not scan the whole Library ledger"
+    );
+    let rows = json_data(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/ledger",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(rows.as_array().unwrap().len(), 150);
+}
+
 struct OrbitCatalog(media::CatalogHit);
 impl api::catalog::Catalog for OrbitCatalog {
     fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {

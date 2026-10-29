@@ -331,17 +331,17 @@ fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::pat
     let Some(dir) = sample_path.parent() else {
         return;
     };
-    let paths = {
-        let store = state.store.lock();
-        store
-            .list_file_coverage()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|coverage| coverage.file.media_id == media.id)
-            .map(|coverage| coverage.file.path)
-            .filter(|path| path.parent() == Some(dir))
-            .collect::<Vec<_>>()
-    };
+    // Pure read: a read-only Store and a directory-range query, never the writer
+    // lock or a whole-Library ledger scan (L1a).
+    let paths = state
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        .and_then(|store| store.file_media_under(dir).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(media_id, path)| *media_id == media.id && path.parent() == Some(dir))
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     let targets = if paths.is_empty() {
         vec![sample_path.to_path_buf()]
     } else {
