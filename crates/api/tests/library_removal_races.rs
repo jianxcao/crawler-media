@@ -10,8 +10,12 @@ impl Fetcher for NoFetch {
     }
 }
 
+/// 2026-10-29 E2E: deleting a Library must not wait for its in-flight scan /
+/// probe / intro-outro / scrape work to finish. The removal cancels every lease
+/// and deletes right away; a late publication from the still-running work is
+/// refused (cancelled lease), and the store fences any bypassed write.
 #[tokio::test]
-async fn removal_waits_for_lease_before_cleaning_and_preserves_source() {
+async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
     let temp = tempfile::tempdir().unwrap();
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
@@ -36,18 +40,10 @@ async fn removal_waits_for_lease_before_cleaning_and_preserves_source() {
             &[],
         )
         .unwrap();
+    // Long-running work that has not noticed the cancellation yet.
     let lease = state.acquire_library_work(&library.id).unwrap();
     let removal = start_library_removal(&state, &library.id).unwrap();
     assert!(lease.control().is_cancelled());
-    assert!(
-        state
-            .store()
-            .lock()
-            .get_library(&library.id)
-            .unwrap()
-            .is_some()
-    );
-    drop(lease);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let current = state
@@ -60,71 +56,11 @@ async fn removal_waits_for_lease_before_cleaning_and_preserves_source() {
                 break;
             }
             assert_ne!(current.state, "failed", "{:?}", current.error);
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
-    assert!(root.is_dir());
-}
-
-/// 2026-10-29 E2E: a heavy Library whose in-flight work takes longer than the old
-/// fixed 30 s drain window must not flip the removal to `failed` (hidden but never
-/// cleaned). The drain keeps waiting, re-cancelling, and completes once work stops.
-#[tokio::test(start_paused = true)]
-async fn slow_work_keeps_removal_draining_past_the_old_timeout() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = ApiState::new(
-        store::Store::open(temp.path().join("data")).unwrap(),
-        "test-token".into(),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoFetch),
-        Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
-    )
-    .unwrap();
-    let root = temp.path().join("heavy");
-    std::fs::create_dir_all(&root).unwrap();
-    let library = state
-        .store()
-        .lock()
-        .create_library(
-            domain::MediaKind::Tv,
-            "Heavy",
-            &[root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    let lease = state.acquire_library_work(&library.id).unwrap();
-    let removal = start_library_removal(&state, &library.id).unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(95)).await;
-    let current = state
-        .store()
-        .lock()
-        .library_removal(&removal.operation_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(current.state, "draining", "{:?}", current.error);
-    drop(lease);
-    tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        loop {
-            let current = state
-                .store()
-                .lock()
-                .library_removal(&removal.operation_id)
-                .unwrap()
-                .unwrap();
-            if current.state == "succeeded" {
-                break;
-            }
-            assert_ne!(current.state, "failed", "{:?}", current.error);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
+    .expect("removal must finish while the work still holds its lease");
     assert!(
         state
             .store()
@@ -133,6 +69,12 @@ async fn slow_work_keeps_removal_draining_past_the_old_timeout() {
             .unwrap()
             .is_none()
     );
+    assert!(
+        lease.publish(|| Ok(())).is_err(),
+        "late work must not publish into a removed Library"
+    );
+    drop(lease);
+    assert!(root.is_dir(), "removal never touches the source files");
 }
 
 /// A removal that failed earlier (e.g. before this build's drain fix) is not left
