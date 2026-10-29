@@ -258,6 +258,9 @@ impl ProbeManager {
             );
         }
         let ledger_id = unit.row.file.file_id.to_string();
+        if let Some(next_retry_at_ms) = self.failure_backoff_until_ms(&ledger_id, now_ms) {
+            return Ok(policy::ProbeRequestResult::Waiting { next_retry_at_ms });
+        }
         if self.enqueue(unit) {
             Ok(policy::ProbeRequestResult::Queued {
                 job_id: self.active_probe_job_id(&ledger_id).unwrap_or_default(),
@@ -676,6 +679,14 @@ impl ProbeManager {
                 None
             }
         }
+    }
+
+    /// When a recent failure still holds this file back, the time it may run again.
+    fn failure_backoff_until_ms(&self, ledger_id: &str, now_ms: i64) -> Option<i64> {
+        let failures = self.last_failure.lock();
+        let elapsed = failures.get(ledger_id)?.elapsed();
+        let window = Duration::from_secs(60);
+        (elapsed < window).then(|| now_ms + (window - elapsed).as_millis() as i64)
     }
 
     fn mark_failed(&self, ledger_id: &str) {

@@ -599,6 +599,21 @@ impl Store {
         Ok(recorded)
     }
 
+    /// Job of the most recent probe unit for this file, in any state.
+    pub fn latest_probe_job_for_ledger(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT job_id FROM probe_job_units WHERE file_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                [ledger_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn active_probe_unit_for_ledger(
         &self,
         ledger_id: &str,
