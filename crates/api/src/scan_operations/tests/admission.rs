@@ -19,7 +19,10 @@ fn cancellation_before_control_registration_prevents_scan() {
     while fix
         .state
         .library_work
-        .active_control(&fix.library_id)
+        .active_control(
+            &fix.library_id,
+            crate::library_lifecycle::LibraryWorkKind::Ordinary,
+        )
         .is_none()
     {
         assert!(Instant::now() < deadline, "scan did not acquire its lease");
@@ -32,7 +35,10 @@ fn cancellation_before_control_registration_prevents_scan() {
     while fix
         .state
         .library_work
-        .active_control(&fix.library_id)
+        .active_control(
+            &fix.library_id,
+            crate::library_lifecycle::LibraryWorkKind::Ordinary,
+        )
         .is_some()
     {
         assert!(Instant::now() < deadline, "scan did not release its lease");

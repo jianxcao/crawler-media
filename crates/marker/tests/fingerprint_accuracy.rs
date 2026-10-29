@@ -80,6 +80,7 @@ impl FingerprintEngine for FixedEngine {
         _path: &Path,
         start_secs: u32,
         duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         Ok(vec![start_secs, duration_secs])
     }
@@ -105,8 +106,14 @@ impl FingerprintEngine for FixedEngine {
 #[test]
 fn a_different_fingerprint_engine_can_be_injected_without_ffmpeg() {
     let engine = FixedEngine;
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, Path::new("ignored.mkv"), 12, 30)
-        .expect("injected extraction should be used");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        Path::new("ignored.mkv"),
+        12,
+        30,
+        &marker::WorkControl::default(),
+    )
+    .expect("injected extraction should be used");
     assert_eq!(fingerprint, vec![12, 30]);
 
     let matched =
@@ -126,6 +133,7 @@ impl FingerprintEngine for TruncatedRemoteStreamOnce {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             Err("Empty fingerprint extracted: File ended prematurely".into())
@@ -154,8 +162,14 @@ fn remote_truncated_fingerprint_sample_is_retried_once() {
         attempts: AtomicUsize::new(0),
     };
 
-    let fingerprint =
-        extract_audio_fingerprint_at_with(&engine, &path, 2398, 180).expect("retry should recover");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("retry should recover");
 
     assert_eq!(fingerprint, vec![7, 11, 13]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 2);
@@ -172,6 +186,7 @@ impl FingerprintEngine for TransientRemoteStreamTwice {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
             Err(self.error.into())
@@ -201,8 +216,14 @@ fn remote_truncated_fingerprint_retries_after_repeated_transient_failures() {
         error: "Empty fingerprint extracted: File ended prematurely",
     };
 
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
-        .expect("retries should recover after repeated temporary truncation");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("retries should recover after repeated temporary truncation");
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
@@ -218,8 +239,14 @@ fn remote_read_errors_are_retried_after_transient_truncated_streams() {
         error: "Empty fingerprint extracted: Read error",
     };
 
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
-        .expect("remote read errors should retry and recover");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("remote read errors should retry and recover");
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
@@ -237,7 +264,12 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
             .with_max_level(tracing::Level::INFO)
             .try_init();
         let fingerprint = ChromaprintEngine
-            .extract_at(Path::new("ignored.mkv"), 0, 30)
+            .extract_at(
+                Path::new("ignored.mkv"),
+                0,
+                30,
+                &marker::WorkControl::default(),
+            )
             .expect("fake ffmpeg should return decodable PCM");
         assert!(!fingerprint.is_empty());
         return;
@@ -317,7 +349,8 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
             .try_init();
         let temp = std::env::var_os("MARKER_EMPTY_PCM_STRM_PATH")
             .expect("test STRM path should be provided");
-        let result = ChromaprintEngine.extract_at(Path::new(&temp), 0, 30);
+        let result =
+            ChromaprintEngine.extract_at(Path::new(&temp), 0, 30, &marker::WorkControl::default());
         assert!(result.is_err(), "empty FFmpeg output must fail extraction");
         return;
     }

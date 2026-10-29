@@ -24,6 +24,7 @@ impl FingerprintEngine for MockVerificationEngine {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<Vec<u32>, String> {
         Ok(Vec::new())
     }

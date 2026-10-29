@@ -29,6 +29,7 @@ pub trait FingerprintEngine: Send + Sync {
         path: &Path,
         start_secs: u32,
         duration_secs: u32,
+        control: &crate::WorkControl,
     ) -> Result<AudioFingerprint, String>;
 
     fn find_common_segment(
@@ -79,8 +80,18 @@ impl FingerprintEngine for ChromaprintEngine {
         path: &Path,
         start_secs: u32,
         duration_secs: u32,
+        control: &crate::WorkControl,
     ) -> Result<AudioFingerprint, String> {
-        chromaprint::extract(path, start_secs, duration_secs)
+        let start_ms = i64::from(start_secs) * 1_000;
+        let request = CaptureRequest {
+            path: path.to_path_buf(),
+            window: SampleWindow::new(start_ms, start_ms + i64::from(duration_secs) * 1_000),
+            audio_stream_index: None,
+            process_deadline_ms: 0,
+        };
+        self.capture_window_controlled(&request, control)
+            .map(|capture| capture.words)
+            .map_err(|failure| failure.to_string())
     }
 
     fn find_common_segment(
@@ -116,7 +127,13 @@ pub fn extract_audio_fingerprint_at(
     start_secs: u32,
     duration_secs: u32,
 ) -> Result<Vec<u32>, String> {
-    extract_audio_fingerprint_at_with(&ChromaprintEngine, path, start_secs, duration_secs)
+    extract_audio_fingerprint_at_with(
+        &ChromaprintEngine,
+        path,
+        start_secs,
+        duration_secs,
+        &crate::WorkControl::default(),
+    )
 }
 
 pub fn extract_audio_fingerprint_at_with(
@@ -124,6 +141,7 @@ pub fn extract_audio_fingerprint_at_with(
     path: &Path,
     start_secs: u32,
     duration_secs: u32,
+    control: &crate::WorkControl,
 ) -> Result<AudioFingerprint, String> {
     let source = match ProbeTarget::from_path(path) {
         ProbeTarget::Local(_) => "local",
@@ -138,7 +156,10 @@ pub fn extract_audio_fingerprint_at_with(
     let mut attempt = 1;
     let result = loop {
         let attempt_started = Instant::now();
-        let result = engine.extract_at(path, start_secs, duration_secs);
+        if control.is_cancelled() {
+            break Err("Library work cancelled".into());
+        }
+        let result = engine.extract_at(path, start_secs, duration_secs, control);
         let retryable_read_error =
             matches!(&result, Err(error) if is_retryable_remote_read_error(error));
         if source != "remote" || !retryable_read_error || attempt >= MAX_REMOTE_SAMPLE_ATTEMPTS {
@@ -158,7 +179,15 @@ pub fn extract_audio_fingerprint_at_with(
                 error = %error,
                 "【声纹】远端音频样本读取异常，等待后重试"
             );
-            std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
+            let delay = std::time::Duration::from_millis(retry_delay_ms);
+            let deadline = Instant::now() + delay;
+            while !control.is_cancelled() && Instant::now() < deadline {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(std::time::Duration::from_millis(20)),
+                );
+            }
         }
         attempt += 1;
     };

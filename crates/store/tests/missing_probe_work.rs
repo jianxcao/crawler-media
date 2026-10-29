@@ -488,6 +488,15 @@ fn fingerprint_handoff_rolls_back_metadata_completion_when_enqueue_fails() {
     let fixture = fixture();
     let store = &fixture.store;
     let file = fixture.file_id.to_string();
+    let owner = store
+        .file_coverage_by_id(fixture.file_id)
+        .unwrap()
+        .unwrap()
+        .file
+        .library_id;
+    store
+        .set_library_intro_settings(&owner.to_string(), true, true)
+        .unwrap();
     job(
         store,
         "metadata",

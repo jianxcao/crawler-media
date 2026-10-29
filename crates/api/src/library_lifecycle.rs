@@ -178,6 +178,13 @@ pub struct LibraryWorkRegistry {
     pub(crate) root_driver: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LibraryWorkKind {
+    Ordinary,
+    AutomaticDetection,
+    ExplicitDetection,
+}
+
 #[derive(Default)]
 struct Entry {
     cancelled: bool,
@@ -185,7 +192,7 @@ struct Entry {
     /// `cancelled` it is scoped to one operation and cleared when that operation
     /// ends, so a failed reconfiguration does not block the Library forever.
     blocked_by: Option<String>,
-    controls: HashMap<String, library::WorkControl>,
+    controls: HashMap<String, (LibraryWorkKind, library::WorkControl)>,
 }
 
 pub struct LibraryWorkLease {
@@ -239,6 +246,8 @@ pub(crate) enum BoundedLeaseError {
     Reconfiguring,
     #[error("Library 正在删除或已不存在")]
     Unavailable,
+    #[error("Library optional detection disabled")]
+    OptionalDisabled,
     #[error("{0}")]
     Store(String),
 }
@@ -264,7 +273,10 @@ impl LibraryWorkRegistry {
         }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();
-        entry.controls.insert(lease_id.clone(), control.clone());
+        entry.controls.insert(
+            lease_id.clone(),
+            (LibraryWorkKind::Ordinary, control.clone()),
+        );
         Ok(LibraryWorkLease {
             registry: self.clone(),
             library_id: library_id.into(),
@@ -277,6 +289,24 @@ impl LibraryWorkRegistry {
         store: &Mutex<store::Store>,
         library_id: &str,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
+        self.acquire_bounded_kind(store, library_id, LibraryWorkKind::Ordinary)
+    }
+
+    pub(crate) fn acquire_optional(
+        self: &Arc<Self>,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+        kind: LibraryWorkKind,
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
+        self.acquire_bounded_kind(store, library_id, kind)
+    }
+
+    fn acquire_bounded_kind(
+        self: &Arc<Self>,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+        kind: LibraryWorkKind,
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         let mut entries = self
             .entries
             .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
@@ -285,24 +315,87 @@ impl LibraryWorkRegistry {
         if entry.blocked_by.is_some() {
             return Err(BoundedLeaseError::Reconfiguring);
         }
+        let store = store
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            .ok_or(BoundedLeaseError::StoreBusy)?;
         if entry.cancelled
             || !store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or(BoundedLeaseError::StoreBusy)?
                 .library_accepts_work(library_id)
                 .map_err(|e| BoundedLeaseError::Store(e.to_string()))?
         {
             return Err(BoundedLeaseError::Unavailable);
         }
+        if kind == LibraryWorkKind::AutomaticDetection {
+            let enabled = store
+                .get_library(library_id)
+                .map_err(|e| BoundedLeaseError::Store(e.to_string()))?
+                .is_some_and(|library| library.detect_intros && library.enable_fingerprint);
+            if !enabled {
+                return Err(BoundedLeaseError::OptionalDisabled);
+            }
+        }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();
-        entry.controls.insert(lease_id.clone(), control.clone());
+        entry
+            .controls
+            .insert(lease_id.clone(), (kind, control.clone()));
         Ok(LibraryWorkLease {
             registry: self.clone(),
             library_id: library_id.into(),
             lease_id,
             control,
         })
+    }
+
+    /// Registry -> Store serializes switch publication with optional admission.
+    /// WorkControl gates are cancelled only after both guards have been dropped.
+    pub(crate) fn set_optional_settings(
+        &self,
+        state: &ApiState,
+        library_id: &str,
+        detect: Option<bool>,
+        fingerprint: Option<bool>,
+    ) -> Result<Result<(), store::StoreError>, axum::response::Response> {
+        let controls = {
+            let mut entries = self
+                .entries
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or_else(crate::http::store_wait::busy_response)?;
+            let store = state
+                .store
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or_else(crate::http::store_wait::busy_response)?;
+            state.require_writable()?;
+            state.require_write_admitted()?;
+            let current = match store.get_library(library_id) {
+                Ok(Some(current)) => current,
+                Ok(None) => return Ok(Err(store::StoreError::Missing(library_id.into()))),
+                Err(error) => return Ok(Err(error)),
+            };
+            let detect = detect.unwrap_or(current.detect_intros);
+            let fingerprint = fingerprint.unwrap_or(current.enable_fingerprint);
+            let disabling =
+                (current.detect_intros && !detect) || (current.enable_fingerprint && !fingerprint);
+            if let Err(error) = store.set_library_intro_settings(library_id, detect, fingerprint) {
+                return Ok(Err(error));
+            }
+            if disabling {
+                entries
+                    .entry(library_id.into())
+                    .or_default()
+                    .controls
+                    .values()
+                    .filter(|(kind, _)| *kind != LibraryWorkKind::Ordinary)
+                    .map(|(_, control)| control.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        for control in controls {
+            control.cancel();
+        }
+        Ok(Ok(()))
     }
     pub fn freeze(
         &self,
@@ -314,7 +407,11 @@ impl LibraryWorkRegistry {
             let operation = store.lock().begin_library_removal(library_id)?;
             let entry = entries.entry(library_id.into()).or_default();
             entry.cancelled = true;
-            let controls: Vec<_> = entry.controls.values().cloned().collect();
+            let controls: Vec<_> = entry
+                .controls
+                .values()
+                .map(|(_, control)| control.clone())
+                .collect();
             (operation, controls)
         };
         // Cancel outside the registry: `cancel` waits on each publication gate,
@@ -359,7 +456,10 @@ impl LibraryWorkRegistry {
         }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();
-        entry.controls.insert(lease_id.clone(), control.clone());
+        entry.controls.insert(
+            lease_id.clone(),
+            (LibraryWorkKind::Ordinary, control.clone()),
+        );
         Ok(LibraryWorkLease {
             registry: self.clone(),
             library_id: library_id.into(),
@@ -378,7 +478,11 @@ impl LibraryWorkRegistry {
             let mut entries = self.entries.lock();
             let entry = entries.entry(library_id.into()).or_default();
             entry.blocked_by = Some(operation_id.into());
-            entry.controls.values().cloned().collect()
+            entry
+                .controls
+                .values()
+                .map(|(_, control)| control.clone())
+                .collect()
         };
         // Same order as `freeze`: never wait on a publication gate under the registry.
         for control in controls {
@@ -406,11 +510,18 @@ impl LibraryWorkRegistry {
         self.drivers.lock().remove(operation_id);
     }
 
-    pub fn active_control(&self, library_id: &str) -> Option<library::WorkControl> {
-        self.entries
-            .lock()
-            .get(library_id)
-            .and_then(|entry| entry.controls.values().next().cloned())
+    pub(crate) fn active_control(
+        &self,
+        library_id: &str,
+        kind: LibraryWorkKind,
+    ) -> Option<library::WorkControl> {
+        self.entries.lock().get(library_id).and_then(|entry| {
+            entry
+                .controls
+                .values()
+                .find(|(active_kind, control)| *active_kind == kind && !control.is_cancelled())
+                .map(|(_, control)| control.clone())
+        })
     }
 
     /// 是否有任何 Library 工作正在进行（维护任务据此跳过重型操作）。
@@ -429,7 +540,11 @@ impl LibraryWorkRegistry {
             let mut entries = self.entries.lock();
             let entry = entries.entry(library_id.into()).or_default();
             entry.cancelled = true;
-            entry.controls.values().cloned().collect()
+            entry
+                .controls
+                .values()
+                .map(|(_, control)| control.clone())
+                .collect()
         };
         // Same order as `freeze`/`block`: a control may wait on its publication gate,
         // and that publication may take the registry to acquire/drop another lease.

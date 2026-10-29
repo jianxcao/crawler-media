@@ -14,6 +14,7 @@ pub struct MetadataPriorityGate {
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
     store: Arc<parking_lot::Mutex<store::Store>>,
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
+    kind: crate::library_lifecycle::LibraryWorkKind,
     owners: Option<Arc<std::collections::HashMap<String, (String, marker::WorkControl)>>>,
 }
 
@@ -25,6 +26,7 @@ impl MetadataPriorityGate {
             shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
+            kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
         }
     }
@@ -36,6 +38,7 @@ impl MetadataPriorityGate {
             shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
+            kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
         }
     }
@@ -46,6 +49,9 @@ impl MetadataPriorityGate {
         units: &[super::ProbeUnit],
     ) -> Result<(Self, Vec<crate::library_lifecycle::LibraryWorkLease>), String> {
         let mut gate = Self::from_manager(manager);
+        if let Some(unit) = units.first() {
+            gate.kind = super::tracks::optional_work_kind(unit);
+        }
         let Some(registry) = gate.registry.as_ref() else {
             return Ok((gate, Vec::new()));
         };
@@ -69,7 +75,7 @@ impl MetadataPriorityGate {
         for (_, owner) in &owners {
             if !controls.contains_key(owner) {
                 let lease = registry
-                    .acquire_bounded(&manager.store, owner)
+                    .acquire_optional(&manager.store, owner, gate.kind)
                     .map_err(|error| error.to_string())?;
                 controls.insert(owner.clone(), lease.control().signal().clone());
                 leases.push(lease);
@@ -135,6 +141,10 @@ mod tests {
                     &[],
                 )
                 .unwrap();
+            store
+                .lock()
+                .set_library_intro_settings(&owner.id, true, true)
+                .unwrap();
             let mut row = super::super::test_support::coverage(
                 media.id,
                 &root.join("episode.mkv").to_string_lossy(),
@@ -197,7 +207,7 @@ impl CaptureGate for MetadataPriorityGate {
         } else if let Some(control) = owner.and_then(|owner| {
             self.registry
                 .as_ref()
-                .and_then(|registry| registry.active_control(&owner))
+                .and_then(|registry| registry.active_control(&owner, self.kind))
         }) {
             return control.signal().clone();
         }

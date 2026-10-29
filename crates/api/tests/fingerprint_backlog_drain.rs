@@ -13,7 +13,13 @@ use store::ScannedLedger;
 struct FixtureFingerprint;
 
 impl FingerprintEngine for FixtureFingerprint {
-    fn extract_at(&self, _: &std::path::Path, _: u32, _: u32) -> Result<AudioFingerprint, String> {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _control: &marker::WorkControl,
+    ) -> Result<AudioFingerprint, String> {
         Ok(vec![1, 2, 3, 4])
     }
 

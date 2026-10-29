@@ -1,7 +1,7 @@
 /// 在 `tmp` 下建一个 `kind` 库并登记 `media_id`：`library_files` 的
 /// (media_id, kind) 外键和路径归属都要求两者先存在，且文件路径必须落在库根内。
 fn seed_probe_library(store: &Store, tmp: &tempfile::TempDir, media_id: MediaId, kind: MediaKind) {
-    store
+    let library = store
         .create_library(
             kind,
             "Fixture",
@@ -10,6 +10,9 @@ fn seed_probe_library(store: &Store, tmp: &tempfile::TempDir, media_id: MediaId,
             true,
             &[],
         )
+        .unwrap();
+    store
+        .set_library_intro_settings(&library.id, true, true)
         .unwrap();
     store
         .insert_media(&domain::Media {
@@ -352,6 +355,19 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
         seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
         super::super::test_support::publish_into(&store.lock(), &mut row);
         let ledger_id = row.file.file_id.to_string();
+        let pending_id = if has_pending_unit {
+            let mut pending = super::super::test_support::coverage(
+                media_id,
+                &tmp.path().join("pending.mkv").to_string_lossy(),
+                Some(1),
+                Some(2),
+            );
+            std::fs::write(&pending.file.path, b"finite pending source").unwrap();
+            super::super::test_support::publish_into(&store.lock(), &mut pending);
+            Some(pending.file.file_id.to_string())
+        } else {
+            None
+        };
         let mut specs = vec![crate::store::ProbeJobUnitSpec {
             ledger_id: &ledger_id,
             kind: "tv",
@@ -360,9 +376,9 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
             overwrite_markers: true,
             reuse_media_info_cache: true,
         }];
-        if has_pending_unit {
+        if let Some(pending_id) = pending_id.as_deref() {
             specs.push(crate::store::ProbeJobUnitSpec {
-                ledger_id: "pending-ledger",
+                ledger_id: pending_id,
                 kind: "tv",
                 force_fingerprint: true,
                 reuse_fingerprint_cache: false,
@@ -420,9 +436,19 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
     let media_id = MediaId::new();
+    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
+    let mut row = super::super::test_support::coverage(
+        media_id,
+        &tmp.path().join("removed.mkv").to_string_lossy(),
+        Some(1),
+        Some(1),
+    );
+    std::fs::write(&row.file.path, b"finite source before deletion").unwrap();
+    super::super::test_support::publish_into(&store.lock(), &mut row);
+    let ledger_id = row.file.file_id.to_string();
     let job_id = "completed-marker-refresh";
     let units = [crate::store::ProbeJobUnitSpec {
-        ledger_id: "removed-ledger-row",
+        ledger_id: &ledger_id,
         kind: "tv",
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
@@ -440,19 +466,49 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
             &units,
         )
         .unwrap();
+    store.lock().start_probe_unit(job_id, &ledger_id).unwrap();
     store
         .lock()
-        .start_probe_unit(job_id, "removed-ledger-row")
-        .unwrap();
-    store
-        .lock()
-        .finish_probe_unit(job_id, "removed-ledger-row", true, None)
+        .finish_probe_unit(job_id, &ledger_id, true, None)
         .unwrap();
     assert_eq!(
         store.lock().get_probe_job(job_id).unwrap().unwrap().status,
         "running"
     );
 
+    // Simulate cleanup interrupted before job reconciliation. Remove dependent
+    // projections with foreign keys enabled, retaining the completion receipt.
+    let database = store
+        .lock()
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let mut connection = rusqlite::Connection::open(database).unwrap();
+    let cleanup = connection.transaction().unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_items WHERE preferred_file_id=?1",
+            [&ledger_id],
+        )
+        .unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_units WHERE preferred_file_id=?1",
+            [&ledger_id],
+        )
+        .unwrap();
+    cleanup
+        .execute("DELETE FROM library_files WHERE file_id=?1", [&ledger_id])
+        .unwrap();
+    cleanup.commit().unwrap();
+    assert!(
+        store
+            .lock()
+            .file_coverage_by_id(row.file.file_id)
+            .unwrap()
+            .is_none()
+    );
     let _restarted = ProbeManager::new(store.clone());
     let recovered = store.lock().get_probe_job(job_id).unwrap().unwrap();
     assert_eq!(recovered.status, "cancelled");
@@ -641,19 +697,35 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
 }
 
 #[test]
-fn forced_tv_voiceprint_ignores_library_fingerprint_toggle() {
-    let tmp = tempfile::tempdir().unwrap();
+fn explicit_tv_refresh_works_with_switches_off_but_automatic_force_does_not() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let library = store
+        .lock()
+        .create_library(
+            MediaKind::Tv,
+            "Manual",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let manager = ProbeManager::new(store);
-
     assert_eq!(
-        fingerprint_duration(&manager, "unconfigured-library", MediaKind::Tv, true,),
-        Some(180),
-        "an explicit refresh must run voiceprint analysis even when the opt-in toggle is off"
+        fingerprint_duration(&manager, &library.id, MediaKind::Tv, true),
+        Some(180)
     );
     assert_eq!(
-        fingerprint_duration(&manager, "unconfigured-library", MediaKind::Movie, true,),
-        None,
-        "voiceprint extraction remains TV-only"
+        fingerprint_duration(&manager, &library.id, MediaKind::Tv, false),
+        None
+    );
+    assert_eq!(
+        fingerprint_duration(&manager, &library.id, MediaKind::Movie, true),
+        None
+    );
+    assert_eq!(
+        fingerprint_duration(&manager, "missing", MediaKind::Tv, true),
+        None
     );
 }

@@ -62,7 +62,13 @@ impl ReplaceSource {
 }
 
 impl FingerprintEngine for ReplaceSource {
-    fn extract_at(&self, path: &Path, _: u32, _: u32) -> Result<AudioFingerprint, String> {
+    fn extract_at(
+        &self,
+        path: &Path,
+        _: u32,
+        _: u32,
+        _control: &marker::WorkControl,
+    ) -> Result<AudioFingerprint, String> {
         if self.during_capture && path == self.row.file.path {
             self.replace();
         }

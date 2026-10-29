@@ -8,7 +8,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
     let store = crate::Store::open(directory.path().join("data")).unwrap();
     let root = directory.path().join("shows");
     std::fs::create_dir_all(&root).unwrap();
-    store
+    let library = store
         .create_library(
             domain::MediaKind::Tv,
             "Shows",
@@ -17,6 +17,9 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
             true,
             &[],
         )
+        .unwrap();
+    store
+        .set_library_intro_settings(&library.id, true, true)
         .unwrap();
     let media = domain::Media {
         id: domain::MediaId::new(),
@@ -57,7 +60,13 @@ struct ContendedPublication {
 }
 
 impl marker::FingerprintEngine for ContendedPublication {
-    fn extract_at(&self, _: &std::path::Path, _: u32, _: u32) -> Result<Vec<u32>, String> {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _control: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
         let store = self.store.clone();
         let entered = self.entered.lock().take().unwrap();
         let (held, ready) = mpsc::channel();

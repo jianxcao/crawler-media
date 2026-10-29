@@ -595,6 +595,10 @@ impl ProbeManager {
         if !all_done {
             return;
         }
+        if job.status == "cancelled" {
+            timings::log_terminal_job(&self.store, &self.timings, &job);
+            return;
+        }
         if job.failed > 0 {
             if let Err(error) = self.store.lock().finish_probe_job(
                 &job.id,
@@ -740,6 +744,7 @@ mod tests {
         include!("probe_manager/marker_refresh_lifecycle_tests.rs");
         include!("probe_manager/marker_refresh_cross_library_tests.rs");
         include!("probe_manager/marker_refresh_lifecycle_worker_tests.rs");
+        include!("probe_manager/optional_capture_cancellation_tests.rs");
     }
 
     mod marker_persist {

@@ -79,6 +79,7 @@ impl FingerprintEngine for GatedCapture {
         _path: &std::path::Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
@@ -146,7 +147,7 @@ fn durable_counts(store: &Store) -> (i64, i64) {
     (pending, terminal)
 }
 
-fn seed_backlog(store: &Store, real_ledger: &str) {
+fn seed_backlog(store: &Store, real_ledger: &str, root: &std::path::Path) {
     let metadata: Vec<String> = std::iter::once(real_ledger.to_string())
         .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
         .collect();
@@ -175,8 +176,9 @@ fn seed_backlog(store: &Store, real_ledger: &str) {
     );
 
     let fingerprint: Vec<String> = (0..FINGERPRINT_PENDING)
-        .map(|index| format!("ledger-f-{index:06}"))
+        .map(|_| LedgerId::new().to_string())
         .collect();
+    record_fingerprint_owners(store, real_ledger, &fingerprint, root);
     let fingerprint_specs: Vec<_> = fingerprint
         .iter()
         .map(|id| store::ProbeJobUnitSpec {
@@ -202,11 +204,50 @@ fn seed_backlog(store: &Store, real_ledger: &str) {
     );
 }
 
-#[tokio::test]
-async fn bounded_windows_preserve_a_large_durable_backlog() {
-    let temp = tempfile::tempdir().unwrap();
-    let media_id = MediaId::new();
-    let ledger_id = LedgerId::new();
+fn record_fingerprint_owners(
+    store: &Store,
+    template: &str,
+    ids: &[String],
+    root: &std::path::Path,
+) {
+    let database = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let mut connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    {
+        // The backlog exercises durable dispatch, so bulk-record owned file
+        // facts without making 100k source files or bypassing job admission.
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO library_files (
+                 file_id, library_id, root_id, media_id, kind, path_key, display_path,
+                 presence_state, publication_state, file_revision, source_version,
+                 quality_source, confidence)
+             SELECT ?2, library_id, root_id, media_id, kind, ?3, ?3,
+                    'present', 'published', 1, source_version, quality_source, confidence
+             FROM library_files WHERE file_id=?1",
+            )
+            .unwrap();
+        for id in ids {
+            let path = root.join(format!("{id}.mkv"));
+            assert_eq!(
+                insert
+                    .execute(rusqlite::params![template, id, path.to_str().unwrap()])
+                    .unwrap(),
+                1
+            );
+        }
+    }
+    tx.commit().unwrap();
+}
+
+fn seed_backlog_fixture(temp: &tempfile::TempDir, media_id: MediaId, ledger_id: LedgerId) {
     let video = temp.path().join("window.mkv");
     std::fs::write(&video, b"not-a-real-video").unwrap();
     {
@@ -259,8 +300,16 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
                 Some(1_200_000),
             )
             .unwrap();
-        seed_backlog(&store, &ledger_id.to_string());
+        seed_backlog(&store, &ledger_id.to_string(), temp.path());
     }
+}
+
+#[tokio::test]
+async fn bounded_windows_preserve_a_large_durable_backlog() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let media_id = MediaId::new();
+    let ledger_id = LedgerId::new();
+    seed_backlog_fixture(&temp, media_id, ledger_id);
 
     let original = (METADATA_PENDING + FINGERPRINT_PENDING) as i64;
     let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));

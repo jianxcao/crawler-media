@@ -14,6 +14,7 @@ impl FingerprintEngine for PairwiseEngine {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         Ok(Vec::new())
     }

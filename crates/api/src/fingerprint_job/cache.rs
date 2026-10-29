@@ -27,7 +27,11 @@ pub async fn capture_or_reuse_fingerprints(
     cached: Option<FingerprintCacheEntry>,
     allow_cache_reuse: bool,
     engine: Arc<dyn FingerprintEngine>,
+    control: &marker::WorkControl,
 ) -> Result<FingerprintCaptureOutcome, String> {
+    if control.is_cancelled() {
+        return Err("Library work cancelled".into());
+    }
     let cache_key = fingerprint_cache_key(source_version, sample_duration_secs, media_duration_ms);
     let cached = cached.filter(|entry| {
         allow_cache_reuse
@@ -47,8 +51,14 @@ pub async fn capture_or_reuse_fingerprints(
                 source_version,
                 "【声纹】片头声纹缓存未命中，开始采集"
             );
-            let intro =
-                extract(engine.clone(), path.to_path_buf(), 0, sample_duration_secs).await?;
+            let intro = extract(
+                engine.clone(),
+                path.to_path_buf(),
+                0,
+                sample_duration_secs,
+                control,
+            )
+            .await?;
             if intro.is_empty() {
                 return Err("empty intro fingerprint".into());
             }
@@ -85,7 +95,15 @@ pub async fn capture_or_reuse_fingerprints(
             source_version,
             "【声纹】片尾声纹缓存未命中，开始采集"
         );
-        match extract(engine, path.to_path_buf(), start_secs, sample_duration_secs).await {
+        match extract(
+            engine,
+            path.to_path_buf(),
+            start_secs,
+            sample_duration_secs,
+            control,
+        )
+        .await
+        {
             Ok(outro) if !outro.is_empty() => {
                 (Some(outro), false, started.elapsed().as_millis() as u64)
             }
@@ -147,9 +165,17 @@ async fn extract(
     path: PathBuf,
     start_secs: u32,
     duration_secs: u32,
+    control: &marker::WorkControl,
 ) -> Result<Vec<u32>, String> {
+    let control = control.clone();
     tokio::task::spawn_blocking(move || {
-        extract_audio_fingerprint_at_with(engine.as_ref(), &path, start_secs, duration_secs)
+        extract_audio_fingerprint_at_with(
+            engine.as_ref(),
+            &path,
+            start_secs,
+            duration_secs,
+            &control,
+        )
     })
     .await
     .map_err(|error| format!("fingerprint worker failed: {error}"))?

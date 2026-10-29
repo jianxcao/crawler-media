@@ -220,7 +220,12 @@ async fn read_tracks(
     let ledger_id = unit.row.file.file_id.to_string();
     let path = &unit.row.file.path;
     let probe_unit = unit.clone();
-    let control = probe_control(mgr, unit);
+    let kind = if unit.marker_refresh_id.is_some() {
+        optional_work_kind(unit)
+    } else {
+        crate::library_lifecycle::LibraryWorkKind::Ordinary
+    };
+    let control = probe_control(mgr, unit, kind);
     let engine = mgr.tracks_probe.clone();
     let tracks_result = tokio::task::spawn_blocking(move || {
         read_tracks_with_nfo(&probe_unit, started_at, &control, engine.as_ref())
@@ -258,12 +263,31 @@ async fn read_tracks(
     Ok(tracks)
 }
 
-pub(super) fn probe_control(mgr: &ProbeManager, unit: &ProbeUnit) -> library::WorkControl {
+/// marker_refresh_id is reconstructed from the durable marker_refresh job kind.
+/// force_fingerprint also occurs in automatic successors and is not an origin.
+pub(super) fn optional_work_kind(unit: &ProbeUnit) -> crate::library_lifecycle::LibraryWorkKind {
+    if unit.marker_refresh_id.is_some() {
+        crate::library_lifecycle::LibraryWorkKind::ExplicitDetection
+    } else {
+        crate::library_lifecycle::LibraryWorkKind::AutomaticDetection
+    }
+}
+
+pub(super) fn probe_control(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    kind: crate::library_lifecycle::LibraryWorkKind,
+) -> library::WorkControl {
     let owner = unit.row.file.library_id.to_string();
     let registry = mgr.library_work.lock().clone();
-    registry
-        .and_then(|registry| registry.active_control(&owner))
-        .unwrap_or_default()
+    let Some(registry) = registry else {
+        return library::WorkControl::default();
+    };
+    registry.active_control(&owner, kind).unwrap_or_else(|| {
+        let cancelled = library::WorkControl::default();
+        cancelled.cancel();
+        cancelled
+    })
 }
 
 fn read_tracks_with_nfo(

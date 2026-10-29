@@ -495,20 +495,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_library_intro_settings(
-        &self,
-        id: &str,
-        detect_intros: bool,
-        enable_fingerprint: bool,
-    ) -> Result<(), StoreError> {
-        self.ensure_library_mutable(id)?;
-        self.library.execute(
-            "UPDATE libraries SET detect_intros = ?1, enable_fingerprint = ?2 WHERE library_id = ?3",
-            params![detect_intros as i64, enable_fingerprint as i64, id],
-        )?;
-        Ok(())
-    }
-
     pub fn set_library_cover_path(
         &self,
         id: &str,

@@ -16,6 +16,7 @@ impl FingerprintEngine for ComparisonCounter {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         unreachable!("cached-season comparison must not read media")
     }

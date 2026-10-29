@@ -86,6 +86,7 @@ impl FingerprintEngine for MockEngine {
         _path: &std::path::Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         Ok(vec![1, 2, 3])
     }

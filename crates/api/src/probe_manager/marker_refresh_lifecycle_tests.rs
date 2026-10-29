@@ -70,6 +70,10 @@ impl RefreshHarness {
             .unwrap();
         store
             .lock()
+            .set_library_intro_settings(&library.id, true, true)
+            .unwrap();
+        store
+            .lock()
             .insert_media(&domain::Media {
                 id: media_id,
                 kind: MediaKind::Tv,
@@ -188,6 +192,7 @@ impl marker::FingerprintEngine for PresenceRaceFingerprint {
         _path: &std::path::Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<marker::AudioFingerprint, String> {
         Ok(vec![1, 2, 3])
     }

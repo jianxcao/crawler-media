@@ -30,7 +30,13 @@ fn intro_tag(case: &str, episode: u32) -> u32 {
 }
 
 impl FingerprintEngine for FixtureEngine {
-    fn extract_at(&self, _: &std::path::Path, _: u32, _: u32) -> Result<Vec<u32>, String> {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _control: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
         panic!("this reproduction must not use legacy media extraction")
     }
     fn find_common_segment(

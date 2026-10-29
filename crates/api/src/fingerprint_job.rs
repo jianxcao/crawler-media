@@ -212,6 +212,7 @@ pub fn analyze_season_fingerprints_with_engine(
             &row.file.path,
             0,
             fingerprint_duration_secs,
+            &marker::WorkControl::default(),
         ) {
             Ok(fp) => known.push(((*row).clone(), fp)),
             Err(error) => {

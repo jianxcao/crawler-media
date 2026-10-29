@@ -310,6 +310,7 @@ impl marker::FingerprintEngine for SharedMatchEngine {
         _path: &std::path::Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<marker::AudioFingerprint, String> {
         Ok(vec![42; 100])
     }

@@ -192,7 +192,26 @@ fn guarded_sample_commit_never_recreates_deleted_ledger_samples() {
 fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let units: Vec<_> = ["first", "deleted", "pending"]
+    let template = row(&store, temp.path(), MediaId::new());
+    let ids: Vec<String> = ["first", "deleted", "pending"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut file = template.clone();
+            file.file_id = Some(LedgerId::new());
+            file.path = temp
+                .path()
+                .join(format!("{name}.mkv"))
+                .display()
+                .to_string();
+            file.episode = Some(index as u32 + 1);
+            store::test_support::publish_fixture_file(&store, &file)
+                .unwrap()
+                .file_id
+                .to_string()
+        })
+        .collect();
+    let units: Vec<_> = ids
         .iter()
         .map(|id| ProbeJobUnitSpec {
             ledger_id: id,
@@ -204,11 +223,18 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
         })
         .collect();
     store
-        .create_probe_job("job", "marker_refresh", "media", Some(1), "scope", &units)
+        .create_probe_job(
+            "job",
+            "marker_refresh",
+            &template.media_id.to_string(),
+            Some(1),
+            "scope",
+            &units,
+        )
         .unwrap();
-    store.start_probe_unit("job", "first").unwrap();
-    store.finish_probe_unit("job", "first", true, None).unwrap();
-    store.start_probe_unit("job", "deleted").unwrap();
+    store.start_probe_unit("job", &ids[0]).unwrap();
+    store.finish_probe_unit("job", &ids[0], true, None).unwrap();
+    store.start_probe_unit("job", &ids[1]).unwrap();
     store.cancel_probe_job("job", "file_deleted").unwrap();
     let job = store.get_probe_job("job").unwrap().unwrap();
     assert_eq!(job.status, "cancelled");
@@ -224,14 +250,14 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
         persisted.iter().filter(|u| u.status == "cancelled").count(),
         2
     );
-    assert!(!store.start_probe_unit("job", "pending").unwrap());
+    assert!(!store.start_probe_unit("job", &ids[2]).unwrap());
     assert!(store.active_probe_job_for_scope("scope").unwrap().is_none());
     assert!(
         store
             .create_probe_job(
                 "retry",
                 "marker_refresh",
-                "media",
+                &template.media_id.to_string(),
                 Some(1),
                 "scope",
                 &units[..1]
@@ -260,7 +286,19 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
     store::test_support::publish_fixture_file(&store, &row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
     let id = row.file_id.expect("fixture file id").to_string();
-    let units: Vec<_> = [id.as_str(), "deleted-before-snapshot"]
+    let mut removed = row.clone();
+    removed.file_id = Some(LedgerId::new());
+    removed.path = temp
+        .path()
+        .join("deleted-before-snapshot.mkv")
+        .display()
+        .to_string();
+    removed.episode = Some(2);
+    let deleted_id = store::test_support::publish_fixture_file(&store, &removed)
+        .unwrap()
+        .file_id
+        .to_string();
+    let units: Vec<_> = [id.as_str(), deleted_id.as_str()]
         .iter()
         .map(|id| ProbeJobUnitSpec {
             ledger_id: id,
@@ -287,6 +325,31 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
             .finish_probe_unit("job", unit.ledger_id, true, None)
             .unwrap();
     }
+    // Remove dependent projections with foreign keys enabled, simulating
+    // cleanup interrupted before reconciliation of the admitted job receipt.
+    let database = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let mut connection = rusqlite::Connection::open(database).unwrap();
+    let cleanup = connection.transaction().unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_items WHERE preferred_file_id=?1",
+            [&deleted_id],
+        )
+        .unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_units WHERE preferred_file_id=?1",
+            [&deleted_id],
+        )
+        .unwrap();
+    cleanup
+        .execute("DELETE FROM library_files WHERE file_id=?1", [&deleted_id])
+        .unwrap();
+    cleanup.commit().unwrap();
     let replacement = MarkerResultReplacement {
         media_id: row.media_id,
         season: 1,
@@ -583,7 +646,10 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
             )
             .is_err()
     );
-    assert!(store.get_probe_job("job").unwrap().unwrap().is_active());
+    assert_eq!(
+        store.get_probe_job("job").unwrap().unwrap().status,
+        "cancelled"
+    );
     assert_eq!(
         store
             .get_media_marker(row.media_id, Some(1), Some(1))

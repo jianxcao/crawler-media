@@ -249,7 +249,7 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
+    let library = store
         .create_library(
             domain::MediaKind::Movie,
             "Probe",
@@ -258,6 +258,9 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
             true,
             &[],
         )
+        .unwrap();
+    store
+        .set_library_intro_settings(&library.id, true, true)
         .unwrap();
     let rows = ["a", "b"].map(|suffix| FixtureFile {
         file_id: Some(domain::LedgerId::new()),

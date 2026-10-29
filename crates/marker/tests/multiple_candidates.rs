@@ -13,6 +13,7 @@ impl FingerprintEngine for MultiCandidateEngine {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         unreachable!("this matcher only compares cached fingerprints")
     }

@@ -100,33 +100,74 @@ fn interrupted_attempt_preserves_unknown_byte_measurement() {
 
 #[test]
 fn put_and_read_probe_sampling_plan_and_outcome() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
 
+    let media_id = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Tv,
+            title: "Sampling plan".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let root = temp.path().join("tv");
+    store
+        .create_library(
+            domain::MediaKind::Tv,
+            "Sampling plan",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let file = store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id,
+            path: root.join("S01E01.mkv").display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ledger_id = file.file_id.to_string();
     let unit = store::ProbeJobUnitSpec {
-        ledger_id: "ledger-plan",
+        ledger_id: &ledger_id,
         kind: "tv",
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: true,
         reuse_media_info_cache: true,
     };
-    store
-        .create_probe_job(
-            "job-plan",
-            "marker_refresh",
-            "media-1",
-            Some(1),
-            "scope-1",
-            &[unit],
-        )
-        .unwrap();
+    assert!(
+        store
+            .create_probe_job(
+                "job-plan",
+                "marker_refresh",
+                &media_id.to_string(),
+                Some(1),
+                "scope-1",
+                &[unit],
+            )
+            .unwrap()
+    );
 
     store
-        .put_probe_sampling_plan("job-plan", "ledger-plan", "{\"mode\":\"adaptive\"}")
+        .put_probe_sampling_plan("job-plan", &ledger_id, "{\"mode\":\"adaptive\"}")
         .unwrap();
     store
-        .put_probe_detection_outcome("job-plan", "ledger-plan", "{\"result\":\"detected\"}")
+        .put_probe_detection_outcome("job-plan", &ledger_id, "{\"result\":\"detected\"}")
         .unwrap();
 
     let units = store.probe_job_units("job-plan").unwrap();

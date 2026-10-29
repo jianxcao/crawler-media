@@ -17,6 +17,7 @@ impl FingerprintEngine for CountingEngine {
         _path: &Path,
         start_secs: u32,
         duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.windows
@@ -58,6 +59,7 @@ async fn unchanged_season_refresh_reuses_both_samples_and_changed_source_recaptu
         None,
         true,
         engine.clone(),
+        &marker::WorkControl::default(),
     )
     .await
     .unwrap();
@@ -82,6 +84,7 @@ async fn unchanged_season_refresh_reuses_both_samples_and_changed_source_recaptu
         persisted,
         true,
         engine.clone(),
+        &marker::WorkControl::default(),
     )
     .await
     .unwrap();
@@ -104,6 +107,7 @@ async fn unchanged_season_refresh_reuses_both_samples_and_changed_source_recaptu
         Some(reused.cache),
         true,
         engine.clone(),
+        &marker::WorkControl::default(),
     )
     .await
     .unwrap();
@@ -130,6 +134,7 @@ async fn explicit_recapture_bypasses_an_unchanged_cache() {
         None,
         true,
         engine.clone(),
+        &marker::WorkControl::default(),
     )
     .await
     .unwrap();
@@ -141,6 +146,7 @@ async fn explicit_recapture_bypasses_an_unchanged_cache() {
         Some(first.cache),
         false,
         engine.clone(),
+        &marker::WorkControl::default(),
     )
     .await
     .unwrap();

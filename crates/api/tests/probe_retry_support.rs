@@ -48,6 +48,7 @@ impl FingerprintEngine for FakeFingerprintEngine {
         _path: &Path,
         start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<marker::AudioFingerprint, String> {
         let episode = episode_number(_path);
         if start_secs == 0 {

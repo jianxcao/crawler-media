@@ -1,4 +1,5 @@
 mod counters;
+mod optional;
 
 use rusqlite::{OptionalExtension, params};
 
@@ -74,6 +75,17 @@ impl Store {
             return Ok(false);
         }
         let tx = crate::write_tx(&self.library)?;
+        if matches!(kind, "fingerprint_probe" | "marker_refresh") {
+            for unit in units {
+                if !optional::file_accepts_optional_work(
+                    &tx,
+                    unit.ledger_id,
+                    kind == "fingerprint_probe",
+                )? {
+                    return Ok(false);
+                }
+            }
+        }
         let inserted = tx.execute(
             "INSERT INTO probe_jobs (
                  id, kind, media_id, season, scope_key, status, total, created_at_ms
@@ -349,6 +361,10 @@ impl Store {
                     finished_at_ms = ?2 WHERE id = ?1",
             params![job_id, now],
         )?;
+        if !optional::file_accepts_optional_work(&tx, ledger_id, true)? {
+            tx.commit()?;
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO probe_jobs (id, kind, media_id, season, scope_key, status, total, created_at_ms)
              SELECT ?2, 'fingerprint_probe', media_id, season, scope_key, 'queued', 1, ?3
@@ -738,8 +754,8 @@ pub(crate) fn probe_job_terminal_status(
         return Some("failed");
     }
     match kind {
-        "marker_refresh" => None,
         _ if cancelled > 0 => Some("cancelled"),
+        "marker_refresh" => None,
         _ if partial > 0 => Some("partial"),
         _ => Some("succeeded"),
     }

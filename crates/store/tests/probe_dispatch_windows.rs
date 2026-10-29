@@ -81,7 +81,7 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
         filter_score: None,
         ..Default::default()
     };
-    store
+    let library = store
         .create_library(
             MediaKind::Movie,
             "Window",
@@ -90,6 +90,9 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
             true,
             &[],
         )
+        .unwrap();
+    store
+        .set_library_intro_settings(&library.id, true, true)
         .unwrap();
     store::test_support::publish_fixture_file(&store, &row).unwrap();
 
@@ -114,6 +117,7 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     let fingerprint_ids: Vec<String> = (0..FINGERPRINT_PENDING)
         .map(|index| format!("ledger-f-{index:06}"))
         .collect();
+    record_fingerprint_owners(&store, &row, &fingerprint_ids, temp.path());
     let fingerprint_specs: Vec<_> = fingerprint_ids.iter().map(|id| spec(id)).collect();
     assert!(
         store
@@ -235,4 +239,46 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
             .len()
             <= 4
     );
+}
+
+fn record_fingerprint_owners(
+    store: &Store,
+    template: &FixtureFile,
+    ids: &[String],
+    root: &std::path::Path,
+) {
+    let database = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let mut connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    {
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO library_files (
+                 file_id, library_id, root_id, media_id, kind, path_key, display_path,
+                 presence_state, publication_state, file_revision, source_version,
+                 quality_source, confidence)
+             SELECT ?2, library_id, root_id, media_id, kind, ?3, ?3,
+                    'present', 'published', 1, source_version, quality_source, confidence
+             FROM library_files WHERE file_id=?1",
+            )
+            .unwrap();
+        for id in ids {
+            let path = root.join(format!("{id}.mkv"));
+            insert
+                .execute(rusqlite::params![
+                    template.file_id.unwrap().to_string(),
+                    id,
+                    path.to_str().unwrap(),
+                ])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
 }

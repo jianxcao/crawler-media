@@ -223,7 +223,7 @@ async fn process_metadata(
     };
     let leased = step(&manager, {
         let unit = unit.clone();
-        move |manager| work_lease(manager, &unit)
+        move |manager| work_lease(manager, &unit, unit.marker_refresh_id.is_some())
     })
     .await;
     let _lease = match leased {
@@ -555,7 +555,7 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
             if unit.marker_refresh_id.is_some() {
                 refresh_leases(manager, &unit)
             } else {
-                Ok(Vec::new())
+                work_lease(manager, &unit, true).map(|lease| lease.into_iter().collect())
             }
         }
     })
@@ -641,6 +641,7 @@ fn refresh_leases(
 pub(super) fn work_lease(
     manager: &ProbeManager,
     unit: &ProbeUnit,
+    optional: bool,
 ) -> Result<Option<crate::library_lifecycle::LibraryWorkLease>, String> {
     let registry = manager.library_work.lock().clone();
     let Some(registry) = registry else {
@@ -653,10 +654,16 @@ pub(super) fn work_lease(
         crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
         unit.row.file.library_id.to_string()
     };
-    registry
-        .acquire_bounded(&manager.store, &library_id)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    let acquired = if optional {
+        registry.acquire_optional(
+            &manager.store,
+            &library_id,
+            super::tracks::optional_work_kind(unit),
+        )
+    } else {
+        registry.acquire_bounded(&manager.store, &library_id)
+    };
+    acquired.map(Some).map_err(|error| error.to_string())
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {

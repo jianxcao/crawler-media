@@ -40,7 +40,7 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Fix
         .iter()
         .any(|root| root.path == std::path::Path::new("/path/to"))
     {
-        store
+        let library = store
             .create_library(
                 domain::MediaKind::Tv,
                 "probe-stage",
@@ -49,6 +49,9 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Fix
                 true,
                 &[],
             )
+            .unwrap();
+        store
+            .set_library_intro_settings(&library.id, true, true)
             .unwrap();
     }
     store::test_support::publish_fixture_file(store, &row).unwrap();

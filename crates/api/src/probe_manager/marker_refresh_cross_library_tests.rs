@@ -6,7 +6,7 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
     std::fs::create_dir_all(&lib_b_dir).unwrap();
     {
         let store = harness.store.lock();
-        store
+        let library = store
             .create_library(
                 MediaKind::Tv,
                 "TV B",
@@ -15,6 +15,9 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
                 true,
                 &[],
             )
+            .unwrap();
+        store
+            .set_library_intro_settings(&library.id, true, true)
             .unwrap();
     }
     let mut row_b = super::super::test_support::coverage(

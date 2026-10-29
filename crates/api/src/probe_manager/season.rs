@@ -341,6 +341,43 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
         .collect();
 
     let store = pipeline.mgr.store.lock();
+    // Comparison runs without Store. Recheck the durable origin under the same
+    // writer guard as model publication; never reacquire Registry from here.
+    let origin = match store.get_probe_job(pipeline.job_id) {
+        Ok(origin) => origin,
+        Err(error) => {
+            tracing::error!(%error, job_id=pipeline.job_id, "season model origin lookup failed");
+            return;
+        }
+    };
+    if origin.as_ref().is_some_and(|job| !job.is_active()) {
+        tracing::info!(
+            job_id = pipeline.job_id,
+            "cancelled season model publication"
+        );
+        return;
+    }
+    match store.probe_job_units(pipeline.job_id) {
+        Ok(units)
+            if units
+                .iter()
+                .any(|unit| matches!(unit.status.as_str(), "cancelled" | "failed")) =>
+        {
+            tracing::info!(
+                job_id = pipeline.job_id,
+                "cancelled season model member publication"
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(%error, job_id=pipeline.job_id, "season model member lookup failed");
+            return;
+        }
+    }
+    let automatic = origin
+        .as_ref()
+        .is_some_and(|job| job.kind == "fingerprint_probe");
     if members.iter().any(|member| {
         super::ledger_id(&member.ledger_id)
             .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
@@ -348,6 +385,14 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
                 row.file.media_id != pipeline.media_id
                     || row.file.version.source_version != member.source_version
                     || crate::fingerprint_job::source::ensure_source_recorded(&store, &row).is_err()
+                    || (automatic
+                        && !store
+                            .get_library(&row.file.library_id.to_string())
+                            .ok()
+                            .flatten()
+                            .is_some_and(|library| {
+                                library.detect_intros && library.enable_fingerprint
+                            }))
             })
     }) {
         tracing::warn!(

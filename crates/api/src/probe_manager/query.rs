@@ -603,6 +603,9 @@ mod tests {
     fn seen_is_released_while_persist_waits_for_the_store_lock() {
         let dir = tempfile::tempdir().unwrap();
         let (store, row) = published_row(dir.path());
+        store
+            .set_library_intro_settings(&row.file.library_id.to_string(), true, true)
+            .unwrap();
         let ledger_id = row.file.file_id.to_string();
         let store = Arc::new(Mutex::new(store));
         let manager = Arc::new(ProbeManager::new(store.clone()));

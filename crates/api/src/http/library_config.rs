@@ -306,7 +306,30 @@ fn apply_library_settings(
     body: &Value,
 ) -> Result<crate::store::Library, Response> {
     let name = body["name"].as_str().map(str::to_string);
-    let store = state.store.lock();
+    if body.get("detect_intros").is_some() || body.get("enable_fingerprint").is_some() {
+        match state.library_work.set_optional_settings(
+            state,
+            id,
+            body["detect_intros"].as_bool(),
+            body["enable_fingerprint"].as_bool(),
+        )? {
+            Ok(()) => {}
+            Err(StoreError::Missing(_)) => return Err(missing_library()),
+            Err(error) => {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                ));
+            }
+        }
+    }
+    let store = state
+        .store
+        .try_lock_for(super::store_wait::STORE_WRITE_WAIT)
+        .ok_or_else(super::store_wait::busy_response)?;
+    state.require_writable()?;
+    state.require_write_admitted()?;
     let Some(current) = (match store.get_library(id) {
         Ok(library) => library,
         Err(error) => {
@@ -319,7 +342,7 @@ fn apply_library_settings(
     }) else {
         return Err(missing_library());
     };
-    apply_library_toggles(&store, id, body, &current)?;
+    apply_library_toggles(&store, id, body)?;
     let access = ["access_mode", "admin_visible", "member_ids"]
         .iter()
         .any(|field| body.get(*field).is_some())
@@ -366,28 +389,8 @@ fn apply_library_settings(
     }
 }
 
-/// Apply the two independent toggle groups a PATCH may carry.
-fn apply_library_toggles(
-    store: &crate::Store,
-    id: &str,
-    body: &Value,
-    current: &crate::store::Library,
-) -> Result<(), Response> {
-    if body.get("detect_intros").is_some() || body.get("enable_fingerprint").is_some() {
-        let detect = body["detect_intros"]
-            .as_bool()
-            .unwrap_or(current.detect_intros);
-        let enable_fp = body["enable_fingerprint"]
-            .as_bool()
-            .unwrap_or(current.enable_fingerprint);
-        if let Err(error) = store.set_library_intro_settings(id, detect, enable_fp) {
-            return Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            ));
-        }
-    }
+/// Apply the ordinary switches a PATCH may carry.
+fn apply_library_toggles(store: &crate::Store, id: &str, body: &Value) -> Result<(), Response> {
     let switch_fields = [
         "realtime_watch",
         "generate_thumbnails",

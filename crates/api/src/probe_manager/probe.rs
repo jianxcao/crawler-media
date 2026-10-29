@@ -88,11 +88,13 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
         return MetadataOutcome::Complete;
     }
     let library_id = unit.row.file.library_id.to_string();
-    let force = unit.force_fingerprint;
+    let explicit_refresh = unit.marker_refresh_id.is_some();
     let duration = crate::http::store_wait::store_read_handle(
         mgr.store.clone(),
         crate::http::store_wait::STORE_READ_WAIT,
-        move |store| fingerprint_duration_for_store(store, &library_id, MediaKind::Tv, force),
+        move |store| {
+            fingerprint_duration_for_store(store, &library_id, MediaKind::Tv, explicit_refresh)
+        },
     )
     .await;
     let duration = match duration {
@@ -109,11 +111,7 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
             forced = unit.force_fingerprint,
             "【声纹】媒体库未启用声纹比对或文件不属于可识别媒体库，跳过声纹生成"
         );
-        return if unit.force_fingerprint {
-            MetadataOutcome::Failed
-        } else {
-            MetadataOutcome::Complete
-        };
+        return MetadataOutcome::Complete;
     };
     MetadataOutcome::Fingerprint(FingerprintWork {
         unit: ProbeUnit {
@@ -363,24 +361,27 @@ pub(super) fn fingerprint_duration(
     mgr: &ProbeManager,
     library_id: &str,
     kind: MediaKind,
-    force_fingerprint: bool,
+    explicit_refresh: bool,
 ) -> Option<u32> {
     let store = mgr.dispatch_store()?;
-    fingerprint_duration_for_store(&store, library_id, kind, force_fingerprint)
+    fingerprint_duration_for_store(&store, library_id, kind, explicit_refresh)
 }
 
 fn fingerprint_duration_for_store(
     store: &crate::Store,
     library_id: &str,
     kind: MediaKind,
-    force_fingerprint: bool,
+    explicit_refresh: bool,
 ) -> Option<u32> {
     let configured = store
         .get_library(library_id)
         .ok()
         .flatten()
-        .is_some_and(|library| library.enable_fingerprint);
-    let enabled = kind == MediaKind::Tv && (force_fingerprint || configured);
+        .is_some_and(|library| {
+            explicit_refresh || (library.detect_intros && library.enable_fingerprint)
+        });
+    let available = store.library_accepts_work(library_id).ok().unwrap_or(false);
+    let enabled = kind == MediaKind::Tv && configured && available;
     enabled.then(|| {
         store
             .get_scrape_config()
@@ -410,6 +411,9 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
             None
         }
     };
+    let control = super::tracks::probe_control(mgr, unit, super::tracks::optional_work_kind(unit))
+        .signal()
+        .clone();
     let outcome = match crate::fingerprint_job::capture_or_reuse_fingerprints(
         &fp_path,
         &source_version,
@@ -418,6 +422,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         cached,
         allow_cache_reuse,
         fingerprint_engine,
+        &control,
     )
     .await
     {
