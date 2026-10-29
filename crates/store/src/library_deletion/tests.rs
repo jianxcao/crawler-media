@@ -100,14 +100,13 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
     assert!(store.file_coverage_by_path(&row.path).unwrap().is_none());
-    assert!(store.get_media(media.id).unwrap().is_some());
-    assert_eq!(
-        store
-            .unit_state(user, media.id, -1, -1)
-            .unwrap()
-            .expect("playback facts outlive the Library")
-            .position_ms,
-        1_000
+    assert!(
+        store.get_media(media.id).unwrap().is_none(),
+        "orphan Media is purged with the Library"
+    );
+    assert!(
+        store.unit_state(user, media.id, -1, -1).unwrap().is_none(),
+        "playback owned by the purged Media leaves with it"
     );
 }
 
@@ -142,7 +141,7 @@ fn interruption_between_databases_recovers_original_operation_and_count() {
         store.clean_library_removal(&removal.operation_id).unwrap(),
         done
     );
-    assert!(store.get_media(row.media_id).unwrap().is_some());
+    assert!(store.get_media(row.media_id).unwrap().is_none());
 }
 
 #[test]
@@ -178,7 +177,7 @@ fn changed_snapshot_identity_rejects_cleanup_before_any_row_is_removed() {
 }
 
 #[test]
-fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
+fn removal_reduces_preferred_file_summaries_and_purges_orphan_media() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (library, row) = fixture(&store, &temp.path().join("tv"));
@@ -227,16 +226,15 @@ fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
     );
     assert_eq!(summary_rows(&store, &library.id, row.media_id), (0, 0));
 
-    // Media identity and user playback facts have their own lifetimes.
-    assert!(store.get_media(row.media_id).unwrap().is_some());
-    let unit = store
-        .unit_state(user, row.media_id, 1, 1)
-        .unwrap()
-        .expect("playback facts outlive the Library");
-    assert_eq!(unit.position_ms, 120_000);
-    assert_eq!(unit.duration_ms, Some(600_000));
-    assert!(unit.favorite);
-    assert_eq!(unit.play_count, 1);
+    // Orphan Media (and the playback rows it owns) leave with the Library.
+    assert!(store.get_media(row.media_id).unwrap().is_none());
+    assert!(
+        store
+            .unit_state(user, row.media_id, 1, 1)
+            .unwrap()
+            .is_none(),
+        "playback owned by purged Media must leave with it"
+    );
 
     // A retried removal reports the same succeeded operation.
     assert_eq!(
@@ -305,4 +303,76 @@ fn large_removal_commits_bounded_batches_and_resumes() {
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
     assert_eq!(done.removed_ledger_count, 250);
+}
+
+
+#[test]
+fn library_removal_purges_orphan_media_and_owned_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let (library, row) = fixture(&store, &temp.path().join("tv"));
+    let media = row.media_id.to_string();
+    // Seed the owned rows the e2e residual scan still finds after a whole-library delete.
+    store
+        .library
+        .execute(
+            "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+             VALUES ('tmdb', 'tv', 'alias-1', ?1, 0)",
+            [&media],
+        )
+        .unwrap();
+    store
+        .library
+        .execute(
+            "INSERT INTO media_episodes (media_id, season, episode, locale, revision)
+             VALUES (?1, 1, 1, 'zh-CN', 1)",
+            [&media],
+        )
+        .unwrap();
+    store
+        .library
+        .execute(
+            "INSERT INTO media_metadata_sources (
+                media_id, entity_scope, source, locale, provider_entity_id, provider_work_id,
+                normalized_json, present_fields_json, preferences_json, selection_origins_json,
+                fetched_at, source_revision)
+             VALUES (?1, 'work', 'tmdb', 'zh-CN', '1', '1', '{}', '[]', '{}', '{}', 1, 0)",
+            [&media],
+        )
+        .unwrap();
+    store
+        .library
+        .execute(
+            "INSERT INTO probe_jobs (id, kind, media_id, scope_key, status, total, created_at_ms, finished_at_ms)
+             VALUES ('job-1', 'media_probe', ?1, ?1 || '-scope', 'succeeded', 1, 1, 2)",
+            [&media],
+        )
+        .unwrap();
+
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+    assert!(store.get_library(&library.id).unwrap().is_none());
+    assert!(
+        store.get_media(row.media_id).unwrap().is_none(),
+        "orphan Media must leave with the Library that owned its only files"
+    );
+    for (table, sql) in [
+        ("media_aliases", "SELECT COUNT(*) FROM media_aliases WHERE media_id=?1"),
+        ("media_episodes", "SELECT COUNT(*) FROM media_episodes WHERE media_id=?1"),
+        (
+            "media_metadata_sources",
+            "SELECT COUNT(*) FROM media_metadata_sources WHERE media_id=?1",
+        ),
+        ("probe_jobs", "SELECT COUNT(*) FROM probe_jobs WHERE media_id=?1"),
+    ] {
+        let count: i64 = store
+            .library
+            .query_row(sql, [&media], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} still has rows for purged media {media}");
+    }
 }

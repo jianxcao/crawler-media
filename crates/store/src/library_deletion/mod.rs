@@ -1,4 +1,8 @@
-//! Recoverable Library removal. Media and user Playback have separate lifetimes.
+//! Recoverable Library removal.
+//!
+//! Files of the Library are deleted in bounded windows. When a Media loses its
+//! last file and nothing user-curated still points at it, it is purged with the
+//! rows it owns (same rule as single-file delete). Historic logs stay.
 //!
 //! Two storage decisions matter before changing this module:
 //!
