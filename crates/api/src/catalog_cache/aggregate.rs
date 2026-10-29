@@ -230,7 +230,6 @@ fn tmdb_results(row: &CatalogCacheRow, val: &Value, map: &mut Entries, seen: &mu
                 record_key(entry, &row.cache_key, seen);
             }
         }
-        return;
     }
 }
 
@@ -275,7 +274,6 @@ fn douban(row: &CatalogCacheRow, val: &Value, map: &mut Entries, seen: &mut Seen
                 record_key(entry, &row.cache_key, seen);
             }
         }
-        return;
     }
 }
 
@@ -344,7 +342,6 @@ fn anilist(row: &CatalogCacheRow, val: &Value, map: &mut Entries, seen: &mut See
                 record_key(entry, &row.cache_key, seen);
             }
         }
-        return;
     }
 }
 
@@ -398,6 +395,5 @@ fn bangumi(row: &CatalogCacheRow, val: &Value, map: &mut Entries, seen: &mut See
                 record_key(entry, &row.cache_key, seen);
             }
         }
-        return;
     }
 }

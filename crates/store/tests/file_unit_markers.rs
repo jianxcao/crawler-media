@@ -72,7 +72,7 @@ fn checked_merge_preserves_second_unit_without_polluting_physical_chapters() {
         .merge_marker_results_checked(
             std::slice::from_ref(&coverage),
             &members,
-            &[marker.clone()],
+            std::slice::from_ref(&marker),
             false,
         )
         .unwrap();
@@ -137,7 +137,7 @@ fn television_whole_unit_does_not_claim_first_episode_marker() {
         updated_at: 0,
     };
     let updates = store
-        .merge_marker_results_checked(&[coverage], &members, &[marker.clone()], false)
+        .merge_marker_results_checked(&[coverage], &members, std::slice::from_ref(&marker), false)
         .unwrap();
     assert!(updates.is_empty());
     assert!(
@@ -298,7 +298,12 @@ fn checked_merge_rejects_coverage_changed_without_source_change() {
     };
     assert!(
         store
-            .merge_marker_results_checked(&[coverage], &members, &[marker.clone()], false)
+            .merge_marker_results_checked(
+                &[coverage],
+                &members,
+                std::slice::from_ref(&marker),
+                false
+            )
             .is_err()
     );
     assert!(
@@ -339,7 +344,7 @@ fn singleton_marker_merge_preserves_physical_chapter_cache() {
     let members = store::observe_sources(&store.source_snapshots(&[current.file.file_id]).unwrap());
     store
         .merge_marker_results_checked(
-            &[current.clone()],
+            std::slice::from_ref(&current),
             &members,
             &[StoredMediaMarker {
                 media_id: current.file.media_id,

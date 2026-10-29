@@ -322,11 +322,12 @@ async fn subscribe_read_rejects_facts_changed_during_unlocked_io() {
     .await
     .unwrap();
     let handle = state.store();
-    let store = handle
-        .try_lock_for(Duration::from_secs(1))
-        .expect("IO must not hold Store");
-    store.delete_ledger_path(path.to_str().unwrap()).unwrap();
-    drop(store);
+    {
+        let store = handle
+            .try_lock_for(Duration::from_secs(1))
+            .expect("IO must not hold Store");
+        store.delete_ledger_path(path.to_str().unwrap()).unwrap();
+    }
     gate.release();
     assert!(
         work.await.unwrap().is_err(),

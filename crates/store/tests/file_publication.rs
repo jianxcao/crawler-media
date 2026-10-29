@@ -579,7 +579,7 @@ fn deleting_all_files_cleans_item_and_orphan_media() {
         presence: FilePresence::Missing,
     };
     store
-        .apply_ledger_presence(&[obs.clone()], PresenceMode::Verify, 1500)
+        .apply_ledger_presence(std::slice::from_ref(&obs), PresenceMode::Verify, 1500)
         .unwrap();
     let mut obs = obs;
     obs.missing_at = Some(1500);

@@ -186,7 +186,7 @@ fn played_series_vm_steps(episodes: i32) -> u64 {
     let (page, stats) = store.protocol_item_page_with_stats(&query).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.items.len(), 1);
-    stats.vm_steps as u64
+    stats.vm_steps
 }
 
 #[test]

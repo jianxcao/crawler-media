@@ -131,7 +131,7 @@ pub async fn delete_catalog_cache(
         // An unknown source is a client error, not a server failure.
         match store.delete_catalog_cache(&query.source, &key) {
             Err(store::StoreError::Invalid(message)) => {
-                return Err(ApiError::invalid("catalog.invalid", message));
+                Err(ApiError::invalid("catalog.invalid", message))
             }
             other => other.map_err(ApiError::from),
         }

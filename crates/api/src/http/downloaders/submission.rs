@@ -543,10 +543,10 @@ impl SubmissionDelivery {
                 score,
             )
         {
-            if let Ok(client) = crate::delivery::client_for_id(&self.state, self.downloader_id) {
-                if let Err(error) = client.remove_owned(&self.torrent, false) {
-                    tracing::error!(%error, torrent=%self.torrent.title, "Failed to roll back untracked manual delivery");
-                }
+            if let Ok(client) = crate::delivery::client_for_id(&self.state, self.downloader_id)
+                && let Err(error) = client.remove_owned(&self.torrent, false)
+            {
+                tracing::error!(%error, torrent=%self.torrent.title, "Failed to roll back untracked manual delivery");
             }
             return Err(SubmitFailure::Response(response));
         }

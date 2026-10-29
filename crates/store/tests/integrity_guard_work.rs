@@ -4,7 +4,9 @@ use playback_event_support::*;
 use rusqlite::{Connection, params};
 use store::stats::StatsScope;
 
-fn work(history: usize) -> ((u64, u64, u64, u64), (u64, u64, u64, u64)) {
+type WorkMetrics = (u64, u64, u64, u64);
+
+fn work(history: usize) -> (WorkMetrics, WorkMetrics) {
     let (tmp, mut fixture) = seed();
     let db = Connection::open(tmp.path().join("library.db")).unwrap();
     let tx = db.unchecked_transaction().unwrap();

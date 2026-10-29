@@ -163,14 +163,13 @@ fn next_up_blocking(
     let query = next_up_query(series_id);
     let scope = {
         let store = state.store.lock();
-        let scope = match read_scope(&store, user_id, &query) {
+        match read_scope(&store, user_id, &query) {
             Ok(scope) => scope,
             Err(error) => {
                 count_candidates(state, error.rows_read);
                 return Err(error.to_string());
             }
-        };
-        scope
+        }
     };
     count_candidates(state, scope.rows_read);
     if scope.unresolved {

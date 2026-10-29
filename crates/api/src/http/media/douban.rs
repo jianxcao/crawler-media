@@ -102,7 +102,7 @@ fn douban_subject_response(id: &str, data: &Value, douban_celebrities: Option<&V
         })
         .unwrap_or_default();
 
-    return ok(json!({
+    ok(json!({
         "item": {
             "id": id,
             "title": title,
@@ -120,7 +120,7 @@ fn douban_subject_response(id: &str, data: &Value, douban_celebrities: Option<&V
         "related": [],
         "library_links": [],
     }))
-    .into_response();
+    .into_response()
 }
 
 fn empty_douban_response(id: &str) -> Response {

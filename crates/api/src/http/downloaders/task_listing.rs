@@ -95,14 +95,14 @@ fn prune_absent_pending(
             .unwrap_or(&[]);
         // Review M-1: same rule as the background reconcile, including the
         // persisted info hash (D-M3).
-        if !hashes.contains_key(&subscribe_id) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = hashes.entry(subscribe_id) {
             let rows = with_bounded_store(state.store(), |store| {
                 store
                     .load_pending_info_hashes(subscribe_id)
                     .unwrap_or_default()
             })
             .ok_or_else(busy_response)?;
-            hashes.insert(subscribe_id, rows);
+            entry.insert(rows);
         }
         let sub_hashes = &hashes[&subscribe_id];
         let hash = sub_hashes.get(&item.torrent.enclosure).map(String::as_str);

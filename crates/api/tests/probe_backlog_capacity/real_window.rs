@@ -138,20 +138,22 @@ async fn full_fingerprint_window_preserves_completed_metadata() {
         .job_id;
     let handed_off = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let store = store.lock();
-            let metadata_done =
-                store.get_probe_job(&metadata).unwrap().unwrap().status == "succeeded";
-            let fingerprint = store
-                .active_probe_unit_for_ledger(&target.file.file_id.to_string())
-                .unwrap();
-            if metadata_done
-                && fingerprint.is_some_and(|item| {
-                    item.stage == store::ProbeDispatchStage::Fingerprint && item.status == "queued"
-                })
-            {
+            let ready = {
+                let store = store.lock();
+                let metadata_done =
+                    store.get_probe_job(&metadata).unwrap().unwrap().status == "succeeded";
+                let fingerprint = store
+                    .active_probe_unit_for_ledger(&target.file.file_id.to_string())
+                    .unwrap();
+                metadata_done
+                    && fingerprint.is_some_and(|item| {
+                        item.stage == store::ProbeDispatchStage::Fingerprint
+                            && item.status == "queued"
+                    })
+            };
+            if ready {
                 break;
             }
-            drop(store);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

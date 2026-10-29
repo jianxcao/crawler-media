@@ -462,7 +462,7 @@ mod tests {
                 "{unit:?}"
             );
         }
-        assert_eq!(batch[0].as_ref().unwrap().played, true);
-        assert_eq!(batch[1].as_ref().unwrap().played, false);
+        assert!(batch[0].as_ref().unwrap().played);
+        assert!(!batch[1].as_ref().unwrap().played);
     }
 }

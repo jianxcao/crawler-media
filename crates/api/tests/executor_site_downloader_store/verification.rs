@@ -84,12 +84,11 @@ impl LoginServer {
 impl Drop for LoginServer {
     fn drop(&mut self) {
         self.release();
-        if let Some(thread) = self.thread.take() {
-            if let Err(error) = thread.join() {
-                if !std::thread::panicking() {
-                    std::panic::resume_unwind(error);
-                }
-            }
+        if let Some(thread) = self.thread.take()
+            && let Err(error) = thread.join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(error);
         }
     }
 }
