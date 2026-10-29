@@ -88,22 +88,36 @@ async fn resumed_scan_skips_checkpointed_files() {
     let first = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(first.len(), 1, "第一轮应入账 f1");
     let f1_row = first[0].file.file_id.to_string();
-    // 让 f1 的探测结束，这样“断点生效”不会被“本来就没再探测”混淆。
+    // 让 f1 的探测结束，这样“断点生效”不会被“本来就没再探测”混淆。真实探测
+    // worker 可能已经跑完了这个 1 字节文件，所以只在单元仍活跃时手动收尾。
     {
         let store = fix.state.store();
-        let job_id = store
-            .lock()
-            .active_probe_unit_for_ledger(&f1_row)
-            .unwrap()
-            .expect("f1 应有一个探测单元")
-            .job_id;
-        store
-            .lock()
-            .finish_probe_unit(&job_id, &f1_row, true, None)
-            .unwrap();
-        store.lock().finish_probe_job(&job_id, true, None).unwrap();
+        assert!(
+            store
+                .lock()
+                .probe_unit_recorded_for_ledger(&f1_row)
+                .unwrap(),
+            "f1 应已产生探测单元"
+        );
+        let active = store.lock().active_probe_unit_for_ledger(&f1_row).unwrap();
+        if let Some(unit) = active {
+            store
+                .lock()
+                .finish_probe_unit(&unit.job_id, &f1_row, true, None)
+                .unwrap();
+            store
+                .lock()
+                .finish_probe_job(&unit.job_id, true, None)
+                .unwrap();
+        }
         assert!(!fix.state.probe.is_queued(&f1_row));
     }
+    let f1_job = fix
+        .state
+        .store()
+        .lock()
+        .latest_probe_job_for_ledger(&f1_row)
+        .unwrap();
 
     // 模拟中断重启：新 operation 的第一轮已经处理并记下 f1，随后进程崩溃，
     // recover_orphaned_scans 把 running 的 operation 排回队列（断点保留）。
@@ -153,12 +167,18 @@ async fn resumed_scan_skips_checkpointed_files() {
         .file
         .file_id
         .to_string();
+    // Durable facts only: a real worker may already have finished f2's probe.
+    let store = fix.state.store();
     assert!(
-        fix.state.probe.is_queued(&f2_row),
+        store
+            .lock()
+            .probe_unit_recorded_for_ledger(&f2_row)
+            .unwrap(),
         "新增文件必须进入探测队列"
     );
-    assert!(
-        !fix.state.probe.is_queued(&f1_row),
+    assert_eq!(
+        store.lock().latest_probe_job_for_ledger(&f1_row).unwrap(),
+        f1_job,
         "断点命中的 f1 不得被重新探测"
     );
 }
@@ -341,21 +361,17 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
         guard.get_file_meta(&ledger_id).unwrap().is_none(),
         "变化文件的派生探测事实必须失效"
     );
-    // 后台义务派发器每 5s 一轮：满载下它可能已把义务派发进探测队列并 ack，
-    // 因此「义务仍挂着」或「已派发到队列」都满足 durable 合同。
+    // The durable contract: the change either re-arms the obligation or has already
+    // turned it into probe work. A real worker may finish that work at once, so the
+    // queue state is transient and cannot be asserted.
     let pending = guard
         .scan_probe_obligations(100)
         .unwrap()
         .iter()
         .any(|obligation| obligation.ledger_id.to_string() == ledger_id);
     assert!(
-        pending || fix.state.probe.is_queued(&ledger_id),
-        "变化文件必须重挂 durable probe 义务"
-    );
-    drop(guard);
-    assert!(
-        fix.state.probe.is_queued(&ledger_id),
-        "变化文件必须重新进入探测队列"
+        pending || guard.probe_unit_recorded_for_ledger(&ledger_id).unwrap(),
+        "变化文件必须重挂 durable probe 义务或已派发探测"
     );
 }
 
