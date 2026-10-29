@@ -1368,7 +1368,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
             reload();
             try {
               (window as any).__CM_RELOAD_HOME__?.();
-            } catch {}
+            } catch { /* Home reload is optional. */ }
           } catch (e: any) {
             toast.error(e?.message || "设为默认库失败");
           }
@@ -1842,7 +1842,7 @@ function LibraryActionsMenu({
                     reload();
                     try {
                       (window as any).__CM_RELOAD_HOME__?.();
-                    } catch {}
+                    } catch { /* Home reload is optional. */ }
                   } catch (e: any) {
                     toast.error(e?.message || "设为默认库失败");
                   }

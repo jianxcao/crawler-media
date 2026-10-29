@@ -10,7 +10,7 @@ async function unwrap<T>(promise: Promise<ApiEnvelope<T>>): Promise<T> {
 }
 
 /**
- * 成员 = 系统用户。列表/读写走 `/api/v1/users`（相对 `VITE_API_BASE_URL`）。
+ * 成员 = 系统用户。列表/读写走 `/api/v1/users`。
  */
 export interface MemberView {
   id: string;

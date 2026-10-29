@@ -171,7 +171,7 @@ test("updateLibraryAndWait polls the operation then re-reads the library", async
 
 test("updateLibraryAndWait returns a synchronous update without polling", async () => {
   const requests = [];
-  const api = await loadApi(async (path, init) => {
+  const api = await loadApi(async (path) => {
     requests.push(path);
     return { ok: true, data: { ...library, name: "新名字" } };
   });

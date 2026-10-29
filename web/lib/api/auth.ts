@@ -101,8 +101,8 @@ export async function logout(): Promise<null> {
 }
 
 /** 查询当前登录状态；未登录时抛 401（由 http.ts 统一跳转登录页）。 */
-export async function getSession(): Promise<SessionView> {
-  const user = await unwrap(request<ApiEnvelope<UserView>>("/auth/me"));
+export async function getSession(signal?: AbortSignal): Promise<SessionView> {
+  const user = await unwrap(request<ApiEnvelope<UserView>>("/auth/me", { signal }));
   return sessionFromUser(user);
 }
 

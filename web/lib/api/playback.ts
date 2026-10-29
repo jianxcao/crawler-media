@@ -37,7 +37,7 @@ export const DEFAULT_PLAYBACK_SCOPE: PlaybackApiScope = {
  * 后端给的是**服务器根相对路径**（`/api/v1/playback/...`，token 已在里面），
  * 与 `request()` 吃的「API 相对路径」不是一回事，不能过 `resolveRequestUrl`
  * ——那会把前缀拼两遍。默认部署（同源 + Next 反代）直接可用；只有把
- * `NEXT_PUBLIC_API_BASE_URL` 指到别的源时才需要补上源。
+ * 同源地址不需要额外补上源。
  */
 export function resolveStreamUrl(path: string): string {
   if (/^https?:\/\//.test(path)) return path;

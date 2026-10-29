@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createSessionSnapshots } from "../lib/session-snapshot.ts";
-import { shouldUsePreviewCache } from "../lib/discovery-collection-cache.ts";
 
 const readWeb = (relativePath) =>
   readFile(new URL(`../${relativePath}`, import.meta.url), "utf8");

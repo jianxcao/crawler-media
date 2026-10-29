@@ -22,6 +22,7 @@ const nodeGlobals = {
   TextEncoder: "readonly",
   Buffer: "readonly",
   queueMicrotask: "readonly",
+  setImmediate: "readonly",
 };
 
 export default tseslint.config(
@@ -53,7 +54,7 @@ export default tseslint.config(
   },
   {
     // 构建/测试脚本跑在 Node 里,声明其全局。
-    files: ["scripts/**/*.mjs", "test/**/*.mjs"],
+    files: ["scripts/**/*.mjs", "test/**/*.mjs", "lib/**/*.mjs"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
