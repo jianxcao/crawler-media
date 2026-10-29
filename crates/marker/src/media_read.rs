@@ -9,9 +9,11 @@ use crate::{ProbeTarget, WorkControl};
 const CANCELLATION_POLL: Duration = Duration::from_millis(25);
 /// Default remote reads in flight; the probe manager re-configures this from
 /// `probe.concurrency` at startup.
-pub const DEFAULT_REMOTE_READ_LIMIT: usize = 4;
+pub const DEFAULT_REMOTE_READ_LIMIT: usize = 1;
+/// STRM sources: pause between remote reads.
+pub const DEFAULT_REMOTE_READ_COOLDOWN: Duration = Duration::from_millis(500);
 static REMOTE_READS: LazyLock<MediaReadGate> =
-    LazyLock::new(|| MediaReadGate::new(DEFAULT_REMOTE_READ_LIMIT, Duration::ZERO));
+    LazyLock::new(|| MediaReadGate::new(DEFAULT_REMOTE_READ_LIMIT, DEFAULT_REMOTE_READ_COOLDOWN));
 
 /// Bounded remote reads shared by metadata, fingerprint and artwork workers:
 /// at most `limit` in flight, admitted FIFO. An optional cooldown starts when a

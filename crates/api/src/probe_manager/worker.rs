@@ -98,11 +98,15 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
 }
 
 /// Default metadata probe workers when `probe.concurrency` is unset.
-pub(crate) const DEFAULT_METADATA_WORKERS: usize = 4;
-/// Upper bound for `probe.concurrency`; protects the remote (pan-302) source.
-pub(crate) const MAX_METADATA_WORKERS: usize = 16;
+pub(crate) const DEFAULT_METADATA_WORKERS: usize = 1;
+/// Upper bound for `probe.concurrency`.
+pub(crate) const MAX_METADATA_WORKERS: usize = 8;
+/// STRM sources allow exactly one read at a time.
+pub(crate) const REMOTE_READ_LIMIT: usize = 1;
+/// Pause after each remote read before the next one is admitted.
+pub(crate) const REMOTE_READ_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// `probe.concurrency` → metadata worker count (default 4, clamped 1..=16).
+/// `probe.concurrency` → metadata worker count (default 1, clamped 1..=8).
 pub(crate) fn metadata_worker_count(setting: Option<&str>) -> usize {
     setting
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -116,19 +120,26 @@ mod concurrency_tests {
     use super::*;
 
     #[test]
-    fn probe_concurrency_defaults_higher_and_is_clamped() {
-        assert_eq!(metadata_worker_count(None), 4);
-        assert_eq!(metadata_worker_count(Some("0")), 4);
-        assert_eq!(metadata_worker_count(Some("junk")), 4);
+    fn probe_concurrency_defaults_to_one_and_is_clamped() {
+        assert_eq!(metadata_worker_count(None), 1);
+        assert_eq!(metadata_worker_count(Some("0")), 1);
+        assert_eq!(metadata_worker_count(Some("junk")), 1);
         assert_eq!(metadata_worker_count(Some(" 6 ")), 6);
-        assert_eq!(metadata_worker_count(Some("99")), 16);
+        assert_eq!(metadata_worker_count(Some("99")), 8);
+    }
+
+    /// STRM sources allow one read at a time: the gate is pinned to one
+    /// remote read with a 500ms cooldown, whatever probe.concurrency says.
+    #[test]
+    fn remote_reads_are_serial_with_a_500ms_cooldown() {
+        assert_eq!(REMOTE_READ_LIMIT, 1);
+        assert_eq!(REMOTE_READ_COOLDOWN, std::time::Duration::from_millis(500));
     }
 }
 
 fn start_workers(manager: &Arc<ProbeManager>, metadata_workers: usize) {
-    // Every metadata worker plus the fingerprint worker may hold one remote
-    // read; the gate no longer serializes them behind a fixed cooldown.
-    marker::media_read::configure_remote_reads(metadata_workers + 1, std::time::Duration::ZERO);
+    // STRM limit: one remote read at a time across all workers, 500ms apart.
+    marker::media_read::configure_remote_reads(REMOTE_READ_LIMIT, REMOTE_READ_COOLDOWN);
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
         return;
