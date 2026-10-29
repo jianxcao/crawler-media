@@ -1,0 +1,1 @@
+sqlite3 "file:/Users/jianxcao/Downloads/crawler-media/data/library.db?mode=ro" "select f.library_id,j.kind,j.status,count(distinct j.id) from probe_jobs j join library_files f on f.media_id=j.media_id group by 1,2,3" 
