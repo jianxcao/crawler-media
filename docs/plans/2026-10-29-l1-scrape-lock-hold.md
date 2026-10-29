@@ -1,12 +1,24 @@
-# L1a：缩短 Scrape 周期任务的共享 Store 锁持有时间
+# L1：读写锁分离（读走只读连接 + 写锁最小化，含 L1a Scrape 持锁）
 
 日期：2026-10-29 · 关联：[存储锁审计 L1](../audits/2026-10-28-storage-lock-review.md#l1--p1共享锁仍把读取排在扫描后面) · 2026-10-29 E2E 测试 §6（报告未入库）
 
 ## 现象
 
-E2E 中 Scrape 任务每 10 分钟扫 `tv/anime`，约 35 s 内所有库的详情请求被挡住（32–41 s，store_wait 5 s 预算耗尽返回 503）。读仍走共享 `Arc<Mutex<Store>>`（L1 未修）；本计划不做 T1/T2 的架构改造，只消除 Scrape 路径上**与目录规模或全库规模成正比的单次持锁**。
+E2E 中 Scrape 任务每 10 分钟扫 `tv/anime`，约 35 s 内所有库的详情请求被挡住（32–41 s，store_wait 5 s 预算耗尽返回 503）。读仍走共享 `Arc<Mutex<Store>>`（L1 未修）；根因是**读与写共用一把进程级 `Mutex<Store>`**：任何长写批都会把所有读排在后面。缩短某一处持锁只是治标，因此本计划做完整的读写分离（T1 + T2），L1a 作为写侧的一部分保留。
 
-## 持锁点（`crates/api/src/watch_scrape.rs`）
+## 全貌
+
+| 层 | 目标 | 做法 |
+|---|---|---|
+| T1 读侧 | 所有读端点（含详情页）永不碰共享写锁 | `Store::open_reader()`：同四个库文件的只读 `Store` 门面（`SQLITE_OPEN_READ_ONLY` + `query_only`，注册 casefold / `norm_path_key`，root alias 按文件共享）。`ApiState` 持有一个有界只读 Store 池；`store_wait::store_read` 改为从池里借只读 Store，不再锁 `state.store`。WAL 下读者看到最近已提交快照，不被写事务阻塞。误写的读路径会被 SQLite 拒绝（显式失败，不会偷偷争写锁）——这些调用点要么改成真正的写路径（`with_bounded_store`），要么去掉写。已有的 `library_reads`（library.db 读池）与 `app_reader` 保持不变。 |
+| T2 写侧 | 写锁只覆盖单行或小批，写完即放 | 扫描 / 探测 / 刮削按批（`SCRAPE_BATCH=64`）或逐文件取锁；IO 一律在锁外；见下方 L1a。 |
+| L1a | 消除 Scrape 路径上与目录 / 全库规模成正比的单次持锁 | 下表 A–D。 |
+
+验收：后台长时间 scrape/scan/probe 写入期间，详情页延迟接近空闲时（以 `store_read` 不再等写锁为结构保证，并用测试锁定：写锁被占用时读端点仍在预算内返回）。
+
+## L1a 写侧持锁点
+
+（`crates/api/src/watch_scrape.rs`）
 
 | # | 位置 | 单次持锁内的工作 | 规模 |
 |---|---|---|---|

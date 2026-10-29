@@ -102,6 +102,43 @@ impl Store {
         Ok(store)
     }
 
+    /// A read-only facade over the same four files (L1 read/write split).
+    ///
+    /// Request reads run here instead of behind the process-wide writer `Store`
+    /// lock: SQLite WAL lets them read the last committed snapshot while a scan,
+    /// probe or scrape batch holds the write lock. Every connection is opened
+    /// `SQLITE_OPEN_READ_ONLY` + `query_only`, so a read path that accidentally
+    /// writes fails loudly instead of racing the writer. Root aliases are shared per
+    /// database file ([`crate::path_key`]), so `norm_path_key` agrees with the writer.
+    pub fn open_reader(&self) -> Result<Self, StoreError> {
+        let open = |path: &Path| -> Result<Connection, StoreError> {
+            let conn = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )?;
+            conn.pragma_update(None, "query_only", "ON")?;
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            apply_reader_pragma_tuning(&conn)?;
+            register_casefold(&conn)?;
+            crate::path_key::register(&conn)?;
+            Ok(conn)
+        };
+        Ok(Self {
+            data_dir: self.data_dir.clone(),
+            root_ledger_scans: std::sync::atomic::AtomicUsize::new(0),
+            media_ledger_reads: std::sync::atomic::AtomicUsize::new(0),
+            role_lookups: std::sync::atomic::AtomicUsize::new(0),
+            app_path: self.app_path.clone(),
+            app: open(&self.app_path)?,
+            cache: open(&self.data_dir.join("cache.db"))?,
+            library: open(&self.data_dir.join("library.db"))?,
+            subscribe: open(&self.data_dir.join("subscribe.db"))?,
+        })
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
