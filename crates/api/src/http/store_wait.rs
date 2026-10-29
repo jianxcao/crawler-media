@@ -119,7 +119,45 @@ where
     F: FnOnce(&crate::Store) -> T + Send + 'static,
     T: Send + 'static,
 {
+    store_read_readers(state.store_readers.clone(), STORE_READ_WAIT, work).await
+}
+
+/// A request that **writes** on the writer `Store` (playback heartbeats, sessions,
+/// marks, settings, search history). Same budget as a read: a late heartbeat that
+/// lands is better than a 503. Pure reads must use [`store_read`], which never
+/// waits for the writer lock; a write inside `store_read` fails loudly
+/// (`attempt to write a readonly database`).
+pub(crate) async fn store_mutate<T, F>(state: &ApiState, work: F) -> Result<T, StoreCallError>
+where
+    F: FnOnce(&crate::Store) -> T + Send + 'static,
+    T: Send + 'static,
+{
     store_read_handle(state.store(), STORE_READ_WAIT, work).await
+}
+
+/// L1 read side: run `work` on a pooled read-only `Store`. It never touches the
+/// writer lock; `Busy` only means every reader stayed checked out for the budget.
+async fn store_read_readers<T, F>(
+    readers: std::sync::Arc<crate::store_readers::StoreReaders>,
+    deadline: Duration,
+    work: F,
+) -> Result<T, StoreCallError>
+where
+    F: FnOnce(&crate::Store) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let wait = deadline.saturating_sub(LOCK_SLACK);
+    let metrics = media_server::query_metrics::QueryMetrics::current()
+        .filter(media_server::query_metrics::QueryMetrics::diagnostic);
+    let task = tokio::task::spawn_blocking(move || match readers.checkout(wait) {
+        Some(reader) => Ok(observe_store_work(&reader, metrics, work)),
+        None => Err(StoreCallError::Busy),
+    });
+    match tokio::time::timeout(deadline, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(StoreCallError::Worker(error.to_string())),
+        Err(_) => Err(StoreCallError::Deadline),
+    }
 }
 
 /// A bounded off-executor mutation. Admission is rechecked after acquiring the

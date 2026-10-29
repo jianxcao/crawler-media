@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::http::store_wait::store_read;
+use crate::http::store_wait::{store_mutate, store_read};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
@@ -129,7 +129,7 @@ pub(super) async fn save_torrents_history(
     let user_id = target.user_id;
     let keyword_owned = keyword.to_string();
     let state_for_write = state.clone();
-    match store_read(state, move |store| {
+    match store_mutate(state, move |store| {
         // Admission may close while this worker waits for the Store lock.
         if !history_write_admitted(&state_for_write, &history_id) {
             return Ok(false);
@@ -188,7 +188,7 @@ pub(super) async fn save_titles_history(
     let user_id = target.user_id;
     let keyword_owned = keyword.to_string();
     let state_for_write = state.clone();
-    match store_read(state, move |store| {
+    match store_mutate(state, move |store| {
         if !history_write_admitted(&state_for_write, &history_id) {
             return Ok(false);
         }
@@ -350,7 +350,7 @@ pub(crate) async fn put_presets(
     let presets = body.get("presets").cloned().unwrap_or_else(|| json!([]));
     let key = user_setting_key("search.presets", user_id);
     let value = presets.to_string();
-    match store_read(&state, move |store| store.put_setting(&key, &value)).await {
+    match store_mutate(&state, move |store| store.put_setting(&key, &value)).await {
         Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
         Ok(Err(error)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -427,7 +427,7 @@ pub(crate) async fn delete_history_entry_route(
     Path(id): Path<String>,
 ) -> Response {
     let id_for_read = id.clone();
-    match store_read(&state, move |store| {
+    match store_mutate(&state, move |store| {
         delete_history_entry(store, user_id, &id_for_read)
     })
     .await
@@ -455,7 +455,7 @@ pub(crate) async fn clear_search_history_route(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
     let key = user_setting_key("search.history", user_id);
-    match store_read(&state, move |store| {
+    match store_mutate(&state, move |store| {
         store.delete_search_history(&key, clear_plan)
     })
     .await

@@ -89,9 +89,9 @@ impl Store {
 
         let store = Self {
             data_dir,
-            root_ledger_scans: std::sync::atomic::AtomicUsize::new(0),
-            media_ledger_reads: std::sync::atomic::AtomicUsize::new(0),
-            role_lookups: std::sync::atomic::AtomicUsize::new(0),
+            root_ledger_scans: Default::default(),
+            media_ledger_reads: Default::default(),
+            role_lookups: Default::default(),
             app_path: app_path.clone(),
             app,
             cache,
@@ -107,8 +107,8 @@ impl Store {
     /// Request reads run here instead of behind the process-wide writer `Store`
     /// lock: SQLite WAL lets them read the last committed snapshot while a scan,
     /// probe or scrape batch holds the write lock. Every connection is opened
-    /// `SQLITE_OPEN_READ_ONLY` + `query_only`, so a read path that accidentally
-    /// writes fails loudly instead of racing the writer. Root aliases are shared per
+    /// `SQLITE_OPEN_READ_ONLY` (TEMP tables stay usable), so a read path that
+    /// accidentally writes a database file fails loudly instead of racing the writer. Root aliases are shared per
     /// database file ([`crate::path_key`]), so `norm_path_key` agrees with the writer.
     pub fn open_reader(&self) -> Result<Self, StoreError> {
         let open = |path: &Path| -> Result<Connection, StoreError> {
@@ -118,7 +118,9 @@ impl Store {
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                     | rusqlite::OpenFlags::SQLITE_OPEN_URI,
             )?;
-            conn.pragma_update(None, "query_only", "ON")?;
+            // No `query_only`: it would also forbid the TEMP tables some reads build
+            // (watch aggregates). SQLITE_OPEN_READ_ONLY already rejects every write
+            // to the database files themselves.
             conn.pragma_update(None, "foreign_keys", "ON")?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             apply_reader_pragma_tuning(&conn)?;
@@ -128,9 +130,10 @@ impl Store {
         };
         Ok(Self {
             data_dir: self.data_dir.clone(),
-            root_ledger_scans: std::sync::atomic::AtomicUsize::new(0),
-            media_ledger_reads: std::sync::atomic::AtomicUsize::new(0),
-            role_lookups: std::sync::atomic::AtomicUsize::new(0),
+            // Diagnostics count the logical store, whichever connection served it.
+            root_ledger_scans: self.root_ledger_scans.clone(),
+            media_ledger_reads: self.media_ledger_reads.clone(),
+            role_lookups: self.role_lookups.clone(),
             app_path: self.app_path.clone(),
             app: open(&self.app_path)?,
             cache: open(&self.data_dir.join("cache.db"))?,

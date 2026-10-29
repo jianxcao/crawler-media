@@ -25,6 +25,8 @@ const LIBRARY_READERS: usize = 2;
 #[derive(Clone)]
 pub struct ApiState {
     pub(crate) store: Arc<Mutex<Store>>,
+    /// L1 读侧：请求读用的只读 Store 池，永不等待写锁（见 `store_readers`）。
+    pub(crate) store_readers: Arc<crate::store_readers::StoreReaders>,
     pub(crate) library_reads: Arc<store::LibraryReadPool>,
     library_read_shutdown: Arc<LibraryReadShutdown>,
     /// Bounded async admission for `library_reads` (one permit per connection).
@@ -294,6 +296,10 @@ impl ApiState {
         let data_dir = store.lock().data_dir().to_path_buf();
         // Task 27：身份读走自己的 app.db 连接，不再排在 `store` 锁后面。
         let app_reader = Arc::new(store.lock().open_app_reader()?);
+        let store_readers = Arc::new(crate::store_readers::StoreReaders::open(
+            &store.lock(),
+            crate::store_readers::STORE_READERS,
+        )?);
         // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
         // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
         let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
@@ -317,6 +323,7 @@ impl ApiState {
             )),
             library_reads,
             app_reader,
+            store_readers,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(
                 Arc::new(crate::password_login::Argon2Engine),
                 2,

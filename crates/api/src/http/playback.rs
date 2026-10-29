@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::str::FromStr;
 
-use super::store_wait::store_read;
+use super::store_wait::{store_mutate, store_read};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::store::UnitState;
@@ -296,7 +296,7 @@ pub(crate) async fn metrics(
     // `playback_clock` 是毫秒时钟；`playback_metrics.recorded_at` 存 unix 秒。
     let now = state.playback_clock.now_ms() / 1000;
     // Review L2: metric persistence is a Store write; keep it off the executor.
-    let result = store_read(&state, move |store| -> Response {
+    let result = store_mutate(&state, move |store| -> Response {
         let media_id = metric_media_id(store, user_id, &body);
         match media_id {
             Some(media_id) => {
@@ -376,7 +376,7 @@ pub(crate) async fn get_policy(State(state): State<ApiState>) -> Response {
 
 pub(crate) async fn put_policy(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
     // Review L2: a KV write; keep the executor free while it waits for the lock.
-    let result = store_read(&state, move |store| -> Response {
+    let result = store_mutate(&state, move |store| -> Response {
         let mut prefs = store
             .get_setting("playback.policy")
             .ok()
@@ -457,7 +457,7 @@ pub(crate) async fn put_ui_prefs(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Json(body): Json<Value>,
 ) -> Response {
-    let result = store_read(&state, move |store| -> Response {
+    let result = store_mutate(&state, move |store| -> Response {
         let key = ui_preferences_key(user_id);
         let raw = store.get_setting(&key).ok().flatten();
         let mut prefs = raw

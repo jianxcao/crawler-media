@@ -266,13 +266,14 @@ pub struct Store {
     data_dir: PathBuf,
     /// Times this store's `list_file_coverage` executed its unfiltered
     /// `FROM library_files f LEFT JOIN library_file_units u` statement.
-    /// Per-instance so concurrent tests never share the diagnostic.
-    pub(crate) root_ledger_scans: std::sync::atomic::AtomicUsize,
+    /// Per store family (a writer and its `open_reader` readers share it), so
+    /// concurrent tests never share the diagnostic.
+    pub(crate) root_ledger_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Calls to `file_coverage_for_media` on this store. Selection can load the
     /// same media twice; the logical candidate count does not show that read.
-    pub(crate) media_ledger_reads: std::sync::atomic::AtomicUsize,
+    pub(crate) media_ledger_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Per-store role lookup diagnostic for bounded roster work.
-    pub(crate) role_lookups: std::sync::atomic::AtomicUsize,
+    pub(crate) role_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     app_path: PathBuf,
     pub(crate) app: Connection,
     pub(crate) cache: Connection,

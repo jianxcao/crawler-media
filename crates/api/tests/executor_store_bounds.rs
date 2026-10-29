@@ -72,21 +72,21 @@ fn busy_code(body: &[u8]) -> Option<String> {
     Some(value["error"]["code"].as_str()?.to_string())
 }
 
-/// Reads may wait through a batch shorter than the five-second read budget.
+/// L1 read/write split: request reads run on read-only connections and never wait
+/// for the writer `Store` lock, however long a batch holds it (and even while a
+/// write transaction is open on library.db). The detail page is the acceptance
+/// endpoint: a missing item answers 404 at idle speed, never 503.
 #[test]
-fn playback_and_search_reads_succeed_after_a_long_store_batch() {
-    check_contended_reads(Some(Duration::from_millis(2500)), StatusCode::OK);
-}
-
-/// A batch that outlasts the budget must get 503, with the executor still free.
-#[test]
-fn playback_and_search_reads_time_out_without_blocking_the_executor() {
-    check_contended_reads(None, StatusCode::SERVICE_UNAVAILABLE);
-}
-
-fn check_contended_reads(release_after: Option<Duration>, expected: StatusCode) {
+fn reads_do_not_wait_for_the_writer_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let (state, token) = state_with_admin(tmp.path());
+    let library = state
+        .store()
+        .lock()
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .expect("default movie library")
+        .id;
     let app = router(state.clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -94,57 +94,41 @@ fn check_contended_reads(release_after: Option<Duration>, expected: StatusCode) 
         .unwrap();
 
     let held_store = state.store();
+    let library_db = tmp.path().join("data/library.db");
     let (locked, acquired) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
-        // A batch that holds the process-wide Store lock: scan / integrity work.
+        // A long scan / scrape / probe batch: writer lock + open write transaction.
         let _guard = held_store.lock();
+        let writer = rusqlite::Connection::open(library_db).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         locked.send(()).unwrap();
-        released.recv_timeout(Duration::from_secs(8)).unwrap();
+        released.recv_timeout(Duration::from_secs(20)).unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
     });
-    acquired.recv_timeout(Duration::from_secs(1)).unwrap();
+    acquired.recv_timeout(Duration::from_secs(2)).unwrap();
 
-    runtime.block_on(async move {
-        let reads = async {
-            let playback =
-                app.clone()
-                    .oneshot(request("GET", "/api/v1/playback/policy", Some(&token)));
-            let search =
-                app.clone()
-                    .oneshot(request("GET", "/api/v1/search/history", Some(&token)));
+    let detail = format!(
+        "/api/v1/libraries/{library}/items/{}",
+        domain::MediaId::new()
+    );
+    runtime.block_on(async {
+        for (uri, expected) in [
+            ("/api/v1/playback/policy", StatusCode::OK),
+            ("/api/v1/search/history", StatusCode::OK),
+            (detail.as_str(), StatusCode::NOT_FOUND),
+        ] {
             let started = Instant::now();
-            let (playback, search) = tokio::join!(playback, search);
+            let response = app.clone().oneshot(request("GET", uri, Some(&token))).await;
             let waited = started.elapsed();
+            assert_read_response(uri, response.unwrap(), expected).await;
             assert!(
-                waited < Duration::from_secs(6),
-                "reads exceeded the five-second budget plus scheduling margin: {waited:?}"
+                waited < Duration::from_millis(500),
+                "{uri} waited {waited:?} behind the writer lock"
             );
-            for (uri, response) in [
-                ("/api/v1/playback/policy", playback.unwrap()),
-                ("/api/v1/search/history", search.unwrap()),
-            ] {
-                assert_read_response(uri, response, expected).await;
-            }
-        };
-        let heartbeat = async {
-            // Check responsiveness during contention, before either request ends.
-            let started = Instant::now();
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let slept = started.elapsed();
-            assert!(
-                slept < Duration::from_millis(200),
-                "executor starved by a blocking Store lock: sleep(10ms) took {slept:?}"
-            );
-            if let Some(delay) = release_after {
-                tokio::time::sleep(delay).await;
-                release.send(()).unwrap();
-            }
-        };
-        tokio::join!(reads, heartbeat);
-        if release_after.is_none() {
-            release.send(()).unwrap();
         }
     });
+    release.send(()).unwrap();
     holder.join().unwrap();
 }
 

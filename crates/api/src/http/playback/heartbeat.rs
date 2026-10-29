@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::heartbeat_input::HeartbeatInput;
 use super::{effective_watch_state, row_for, watch_state_json};
-use crate::http::store_wait::store_read;
+use crate::http::store_wait::{store_mutate, store_read};
 use crate::http::strict_json::StrictJson;
 use crate::store::{StoreError, UNIT_WHOLE, UnitState};
 use crate::{
@@ -132,7 +132,7 @@ pub(crate) async fn progress(
     // Review L2: the position write is the second Store section; same seam.
     let ledger_id = file.file_id;
     let media_id = media.id;
-    match store_read(&state, move |store| {
+    match store_mutate(&state, move |store| {
         let heartbeat = Heartbeat {
             body: &body,
             user_id,
