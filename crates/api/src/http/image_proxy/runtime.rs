@@ -1,13 +1,13 @@
 //! Cache reads never queue behind an upstream fetch. Misses warm the cache in
-//! bounded, deduplicated background work and immediately free the HTTP connection.
-use std::collections::HashSet;
+//! bounded, deduplicated background work; fast fetches get a short response window.
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 
 use super::cache::{Image, ImageCache};
 use super::{ProxyQuery, allowed_url};
@@ -20,7 +20,7 @@ pub(super) struct ImageProxy {
     cache: Arc<ImageCache>,
     reads: crate::blocking_budget::BlockingBudget,
     gate: Arc<Semaphore>,
-    pending: Mutex<HashSet<String>>,
+    pending: Mutex<HashMap<String, watch::Sender<()>>>,
     fetch: FetchImage,
 }
 
@@ -30,7 +30,7 @@ impl ImageProxy {
             cache,
             reads: crate::blocking_budget::BlockingBudget::new(8),
             gate,
-            pending: Mutex::new(HashSet::new()),
+            pending: Mutex::new(HashMap::new()),
             fetch,
         }
     }
@@ -66,7 +66,33 @@ impl ImageProxy {
             Ok(Err(error)) => tracing::warn!(%error, "Image cache lookup failed"),
             Err(error) => tracing::error!(%error, "Image cache worker failed"),
         }
-        self.start_fetch(query.url);
+        let wait_for_fetch = self.gate.available_permits() > 0;
+        let pending = self.start_fetch(query.url.clone());
+        if wait_for_fetch
+            && let Some(mut pending) = pending
+            && tokio::time::timeout(Duration::from_millis(150), pending.changed())
+                .await
+                .is_ok()
+        {
+            let cache = self.cache.clone();
+            let url = query.url;
+            let lookup = async {
+                self.reads
+                    .reserve(Duration::from_millis(250))
+                    .await?
+                    .run(Duration::from_millis(750), move || cache.lookup(&url))
+                    .await
+            }
+            .await;
+            if let Ok(Ok(Some((kind, bytes)))) = lookup {
+                let mut response = conditional_image(&headers, bytes, &kind, false);
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=86400"),
+                );
+                return response;
+            }
+        }
         let mut response = err(
             StatusCode::SERVICE_UNAVAILABLE,
             "image.pending",
@@ -81,19 +107,21 @@ impl ImageProxy {
         response
     }
 
-    fn start_fetch(self: &Arc<Self>, url: String) {
+    fn start_fetch(self: &Arc<Self>, url: String) -> Option<watch::Receiver<()>> {
         let mut pending = self.pending.lock();
-        if pending.contains(&url) {
-            return;
+        if let Some(sender) = pending.get(&url) {
+            return Some(sender.subscribe());
         }
         // Keep admission bounded even if a page contains many cold images. The
         // semaphore queue is fair; a browser retry never has to win a race for a
         // newly free upstream slot.
         if pending.len() >= 64 {
             tracing::warn!("Image cache warmup queue full; retry on next image request");
-            return;
+            return None;
         }
-        pending.insert(url.clone());
+        // Removing the flight drops the sender and wakes all waiting requests.
+        let (sender, receiver) = watch::channel(());
+        pending.insert(url.clone(), sender);
         let proxy = self.clone();
         tokio::spawn(async move {
             let flight = Flight {
@@ -116,6 +144,7 @@ impl ImageProxy {
                 tracing::error!(%error, "Image cache warmup worker failed");
             }
         });
+        Some(receiver)
     }
 }
 

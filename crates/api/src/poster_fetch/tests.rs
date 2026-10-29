@@ -2,6 +2,32 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[test]
+fn http_poster_encodes_unicode_and_spaces_in_upstream_path() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut request = [0; 2048];
+        let length = stream.read(&mut request).unwrap();
+        let request = std::str::from_utf8(&request[..length]).unwrap();
+        assert!(
+            request.starts_with("GET /%E7%81%AB%E7%BA%BF%20poster.jpg HTTP/1.1"),
+            "{request}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nimage")
+            .unwrap();
+    });
+    let result = HttpPoster.get(&format!("http://{address}/火线 poster.jpg"));
+    assert_eq!(result.unwrap(), b"image");
+    server.join().unwrap();
+}
+
 struct PosterCatalog;
 impl crate::catalog::Catalog for PosterCatalog {
     fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {

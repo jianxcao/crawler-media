@@ -179,6 +179,33 @@ fn upstream_body_reader_enforces_limit_without_content_length() {
 }
 
 #[tokio::test]
+async fn fast_cold_fetch_is_returned_without_a_pending_response() {
+    use axum::http::{HeaderMap, StatusCode};
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let proxy = Arc::new(super::runtime::ImageProxy::new(
+        Arc::new(ImageCache::new(tmp.path().into(), 1000, 100)),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        Arc::new(|_| image(20)),
+    ));
+    let response = proxy
+        .response(
+            super::ProxyQuery {
+                url: "https://image.tmdb.org/fast-cold-fetch.jpg".into(),
+            },
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 100)
+            .await
+            .unwrap()
+            .len(),
+        20
+    );
+}
+
+#[tokio::test]
 async fn saturated_proxy_returns_unavailable_without_fetching() {
     let gate = Arc::new(tokio::sync::Semaphore::new(1));
     let _permit = gate.clone().acquire_owned().await.unwrap();

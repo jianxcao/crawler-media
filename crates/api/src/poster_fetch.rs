@@ -19,7 +19,8 @@ pub struct HttpPoster;
 
 impl PosterFetch for HttpPoster {
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
-        http_agent::call_url(url, |agent| agent.get(url).call())
+        let url = url::Url::parse(url).map_err(|error| error.to_string())?;
+        http_agent::call_url(url.as_str(), |agent| agent.get(url.as_str()).call())
             .map_err(|err| err.to_string())?
             .into_body()
             .read_to_vec()
