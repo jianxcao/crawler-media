@@ -52,7 +52,6 @@ pub mod directory;
 mod dynamic_downloader;
 pub mod fingerprint_job;
 pub mod http;
-mod store_readers;
 pub mod library_lifecycle;
 pub mod library_presence;
 /// Pure, testable reconciliation helper (depth limit 5, 100,000-entry budget,
@@ -80,6 +79,7 @@ pub mod settings_keys;
 pub mod site_maintenance;
 pub mod storage_operations;
 pub mod store;
+mod store_readers;
 pub mod theintrodb;
 pub mod ui;
 pub mod user_removal;
