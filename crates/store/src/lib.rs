@@ -55,6 +55,8 @@ pub use unidentified::UnidentifiedRow;
 mod library_covers;
 mod library_deletion;
 pub mod library_query;
+mod library_search;
+pub use library_search::{LibrarySearchHit, LibrarySearchPage};
 pub mod library_write;
 pub use library_deletion::LibraryRemoval;
 mod library_key_owner;

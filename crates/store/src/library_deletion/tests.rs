@@ -305,7 +305,6 @@ fn large_removal_commits_bounded_batches_and_resumes() {
     assert_eq!(done.removed_ledger_count, 250);
 }
 
-
 #[test]
 fn library_removal_purges_orphan_media_and_owned_rows() {
     let temp = tempfile::tempdir().unwrap();
@@ -361,13 +360,22 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
         "orphan Media must leave with the Library that owned its only files"
     );
     for (table, sql) in [
-        ("media_aliases", "SELECT COUNT(*) FROM media_aliases WHERE media_id=?1"),
-        ("media_episodes", "SELECT COUNT(*) FROM media_episodes WHERE media_id=?1"),
+        (
+            "media_aliases",
+            "SELECT COUNT(*) FROM media_aliases WHERE media_id=?1",
+        ),
+        (
+            "media_episodes",
+            "SELECT COUNT(*) FROM media_episodes WHERE media_id=?1",
+        ),
         (
             "media_metadata_sources",
             "SELECT COUNT(*) FROM media_metadata_sources WHERE media_id=?1",
         ),
-        ("probe_jobs", "SELECT COUNT(*) FROM probe_jobs WHERE media_id=?1"),
+        (
+            "probe_jobs",
+            "SELECT COUNT(*) FROM probe_jobs WHERE media_id=?1",
+        ),
     ] {
         let count: i64 = store
             .library

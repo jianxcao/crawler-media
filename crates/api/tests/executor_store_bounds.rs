@@ -331,5 +331,4 @@ fn series_detail_and_files_answer_while_the_writer_is_busy() {
     }
     release.send(()).unwrap();
     holder.join().unwrap();
-
 }

@@ -8,7 +8,10 @@
 
 | 项 | 状态 | 提交 | 验证 / 前后对比 |
 |---|---|---|---|
-| L1 / T1 / T2 | **未修复** | — | 读路径完全脱离共享 Store 锁、按库写连接调度属架构改造（prepare/validate 改用专用读连接、写者调度器），本轮未做；T4 已先消除池满即 503。 |
+| L1 / T1 / T2（读） | 部分修复 | `0aa8426d` `f7f2cd44` `3876d72c` `1c0cfdef` | 请求读走 `StoreReaders`；写走 `store_mutate`（5s）。详情/文件/`probe-status` 的 `probe_queued` 与 marker refresh 已迁到只读连接（`series_detail_and_files_answer_while_the_writer_is_busy`：持写锁+BEGIN IMMEDIATE 时 <500ms）。**残留**：prepare/validate 等仍可能碰写者；读池满时 items 仍 503（见下方「本轮只记不改」）。 |
+| 删库孤儿 Media | 已修复 | `e9dfa7ef` | 库删除每批调用与单文件删除相同的 `purge_orphan_media_in_tx`。删库后 media / aliases / metadata_sources / episodes / probe_jobs 无该 Media 残留。 |
+| 库搜索 | 已修复 | （本提交） | `/search/library-items`：SQL 搜 `search_text`+`library_protocol_people.name_key`，默认 limit 50（最大 100），`next_cursor` 键集续页；返回卡片而非每个文件。前缀不再 6.6MB；演员名可命中。 |
+| L1 / T1 / T2（架构余量） | **未完全** | — | 按库写连接调度、prepare/validate 全改专用读连接仍属后续。 |
 | L2 | 已修复 | `8b9999c6` | Probe 发布改为增量归约（仅受影响文件）；首选源子查询限定本 Media。N 次 Probe（debug，无 ANALYZE）：N=100 575.7→60.0 ms，N=400 30,782→196.7 ms，增长 53.5×→3.3×。`store` 全部测试通过。 |
 | L3 | 已修复 | `8da4cd06` | 已播放断言按主键定位（集/季/整片 UNION ALL）。Series IsPlayed 计数+分页 VM steps：E=250 2,015,920→34,919，E=1000 32,062,420→138,419，增长 15.9×→3.96×。 |
 | L4 | 已修复 | `d660ea8f` | Movie 不读覆盖；TV 用 `file_coverage_in_library(lib, Some(media), AllRecorded)`。单元测试 `scrape_coverage_tests`。 |
@@ -17,6 +20,11 @@
 | L7 | **未修复** | — | 卡片就绪状态/`has_poster` 合同需同时改扫描流程、DTO 与 Web，本轮未做。 |
 | T3 | 已覆盖 | L2/L3 | 工作量回归测试见 `crates/store/tests/storage_lock_work.rs`。 |
 | T4 | 已修复 | `3f9b4b80` | `LibraryReadGate`：异步有界等候（每连接 4 个等候位）、共用绝对 deadline、取消即出队、worker 结束才归还 permit。测试：池满时第二个读等待后 200；队列满才 503 并恢复。 |
+
+### 本轮只记不改（2026-10-29）
+
+- **前端超时（任务流 + 封面代理）**：e2e 复现页面 11–20s / 请求超时卡片，根因是前端 HTTP/1.1 连接被长请求占满。本轮不改 Web；需另开前端连接池/取消/优先级任务。
+- **读池 busy**：批量入库期间 items 等接口仍可能 503（reader 全忙）。容量与排队策略属 T4 后续，本轮不改。
 
 ## 现场证据与版本边界
 

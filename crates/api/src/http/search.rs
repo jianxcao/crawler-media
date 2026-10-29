@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::{Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -17,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::http::store_wait::{self, store_read};
-use crate::http::{err, ok, ok_list};
+use crate::http::{err, ok};
 use crate::management::ApiState;
 
 fn release_json(torrent: &Torrent) -> Value {
@@ -352,77 +353,73 @@ pub(crate) async fn search_library_items(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let keyword = query.get("keyword").cloned().unwrap_or_default();
-    // Already off-executor (search budget); the lock wait is bounded so a scan
-    // holding the Store reports "busy" instead of eating the whole budget.
-    let store_handle = state.store();
-    let res = state
-        .search_work
-        .run(fanout::SEARCH_DEADLINE, move || {
-            store_wait::with_bounded_store(store_handle, |store| {
-                let visible = crate::visible_scope::VisibleLibraries::load(&store, user_id)
-                    .unwrap_or_default();
-                let mut items = Vec::new();
-                let rows = visible.ids().into_iter().flat_map(|lib| {
-                    store
-                        .file_coverage_in_library(lib, None, store::FileReadScope::Published)
-                        .unwrap_or_default()
-                });
-                for row in rows {
-                    let Some(media) = store.get_media(row.file.media_id).ok().flatten() else {
-                        continue;
-                    };
-                    if !crate::http::library::file_visible_to_user(
-                        &store, &row.file, &media, user_id,
-                    ) {
-                        continue;
-                    }
-                    if !keyword.is_empty()
-                        && !media.title.to_lowercase().contains(&keyword.to_lowercase())
-                    {
-                        continue;
-                    }
-                    items.push(json!({
-                        "file_id": row.file.file_id.to_string(),
-                        "media_item_id": media.id.to_string(),
-                        "title": media.title,
-                        "kind": media.kind.as_str(),
-                        "path": row.file.path,
-                        "units": row.units,
-                    }));
-                }
-                items
-            })
-        })
-        .await;
-
-    match res {
-        Ok(Some(items)) => ok_list(items).into_response(),
-        Ok(None) => {
-            tracing::warn!("库内搜索未在预算内拿到 Store 锁");
-            err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "search.busy",
-                "搜索并发过载",
-            )
-        }
-        Err(error) => {
-            tracing::warn!(%error, "库内搜索未获搜索预算准入");
-            if matches!(error, crate::blocking_budget::BlockingError::Busy) {
-                err(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "search.busy",
-                    "搜索并发过载",
-                )
-            } else {
-                // 用户可见文案必须是可读中文；具体英文错误只进日志。
+    let limit = match query.get("limit").map(String::as_str) {
+        None => None,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(limit @ 1..=100) => Some(limit),
+            _ => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "search.invalid",
+                    "limit 必须在 1..=100 之间",
+                );
+            }
+        },
+    };
+    let cursor = query.get("cursor").cloned();
+    let loaded = store_wait::store_read(&state, move |store| {
+        let visible =
+            crate::visible_scope::VisibleLibraries::load(store, user_id).map_err(|error| {
+                tracing::error!(%error, "加载可见库失败");
                 err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "search.failed",
                     "搜索执行失败，请稍后重试",
                 )
-            }
-        }
-    }
+            })?;
+        let page = store
+            .search_library_items(&visible.ids(), &keyword, limit, cursor.as_deref())
+            .map_err(|error| match error {
+                crate::store::StoreError::Invalid(message) => {
+                    err(StatusCode::BAD_REQUEST, "search.invalid", &message)
+                }
+                error => {
+                    tracing::error!(%error, "库内搜索失败");
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "search.failed",
+                        "搜索执行失败，请稍后重试",
+                    )
+                }
+            })?;
+        Ok::<_, Response>(page)
+    })
+    .await;
+    let page = match loaded {
+        Ok(Ok(page)) => page,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
+    };
+    let items: Vec<Value> = page
+        .items
+        .into_iter()
+        .map(|hit| {
+            json!({
+                "library_id": hit.library_id.to_string(),
+                "media_item_id": hit.media_id.to_string(),
+                "title": hit.title,
+                "kind": hit.kind.as_str(),
+                "year": hit.year,
+                "matched_by": hit.matched_by,
+            })
+        })
+        .collect();
+    Json(json!({
+        "ok": true,
+        "data": Value::Array(items),
+        "next_cursor": page.next_cursor,
+    }))
+    .into_response()
 }
 
 mod fanout;
