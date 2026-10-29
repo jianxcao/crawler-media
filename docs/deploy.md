@@ -55,11 +55,11 @@ CRAWLER_MEDIA_DATA=/absolute/path/to/new-data cargo run -p api --bin crawler-med
 
 新目录创建当前布局；应用不导入原目录的 Library、User、Playback 或 Jobs。回退应使用原二进制与保留的原目录。此处只说明布局与启动边界，不代表查询性能目标或现有实例切换已验收。
 
-当前查询投影的原始事实、精确协议成员、边际计数和查询配置都位于 `library.db`；`library_query_config` 只存一个实例默认语言及版本。`GET/PATCH /api/v1/settings/metadata-language` 以 revision CAS 更改默认语言，并为受影响 Library 登记持久 `default_locale` 操作；单库 `display_locale` 通过 `PATCH /api/v1/libraries/{id}` 登记持久 `locale` 操作。重建期间读查询可能返回 typed 503 `library.reindexing`，客户端应轮询对应操作。失败的当前 owner 可用 `POST /api/v1/libraries/{id}/operations/{operation_id}/retry` 重试原 ID/游标。旧 `/settings/metadata` 的 `language` 字段返回 400，不兼容回读。查询性能与未跑容量/现场形状见[10-25 验收记录](benchmarks/2026-10-25-large-hit-query-read-model.md)。
+当前查询投影的原始事实、精确协议成员、边际计数和查询配置都位于 `library.db`；`library_query_config` 只存一个实例默认语言及版本。`GET/PATCH /api/v1/settings/metadata-language` 以 revision CAS 更改默认语言，并为受影响 Library 登记持久 `default_locale` 操作；单库 `display_locale` 通过 `PATCH /api/v1/libraries/{id}` 登记持久 `locale` 操作。重建期间读查询可能返回 typed 503 `library.reindexing`，客户端应轮询对应操作。失败的当前 owner 可用 `POST /api/v1/libraries/{id}/operations/{operation_id}/retry` 重试原 ID/游标。旧 `/settings/metadata` 的 `language` 字段返回 400，不兼容回读。查询性能与未跑容量/现场形状见10-25 验收记录（`git show 5e44f101:docs/benchmarks/2026-10-25-large-hit-query-read-model.md`）。
 
 干净切换还包括持久工作与凭据：已存在且无布局标记的 Jobs 数据库不会被认领为当前布局；旧扫描 scope 签名不会自动升级，旧 operation 会取消且不登记文件。非空明文/损坏管理员凭据使启动失败，即使设置新的启动密码也不隐式导入或轮换；保留原库并使用上述停机备份/干净切换流程。当前合法哈希凭据与 CLI Bearer 的安全分离检查仍保留。
 
-`cf7fb70` 曾有 Jobs 身份头与 DDL 分开提交的初始化缺口；后续改为同事务初始化，历史修复记录见[执行记录 S01](superpowers/plans/2026-10-23-storage-review-remediation.md)。Jobs 是持久队列，不能当作可删缓存；也没有自动认领旧布局的路径。
+`cf7fb70` 曾有 Jobs 身份头与 DDL 分开提交的初始化缺口；后续改为同事务初始化，历史修复记录见执行记录 S01（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。Jobs 是持久队列，不能当作可删缓存；也没有自动认领旧布局的路径。
 
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
@@ -129,15 +129,15 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
 
-维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；上轮实现见[修复记录](audits/2026-10-28-storage-remediation-verification.md)，当前锁/性能缺口与未实施方案见[共享锁复审](audits/2026-10-28-storage-lock-review.md)。这些文档不授权部署或删库。
+维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 历史复核（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`）；上轮实现见修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`），当前锁/性能缺口与未实施方案见[共享锁复审](audits/2026-10-28-storage-lock-review.md)。这些文档不授权部署或删库。
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 
 Library items/gallery/facets 与覆盖的 Jellyfin Items/Latest/Episodes 查询使用实例内两个只读连接：短 Store 锁准备授权，释放后执行单库快照，归还连接后重验原凭据、角色、ACL 与 Library roster。Latest 的全部片段属于同一次授权尝试；配置变化最多重试一次。认证前创建的 30 秒绝对预算覆盖设备凭据绑定、准入、锁等待、SQL、冷详情和最终重验。池满或预算耗尽返回 503；只读实例仍可提供合法读取，写入继续按原合同拒绝。
 
-R6 修复后，metadata/discovery/Playback 和 Jellyfin/Emby 的 mutation 统一经过实例只读与维护门禁，受保护的 ledger 删除拒绝且保留数据库事实和视频字节；安全读与显式只读预览保持可用。[当前复审 R6](audits/2026-10-28-storage-main-rereview.md#r6metadata-路由绕过写门禁)记录公开 HTTP 回归。门禁是准入检查，不能代替停写、等待在途 worker 完成及关闭连接。
+R6 修复后，metadata/discovery/Playback 和 Jellyfin/Emby 的 mutation 统一经过实例只读与维护门禁，受保护的 ledger 删除拒绝且保留数据库事实和视频字节；安全读与显式只读预览保持可用。当前复审 R6（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）记录公开 HTTP 回归。门禁是准入检查，不能代替停写、等待在途 worker 完成及关闭连接。
 
-HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 [Library 读取隔离记录](benchmarks/2026-10-25-library-read-isolation.md)。读池减少查询执行期间的 Store 锁占用，不承诺消除认证/准备/重验与 writer 的锁争用，也不提升单条 SQL 自身速度。
+HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 Library 读取隔离记录（`git show 5e44f101:docs/benchmarks/2026-10-25-library-read-isolation.md`）。读池减少查询执行期间的 Store 锁占用，不承诺消除认证/准备/重验与 writer 的锁争用，也不提升单条 SQL 自身速度。
 
 
 ### Obscura 受管浏览器补充（r9）

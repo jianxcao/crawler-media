@@ -1,6 +1,6 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
-> 当前锁/查询/归约缺口见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。[上轮修复记录](../audits/2026-10-28-storage-remediation-verification.md)仅负责当时范围；历史审查保留固定版本反例。
+> 当前锁/查询/归约缺口见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。上轮修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）仅负责当时范围；历史审查保留固定版本反例。
 
 [返回数据库总览](README.md)
 
@@ -18,7 +18,7 @@
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
 - 根迁移每窗口≤100文件/Unidentified 候选，持久游标、公平轮转和状态可查询；API driver 批间放锁并在解冻后自动继续。关联 NFO 与文件同批迁移。Unidentified 的索引 seek 不重扫游标前记录。
-- 当前修复验收与前轮对账见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。[10-24 复审](../audits/2026-10-24-storage-rereview.md)和[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)保留历史版本证据。
+- 当前修复验收与前轮对账见再次复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。10-24 复审（`git show 5e44f101:docs/audits/2026-10-24-storage-rereview.md`）和执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）保留历史版本证据。
 
 ## 字段阅读规则
 
@@ -55,7 +55,7 @@
 - [library_operations](#library_operations) — 11 字段；roots/locale/default_locale/integrity/scrape 持久操作载体。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
 - [library_removals](#library_removals) — 11 个字段
-- [library_roots](#library_roots) — 6字段；path_key 唯一；根替换使用持久重配置，新增嵌套根队列有恢复驱动；当轮实现见[执行记录 S02](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+- [library_roots](#library_roots) — 6字段；path_key 唯一；根替换使用持久重配置，新增嵌套根队列有恢复驱动；当轮实现见执行记录 S02（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。
 - [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
 - [media_aliases](#media_aliases) — 5 字段；来源别名归属及每来源唯一刷新目标；不把来源 ID 当内部身份。
@@ -70,7 +70,7 @@
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议。旧无绑定 progress 换源反例的后续修复见[执行记录 S04](../superpowers/plans/2026-10-23-storage-review-remediation.md)，分集已按请求单元/必要祖先分窗读取，同一快照内归约；公开 Store 工作量及尚未汇总的完整 HTTP 指标见[当前复审](../audits/2026-10-28-storage-main-rereview.md#查询性能与真正未完成的优化)。清历史清完整resume与断言、favorite保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议。旧无绑定 progress 换源反例的后续修复见执行记录 S04（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`），分集已按请求单元/必要祖先分窗读取，同一快照内归约；公开 Store 工作量及尚未汇总的完整 HTTP 指标见当前复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。清历史清完整resume与断言、favorite保留。
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -731,7 +731,7 @@ CREATE TABLE library_query_counts (
 
 ## library_metadata_inputs
 
-Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验、路径独占与执行 lease；不可重放失败退出和重启恢复已修，见[修复对账](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)，不继续沿用旧 A12/R2 缺陷状态。
+Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验、路径独占与执行 lease；不可重放失败退出和重启恢复已修，见修复对账（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`），不继续沿用旧 A12/R2 缺陷状态。
 
 **写入方与生命周期（2026-10-24补修）**
 

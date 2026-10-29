@@ -80,7 +80,7 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 
 ## 维护任务（2026-10-20 源码状态）
 
-当前注册 `database_maintenance`、`jobs_retention`、`playback_history_retention`、`data_retention` 四类；默认只开启前两类，保留参数仅在 `job_defs.payload`（`crates/api/src/maintenance/mod.rs`）。schema version 不是配置并发 revision。2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 和 [DB8 合同](<../superpowers/plans/2026-10-12-db8-maintenance-retention.md>) 保留为历史发现/要求，不代表所有发现今天仍存在或已重新验收。
+当前注册 `database_maintenance`、`jobs_retention`、`playback_history_retention`、`data_retention` 四类；默认只开启前两类，保留参数仅在 `job_defs.payload`（`crates/api/src/maintenance/mod.rs`）。schema version 不是配置并发 revision。2026-10-13 的 总复核（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`） 和 DB8 合同（`git show 5e44f101:docs/superpowers/plans/2026-10-12-db8-maintenance-retention.md`） 保留为历史发现/要求，不代表所有发现今天仍存在或已重新验收。
 
 当前 runner 在批/库边界检查禁用、取消、停机；配置 CAS 已同事务保存 payload/可选周期并刷新 queued payload，running 保持快照。令牌仍仅覆盖 payload，不能检测仅改周期冲突。Jobs 预览与实跑走含保护行的原始 keyset 窗口，预览经 blocking budget 执行；批间 2 秒预算不是 SQL 硬执行上限。开发 `/jobs/tick` 跳过维护并将已 claim 的维护无惩罚放回 queued，不再取消它们。依据 `maintenance/runner.rs`、`http/job_maintenance.rs`、`jobs/src/store.rs`、`job_loop.rs`；代码存在不等于本次执行过这些回归。
 

@@ -26,3 +26,4 @@ web/tsconfig.tsbuildinfo
 *.db-journal
 *.db-wal
 *.db-shm
+docs/test-reports/

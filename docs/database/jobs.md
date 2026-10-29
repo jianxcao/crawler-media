@@ -2,11 +2,11 @@
 
 [返回数据库总览](README.md)
 
-结构核对记录：2026-10-24 修复工作树；当轮回归结果见[历史执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，现行存储问题见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不再定义 Jobs 布局，也不依赖 Jobs 生产代码。
+结构核对记录：2026-10-24 修复工作树；当轮回归结果见历史执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`），现行存储问题见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不再定义 Jobs 布局，也不依赖 Jobs 生产代码。
 
 共 **4 张业务表、29 字段、9 个显式命名索引、6 触发器**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。当前文件重开只校验，已填充的无头文件、旧/未知/未来布局或当前头却缺失/错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外旧索引也拒绝；未维护第二份表/索引清单。
 
-Queue 连接明确设置 WAL、busy_timeout、FK 和 synchronous=FULL，并与 Store 四个库共用同一套连接调优（`cache_size=-16384`、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`，打开时 `PRAGMA optimize=0x10002`、关闭时 `PRAGMA optimize`）；建库路径同样在切 WAL 之前设 `auto_vacuum=INCREMENTAL`，因此维护任务可以对该库跑 `PRAGMA incremental_vacuum`。Jobs 是持久执行事实，拒绝时提示先备份；启动不会删除队列。初始化各阶段故障、独立 Queue→ApiState 重开、损坏布局零写拒绝已有回归，详见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+Queue 连接明确设置 WAL、busy_timeout、FK 和 synchronous=FULL，并与 Store 四个库共用同一套连接调优（`cache_size=-16384`、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`，打开时 `PRAGMA optimize=0x10002`、关闭时 `PRAGMA optimize`）；建库路径同样在切 WAL 之前设 `auto_vacuum=INCREMENTAL`，因此维护任务可以对该库跑 `PRAGMA incremental_vacuum`。Jobs 是持久执行事实，拒绝时提示先备份；启动不会删除队列。初始化各阶段故障、独立 Queue→ApiState 重开、损坏布局零写拒绝已有回归，详见执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。
 
 本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 

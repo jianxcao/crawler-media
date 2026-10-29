@@ -42,7 +42,7 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
 ## 播放会话代际与 PlaySessionId 目标（2026-10-13 Batch 2）
 
-2026-10-23（8fbf81b）历史边界：普通Items/PersonIds使用持久协议查询与写入期候选索引，Web/Jellyfin显式事件共用Store::commit_playback_event。此前R06–R13/R23/R24反例保留在[1845dab历史审查](../audits/2026-10-22-storage-repair-review.md)，后续实现见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，现行问题见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。完整设备验收仍需另行证明。
+2026-10-23（8fbf81b）历史边界：普通Items/PersonIds使用持久协议查询与写入期候选索引，Web/Jellyfin显式事件共用Store::commit_playback_event。此前R06–R13/R23/R24反例保留在1845dab历史审查（`git show 5e44f101:docs/audits/2026-10-22-storage-repair-review.md`），后续实现见执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`），现行问题见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。完整设备验收仍需另行证明。
 
 PlaybackInfo签发持久PlaySessionId，取流使用版本化来源和User/Device/逻辑Media-unit/Library配置绑定。不要恢复历史裸file_id取流或忽略会话绑定；协议参数与真实客户端验收以当前handler/集成回归为准。
 

@@ -8,4 +8,4 @@ v1 需要五种 **Metadata source**，包括没有 TMDB id 的作品。把 TMDB 
 
 ## 历史落地边界（2026-10-23，8fbf81b）
 
-当时身份编辑保留多别名、显式文件改挂保留原始Playback事实、元数据写屏障、强类型merge冻结计划与管理/恢复入口已落地。历史合并反例见[固定版本审查](../audits/2026-10-22-storage-repair-review.md)，后续对账见[8fbf81b 复审](../audits/2026-10-23-storage-followup-review.md)及[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。现行存储问题见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)，不添加旧模型兼容层。
+当时身份编辑保留多别名、显式文件改挂保留原始Playback事实、元数据写屏障、强类型merge冻结计划与管理/恢复入口已落地。历史合并反例见固定版本审查（`git show 5e44f101:docs/audits/2026-10-22-storage-repair-review.md`），后续对账见8fbf81b 复审（`git show 5e44f101:docs/audits/2026-10-23-storage-followup-review.md`）及执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。现行存储问题见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`），不添加旧模型兼容层。

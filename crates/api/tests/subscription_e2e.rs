@@ -1,4 +1,4 @@
-//! End-to-end subscription/download flow tests (see docs/subscription-fix-plan.md).
+//! End-to-end subscription/download flow tests (see git show 5e44f101:docs/subscription-fix-plan.md).
 //! Run: `cargo test -p api --test subscription_e2e`
 #![allow(dead_code)]
 

@@ -7,11 +7,11 @@
 > - 领域词汇：`CONTEXT.md`
 >
 > 本文只锁定信封、认证、核心 DTO 形状，以及「明确不做」的产品边界。
-> 阶段进度见 `docs/agents/roadmap.md`，那是历史档案，不是接口规范。
+> 阶段进度见 `git show 5e44f101:docs/agents/roadmap.md`，那是历史档案，不是接口规范。
 
 本实例的管理面是**自有 REST**。不做上游 MoviePilot / MovieClaw 的信封、DTO 字段名或数字哈希 ID。Jellyfin/Emby 播放协议（Infuse 直连）是另一套表面，见 ADR-0005，不是「上游兼容层」。
 
-当前实现的锁/性能和旧输入缺口见[共享锁复审与未实施方案](../audits/2026-10-28-storage-lock-review.md)。上轮已删除三个旧 Filter kind 及旧根合并路由，结果见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)；仍接受旧 title_ref 是待修缺陷，不是兼容合同。
+当前实现的锁/性能和旧输入缺口见[共享锁复审与未实施方案](../audits/2026-10-28-storage-lock-review.md)。上轮已删除三个旧 Filter kind 及旧根合并路由，结果见修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）；仍接受旧 title_ref 是待修缺陷，不是兼容合同。
 
 ## 通用约定
 
@@ -87,7 +87,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 `POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
 
-R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的变更统一经过实例只读/维护写门禁（409 `instance.read_only` / 503 `runtime.busy` + Retry-After）。Playback 同事务拒绝 merging/retired 身份：self mark 为 409 `playback.protected`，错误信息包含可用 survivor；Jellyfin 可见的冻结项为 409，已退役且不可见项为 404。不重定向旧 ID；已签发的迟到事件仍为 IgnoredStale。门禁只控制新准入，不取消或排空已准入 worker。回归与恢复证据见[复审 R6/R7](../audits/2026-10-28-storage-main-rereview.md#r6r9-修复实现)。
+R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的变更统一经过实例只读/维护写门禁（409 `instance.read_only` / 503 `runtime.busy` + Retry-After）。Playback 同事务拒绝 merging/retired 身份：self mark 为 409 `playback.protected`，错误信息包含可用 survivor；Jellyfin 可见的冻结项为 409，已退役且不可见项为 404。不重定向旧 ID；已签发的迟到事件仍为 IgnoredStale。门禁只控制新准入，不取消或排空已准入 worker。回归与恢复证据见复审 R6/R7（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。
 
 ### 浏览列表分页：cursor，没有 offset
 
@@ -110,7 +110,7 @@ R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的
   伪造下一页）。`total` **只在第一页**（不带 `cursor` 的那一页）给出，续页为 `null`——
   续页不再跑 `COUNT`；`gallery` 恒为 `null`（图组先剔除无图条目再分页，总数口径不同）。
 - 游标是服务端签发的不透明 JSON，客户端不得解析或构造；非 JSON / 空串游标 **400**
-  `library.invalid`。当前唯一格式校验版本、Library/User/筛选/排序/方向作用域及排序键类型；不匹配或缺少版本/scope 返回 400，不解码旧无 scope 格式。客户端必须在这些条件改变后从首页重来；item-index 签发的桶游标可用于同作用域列表。修复对账见[当前复审](../audits/2026-10-28-storage-main-rereview.md#上轮修复逐项对账)。
+  `library.invalid`。当前唯一格式校验版本、Library/User/筛选/排序/方向作用域及排序键类型；不匹配或缺少版本/scope 返回 400，不解码旧无 scope 格式。客户端必须在这些条件改变后从首页重来；item-index 签发的桶游标可用于同作用域列表。修复对账见当前复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。
 - 前端只有一个实现：`web/lib/api/libraries.ts` 的 `buildBrowseQuery`，
   它**绝不**写 `offset`（`web/test/library-paging.test.mjs` 锁死）。海报墙是**前缀模型**：
   从第 0 条起连续加载，追加用 `next_cursor`；A-Z 跳转/「回到上次位置」使用下节
@@ -172,7 +172,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 `{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
-- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite|seen`，`seen` 为存在真实观看证据的首页语义；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。旧 watch 值 `watched/unplayed/unseen` 返回 400；排序只使用当前 sort + 独立 order，`release_date_asc` 及其他未知 sort 返回 400，见[复审 R9](../audits/2026-10-28-storage-main-rereview.md#r9无兼容切换尚有旧值转换)。不能把 UI 预设档位当作 handler 全部接受范围（`crates/api/src/http/library/query.rs`）。
+- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite|seen`，`seen` 为存在真实观看证据的首页语义；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。旧 watch 值 `watched/unplayed/unseen` 返回 400；排序只使用当前 sort + 独立 order，`release_date_asc` 及其他未知 sort 返回 400，见复审 R9（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。不能把 UI 预设档位当作 handler 全部接受范围（`crates/api/src/http/library/query.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 
@@ -216,7 +216,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
 - 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
-- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [复审与剩余方案](../audits/2026-10-28-storage-head-review.md)。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 复审与剩余方案（`git show 5e44f101:docs/audits/2026-10-28-storage-head-review.md`）。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 
@@ -236,7 +236,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 当前 runner 在批/库边界检查 def 禁用、取消、停机与读取失败，停止后不启动下一批；已开始的一批不因此回滚，已删除数据也不恢复。SSE `/jobs/stream` 的 `count` 可因清理**下降**，不能用作单调递增序列；变更通知另有 revision（`jobs/src/change_state.rs`）。
 
-2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
+2026-10-13 的 总复核（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`） 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
 
 ## 当前存储切换边界（2026-10-28核对）
 
@@ -248,7 +248,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 **Playback 事件：** 自有 `POST /playback/progress` 必须提交签发的 play_session_id、非负 event_sequence、device_id 和 start/progress/stop event；缺失、空白、伪造或跨用户/设备绑定 400 且不写播放事实。签发绑定固定 target/file/revision/source/config/generation；已签发但过期事件按 IgnoredStale 合同处理，不能补当前源身份。`POST /playback/sessions` 签发失败返回500；成功回执的 play_session_id 必填，流地址仅由签发绑定生成，保留合法STRM直接URL。Web 显式签发后上报，Jellyfin adapter 按协议建立绑定后复用 Store 提交。
 
-**Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 仅从当前 downloaders 行及明确支持的环境覆盖选择，旧 settings JSON 不再读取。修复前反例保留于[固定版本复审](../audits/2026-10-24-storage-rereview.md)，当前验证见[再次复审](../audits/2026-10-28-storage-main-rereview.md)。
+**Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 仅从当前 downloaders 行及明确支持的环境覆盖选择，旧 settings JSON 不再读取。修复前反例保留于固定版本复审（`git show 5e44f101:docs/audits/2026-10-24-storage-rereview.md`），当前验证见再次复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。
 
 **Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。本轮已核对实际Web调用者和create严格拒旧，原F01生产问题关闭；Rust共享fixture已使用当前字段；不恢复旧inline filter兼容。
 
@@ -256,7 +256,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 成功信封只使用 `{ok:true,data}`。实际Web HTTP、catalog/health及消费data回执的组件已切换；旧success、裸数组/对象与缺data被拒。明确204无body单独处理，保留合法业务空值。
 
-普通协议分页使用写入期 genre/person 精确成员、分类计数与页内选源。精确 total 与 offset 的新模型预算及实测状态见[2026-10-25 验收记录](../benchmarks/2026-10-25-large-hit-query-read-model.md)；旧实现的增长曲线保留在[历史性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)和[2026-10-24 测量](../benchmarks/2026-10-24-storage-query-rereview.md)。
+普通协议分页使用写入期 genre/person 精确成员、分类计数与页内选源。精确 total 与 offset 的新模型预算及实测状态见2026-10-25 验收记录（`git show 5e44f101:docs/benchmarks/2026-10-25-large-hit-query-read-model.md`）；旧实现的增长曲线保留在历史性能报告（`git show 5e44f101:docs/benchmarks/2026-10-23-storage-redesign-report.md`）和2026-10-24 测量（`git show 5e44f101:docs/benchmarks/2026-10-24-storage-query-rereview.md`）。
 
 ## 现行表面（去哪看）
 

@@ -8,7 +8,7 @@
 
 ## 职责与来源
 
-只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前协议分页读取持久采用元数据及输入，旧请求时NFO/catalog缺陷不能直接照搬为现状。清cache的完整现场验收与边界见[当前复核](../audits/2026-10-24-storage-rereview.md)。
+只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前协议分页读取持久采用元数据及输入，旧请求时NFO/catalog缺陷不能直接照搬为现状。清cache的完整现场验收与边界见当前复核（`git show 5e44f101:docs/audits/2026-10-24-storage-rereview.md`）。
 
 来源是固定 [CacheSource](../../crates/media/src/response_cache/source.rs) 白名单，不是用户提供的 SQL 表名；表内没有 `source` 列。
 
@@ -51,4 +51,4 @@
 - `CatalogCache::put` 默认 TTL **604800 秒（7天）**；底层 put 可显式传 expires_at 或 NULL，DDL 不指定 TTL。
 - `get_fresh` 在 `expires_at <= now` 时视为过期；`get_stale` 忽略期限。刷新成功解码后才替换持久响应；失败仅可使用可解码的 stale 值。
 - 底层 `get/list/details_for_prefixes` 不过滤 TTL，命中不等于 fresh。列表按 `fetched_at DESC, entry_id ASC`。
-- 来源聚合游标必须携带来源及表内 ID，不能只用 entry_id。清理预算/详情保护仍按[来源缓存合同](../superpowers/specs/2026-10-18-source-separated-cache.md)，不是到期自动删除。
+- 来源聚合游标必须携带来源及表内 ID，不能只用 entry_id。清理预算/详情保护仍按来源缓存合同（`git show 5e44f101:docs/superpowers/specs/2026-10-18-source-separated-cache.md`），不是到期自动删除。

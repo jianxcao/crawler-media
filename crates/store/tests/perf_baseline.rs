@@ -1,4 +1,4 @@
-//! Task 17 of `docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`:
+//! Task 17 of `git show d7fd28a2^:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`:
 //! the performance baseline and the deterministic regression gate.
 //!
 //! `"no performance regression"` is only a claim until something measures it. This binary

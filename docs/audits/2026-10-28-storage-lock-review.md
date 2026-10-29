@@ -178,7 +178,7 @@ flowchart LR
 
 ## 已关闭的旧发现与本轮验证
 
-`7e3bd653` 已 offload 详情等 Store 调用，重复文件观察已离锁且不再逐文件重读覆盖，文件页 coverage 已按页 seek，Series scalar 已按三坐标 seek，图片发现已移锁外，旧 Filter kind/旧根合并路由已删除，删除/模型身份屏障与唯一 DDL 校验已有修复。保留[上轮修复记录](2026-10-28-storage-remediation-verification.md)的固定范围结果，不重复列为待办。L3 是筛选谓词的另一条 SQL，不能用 scalar 通过证明它通过。
+`7e3bd653` 已 offload 详情等 Store 调用，重复文件观察已离锁且不再逐文件重读覆盖，文件页 coverage 已按页 seek，Series scalar 已按三坐标 seek，图片发现已移锁外，旧 Filter kind/旧根合并路由已删除，删除/模型身份屏障与唯一 DDL 校验已有修复。保留上轮修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）的固定范围结果，不重复列为待办。L3 是筛选谓词的另一条 SQL，不能用 scalar 通过证明它通过。
 
 本轮 `7e3bd653` 的 `cargo test --workspace --no-fail-fast` 退出 0，输出汇总 **3314 passed / 0 failed / 24 ignored**（494 个 suite 结果，含子进程与 doc-tests）。Web 定向 `node --test test/library-operations.test.mjs test/library-file-pagination.test.mjs test/discover-reference.test.mjs` **45 passed / 0 failed**。完整日志分别在 `/tmp/crawler-media-review-7e3bd653-workspace.log`、`/tmp/storage-review-web-targeted-7e3bd653.log`；关键新探针的源码/结果已随文档持久保存，不依赖临时目录取回。
 

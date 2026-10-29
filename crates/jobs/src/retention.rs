@@ -1,6 +1,6 @@
 //! 终止态 Jobs 历史的按龄分批保留（DB8 Task 2）。
 //!
-//! 规则见 `docs/superpowers/plans/2026-10-12-db8-maintenance-retention.md` 第 3.3 / 5.1 节：
+//! 规则见 `git show 5e44f101:docs/superpowers/plans/2026-10-12-db8-maintenance-retention.md` 第 3.3 / 5.1 节：
 //!
 //! - 只有 `succeeded / failed / cancelled` 且 `finished_at IS NOT NULL AND finished_at < cutoff`
 //!   才是候选；`finished_at` 为 NULL 或等于 `cutoff` 一律保留。

@@ -24,7 +24,7 @@ Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、
 
 文件显式持有 `library_id/root_id/path_key`，归属在写入时确定并重验当前最深根，普通读消费登记事实。原始 Playback 单元与物理源绑定恢复包区分；文件版本 CAS 阻止旧工作发布。冷轨道/章节不复制到完整浏览投影；卡片、协议 genre/person 成员、静态分类边际计数与稀疏用户摘要是必要冗余，写路径负责同事务差量维护，Integrity 操作负责从原始事实修复。
 
-同库提高原子性，但单写者和外层 Store Mutex 仍会争用；SQL 分批 COMMIT 不自动释放 Mutex。磁盘/网络观察须锁外进行，根迁移、删除与修复需要持久游标、公平调度和有界窗口。精确 count、已筛选 facets、genre 大命中和深 offset 不承诺常量成本；当前验收记录见[10-25 报告](../benchmarks/2026-10-25-large-hit-query-read-model.md)，旧实现数据保留于[10-24 报告](../benchmarks/2026-10-24-storage-query-rereview.md)。
+同库提高原子性，但单写者和外层 Store Mutex 仍会争用；SQL 分批 COMMIT 不自动释放 Mutex。磁盘/网络观察须锁外进行，根迁移、删除与修复需要持久游标、公平调度和有界窗口。精确 count、已筛选 facets、genre 大命中和深 offset 不承诺常量成本；当前验收记录见10-25 报告（`git show 5e44f101:docs/benchmarks/2026-10-25-large-hit-query-read-model.md`），旧实现数据保留于10-24 报告（`git show 5e44f101:docs/benchmarks/2026-10-24-storage-query-rereview.md`）。
 
 ## 初始化与连接
 
@@ -50,7 +50,7 @@ Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务�
 
 Store Mutex 和 reader lease 不同时持有；writer 不等待读池。认证前的 30 秒预算贯穿所有阶段，busy 不超过剩余预算与 5000ms 较小值，progress 每 1000 VM 检查取消/截止。超时不提前归还 lease/permit，实际 worker 清理后才释放；物理 IO 不承诺即时中止。关闭或确认身份/布局变化后拒绝新租用并排空，保留只读实例现有读写合同。
 
-普通读不安装 SQL trace；诊断观察复用真实 sqlite3_stmt 状态，并按连接和请求归属，覆盖初始布局、BEGIN、roster、选页/水合、ROLLBACK、末次布局。连接池改善锁边界，单条 SQL 继续受原[查询预算](../superpowers/specs/2026-10-25-large-hit-query-read-model.md#91-设计目标不是已测结果)约束。实测、WAL/取消边界及未跑现场项见[隔离记录](../benchmarks/2026-10-25-library-read-isolation.md)。
+普通读不安装 SQL trace；诊断观察复用真实 sqlite3_stmt 状态，并按连接和请求归属，覆盖初始布局、BEGIN、roster、选页/水合、ROLLBACK、末次布局。连接池改善锁边界，单条 SQL 继续受原查询预算（`git show 5e44f101:docs/superpowers/specs/2026-10-25-large-hit-query-read-model.md`）约束。实测、WAL/取消边界及未跑现场项见隔离记录（`git show 5e44f101:docs/benchmarks/2026-10-25-library-read-isolation.md`）。
 
 ## 运维边界
 

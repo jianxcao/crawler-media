@@ -1,6 +1,6 @@
 # 性能基线 + 确定性回归门禁（Task 17）
 
-> 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
+> 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。
 
 日期：2026-10-26。分支：`feat/storage-redesign`。任务：计划
 `2026-10-26-storage-redesign-review-fixes.md`（历史原文：`git show 5730b032:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`） 的 Task 17。
