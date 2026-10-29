@@ -127,3 +127,74 @@ fn read_budget_covers_a_long_batch_and_write_budget_stays_short() {
         "写预算必须短于读预算，否则两个入口就没有区分的理由"
     );
 }
+
+#[tokio::test]
+async fn cancelled_read_does_not_run_after_waiting_for_a_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = store(tmp.path());
+    let readers = Arc::new(crate::store_readers::StoreReaders::open(&handle.lock(), 1).unwrap());
+    let held = readers.checkout(Duration::ZERO).unwrap();
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = ran.clone();
+    let pool = readers.clone();
+    let waiting = tokio::spawn(super::store_read_readers(
+        pool,
+        Duration::from_secs(1),
+        move |_| observed.store(true, std::sync::atomic::Ordering::SeqCst),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "a cancelled waiter must leave the queue without taking a connection"
+    );
+}
+
+#[tokio::test]
+async fn pooled_read_waits_for_return_then_reads_without_the_writer_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let writer = store(tmp.path());
+    let readers = Arc::new(crate::store_readers::StoreReaders::open(&writer.lock(), 1).unwrap());
+    let held = readers.checkout(Duration::ZERO).unwrap();
+    let queued = tokio::spawn(super::store_read_readers(
+        readers,
+        Duration::from_secs(1),
+        |store| store.list_libraries(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !queued.is_finished(),
+        "a normal read must wait for a reader"
+    );
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _writer = writer.lock();
+        locked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+    locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(held);
+    let outcome = queued.await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let libraries = outcome.unwrap().unwrap().unwrap();
+    assert!(!libraries.is_empty());
+}
+
+#[tokio::test]
+async fn pool_wait_expires_with_busy_within_the_request_deadline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let writer = store(tmp.path());
+    let readers = Arc::new(crate::store_readers::StoreReaders::open(&writer.lock(), 1).unwrap());
+    let _held = readers.checkout(Duration::ZERO).unwrap();
+    let deadline = Duration::from_millis(100);
+    let started = Instant::now();
+    let outcome: Result<(), _> =
+        super::store_read_readers(readers, deadline, |_| panic!("pool remains full")).await;
+    assert!(matches!(outcome, Err(StoreCallError::Busy)));
+    assert!(started.elapsed() < Duration::from_millis(500));
+}

@@ -149,14 +149,30 @@ where
     let wait = deadline.saturating_sub(LOCK_SLACK);
     let metrics = media_server::query_metrics::QueryMetrics::current()
         .filter(media_server::query_metrics::QueryMetrics::diagnostic);
-    let task = tokio::task::spawn_blocking(move || match readers.checkout(wait) {
-        Some(reader) => Ok(observe_store_work(&reader, metrics, work)),
-        None => Err(StoreCallError::Busy),
-    });
-    match tokio::time::timeout(deadline, task).await {
-        Ok(Ok(result)) => result,
+    let started = std::time::Instant::now();
+    let Some(reader) = readers.checkout_async(wait).await else {
+        tracing::warn!(
+            wait_ms = wait.as_millis() as u64,
+            "Store read pool stayed busy within the wait budget"
+        );
+        return Err(StoreCallError::Busy);
+    };
+    let remaining = deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        tracing::warn!("Store read deadline passed before worker dispatch");
+        return Err(StoreCallError::Deadline);
+    }
+    let task = tokio::task::spawn_blocking(move || observe_store_work(&reader, metrics, work));
+    match tokio::time::timeout(remaining, task).await {
+        Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => Err(StoreCallError::Worker(error.to_string())),
-        Err(_) => Err(StoreCallError::Deadline),
+        Err(_) => {
+            tracing::warn!(
+                wait_ms = deadline.as_millis() as u64,
+                "Store read exceeded its deadline"
+            );
+            Err(StoreCallError::Deadline)
+        }
     }
 }
 

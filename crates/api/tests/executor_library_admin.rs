@@ -13,6 +13,8 @@ use tower::ServiceExt;
 mod artwork_writes;
 #[path = "executor_library_admin/images.rs"]
 mod images;
+#[path = "executor_library_admin/read_queue.rs"]
+mod read_queue;
 #[path = "executor_library_admin/resolvers.rs"]
 mod resolvers;
 
