@@ -2,7 +2,7 @@
 
 - Status: Accepted design; implementation acceptance is tracked separately below.
 - Scope: approved Library deletion and NFO reimport plan, Tasks 1–7.
-- Current-layout note (2026-10-20): the design/history below uses “ledger” and `file_meta` terminology from its implementation period. Current persistent file facts are `library_files`, derived probe details are `file_details`, and Media/Playback now share `library.db`; `app.db`, `cache.db`, `subscribe.db` are separate Store files, with `jobs.db` outside Store. There is still no cross-file atomic transaction. Source: `crates/store/src/open.rs`, `schema/v1/library.sql`, `ledger_cleanup.rs`. Historical execution is recorded in the [storage plan](<../superpowers/plans/2026-10-23-storage-review-remediation.md>); current findings and acceptance boundaries are in the [2026-10-28 review](../audits/2026-10-28-storage-main-rereview.md), not inferred from this ADR.
+- Current-layout note (2026-10-20): the design/history below uses “ledger” and `file_meta` terminology from its implementation period. Current persistent file facts are `library_files`, derived probe details are `file_details`, and Media/Playback now share `library.db`; `app.db`, `cache.db`, `subscribe.db` are separate Store files, with `jobs.db` outside Store. There is still no cross-file atomic transaction. Source: `crates/store/src/open.rs`, `schema/v1/library.sql`, `ledger_cleanup.rs`. Current findings and fix status are in the [storage lock review](../audits/2026-10-28-storage-lock-review.md), not inferred from this ADR.
 
 ## Context
 
@@ -24,7 +24,7 @@ The last Library of a kind remains protected under the existing default-Library/
 
 Admin `DELETE /api/v1/libraries/{id}` returns `202` with an operation identifier, including when cleanup is fast. Admin `GET /api/v1/library-removals/{operation_id}` exposes `frozen`, `draining`, `cleaning`, `succeeded` or `failed`, the snapshot removal count and any error. Repeated requests use the existing operation.
 
-The sequence is freeze/snapshot → prevent new work → cancel queued/running work → wait for leases to drain → idempotent scoped cleanup → delete root configuration → succeeded. Registry/Store locking and publication checks must prevent a canceled worker from writing ledger data, probe facts or sidecars, including after another Library reuses the same root. Child-process work must actually terminate and be reaped. A drain timeout fails the operation and leaves the Library frozen; it is not reported as success.
+The sequence (since `ffa96c36`, 2026-10-29) is freeze/snapshot → prevent new work → cancel all queued/running work of the Library → delete immediately → idempotent scoped cleanup → delete root configuration → succeeded. Removal does **not** wait for in-flight scan/probe/marker/scrape work or leases to drain: cancellation returns only after every publication gate is closed, so a late publication (covers included) is refused, and the Store refuses any write into a Library under removal (`library_removals` fence; FKs once the row is gone). Canceled work notices the cancellation on its own and its result is discarded (`crates/api/src/library_lifecycle/removal.rs`). The earlier lease-drain wait and its 30s re-cancel slices were removed.
 
 The durable operation stores the cleanup scope so a restart or partial cross-database cleanup can resume safely. It does not pretend the four databases share a transaction. Cleanup retries must preserve the snapshot count and not revive canceled work. Frozen libraries are hidden from ordinary browsing/new Playback and remain visible for administrative status/retry. Static artwork read endpoints remain public under the existing image-authentication contract.
 
@@ -44,12 +44,12 @@ NFO metadata is not stream-probe output. Reimport must schedule fresh media prob
 
 - Reliable MediaId reuse reconnects Playback facts only for Media that survived removal (kept by another file, collection or subscription); purged orphan Media come back as new Media without old favorites/progress.
 - Files stay available to external tools throughout removal. The application must stop offering new Playback through removed ledger rows.
-- Failed removal may require retry and stays frozen; this is preferable to apparent success with a live publisher.
+- Removal no longer blocks on slow work; a removal that fails in cleanup may be retried and stays frozen until it succeeds.
 - No path-cache migration, unowned-ledger adoption or history-clearing option is introduced.
 
 The public API regression source in `crates/api/tests/library_delete_reimport.rs` contains cases for TV S01E03 positions 750000/120000 ms with distinct favorite/watched states, whole-movie positions, fresh ledger identity, old file-meta/fingerprint/stage cleanup, preserved sidecar bytes, an independent Library's same-Media file/cache, default-off detection switches, and a different-alias negative case. These describe assertions, **not a fresh pass result**. It constructs ApiState before entering Tokio so probe workers are not started, and injects an offline Catalog. This checks cache non-reuse, **not** successful fresh probe execution, real streaming or child-process cancellation. Creation also schedules an automatic scan; the explicit public scan is intentionally idempotent with that path. Under the orphan-purge rule, history recovery in those cases only holds where the Media is kept by another Library's file, a collection or a subscription.
 
-Restart-mid-clean, restart-draining, canceled-job recovery, lease/publication races, ambiguous no-ID reimport, nested-root ownership, member visibility, Subscribe-target handling and actual fake-probe completion require the corresponding focused suites and/or UI regression cases. This ADR is not proof those checks passed. Browser/VidHub cases remain Not run unless actually executed.
+Restart-mid-clean, canceled-job recovery, lease/publication races, ambiguous no-ID reimport, nested-root ownership, member visibility, Subscribe-target handling and actual fake-probe completion require the corresponding focused suites and/or UI regression cases. This ADR is not proof those checks passed. Browser/VidHub cases remain Not run unless actually executed.
 
 ## External convention references (limited claim)
 

@@ -6,7 +6,7 @@
 
 ## 决策（2026-10-16，r2 按计划修订同步）
 
-取代 2026-10-10 的 **external-CDP-only** 边界（见文末「历史边界」）。实现计划：`docs/superpowers/plans/2026-10-16-cdp-obscura-managed-browser.md`。
+取代 2026-10-10 的 **external-CDP-only** 边界（见文末「历史边界」）。部署与运维见 [`docs/deploy.md`](../deploy.md)；原实现计划已删除，可用 `git show 4715bb3f:docs/superpowers/plans/2026-10-16-cdp-obscura-managed-browser.md` 取回。
 
 ### 单一开关
 
@@ -14,7 +14,7 @@
 
 - **关闭**：完全不使用 CDP。登录与 **Check-in** 走 HTTP 插件。不探测端点、不下载、不启动任何浏览器进程。Site 上的 `cdp_url` 在开关关闭时**不生效**；`/settings/browser` 返回被忽略的数量 `ignored_site_endpoints`，UI 告警。
 - **开启**：`maintenance_via = browser` 的 Site 用浏览器登录与签到，端点按下一节的顺序解析；`maintenance_via = http`（默认）的 Site 仍走 HTTP。
-- **搜索不受开关影响**：始终 HTTP。Profile 的 `render` 字段被忽略（加载时 `warn!`），下一个 minor 版本删除。
+- **搜索不受开关影响**：始终 HTTP。Profile 的 `render` 字段仍处于兼容期：加载时被忽略并 `warn!`（`crates/indexer/src/profile.rs`），尚未删除。
 - 开关读取失败（非法值）报错，**不得**静默当作关闭。
 
 ### 端点解析（开关开启时）
@@ -89,11 +89,13 @@
 - 默认镜像仍不带 Chromium，也不带 Obscura。离线或默认（`preinstalled`）部署须按 deploy 文档预置二进制，或配置外部 `cdp.url`。
 - `CRAWLER_MEDIA_BROWSER` 只设置开关的启动默认值（仅在 `cdp.enabled` 未设置时写入），不再导致启动失败；它**不**决定是否下载，也不保证启动浏览器（见上方启动条件）。
 
-## r9 修订历史（2026-10-16）
-- **当时的数据升级方案（现已取代）**：r9 曾允许 v7 库增量补 `sites.maintenance_via`（默认 `http`）并保留已有数据。此处仅保留历史，当前入口拒绝旧布局，不应据此执行升级。
-- **会话隔离**：每个 Browser 会话使用独立的 BrowserContext（`Target.createBrowserContext` → `createTarget{browserContextId}` → `disposeBrowserContext`）。本应用不调用任何 cookie 删除命令，也不会碰到其他上下文里的 cookie；会话结束后，该会话的 cookie 随上下文一起销毁，因此不会串号，也不会残留凭据。不支持 BrowserContext 的端点标记为不兼容，登录/签到在导航前回退 HTTP。
-- **回退边界**：只有导航前失败（BrowserSetup/BrowserBusy）才回退 HTTP，且回退时不重复发 Hook 事件；导航后的失败原样报告。
-- **T0 验证表**：2026-10-16 在 box 上用 Obscura v0.2.3（x86_64-linux，sha256 `1534d1e6…eec` 校验通过）实测。前 6 项结果出自本仓库测试（`crates/indexer/tests/obscura_t0.rs`、`crates/api/tests/management/obscura_lifecycle.rs`，均为 `#[ignore]`），其余出自复审 r2 的 Node 探针：
+## 修订历史（精简）
+
+- 2026-10-10：原边界为 external-CDP-only（无受管浏览器、Site 端点凌驾开关），已被 2026-10-16 决策取代。
+- 2026-10-16 r9：每会话独立 BrowserContext，不删 cookie；仅导航前失败（BrowserSetup/BrowserBusy）回退 HTTP 且不重发 Hook 事件。当时的 v7 库增量升级方案已取代，当前入口拒绝旧布局。
+- 完整修订文本见 `git show 4715bb3f:docs/adr/0007-cdp-browser-opt-in.md`。
+
+T0 实测（2026-10-16，Obscura v0.2.3，`crates/indexer/tests/obscura_t0.rs`）：
 
 | 能力 | 结果 |
 |---|---|
@@ -106,14 +108,6 @@
 | `getCookies{urls}` 是否按 path 过滤 | **不过滤**，所以回读只取 path=`/` 的 cookie |
 | 访问私网目标 | 默认禁止；需要的话设置 `CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK=1`，启动时会加上 `--allow-private-network` |
 | 拒收公共后缀 cookie | 未测 |
-
-## 历史边界（2026-10-10，已被上一节取代）
-
-> 以下为被取代的边界记录，保留用于追溯。**旧文档的日期与绿测不表示当前能力。**
-
-原生产能力为 **external-CDP-only**：仓库没有可靠的受管 Chromium 下载/启动实现；`BrowserConfig::enable_in` 创建的空目录及 HEADLESS 文件不能证明存在 Chromium，因此 `enable_in` 与 `CRAWLER_MEDIA_BROWSER=1` 明确拒绝受管能力，不创建占位目录。Obscura 的下载/启动辅助器当时只证明可以尝试启动第三方 daemon，Browser 设置及开机不再自动调用它；用户须自行准备运行中的兼容外部服务。当时的路由优先级为 Site `cdp_url` → 启用的 Obscura → 启用的全局 CDP，且显式 Site 端点在全局开关关闭时仍可使用。
-
-上述「受管能力不可用、不自动调用 Obscura、Site 端点凌驾开关」三点均被 2026-10-16 决策取代。
 
 ## 验证边界
 

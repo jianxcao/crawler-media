@@ -21,7 +21,9 @@
 当前表名为 `file_probe_obligations`，`file_id` 外键引用 `library_files` 并 `ON DELETE CASCADE`；扫描经 `insert_scanned_files` 在同一事务发布文件/覆盖/摘要并登记义务（`crates/store/src/scan_probe_obligations.rs`、`library_write`）。历史名称 `ledger_probe_obligations` 不再是当前 DDL，也不要求恢复旧表。
 
 - 即使扫描在元数据反查或部分阶段中途退出，已登记的 ledger 仍具备未完成的 probe 义务。
-- 调度器每 5 秒自动派发最多 100 条待处理义务；成功安排持久探测任务后才 ACK 删除义务行。
+- 调度器每 5 秒一轮、每轮最多取 100 条待处理义务（`crates/api/src/scan_probe_dispatch.rs`）。
+- ACK 规则：探测请求返回 `Queued{job_id}` 时只对该 job 确认（`ack_scan_probe_obligation_for_work`）；`AlreadyRunning` 按当前服务它的工作确认；`Complete` 仅在义务仍为当前版本时确认。派发失败或返回失败退避（`Waiting`，不是 `AlreadyRunning`）时**保留义务**等待下一轮重试（`43e9cd73`、`80c30ade`）。
+- 文件事实已不存在或已被标记 missing 时直接 ACK，避免永远占用 100 条窗口；源恢复时重新登记义务（`library_presence.rs`）。
 - 删除文件事实时级联清理对应 probe obligation；防止已派发 worker 迟到发布仍需生命周期租约与提交检查，不能只由外键删除推断 worker 已停止。
 
 本 ADR 描述持久化义务与阶段决策，不代表所有探测、取消、重启或真实拉流路径已完成验收；当前实现与验收范围须分别记录，不能用表存在或历史 workspace 通过替代运行时证据。

@@ -1,8 +1,8 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 当前只读审查与未实施方案见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)：offload 已修，读路径仍依赖全局 Store 锁，Probe 归约及协议观看筛选仍有超线性工作量。上轮 H1–H6 的固定范围结果见[修复记录](../audits/2026-10-28-storage-remediation-verification.md)，不将其绿灯扩大到所有接口。
+> 当前修复状态见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)：请求读已与写者分离（L1），Probe 归约与协议观看筛选的超线性问题已修（L2/L3）；剩余为 L7 与 prepare/validate 余量。
 
-状态：接受；五文件边界保留。未合并的开发中间布局已收敛为唯一生产定义，五文件当前身份版本均为 1；这是当前结构标识，不是旧库迁移支持。字段/索引见[数据库字典](../database/README.md)。新的连接/调度调整仍为提案，不以本文宣称已经实现。
+状态：接受；五文件边界保留。未合并的开发中间布局已收敛为唯一生产定义，五文件当前身份版本均为 1；这是当前结构标识，不是旧库迁移支持。字段/索引见[数据库字典](../database/README.md)。读写分离已落地（见「读写分离」一节）；按库写连接调度仍为提案。
 
 ## 决策
 
@@ -38,9 +38,15 @@ Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务�
 
 旧 `/directory` 聚合/roots 写、组合 Naming 拆解、Downloader JSON 回退和自有无签发会话 Playback 已删除；前端与 CLI 同批迁移。Transfer/Watch 设置独立 revision CAS，根替换只走 Library operation，Claim/Unidentified 消费登记归属。Jellyfin 按协议建立有效绑定，静态图片保持 public。
 
+## 读写分离（2026-10-29）
+
+- **请求读**：`StoreReaders`（`crates/api/src/store_readers.rs`，`STORE_READERS = 8`）是一组由 `Store::open_reader` 打开的只读 Store，请求读经 `store_read` / `store_read_handle` 借用，不锁进程级 writer Store；checkout 为异步可取消（`29fbceae`）。每个只读 Store 打开四个数据库文件。
+- **写**：经 `store_mutate`（5s 等锁上限）获取 writer Store。详情、文件列表与 `probe-status` 不取写锁（`1c0cfdef`）；Scrape 按 64 文件批量写、目录级 ledger 读取在写锁外（`3876d72c`）。
+- **Library/Jellyfin 覆盖查询**另有下节的 `LIBRARY_READERS = 2` 只读 library.db lease 池（`crates/api/src/management/state.rs`），与 `StoreReaders` 相互独立。
+
 ## 有界 Library 读连接
 
-实例为覆盖的 Library/Jellyfin 查询持有最多两个独占只读 lease，连接只打开已验证的当前 `library.db`，不初始化布局、不获取 writer 租约、不 ATTACH app.db。短 Store 阶段持原请求 token 形成 owned 上下文；单库快照重验 Library roster 后执行；快照关闭并归池后，短 Store 阶段重验原凭据、角色、ACL/config/lifecycle、当前 roster 与选中文件引用。Latest 的多个片段统一发布，最多重试一次；最终重验是现有授权发布检查点，不表示 app/library 两文件具有原子授权快照。完整解除共享锁的提案及跨文件竞态边界见当前复审 T1。
+实例为覆盖的 Library/Jellyfin 查询持有最多两个（`LIBRARY_READERS = 2`）独占只读 lease，连接只打开已验证的当前 `library.db`，不初始化布局、不获取 writer 租约、不 ATTACH app.db。短 Store 阶段持原请求 token 形成 owned 上下文；单库快照重验 Library roster 后执行；快照关闭并归池后，短 Store 阶段重验原凭据、角色、ACL/config/lifecycle、当前 roster 与选中文件引用。Latest 的多个片段统一发布，最多重试一次；最终重验是现有授权发布检查点，不表示 app/library 两文件具有原子授权快照。完整解除共享锁的提案及跨文件竞态边界见当前复审 T1。
 
 Store Mutex 和 reader lease 不同时持有；writer 不等待读池。认证前的 30 秒预算贯穿所有阶段，busy 不超过剩余预算与 5000ms 较小值，progress 每 1000 VM 检查取消/截止。超时不提前归还 lease/permit，实际 worker 清理后才释放；物理 IO 不承诺即时中止。关闭或确认身份/布局变化后拒绝新租用并排空，保留只读实例现有读写合同。
 
