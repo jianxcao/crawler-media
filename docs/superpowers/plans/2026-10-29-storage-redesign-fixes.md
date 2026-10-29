@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024，axum，rusqlite（SQLite WAL），parking_lot，tokio；前端 React + TS（pnpm）。
 
-**Spec:** `docs/test-reports/2026-10-29-storage-redesign-review.md`（审核报告，下文简称「报告」；条目编号 B*/F*/S-DB*/P-*/Z*/D* 与报告一致）
+**Spec:** `docs/superpowers/specs/2026-10-29-storage-redesign-review.md`（审核报告，下文简称「报告」；条目编号 B*/F*/S-DB*/P-*/Z*/D* 与报告一致）
 
 ## Global Constraints
 
@@ -17,7 +17,7 @@
 - 锁纪律：读永不拿 writer 锁；写锁只包住真正的写；任何锁都不得跨 `.await`、网络或文件 IO 持有。
 - 不可改的常量：`REMOTE_READ_LIMIT = 1`、`REMOTE_READ_COOLDOWN = 500ms`、`STORE_READERS = 8`。
 - ADR-0012 的删除语义保持不变：先隐藏，取消任务，再删除，最后清理孤儿 Media（含 favorites 和进度）。
-- 资源：同一时间只跑一个 cargo 进程；一律 `-j4`，测试一律 `-- --test-threads=4`；先跑定向测试，全量只在最后跑一次并带 `--no-fail-fast`。
+- 资源：同一时间只跑一个 cargo 进程；一律 `-j8`，测试一律 `-- --test-threads=8`；先跑定向测试，全量只在最后跑一次并带 `--no-fail-fast`。
 - Git：只在 `feat/storage-redesign` 上提交；不 push main，不 force push，不开 PR；不提交 `docs/test-reports/`、`.e2e/`。
 - 尺寸：`.rs` 文件硬上限 800 行；生产函数硬上限 120 行；`lib.rs` 只放模块树和 re-export。
 - 术语以 `CONTEXT.md` 为准（Library、Media、Subscribe、Release…）。
@@ -95,7 +95,7 @@
 - [ ] **Step 2: 运行，确认失败**：`python3 -m unittest scripts/e2e/test_perfgate.py`，预期 ImportError 或全部失败。
 - [ ] **Step 3: 实现** `list-routes.py`、`perfgate.py` 的纯函数部分（覆盖检查、分位数、判定、对比），让 Step 1 的测试通过。
 - [ ] **Step 4: 写 `perf-cases.json`**，直到 `python3 scripts/e2e/perfgate.py idle --dry-run` 的覆盖检查通过（`--dry-run` 只做覆盖检查，不发请求）。
-- [ ] **Step 5: 写 `seed-activity.py` 和 `performance-slo.md`**；修改 `stress-up.sh`，构建一律用 `cargo build --release -j4 -p api`，构建期间不跑其他 cargo 进程。
+- [ ] **Step 5: 写 `seed-activity.py` 和 `performance-slo.md`**；修改 `stress-up.sh`，构建一律用 `cargo build --release -j8 -p api`，构建期间不跑其他 cargo 进程。
 - [ ] **Step 6: 在修复前的 HEAD（ec958b93）上测基线**：
   `zsh scripts/e2e/stress-up.sh /tmp/e2e-stress`
   `python3 scripts/e2e/perfgate.py idle --out .e2e/perf/baseline-idle.json`
@@ -139,13 +139,13 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - Produces（测试用）：`pub fn library_in_transaction(&self) -> bool`，加 `#[doc(hidden)]`。
 
 - [ ] **Step 1: 写失败测试**：`watch_report_failure_leaves_library_connection_in_autocommit`。打开临时 Store，用测试专用的方式让聚合失败（例如 `DROP TABLE playback_logs` 后再调 `playback_watch_report(None, None, now, 30, 0)`），断言返回 `Err` 且 `!store.library_in_transaction()`；再调一次，断言错误类型不是 "cannot start a transaction"，SAVEPOINT 没有嵌套。
-- [ ] **Step 2: 运行，确认失败**。命令：`cargo test -j4 -p store --test watch_aggregate_rollback -- --test-threads=4`。预期 FAIL，断言 library 仍在事务中。
+- [ ] **Step 2: 运行，确认失败**。命令：`cargo test -j8 -p store --test watch_aggregate_rollback -- --test-threads=8`。预期 FAIL，断言 library 仍在事务中。
 - [ ] **Step 3: 实现**。`:143-145` 的 `self.subscribe` 改为 `self.library`。实现 `reset_if_in_transaction`，回滚时用 `tracing::error!(db = ..., "reader returned inside a transaction; rolled back")` 记录。
 - [ ] **Step 4: 写失败测试**：`reader_returned_inside_transaction_is_rolled_back`。从 `StoreReaders::open(&writer, 1)` checkout 一个 reader，在 library 连接上执行 `BEGIN`，然后 drop；再次 checkout，断言 `!library_in_transaction()`。
 - [ ] **Step 5: 实现**。`StoreReader::drop` 在 `idle.push(store)` 之前调 `store.reset_if_in_transaction()`。
 - [ ] **Step 6: 验证**。依次运行：
-  `cargo test -j4 -p store --test watch_aggregate_rollback -- --test-threads=4`
-  `cargo test -j4 -p api --lib store_readers -- --test-threads=4`
+  `cargo test -j8 -p store --test watch_aggregate_rollback -- --test-threads=8`
+  `cargo test -j8 -p api --lib store_readers -- --test-threads=8`
   预期全部 PASS。
 - [ ] **Step 7: 提交** `fix(store): roll back watch_aggregate savepoint on the library connection`。
 
@@ -169,9 +169,9 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 - [ ] **Step 1: 写失败测试**：`heartbeat_is_refused_in_read_only_mode`。启动测试 app，建一个播放会话，把服务切到只读模式（使用现有的 maintenance/read-only 切换接口），再 POST 心跳。断言状态码是 503，错误码与 `require_writable` 的一致；并断言 DB 里该会话的 `last_report_at_ms` 没有变化。
 - [ ] **Step 2: 写失败测试**：`queued_write_does_not_land_after_maintenance_starts`。在测试线程里持有 writer 锁，发起一个搜索历史写（`POST` 对应 `search/history.rs:132` 的路由），然后开启维护模式，再释放锁。断言响应不是 2xx，并且历史表里没有新行。
-- [ ] **Step 3: 运行，确认失败**。命令：`cargo test -j4 -p api --test write_admission -- --test-threads=4`。预期 2 个 FAIL，返回的是 200。
+- [ ] **Step 3: 运行，确认失败**。命令：`cargo test -j8 -p api --test write_admission -- --test-threads=8`。预期 2 个 FAIL，返回的是 200。
 - [ ] **Step 4: 实现**。把 14 处 `store_mutate` 都换成 `store_write`，然后删除 `store_mutate`。模块文档里删掉「late heartbeat better than 503」一段，改写成「写一律 1s 预算 + 锁内准入」。
-- [ ] **Step 5: 验证**。命令：`cargo test -j4 -p api --test write_admission -- --test-threads=4`，再跑 `cargo test -j4 -p api --test playback -- --test-threads=4`（播放相关的现有测试）。预期全部 PASS。
+- [ ] **Step 5: 验证**。命令：`cargo test -j8 -p api --test write_admission -- --test-threads=8`，再跑 `cargo test -j8 -p api --test playback -- --test-threads=8`（播放相关的现有测试）。预期全部 PASS。
 - [ ] **Step 6: 提交** `fix(api): route every request write through store_write admission`。
 
 ### Task 3: B1 Library 读路径（prepare / validate / hydrate）改走读池
@@ -200,15 +200,15 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 3: 写失败测试**（api）：`jellyfin_items_page_is_served_while_writer_is_held`。测试 app 有 1 个库、60 个 item。测试线程拿住 `state.store().lock()` 并保持 3s，同时 GET `/Users/{id}/Items?ParentId=…&Limit=50` 和 `/Users/{id}/Items/Latest`。断言 1s 内都返回 200，且 Items 页含 50 条。
 - [ ] **Step 4: 写失败测试**（api）：`items_page_drops_file_deleted_between_prepare_and_validate`。用测试钩子（`#[cfg(test)]` 的 prepare 后回调）在 prepare 之后删掉一个文件。断言响应是 200，且不含该 item。
 - [ ] **Step 5: 运行，确认失败**。依次运行：
-  `cargo test -j4 -p store --test page_validate -- --test-threads=4`
-  `cargo test -j4 -p api --test library_reads_off_writer -- --test-threads=4`
+  `cargo test -j8 -p store --test page_validate -- --test-threads=8`
+  `cargo test -j8 -p api --test library_reads_off_writer -- --test-threads=8`
   预期 FAIL：store 侧找不到函数，api 侧超时或 503。
 - [ ] **Step 6: 实现 store 侧**：`PageSnapshot`、`validate_page_snapshot`、`page_hydration`，各自在一个 `BEGIN DEFERRED` 读事务内完成。
 - [ ] **Step 7: 实现 api 侧**：替换参数类型；删掉 `try_lock_until` 及其 deadline 逻辑；`heavy_db_facts` 改为整页调用一次 `page_hydration`；`query_lookups.rs` 和 `probe_manager/query.rs` 改走 `store_read`。
-- [ ] **Step 8: 验证**。运行 Step 5 的两条命令，再跑 `cargo test -j4 -p api --test media_server -- --test-threads=4`（Jellyfin 相关的现有测试；目标名以 `ls crates/api/tests` 为准）。预期全部 PASS。
+- [ ] **Step 8: 验证**。运行 Step 5 的两条命令，再跑 `cargo test -j8 -p api --test media_server -- --test-threads=8`（Jellyfin 相关的现有测试；目标名以 `ls crates/api/tests` 为准）。预期全部 PASS。
 - [ ] **Step 9: 提交** `fix(api): serve Library reads from the reader pool with optimistic validation`。
 
-> 阶段 A 收尾：`cargo fmt --all -- --check`、`cargo clippy -j4 --all-targets -- -D warnings`，再跑一次全量 `cargo test -j4 --workspace --no-fail-fast -- --test-threads=4`。然后执行 Task 0 的阶段闸门（产物命名为 `phaseA-*`）。测试全绿、且 busy 模式下没有 503，才算满足合并条件。
+> 阶段 A 收尾：`cargo fmt --all -- --check`、`cargo clippy -j8 --all-targets -- -D warnings`，再跑一次全量 `cargo test -j8 --workspace --no-fail-fast -- --test-threads=8`。然后执行 Task 0 的阶段闸门（产物命名为 `phaseA-*`）。测试全绿、且 busy 模式下没有 503，才算满足合并条件。
 
 ---
 
@@ -238,9 +238,9 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - `GET /jobs` 的 `get_subscribe` N+1 改为一次 `SELECT id FROM subscribes WHERE user_id=?1` 取集合，在内存里过滤。
 
 - [ ] **Step 1: 写失败测试**：`interactive_reads_succeed_while_writer_is_held`。持有 writer 锁 3s，期间并发请求：`POST /api/v1/session/login`（密码登录）、`GET /Users/{id}/Views`、`GET /Users/{id}/Items/{item}`、`GET /api/v1/jobs`、`GET /api/v1/subscriptions`。断言每个请求都 < 1s 返回 200。
-- [ ] **Step 2: 运行，确认失败**：`cargo test -j4 -p api --test reads_during_scan -- --test-threads=4`。
+- [ ] **Step 2: 运行，确认失败**：`cargo test -j8 -p api --test reads_during_scan -- --test-threads=8`。
 - [ ] **Step 3: 实现**：按 Files 列表逐点改为读池；删除 `AppReader` 及其构造。
-- [ ] **Step 4: 验证**：Step 2 的命令，以及 `cargo test -j4 -p api --test auth -- --test-threads=4`（现有鉴权测试；目标名以实际文件为准）。PASS。
+- [ ] **Step 4: 验证**：Step 2 的命令，以及 `cargo test -j8 -p api --test auth -- --test-threads=8`（现有鉴权测试；目标名以实际文件为准）。PASS。
 - [ ] **Step 5: 提交** `fix(api): move remaining pure reads off the writer lock`。
 
 ### Task 5: F3 probe_manager 不在 tokio worker 上无界拿 writer
@@ -264,10 +264,10 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 1: 写失败测试**：`probe_round_does_not_stall_runtime_while_writer_is_held`。用 `current_thread` runtime，拿住 writer 3s，期间驱动一轮 probe manager `step()`，同一 runtime 上再 spawn 一个 `tokio::time::sleep(10ms)` 任务。断言该任务 < 200ms 完成。
 - [ ] **Step 2: 写失败测试**（store）：`file_coverage_page_uses_index`，做 query-plan 断言，计划里没有 `SCAN library_files`。
 - [ ] **Step 3: 运行，确认失败**：
-  `cargo test -j4 -p api --test probe_manager_lock -- --test-threads=4`
-  `cargo test -j4 -p store file_coverage_page -- --test-threads=4`
+  `cargo test -j8 -p api --test probe_manager_lock -- --test-threads=8`
+  `cargo test -j8 -p store file_coverage_page -- --test-threads=8`
 - [ ] **Step 4: 实现**。注意：`REMOTE_READ_LIMIT` 和 `REMOTE_READ_COOLDOWN` 不动。
-- [ ] **Step 5: 验证**：Step 3 的命令，加 `cargo test -j4 -p api --test probe -- --test-threads=4`。PASS。
+- [ ] **Step 5: 验证**：Step 3 的命令，加 `cargo test -j8 -p api --test probe -- --test-threads=8`。PASS。
 - [ ] **Step 6: 提交** `fix(api): keep probe manager store access off tokio workers`。
 
 ### Task 6: S-DB1 / S-DB2 / S-DB3 删除路径的索引，以及订阅悬空
@@ -291,10 +291,10 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 2: 写失败测试**：`orphan_purge_still_removes_projection_rows`。确认去掉显式删除后，依赖级联依然能把 4 张投影表清干净（ADR-0012 行为不变）。
 - [ ] **Step 3: 写失败测试**：`subscribe_bound_to_deleted_library_falls_back_to_default`。订阅绑定库 L，删除 L 后断言 `subscribes.library_id IS NULL`，并且 transfer plan 能解析到同 kind 的默认库，不再报错。
 - [ ] **Step 4: 运行，确认失败**：
-  `cargo test -j4 -p store --test library_removal_plans -- --test-threads=4`
-  `cargo test -j4 -p api --test library_removal_subscribes -- --test-threads=4`
+  `cargo test -j8 -p store --test library_removal_plans -- --test-threads=8`
+  `cargo test -j8 -p api --test library_removal_subscribes -- --test-threads=8`
 - [ ] **Step 5: 实现**。如果 `worker/transfer/plan.rs:85-90` 遇到 `library_id = NULL` 时不会走默认库，在这里补上。
-- [ ] **Step 6: 验证**：Step 4 的命令，加 `cargo test -j4 -p store --test schema_layout -- --test-threads=4`（布局校验；目标名以实际文件为准）。PASS。
+- [ ] **Step 6: 验证**：Step 4 的命令，加 `cargo test -j8 -p store --test schema_layout -- --test-threads=8`（布局校验；目标名以实际文件为准）。PASS。
 - [ ] **Step 7: 提交** `perf(store): index Library removal paths and detach orphaned subscribes`。
 
 ### Task 7: F8 / F6 / F7 每个库一个 writer，统一读池，jobs 读写分离
@@ -314,9 +314,9 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 1: 写失败测试**：`cache_write_does_not_block_library_heartbeat`。拿住 cache writer 2s，期间心跳写（library）断言 < 200ms 成功。
 - [ ] **Step 2: 写失败测试**：`job_claim_and_job_list_do_not_serialize`。持有 jobs 写事务期间 `GET /api/v1/jobs`，断言 < 200ms。
 - [ ] **Step 3: 写失败测试**：`transfer_releases_subscribe_guard_during_downloader_io`。用 fake downloader 阻塞 2s，期间对同一订阅 `GET /api/v1/subscriptions/{id}`，断言 < 200ms。
-- [ ] **Step 4: 运行，确认失败**：`cargo test -j4 -p api --test writer_isolation -- --test-threads=4`。
+- [ ] **Step 4: 运行，确认失败**：`cargo test -j8 -p api --test writer_isolation -- --test-threads=8`。
 - [ ] **Step 5: 实现**。
-- [ ] **Step 6: 验证**：先跑 store 和 api 两个 crate 的全部测试，`cargo test -j4 -p store -- --test-threads=4`，再 `cargo test -j4 -p api -- --test-threads=4`。PASS。
+- [ ] **Step 6: 验证**：先跑 store 和 api 两个 crate 的全部测试，`cargo test -j8 -p store -- --test-threads=8`，再 `cargo test -j8 -p api -- --test-threads=8`。PASS。
 - [ ] **Step 7: 提交** `refactor(store): one writer per database and unified reader pools`。
 
 ---
@@ -346,8 +346,8 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 2: 写失败测试**：`next_up_orders_by_last_played_and_respects_visible_libraries`。3 个库中用户只可见 2 个，断言结果只来自可见库，并按 `last_played_at DESC, media_id` 排序。
 - [ ] **Step 3: 写失败测试**：`up_next_statement_count_is_constant`。用 `Store::with_stats` 统计语句数，分别在 10 条和 200 条历史下请求 `GET /api/v1/playback/up-next?limit=20`，断言语句数相同（证明没有 N+1）。
 - [ ] **Step 4: 运行，确认失败；实现；验证**：
-  `cargo test -j4 -p store --test continue_watching -- --test-threads=4`
-  `cargo test -j4 -p api --test next_up_resume -- --test-threads=4`
+  `cargo test -j8 -p store --test continue_watching -- --test-threads=8`
+  `cargo test -j8 -p api --test next_up_resume -- --test-threads=8`
 - [ ] **Step 5: 提交** `perf: serve NextUp, Resume and up-next from user_library_items`。
 
 ### Task 9: P-S2 / P-S3 收藏与 LastPlayed 排序
@@ -360,7 +360,7 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 - [ ] **Step 1: 写失败测试**：`favorites_page_plan_has_no_scan`；`favorites_keyset_pages_are_disjoint_and_complete`（25 条收藏、页大小 10，三页的并集等于全集，没有重复）。
 - [ ] **Step 2: 写失败测试**：`last_played_sort_has_no_temp_btree`；`last_played_pages_cross_from_played_to_unplayed`（跨段翻页时既不漏也不重复）。
-- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j4 -p store --test favorites_page --test last_played_page -- --test-threads=4`。
+- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j8 -p store --test favorites_page --test last_played_page -- --test-threads=8`。
 - [ ] **Step 4: 提交** `perf(store): keyset favorites and segmented LastPlayed paging`。
 
 ### Task 10: P-S4 /missing、P-S6 收藏夹、P-S7 /jobs 的 N+1
@@ -377,7 +377,7 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 1: 写失败测试**：`missing_files_is_library_scoped_and_indexed`。两个库各有缺失文件，断言只返回目标库的，并且计划走 `files_missing`。
 - [ ] **Step 2: 写失败测试**：`missing_entry_matches_by_path_key`。用大小写或尾随斜杠不同的路径复现报告里怀疑的 path_key/path 不匹配。如果测试本来就通过，说明不存在这个问题，在提交说明里记录。
 - [ ] **Step 3: 写失败测试**：`collection_list_statement_count_is_constant`。用 `with_stats` 统计 5 个和 50 个 item 时的语句数，断言二者相同。
-- [ ] **Step 4: 运行，确认失败；实现；验证**：`cargo test -j4 -p store --test missing_files --test collections_reads -- --test-threads=4`。
+- [ ] **Step 4: 运行，确认失败；实现；验证**：`cargo test -j8 -p store --test missing_files --test collections_reads -- --test-threads=8`。
 - [ ] **Step 5: 提交** `perf(store): index missing files and batch collection reads`。
 
 ### Task 11: P-S5 Library 搜索改用 FTS5 trigram
@@ -390,7 +390,7 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 - [ ] **Step 1: 写失败测试**：`search_matches_title_and_people_substrings`（中文 3 字子串、演员名都能命中）；`search_plan_uses_fts`；`search_respects_library_visibility`。
 - [ ] **Step 2: 写失败测试**：`search_shorter_than_three_chars_falls_back_to_prefix`。trigram 不支持少于 3 个字符的查询；这种查询走 `title_sort` 前缀范围扫描，并断言计划里没有 SCAN。
-- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j4 -p store --test library_search -- --test-threads=4`。
+- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j8 -p store --test library_search -- --test-threads=8`。
 - [ ] **Step 4: 提交** `perf(store): FTS5 trigram index for Library search`。
 
 ### Task 12: P-J2 / P-J4 Jellyfin 计数与剧集排序
@@ -405,7 +405,7 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 - [ ] **Step 1: 写失败测试**：`episodes_of_pinned_series_do_not_skip_scan`；`played_filter_count_expands_cte_once`（EXPLAIN 中 CTE 只出现一次）；`latest_skips_exact_count`（`with_stats` 统计 COUNT 语句数为 0）。
 - [ ] **Step 2: 写行为回归测试**：`played_and_favorite_counts_match_page_totals`。计数与逐页翻完的条数一致，覆盖 IsPlayed=true/false 和 IsFavorite 三种组合。
-- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j4 -p store --test protocol_plans -- --test-threads=4`。
+- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j8 -p store --test protocol_plans -- --test-threads=8`。
 - [ ] **Step 4: 提交** `perf(store): single-pass protocol counts and pinned episode index`。
 
 ---
@@ -425,7 +425,7 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 - [ ] **Step 1: 写失败测试**：`every_status_variant_is_accepted_and_unknown_is_rejected`（逐列）。
 - [ ] **Step 2: 写失败测试**：`removing_user_drops_tokens_credentials_and_memberships`；`rotating_token_drops_its_device_credential`。
-- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j4 -p store --test status_checks --test user_removal -- --test-threads=4`，然后 `cargo test -j4 -p jobs -- --test-threads=4`。
+- [ ] **Step 3: 运行，确认失败；实现；验证**：`cargo test -j8 -p store --test status_checks --test user_removal -- --test-threads=8`，然后 `cargo test -j8 -p jobs -- --test-threads=8`。
 - [ ] **Step 4: 提交** `feat(store): CHECK status columns and cascade app.db ownership`。
 
 ### Task 14: 零兼容清理（报告第 5 节）
@@ -442,8 +442,8 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - [ ] **Step 2: 写失败测试**（filter）：`hr_atom_with_unknown_exclude_drops_unknown_hr_release`。
 - [ ] **Step 3: 写失败测试**（web）：`strict_hr_toggle_survives_save_and_reload`。atoms 序列化后再解析，断言严格开关的状态不变；平台和制作组往返后保持原样，不再塌缩成 `title_match`。
 - [ ] **Step 4: 运行，确认失败**：
-  `cargo test -j4 -p api --test subscriptions_create -- --test-threads=4`
-  `cargo test -j4 -p filter -- --test-threads=4`
+  `cargo test -j8 -p api --test subscriptions_create -- --test-threads=8`
+  `cargo test -j8 -p filter -- --test-threads=8`
   `cd web && pnpm test`
 - [ ] **Step 5: 实现**。完成后执行 `cd web && pnpm lint && pnpm typecheck && pnpm build`。
 - [ ] **Step 6: 验证**：Step 4 的命令全部 PASS。
@@ -474,8 +474,8 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - Test：不新增行为测试，现有测试即为回归保障
 
 - [ ] **Step 1**：用 AGENTS.md 的尺寸检查命令，以及一个能统计函数行数的脚本（放在 `$TMPDIR`，用完删除），列出超限清单。
-- [ ] **Step 2**：按职责拆分，每个 crate 一个 commit，提交前跑该 crate 的测试 `cargo test -j4 -p <crate> -- --test-threads=4`。
-- [ ] **Step 3: 收尾**：`cargo fmt --all -- --check`、`cargo clippy -j4 --all-targets -- -D warnings`、`cargo test -j4 --workspace --no-fail-fast -- --test-threads=4`，再加 `cd web && pnpm lint && pnpm typecheck && pnpm test && pnpm build`。
+- [ ] **Step 2**：按职责拆分，每个 crate 一个 commit，提交前跑该 crate 的测试 `cargo test -j8 -p <crate> -- --test-threads=8`。
+- [ ] **Step 3: 收尾**：`cargo fmt --all -- --check`、`cargo clippy -j8 --all-targets -- -D warnings`、`cargo test -j8 --workspace --no-fail-fast -- --test-threads=8`，再加 `cd web && pnpm lint && pnpm typecheck && pnpm test && pnpm build`。
 - [ ] **Step 4: 提交** `refactor: keep lib.rs as module trees and split oversized functions`。
 
 ---
@@ -498,3 +498,23 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 ## Execution Handoff
 
 Task 0 必须最先做，并且基线要在修复前的 HEAD 上测，否则就没有可对比的数据。Task 0 只改脚本和文档，不改 crate 代码。之后的阶段 A（Task 1–3）是合并前必须完成的，三者互相独立，可以按 1 → 2 → 3 的顺序实施。阶段 B 起，Task 7 会改动 Store 的公共形态，后续任务都应在它之后开始，或者在它之前完成。
+
+---
+
+## 阶段 E：r5 e2e 发现（docs/test-reports/2026-10-29-e2e-r5.md，本地未提交）
+
+> 与阶段 A 并行优先级：E1 视为合并阻塞项。
+
+### Task 17 (E1, 高): Scrape 期浏览器同源连接池被占满，页面 p95 35.8s、5 页白屏
+现象：服务器首字节 1–5ms，但 API 在浏览器排队 10.4–10.7s；页面、API、图片代理共用同一 origin 的 6 条 HTTP/1.1 连接，部分图片代理请求挂 15s。
+方案（择优组合，需在报告中说明取舍）：前端图片加载并发上限（如 4，视口优先，离开视口取消）；图片代理请求不得长时间挂起（见 Task 20）；评估生产服务启用 HTTP/2（h2c/TLS）或图片走独立 origin。
+验收：按 e2e-runbook 在 scrape 期跑页面测试，p95 ≤ 1.5s，0 白屏。
+
+### Task 18 (E2, 中): 关闭片头检测/指纹后，已排队的约 300 个探测任务不取消
+关闭对应功能时立即取消该库/该类型已排队与运行中的任务（与删除库取消任务同一机制）。先写失败测试。
+
+### Task 19 (E3, 低): 未入库剧集的 still 截图直接用 TMDB 原始路径，未走图片代理导致 404（例：万神殿 S1E4）
+统一走图片代理，先写失败测试。
+
+### Task 20 (E4, 低): 图片仍在缓存填充时后端先返回 503，依赖前端重试
+改为不返回 503：等待填充完成（有界）或直接回源转发，避免请求挂起占连接。与 Task 17 一起考虑。
