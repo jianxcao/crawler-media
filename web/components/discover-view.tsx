@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
@@ -781,7 +781,7 @@ function useHeroBackdrop(revealed: boolean, w1280: string | undefined): string |
     }
     let cancelled = false;
     const preload = new AbortController();
-    const img = createArtworkImage(preload.signal);
+    const { image: img, load: loadImage } = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -791,7 +791,7 @@ function useHeroBackdrop(revealed: boolean, w1280: string | undefined): string |
         });
     };
     img.onload = settle;
-    img.src = original;
+    loadImage(original);
     return () => {
       cancelled = true;
       preload.abort();

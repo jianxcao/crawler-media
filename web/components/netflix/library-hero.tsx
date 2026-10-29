@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { ArtworkImage } from "@/components/artwork-image";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -163,7 +163,7 @@ function NetflixBillboard({
     setArtState("pending");
     let cancelled = false;
     const preload = new AbortController();
-    const img = createArtworkImage(preload.signal);
+    const { image: img, load: loadImage } = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -176,7 +176,7 @@ function NetflixBillboard({
     img.onerror = () => {
       if (!cancelled) setArtState("failed");
     };
-    img.src = hdUrl;
+    loadImage(hdUrl);
     return () => {
       cancelled = true;
       preload.abort();

@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -124,9 +124,9 @@ export function ImageLightbox({
     for (const neighbor of [index - 1, index + 1]) {
       const url = images[(neighbor + images.length) % images.length];
       if (url) {
-        const img = createArtworkImage(preload.signal);
+        const { image: img, load: loadImage } = createArtworkImage(preload.signal);
         img.referrerPolicy = "no-referrer";
-        img.src = url;
+        loadImage(url);
       }
     }
     return () => preload.abort();

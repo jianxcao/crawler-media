@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -16,7 +16,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function load(url: string, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     if (signal.aborted) { resolve(false); return; }
-    const img = createArtworkImage(signal);
+    const { image: img, load: loadImage } = createArtworkImage(signal);
     const onAbort = () => resolve(false);
     signal.addEventListener("abort", onAbort, { once: true });
     const done = (ok: boolean) => {
@@ -33,7 +33,7 @@ function load(url: string, signal: AbortSignal): Promise<boolean> {
     };
     img.onload = () => done(true);
     img.onerror = () => done(false);
-    img.src = url;
+    loadImage(url);
   });
 }
 

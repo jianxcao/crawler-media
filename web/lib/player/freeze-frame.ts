@@ -94,6 +94,12 @@ export function drawTile(
   return true;
 }
 
+/** Empty queued images are complete too; only a decoded bitmap is ready to paint. */
+export function whenTileReady(image: HTMLImageElement, paint: () => void): void {
+  if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) paint();
+  else image.addEventListener("load", paint, { once: true });
+}
+
 /**
  * 冻结帧能不能撤了：新位置的那一帧已经解出来，且不在跳转途中。
  *

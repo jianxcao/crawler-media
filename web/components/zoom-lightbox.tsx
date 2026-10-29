@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -355,8 +355,8 @@ export function ZoomLightbox({
     for (const neighbor of [index - 1, index + 1]) {
       const url = slides[neighbor]?.screenUrl;
       if (url) {
-        const img = createArtworkImage(preload.signal);
-        img.src = url;
+        const { load: loadImage } = createArtworkImage(preload.signal);
+        loadImage(url);
       }
     }
     return () => preload.abort();

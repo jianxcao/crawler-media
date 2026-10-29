@@ -1,6 +1,6 @@
 "use client";
 
-import { createArtworkImage } from "@/lib/artwork-retry";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -170,7 +170,7 @@ export function MediaDetailView({
     setHdState("pending");
     let cancelled = false;
     const preload = new AbortController();
-    const img = createArtworkImage(preload.signal);
+    const { image: img, load: loadImage } = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -183,7 +183,7 @@ export function MediaDetailView({
     img.onerror = () => {
       if (!cancelled) setHdState("failed");
     };
-    img.src = hdUrl;
+    loadImage(hdUrl);
     return () => {
       cancelled = true;
       preload.abort();

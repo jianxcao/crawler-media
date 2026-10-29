@@ -1,10 +1,12 @@
 /* global EventTarget, Event */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { artworkRetry, createArtworkImage, installArtworkRetry } from "../lib/artwork-retry.ts";
+import { artworkRetry } from "../lib/artwork-retry.ts";
+import { createArtworkImage, manageArtworkImage } from "../lib/artwork-loading.ts";
 
 class Artwork extends EventTarget {
   constructor(src) { super(); this.src = src; }
+  removeAttribute(name) { if (name === "src") this.src = ""; }
 }
 
 function error() { return new Event("error", { cancelable: true }); }
@@ -12,7 +14,7 @@ function error() { return new Event("error", { cancelable: true }); }
 test("proxy cache miss retries without showing the broken-image fallback, then gives up within a bound", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/api/v1/images/proxy?url=https%3A%2F%2Fcatalog.invalid%2Fposter.jpg&variant=poster-card");
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   for (let i = 1; i <= 20; i++) {
     assert.equal(retry.onError(error()), true);
     t.mock.timers.tick(Math.min(5_000, 1_000 * 2 ** (i - 1)));
@@ -27,7 +29,7 @@ test("proxy cache miss retries without showing the broken-image fallback, then g
 test("replacing a pending image does not overwrite its new source", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/images/proxy?url=first");
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   retry.onError(error());
   image.src = "https://app.invalid/images/proxy?url=second";
   t.mock.timers.tick(1_000);
@@ -38,7 +40,7 @@ test("replacing a pending image does not overwrite its new source", (t) => {
 test("unmount cancels retry timers and local asset failures pass through immediately", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/images/proxy?url=poster");
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   retry.onError(error());
   retry.dispose();
   t.mock.timers.tick(5_000);
@@ -50,21 +52,22 @@ test("unmount cancels retry timers and local asset failures pass through immedia
 test("native preloads suppress only transient cache misses and preserve their existing error handler", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/images/proxy?url=poster");
-  const cleanup = installArtworkRetry(image);
+  const managed = manageArtworkImage(image);
+  managed.load({ src: "https://app.invalid/images/proxy?url=poster" });
   let failures = 0;
   image.addEventListener("error", () => { failures++; });
   for (let i = 0; i < 20; i++) { image.dispatchEvent(error()); t.mock.timers.tick(Math.min(5_000, 1_000 * 2 ** i)); }
   assert.equal(failures, 0);
   image.dispatchEvent(error());
   assert.equal(failures, 1);
-  cleanup();
+  managed.dispose();
 });
 
 
 test("cold artwork remains retryable while a full background queue drains for 64 seconds", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/images/proxy?url=queued-poster");
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   let elapsed = 0;
   let attempt = 0;
   while (elapsed < 64_000) {
@@ -87,8 +90,8 @@ test("canceling a detached preload clears pending retries and prevents traffic a
   globalThis.Image = function () { return new Preload(""); };
   t.after(() => { if (previous) globalThis.Image = previous; else delete globalThis.Image; });
   const controller = new AbortController();
-  const image = createArtworkImage(controller.signal);
-  image.src = "https://app.invalid/images/proxy?url=abandoned-poster";
+  const { image, load } = createArtworkImage(controller.signal);
+  load("https://app.invalid/images/proxy?url=abandoned-poster");
   image.dispatchEvent(error());
   controller.abort();
   t.mock.timers.tick(100_000);
@@ -101,7 +104,7 @@ for (const path of ["/posters/file", "/fanart/file", "/stills/file", "/chapters/
   test(`native artwork ${path} recovers transient failures with a short bounded retry window`, (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const image = new Artwork(`https://app.invalid/api/v1${path}?version=fixture`);
-    const retry = artworkRetry(image);
+    const retry = artworkRetry(image, (source) => { image.src = source; });
     for (let i = 1; i <= 4; i++) {
       assert.equal(retry.onError(error()), true);
       t.mock.timers.tick(Math.min(5_000, 1_000 * 2 ** (i - 1)));
@@ -116,7 +119,8 @@ for (const path of ["/posters/file", "/fanart/file", "/stills/file", "/chapters/
 
 test("external images and local assets retain immediate fallback", () => {
   for (const source of ["", "data:image/png;base64,fixture", "https://catalog.invalid/poster.jpg", "https://app.invalid/api/v1/images/assets/poster"]) {
-    const retry = artworkRetry(new Artwork(source));
+    const image = new Artwork(source);
+    const retry = artworkRetry(image, (next) => { image.src = next; });
     assert.equal(retry.onError(error()), false);
     retry.dispose();
   }
@@ -126,7 +130,7 @@ test("navigation cancels native artwork retries", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const source = "https://app.invalid/api/v1/libraries/fixture/cover";
   const image = new Artwork(source);
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   assert.equal(retry.onError(error()), true);
   retry.dispose();
   t.mock.timers.tick(100_000);
@@ -136,7 +140,7 @@ test("navigation cancels native artwork retries", (t) => {
 test("Media poster cache warmup retains the long queue window and preserves its query", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const image = new Artwork("https://app.invalid/api/v1/media/fixture/poster?version=fixture");
-  const retry = artworkRetry(image);
+  const retry = artworkRetry(image, (source) => { image.src = source; });
   let elapsed = 0;
   for (let i = 1; i <= 20; i++) {
     assert.equal(retry.onError(error()), true, `Media poster should remain pending at ${elapsed}ms`);

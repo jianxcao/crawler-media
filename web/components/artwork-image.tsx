@@ -1,26 +1,33 @@
 "use client";
 
-import { useCallback, useRef, type ComponentPropsWithRef } from "react";
-import { artworkRetry } from "@/lib/artwork-retry";
+import { useCallback, useLayoutEffect, useRef, type ComponentPropsWithRef } from "react";
+import { manageArtworkImage, observeArtworkImage } from "@/lib/artwork-loading";
 
-/** Lazy static artwork with bounded retries while the server warms its cache. */
-export function ArtworkImage({ ref, loading = "lazy", onError, onLoad, ...props }: ComponentPropsWithRef<"img">) {
-  const retry = useRef<ReturnType<typeof artworkRetry> | null>(null);
+/** Static artwork shares four network slots with preloads and retries. */
+export function ArtworkImage({ ref, src, srcSet, sizes, loading = "lazy", ...props }: ComponentPropsWithRef<"img">) {
+  const current = useRef<ReturnType<typeof manageArtworkImage> | null>(null);
   const attach = useCallback((image: HTMLImageElement | null) => {
     if (!image) return;
-    const lease = artworkRetry(image);
-    retry.current = lease;
+    const managed = manageArtworkImage(image);
+    managed.setVisible(false);
+    current.current = managed;
+    const stop = observeArtworkImage(image, (near, priority) => managed.setVisible(near, priority));
     const detachRef = typeof ref === "function" ? ref(image) : undefined;
     if (ref && typeof ref !== "function") ref.current = image;
     return () => {
-      lease.dispose();
-      retry.current = null;
+      stop();
+      managed.dispose();
+      current.current = null;
       if (typeof detachRef === "function") detachRef();
       else if (typeof ref === "function") ref(null);
       else if (ref) ref.current = null;
     };
   }, [ref]);
-  return <img {...props} loading={loading} ref={attach}
-    onError={(event) => { if (!retry.current?.onError(event.nativeEvent)) onError?.(event); }}
-    onLoad={(event) => { retry.current?.onLoad(); onLoad?.(event); }} />;
+  useLayoutEffect(() => {
+    if (loading === "eager") current.current?.setVisible(true, 0);
+    current.current?.load({ src, srcSet, sizes });
+  }, [src, srcSet, sizes, loading, ref]);
+  // Native lazy loading could hold a slot without starting traffic inside
+  // content-visibility subtrees; viewport admission is managed above.
+  return <img {...props} loading="eager" ref={attach} />;
 }

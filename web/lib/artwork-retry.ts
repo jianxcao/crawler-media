@@ -14,7 +14,7 @@ function retryLimit(source: string): number {
 }
 
 /** Retry cache warmup and transient native artwork deadlines without holding a connection. */
-export function artworkRetry(image: HTMLImageElement) {
+export function artworkRetry(image: HTMLImageElement, request: (source: string) => void) {
   let attempts = 0;
   let previousSource = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -32,7 +32,7 @@ export function artworkRetry(image: HTMLImageElement) {
       const next = new URL(source);
       next.searchParams.set("_retry", String(attempts));
       previousSource = next.href;
-      image.src = previousSource;
+      request(previousSource);
     }, Math.min(MAX_RETRY_MS, 1_000 * 2 ** (attempts - 1)));
     return true;
   };
@@ -42,36 +42,4 @@ export function artworkRetry(image: HTMLImageElement) {
     previousSource = "";
   };
   return { onError, onLoad, dispose: () => clearTimeout(timer) };
-}
-
-export function installArtworkRetry(image: HTMLImageElement): () => void {
-  const retry = artworkRetry(image);
-  image.addEventListener("error", retry.onError);
-  image.addEventListener("load", retry.onLoad);
-  return () => {
-    retry.dispose();
-    image.removeEventListener("error", retry.onError);
-    image.removeEventListener("load", retry.onLoad);
-  };
-}
-
-/** Also used by slideshow/hero preloads, before their existing onerror handler. */
-export function createArtworkImage(signal: AbortSignal): HTMLImageElement {
-  const image = new Image();
-  const detachRetry = installArtworkRetry(image);
-  const cancel = () => {
-    detachRetry();
-    image.removeEventListener("load", loaded);
-    image.onload = null;
-    image.onerror = null;
-    image.removeAttribute("src");
-  };
-  const loaded = () => {
-    detachRetry();
-    signal.removeEventListener("abort", cancel);
-  };
-  signal.addEventListener("abort", cancel, { once: true });
-  image.addEventListener("load", loaded, { once: true });
-  if (signal.aborted) cancel();
-  return image;
 }

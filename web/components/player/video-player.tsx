@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { MediaController } from "media-chrome/react";
+import { createArtworkImage } from "@/lib/artwork-loading";
 
 import { ChevronLeftIcon, LockIcon } from "@/components/icons";
 
@@ -64,6 +65,7 @@ import {
   canReleaseFreeze,
   captureFrame,
   drawTile,
+  whenTileReady,
 } from "@/lib/player/freeze-frame";
 import {
   planSystemTrackModes,
@@ -378,7 +380,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     pendingCommitTimerRef.current = null;
   }, []);
   /** 雪碧图的解码缓存：连按快进会连着要同一张，每次新建 Image 等于重解一遍 */
-  const sheetCacheRef = useRef(new Map<string, HTMLImageElement>());
+  const sheetCacheRef = useRef(new Map<string, { image: HTMLImageElement; abort: AbortController }>());
 
   /**
    * 把画面冻住，盖住接下来那段没有画面的空窗
@@ -410,27 +412,30 @@ export function VideoPlayer(props: VideoPlayerProps) {
       const tile = targetFileMs === undefined ? null : tileAt(trickplayRef.current, targetFileMs);
       if (!tile) return;
       const cache = sheetCacheRef.current;
-      let image = cache.get(tile.url);
-      if (!image) {
+      let entry = cache.get(tile.url);
+      if (!entry) {
         // 一张雪碧图解码后就是几 MB，连着远跳十几次能攒出几十 MB。留最近
         // 四张：连按快进反复要的是同一张，四张足够接住，再多是纯占内存。
         // Map 按插入序，超了就丢最早那张。
         while (cache.size >= 4) {
           const oldest = cache.keys().next().value;
           if (oldest === undefined) break;
+          cache.get(oldest)?.abort.abort();
           cache.delete(oldest);
         }
-        image = new Image();
-        image.src = tile.url;
-        cache.set(tile.url, image);
+        const abort = new AbortController();
+        const request = createArtworkImage(abort.signal, 0);
+        entry = { image: request.image, abort };
+        request.load(tile.url);
+        cache.set(tile.url, entry);
       }
+      const image = entry.image;
       const paint = () => {
         // 过期的那张不能画：这几十毫秒里可能已经撤了冻结、或者又跳了一次
         if (freezeTokenRef.current !== token) return;
         if (drawTile(canvas, image, tile)) setFrozen(true);
       };
-      if (image.complete) paint();
-      else image.addEventListener("load", paint, { once: true });
+      whenTileReady(image, paint);
     },
     [video],
   );
@@ -478,7 +483,13 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     setFrozen(false);
     freezeTokenRef.current += 1;
-    sheetCacheRef.current.clear();
+    const cache = sheetCacheRef.current;
+    for (const entry of cache.values()) entry.abort.abort();
+    cache.clear();
+    return () => {
+      for (const entry of cache.values()) entry.abort.abort();
+      cache.clear();
+    };
   }, [unitKey]);
 
   /** 本集自动播放的结果。只有 blocked 需要界面兜底（中央大播放键） */

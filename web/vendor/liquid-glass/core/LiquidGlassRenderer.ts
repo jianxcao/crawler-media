@@ -1,4 +1,5 @@
 import { fragmentShader, vertexShader } from "./shaders";
+import { createArtworkImage } from "@/lib/artwork-loading";
 import type { LiquidGlassSettings } from "./types";
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
@@ -29,6 +30,7 @@ export class LiquidGlassRenderer {
   private uniforms: Uniforms = {};
   private texture!: WebGLTexture;
   private image: HTMLImageElement;
+  private imageAbort: AbortController | null = null;
   private video: HTMLVideoElement | null = null;
   private ready = false;
   private settings: LiquidGlassSettings;
@@ -199,6 +201,8 @@ private sampleBackground = 0;
 
   private loadSource(url: string) {
     this.image.removeEventListener("load", this.handleImageLoad);
+    this.imageAbort?.abort();
+    this.imageAbort = null;
     this.video?.removeEventListener("loadeddata", this.handleVideoReady);
     this.video = null;
     this.ready = false;
@@ -225,14 +229,22 @@ private sampleBackground = 0;
       return;
     }
     const cachedImage = imageCache.get(url);
-    this.image = cachedImage ?? new Image();
-    if (!cachedImage) {
-      this.image.crossOrigin = "anonymous";
-      imageCache.set(url, this.image);
-      this.image.src = url;
+    if (cachedImage) {
+      this.image = cachedImage;
+      this.handleImageLoad();
+      return;
     }
-    if (this.image.complete && this.image.naturalWidth > 0) this.handleImageLoad();
-    else this.image.addEventListener("load", this.handleImageLoad, { once: true });
+    this.imageAbort = new AbortController();
+    const request = createArtworkImage(this.imageAbort.signal, 2);
+    this.image = request.image;
+    this.image.crossOrigin = "anonymous";
+    const image = this.image;
+    image.addEventListener("load", () => {
+      // Only completed bitmaps may outlive their owner's abort controller.
+      imageCache.set(url, image);
+      this.handleImageLoad();
+    }, { once: true, signal: this.imageAbort.signal });
+    request.load(url);
   }
 
   private watchPosition = () => {
@@ -320,6 +332,7 @@ private sampleBackground = 0;
   }
   dispose() {
     this.disposed = true;
+    this.imageAbort?.abort();
     window.cancelAnimationFrame(this.positionFrame);
     this.ready = false;
     this.image.removeEventListener("load", this.handleImageLoad);
