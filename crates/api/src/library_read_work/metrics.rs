@@ -46,17 +46,6 @@ impl WorkerMetrics {
             metrics.duration(phase, start.elapsed());
         }
     }
-    pub(super) fn lock_wait(&self, start: Instant) {
-        self.duration(
-            match self.stage {
-                "auth" => "auth_wait",
-                "validate" => "validate_wait",
-                "credential_binding" => "binding_wait",
-                _ => "prepare_wait",
-            },
-            start,
-        );
-    }
     pub(super) fn acquired(&mut self) {
         self.held = Some(Instant::now());
         if let Some(metrics) = &self.metrics {

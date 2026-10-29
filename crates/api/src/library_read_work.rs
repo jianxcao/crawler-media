@@ -12,9 +12,11 @@ use store::{LibraryReadRequest, LibraryReadResult, ReadCredential};
 
 mod gate;
 mod metrics;
+mod mutation;
 pub(crate) use gate::LibraryReadGate;
 use media_server::query_metrics::QueryMetrics;
 use metrics::{StageMetrics, WorkerMetrics};
+pub(crate) use mutation::run_store_write_stage_named;
 
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
@@ -42,14 +44,34 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
+    let lock_started = Instant::now();
+    let reader = state
+        .store_readers
+        .checkout_async(deadline.saturating_duration_since(Instant::now()))
+        .await;
+    let reader_wait = lock_started.elapsed();
+    state.record_query_phase("lock_wait", reader_wait);
+    if let Some(metrics) = QueryMetrics::current() {
+        metrics.duration(
+            match stage {
+                "auth" => "auth_wait",
+                "validate" => "validate_wait",
+                "credential_binding" => "binding_wait",
+                _ => "prepare_wait",
+            },
+            reader_wait,
+        );
+    }
+    let reader = reader.ok_or_else(|| {
+        phase.timeout();
+        LibraryReadError::Deadline
+    })?;
     let reservation = state.http_work.try_reserve().map_err(|_| {
         phase.rejected();
         LibraryReadError::Busy
     })?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_on_drop = CancelOnDrop(cancelled.clone());
-    let store = state.store();
-    let metrics = state.clone();
     let stage_barrier = state.library_read_stage_barrier.clone();
     let remaining = deadline.saturating_duration_since(Instant::now());
     let request_metrics = QueryMetrics::current();
@@ -65,15 +87,10 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
             if let Some(barrier) = stage_barrier {
                 barrier(stage);
             }
-            let lock_started = Instant::now();
-            let guard = store.try_lock_until(deadline);
-            worker.lock_wait(lock_started);
-            let guard = guard.ok_or(LibraryReadError::Deadline)?;
             worker.acquired();
-            metrics.record_query_phase("lock_wait", lock_started.elapsed());
             budget.check()?;
-            let result = guard.with_query_budget(&budget, work);
-            drop(guard);
+            let result = reader.with_query_budget(&budget, work);
+            drop(reader);
             result
         })
         .await;

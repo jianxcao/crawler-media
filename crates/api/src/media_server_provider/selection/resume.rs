@@ -52,7 +52,10 @@ fn resume_page_blocking(
     limit: usize,
 ) -> Result<ServerItemPage, String> {
     let (targets, scope) = {
-        let store = state.store.lock();
+        let store = state
+            .store_readers
+            .checkout(SELECTION_DEADLINE)
+            .ok_or("Library reader pool busy")?;
         let targets = store.user_resumable_units(user_id).map_err(|error| {
             tracing::error!(%error, %user_id, "Jellyfin 续播候选读取失败");
             error.to_string()
@@ -75,9 +78,14 @@ fn resume_page_blocking(
     count_candidates(state, scope.rows_read);
     let selection = resume_selection(&scope, user_id, &targets, offset, limit);
     let total = selection.total;
+    let hydration = hydration::load(state, &selection.page)?;
     let mut items = Vec::with_capacity(selection.page.len());
     for item in selection.page {
-        items.push(heavy_snapshot(state, user_id, item, None).map_err(|error| error.to_string())?);
+        let facts = hydration.get(&item.coverage.file.file_id);
+        items.push(
+            heavy_snapshot(state, user_id, item, facts, None, None)
+                .map_err(|error| error.to_string())?,
+        );
         count_heavy(state, 1);
     }
     tracing::debug!(%user_id, total, returned = items.len(), "Jellyfin 续播选页完成");

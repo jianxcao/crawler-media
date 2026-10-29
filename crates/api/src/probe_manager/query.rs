@@ -15,32 +15,54 @@ enum PersistOutcome {
 }
 
 impl ProbeManager {
-    fn query_store<T>(
+    fn query_write<T>(
         &self,
         budget: &QueryBudget,
         work: impl FnOnce(&crate::Store) -> Result<T, LibraryReadError>,
     ) -> Result<T, LibraryReadError> {
         budget.check()?;
+        let write_deadline = budget
+            .deadline
+            .min(std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT);
         let store = self
             .store
-            .try_lock_until(budget.deadline)
+            .try_lock_until(write_deadline)
             .ok_or(LibraryReadError::Deadline)?;
         budget.check()?;
         store.with_query_budget(budget, work)
     }
 
     /// Preserve request_probe's page assessment and durable dispatch under one request deadline.
+    #[cfg(test)]
     pub(crate) fn request_probe_query(
         &self,
         row: &domain::FileCoverage,
+        readers: &Arc<crate::store_readers::StoreReaders>,
         budget: &QueryBudget,
         writable: Arc<AtomicBool>,
     ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
+        let need = self.assess_page_probe(row, readers, budget)?;
+        self.admit_page_probe(row, need, budget, writable)
+    }
+
+    fn assess_page_probe(
+        &self,
+        row: &domain::FileCoverage,
+        readers: &Arc<crate::store_readers::StoreReaders>,
+        budget: &QueryBudget,
+    ) -> Result<policy::ProbeNeed, LibraryReadError> {
         budget.check()?;
         let now_ms = self.clock.lock().now_ms();
         self.assessments.fetch_add(1, Ordering::SeqCst);
         let source_version = crate::fingerprint_job::current_source_version(&row.file.path);
-        let need = self.query_store(budget, |store| {
+        let reader = readers
+            .checkout(
+                budget
+                    .deadline
+                    .saturating_duration_since(std::time::Instant::now()),
+            )
+            .ok_or(LibraryReadError::Deadline)?;
+        reader.with_query_budget(budget, |store| {
             Ok(policy::assess_probe_need(
                 store,
                 &row.file,
@@ -48,7 +70,57 @@ impl ProbeManager {
                 now_ms,
                 source_version,
             ))
-        })?;
+        })
+    }
+
+    pub(crate) fn schedule_page_probe(
+        self: &Arc<Self>,
+        row: domain::FileCoverage,
+        readers: Arc<crate::store_readers::StoreReaders>,
+        writable: Arc<AtomicBool>,
+        budget: Option<&QueryBudget>,
+    ) {
+        let budget = budget.cloned().unwrap_or_else(|| QueryBudget {
+            deadline: std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT,
+            cancelled: self.shutting_down.clone(),
+        });
+        let need = match self.assess_page_probe(&row, &readers, &budget) {
+            Ok(need) => need,
+            Err(error) => {
+                tracing::warn!(%error, file_id = %row.file.file_id, "Page auto-probe assessment unavailable");
+                return;
+            }
+        };
+        if !matches!(need.retry, policy::ProbeRequestResult::Complete)
+            || (need.metadata_valid && !need.intro_missing && !need.outro_missing)
+        {
+            return;
+        }
+        let Ok(reservation) = self.dispatch_work.try_reserve() else {
+            tracing::debug!(file_id = %row.file.file_id, "Page auto-probe admission window full");
+            return;
+        };
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let result = reservation
+                .run_to_completion(move || manager.admit_page_probe(&row, need, &budget, writable))
+                .await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "Page auto-probe admission stopped"),
+                Err(error) => tracing::error!(%error, "Page auto-probe admission worker failed"),
+            }
+        });
+    }
+
+    fn admit_page_probe(
+        &self,
+        row: &domain::FileCoverage,
+        need: policy::ProbeNeed,
+        budget: &QueryBudget,
+        writable: Arc<AtomicBool>,
+    ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
+        budget.check()?;
         if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
             return Ok(need.retry);
         }
@@ -99,12 +171,19 @@ impl ProbeManager {
             overwrite_markers: unit.overwrite_markers,
             reuse_media_info_cache: unit.reuse_media_info_cache,
         };
-        self.query_store(budget, |store| {
+        self.query_write(budget, |store| {
             if !writable.load(Ordering::Acquire) {
                 tracing::warn!(
                     ledger_id,
                     "Page auto-probe persistence skipped after writer lease loss"
                 );
+                return Ok(PersistOutcome::ReadOnly);
+            }
+            if !store.library_accepts_work(&unit.row.file.library_id.to_string())?
+                || store.get_file_version(unit.row.file.file_id)?
+                    != Some(unit.row.file.version.clone())
+                || store.ledger_is_missing(&ledger_id)?
+            {
                 return Ok(PersistOutcome::ReadOnly);
             }
             store
@@ -184,7 +263,7 @@ impl ProbeManager {
                 job_id,
                 "Metadata dispatch window full; cancelling page admission"
             );
-            self.query_store(budget, |store| {
+            self.query_write(budget, |store| {
                 if !writable.load(Ordering::Acquire) {
                     tracing::warn!(
                         ledger_id,
@@ -276,6 +355,72 @@ mod tests {
     use domain::{Media, MediaId, MediaKind};
     use parking_lot::Mutex;
     use std::time::Instant;
+
+    #[test]
+    fn frozen_library_cannot_recreate_probe_work_after_cancellation() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let (store, row) = published_row(dir.path());
+        let alternate = dir.path().join("other-movies");
+        std::fs::create_dir_all(&alternate).unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "Other movies",
+                &[alternate.to_str().unwrap()],
+                "everyone",
+                false,
+                &[],
+            )
+            .unwrap();
+        let ledger = row.file.file_id.to_string();
+        let library = row.file.library_id.to_string();
+        let shared = Arc::new(Mutex::new(store));
+        let manager = ProbeManager::new(shared.clone());
+        let readers =
+            Arc::new(crate::store_readers::StoreReaders::open(&shared.lock(), 1).unwrap());
+        // A stale page still owns the recorded source after the deletion freeze
+        // and the real cancellation sweep have completed.
+        shared.lock().begin_library_removal(&library).unwrap();
+        manager
+            .cancel_ledger_work(std::slice::from_ref(&ledger), "Library removal")
+            .unwrap();
+        assert!(
+            shared
+                .lock()
+                .get_file_version(row.file.file_id)
+                .unwrap()
+                .is_some()
+        );
+        let result = manager
+            .request_probe_query(
+                &row,
+                &readers,
+                &QueryBudget {
+                    deadline: Instant::now() + Duration::from_secs(2),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+                Arc::new(AtomicBool::new(true)),
+            )
+            .unwrap();
+        assert_eq!(result, policy::ProbeRequestResult::Disabled);
+        assert!(
+            !shared
+                .lock()
+                .probe_unit_recorded_for_ledger(&ledger)
+                .unwrap(),
+            "a frozen Library must not acquire a fresh durable probe after its cancellation sweep"
+        );
+        assert!(
+            manager
+                .metadata_rx
+                .lock()
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .is_err(),
+            "a frozen Library must not dispatch a fresh metadata probe"
+        );
+    }
 
     #[test]
     fn page_metadata_completion_before_sender_returns_releases_seen() {
@@ -372,12 +517,14 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let manager = Arc::new(ProbeManager::new(store.clone()));
         let writable = Arc::new(AtomicBool::new(true));
+        let readers = Arc::new(crate::store_readers::StoreReaders::open(&store.lock(), 1).unwrap());
         let guard = store.lock();
         let probe = manager.clone();
         let flag = writable.clone();
         let worker = std::thread::spawn(move || {
             probe.request_probe_query(
                 &row,
+                &readers,
                 &QueryBudget {
                     deadline: Instant::now() + Duration::from_secs(2),
                     cancelled: Arc::new(AtomicBool::new(false)),

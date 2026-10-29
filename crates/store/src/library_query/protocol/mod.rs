@@ -17,7 +17,7 @@
 mod count;
 mod folder;
 mod membership;
-mod metadata;
+pub(crate) mod metadata;
 mod order;
 mod page;
 mod predicates;

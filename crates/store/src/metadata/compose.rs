@@ -47,12 +47,12 @@ pub(crate) struct PendingTarget {
 
 /// One current source snapshot of an entity/locale.
 pub(crate) struct SourceSnapshot {
-    source: String,
-    provider_entity_id: String,
-    revision: i64,
-    fields: MetadataFields,
-    origins: BTreeMap<String, SourceFieldOrigin>,
-    pending: Option<PendingTarget>,
+    pub(crate) source: String,
+    pub(crate) provider_entity_id: String,
+    pub(crate) revision: i64,
+    pub(crate) fields: MetadataFields,
+    pub(crate) origins: BTreeMap<String, SourceFieldOrigin>,
+    pub(crate) pending: Option<PendingTarget>,
 }
 
 /// Split `selection_origins_json` into per-field origins and the pending marker.
@@ -148,13 +148,22 @@ pub(crate) fn compose_entity(
     locale: &str,
 ) -> Result<(MetadataFields, FieldOrigins), StoreError> {
     let snapshots = load_snapshots(conn, media, scope, locale)?;
+    let overrides = load_overrides(conn, media, scope, locale)?;
+    Ok(compose_loaded(media, &snapshots, overrides))
+}
+
+pub(crate) fn compose_loaded(
+    media: MediaId,
+    snapshots: &[SourceSnapshot],
+    overrides: Option<(MetadataFields, i64)>,
+) -> (MetadataFields, FieldOrigins) {
     let mut fields = MetadataFields::default();
     let mut origins = FieldOrigins::new();
-    compose_sources(&mut fields, &mut origins, &snapshots, media);
-    if let Some((overrides, revision)) = load_overrides(conn, media, scope, locale)? {
+    compose_sources(&mut fields, &mut origins, snapshots, media);
+    if let Some((overrides, revision)) = overrides {
         apply_overrides(&mut fields, &mut origins, overrides, revision, media);
     }
-    Ok((fields, origins))
+    (fields, origins)
 }
 
 fn origin(

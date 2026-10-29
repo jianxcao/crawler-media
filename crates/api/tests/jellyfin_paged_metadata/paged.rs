@@ -32,7 +32,7 @@ async fn http_page_does_not_load_unselected_ledger_or_metadata() {
 }
 
 #[tokio::test]
-async fn selected_reference_failure_never_returns_a_short_success_page() {
+async fn repeated_selected_source_change_returns_a_safe_short_success_page() {
     let mut fixture = tv_fixture(2, 1);
     let path = fixture.dir.path().join("data/library.db");
     fixture.state = fixture
@@ -52,7 +52,7 @@ async fn selected_reference_failure_never_returns_a_short_success_page() {
             }
         }));
     let app = router(fixture.state.clone());
-    let (status, _) = get(
+    let (status, body) = get(
         &app,
         &format!(
             "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&Limit=1",
@@ -60,7 +60,11 @@ async fn selected_reference_failure_never_returns_a_short_success_page() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        items(&body).is_empty(),
+        "stale selected source must be removed: {body}"
+    );
 }
 
 #[tokio::test]

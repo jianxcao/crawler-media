@@ -392,7 +392,7 @@ fn saturated_reader_queue_returns_503_and_recovers() {
     });
 }
 
-fn lock_wait_expires_at_stage(target: &'static str) {
+fn paused_stage_expires_at_deadline(target: &'static str) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -443,27 +443,13 @@ fn lock_wait_expires_at_stage(target: &'static str) {
         })
         .await
         .unwrap();
-        let (locked_tx, locked_rx) = mpsc::channel();
-        let (writer_release_tx, writer_release_rx) = mpsc::channel();
-        let store = state.store();
-        let writer = std::thread::spawn(move || {
-            let _guard = store.lock();
-            locked_tx.send(()).unwrap();
-            writer_release_rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
-        });
-        tokio::task::spawn_blocking(move || {
-            locked_rx.recv_timeout(Duration::from_secs(3)).unwrap()
-        })
-        .await
-        .unwrap();
+        // A named stage paused past the shared deadline must not run late SQL,
+        // even when its reader was already acquired before the pause.
         let progressed = Arc::new(AtomicBool::new(false));
         let task_progress = progressed.clone();
         tokio::spawn(async move {
             task_progress.store(true, Ordering::SeqCst);
         });
-        stage_release_tx.send(()).unwrap();
         let response = tokio::time::timeout(Duration::from_secs(2), reader)
             .await
             .unwrap()
@@ -475,8 +461,7 @@ fn lock_wait_expires_at_stage(target: &'static str) {
             "{target}"
         );
         assert!(progressed.load(Ordering::SeqCst));
-        writer_release_tx.send(()).unwrap();
-        writer.join().unwrap();
+        stage_release_tx.send(()).unwrap();
         assert_read_error_body(response).await;
     });
 }
@@ -490,13 +475,13 @@ async fn assert_read_error_body(response: axum::response::Response) {
 }
 
 #[test]
-fn prepare_store_wait_uses_request_deadline() {
-    lock_wait_expires_at_stage("prepare");
+fn paused_prepare_uses_request_deadline() {
+    paused_stage_expires_at_deadline("prepare");
 }
 
 #[test]
-fn validate_store_wait_uses_same_request_deadline() {
-    lock_wait_expires_at_stage("validate");
+fn paused_validate_uses_same_request_deadline() {
+    paused_stage_expires_at_deadline("validate");
 }
 
 #[test]

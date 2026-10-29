@@ -21,6 +21,28 @@ impl Store {
         Ok(self.revoked_list()?.iter().any(|id| id == &key))
     }
 
+    /// Whether this authenticated device has a new ordinary credential to record.
+    /// This read also keeps CLI and already observed requests off the writer.
+    pub fn playback_credential_needs_binding(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        token: &str,
+    ) -> Result<bool, StoreError> {
+        if !valid_device_identity(device_id) {
+            return Ok(false);
+        }
+        Ok(self.app.query_row(
+            "SELECT EXISTS(SELECT 1 FROM user_tokens t
+             WHERE t.user_id=?1 AND t.token=?3
+             AND t.token <> COALESCE((SELECT value FROM settings WHERE key=?4), '')
+             AND NOT EXISTS(SELECT 1 FROM playback_device_credentials c
+                 WHERE c.user_id=t.user_id AND c.device_id=?2 AND c.token=t.token))",
+            params![user_id.to_string(), device_id, token, SETTING_CLI_TOKEN],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Record an observed authenticated protocol credential, never a CLI token.
     /// One ordinary token may be shared by multiple devices: revoking it necessarily
     /// invalidates all of those devices, but never independently issued credentials.

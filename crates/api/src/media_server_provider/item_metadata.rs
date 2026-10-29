@@ -78,15 +78,25 @@ pub(super) fn item_db_facts(
     unit: Option<&crate::store::PlaybackUnitSnapshot>,
     whole_unit: Option<&crate::store::PlaybackUnitSnapshot>,
 ) -> ItemDbFacts {
-    // 旧口径：`row.season.zip(row.episode)` 同时存在时才带上恢复进度；整片不参与续播。
-    let resume_state = (!is_whole_unit(unit_coords))
-        .then(|| unit.map(|unit| unit.state.clone()))
-        .flatten();
     let tracks = store
         .get_file_meta(&file.file_id.to_string())
         .ok()
         .flatten()
         .unwrap_or_default();
+    item_db_facts_with_tracks(tracks, unit_coords, is_series, unit, whole_unit)
+}
+
+pub(super) fn item_db_facts_with_tracks(
+    tracks: library::Tracks,
+    unit_coords: (i32, i32),
+    is_series: bool,
+    unit: Option<&crate::store::PlaybackUnitSnapshot>,
+    whole_unit: Option<&crate::store::PlaybackUnitSnapshot>,
+) -> ItemDbFacts {
+    // 旧口径：`row.season.zip(row.episode)` 同时存在时才带上恢复进度；整片不参与续播。
+    let resume_state = (!is_whole_unit(unit_coords))
+        .then(|| unit.map(|unit| unit.state.clone()))
+        .flatten();
     let favorite = if is_series { whole_unit } else { unit };
     ItemDbFacts {
         resume_state,

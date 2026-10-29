@@ -249,17 +249,30 @@ impl MediaServerProvider for ApiServerProvider {
             std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT
         });
 
-        let state = self.state.clone();
-        let device_id = device_id.to_owned();
-        let token = token.to_owned();
-        crate::library_read_work::run_store_query_stage_named(
-            &state.clone(),
+        let read_device = device_id.to_owned();
+        let read_token = token.to_owned();
+        let needed = crate::library_read_work::run_store_query_stage_named(
+            &self.state,
             deadline,
             "credential_binding",
             move |store| {
-                if !state.instance_writable() {
-                    return Ok(());
-                }
+                store
+                    .playback_credential_needs_binding(user_id, &read_device, &read_token)
+                    .map_err(Into::into)
+            },
+        )
+        .await
+        .map_err(query_stage_error)?;
+        if !needed {
+            return Ok(());
+        }
+        let device_id = device_id.to_owned();
+        let token = token.to_owned();
+        crate::library_read_work::run_store_write_stage_named(
+            &self.state,
+            deadline,
+            "credential_binding",
+            move |store| {
                 store
                     .bind_playback_credential(user_id, &device_id, &token)
                     .map_err(Into::into)
@@ -687,6 +700,7 @@ fn query_stage_error(error: store::LibraryReadError) -> media_server::provider::
     } else if matches!(error, store::LibraryReadError::Unauthorized) {
         media_server::provider::QueryError::Unauthorized
     } else {
+        tracing::error!(%error, "Jellyfin Library query stage failed");
         media_server::provider::QueryError::Internal(error.to_string())
     }
 }

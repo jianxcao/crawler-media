@@ -512,3 +512,148 @@ fn assert_layer_keys(observations: &[store::metadata::NfoObservation], video_pat
         assert_ne!(observation.input_key, video_path.to_string_lossy());
     }
 }
+
+#[test]
+fn batch_page_hydration_preserves_pack_scopes_and_metadata_precedence() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let root_path = tmp.path().join("tv");
+    let (library, root) = library_with_root(&store, &root_path, "TV", MediaKind::Tv);
+    let media = insert_media(&store, MediaKind::Tv, "Base series");
+    std::fs::write(
+        root_path.join("tvshow.nfo"),
+        "<tvshow><title>Series from NFO</title><plot>Series plot</plot></tvshow>",
+    )
+    .unwrap();
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
+    let mut files = Vec::new();
+    for episode in [1, 2] {
+        let path = root_path.join(format!("Show.S01E{episode:02}.mkv"));
+        std::fs::write(&path, b"local fixture").unwrap();
+        std::fs::write(path.with_extension("nfo"), format!(
+            "<episodedetails><season>1</season><episode>{episode}</episode><title>Episode {episode}</title><plot>Plot {episode}</plot></episodedetails>"
+        )).unwrap();
+        let file = video_file(&library, &root, media, MediaKind::Tv, path);
+        let units = if episode == 1 {
+            vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
+        } else {
+            vec![UnitKey::new(1, 2)]
+        };
+        publish(&store, &scope, &file, &units, "zh-CN");
+        files.push(file);
+    }
+    adopt_page_fields(
+        &store,
+        media,
+        EntityScope::Work,
+        "zh-CN",
+        "Provider series",
+        0,
+    );
+    adopt_page_fields(
+        &store,
+        media,
+        EntityScope::Work,
+        "en-US",
+        "Foreign series",
+        0,
+    );
+    adopt_page_fields(
+        &store,
+        media,
+        EntityScope::Episode {
+            season: 1,
+            episode: 1,
+        },
+        "zh-CN",
+        "Provider episode",
+        0,
+    );
+    let manual = domain::MetadataFields {
+        overview: FieldValue::Value("Manual series plot".into()),
+        ..Default::default()
+    };
+    store
+        .set_metadata_overrides(media, EntityScope::Work, "zh-CN", &manual, 0)
+        .unwrap();
+    let hydrated = store.page_hydration(&[files[0].file_id]).unwrap();
+    let fields = &hydrated[&files[0].file_id].fields;
+    for scope in [
+        EntityScope::Work,
+        EntityScope::Season(1),
+        EntityScope::Episode {
+            season: 1,
+            episode: 1,
+        },
+        EntityScope::Episode {
+            season: 1,
+            episode: 2,
+        },
+    ] {
+        assert_eq!(
+            fields[&scope],
+            store
+                .protocol_page_metadata(library.parse().unwrap(), media, scope, None)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        fields[&EntityScope::Episode {
+            season: 1,
+            episode: 1
+        }]
+            .title,
+        FieldValue::Value("Episode 1".into())
+    );
+    assert_eq!(
+        fields[&EntityScope::Episode {
+            season: 1,
+            episode: 2
+        }]
+            .title,
+        FieldValue::Value("Episode 2".into())
+    );
+    assert_eq!(
+        fields[&EntityScope::Work].overview,
+        FieldValue::Value("Manual series plot".into())
+    );
+}
+
+fn adopt_page_fields(
+    store: &Store,
+    media: MediaId,
+    scope: EntityScope,
+    locale: &str,
+    title: &str,
+    revision: i64,
+) {
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id: media,
+                scope,
+                locale: locale.into(),
+                source: "tmdb".into(),
+                provider_entity_id: "1".into(),
+                provider_work_id: "1".into(),
+                fetched_at: 1,
+                normalized: domain::NormalizedMetadata {
+                    fields: domain::MetadataFields {
+                        title: FieldValue::Value(title.into()),
+                        ..Default::default()
+                    },
+                    field_origins: Default::default(),
+                },
+                expected_revision: Some(revision),
+                preferences: domain::MetadataPreferences {
+                    language_priority: vec![locale.into()],
+                    cert_country_priority: vec![],
+                },
+            },
+            1,
+        )
+        .unwrap();
+}

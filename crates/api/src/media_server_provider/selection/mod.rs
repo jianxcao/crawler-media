@@ -7,7 +7,7 @@
 //!   回落到本地轻候选，按协议 id 对齐（物理版本由 `preferred_source` 决定）；
 //! - person 过滤仍走候选级路径：它需要 catalog 参与成员判定，且 catalog 失败必须
 //!   当成硬失败，不能因为「这个人没在库里」缩成更小的一页；
-//! - 任何读取失败都向上抛，绝不退化成「更小的一页」。
+//! - 读取错误向上抛；选中源变化重做一次，仍变化时仅剔除已校验失效的源。
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -20,6 +20,7 @@ use super::item_metadata;
 use super::items::{snapshot_unit_coords, unit_columns, with_date_created};
 use super::*;
 
+mod hydration;
 mod light;
 mod page;
 mod request;
@@ -43,7 +44,15 @@ async fn finish_protocol(
     user_id: UserId,
     query: ServerItemQuery,
     result: store::LibraryReadResult,
-) -> Result<(ServerItemPage, Vec<domain::ProtocolItemRef>), AttemptError> {
+    probe_budget: store::QueryBudget,
+) -> Result<
+    (
+        ServerItemPage,
+        Vec<domain::ProtocolItemRef>,
+        store::PageSnapshot,
+    ),
+    AttemptError,
+> {
     let store::LibraryReadResult::Protocol {
         page,
         inputs,
@@ -57,15 +66,32 @@ async fn finish_protocol(
         .jellyfin_hydrated_rows
         .fetch_add(inputs.hydrated_rows() as usize, Ordering::SeqCst);
     let references = page.items.clone();
+    let snapshot = inputs.page_snapshot();
+    let files = inputs.files.keys().copied().collect::<Vec<_>>();
+    let hydration = crate::library_read_work::run_store_query_stage_named(
+        state,
+        deadline,
+        "hydrate",
+        move |store| store.page_hydration(&files).map_err(Into::into),
+    )
+    .await?;
     let cold_state = state.clone();
     let selected = crate::library_read_work::run_cold_query_stage(state, deadline, move |budget| {
         if let Some(barrier) = &cold_state.protocol_selection_barrier {
             barrier(&page);
         }
-        hydrate_page(&cold_state, user_id, query, (page, inputs, series), &budget)
+        hydrate_page(
+            &cold_state,
+            user_id,
+            query,
+            (page, inputs, series),
+            hydration,
+            &budget,
+            &probe_budget,
+        )
     })
     .await?;
-    Ok((selected, references))
+    Ok((selected, references, snapshot))
 }
 
 pub(super) async fn next_up_items(
@@ -100,7 +126,9 @@ fn hydrate_page(
     user_id: UserId,
     query: ServerItemQuery,
     (page, mut inputs, series_facts): SelectedFacts,
+    hydration: HashMap<domain::LedgerId, store::HydratedFile>,
     budget: &store::QueryBudget,
+    probe_budget: &store::QueryBudget,
 ) -> Result<ServerItemPage, QueryError> {
     let units_started = std::time::Instant::now();
     // Multiple selected episodes may name the same pack. Move its coverage once,
@@ -131,7 +159,21 @@ fn hydrate_page(
         state.record_query_phase("selected_facts", light_started.elapsed());
         let details_started = std::time::Instant::now();
         items.push(
-            heavy_snapshot(state, user_id, item, Some(budget)).map_err(ColdError::into_query)?,
+            heavy_snapshot(
+                state,
+                user_id,
+                item,
+                hydration.get(
+                    &reference
+                        .preferred_source
+                        .as_ref()
+                        .ok_or_else(|| QueryError::Internal("selected source missing".into()))?
+                        .file_id,
+                ),
+                Some(budget),
+                Some(probe_budget),
+            )
+            .map_err(ColdError::into_query)?,
         );
         state.record_query_phase("cold_details", details_started.elapsed());
         count_heavy(state, 1);
@@ -162,7 +204,10 @@ fn next_up_blocking(
 ) -> Result<ServerItemPage, String> {
     let query = next_up_query(series_id);
     let scope = {
-        let store = state.store.lock();
+        let store = state
+            .store_readers
+            .checkout(SELECTION_DEADLINE)
+            .ok_or("Library reader pool busy")?;
         match read_scope(&store, user_id, &query) {
             Ok(scope) => scope,
             Err(error) => {
@@ -217,10 +262,14 @@ fn next_up_blocking(
     }
     let total = next_up.len();
     let selected: Vec<LightItem> = next_up.into_iter().skip(offset).take(limit).collect();
+    let hydration = hydration::load(state, &selected)?;
     let mut page_items = Vec::with_capacity(selected.len());
     for item in selected {
-        page_items
-            .push(heavy_snapshot(state, user_id, item, None).map_err(|error| error.to_string())?);
+        let facts = hydration.get(&item.coverage.file.file_id);
+        page_items.push(
+            heavy_snapshot(state, user_id, item, facts, None, None)
+                .map_err(|error| error.to_string())?,
+        );
         count_heavy(state, 1);
     }
     Ok(ServerItemPage {
@@ -252,13 +301,6 @@ enum ColdError {
     Internal(String),
 }
 impl ColdError {
-    fn from_store(error: store::StoreError) -> Self {
-        if crate::library_read_work::store_error_is_unavailable(&error) {
-            Self::Unavailable
-        } else {
-            Self::Internal(error.to_string())
-        }
-    }
     fn from_read(error: store::LibraryReadError) -> Self {
         if crate::library_read_work::error_is_unavailable(&error) {
             Self::Unavailable
@@ -274,68 +316,16 @@ impl ColdError {
     }
 }
 
-type HeavyDbFacts = (
-    item_metadata::ItemDbFacts,
-    domain::MetadataFields,
-    Vec<library::ChapterMarker>,
-    Option<store::StoredMediaMarker>,
-);
-
-/// Collect cold DB facts with the request budget, then release Store before rendering.
-fn heavy_db_facts(
-    state: &ApiState,
-    item: &LightItem,
-    budget: Option<&store::QueryBudget>,
-) -> Result<HeavyDbFacts, ColdError> {
-    let file = &item.coverage.file;
-    let coords = snapshot_unit_coords(item.snapshot.unit);
-    let (season, episode) = unit_columns(coords);
-    let is_series = item.snapshot.is_series;
-    let media = &item.snapshot.media;
-    let load = |store: &crate::Store| -> Result<HeavyDbFacts, ColdError> {
-        let facts = item_metadata::item_db_facts(
-            store,
-            file,
-            coords,
-            is_series,
-            item.unit.as_ref(),
-            item.whole_unit.as_ref(),
-        );
-        let fields = item_metadata::page_fields(store, file, coords, media, is_series)
-            .map_err(ColdError::from_store)?;
-        let chapters = store
-            .get_cached_chapters(&file.file_id.to_string())
-            .map_err(ColdError::from_store)?
-            .unwrap_or_default();
-        let marker = store
-            .get_media_marker(file.media_id, season, episode)
-            .map_err(ColdError::from_store)?;
-        Ok((facts, fields, chapters, marker))
-    };
-    if let Some(budget) = budget {
-        budget.check().map_err(ColdError::from_read)?;
-        let store = state
-            .store
-            .try_lock_until(budget.deadline)
-            .ok_or(ColdError::Unavailable)?;
-        budget.check().map_err(ColdError::from_read)?;
-        store
-            .with_query_budget(budget, |store| Ok(load(store)))
-            .map_err(ColdError::from_read)?
-    } else {
-        let store = state.store.lock();
-        load(&store)
-    }
-}
-
 /// 本页重元数据：tracks/chapters/intro-outro/NFO/stat/外部字幕都在这里。
 fn heavy_snapshot(
     state: &ApiState,
     _user_id: UserId,
     item: LightItem,
+    hydration: Option<&store::HydratedFile>,
     budget: Option<&store::QueryBudget>,
+    probe_budget: Option<&store::QueryBudget>,
 ) -> Result<MediaItemSnapshot, ColdError> {
-    let (facts, fields, chapters, marker) = heavy_db_facts(state, &item, budget)?;
+    let (facts, fields, chapters, marker) = hydration::facts(&item, hydration);
     let browse = state.file_stats.as_ref();
     let LightItem {
         snapshot,
@@ -376,25 +366,12 @@ fn heavy_snapshot(
     if !is_series {
         // 探测不能改变 person 成员或计数，只为已经选中的页安排，且不持有 Store 锁。
         if state.instance_writable() {
-            if let Some(budget) = budget {
-                match state.probe.request_probe_query(
-                    &coverage,
-                    budget,
-                    state.instance_writable.clone(),
-                ) {
-                    Ok(_) => {}
-                    Err(
-                        store::LibraryReadError::Deadline
-                        | store::LibraryReadError::Cancelled
-                        | store::LibraryReadError::Busy,
-                    ) => return Err(ColdError::Unavailable),
-                    Err(error) => {
-                        tracing::warn!(%error, file_id = %coverage.file.file_id, "Page auto-probe admission failed")
-                    }
-                }
-            } else {
-                crate::http::library::ensure_probe_enqueued(state, &coverage);
-            }
+            state.probe.schedule_page_probe(
+                coverage.as_ref().clone(),
+                state.store_readers.clone(),
+                state.instance_writable.clone(),
+                probe_budget,
+            );
         } else {
             tracing::warn!(file_id = %coverage.file.file_id, "Auto-probe skipped in read-only instance");
         }

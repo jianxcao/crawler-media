@@ -31,7 +31,7 @@ fn state(dir: &tempfile::TempDir) -> ApiState {
 }
 
 #[test]
-fn writer_lock_before_auth_respects_deadline() {
+fn writer_lock_before_auth_does_not_block_reader_routes() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -54,8 +54,6 @@ fn writer_lock_before_auth_respects_deadline() {
         });
         ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let progress = Arc::new(AtomicBool::new(false));
-        let started = Instant::now();
-        let deadline = started + Duration::from_millis(80);
         for (uri, method) in [
             (
                 "/api/v1/libraries/00000000-0000-0000-0000-000000000001/items",
@@ -78,6 +76,8 @@ fn writer_lock_before_auth_respects_deadline() {
             ("/Items", "HEAD"),
             ("/emby/Items", "HEAD"),
         ] {
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(80);
             let mut request = Request::builder()
                 .method(method)
                 .uri(uri)
@@ -102,7 +102,11 @@ fn writer_lock_before_auth_respects_deadline() {
                     .unwrap();
             assert_eq!(
                 response.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
+                if uri.starts_with("/api/") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::OK
+                },
                 "{method} {uri}"
             );
             assert!(
@@ -111,11 +115,69 @@ fn writer_lock_before_auth_respects_deadline() {
             );
             assert!(
                 !released.load(Ordering::SeqCst),
-                "writer released before query rejected"
+                "read must finish while the writer remains held"
             );
         }
         release_tx.send(()).unwrap();
         writer.join().unwrap();
+    });
+}
+
+#[test]
+fn expired_query_deadline_is_preserved_before_auth() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let state = state(&dir);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let app = router(state);
+        for (uri, method) in [
+            (
+                "/api/v1/libraries/00000000-0000-0000-0000-000000000001/items",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/00000000-0000-0000-0000-000000000001/facets",
+                "GET",
+            ),
+            (
+                "/api/v1/libraries/00000000-0000-0000-0000-000000000001/gallery",
+                "GET",
+            ),
+            ("/Items", "GET"),
+            ("/emby/Items", "GET"),
+            (
+                "/api/v1/libraries/00000000-0000-0000-0000-000000000001/items",
+                "HEAD",
+            ),
+            ("/Items", "HEAD"),
+            ("/emby/Items", "HEAD"),
+        ] {
+            let now = Instant::now();
+            let timing = QueryTiming {
+                started: now - Duration::from_millis(50),
+                deadline: now,
+            };
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap();
+            if method == "HEAD" {
+                request.extensions_mut().insert(QueryTimingSeed(timing));
+            } else {
+                request.extensions_mut().insert(timing);
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri}"
+            );
+        }
     });
 }
 

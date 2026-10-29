@@ -155,7 +155,11 @@ impl Store {
 }
 
 /// Adopted `details_json.fields`: fills only what the observation layer left missing.
-fn overlay_adopted_details(base: &mut MetadataFields, details_json: &str, media_id: MediaId) {
+pub(crate) fn overlay_adopted_details(
+    base: &mut MetadataFields,
+    details_json: &str,
+    media_id: MediaId,
+) {
     let Ok(details) = serde_json::from_str::<serde_json::Value>(details_json) else {
         tracing::warn!(
             media_id = %media_id,
@@ -178,7 +182,7 @@ fn overlay_adopted_details(base: &mut MetadataFields, details_json: &str, media_
 
 /// Fill the base's `missing` fields from the candidate. `empty` is an explicit conclusion
 /// (`FieldValue::Empty`) and is never overwritten.
-fn overlay_missing(base: &mut MetadataFields, candidate: &MetadataFields) {
+pub(crate) fn overlay_missing(base: &mut MetadataFields, candidate: &MetadataFields) {
     let (Ok(mut base_json), Ok(candidate_json)) = (
         serde_json::to_value(&*base),
         serde_json::to_value(candidate),

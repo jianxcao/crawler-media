@@ -246,7 +246,7 @@ async fn favorite_filter_uses_the_same_observation_as_the_response() {
 }
 
 #[tokio::test]
-async fn heavy_counter_records_a_completed_snapshot_before_a_later_failure() {
+async fn page_uses_captured_heavy_facts_before_a_later_database_failure() {
     let fixture = tv_fixture(2, 1);
     let heavy = fixture.state.jellyfin_heavy_items();
     let app = router(fixture.state.clone());
@@ -277,11 +277,24 @@ async fn heavy_counter_records_a_completed_snapshot_before_a_later_failure() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(
-        heavy.load(Ordering::SeqCst) >= 1,
-        "后一行失败前，已经建完的重元数据必须记上，实际 {}",
-        heavy.load(Ordering::SeqCst)
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        heavy.load(Ordering::SeqCst),
+        2,
+        "all heavy database facts were captured before filesystem rendering"
+    );
+    let (status, _) = get(
+        &app,
+        &format!(
+            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Series&Limit=2",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a later request must report the missing selected facts table"
     );
 }
 

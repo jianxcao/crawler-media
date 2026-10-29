@@ -16,6 +16,7 @@ use crate::{Store, StoreError};
 
 #[derive(Default)]
 pub struct ProtocolPageInputs {
+    pub config_revision: i64,
     pub files: HashMap<LedgerId, LibraryFile>,
     pub media: HashMap<MediaId, Media>,
     pub coverage: Vec<FileCoverage>,
@@ -23,6 +24,23 @@ pub struct ProtocolPageInputs {
 }
 
 impl ProtocolPageInputs {
+    pub fn page_snapshot(&self) -> crate::PageSnapshot {
+        crate::PageSnapshot {
+            config_revision: self.config_revision,
+            files: self
+                .files
+                .values()
+                .map(|file| {
+                    (
+                        file.file_id,
+                        file.version.revision,
+                        file.media_id,
+                        file.library_id,
+                    )
+                })
+                .collect(),
+        }
+    }
     pub fn hydrated_rows(&self) -> u64 {
         (self.files.len()
             + self.media.len()
@@ -36,58 +54,6 @@ impl ProtocolPageInputs {
 }
 
 impl Store {
-    /// Validate a complete response against one current Library snapshot. The
-    /// contexts preserve typed auth changes before selected-source validation.
-    pub fn validate_protocol_references(
-        &self,
-        contexts: &[crate::LibraryReadContext],
-        references: &[ProtocolItemRef],
-    ) -> Result<(), crate::LibraryReadError> {
-        let context = contexts.first().ok_or_else(|| {
-            StoreError::Invalid("protocol response missing authorization context".into())
-        })?;
-        let tx = self
-            .library
-            .unchecked_transaction()
-            .map_err(StoreError::from)?;
-        for context in contexts {
-            self.validate_library_read(context)?;
-        }
-        let authorized = context.authorized();
-        let user = context.user();
-        let is_admin = context.is_admin();
-        if !references.is_empty() {
-            let mut checked_libraries = HashSet::new();
-            for reference in references {
-                let (file, _) = validated_source(
-                    &tx,
-                    &authorized,
-                    user,
-                    is_admin,
-                    &mut checked_libraries,
-                    reference,
-                )?;
-                let exists: Option<i64> = tx
-                    .query_row(
-                        "SELECT 1 FROM media WHERE media_id=?1",
-                        [file.media_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(StoreError::from)?;
-                if exists.is_none() {
-                    return Err(stale(reference, "selected Media missing").into());
-                }
-            }
-        }
-        // App credentials/role can change independently of the Library snapshot.
-        for context in contexts {
-            self.validate_library_read(context)?;
-        }
-        tx.commit().map_err(StoreError::from)?;
-        Ok(())
-    }
-
     pub fn protocol_page_inputs_with_stats(
         &self,
         user: UserId,
@@ -127,7 +93,10 @@ pub(crate) fn page_inputs_on(
     is_admin: bool,
     references: &[ProtocolItemRef],
 ) -> Result<ProtocolPageInputs, StoreError> {
-    let mut result = ProtocolPageInputs::default();
+    let mut result = ProtocolPageInputs {
+        config_revision: super::page_validate::config_revision(conn)?,
+        ..Default::default()
+    };
     if references.is_empty() {
         return Ok(result);
     }

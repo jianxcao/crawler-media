@@ -209,68 +209,77 @@ fn queued_worker_logs_actual_queue_duration_after_response_timeout() {
     });
 }
 
-#[tokio::test]
-async fn store_lock_wait_is_measured_in_the_worker_stop_log() {
+struct ReaderRelease(Arc<(Mutex<bool>, std::sync::Condvar)>);
+impl Drop for ReaderRelease {
+    fn drop(&mut self) {
+        let (released, changed) = self.0.as_ref();
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reader_pool_wait_deadline_is_measured_in_the_completion_log() {
     logs();
     let fixture = support::Fixture::new(1);
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
+    let release = ReaderRelease(Arc::new((Mutex::new(false), std::sync::Condvar::new())));
+    let gate = release.0.clone();
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let state = fixture
         .state
         .clone()
         .with_library_read_stage_barrier(Arc::new(move |stage| {
             if stage == "prepare" {
                 entered_tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
+                let (released, changed) = gate.as_ref();
+                let guard = released.lock().unwrap();
+                let (_guard, wait) = changed
+                    .wait_timeout_while(guard, Duration::from_secs(5), |released| !*released)
                     .unwrap();
+                assert!(!wait.timed_out(), "reader holders must be released");
             }
         }));
+    let app = router(state.clone());
+    let uri = format!("/api/v1/libraries/{}/facets", fixture.library);
+    let mut holders = Vec::new();
+    for _ in 0..8 {
+        let timing = QueryTiming::start();
+        holders.push(tokio::spawn(app.clone().oneshot(support::request(
+            &uri,
+            timing,
+            QueryMetrics::new(timing, false),
+        ))));
+        tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
     let timing = timing();
     let metrics = QueryMetrics::new(timing, false);
     let id = metrics.snapshot().request_id;
-    let request = support::request(
-        &format!("/api/v1/libraries/{}/facets", fixture.library),
-        timing,
-        metrics,
-    );
-    let reader = tokio::spawn(router(state.clone()).oneshot(request));
-    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(2)).unwrap())
-        .await
-        .unwrap();
-    let (locked_tx, locked_rx) = mpsc::channel();
-    let (writer_release_tx, writer_release_rx) = mpsc::channel();
-    let store = state.store();
-    let writer = std::thread::spawn(move || {
-        let _guard = store.lock();
-        locked_tx.send(()).unwrap();
-        writer_release_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
-    });
-    locked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    release_tx.send(()).unwrap();
-    let response = tokio::time::timeout(Duration::from_secs(2), reader)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    writer_release_tx.send(()).unwrap();
-    writer.join().unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let late = stopped(id).await;
-    assert!(
-        completed_duration(&late, "prepare_lock_wait_ms") >= 150.,
-        "{late:?}"
-    );
-    assert!(completed_duration(&late, "prepare_lock_held_ms") >= 0.);
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(support::request(&uri, timing, metrics)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let completion = record(id, "Library read request completed").unwrap();
-    if completion["prepare_lock_wait_ms"] == "None" {
-        assert!(completion["pending_phases"].contains("prepare_wait"));
-    } else {
-        assert!(completed_duration(&completion, "prepare_lock_wait_ms") >= 150.);
+    // Releasing the other eight real readers must not start a late worker for
+    // the waiter whose absolute request deadline has already elapsed.
+    drop(release);
+    for holder in holders {
+        assert_eq!(holder.await.unwrap().unwrap().status(), StatusCode::OK);
     }
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        completed_duration(&completion, "prepare_lock_wait_ms") >= 150.,
+        "{completion:?}"
+    );
+    assert_eq!(completion["metrics_final"], "true");
+    assert_eq!(completion["pending_phases"], "[]");
+    assert!(
+        record(id, "Library read worker actually stopped").is_none(),
+        "an expired async reader waiter never acquires a blocking worker"
+    );
 }

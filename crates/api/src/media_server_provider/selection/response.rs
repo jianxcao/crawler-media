@@ -8,6 +8,11 @@ use domain::{LibraryId, ProtocolItemRef, ProtocolParent};
 use media_server::provider::{
     MediaItemSnapshot, QueryError, QueryPrincipal, ServerItemPage, ServerItemQuery,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
 use store::{
     LibraryReadContext, LibraryReadError, LibraryReadRequest, LibraryReadResult, ReadCredential,
 };
@@ -47,16 +52,19 @@ async fn query_response(
     // Once the request resolves a Library, retries must preserve its identity.
     let mut explicit_library = None;
     for attempt in 0..2 {
+        let mut admission = ProbeAdmission::new(principal.deadline);
         let mut work = Attempt {
+            probe_budget: admission.budget.clone(),
             state,
             principal: &principal,
             explicit_library: &mut explicit_library,
             contexts: Vec::new(),
             references: Vec::new(),
             latest_total: None,
+            snapshot: None,
         };
         let result = async {
-            let page = match kind {
+            let mut page = match kind {
                 ResponseKind::Page => work.segment(query.clone()).await?,
                 ResponseKind::Latest => work.latest(&query).await?,
             };
@@ -64,28 +72,67 @@ async fn query_response(
                 ResponseKind::Page => Some(page.total as u64),
                 ResponseKind::Latest => work.latest_total,
             };
-            work.validate().await?;
+            if let store::PageValidation::Stale { gone } = work.validate().await? {
+                if attempt == 0 {
+                    return Err(AttemptError::SourcesChanged);
+                }
+                let gone = gone.into_iter().collect::<std::collections::HashSet<_>>();
+                page.items.retain(|item| !gone.contains(&item.file.file_id));
+                page.total = page.total.max(page.items.len());
+            }
             Ok((page, total))
         }
         .await;
         match result {
             Ok((page, total)) => {
+                admission.complete();
                 media_server::query_metrics::QueryMetrics::page(page.items.len() as u64, total);
                 return Ok(page);
             }
-            Err(AttemptError::Changed) if attempt == 0 => {
+            Err(AttemptError::Changed | AttemptError::SourcesChanged) if attempt == 0 => {
                 media_server::query_metrics::QueryMetrics::retry();
                 tracing::warn!(user_id = %principal.user_id, "Jellyfin Library context changed; retrying complete response");
             }
-            Err(AttemptError::Changed) => return Err(QueryError::Unavailable),
+            Err(AttemptError::Changed | AttemptError::SourcesChanged) => {
+                return Err(QueryError::Unavailable);
+            }
             Err(AttemptError::Query(error)) => return Err(error),
         }
     }
     Err(QueryError::Unavailable)
 }
 
+/// Admission may outlive successful cold rendering, but remains owned by the
+/// whole response attempt until publication validation succeeds.
+struct ProbeAdmission {
+    budget: store::QueryBudget,
+    cancel_on_drop: bool,
+}
+impl ProbeAdmission {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            budget: store::QueryBudget {
+                deadline,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+            cancel_on_drop: true,
+        }
+    }
+    fn complete(&mut self) {
+        self.cancel_on_drop = false;
+    }
+}
+impl Drop for ProbeAdmission {
+    fn drop(&mut self) {
+        if self.cancel_on_drop {
+            self.budget.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
 pub(super) enum AttemptError {
     Changed,
+    SourcesChanged,
     Query(QueryError),
 }
 impl From<LibraryReadError> for AttemptError {
@@ -104,12 +151,14 @@ impl From<QueryError> for AttemptError {
 }
 
 struct Attempt<'a> {
+    probe_budget: store::QueryBudget,
     state: &'a ApiState,
     principal: &'a QueryPrincipal,
     explicit_library: &'a mut Option<LibraryId>,
     contexts: Vec<LibraryReadContext>,
     references: Vec<ProtocolItemRef>,
     latest_total: Option<u64>,
+    snapshot: Option<store::PageSnapshot>,
 }
 impl Attempt<'_> {
     async fn latest(&mut self, query: &ServerItemQuery) -> Result<ServerItemPage, AttemptError> {
@@ -171,9 +220,21 @@ impl Attempt<'_> {
             fallback.parent = ProtocolParent::Studio(query.parent_id.clone().unwrap_or_default());
             result = self.lease(&credential, fallback).await?;
         }
-        let (page, references) =
-            super::finish_protocol(self.state, deadline, user_id, query, result).await?;
+        let (page, references, snapshot) = super::finish_protocol(
+            self.state,
+            deadline,
+            user_id,
+            query,
+            result,
+            self.probe_budget.clone(),
+        )
+        .await?;
         self.references.extend(references);
+        if let Some(combined) = &mut self.snapshot {
+            combined.files.extend(snapshot.files);
+        } else {
+            self.snapshot = Some(snapshot);
+        }
         Ok(page)
     }
 
@@ -197,17 +258,26 @@ impl Attempt<'_> {
         Ok(result)
     }
 
-    async fn validate(self) -> Result<(), AttemptError> {
+    async fn validate(self) -> Result<store::PageValidation, AttemptError> {
         self.state.library_reads.check_open()?;
-        run_store_query_stage_named(
+        let validation = run_store_query_stage_named(
             self.state,
             self.principal.deadline,
             "validate",
-            move |store| store.validate_protocol_references(&self.contexts, &self.references),
+            move |store| {
+                if let Some(snapshot) = self.snapshot {
+                    store.validate_protocol_page(&self.contexts, &self.references, &snapshot)
+                } else {
+                    for context in self.contexts {
+                        store.validate_library_read(&context)?;
+                    }
+                    Ok(store::PageValidation::Fresh)
+                }
+            },
         )
         .await?;
         self.state.library_reads.check_open()?;
-        Ok(())
+        Ok(validation)
     }
 }
 

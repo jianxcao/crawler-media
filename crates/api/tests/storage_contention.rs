@@ -149,6 +149,12 @@ async fn unrelated_user_growth_does_not_expand_heartbeat_write_scope() {
 
 // Same reason as above: the scan holds the store lock on another thread, and only a
 // second worker can keep the heartbeat endpoint answering while it does.
+// This performance gate measures release execution; debug instrumentation cost
+// cannot be compared with its production latency limits.
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release performance gate; run with --release"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded() {
     // 规模可调：默认 10k（计划 Step 1 点名的规模）；缩小只为定位写放大点，断言语义不变。
