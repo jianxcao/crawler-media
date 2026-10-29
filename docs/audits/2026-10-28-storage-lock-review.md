@@ -8,9 +8,11 @@
 
 | 项 | 状态 | 提交 | 验证 / 前后对比 |
 |---|---|---|---|
-| L1 / T1 / T2（读） | 部分修复 | `0aa8426d` `f7f2cd44` `3876d72c` `1c0cfdef` | 请求读走 `StoreReaders`；写走 `store_mutate`（5s）。详情/文件/`probe-status` 的 `probe_queued` 与 marker refresh 已迁到只读连接（`series_detail_and_files_answer_while_the_writer_is_busy`：持写锁+BEGIN IMMEDIATE 时 <500ms）。**残留**：prepare/validate 等仍可能碰写者；读池满时 items 仍 503（见下方「本轮只记不改」）。 |
-| 删库孤儿 Media | 已修复 | `e9dfa7ef` | 库删除每批调用与单文件删除相同的 `purge_orphan_media_in_tx`。删库后 media / aliases / metadata_sources / episodes / probe_jobs 无该 Media 残留。 |
-| 库搜索 | 已修复 | （本提交） | `/search/library-items`：SQL 搜 `search_text`+`library_protocol_people.name_key`，默认 limit 50（最大 100），`next_cursor` 键集续页；返回卡片而非每个文件。前缀不再 6.6MB；演员名可命中。 |
+| L1 / T1 / T2（读） | 已修复（主路径） | `0aa8426d` `f7f2cd44` `1c0cfdef` `3876d72c` | 读写分离：请求读走只读 `StoreReaders`（`open_reader`），写走 `store_mutate`（5s）。详情/文件/`probe-status` 不再取写锁（`1c0cfdef`，持写锁+BEGIN IMMEDIATE 时 <500ms）。Scrape 按 64 文件批量写入，目录级 ledger 读取移出写锁（`3876d72c`）。**残留**：prepare/validate 等仍可能碰写者。 |
+| 删库孤儿 Media | 已修复 | `e9dfa7ef` `95410373` `b4deb257` | 库删除每批调用与单文件删除相同的 `purge_orphan_media_in_tx`，无其他库引用的 Media 连同 aliases / metadata_sources / episodes / probe_jobs 一并清除；`ec9fdc1e`（保留 Media 身份/播放记录）已被 `95410373` 回退，ADR-0012 与回归断言见 `b4deb257`。 |
+| 删库取消 | 已修复 | `ffa96c36` | 删除 Library 时取消该库全部工作并立即删除，不再等待工作停下（替代 `b2505a8f` 的等待/自动重试）。 |
+| 读池容量 / T4 续 | 已修复 | `29fbceae` | 读池 checkout 改为异步可取消，`STORE_READERS` 4→8，避免批量 Scrape 期间读接口 503。 |
+| 库搜索 | 已修复 | `70bee254` | `/search/library-items`：SQL 搜 `search_text`+`library_protocol_people.name_key`，默认 limit 50（最大 100），`next_cursor` 键集续页；返回卡片而非每个文件。前缀不再 6.6MB；演员名可命中。 |
 | L1 / T1 / T2（架构余量） | **未完全** | — | 按库写连接调度、prepare/validate 全改专用读连接仍属后续。 |
 | L2 | 已修复 | `8b9999c6` | Probe 发布改为增量归约（仅受影响文件）；首选源子查询限定本 Media。N 次 Probe（debug，无 ANALYZE）：N=100 575.7→60.0 ms，N=400 30,782→196.7 ms，增长 53.5×→3.3×。`store` 全部测试通过。 |
 | L3 | 已修复 | `8da4cd06` | 已播放断言按主键定位（集/季/整片 UNION ALL）。Series IsPlayed 计数+分页 VM steps：E=250 2,015,920→34,919，E=1000 32,062,420→138,419，增长 15.9×→3.96×。 |
@@ -20,11 +22,14 @@
 | L7 | **未修复** | — | 卡片就绪状态/`has_poster` 合同需同时改扫描流程、DTO 与 Web，本轮未做。 |
 | T3 | 已覆盖 | L2/L3 | 工作量回归测试见 `crates/store/tests/storage_lock_work.rs`。 |
 | T4 | 已修复 | `3f9b4b80` | `LibraryReadGate`：异步有界等候（每连接 4 个等候位）、共用绝对 deadline、取消即出队、worker 结束才归还 permit。测试：池满时第二个读等待后 200；队列满才 503 并恢复。 |
+| Web 同源 /api | 已修复 | `f29f5a10` | Web 改为同源 `/api`（Vite dev 代理），移除 `VITE_API_BASE_URL`；CORS max-age，启动超时自动重试。 |
+| 图片缓存等待 | 已修复 | `ccfeff52` `b17f955a` | 快速缓存填充有界等待、上游 URI 编码规范化；任务 SSE 共享单流、图片响应缓存与懒加载，缓解浏览器连接耗尽。 |
+| Probe 远程读 | 现行约束 | `eb9ede38` | STRM 远程读串行：`REMOTE_READ_LIMIT = 1`、冷却 500ms、`probe.concurrency` 默认 1（回退 `98cd82e6` 的并发 4）。 |
 
 ### 本轮只记不改（2026-10-29）
 
-- **前端超时（任务流 + 封面代理）**：e2e 复现页面 11–20s / 请求超时卡片，根因是前端 HTTP/1.1 连接被长请求占满。本轮不改 Web；需另开前端连接池/取消/优先级任务。
-- **读池 busy**：批量入库期间 items 等接口仍可能 503（reader 全忙）。容量与排队策略属 T4 后续，本轮不改。
+- **前端超时（任务流 + 封面代理）**：e2e 复现页面 11–20s / 请求超时卡片，根因是前端 HTTP/1.1 连接被长请求占满。已由 `b17f955a`（共享 SSE、图片缓存/懒加载）、`ccfeff52`、`f29f5a10`（同源 /api）处理，待 e2e 复核。
+- **读池 busy**：已由 `29fbceae`（8 个 reader、异步可取消等候）缓解；若 e2e 再现 503 需另测。
 
 ## 现场证据与版本边界
 

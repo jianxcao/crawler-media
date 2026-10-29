@@ -1,6 +1,6 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。当前复审基线 `feat/storage-redesign@7e3bd653`，对比 main `756444f7`。用户要求只审查及整理文档；[共享锁复审与技术方案](audits/2026-10-28-storage-lock-review.md)确认全局锁、Probe 重建和协议观看筛选仍有问题，暂不建议合并。上轮已修项与本轮未实施方案分别记录。
+更新：2026-10-29。分支 `feat/storage-redesign`。[共享锁复审](audits/2026-10-28-storage-lock-review.md)的修复状态表已对齐：读写分离（只读 `StoreReaders`，8 个 reader）、详情不取写锁、Scrape 批量写、删库即取消并清除孤儿 Media、库搜索分页、Web 同源 `/api`（无 `VITE_API_BASE_URL`）均已落地；STRM Probe 远程读保持串行（并发 1、冷却 500ms）。剩余：L7、L5 首屏分页、prepare/validate 读写余量。
 
 ## 当前先读
 
@@ -49,7 +49,7 @@
 | [0009 Job](adr/0009-job-queue.md) | Interval/queued-running约束、状态事实与恢复 |
 | [0010 Password](adr/0010-password-hashing.md) | Argon2id；旧明文fallback已移除，历史兼容描述不作当前合同 |
 | [0011 Probe retry](adr/0011-probe-stage-retry.md) | 持久阶段/退避，不以NFO代替Probe成功 |
-| [0012 Library removal](adr/0012-library-removal.md) | freeze/drain、明确归属、保留Media/User事实及字节 |
+| [0012 Library removal](adr/0012-library-removal.md) | 删库即取消该库工作；清除无其他库引用的孤儿 Media；磁盘字节保留 |
 
 ## 历史审计与测量
 
