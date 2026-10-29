@@ -4,7 +4,7 @@ API + Jellyfin 兼容服务是单个 Rust 二进制（`crates/api`）。前端�
 
 ## 部署形态
 
-- **开发**：两个端口。Vite dev（3334）经 `VITE_API_BASE_URL` 直连后端（18765），
+- **开发**：两个端口。Vite dev（3334）将同源 API 请求代理到后端（18765），
   跨域由后端 CORS 层放行（`CRAWLER_MEDIA_CORS_ORIGINS`，默认放行 127.0.0.1:3334 / localhost:3334）。
 - **生产**：一个端口。Rust 监听 `CRAWLER_MEDIA_LISTEN`（默认 127.0.0.1:18765），同时托管：
   - `/` —— 前端静态产物（`CRAWLER_MEDIA_UI` 指向 `web/dist`，SPA fallback 到 index.html）
@@ -19,7 +19,7 @@ cargo run -p api --bin crawler-media -- serve
 
 # 2. 前端（开发模式，直连后端，跨域走后端 CORS）
 cd web
-VITE_API_BASE_URL=http://127.0.0.1:18765/api/v1 pnpm dev   # 监听 127.0.0.1:3334
+pnpm dev   # 监听 127.0.0.1:3334；可用 VITE_BACKEND_TARGET 指定后端
 
 # 3. 在仓库根目录另开终端：生产构建 + 单端口烟测
 pnpm --dir web build             # 产出 web/dist/

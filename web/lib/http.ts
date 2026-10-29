@@ -25,7 +25,7 @@ function trimLeadingSlash(value: string): string {
 
 /**
  * 把 API 相对路径解析成完整请求地址。
- * `VITE_API_BASE_URL` 默认 `/api/v1`，因此 `request("/libraries")` 打的是
+ * API 使用同源 `/api/v1`，因此 `request("/libraries")` 打的是
  * `/api/v1/libraries`。后端历史遗留根路径已全部移除，自有接口统一前缀 `/api/v1`。
  */
 export function resolveRequestUrl(path: string): string {

@@ -210,15 +210,14 @@ start_frontend() {
   fi
   free_port "$FRONTEND_PORT"
   log "启动前端 (端口 $FRONTEND_PORT)..."
-  # Vite dev 直连后端(不走反代):VITE_API_BASE_URL 指到后端端口,
-  # 跨域由后端 CORS 层放行(start_backend 里按 FRONTEND_PORT 配了白名单)。
+  # Vite 同源代理转发到后端端口。
   # 先跑 copy-jassub 复制字幕渲染资产,再 exec vite,避免 pid 文件记到 shell 包装器。
   (
     cd "$FRONTEND_DIR"
     if [[ -f scripts/copy-jassub.mjs ]]; then
       node scripts/copy-jassub.mjs >>"$FRONTEND_LOG" 2>&1 || true
     fi
-    launch frontend env VITE_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT/api/v1" \
+    launch frontend env VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
       node "$FRONTEND_DIR/node_modules/vite/bin/vite.js" \
       --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort
   )

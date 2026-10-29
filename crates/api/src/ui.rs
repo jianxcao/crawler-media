@@ -1,11 +1,12 @@
 //! CORS 与静态 UI 托管。
 //!
 //! 两种部署形态共用同一个 Rust 进程:
-//! - 开发:Vite dev(3334)直连后端(18765),浏览器跨域需要 CORS。
+//! - 开发:Vite dev(3334)将 API 请求代理到后端(18765)。
 //! - 生产:单端口,Rust 同时托管 `web/dist` 静态 UI 与 API(Jellyfin 兼容),
 //!   同一来源下 CORS 头对浏览器无副作用,因此不必按环境区分。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -52,6 +53,7 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_origin(AllowOrigin::list(list))
         .allow_methods(Any)
         .allow_headers(Any)
+        .max_age(Duration::from_secs(86400))
 }
 
 /// 从环境变量读取 CORS 白名单;未设置时用开发默认端口。

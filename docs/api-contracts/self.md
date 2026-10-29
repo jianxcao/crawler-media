@@ -269,7 +269,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 完整 method/path 以 `crates/api/src/http/mod.rs` 的 `router_with_slow_after()` 与 `crates/api/src/http/routes/{mod,member,admin}.rs` 的 `.route(...)` 注册为准（2026-10-21 由 818 行的 `http/mod.rs` 拆分而来，路由字符串与 merge 顺序未变）。
 
-前端 `web/lib/api/*` 的路径是相对 `VITE_API_BASE_URL`（默认 `/api/v1`）。改密走 `PATCH /users/{id}` 的 `password`，没有 `POST /users/{id}/reset-password`。
+前端 `web/lib/api/*` 的路径相对同源 `/api/v1`。改密走 `PATCH /users/{id}` 的 `password`，没有 `POST /users/{id}/reset-password`。
 
 ## 明确不做
 
