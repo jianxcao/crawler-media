@@ -11,20 +11,12 @@
 //! generalised into one place: blocking pool + bounded `try_lock_for` + `runtime.busy`.
 //! Do not grow another flavour per handler.
 //!
-//! Two entry points, one taxonomy, **two budgets split by direction**:
-//! - [`store_read`] for a handler that is already `async`: the whole store body runs
-//!   on the blocking pool, waiting up to [`STORE_READ_WAIT`] (5 s).
-//! - [`with_bounded_store`] for work that already runs inside a blocking budget
-//!   (`state.http_work.run*`): the synchronous bounded wait for code that is off the
-//!   executor already, waiting up to [`STORE_WRITE_WAIT`] (1 s).
-//!
-//! The asymmetry is deliberate (Task 27). A reader that waits 3 s and then succeeds
-//! beats a 503 for a fire-and-forget heartbeat by a wide margin — a late read is
-//! still a correct read, and a scan batch (~1.3 s for 100 files, ~950 ms of that is
-//! publishing) is simply longer than any budget that keeps the old latency shape. A
-//! writer is different: waiting 5 s and then answering `Deadline` has already spent
-//! the user's patience on an outcome it cannot describe ("unknown", not "not
-//! applied"), so the write path says "busy, retry" early and lets the client decide.
+//! Request reads use [`store_read`] and wait up to [`STORE_READ_WAIT`] (5 s) for a
+//! pooled reader, without waiting for the writer. Request writes use [`store_write`]
+//! with a [`STORE_WRITE_WAIT`] (1 s) lock budget and recheck instance/maintenance
+//! admission while holding the writer lock. Queued writes cannot land after
+//! admission closes. Work already on a blocking budget uses [`with_bounded_store`]
+//! for the same bounded lock wait and must check admission inside its closure.
 
 use std::time::Duration;
 
@@ -120,19 +112,6 @@ where
     T: Send + 'static,
 {
     store_read_readers(state.store_readers.clone(), STORE_READ_WAIT, work).await
-}
-
-/// A request that **writes** on the writer `Store` (playback heartbeats, sessions,
-/// marks, settings, search history). Same budget as a read: a late heartbeat that
-/// lands is better than a 503. Pure reads must use [`store_read`], which never
-/// waits for the writer lock; a write inside `store_read` fails loudly
-/// (`attempt to write a readonly database`).
-pub(crate) async fn store_mutate<T, F>(state: &ApiState, work: F) -> Result<T, StoreCallError>
-where
-    F: FnOnce(&crate::Store) -> T + Send + 'static,
-    T: Send + 'static,
-{
-    store_read_handle(state.store(), STORE_READ_WAIT, work).await
 }
 
 /// L1 read side: run `work` on a pooled read-only `Store`. It never touches the

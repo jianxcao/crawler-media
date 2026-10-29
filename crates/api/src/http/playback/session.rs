@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::http::store_wait::{store_mutate, store_read};
+use crate::http::store_wait::{store_read, store_write};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
@@ -149,7 +149,7 @@ async fn issue_binding(
     let version = file.version.clone();
     let now = state.playback_clock.now_ms() / 1000;
     let device = device.to_string();
-    let issued = store_mutate(state, move |store| {
+    let issued = store_write(state, move |store| {
             store
                 .issue_play_session(
                     user,
@@ -170,11 +170,7 @@ async fn issue_binding(
                 })
     })
     .await;
-    match issued {
-        Ok(Ok(id)) => Ok(id),
-        Ok(Err(response)) => Err(response),
-        Err(error) => Err(error.response()),
-    }
+    issued?
 }
 
 fn session_stream_url(

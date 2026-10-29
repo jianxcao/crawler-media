@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::http::store_wait::{store_mutate, store_read};
+use crate::http::store_wait::{store_read, store_write};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::store::PlayLogRow;
@@ -319,7 +319,7 @@ pub(crate) async fn clear_history(
         .cloned()
         .unwrap_or_else(|| "all".to_string());
     let query_for_read = query;
-    match store_mutate(&state, move |store| -> Response {
+    match store_write(&state, move |store| -> Response {
         let media_ids = match resolve_history_media_ids(store, &scope, &query_for_read) {
             Ok(ids) => ids,
             Err(resp) => return resp,
@@ -349,7 +349,7 @@ pub(crate) async fn clear_history(
     .await
     {
         Ok(response) => response,
-        Err(error) => error.response(),
+        Err(response) => response,
     }
 }
 

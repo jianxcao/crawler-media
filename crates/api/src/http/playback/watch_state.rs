@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::resolve_media_id;
-use crate::http::store_wait::{store_mutate, store_read};
+use crate::http::store_wait::{store_read, store_write};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::store::{UNIT_WHOLE, UnitRow};
@@ -359,7 +359,7 @@ pub(crate) async fn set_marks(
     // Review L2: a mark is a Store mutation; the executor must not wait on the
     // global lock for it.
     let now_ms = state.playback_clock.now_ms();
-    match store_mutate(&state, move |store| -> Response {
+    match store_write(&state, move |store| -> Response {
         let Some((season, episode)) =
             super::selection::watch_unit(store, media_id, season, episode)
         else {
@@ -391,7 +391,7 @@ pub(crate) async fn set_marks(
     .await
     {
         Ok(response) => response,
-        Err(error) => error.response(),
+        Err(response) => response,
     }
 }
 

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::http::playback::session_timeout_secs;
 use crate::http::playback_device_target::{DeviceTargetQuery, resolve_device_target};
-use crate::http::store_wait::{store_mutate, store_read};
+use crate::http::store_wait::{store_read, store_write};
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::playback_read::PlaybackRead;
@@ -178,7 +178,7 @@ pub(crate) async fn end_session(
     Query(query): Query<DeviceTargetQuery>,
 ) -> Response {
     let now = playback_now(&state);
-    match store_mutate(&state, move |store| -> Response {
+    match store_write(&state, move |store| -> Response {
         let target_user = match resolve_device_target(store, user_id, &device_id, &query) {
             Ok(target_user) => target_user,
             Err(response) => return response,
@@ -205,7 +205,7 @@ pub(crate) async fn end_session(
     .await
     {
         Ok(response) => response,
-        Err(error) => error.response(),
+        Err(response) => response,
     }
 }
 
@@ -293,7 +293,7 @@ pub(crate) async fn revoke_device(
     Query(query): Query<DeviceTargetQuery>,
 ) -> Response {
     let now = playback_now(&state);
-    match store_mutate(&state, move |store| -> Response {
+    match store_write(&state, move |store| -> Response {
         let target_user = match resolve_device_target(store, user_id, &device_id, &query) {
             Ok(target_user) => target_user,
             Err(response) => return response,
@@ -338,6 +338,6 @@ pub(crate) async fn revoke_device(
     .await
     {
         Ok(response) => response,
-        Err(error) => error.response(),
+        Err(response) => response,
     }
 }
