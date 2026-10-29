@@ -6,6 +6,44 @@ use super::{Store, StoreError, schema};
 use std::num::NonZeroUsize;
 
 impl Store {
+    /// Reset snapshots accidentally left open before a reader is reused.
+    /// Returns whether rollback was attempted on any connection.
+    /// A connection that cannot be reset must not be returned to a pool.
+    pub fn reset_if_in_transaction(&self) -> bool {
+        let mut reset = false;
+        for (db, connection) in [
+            ("app", &self.app),
+            ("library", &self.library),
+            ("subscribe", &self.subscribe),
+            ("cache", &self.cache),
+        ] {
+            if !connection.is_autocommit() {
+                reset = true;
+                match connection.execute_batch("ROLLBACK") {
+                    Ok(()) => {
+                        tracing::error!(db, "reader returned inside a transaction; rolled back")
+                    }
+                    Err(error) => {
+                        tracing::error!(db, %error, "reader transaction rollback failed");
+                    }
+                }
+            }
+        }
+        reset
+    }
+
+    #[doc(hidden)]
+    pub fn has_open_transaction(&self) -> bool {
+        [&self.app, &self.library, &self.subscribe, &self.cache]
+            .iter()
+            .any(|connection| !connection.is_autocommit())
+    }
+
+    #[doc(hidden)]
+    pub fn library_in_transaction(&self) -> bool {
+        !self.library.is_autocommit()
+    }
+
     pub fn open_library_read_pool(
         &self,
         size: NonZeroUsize,

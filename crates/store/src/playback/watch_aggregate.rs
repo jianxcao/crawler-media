@@ -141,7 +141,7 @@ impl Store {
             }
             Err(error) => {
                 let _ = self
-                    .subscribe
+                    .library
                     .execute_batch("ROLLBACK TO watch_aggregate; RELEASE watch_aggregate");
                 let _ = self.reset_watch_visible_media();
                 Err(error)

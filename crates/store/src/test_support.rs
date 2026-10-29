@@ -11,6 +11,12 @@ use std::path::Path;
 use super::{Store, StoreError};
 use crate::library_write::{FilePublication as PublicationRequest, WriteScope};
 
+/// Leave a read snapshot open to exercise reader-pool cleanup.
+pub fn begin_library_snapshot(store: &Store) -> Result<(), StoreError> {
+    store.library.execute_batch("BEGIN")?;
+    Ok(())
+}
+
 /// Specification of a file to be published in tests: the ledger facts a fixture
 /// needs, expressed with the same shapes the production read model uses.
 #[derive(Clone, Debug, PartialEq)]

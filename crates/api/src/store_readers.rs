@@ -104,6 +104,14 @@ impl std::ops::Deref for StoreReader {
 impl Drop for StoreReader {
     fn drop(&mut self) {
         if let Some(store) = self.store.take() {
+            store.reset_if_in_transaction();
+            if store.has_open_transaction() {
+                tracing::error!("retiring reader whose transaction could not be rolled back");
+                if let Some(permit) = self.permit.take() {
+                    permit.forget();
+                }
+                return;
+            }
             // Return the connection before exposing its permit. Keep the mutex
             // through notify so synchronous waiters cannot miss the return.
             let mut idle = self.pool.idle.lock();
@@ -117,6 +125,19 @@ impl Drop for StoreReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_returned_inside_transaction_is_rolled_back() {
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let writer = Store::open(tmp.path()).unwrap();
+        let readers = Arc::new(StoreReaders::open(&writer, 1).unwrap());
+        let reader = readers.checkout(Duration::ZERO).unwrap();
+        store::test_support::begin_library_snapshot(&reader).unwrap();
+        assert!(reader.library_in_transaction());
+        drop(reader);
+        let reader = readers.checkout(Duration::ZERO).unwrap();
+        assert!(!reader.library_in_transaction());
+    }
 
     #[tokio::test]
     async fn cancelling_an_assigned_async_waiter_wakes_a_synchronous_reader() {
