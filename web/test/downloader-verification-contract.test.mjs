@@ -230,3 +230,34 @@ test("old verification finishing cannot unlock an overlapping save or admit anot
   assert.equal(updated.props.downloader.url, "http://changed.invalid");
   assert.equal(updated.props.downloader.status, "pending");
 });
+
+test("limits preserve each downloader's unavailable state instead of presenting unknown speeds as unlimited", async () => {
+  const { api } = apiFixture(() => ({
+    status: "unavailable", error: "connection refused",
+    download_limit_bytes: null, upload_limit_bytes: null,
+  }));
+  const limits = await api.getDownloaderLimits("fixture");
+  assert.equal(limits.status, "unavailable");
+  assert.equal(limits.error, "connection refused");
+});
+
+test("an unavailable downloader displays its status and disables limits editing and saving", async () => {
+  const fixture = componentFixture({
+    listDownloaders: async () => [row({ status: "active" })],
+    getDownloaderLimits: async () => ({
+      status: "unavailable", error: "connection refused",
+      download_limit_bytes: null, upload_limit_bytes: null,
+    }),
+  });
+  fixture.root.render(); await settle();
+  const element = nodes(fixture.root.render()).find((node) => node.type?.name === "DownloaderRow");
+  const downloader = fixture.instance(element.type, element.props);
+  const modal = nodes(downloader.render()).find((node) => node.type?.name === "DownloaderLimitsModal");
+  const instance = fixture.instance(modal.type, { ...modal.props, open: true });
+  instance.render(); await settle();
+  const tree = instance.render();
+  assert.ok(nodes(tree).some((node) => typeof node.props?.children === "string" && /下载器不可用.*connection refused/.test(node.props.children)));
+  const save = nodes(tree).find((node) => node.type === "button" && node.props?.children === "保存");
+  assert.equal(save.props.disabled, true);
+  assert.ok(nodes(tree).filter((node) => node.type?.name === "LimitInput").every((node) => node.props.disabled));
+});

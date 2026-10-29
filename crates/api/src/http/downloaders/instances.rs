@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 
-use super::tasks::{run_downloader_action, run_downloader_read};
+use super::tasks::{DownloaderWorkError, run_downloader_action, run_downloader_read};
 
 #[derive(Deserialize)]
 pub(crate) struct DownloaderInput {
@@ -401,14 +401,50 @@ pub(crate) async fn get_limits(
         Ok(id) => id,
         Err((status, code, msg)) => return err(status, code, &msg),
     };
+    if let Some(id) = downloader_id {
+        match crate::http::store_wait::store_read(&state, move |store| store.get_downloader(id))
+            .await
+        {
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => {
+                return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%id, %error, "读取下载器配置失败");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+            Err(error) => return error.response(),
+        }
+    }
     match run_downloader_read(&state, downloader_id, |client| client.get_speed_limits()).await {
         Ok((dl, ul)) => ok(json!({
+            "status": "available",
+            "error": null,
             "download_limit_bytes": if dl == 0 { Value::Null } else { json!(dl) },
             "upload_limit_bytes": if ul == 0 { Value::Null } else { json!(ul) },
         }))
         .into_response(),
+        Err(DownloaderWorkError::Resolve(message) | DownloaderWorkError::Operation(message)) => {
+            unavailable_limits(downloader_id, &message)
+        }
+        Err(DownloaderWorkError::Timeout) => unavailable_limits(downloader_id, "下载器响应超时"),
         Err(error) => error.response(),
     }
+}
+
+fn unavailable_limits(id: Option<DownloaderId>, message: &str) -> Response {
+    tracing::warn!(downloader_id = ?id, error = %message, "下载器限速状态不可用");
+    ok(json!({
+        "status": "unavailable",
+        "error": message,
+        "download_limit_bytes": null,
+        "upload_limit_bytes": null,
+    }))
+    .into_response()
 }
 
 /// PUT /downloaders/limits
@@ -436,6 +472,8 @@ pub(crate) async fn set_limits(
     .await
     {
         Ok(()) => ok(json!({
+            "status": "available",
+            "error": null,
             "download_limit_bytes": if dl == 0 { Value::Null } else { json!(dl) },
             "upload_limit_bytes": if ul == 0 { Value::Null } else { json!(ul) },
         }))

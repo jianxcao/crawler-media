@@ -20,7 +20,7 @@ import { TransferModeCard } from "@/components/transfer-mode-card";
 import {
   type Downloader,
   type DownloaderClientType,
-  type DownloaderLimits,
+  type DownloaderLimitsSnapshot,
   type DownloaderPayload,
   type DownloaderStatus,
   type PathMapping,
@@ -674,6 +674,7 @@ function DownloaderLimitsModal({
   const { backdrop } = useBackdrop();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 表单态：限速以 KiB/s 字符串承载（空 = 不限速）；队列数值空 = 保持现状
   const [dlKib, setDlKib] = useState("");
@@ -686,7 +687,12 @@ function DownloaderLimitsModal({
   // Transmission 没有「最大活动种子数」概念（读回 null 时隐藏该输入）
   const [supportsMaxTotal, setSupportsMaxTotal] = useState(true);
 
-  const applyLimits = useCallback((limits: DownloaderLimits) => {
+  const applyLimits = useCallback((limits: DownloaderLimitsSnapshot) => {
+    setUnavailable(limits.status === "unavailable");
+    if (limits.status === "unavailable") {
+      setError(`下载器不可用：${limits.error || "无法读取限速状态"}`);
+      return;
+    }
     setDlKib(
       limits.download_limit_bytes != null
         ? String(Math.round(limits.download_limit_bytes / KIB))
@@ -710,10 +716,11 @@ function DownloaderLimitsModal({
   useEffect(() => {
     if (!open) return;
     setLoading(true);
+    setUnavailable(false);
     setError(null);
     getDownloaderLimits(downloader.id)
       .then((limits) => applyLimits(limits))
-      .catch((e) => setError((e as Error).message))
+      .catch((e) => { setUnavailable(true); setError((e as Error).message); })
       .finally(() => setLoading(false));
   }, [open, downloader.id, applyLimits]);
 
@@ -730,6 +737,7 @@ function DownloaderLimitsModal({
   }
 
   async function save() {
+    if (unavailable) return;
     setBusy(true);
     setError(null);
     try {
@@ -785,7 +793,7 @@ function DownloaderLimitsModal({
                 value={dlKib}
                 unit="KiB/s"
                 placeholder="不限"
-                disabled={busy}
+                disabled={busy || unavailable}
                 onChange={setDlKib}
               />
               <LimitInput
@@ -793,7 +801,7 @@ function DownloaderLimitsModal({
                 value={upKib}
                 unit="KiB/s"
                 placeholder="不限"
-                disabled={busy}
+                disabled={busy || unavailable}
                 onChange={setUpKib}
               />
             </div>
@@ -807,7 +815,7 @@ function DownloaderLimitsModal({
                   backgroundImage={backdrop}
                   variant="dark"
                   checked={altSpeed}
-                  disabled={busy}
+                  disabled={busy || unavailable}
                   aria-label="备用限速档"
                   onCheckedChange={setAltSpeed}
                   className="!min-h-0 !w-auto shrink-0 !gap-0 !bg-transparent !p-0"
@@ -826,7 +834,7 @@ function DownloaderLimitsModal({
                   backgroundImage={backdrop}
                   variant="dark"
                   checked={queueEnabled}
-                  disabled={busy}
+                  disabled={busy || unavailable}
                   aria-label="任务队列"
                   onCheckedChange={setQueueEnabled}
                   className="!min-h-0 !w-auto shrink-0 !gap-0 !bg-transparent !p-0"
@@ -841,20 +849,20 @@ function DownloaderLimitsModal({
                 <LimitInput
                   label="最大同时下载数"
                   value={maxDown}
-                  disabled={busy}
+                  disabled={busy || unavailable}
                   onChange={setMaxDown}
                 />
                 <LimitInput
                   label="最大做种数"
                   value={maxUp}
-                  disabled={busy}
+                  disabled={busy || unavailable}
                   onChange={setMaxUp}
                 />
                 {supportsMaxTotal && (
                   <LimitInput
                     label="最大活动种子数"
                     value={maxTotal}
-                    disabled={busy}
+                    disabled={busy || unavailable}
                     onChange={setMaxTotal}
                   />
                 )}
@@ -877,7 +885,7 @@ function DownloaderLimitsModal({
         <button
           type="button"
           onClick={() => void save()}
-          disabled={busy || loading}
+          disabled={busy || loading || unavailable}
           className="btn-accent rounded-full px-4 py-2 text-sub font-semibold disabled:opacity-60"
         >
           {busy ? "保存中…" : "保存"}

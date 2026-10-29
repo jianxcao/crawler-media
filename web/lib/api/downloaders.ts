@@ -292,6 +292,11 @@ export interface DownloaderLimits {
   max_active_torrents: number | null;
 }
 
+export interface DownloaderLimitsSnapshot extends DownloaderLimits {
+  status: "available" | "unavailable";
+  error: string | null;
+}
+
 const UNLIMITED_LIMITS: DownloaderLimits = {
   download_limit_bytes: null,
   upload_limit_bytes: null,
@@ -305,14 +310,16 @@ const UNLIMITED_LIMITS: DownloaderLimits = {
 /**
  * 实时读取下载器的全局限速与任务队列上限。
  */
-export function getDownloaderLimits(id: string): Promise<DownloaderLimits> {
+export function getDownloaderLimits(id: string): Promise<DownloaderLimitsSnapshot> {
   const query = id ? `?id=${encodeURIComponent(id)}` : "";
   return unwrap(
-    request<ApiEnvelope<{ download_limit_bytes: number | null; upload_limit_bytes: number | null }>>(
+    request<ApiEnvelope<Pick<DownloaderLimitsSnapshot, "status" | "error" | "download_limit_bytes" | "upload_limit_bytes">>>(
       `/downloaders/limits${query}`,
     ),
   ).then((data) => ({
     ...UNLIMITED_LIMITS,
+    status: data.status,
+    error: data.error,
     download_limit_bytes: data.download_limit_bytes,
     upload_limit_bytes: data.upload_limit_bytes,
   }));
@@ -324,10 +331,10 @@ export function getDownloaderLimits(id: string): Promise<DownloaderLimits> {
 export function setDownloaderLimits(
   id: string,
   limits: DownloaderLimits,
-): Promise<DownloaderLimits> {
+): Promise<DownloaderLimitsSnapshot> {
   const query = id ? `?id=${encodeURIComponent(id)}` : "";
   return unwrap(
-    request<ApiEnvelope<{ download_limit_bytes: number | null; upload_limit_bytes: number | null }>>(
+    request<ApiEnvelope<Pick<DownloaderLimitsSnapshot, "status" | "error" | "download_limit_bytes" | "upload_limit_bytes">>>(
       `/downloaders/limits${query}`,
       {
         method: "PUT",
@@ -339,6 +346,8 @@ export function setDownloaderLimits(
     ),
   ).then((data) => ({
     ...UNLIMITED_LIMITS,
+    status: data.status,
+    error: data.error,
     download_limit_bytes: data.download_limit_bytes,
     upload_limit_bytes: data.upload_limit_bytes,
   }));
