@@ -21,16 +21,26 @@ async fn probe_obligation_is_created_on_scan_and_recovered() {
         .unwrap()
         .expect("row must exist");
 
-    // Dispatch once
-    let _count = api::scan_probe_dispatch::dispatch_once(fix.state.clone())
+    // Dispatch once. The 7-byte "video" can never probe successfully, and failed
+    // work must stay retryable: the obligation is acked only by accepted or
+    // completed work, otherwise it remains next to the failed job.
+    api::scan_probe_dispatch::dispatch_once(fix.state.clone())
         .await
         .unwrap();
-    // Either already enqueued/acked or acked in this dispatch_once call
-    let remaining = store_arc.lock().scan_probe_obligations(10).unwrap();
-    assert_eq!(
-        remaining.len(),
-        0,
-        "all obligations must be dispatched and acked"
+    let ledger_id = _row.file.file_id.to_string();
+    let guard = store_arc.lock();
+    let remaining = guard.scan_probe_obligations(10).unwrap();
+    let in_flight = guard
+        .active_probe_unit_for_ledger(&ledger_id)
+        .unwrap()
+        .is_some();
+    assert!(
+        guard.probe_unit_recorded_for_ledger(&ledger_id).unwrap(),
+        "the scan obligation must have produced probe work"
+    );
+    assert!(
+        remaining.is_empty() || (!in_flight && remaining.len() == 1),
+        "obligation is acked by live work or kept for retry after failure: {remaining:?}"
     );
 }
 

@@ -73,14 +73,6 @@ fn dispatch_obligations(
             }
         }
 
-        // The job already running for this file, read before admission: a fast probe can
-        // finish between `AlreadyRunning` and the ACK below, and the obligation is satisfied
-        // by that job whatever its terminal state.
-        let running_job = shared
-            .lock()
-            .active_probe_unit_for_ledger(&row.file.file_id.to_string())
-            .map_err(|error| error.to_string())?
-            .map(|unit| unit.job_id);
         let result = probe.request_probe(
             &row,
             crate::probe_manager::policy::ProbeRequestOrigin::Detail,
@@ -93,21 +85,8 @@ fn dispatch_obligations(
                 .ack_scan_probe_obligation_for_work(&ob, Some(&job_id))
                 .map_err(|error| error.to_string())?,
             Ok(crate::probe_manager::policy::ProbeRequestResult::AlreadyRunning) => store
-                .ack_scan_probe_obligation_for_work(&ob, running_job.as_deref())
+                .ack_scan_probe_obligation_for_work(&ob, None)
                 .map_err(|error| error.to_string())?,
-            // Waiting: an earlier attempt for this file finished and its retry policy now
-            // owns the next one; that attempt satisfies the obligation.
-            Ok(crate::probe_manager::policy::ProbeRequestResult::Waiting { .. }) => {
-                match store
-                    .latest_probe_job_for_ledger(&row.file.file_id.to_string())
-                    .map_err(|error| error.to_string())?
-                {
-                    Some(job_id) => store
-                        .ack_scan_probe_obligation_for_work(&ob, Some(&job_id))
-                        .map_err(|error| error.to_string())?,
-                    None => false,
-                }
-            }
             Ok(crate::probe_manager::policy::ProbeRequestResult::Complete) => store
                 .ack_scan_probe_obligation_if_current(&ob)
                 .map_err(|error| error.to_string())?,

@@ -8,6 +8,17 @@ use store::{
 #[path = "support/mod.rs"]
 mod support;
 
+/// Park a published file as unidentified while its claim target stays: deleting
+/// the last file purges the orphan media row, and a claim always targets an
+/// existing media.
+fn detach_keeping_media(store: &Store, path: &str, media_id: domain::MediaId) {
+    let media = store.get_media(media_id).unwrap().expect("seeded media");
+    store.delete_ledger_path(path).unwrap();
+    if store.get_media(media_id).unwrap().is_none() {
+        store.insert_media(&media).unwrap();
+    }
+}
+
 #[test]
 fn claim_consumes_only_observed_source_and_rolls_back_with_failed_publication() {
     let tmp = tempfile::tempdir().unwrap();
@@ -16,7 +27,7 @@ fn claim_consumes_only_observed_source_and_rolls_back_with_failed_publication() 
     let (_, id) = support::seed_published_file(&store, &root, "Claim");
     let file = store.file_coverage_by_id(id).unwrap().unwrap().file;
     let path = file.path.display().to_string();
-    store.delete_ledger_path(&path).unwrap();
+    detach_keeping_media(&store, &path, file.media_id);
     store
         .insert_unidentified(path.clone(), Confidence::Low)
         .unwrap();
@@ -137,7 +148,7 @@ fn an_old_claim_cannot_consume_a_deleted_and_reparked_source() {
     let (_, id) = support::seed_published_file(&store, &tmp.path().join("movies"), "Repark");
     let mut file = store.file_coverage_by_id(id).unwrap().unwrap().file;
     let path = file.path.display().to_string();
-    store.delete_ledger_path(&path).unwrap();
+    detach_keeping_media(&store, &path, file.media_id);
     store
         .insert_unidentified(path.clone(), Confidence::Low)
         .unwrap();
@@ -161,7 +172,7 @@ fn an_old_claim_cannot_consume_a_deleted_and_reparked_source() {
     store
         .publish_unidentified_checked_context(&scope, &publication, None, &old_source, 1)
         .unwrap();
-    store.delete_ledger_path(&path).unwrap();
+    detach_keeping_media(&store, &path, file.media_id);
     std::fs::write(&file.path, b"replacement source bytes").unwrap();
     store
         .insert_unidentified(path.clone(), Confidence::Low)
