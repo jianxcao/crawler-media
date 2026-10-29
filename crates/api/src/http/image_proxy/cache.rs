@@ -43,6 +43,15 @@ impl ImageCache {
         }
     }
 
+    /// Immutable entries are published by atomic rename. Hits need no publication
+    /// mutex, directory scan, eviction, or upstream capacity.
+    pub(super) fn lookup(&self, url: &str) -> Result<Option<Image>, String> {
+        self.read(
+            &self.root.join(format!("{}.img", super::cache_key(url))),
+            false,
+        )
+    }
+
     pub(super) fn get(
         &self,
         url: &str,
@@ -64,7 +73,7 @@ impl ImageCache {
             let _guard = self.publication.lock().map_err(|e| e.to_string())?;
             fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
             self.reserve(0)?;
-            if let Some(image) = self.read(&path)? {
+            if let Some(image) = self.read(&path, true)? {
                 return Ok(image);
             }
         }
@@ -83,7 +92,7 @@ impl ImageCache {
         }
         let _guard = self.publication.lock().map_err(|e| e.to_string())?;
         self.reserve(0)?;
-        if let Some(image) = self.read(&path)? {
+        if let Some(image) = self.read(&path, true)? {
             return Ok(image);
         }
         let size = content_type.len() as u64 + 1 + bytes.len() as u64;
@@ -110,7 +119,7 @@ impl ImageCache {
         Ok((content_type, bytes))
     }
 
-    fn read(&self, path: &Path) -> Result<Option<Image>, String> {
+    fn read(&self, path: &Path, discard_invalid: bool) -> Result<Option<Image>, String> {
         let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -129,8 +138,10 @@ impl ImageCache {
         {
             return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
         }
-        tracing::warn!(path = %path.display(), "Removing invalid or oversized image cache entry");
-        self.remove_checked(path)?;
+        tracing::warn!(path = %path.display(), "Invalid or oversized image cache entry");
+        if discard_invalid {
+            self.remove_checked(path)?;
+        }
         Ok(None)
     }
 

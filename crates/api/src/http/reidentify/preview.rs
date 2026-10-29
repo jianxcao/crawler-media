@@ -29,12 +29,10 @@ pub(crate) async fn preview(
             Err(error) => return error.response(),
         };
     let files = state.file_stats.clone();
-    match state
-        .fs_work
-        .run(crate::http::library::BROWSE_DEADLINE, move || {
-            render(media, coverages, revision, files.as_ref())
-        })
-        .await
+    match crate::http::fs::read_work(&state, move || {
+        render(media, coverages, revision, files.as_ref())
+    })
+    .await
     {
         Ok(response) => response,
         Err(error) => crate::http::library::browse_work_error(error),

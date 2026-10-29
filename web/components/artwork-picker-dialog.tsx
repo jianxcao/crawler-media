@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BrandLoader } from "@/components/brand-loader";
@@ -223,7 +224,7 @@ export function ArtworkPickerDialog({
                     : "ring-white/10 hover:ring-[var(--accent-2)]"
                 }`}
               >
-                <img
+                <ArtworkImage
                   src={imageUrl(c.preview_url)}
                   alt=""
                   loading="lazy"

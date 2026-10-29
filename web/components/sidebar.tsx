@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
@@ -125,7 +126,7 @@ export function Sidebar({
       {collapsed ? (
         <div className="flex flex-col items-center gap-2 px-3 pb-3 pt-5">
           <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
-            <img
+            <ArtworkImage
               src="/logo-mark.svg"
               alt={publicEnv.appName}
               width={32}
@@ -140,7 +141,7 @@ export function Sidebar({
         <div className="flex items-center justify-between px-4 pb-3 pt-4">
           <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
             <div className="flex items-center gap-2.5">
-              <img
+              <ArtworkImage
                 src="/logo-mark.svg"
                 alt=""
                 width={30}

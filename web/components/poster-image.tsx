@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /**
@@ -75,7 +76,7 @@ export function PosterImage({
   /** 图片地址；为空时直接渲染占位 */
   src?: string | null;
   alt: string;
-  /** 应用在 <img> 与默认占位上的布局类（定位 / 尺寸 / 过渡等） */
+  /** 应用在 <ArtworkImage> 与默认占位上的布局类（定位 / 尺寸 / 过渡等） */
   className?: string;
   /** 自定义占位内容；不传则渲染深色渐变底 */
   fallback?: ReactNode;
@@ -128,7 +129,7 @@ export function PosterImage({
   }
   return (
     <>
-      <img
+      <ArtworkImage
         ref={imgRef}
         src={src}
         alt={alt}

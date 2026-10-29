@@ -160,7 +160,8 @@ fn create_store_and_service(
     let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
     let catalog = Arc::new(MockCatalog);
     let service =
-        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher);
+        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher)
+            .unwrap();
     (tmp, store, service)
 }
 
@@ -488,12 +489,15 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
     let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
     let catalog = Arc::new(MockCatalog);
 
-    let service = Arc::new(MediaPosterService::with_custom_fetcher(
-        store.clone(),
-        catalog,
-        cache_dir,
-        Arc::new(SimpleFetcher),
-    ));
+    let service = Arc::new(
+        MediaPosterService::with_custom_fetcher(
+            store.clone(),
+            catalog,
+            cache_dir,
+            Arc::new(SimpleFetcher),
+        )
+        .unwrap(),
+    );
 
     // Fill registry to 4096 live gates
     let mut live_gates = Vec::new();

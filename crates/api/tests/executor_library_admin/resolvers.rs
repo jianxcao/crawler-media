@@ -79,7 +79,7 @@ impl api::library_cover_service::CoverRenderer for ContendedCoverRenderer {
 }
 
 #[test]
-fn public_library_cover_cas_keeps_executor_responsive_after_rendering() {
+fn explicit_library_cover_cas_keeps_executor_responsive_after_rendering() {
     let mut f = Fixture::new();
     let (entered, started) = tokio::sync::oneshot::channel();
     let holders = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -91,11 +91,16 @@ fn public_library_cover_cas_keeps_executor_responsive_after_rendering() {
     f.state = f.state.with_cover_service(Arc::new(
         api::library_cover_service::LibraryCoverService::new(Arc::new(renderer)),
     ));
-    let uri = format!("/api/v1/libraries/{}/cover", f.file.library_id);
+    let uri = format!("/api/v1/libraries/{}/cover/generate", f.file.library_id);
     let (response, elapsed) = runtime().block_on(async {
         tokio::join!(
-            router(f.state.clone())
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()),
+            router(f.state.clone()).oneshot(
+                Request::post(uri)
+                    .header("authorization", format!("Bearer {}", f.token))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            ),
             async {
                 let start = tokio::time::timeout(Duration::from_secs(3), started)
                     .await

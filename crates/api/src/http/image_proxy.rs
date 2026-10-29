@@ -2,22 +2,20 @@
 //! Fetched bytes are cached on disk under `{CRAWLER_MEDIA_DATA}/cache/images`
 //! so a second visit never re-fetches the upstream image.
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 mod cache;
+mod runtime;
 
 const IMAGE_RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
 const IMAGE_CONCURRENCY: usize = 8;
 
 use axum::extract::Query;
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::HeaderMap;
+use axum::response::Response;
 use serde::Deserialize;
 use url::Url;
-
-use crate::http::err;
 
 #[derive(Deserialize)]
 pub(crate) struct ProxyQuery {
@@ -42,75 +40,46 @@ const ALLOWED_HOSTS: &[&str] = &[
     "s4.anilist.co",
 ];
 
-pub(crate) async fn proxy_image(query: Query<ProxyQuery>) -> Response {
-    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    proxy_with_gate(
-        query.0,
-        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)))
-            .clone(),
-    )
-    .await
+pub(crate) async fn proxy_image(headers: HeaderMap, query: Query<ProxyQuery>) -> Response {
+    static PROXY: OnceLock<Arc<runtime::ImageProxy>> = OnceLock::new();
+    PROXY
+        .get_or_init(|| {
+            Arc::new(runtime::ImageProxy::new(
+                image_cache(),
+                Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
+                Arc::new(fetch_image),
+            ))
+        })
+        .response(query.0, headers)
+        .await
 }
 
-async fn proxy_with_gate(query: ProxyQuery, gate: Arc<tokio::sync::Semaphore>) -> Response {
-    if !allowed_url(&query.url) {
-        return err(StatusCode::BAD_REQUEST, "image.invalid", "不允许的图床");
-    }
-    let permit = match gate.try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            tracing::warn!("Image proxy concurrency limit reached");
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "image.busy",
-                "图片代理繁忙，请稍后重试",
-            );
-        }
-    };
-    match tokio::task::spawn_blocking(move || {
-        // Keep the permit in the blocking task, including after request cancellation.
-        let _permit = permit;
-        cached_fetch(&query.url)
-    })
-    .await
-    {
-        Ok(Ok((content_type, bytes))) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, content_type),
-                (header::CACHE_CONTROL, "public, max-age=86400".into()),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Ok(Err(error)) => {
-            tracing::error!(%error, "Image proxy failed");
-            err(StatusCode::BAD_GATEWAY, "image.fetch", &error)
-        }
-        Err(error) => {
-            tracing::error!(%error, "Image proxy worker failed");
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "image.fetch",
-                &error.to_string(),
-            )
-        }
-    }
-}
-
-fn cache_root() -> PathBuf {
-    crate::config::data_dir_from_env()
-        .join("cache")
-        .join("images")
-}
-
-fn cached_fetch(url: &str) -> Result<(String, Vec<u8>), String> {
-    static CACHE: OnceLock<cache::ImageCache> = OnceLock::new();
+fn image_cache() -> Arc<cache::ImageCache> {
+    static CACHE: OnceLock<Arc<cache::ImageCache>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            cache::ImageCache::new(cache_root(), IMAGE_CACHE_BUDGET_BYTES, IMAGE_RESPONSE_LIMIT)
+            Arc::new(cache::ImageCache::new(
+                crate::config::data_dir_from_env()
+                    .join("cache")
+                    .join("images"),
+                IMAGE_CACHE_BUDGET_BYTES,
+                IMAGE_RESPONSE_LIMIT,
+            ))
         })
-        .get(url, || fetch_image(url))
+        .clone()
+}
+
+#[cfg(test)]
+async fn proxy_with_gate(query: ProxyQuery, gate: Arc<tokio::sync::Semaphore>) -> Response {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let proxy = Arc::new(runtime::ImageProxy::new(
+        Arc::new(cache::ImageCache::new(dir.path().into(), 1000, 100)),
+        gate.clone(),
+        Arc::new(|_| Err("offline image fixture".into())),
+    ));
+    let response = proxy.response(query, HeaderMap::new()).await;
+    gate.close();
+    response
 }
 
 /// SipHash hex of the URL: a disk-cache filename, not a security primitive.
@@ -187,6 +156,7 @@ fn no_redirect_agent(url: &str) -> ureq::Agent {
 
 fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
     let agent = no_redirect_agent(url);
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let mut current = url.to_string();
     // 手动跟随重定向：每一跳都重新过白名单，最多 5 跳。
     for _ in 0..5 {
@@ -204,7 +174,15 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
         if !referer.is_empty() {
             request = request.header("Referer", referer);
         }
-        let response = request.call().map_err(|err| err.to_string())?;
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| "Image fetch deadline elapsed".to_string())?;
+        let response = request
+            .config()
+            .timeout_global(Some(remaining))
+            .build()
+            .call()
+            .map_err(|err| err.to_string())?;
         let status = response.status();
         if status.is_redirection() {
             let location = response

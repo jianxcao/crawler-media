@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -86,7 +87,7 @@ export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: s
                   <Link to={hrefOf(item)} className="block">
                     <div className="aspect-[2/3] overflow-hidden rounded-2xl border border-white/[0.07] bg-white/[0.04]">
                       {item.poster_url ? (
-                        <img
+                        <ArtworkImage
                           src={imageUrl(item.poster_url)}
                           alt=""
                           className="h-full w-full object-cover"

@@ -15,6 +15,9 @@ use api::media_posters::PosterError;
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
 
+#[path = "media_posters/nonblocking.rs"]
+mod nonblocking;
+
 struct MockCatalog {
     poster_calls: AtomicUsize,
 }
@@ -119,12 +122,15 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
     )
     .unwrap();
 
-    let poster_service = Arc::new(MediaPosterService::with_custom_fetcher(
-        state.store(),
-        catalog.clone(),
-        cache_dir,
-        fetcher.clone(),
-    ));
+    let poster_service = Arc::new(
+        MediaPosterService::with_custom_fetcher(
+            state.store(),
+            catalog.clone(),
+            cache_dir,
+            fetcher.clone(),
+        )
+        .unwrap(),
+    );
 
     let state = state.with_media_posters(poster_service);
     let app = api::router(state);
@@ -137,6 +143,26 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
         .unwrap();
 
     let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let res = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/api/v1/media/{media_id}/poster"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["content-type"], "image/png");
     assert_eq!(res.headers()["cache-control"], "public, max-age=86400");

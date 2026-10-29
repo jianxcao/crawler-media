@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { playLinkFileId } from "@/lib/player/active-target";
 import type { ReactNode } from "react";
 import { Children, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -852,7 +853,7 @@ export function LibraryItemDetailView({
           className="pointer-events-none absolute inset-x-0 top-0 z-0 overflow-hidden"
           style={{ height: mobileHeroHeight }}
         >
-          <img src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
+          <ArtworkImage src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
           <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
           <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
         </div>
@@ -881,7 +882,7 @@ export function LibraryItemDetailView({
            页首 Hero 承担封面展示，这里不再重复 */}
         {!isMobile && immersiveUrl && (
           <div className="mb-6 flex items-start gap-6">
-            <img
+            <ArtworkImage
               src={immersiveUrl}
               alt=""
               decoding="async"

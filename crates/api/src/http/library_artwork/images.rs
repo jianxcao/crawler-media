@@ -1,7 +1,6 @@
 //! Public native image reads: owned authorization facts first, bounded disk work second.
 
 use std::path::{Path as FsPath, PathBuf};
-use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -12,9 +11,7 @@ use crate::http::{err, store_wait};
 use crate::management::ApiState;
 
 use super::image_content_type;
-use super::image_response::conditional_image;
-
-const IMAGE_WAIT: Duration = Duration::from_secs(5);
+use super::image_response::{IMAGE_READ, IMAGE_WAIT, conditional_image};
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -78,12 +75,12 @@ async fn local_bytes(
 ) -> Result<Option<Vec<u8>>, Response> {
     let files = state.file_stats.clone();
     let reservation = state
-        .fs_work
+        .artwork_reads
         .reserve(IMAGE_WAIT)
         .await
         .map_err(|_| store_wait::busy_response())?;
     reservation
-        .run_to_completion(move || {
+        .run(IMAGE_READ, move || {
             sidecar(&path, kind, files.as_ref()).and_then(|image| match std::fs::read(&image) {
                 Ok(bytes) => Some(bytes),
                 Err(error) => {
@@ -110,50 +107,14 @@ async fn artwork_bytes(
         let coverage = store.file_coverage_by_id(file).ok().flatten()?;
         let media = store.get_media(coverage.file.media_id).ok().flatten()?;
         super::super::library::file_visible_to_user(store, &coverage.file, &media, user)
-            .then_some((coverage, media))
+            .then_some(coverage)
     })
     .await;
-    let (coverage, media) = match captured {
+    let coverage = match captured {
         Ok(Some(facts)) => facts,
         Ok(None) => return kind.missing(),
         Err(error) => return error.response(),
     };
-    match local_bytes(&state, coverage.file.path.clone(), kind).await {
-        Ok(Some(bytes)) => {
-            let mime = image_content_type(&bytes);
-            return conditional_image(&headers, bytes, mime, true);
-        }
-        Ok(None) => {}
-        Err(response) => return response,
-    };
-    if matches!(kind, Kind::Still)
-        || state.require_writable().is_err()
-        || state.require_write_admitted().is_err()
-    {
-        return kind.missing();
-    }
-    let worker = state.clone();
-    let path = coverage.file.path.clone();
-    let fetch = state
-        .http_work
-        .run_to_completion(move || {
-            if worker.require_writable().is_err() || worker.require_write_admitted().is_err() {
-                return;
-            }
-            match kind {
-                Kind::Poster => {
-                    let _ = crate::poster_fetch::attach_poster(&worker, &media, &path);
-                }
-                Kind::Backdrop => {
-                    let _ = crate::poster_fetch::attach_backdrop(&worker, &media, &path);
-                }
-                Kind::Still => {}
-            }
-        })
-        .await;
-    if let Err(error) = fetch {
-        return super::super::library::browse_work_error(error);
-    }
     match local_bytes(&state, coverage.file.path, kind).await {
         Ok(Some(bytes)) => {
             let mime = image_content_type(&bytes);
@@ -212,32 +173,47 @@ pub(crate) async fn library_cover(
         Ok(None) => return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在"),
         Err(error) => return error.response(),
     };
-    let cover = match state
-        .cover_service()
-        .ensure_cover(&state, &library.id)
-        .await
-    {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(%error, library_id=%library.id, "failed to ensure library cover");
-            None
+    let path = library
+        .cover_path
+        .as_deref()
+        .filter(|path| !matches!(*path, "none" | ""));
+    if path.is_none() {
+        if library.cover_path.is_none() {
+            state
+                .cover_service()
+                .refresh_in_background(&state, &library.id);
         }
-    };
-    let reservation = match state.fs_work.reserve(IMAGE_WAIT).await {
+        return match crate::media_server_provider::default_library_cover(library.kind) {
+            Ok(bytes) => conditional_image(&headers, bytes, "image/jpeg", true),
+            Err(error) => {
+                tracing::error!(%error, "Default Library cover unavailable");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
+    let reservation = match state.artwork_reads.reserve(IMAGE_WAIT).await {
         Ok(reservation) => reservation,
         Err(_) => return store_wait::busy_response(),
     };
+    let refresh_id = library.id.clone();
     let result = reservation
-        .run_to_completion(move || {
-            if let Some(path) = cover {
-                std::fs::read(path).map_err(|error| error.to_string())
-            } else {
-                crate::media_server_provider::default_library_cover(library.kind)
+        .run(IMAGE_READ, move || {
+            if let Some(path) = library.cover_path.as_deref().filter(|path| !matches!(*path, "none" | "")) {
+                match std::fs::read(path) {
+                    Ok(bytes) => return Ok((bytes, false)),
+                    Err(error) => tracing::warn!(%error, %path, "cached Library cover unavailable; serving default"),
+                }
             }
+            crate::media_server_provider::default_library_cover(library.kind).map(|bytes| (bytes, true))
         })
         .await;
     match result {
-        Ok(Ok(bytes)) => {
+        Ok(Ok((bytes, refresh))) => {
+            if refresh {
+                state
+                    .cover_service()
+                    .refresh_in_background(&state, &refresh_id);
+            }
             let mime = image_content_type(&bytes);
             conditional_image(&headers, bytes, mime, true)
         }

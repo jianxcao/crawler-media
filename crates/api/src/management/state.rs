@@ -44,6 +44,8 @@ pub struct ApiState {
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// 文件目录浏览有界 blocking 预算（默认 2）。
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Cached native artwork reads cannot queue behind maintenance filesystem IO.
+    pub(crate) artwork_reads: Arc<crate::blocking_budget::BlockingBudget>,
     /// Instance-owned coalesced Browser reconciliation; no global registry.
     pub(crate) browser_reconcile: Arc<crate::http::browser_settings::ReconcileCoordinator>,
     /// 后台背景图独立准入，按最终目标路径单飞；不占用交互式请求预算。
@@ -275,17 +277,7 @@ impl ApiState {
     {
         std::fs::create_dir_all(&library_root)?;
         apply_admin_bootstrap(&store.lock(), action)?;
-        let jellyfin_server_id = {
-            let guard = store.lock();
-            match guard.get_setting("jellyfin.server_id")? {
-                Some(id) => id,
-                None => {
-                    let id = uuid::Uuid::new_v4().simple().to_string();
-                    guard.put_setting("jellyfin.server_id", &id)?;
-                    id
-                }
-            }
-        };
+        let jellyfin_server_id = startup::jellyfin_server_id(&store.lock())?;
         let jobs_path = store.lock().data_dir().join("jobs.db");
         let jobs = open_jobs(&jobs_path)?;
         let library_reads = Arc::new(
@@ -312,9 +304,11 @@ impl ApiState {
         ));
         probe.set_chapter_frames(chapter_frames.clone());
         let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
-        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
-            crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
-        );
+        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> =
+            Arc::new(crate::media_posters::service::MediaPosterService::new(
+                store_readers.clone(),
+                catalog.clone(),
+            ));
         let state = Self {
             store: store.clone(),
             library_read_shutdown: Arc::new(LibraryReadShutdown(library_reads.clone())),
@@ -331,6 +325,7 @@ impl ApiState {
             http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
+            artwork_reads: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             browser_reconcile: Default::default(),
             backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
             notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),

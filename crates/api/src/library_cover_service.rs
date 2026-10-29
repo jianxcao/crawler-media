@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod refresh;
+
 use cover_generator::CoverOptions;
 
 use crate::ApiState;
@@ -60,12 +62,16 @@ pub struct GeneratedCover {
 }
 
 pub struct LibraryCoverService {
+    refresh: refresh::RefreshQueue,
     renderer: Arc<dyn CoverRenderer>,
 }
 
 impl LibraryCoverService {
     pub fn new(renderer: Arc<dyn CoverRenderer>) -> Self {
-        Self { renderer }
+        Self {
+            renderer,
+            refresh: refresh::RefreshQueue::default(),
+        }
     }
 
     /// 生产默认服务（真实渲染器）。

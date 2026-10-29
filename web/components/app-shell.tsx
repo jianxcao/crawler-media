@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -585,7 +586,7 @@ function MobileTopBar({
             className="flex h-11 shrink-0 items-center transition-opacity active:opacity-60"
           >
             {actions ? (
-              <img
+              <ArtworkImage
                 src="/logo-mark.svg"
                 alt={publicEnv.appName}
                 width={30}
@@ -594,7 +595,7 @@ function MobileTopBar({
               />
             ) : (
               <div className="flex items-center gap-2">
-                <img
+                <ArtworkImage
                   src="/logo-mark.svg"
                   alt=""
                   width={26}

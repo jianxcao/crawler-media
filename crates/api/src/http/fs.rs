@@ -35,8 +35,7 @@ pub struct FsBrowse {
 /// 网络存储或超大目录上，因此**整体**放进 blocking 线程：async worker 上做这些
 /// 同步调用会把运行时一起拖住。
 ///
-/// 这里用裸 `spawn_blocking` 而不是共享的 HTTP 预算：目录选择器的扫描可能很久，
-/// 不应该占用其它端点共用的 8 个准入名额，也不引入新的 504 语义（对外行为不变）。
+/// Filesystem readers share a bounded queue, separate from database/HTTP work.
 pub async fn browse_fs(
     State(state): State<ApiState>,
     Query(query): Query<BrowseQuery>,
@@ -58,16 +57,13 @@ pub async fn browse_fs(
             }
         });
 
-    match state
-        .fs_work
-        .run(std::time::Duration::from_secs(10), move || {
-            read_directory(&target)
-        })
-        .await
-    {
+    match read_work(&state, move || read_directory(&target)).await {
         Ok(Ok(browse)) => ok(serde_json::to_value(browse).unwrap_or_default()).into_response(),
         Ok(Err(response)) => response,
-        Err(crate::blocking_budget::BlockingError::Busy) => err(
+        Err(
+            crate::blocking_budget::BlockingError::Busy
+            | crate::blocking_budget::BlockingError::Timeout,
+        ) => err(
             StatusCode::SERVICE_UNAVAILABLE,
             "fs.busy",
             "文件系统浏览并发过载",
@@ -78,6 +74,38 @@ pub async fn browse_fs(
             &error.to_string(),
         ),
     }
+}
+
+/// Read-only filesystem work queues before starting a blocking worker. A burst
+/// of artwork/scrape IO must not turn unrelated maintenance reads into immediate
+/// 503s. The ten second deadline includes both queueing and actual observation;
+/// a timed out worker keeps its permit until its filesystem calls finish.
+pub(crate) async fn read_work<T: Send + 'static>(
+    state: &ApiState,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, crate::blocking_budget::BlockingError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let result = async {
+        state
+            .fs_work
+            .reserve(super::store_wait::STORE_READ_WAIT)
+            .await?
+            .run(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+                work,
+            )
+            .await
+    }
+    .await;
+    if let Err(error) = &result {
+        match error {
+            crate::blocking_budget::BlockingError::Worker(_) => {
+                tracing::error!(%error, "filesystem read worker failed");
+            }
+            _ => tracing::warn!(%error, "filesystem read did not finish within its budget"),
+        }
+    }
+    result
 }
 
 /// 同步的目录枚举。状态码与文案保持既有行为：不存在 404、不是目录 400、

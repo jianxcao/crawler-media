@@ -71,7 +71,7 @@ test("release() clears the pending local timer before timeout expires", async ()
   assert.equal(lease.isLocalTimeout(), false);
 });
 
-test("with external signal, local timeout is not armed even after timeoutMs expires", async () => {
+test("a caller cancellation signal still has a bounded request deadline", async () => {
   const externalController = new AbortController();
   const external = externalController.signal;
 
@@ -81,8 +81,8 @@ test("with external signal, local timeout is not armed even after timeoutMs expi
 
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.equal(lease.signal.aborted, false);
-  assert.equal(lease.isLocalTimeout(), false);
+  assert.equal(lease.signal.aborted, true);
+  assert.equal(lease.isLocalTimeout(), true);
 
   lease.release();
   assert.equal(getEventListeners(external, "abort").length, 0);

@@ -2,7 +2,7 @@
 //! file (`chapter_N.jpg`), served for the detail strip and the player.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -455,6 +455,7 @@ pub(crate) async fn generate_chapters(
 /// GET /chapters/{ledger_id}/{index} — a generated chapter scene frame.
 pub(crate) async fn chapter_image(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Path((ledger_id, index)): Path<(String, String)>,
 ) -> Response {
     let Ok(file_id) = domain::LedgerId::from_str(&ledger_id) else {
@@ -475,20 +476,26 @@ pub(crate) async fn chapter_image(
     };
     let frame = chapter_image_path(&row.file.path, index);
     let reservation = match state
-        .fs_work
-        .reserve(std::time::Duration::from_secs(5))
+        .artwork_reads
+        .reserve(super::library_artwork::image_response::IMAGE_WAIT)
         .await
     {
         Ok(reservation) => reservation,
         Err(_) => return super::store_wait::busy_response(),
     };
     match reservation
-        .run_to_completion(move || std::fs::read(frame))
+        .run(
+            super::library_artwork::image_response::IMAGE_READ,
+            move || std::fs::read(frame),
+        )
         .await
     {
-        Ok(Ok(bytes)) => {
-            ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
-        }
+        Ok(Ok(bytes)) => super::library_artwork::image_response::conditional_image(
+            &headers,
+            bytes,
+            "image/jpeg",
+            true,
+        ),
         Err(error) => super::library::browse_work_error(error),
         _ => err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在"),
     }

@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-retry";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -118,14 +120,16 @@ export function ImageLightbox({
 
   // 预加载相邻图片：切换时不白屏
   useEffect(() => {
+    const preload = new AbortController();
     for (const neighbor of [index - 1, index + 1]) {
       const url = images[(neighbor + images.length) % images.length];
       if (url) {
-        const img = new Image();
+        const img = createArtworkImage(preload.signal);
         img.referrerPolicy = "no-referrer";
         img.src = url;
       }
     }
+    return () => preload.abort();
   }, [index, images]);
 
   const markBroken = (i: number) =>
@@ -227,7 +231,7 @@ export function ImageLightbox({
             </span>
           </div>
         ) : (
-          <img
+          <ArtworkImage
             key={images[index]}
             src={images[index]}
             alt={`第 ${index + 1} 张图片`}
@@ -291,7 +295,7 @@ export function ImageLightbox({
                     : "opacity-55 hover:opacity-90"
                 }`}
               >
-                <img
+                <ArtworkImage
                   src={url}
                   alt=""
                   loading="lazy"

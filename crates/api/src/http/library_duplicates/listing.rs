@@ -53,13 +53,7 @@ pub(crate) async fn duplicates(State(state): State<ApiState>, Path(id): Path<Str
         Err(error) => return error.response(),
     };
     let files = state.file_stats.clone();
-    match state
-        .fs_work
-        .run(super::super::library::BROWSE_DEADLINE, move || {
-            group(captured, files.as_ref())
-        })
-        .await
-    {
+    match super::super::fs::read_work(&state, move || group(captured, files.as_ref())).await {
         Ok(groups) => ok_list(groups).into_response(),
         Err(error) => super::super::library::browse_work_error(error),
     }

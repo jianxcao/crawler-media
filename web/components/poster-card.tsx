@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import { Link } from "react-router-dom";
@@ -406,7 +407,7 @@ function PosterCardContent({
             <div className="flex items-center">
               {item.studioLogo ? (
                 <div className="flex h-4 max-w-[64px] items-center rounded bg-black/60 px-1 py-0.5 backdrop-blur-sm">
-                  <img
+                  <ArtworkImage
                     src={item.studioLogo}
                     alt={item.extent ?? "平台"}
                     className="max-h-3 w-auto object-contain brightness-0 invert drop-shadow"

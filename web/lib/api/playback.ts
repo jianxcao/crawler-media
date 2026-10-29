@@ -904,6 +904,7 @@ export function reportPlaybackProgressOnUnload(
   // keepalive fetch 能带上 token，并且在页面卸载后继续发出。
   if (typeof fetch !== "undefined" && token) {
     void fetch(url, {
+      signal: AbortSignal.timeout(15_000),
       method: "POST",
       headers: {
         Accept: "application/json",

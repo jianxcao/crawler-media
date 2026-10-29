@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -18,8 +18,10 @@ use crate::catalog::Catalog;
 const NEGATIVE_CACHE_CAPACITY: usize = 4_096;
 const GATE_REGISTRY_CAPACITY: usize = 4_096;
 
+mod delivery;
+
 pub struct MediaPosterService {
-    store: Arc<Mutex<Store>>,
+    readers: Arc<crate::store_readers::StoreReaders>,
     catalog: Arc<dyn Catalog>,
     cache: DiskPosterCache,
     fetcher: Arc<dyn ImageFetcher>,
@@ -28,26 +30,21 @@ pub struct MediaPosterService {
     global_concurrency: Arc<Semaphore>,
     active_workers: Arc<AtomicUsize>,
     wait_deadline: Duration,
+    cache_reads: crate::blocking_budget::BlockingBudget,
+    warming: Arc<Mutex<HashSet<MediaId>>>,
 }
 
 impl MediaPosterService {
-    pub fn new(store: Arc<Mutex<Store>>, catalog: Arc<dyn Catalog>) -> Self {
-        let clock = Arc::new(SystemPosterClock::new());
-        Self {
-            store,
+    pub(crate) fn new(
+        readers: Arc<crate::store_readers::StoreReaders>,
+        catalog: Arc<dyn Catalog>,
+    ) -> Self {
+        Self::configured(
+            readers,
             catalog,
-            cache: DiskPosterCache::new(DiskPosterCache::default_dir()),
-            fetcher: Arc::new(RestricedImageFetcher),
-            in_flight: Arc::new(Mutex::new(HashMap::new())),
-            negative_cache: Arc::new(Mutex::new(NegativePosterCache::new(
-                NEGATIVE_CACHE_CAPACITY,
-                NEGATIVE_TTL,
-                clock,
-            ))),
-            global_concurrency: Arc::new(Semaphore::new(4)),
-            active_workers: Arc::new(AtomicUsize::new(0)),
-            wait_deadline: Duration::from_secs(10),
-        }
+            DiskPosterCache::default_dir(),
+            Arc::new(RestricedImageFetcher),
+        )
     }
 
     pub fn with_custom_fetcher(
@@ -55,10 +52,20 @@ impl MediaPosterService {
         catalog: Arc<dyn Catalog>,
         cache_dir: std::path::PathBuf,
         fetcher: Arc<dyn ImageFetcher>,
+    ) -> Result<Self, store::StoreError> {
+        let readers = Arc::new(crate::store_readers::StoreReaders::open(&store.lock(), 4)?);
+        Ok(Self::configured(readers, catalog, cache_dir, fetcher))
+    }
+
+    fn configured(
+        readers: Arc<crate::store_readers::StoreReaders>,
+        catalog: Arc<dyn Catalog>,
+        cache_dir: std::path::PathBuf,
+        fetcher: Arc<dyn ImageFetcher>,
     ) -> Self {
         let clock = Arc::new(SystemPosterClock::new());
         Self {
-            store,
+            readers,
             catalog,
             cache: DiskPosterCache::new(cache_dir),
             fetcher,
@@ -71,6 +78,8 @@ impl MediaPosterService {
             global_concurrency: Arc::new(Semaphore::new(4)),
             active_workers: Arc::new(AtomicUsize::new(0)),
             wait_deadline: Duration::from_secs(10),
+            cache_reads: crate::blocking_budget::BlockingBudget::new(4),
+            warming: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -152,7 +161,7 @@ impl MediaPosterService {
     }
 
     fn spawn_worker(&self, media_id: MediaId, entry: Arc<PosterInflight>) {
-        let store = self.store.clone();
+        let readers = self.readers.clone();
         let catalog = self.catalog.clone();
         let fetcher = self.fetcher.clone();
         let cache = self.cache.clone();
@@ -187,7 +196,9 @@ impl MediaPosterService {
                     }
 
                     let (kind, tmdb_id) = {
-                        let s = store.lock();
+                        let s = readers
+                            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+                            .ok_or(PosterError::Busy)?;
                         let media = s
                             .get_media(media_id)
                             .map_err(|e| PosterError::Io(e.to_string()))?
@@ -223,6 +234,14 @@ impl MediaPosterService {
 
 #[async_trait::async_trait]
 impl MediaPosterSource for MediaPosterService {
+    async fn cached(&self, media_id: MediaId) -> Result<Option<PosterBytes>, PosterError> {
+        self.cached_bytes(media_id).await
+    }
+
+    fn warm(self: Arc<Self>, media_id: MediaId) -> Result<(), PosterError> {
+        self.start_warm(media_id)
+    }
+
     async fn get(&self, media_id: MediaId) -> Result<PosterBytes, PosterError> {
         if let Some(err) = self.check_negative_cache(media_id) {
             return Err(err);

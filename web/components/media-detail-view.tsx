@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-retry";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -167,7 +169,8 @@ export function MediaDetailView({
     }
     setHdState("pending");
     let cancelled = false;
-    const img = new Image();
+    const preload = new AbortController();
+    const img = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -183,6 +186,7 @@ export function MediaDetailView({
     img.src = hdUrl;
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, [hdUrl]);
   // 等待高清期间保持黑场（宁黑勿糊）：只有确认无高清档或高清加载失败，
@@ -368,7 +372,7 @@ export function MediaDetailView({
           className="pointer-events-none absolute inset-x-0 top-0 z-0 overflow-hidden"
           style={{ height: mobileHeroHeight }}
         >
-          <img src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
+          <ArtworkImage src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
           <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
           <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
         </div>
@@ -917,7 +921,7 @@ function PhotoWall({
               // cache:no-store 绕过 HTTP 缓存：灯箱 <img> 已用 no-cors 模式加载过
               // 这张图，缓存里是不带 CORS 头的响应（CDN Vary: Origin），直接 fetch
               // 会命中污染缓存被判跨域失败——必须强制重新请求
-              const resp = await fetch(image.fullUrl, { cache: "no-store" });
+              const resp = await fetch(image.fullUrl, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
               if (!resp.ok) throw new Error();
               blob = await resp.blob();
             } catch {
@@ -1217,7 +1221,7 @@ function SeasonsSection({
             >
               {ep.still_url ? (
                 <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.04]">
-                  <img
+                  <ArtworkImage
                     src={ep.still_url}
                     alt={ep.name || `第 ${ep.episode_number} 集`}
                     className="size-full object-cover transition duration-300 group-hover:scale-105"

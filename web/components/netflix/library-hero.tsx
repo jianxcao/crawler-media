@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-retry";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -160,7 +162,8 @@ function NetflixBillboard({
     }
     setArtState("pending");
     let cancelled = false;
-    const img = new Image();
+    const preload = new AbortController();
+    const img = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -176,6 +179,7 @@ function NetflixBillboard({
     img.src = hdUrl;
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, [hdUrl, fallbackSrc]);
   const artSrc = artState === "ok" ? hdUrl : artState === "failed" ? fallbackSrc : "";
@@ -233,7 +237,7 @@ function NetflixBillboard({
       <div className="absolute inset-0 overflow-hidden bg-black">
         {artSrc ? (
           <div className="nf-billboard-art absolute inset-0">
-            <img src={artSrc} alt="" className="size-full object-cover" />
+            <ArtworkImage src={artSrc} alt="" className="size-full object-cover" />
           </div>
         ) : artworkUrl ? null : libraryItem?.poster_url ? (
           <PosterFallbackFill url={libraryItem.poster_url} aspect={2 / 3} />
@@ -300,7 +304,7 @@ function PosterFallbackFill({ url, aspect }: { url: string; aspect: number }) {
   const src = imageUrl(url, cardVariantFor(aspect));
   return (
     <>
-      <img src={src} alt="" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
+      <ArtworkImage src={src} alt="" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
       <div className="absolute inset-0 flex items-center justify-center">
         <div
           style={{ aspectRatio: aspect, height: "86%" }}

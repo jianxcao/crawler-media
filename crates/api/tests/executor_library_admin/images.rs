@@ -83,7 +83,7 @@ impl api::file_stat_read::FileStatRead for SlowImageFiles {
 }
 
 #[test]
-fn concurrent_native_images_queue_instead_of_dropping_on_a_two_worker_budget() {
+fn concurrent_native_images_queue_within_the_dedicated_read_budget() {
     let mut f = Fixture::new();
     let uris = artwork(&f);
     f.state = f.state.with_file_stat_read(Arc::new(SlowImageFiles));
@@ -114,4 +114,64 @@ fn missing_episode_still_does_not_serve_the_backdrop() {
         .block_on(router(f.state.clone()).oneshot(image_request(&uri)))
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+struct StalledImageFiles;
+impl api::file_stat_read::FileStatRead for StalledImageFiles {
+    fn read_nfo(&self, _: &std::path::Path) -> Option<library::NfoMeta> {
+        None
+    }
+    fn metadata(&self, path: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+        std::fs::metadata(path)
+    }
+    fn is_file(&self, path: &std::path::Path) -> bool {
+        std::thread::sleep(Duration::from_secs(2));
+        path.is_file()
+    }
+}
+
+#[test]
+fn slow_native_sidecar_read_has_a_bounded_response_time() {
+    let mut f = Fixture::new();
+    let uris = artwork(&f);
+    f.state = f.state.with_file_stat_read(Arc::new(StalledImageFiles));
+    let response = runtime().block_on(async {
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            router(f.state.clone()).oneshot(image_request(&uris[0])),
+        )
+        .await
+    });
+    assert_eq!(
+        response
+            .expect("slow sidecar reads must free the browser connection within the image deadline")
+            .unwrap()
+            .status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
+}
+
+#[test]
+fn cached_native_images_do_not_wait_for_maintenance_filesystem_work() {
+    let f = Fixture::new();
+    let uris = artwork(&f);
+    let one = f.state.fs_work.try_reserve().unwrap();
+    let two = f.state.fs_work.try_reserve().unwrap();
+    runtime().block_on(async {
+        for uri in uris {
+            let response = tokio::time::timeout(
+                Duration::from_millis(500),
+                router(f.state.clone()).oneshot(image_request(&uri)),
+            )
+            .await;
+            assert_eq!(
+                response
+                    .expect("cached images must not queue behind directory scans")
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    });
+    drop((one, two));
 }

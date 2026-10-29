@@ -39,3 +39,13 @@ impl ApiState {
         Ok(())
     }
 }
+
+/// Persist the protocol identity once, independently of runtime worker setup.
+pub(super) fn jellyfin_server_id(store: &crate::Store) -> Result<String, crate::store::StoreError> {
+    if let Some(id) = store.get_setting("jellyfin.server_id")? {
+        return Ok(id);
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    store.put_setting("jellyfin.server_id", &id)?;
+    Ok(id)
+}

@@ -25,6 +25,7 @@
  *    套面板：只看名字不足以在同名双版本之间下判断。
  */
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useState } from "react";
 
 import {
@@ -206,7 +207,7 @@ function CurrentIdentity({ preview }: { preview: ReidentifyPreview }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3">
       {posterSrc ? (
-        <img
+        <ArtworkImage
           src={posterSrc}
           alt={current.title}
           loading="lazy"
@@ -333,7 +334,7 @@ function GroupRow({
         {outcome.media_item_id != null ? (
           <div className="flex items-center gap-3">
             {outcome.poster_url ? (
-              <img
+              <ArtworkImage
                 src={imageUrl(outcome.poster_url, "poster-card")}
                 alt={outcome.title ?? ""}
                 loading="lazy"

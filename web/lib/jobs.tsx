@@ -10,9 +10,8 @@ import {
   useState,
 } from "react";
 
-import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { ACTIVE_JOB_STATUSES, listJobs, type JobView } from "@/lib/api/jobs";
-import { getAuthToken, redirectToLoginOn401, resolveRequestUrl } from "@/lib/http";
+import { subscribeToJobsStream } from "@/lib/jobs-stream";
 import { useSession } from "@/lib/session";
 
 interface JobsContextValue {
@@ -91,59 +90,16 @@ export function JobsProvider({ children }: { children: React.ReactNode }) {
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
 
-    // 任务流订阅用 @microsoft/fetch-event-source：EventSource 不能带
-    // Authorization 头（登录走 Bearer token，不设 cookie），fetch 版带上
-    // Bearer 与全站鉴权一致；库自动 backoff 重连，断线后订阅自行恢复。
-    let controller: AbortController | null = null;
-    let eventRefreshTimer: number | null = null;
-    const scheduleEventRefresh = () => {
-      if (eventRefreshTimer !== null) return;
-      // 服务端一次读取可能连续推送多个事件，合为一次快照校准。
-      eventRefreshTimer = window.setTimeout(() => {
-        eventRefreshTimer = null;
-        refresh();
-      }, 120);
-    };
-
-    controller = new AbortController();
-    const token = getAuthToken();
-    void fetchEventSource(resolveRequestUrl("/jobs/stream"), {
-      signal: controller.signal,
-      headers: {
-        Accept: "text/event-stream",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      openWhenHidden: true,
-      async onopen(response) {
-        if (response.ok) return;
-        // 非 2xx：401 跳登录（http 层统一处理），其余静默；不重连避免风暴。
-        if (response.status === 401) {
-          redirectToLoginOn401(response.status);
-        }
-        throw new Error(`jobs/stream ${response.status}`);
-      },
-      onmessage(block) {
-        if (block.event === "ready" || block.event === "job") {
-          scheduleEventRefresh();
-        }
-      },
-      onerror(error) {
-        // 用户取消 / 401：终止重连。
-        if (controller?.signal.aborted) throw error;
-        if (error instanceof Error && error.message.includes("401")) throw error;
-        // 其余网络断线：返回 void 让库按 backoff 自动重连。
-      },
-    });
+    const unsubscribe = subscribeToJobsStream(refresh);
 
     return () => {
       requestSeq.current += 1;
       refreshQueued.current = false;
-      if (eventRefreshTimer !== null) window.clearTimeout(eventRefreshTimer);
-      controller?.abort();
+      unsubscribe();
       window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
     };
-  }, [enabled, refresh]);
+  }, [enabled, refresh, session.username]);
 
   const activeJobs = useMemo(
     () => jobs.filter((job) => job.last_status != null && ACTIVE_JOB_STATUSES.has(job.last_status)),

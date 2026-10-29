@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-retry";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
@@ -349,13 +351,15 @@ export function ZoomLightbox({
 
   // 预加载相邻两张的屏幕适配图：翻过去不用再等（不预拉原图，几 MB 一张太贵）
   useEffect(() => {
+    const preload = new AbortController();
     for (const neighbor of [index - 1, index + 1]) {
       const url = slides[neighbor]?.screenUrl;
       if (url) {
-        const img = new Image();
+        const img = createArtworkImage(preload.signal);
         img.src = url;
       }
     }
+    return () => preload.abort();
   }, [index, slides]);
 
   // —— 舞台手势：拖拽平移、两指捏合、双击 / 双击屏幕 ——
@@ -563,7 +567,7 @@ export function ZoomLightbox({
           >
             {/* 三级渐进：缩略图垫底（模糊）→ 屏幕适配图盖上 → 放大后原图再盖上 */}
             {thumbUrl && (
-              <img
+              <ArtworkImage
                 src={thumbUrl}
                 alt=""
                 aria-hidden="true"
@@ -573,7 +577,7 @@ export function ZoomLightbox({
                 }`}
               />
             )}
-            <img
+            <ArtworkImage
               key={screenUrl}
               src={screenUrl}
               alt={slide.title}
@@ -590,7 +594,7 @@ export function ZoomLightbox({
               }`}
             />
             {fullUrl && wantOriginal && (
-              <img
+              <ArtworkImage
                 key={fullUrl}
                 src={fullUrl}
                 alt={slide.title}
@@ -739,7 +743,7 @@ export function ZoomLightbox({
                   }`}
                   style={{ width: Math.round(48 * Math.min(2, Math.max(0.5, entry.aspect ?? 1))) }}
                 >
-                  <img
+                  <ArtworkImage
                     src={entry.thumbUrl}
                     alt=""
                     loading="lazy"

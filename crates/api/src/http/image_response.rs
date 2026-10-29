@@ -8,6 +8,10 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
+
+pub(crate) const IMAGE_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const IMAGE_READ: Duration = Duration::from_secs(1);
 
 /// ETag 值（含引号）。
 pub fn etag_for(bytes: &[u8]) -> String {

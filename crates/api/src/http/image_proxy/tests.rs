@@ -194,3 +194,199 @@ async fn saturated_proxy_returns_unavailable_without_fetching() {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+#[tokio::test]
+async fn uncached_proxy_does_not_wait_for_upstream_capacity() {
+    use axum::http::StatusCode;
+    let response = super::proxy_with_gate(
+        super::ProxyQuery {
+            url: "https://image.tmdb.org/t/p/w342/not-cached-regression.jpg".into(),
+        },
+        Arc::new(tokio::sync::Semaphore::new(0)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "image.pending");
+}
+
+#[tokio::test]
+async fn proxy_miss_returns_before_fetch_finishes_and_then_serves_conditional_cache_hits() {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use std::time::Duration;
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let cache = Arc::new(ImageCache::new(tmp.path().into(), 1000, 100));
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let started_tx = parking_lot::Mutex::new(Some(started_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = parking_lot::Mutex::new(release_rx);
+    let proxy = Arc::new(super::runtime::ImageProxy::new(
+        cache.clone(),
+        gate.clone(),
+        Arc::new(move |_| {
+            if let Some(tx) = started_tx.lock().take() {
+                let _ = tx.send(());
+            }
+            release_rx
+                .lock()
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            image(20)
+        }),
+    ));
+    let url = "https://image.tmdb.org/cache-regression.jpg";
+    let query = || super::ProxyQuery { url: url.into() };
+    let response = tokio::time::timeout(
+        Duration::from_millis(300),
+        proxy.response(query(), HeaderMap::new()),
+    )
+    .await;
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        response
+            .expect("miss must free the HTTP connection before remote completion")
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    started_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cache.lookup(url).unwrap().is_none() || gate.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let _upstream_busy = gate.acquire().await.unwrap();
+    let response = proxy.response(query(), HeaderMap::new()).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "cache hits bypass upstream capacity"
+    );
+    assert_eq!(response.headers()["cache-control"], "public, max-age=86400");
+    let etag = response.headers()["etag"].clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "if-none-match",
+        HeaderValue::from_bytes(etag.as_bytes()).unwrap(),
+    );
+    let response = proxy.response(query(), headers).await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn saturated_proxy_queues_a_unique_miss_until_upstream_capacity_returns() {
+    use axum::http::{HeaderMap, StatusCode};
+    use std::time::Duration;
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let cache = Arc::new(ImageCache::new(tmp.path().into(), 1000, 100));
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let busy = gate.clone().acquire_owned().await.unwrap();
+    let proxy = Arc::new(super::runtime::ImageProxy::new(
+        cache.clone(),
+        gate,
+        Arc::new(|_| image(20)),
+    ));
+    let url = "https://image.tmdb.org/queued-regression.jpg";
+    let response = proxy
+        .response(super::ProxyQuery { url: url.into() }, HeaderMap::new())
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(cache.lookup(url).unwrap().is_none());
+    drop(busy);
+    tokio::time::timeout(Duration::from_millis(300), async {
+        while cache.lookup(url).unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a queued image must warm without another browser request");
+}
+
+#[test]
+fn lookup_does_not_unlink_an_invalid_entry_outside_publication() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let cache = ImageCache::new(tmp.path().into(), 1000, 100);
+    let path = tmp
+        .path()
+        .join(format!("{}.img", super::cache_key("invalid")));
+    std::fs::write(&path, b"incomplete cache entry").unwrap();
+    assert!(cache.lookup("invalid").unwrap().is_none());
+    assert!(
+        path.is_file(),
+        "only serialized publication may discard invalid entries"
+    );
+    cache.get("invalid", || image(20)).unwrap();
+    assert_eq!(cache.lookup("invalid").unwrap().unwrap().1, vec![42; 20]);
+}
+
+#[test]
+fn stalled_cache_lookup_has_a_bounded_response_deadline() {
+    use axum::http::{HeaderMap, StatusCode};
+    use std::time::Duration;
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cache = Arc::new(ImageCache::new(tmp.path().into(), 1000, 100));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let proxy = Arc::new(super::runtime::ImageProxy::new(
+            cache,
+            gate.clone(),
+            Arc::new(|_| Err("offline".into())),
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        entered_rx.await.unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_millis(1200),
+            proxy.response(
+                super::ProxyQuery {
+                    url: "https://image.tmdb.org/stalled.jpg".into(),
+                },
+                HeaderMap::new(),
+            ),
+        )
+        .await;
+        gate.close();
+        release_tx.send(()).unwrap();
+        worker.await.unwrap();
+        assert_eq!(
+            response
+                .expect("cache worker queueing must not retain a browser connection indefinitely")
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    });
+}

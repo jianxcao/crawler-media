@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Link } from "react-router-dom";
@@ -668,7 +669,7 @@ function LibraryCover({
   if (candidateUrl && !collageFailed) {
     return (
       <div className="absolute inset-0 overflow-hidden">
-        <img
+        <ArtworkImage
           src={candidateUrl}
           alt=""
           loading="lazy"
@@ -687,7 +688,7 @@ function LibraryCover({
   if (backdropUrl) {
     return (
       <div className="absolute inset-0 overflow-hidden bg-[#0a0c12]">
-        <img
+        <ArtworkImage
           src={imageUrl(backdropUrl, "landscape-card")}
           alt=""
           loading="lazy"

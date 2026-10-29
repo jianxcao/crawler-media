@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-retry";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -11,10 +13,14 @@ const FADE_MS = 1600;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 预加载并解码一张图；失败返回 false（该张本轮跳过）。 */
-function load(url: string): Promise<boolean> {
+function load(url: string, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
-    const img = new Image();
+    if (signal.aborted) { resolve(false); return; }
+    const img = createArtworkImage(signal);
+    const onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
     const done = (ok: boolean) => {
+      signal.removeEventListener("abort", onAbort);
       if (!ok) {
         resolve(false);
         return;
@@ -79,11 +85,13 @@ export function DetailBackdropSlideshow({
   useEffect(() => {
     if (!bottom) return;
     let cancelled = false;
-    load(bottom).then((ok) => {
+    const preload = new AbortController();
+    load(bottom, preload.signal).then((ok) => {
       if (!cancelled && ok) setReady(true);
     });
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, [bottom]);
 
@@ -91,6 +99,7 @@ export function DetailBackdropSlideshow({
     if (urlsRef.current.length < 2) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let cancelled = false;
+    const preload = new AbortController();
 
     const cycle = async () => {
       await sleep(ROTATE_INTERVAL_MS);
@@ -99,7 +108,7 @@ export function DetailBackdropSlideshow({
           const urls = urlsRef.current;
           const url = urls[indexRef.current % urls.length];
           indexRef.current += 1;
-          const ok = await load(url);
+          const ok = await load(url, preload.signal);
           if (cancelled) return;
           if (ok) {
             setTop(url);
@@ -128,6 +137,7 @@ export function DetailBackdropSlideshow({
     void cycle();
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, []);
 
@@ -141,7 +151,7 @@ export function DetailBackdropSlideshow({
       {/* key=src（加层前缀）：换图即新元素，Ken Burns 动画从头起播。
           前缀必须有——溶解收尾时 bottom 会短暂与 top 同 URL，裸 URL 作 key
           会触发 React 重复 key 报错（每次轮换一条）。 */}
-      <img
+      <ArtworkImage
         key={`b:${bottom}`}
         src={bottom}
         alt=""
@@ -149,7 +159,7 @@ export function DetailBackdropSlideshow({
         className="absolute inset-0 size-full object-cover"
       />
       {top && (
-        <img
+        <ArtworkImage
           key={`t:${top}`}
           src={top}
           alt=""

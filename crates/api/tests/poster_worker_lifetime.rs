@@ -137,6 +137,7 @@ fn setup_service_and_store(
 
     let service = Arc::new(
         MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher)
+            .unwrap()
             .with_wait_deadline(deadline),
     );
 
@@ -483,6 +484,7 @@ async fn cache_write_failure_fails_leader_and_follower() {
             cache_file_blocker,
             fetcher_fail.clone(),
         )
+        .unwrap()
         .with_wait_deadline(Duration::from_secs(10)),
     );
     let m_fail = insert_media(&store_fail.lock(), "fail_cache_media");

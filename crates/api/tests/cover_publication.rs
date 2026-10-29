@@ -418,3 +418,176 @@ fn cover_options(title: &str) -> CoverOptions {
 fn _router(state: &ApiState) -> axum::Router {
     router(state.clone())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cover_get_serves_cached_bytes_while_writer_is_busy() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = make_state(tmp.path());
+    let library = seed_library(&state, tmp.path());
+    state
+        .cover_service()
+        .replace_cover(&state, &library, b"cached cover".to_vec())
+        .await
+        .unwrap();
+    let app = router(state.clone());
+    let handle = state.store();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = handle.lock();
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    });
+    entered_rx.await.unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_millis(500),
+        app.oneshot(
+            Request::get(format!("/api/v1/libraries/{library}/cover"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let response = response
+        .expect("a cached native image must never wait for the writer")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response.headers()["etag"].clone();
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        b"cached cover".as_slice()
+    );
+    let response = router(state)
+        .oneshot(
+            Request::get(format!("/api/v1/libraries/{library}/cover"))
+                .header("if-none-match", etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn cover_get_serves_default_while_background_render_is_running() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let (state, gate) = gated_state(tmp.path(), b"background cover");
+    let _release = ReleaseOnDrop(&gate);
+    let library = seed_library(&state, tmp.path());
+    let response = tokio::time::timeout(
+        Duration::from_millis(500),
+        router(state.clone()).oneshot(
+            Request::get(format!("/api/v1/libraries/{library}/cover"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("GET must return before the renderer finishes")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        bytes.starts_with(b"\xff\xd8\xff"),
+        "GET immediately serves the built-in default"
+    );
+    wait_entered(&gate).await;
+    assert_eq!(cover_path(&state, &library), None);
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while cover_path(&state, &library).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        referenced_bytes(&state, &library).unwrap(),
+        b"background cover"
+    );
+}
+
+#[tokio::test]
+async fn all_default_covers_are_refreshed_after_the_background_renderer_is_released() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let (state, gate) = gated_state(tmp.path(), b"queued cover");
+    let _release = ReleaseOnDrop(&gate);
+    let first = seed_library(&state, &tmp.path().join("first"));
+    let second = seed_library(&state, &tmp.path().join("second"));
+    for library in [&first, &second] {
+        let response = router(state.clone())
+            .oneshot(
+                Request::get(format!("/api/v1/libraries/{library}/cover"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    wait_entered(&gate).await;
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cover_path(&state, &first).is_none() || cover_path(&state, &second).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every admitted default must be refreshed without another GET");
+}
+
+#[tokio::test]
+async fn missing_cached_cover_is_regenerated_in_background() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = make_state(tmp.path()).with_cover_service(Arc::new(LibraryCoverService::new(
+        Arc::new(FixedRenderer(b"regenerated cover".to_vec())),
+    )));
+    let library = seed_library(&state, tmp.path());
+    let path = state
+        .cover_service()
+        .replace_cover(&state, &library, b"removed cover".to_vec())
+        .await
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let response = router(state.clone())
+        .oneshot(
+            Request::get(format!("/api/v1/libraries/{library}/cover"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cover_path(&state, &library).as_deref() == path.to_str() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a missing cache file must be rebuilt without blocking GET");
+    assert_eq!(
+        referenced_bytes(&state, &library).unwrap(),
+        b"regenerated cover"
+    );
+}

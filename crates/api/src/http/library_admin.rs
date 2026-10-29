@@ -18,28 +18,26 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             Err(error) => return error.response(),
         };
     let files = state.file_stats.clone();
-    match state
-        .fs_work
-        .run_to_completion(move || {
-            // Disk observation (hardlink count, unknown sizes) runs after the store lock is released.
-            for (item, (path, is_strm, saved_mode, size_bytes)) in items.iter_mut().zip(pending) {
-                let meta = (!is_strm || size_bytes.is_none())
-                    .then(|| files.metadata(&path).ok())
-                    .flatten();
-                let file_size = size_bytes
-                    .or_else(|| meta.as_ref().map(|m| m.len()))
-                    .unwrap_or(0);
-                item["transfer_mode"] = json!(transfer_mode_label(
-                    is_strm,
-                    meta.as_ref(),
-                    saved_mode,
-                    &global_transfer_mode
-                ));
-                item["file_size"] = json!(file_size);
-            }
-            ok_list(items).into_response()
-        })
-        .await
+    match super::fs::read_work(&state, move || {
+        // Disk observation (hardlink count, unknown sizes) runs after the store lock is released.
+        for (item, (path, is_strm, saved_mode, size_bytes)) in items.iter_mut().zip(pending) {
+            let meta = (!is_strm || size_bytes.is_none())
+                .then(|| files.metadata(&path).ok())
+                .flatten();
+            let file_size = size_bytes
+                .or_else(|| meta.as_ref().map(|m| m.len()))
+                .unwrap_or(0);
+            item["transfer_mode"] = json!(transfer_mode_label(
+                is_strm,
+                meta.as_ref(),
+                saved_mode,
+                &global_transfer_mode
+            ));
+            item["file_size"] = json!(file_size);
+        }
+        ok_list(items).into_response()
+    })
+    .await
     {
         Ok(response) => response,
         Err(error) => super::library::browse_work_error(error),
@@ -291,20 +289,18 @@ pub(crate) async fn list_unidentified(
         Err(error) => return error.response(),
     };
     let files = state.file_stats.clone();
-    match state
-        .fs_work
-        .run_to_completion(move || {
-            // Unidentified rows have no persisted size; stat them after releasing the store lock.
-            for item in &mut items {
-                let size = item["path"]
-                    .as_str()
-                    .and_then(|path| files.metadata(std::path::Path::new(path)).ok())
-                    .map_or(0, |m| m.len());
-                item["total_size_bytes"] = json!(size);
-            }
-            ok_list(items).into_response()
-        })
-        .await
+    match super::fs::read_work(&state, move || {
+        // Unidentified rows have no persisted size; stat them after releasing the store lock.
+        for item in &mut items {
+            let size = item["path"]
+                .as_str()
+                .and_then(|path| files.metadata(std::path::Path::new(path)).ok())
+                .map_or(0, |m| m.len());
+            item["total_size_bytes"] = json!(size);
+        }
+        ok_list(items).into_response()
+    })
+    .await
     {
         Ok(response) => response,
         Err(error) => super::library::browse_work_error(error),
