@@ -1,4 +1,4 @@
-# ADR-0012: Library removal preserves files and canonical Playback identity
+# ADR-0012: Library removal preserves files and purges orphan Media
 
 - Status: Accepted design; implementation acceptance is tracked separately below.
 - Scope: approved Library deletion and NFO reimport plan, Tasks 1–7.
@@ -6,7 +6,7 @@
 
 ## Context
 
-A Library configuration, its ledger/file-derived facts, a canonical Media, and a User's Playback history have different lifetimes. Removing a configured root must not mean deleting disk content or forgetting the Media identity used by Playback. Recreating a root creates a new Library and new ledger rows; matching only a filename or reusing an old path is not sufficient to recover identity safely.
+A Library configuration, its ledger/file-derived facts, a canonical Media, and a User's Playback history have different lifetimes. Removing a configured root must not mean deleting disk content. (Superseded for orphan Media: see Decision — Media left without any file and not user-curated are purged with their Playback.) Recreating a root creates a new Library and new ledger rows; matching only a filename or reusing an old path is not sufficient to recover identity safely.
 
 Store uses four independent SQLite connections/files, plus a separate Jobs queue connection/file. An ordinary transaction on one connection does not atomically commit the others. Cancellation notification alone also does not prove an old worker has stopped publishing: blocking scans and child processes can outlive the requesting future.
 
@@ -14,7 +14,7 @@ Store uses four independent SQLite connections/files, plus a separate Jobs queue
 
 ### Remove indexing facts, not disk content or user history
 
-Removal deletes only the strict ownership snapshot's ledger and derived file metadata, fingerprint caches/samples/attempts and probe-stage state. It retains Media and each User's Playback position, watched state and favorite state, as well as Subscribe, Downloader configuration and Catalog caches. Video, STRM, subtitles, NFO, poster, fanart and episode artwork are neither removed, moved nor rewritten by this operation.
+Removal deletes only the strict ownership snapshot's ledger and derived file metadata, fingerprint caches/samples/attempts and probe-stage state. When a Media loses its last Library file and is not kept by a collection entry or a subscription, it is purged together with every row it owns (aliases, metadata, episodes, markers, probe/fingerprint state and each User's Playback position, watched state and favorite state) — the same rule as single-file delete (`library_write/orphan_media.rs`). Media still backed by another Library's file or kept by a collection/subscription keep their Playback facts. Historic logs (`playback_logs`, `playback_metrics`, removal receipts), Subscribe, Downloader configuration and Catalog caches are retained. Video, STRM, subtitles, NFO, poster, fanart and episode artwork are neither removed, moved nor rewritten by this operation.
 
 Ownership is captured before roots disappear, using the longest uniquely matching root and directory-component boundaries. Default-library fallback is not deletion ownership. Ambiguous roots fail preflight rather than guessing. Nested independent libraries and another Library's file for the same Media remain intact. Shared Media/episode facts cannot be indiscriminately cleared while another ledger still needs them.
 
@@ -42,12 +42,12 @@ NFO metadata is not stream-probe output. Reimport must schedule fresh media prob
 
 ## Consequences and acceptance boundaries
 
-- Reliable MediaId reuse reconnects each User's independent Playback facts without migrating progress by path.
+- Reliable MediaId reuse reconnects Playback facts only for Media that survived removal (kept by another file, collection or subscription); purged orphan Media come back as new Media without old favorites/progress.
 - Files stay available to external tools throughout removal. The application must stop offering new Playback through removed ledger rows.
 - Failed removal may require retry and stays frozen; this is preferable to apparent success with a live publisher.
 - No path-cache migration, unowned-ledger adoption or history-clearing option is introduced.
 
-The public API regression source in `crates/api/tests/library_delete_reimport.rs` contains cases for TV S01E03 positions 750000/120000 ms with distinct favorite/watched states, whole-movie positions, fresh ledger identity, old file-meta/fingerprint/stage cleanup, preserved sidecar bytes, an independent Library's same-Media file/cache, default-off detection switches, and a different-alias negative case. These describe assertions, **not a fresh pass result**. It constructs ApiState before entering Tokio so probe workers are not started, and injects an offline Catalog. This checks cache non-reuse, **not** successful fresh probe execution, real streaming or child-process cancellation. Creation also schedules an automatic scan; the explicit public scan is intentionally idempotent with that path.
+The public API regression source in `crates/api/tests/library_delete_reimport.rs` contains cases for TV S01E03 positions 750000/120000 ms with distinct favorite/watched states, whole-movie positions, fresh ledger identity, old file-meta/fingerprint/stage cleanup, preserved sidecar bytes, an independent Library's same-Media file/cache, default-off detection switches, and a different-alias negative case. These describe assertions, **not a fresh pass result**. It constructs ApiState before entering Tokio so probe workers are not started, and injects an offline Catalog. This checks cache non-reuse, **not** successful fresh probe execution, real streaming or child-process cancellation. Creation also schedules an automatic scan; the explicit public scan is intentionally idempotent with that path. Under the orphan-purge rule, history recovery in those cases only holds where the Media is kept by another Library's file, a collection or a subscription.
 
 Restart-mid-clean, restart-draining, canceled-job recovery, lease/publication races, ambiguous no-ID reimport, nested-root ownership, member visibility, Subscribe-target handling and actual fake-probe completion require the corresponding focused suites and/or UI regression cases. This ADR is not proof those checks passed. Browser/VidHub cases remain Not run unless actually executed.
 

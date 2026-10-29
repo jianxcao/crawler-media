@@ -474,7 +474,7 @@ async fn await_reimport(app: &Router, library_id: &str) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn clean_start_restart_clear_cache_remove_reimport_preserves_identity_and_marks() {
+async fn clean_start_restart_clear_cache_remove_purges_orphan_media_and_reimport_starts_fresh() {
     let fixture = Fixture::new();
     let app = fixture.app.clone();
     common::create_member(&app, MEMBER_LOGIN).await;
@@ -534,10 +534,28 @@ async fn clean_start_restart_clear_cache_remove_reimport_preserves_identity_and_
     )
     .await;
 
-    // 重新导入后身份、收藏、cache 前后快照都必须一致；旧 file-ID 逻辑路由必须被拒。
-    assert_eq!(after_reimport.media_id, original_media_id);
-    assert!(after_reimport.favorite);
+    // cache 前后快照必须一致（cache 不是身份来源）。删除 Library 时失去最后一个
+    // 文件的 Media 连同其收藏/播放进度一起清除，所以重新导入得到全新 Media，
+    // 旧收藏不会回来；旧 file-ID 逻辑路由必须被拒。
     assert_eq!(after_cache_clear, adopted_before_cache_clear);
+    assert_ne!(
+        after_reimport.media_id, original_media_id,
+        "孤儿 Media 必须随 Library 删除被清除，重新导入是新身份"
+    );
+    assert!(!after_reimport.favorite, "被清除 Media 的收藏不能复活");
+    let purged = send(
+        &app,
+        "GET",
+        &format!("/api/v1/libraries/{reimported}/items/{original_media_id}"),
+        Some(TOKEN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        purged.status(),
+        StatusCode::NOT_FOUND,
+        "已清除的 Media 不可再打开"
+    );
     assert_eq!(old_file_id_item_response.status(), StatusCode::NOT_FOUND);
 
     // 反向对照：真正的 media item id 仍然 200，说明上面的 404 来自
@@ -545,7 +563,10 @@ async fn clean_start_restart_clear_cache_remove_reimport_preserves_identity_and_
     let detail = send(
         &app,
         "GET",
-        &format!("/api/v1/libraries/{reimported}/items/{original_media_id}"),
+        &format!(
+            "/api/v1/libraries/{reimported}/items/{}",
+            after_reimport.media_id
+        ),
         Some(TOKEN),
         Value::Null,
     )

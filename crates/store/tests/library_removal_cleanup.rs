@@ -120,13 +120,28 @@ fn removal_keeps_locked_markers_and_clears_unlocked_ones() {
         .clone();
     let locked_media = media(&store, "Locked");
     let unlocked_media = media(&store, "Unlocked");
+    let orphan_media = media(&store, "Orphan");
     ledger(&store, &locked_media, &root.join("locked.strm"));
     ledger(&store, &unlocked_media, &root.join("unlocked.strm"));
+    ledger(&store, &orphan_media, &root.join("orphan.strm"));
+    // A collection keeps Locked/Unlocked alive after their last file leaves, so
+    // marker handling applies to them; Orphan has nothing keeping it.
+    let collection = store
+        .create_collection(domain::UserId::new(), "keep")
+        .unwrap();
+    for kept in [&locked_media, &unlocked_media] {
+        store
+            .add_collection_item(&collection, &kept.id.to_string())
+            .unwrap();
+    }
     store
         .put_media_marker(&marker(&locked_media, true))
         .unwrap();
     store
         .put_media_marker(&marker(&unlocked_media, false))
+        .unwrap();
+    store
+        .put_media_marker(&marker(&orphan_media, true))
         .unwrap();
 
     remove(&store, &library_id);
@@ -140,6 +155,14 @@ fn removal_keeps_locked_markers_and_clears_unlocked_ones() {
     assert!(
         store
             .get_media_marker(unlocked_media.id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    // Orphan Media is purged with every row it owns, locked marker included.
+    assert!(store.get_media(orphan_media.id).unwrap().is_none());
+    assert!(
+        store
+            .get_media_marker(orphan_media.id, Some(1), Some(1))
             .unwrap()
             .is_none()
     );

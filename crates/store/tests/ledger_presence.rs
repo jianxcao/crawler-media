@@ -170,7 +170,10 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
     assert!(store.file_coverage_by_id(file.file_id).unwrap().is_none());
-    assert!(store.get_media(media.id).unwrap().is_some());
+    assert!(
+        store.get_media(media.id).unwrap().is_none(),
+        "orphan Media is purged with the Library"
+    );
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     assert_eq!(
         store.clean_library_removal(&removal.operation_id).unwrap(),
