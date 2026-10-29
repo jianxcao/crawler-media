@@ -18,10 +18,13 @@
 - 不可改的常量：`REMOTE_READ_LIMIT = 1`、`REMOTE_READ_COOLDOWN = 500ms`、`STORE_READERS = 8`。
 - ADR-0012 的删除语义保持不变：先隐藏，取消任务，再删除，最后清理孤儿 Media（含 favorites 和进度）。
 - 资源：同一时间只跑一个 cargo 进程；一律 `-j8`，测试一律 `-- --test-threads=8`；先跑定向测试，全量只在最后跑一次并带 `--no-fail-fast`。
-- Git：只在 `feat/storage-redesign` 上提交；不 push main，不 force push，不开 PR；不提交 `docs/test-reports/`、`.e2e/`。
+- Git：每个 Task 完成并验证后在当前 `feat/storage-redesign` 分支单独 commit，再 push 到 `origin feat/storage-redesign`；不 push main，不 force push，不开 PR；不提交 `docs/test-reports/`、`.e2e/`，不夹带无关改动。
 - 尺寸：`.rs` 文件硬上限 800 行；生产函数硬上限 120 行；`lib.rs` 只放模块树和 re-export。
 - 术语以 `CONTEXT.md` 为准（Library、Media、Subscribe、Release…）。
-- 提交信息结尾加 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。
+- 提交信息不加 `Co-Authored-By` 行。
+- 执行顺序按用户最新要求：Task 0 → 阶段 A（Task 1–3）→ 阶段 E（Task 17–20）→ 阶段 B → 阶段 C → 阶段 D。阶段 E 的文档位置不代表执行次序。
+- 审核报告可能尚未同步；Task 13–15 中依赖报告 Z*/D*/S-DB5 清单的条目先跳过，不猜测清单。收尾在当前分支再 `git pull` 检查；仍不存在就在最终汇报列出未完成项和原因。
+- e2e 与页面测试由其他执行者负责；本执行只跑计划内单元/集成测试及 perfgate。临时文件只放 `/tmp`，用完删除；不得打印测试密钥或读取并输出 Codex 配置。
 - 性能验收以 `docs/testing/performance-slo.md` 为准（Task 0 产出）：每个阶段结束都要跑 `perfgate.py` 的 idle 和 busy 两种模式。相对上一阶段，任何接口的 p95 都不得变差超过 20%；阶段 C 结束时所有接口必须达标。测得的数字放在 `.e2e/perf/`，不提交。
 
 ## Review Focus
@@ -87,28 +90,28 @@
   - 输出每个用例的 p50/p95/p99/max 和状态码分布，附上 SLO 判定和相对基线的变化百分比。
 - `seed-activity.py <base_url> <admin_token>`：全部通过公开 API 完成，不直接写 SQLite；可以重复运行（用户名固定，已存在则跳过）；并发数不超过 8。
 
-- [ ] **Step 1: 先写闸门的自测**（`scripts/e2e/test_perfgate.py`，用 `python3 -m unittest` 运行，不访问网络）：
+- [x] **Step 1: 先写闸门的自测**（`scripts/e2e/test_perfgate.py`，用 `python3 -m unittest` 运行，不访问网络）：
   - `test_uncovered_get_route_fails`：给一份 routes 输入，其中有一个 GET 路由既不在 cases 也不在豁免里。断言覆盖检查返回这个路由。
   - `test_p95_over_slo_fails`：给一组延迟样本（p95 = 180ms，class L）。断言判定为不达标。
   - `test_regression_over_20_percent_flagged`：基线 p95 = 100ms，本次 120.1ms。断言标记为退化。
   - `test_any_5xx_in_busy_fails`：busy 模式的样本里有一个 503。断言判定为失败。
-- [ ] **Step 2: 运行，确认失败**：`python3 -m unittest scripts/e2e/test_perfgate.py`，预期 ImportError 或全部失败。
-- [ ] **Step 3: 实现** `list-routes.py`、`perfgate.py` 的纯函数部分（覆盖检查、分位数、判定、对比），让 Step 1 的测试通过。
-- [ ] **Step 4: 写 `perf-cases.json`**，直到 `python3 scripts/e2e/perfgate.py idle --dry-run` 的覆盖检查通过（`--dry-run` 只做覆盖检查，不发请求）。
-- [ ] **Step 5: 写 `seed-activity.py` 和 `performance-slo.md`**；修改 `stress-up.sh`，构建一律用 `cargo build --release -j8 -p api`，构建期间不跑其他 cargo 进程。
-- [ ] **Step 6: 在修复前的 HEAD（ec958b93）上测基线**：
+- [x] **Step 2: 运行，确认失败**：`python3 -m unittest scripts/e2e/test_perfgate.py`，预期 ImportError 或全部失败。
+- [x] **Step 3: 实现** `list-routes.py`、`perfgate.py` 的纯函数部分（覆盖检查、分位数、判定、对比），让 Step 1 的测试通过。
+- [x] **Step 4: 写 `perf-cases.json`**，直到 `python3 scripts/e2e/perfgate.py idle --dry-run` 的覆盖检查通过（`--dry-run` 只做覆盖检查，不发请求）。
+- [x] **Step 5: 写 `seed-activity.py` 和 `performance-slo.md`**；修改 `stress-up.sh`，构建一律用 `cargo build --release -j8 -p api`，构建期间不跑其他 cargo 进程。
+- [x] **Step 6: 在修复前的 HEAD（4c507440，仅文档变更）上测基线**：
   `zsh scripts/e2e/stress-up.sh /tmp/e2e-stress`
   `python3 scripts/e2e/perfgate.py idle --out .e2e/perf/baseline-idle.json`
   `python3 scripts/e2e/perfgate.py busy --out .e2e/perf/baseline-busy.json`
   重启实例后：`python3 scripts/e2e/perfgate.py cold --out .e2e/perf/baseline-cold.json`
   这一步预期会有大量不达标，这正是基线要记录的。
-- [ ] **Step 7: 根据基线修订计划**：
+- [x] **Step 7: 根据基线修订计划**：
   - 把实测不达标的用例逐条映射到报告条目（P-*、F*、B*）；
   - 找不到对应条目的不达标用例，在本计划阶段 C 末尾新增 Task 12.x，写法和其他任务一样：Files、失败测试、验证命令；
   - 阶段 C 的任务按「不达标幅度 × 用户触达频率」重新排序；
   - 统计信息过期造成的问题，并入 Task 5（改在扫描轮结束后执行 optimize）。
-- [ ] **Step 8: 验证**：`python3 -m unittest scripts/e2e/test_perfgate.py` 通过；`perfgate.py idle --dry-run` 覆盖检查通过。
-- [ ] **Step 9: 提交** `test(e2e): add performance SLOs and route-complete perf gate`。只提交脚本和 docs/testing 下的文件，不提交 `.e2e/perf/`。
+- [x] **Step 8: 验证**：`python3 -m unittest scripts/e2e/test_perfgate.py` 通过；`perfgate.py idle --dry-run` 覆盖检查通过。
+- [x] **Step 9: 提交** `test(e2e): add performance SLOs and route-complete perf gate`。提交脚本、docs/testing 文档，以及 Step 7 授权的本计划基线缺口修订；不提交 `.e2e/perf/`。
 
 **阶段闸门（之后每个阶段结束时执行）：**
 ```
@@ -410,6 +413,160 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 
 ---
 
+### Task 0 Step 7：实测缺口与阶段 C 实测顺序
+
+以下数据来自修复前 `4c50744008d5` 的本地报告；原始数字留在 `.e2e/perf/`，不提交。idle 已完成 165 个用例、每项 40 次，29 项失败。busy 已完成 165 项，144 项达标、21 项超标，所有请求及前置检查均无 HTTP 错误；cold 已完成165项，152达标、13延迟超标，165次请求全200。重启后idle完成165项，141达标、24超标，6600次请求全200。
+
+海报夹具已纠正：原压力 Media 的虚构 TMDB ID 没有远程图片，改为通过公开 API 得到的真实 catalog 对应 Media，关联 Subscribe 已暂停、search/catalog 任务已禁用。纠正后冷缓存 40 次请求仍全部 503（p95 0.6ms），后台约 398ms 后完成填充，属于真实 Task 20/E4 缺陷。原结果及仅海报重测的审计来源保留，不通过换状态码、预热或豁免抹掉失败。
+
+下表单位为 ms；idle 的两个数字为 p95/p99。报告尚缺失时只使用本计划已经明确的编号，不虚构审核条目。
+
+| 不达标用例 | idle p95/p99 | 既有条目与新增任务 |
+|---|---:|---|
+| jellyfin-genres | 376.2/479.3 | Task 4 F4/F5、Task 12.2：全库实体枚举 |
+| jellyfin-genres-name-images-backdrop | 369.0/413.6 | Task 12.2：全库枚举后选本地图片 |
+| jellyfin-genres-name-images-primary | 360.2/365.7 | Task 12.2，同上 |
+| jellyfin-items-counts | 369.2/376.8 | Task 12 P-J2、Task 12.2：计数 handler 仍水合整库 |
+| jellyfin-items-id | 976.0/1002.4 | Task 4 F4/F5、Task 12.1：可选 catalog 同步回源 |
+| jellyfin-persons-name | 364.4/380.7 | Task 12.2：全库演员查找 |
+| jellyfin-persons-name-images-primary | 1431.2/1615.6 | Task 12.2/12.3：全库查找及跟随重定向的外网图片下载 |
+| jellyfin-search-hints | 369.4/370.9 | Task 11 P-S5、Task 12.2：协议层全库筛选 |
+| jellyfin-shows-nextup | 167.6/171.5 | Task 8 P-J1 |
+| jellyfin-shows-id-seasons | 1223.7/1379.0 | Task 12 P-J4、Task 12.1/12.2：全剧统计和同步 catalog |
+| jellyfin-studios | 358.5/391.0 | Task 12.2：全库实体枚举 |
+| jellyfin-studios-name-images-backdrop | 373.9/383.8 | Task 12.2：全库枚举后选本地图片 |
+| jellyfin-studios-name-images-primary | 360.6/362.9 | Task 12.2，同上 |
+| jellyfin-users-user-id-items-counts | 360.9/373.0 | Task 12 P-J2、Task 12.2 |
+| jellyfin-users-user-id-items-id | 963.5/1224.9 | Task 4 F4/F5、Task 12.1 |
+| self-discover-kind | 7.2/6775.9 | Task 12.5：首个冷 catalog 请求，热 p95 已达标 |
+| self-ledger | 798.1/880.8 | Task 12.4：全量返回、逐文件 Media/ownership 查询 |
+| self-libraries-routing-options | 1.6/842.1 | Task 12.5：首个远程配置请求 |
+| self-libraries-id-items-item-id-artwork-candidates | 1044.5/1062.3 | Task 4 F4/F5、Task 12.1：本地图片存在仍同步回源 |
+| self-libraries-id-items-item-id-similar | 948.0/1061.4 | Task 4 F4/F5、Task 12.1：未持久化的远程 404 |
+| self-media-douban-id | 638.3/1730.1 | Task 12.5：每次顺序拉 subject/credits，非单个冷样本 |
+| self-media-person-id | 4.6/1091.0 | Task 12.5：首个远程人物请求 |
+| self-media-id-poster | 0.6/0.6，40×503 | 已纠正 Task 0 夹具；Task 20 E4 修复真实冷填充 |
+| self-settings-countries | 2.5/939.5 | Task 12.5：首个同步远程配置调用，还会阻塞 async worker |
+| self-subscriptions-today-arrivals | 881.7/919.5 | Task 12.1：每请求重复 season_episodes 回源 |
+| self-subscriptions-id | 955.8/1061.8 | Task 12.1：air_dates 同步回源 |
+| self-system-logs-export | 1248.2/1268.1 | Task 12.6：已流式返回，计时包含完整文件下载 |
+| jellyfin-playback-info | 1173.9/1292.8 | Task 4 F4/F5、Task 12.1：单条目可选 enrichment |
+| page-detail | 1164.9/2097.4 | Task 3 B1、Task 5 F3、Task 12.1：请求组包含 similar |
+
+busy 完整基线已观察到：Items 详情 p95 1092.5ms、用户 Items 详情 1182.3ms、Seasons 1294.9ms、Person 图片 1110.6ms、artwork candidates 1118.2ms、similar 1184.9ms、ledger 1080.5ms。日志完整导出 p95 3314.4ms、catalog 标题搜索 p95 709.0ms（busy S 类目标400ms）；分别补入 Task12.6、Task12.5。这些结果支持先解决持续回源和全库工作；整轮零 HTTP 错误。`jellyfin-shows-id-episodes` 是 D 类（70 集分集详情），busy p95/p99 为 245.1/286.4ms，超过 D 类 busy p95 200ms 目标，归入 Task 12 P-J4；最终以报告 target_p95/target_p99 为判定依据。
+
+cold的13项失败全部映射到下表已有缺口：实体图片、详情/PlaybackInfo、Seasons、候选图片/similar、Douban与日志导出。12项重启前后idle变化超过2倍，但Scrape状态、缓存及日志体积不同，不能证明统计信息过期；Task5保留扫描轮结束optimize及其验证。首次cold重启曾被全局Scrape阻塞，失败证据保留；停用该可选Job后正式cold完成，必需probe保持开启。
+
+**排序依据与执行顺序：** 使用最大 `p95/目标p95`、`p99/目标p99` 比值衡量幅度；触达频率没有生产遥测，明确按「详情/播放/图片很高，浏览/搜索/NextUp 高，管理/导出低」的产品假设判断，不伪造访问次数。正确性失败先处理；Task 20 在阶段 E 先执行。阶段 C 执行顺序（完整cold未出现需要提升的新缺口）：
+
+1. Task 12.1：PlaybackInfo 11.74 倍、详情约 9.76 倍，且影响详情页。
+2. Task 12 → Task 12.2 → Task 12.3：先提供计数/pinned 查询，再消除实体/季全库工作和外网图片重复下载；Person 图片 14.31 倍、Seasons 8.16 倍、实体图片约 3.74 倍。
+3. Task 11：搜索 hints 1.85 倍，复用前一步查询 seam，并补完整 FTS 行为。
+4. Task 8：NextUp idle 1.12 倍但首页频率高；完整 busy/cold 可提升优先级。
+5. Task 12.5：Discover 首个请求 p99 8.47 倍，热 p95 已达标；Douban 持续超标约 2.16 倍。须区分冷外网与 SQL。
+6. Task 12.4 → Task 10：ledger 2.66 倍；复用文件分页/批量事实，但不混同 probe 或 missing 的调用路径。
+7. Task 9：保留收藏/LastPlayed 的全部计划行为和索引验证，即使 idle 没有失败样本。
+8. Task 12.6：导出 4.16 倍、管理频率低，先证明响应体积和吞吐根因。
+
+Tasks 8–12 全部保留；排序不等于删除已经达标的计划项。每个新增任务也单独 red→green→定向 perfgate→commit/push。以下新增项优先复用既有 API 响应合同、缓存及执行器；不预先强制引入 pending 状态或新的 UI 流程。若完整新鲜远程数据在真实冷 miss 时无法满足既定 SLO，记录具体接口、外网耗时和无法兼得的条件，再确定必要的最小合同变更；不能用预热、改阈值、空成功或豁免替代修复。
+
+### Task 12.1: Library 详情、播放和订阅读不等待可选 catalog 回源
+
+**Files:**
+- Modify: `crates/api/src/media_server_provider/{enrichment.rs,items.rs}`、`media_server_provider.rs`
+- Modify: `crates/api/src/http/{library_artwork.rs,library_organize.rs,subscriptions.rs}`、`http/subscription_depth/arrivals.rs`
+- Modify: `crates/media/src/{cache.rs,client.rs}`：需要时增加持久化的 typed NotFound 缓存及有界合并刷新，不缓存瞬时故障为成功
+- Create: `crates/api/tests/adopted_reads_catalog_independence.rs`、`crates/media/tests/catalog_negative_cache.rs`
+
+**Interfaces/行为：** Library 已采纳元数据、文件和播放状态是正常读结果来源；可选 enrichment 仅消费现有缓存或在独立任务刷新。Catalog 不存在是明确的缓存状态，不能与超时/鉴权失败/解析错误混成空数据。similar 原有列表响应优先用正常正/负缓存消除重复回源，保留真实错误处理；只有实测证明现有合同无法满足冷 SLO 时才另列最小设计决定。压力数据的不存在 TMDB ID 是缺失 catalog 的真实韧性场景，不能整体替换成真实 ID 掩盖它。
+
+- [ ] **Step 1: 写失败测试**：`adopted_item_detail_and_playback_info_do_not_wait_for_catalog`，fake catalog 被屏障阻塞，已有采纳字段、文件选择、played/favorite 仍正确返回；隐藏 Library 仍不可见。
+- [ ] **Step 2: 写失败测试**：`local_artwork_and_subscription_facts_survive_optional_catalog_miss`，本地候选图片、已采纳 air dates、订阅进度和 arrivals 正确；不捏造未知播出日期。`catalog_not_found_is_cached_but_transient_errors_are_not`，公开 client 结果区分 NotFound 与瞬时失败，并验证过期后可恢复为真实结果，不只断言 mock 调用次数。
+- [ ] **Step 3: 运行确认失败，再实现**：`cargo test -j8 -p api --test adopted_reads_catalog_independence -- --test-threads=8`；`cargo test -j8 -p media --test catalog_negative_cache -- --test-threads=8`。所有 HTTP 依赖注入 fake，不访问外网。
+- [ ] **Step 4: 验证**：重跑 Step 3；依次过滤 `jellyfin-items-id`、`jellyfin-users-user-id-items-id`、`jellyfin-playback-info`、`self-subscriptions`、`self-libraries-id-items-item-id`、`page-detail` 的 idle perfgate。page-detail 包含 similar，不把它的网络耗时误认作 detail SQL。
+- [ ] **Step 5: 提交** `perf(api): serve adopted Library facts without optional catalog waits`。
+
+### Task 12.2: Jellyfin 实体、计数、搜索提示和季列表改为定向投影读
+
+**Files:**
+- Create: `crates/store/src/library_query/protocol/entities.rs`（按职责需要拆为具名模块）
+- Modify: `crates/store/src/query_projection/*`、`schema/v1/library.sql`：维护所需 genre/studio/people 查询及索引
+- Modify: `crates/api/src/media_server_provider/{items.rs,person_images.rs,read_snapshot.rs}`
+- Modify: `crates/media-server/src/{provider.rs,routes/catalog.rs,routes/users.rs,routes/people.rs,routes/shows.rs,routes/media/images.rs}`
+- Create: `crates/store/tests/protocol_entities.rs`、`crates/api/tests/protocol_entity_reads.rs`
+
+**Interfaces/行为：** 从可见 Library 投影读取精确 count、entity 名称/稳定 ID、代表图片和 pinned series 的季统计，只水合返回页。Items/Counts handler 直接使用 Task 12 计数查询；不能仍调用 `list_visible_items(None)` 再 count。SearchHints 复用有界搜索 seam，Task 11 完成后接上 FTS。Seasons 不得为一部剧重读整库。已有响应 JSON、稳定 ID、排序和可见性保持正确。
+
+- [ ] **Step 1: 写失败测试**：`entity_counts_and_representative_artwork_respect_library_visibility`；两个可见/隐藏库共享名称，检查 counts、代表图片、名称与稳定 ID，删除/隐藏立即不再返回。
+- [ ] **Step 2: 写失败测试**：`entity_lookup_work_is_bounded_by_result_page`，增加大量无关 Media 后，公开查询统计的语句数和水合行数保持页内规模；`protocol_counts_match_visible_paged_totals`；`seasons_are_series_scoped_and_preserve_play_state`；`search_hints_apply_visibility_and_limit`。
+- [ ] **Step 3: 写 query-plan 失败测试**：选中 entity/series 的查询不得扫描大型 library_files/items 或使用无界临时排序；允许扫描小型 `json_each` 参数集。覆盖 aliased SCAN，不能只检查未使用的原表名字符串。
+- [ ] **Step 4: red→实现→green**：`cargo test -j8 -p store --test protocol_entities -- --test-threads=8`；`cargo test -j8 -p api --test protocol_entity_reads -- --test-threads=8`；再跑 `cargo test -j8 -p api --test jellyfin_paged_metadata -- --test-threads=8`。
+- [ ] **Step 5: perfgate**：逐个过滤 `jellyfin-genres`、`jellyfin-studios`、`jellyfin-persons-name`、两类 `items-counts`、`jellyfin-search-hints`、`jellyfin-shows-id-seasons`；Task 12 已验证的 pinned episodes 继续保留回归。
+- [ ] **Step 6: 提交** `perf: query Jellyfin entities and seasons from bounded projections`。
+
+### Task 12.3: Jellyfin Person 图片复用本地缓存和有界填充
+
+**Files:**
+- Modify: `crates/media-server/src/routes/media/images.rs`、`crates/api/src/media_server_provider/person_images.rs`
+- Modify: Task 20 产出的图片缓存/传输模块，复用其并发合并及有界填充，不再创建第二套同职责缓存
+- Create: `crates/api/tests/protocol_person_images.rs`
+
+**行为：** 当前 Person 图片返回远程头像 307，闸门会跟随重定向并下载完整外网图片。保留外部可用的图片语义，优先从本地缓存服务；冷填充按 Task 20 有界完成。不能只缩短 API 重定向计时就宣称图片变快。图片端点保持 public router，用户上下文仍为 Option；实体可见性由既有规则校验。
+
+- [ ] **Step 1: 写失败测试**：`person_image_warm_read_serves_cached_bytes`，有限 fake image origin 提供正确内容，后续即使源不可达也返回正确 bytes/content-type；`person_image_fill_is_shared_and_never_returns_warming_503`；`person_image_resolution_respects_library_visibility`。
+- [ ] **Step 2: 写失败测试**：`stalled_person_image_source_has_bounded_completion`，源被屏障阻塞时取消/截止能释放资源，错误不能伪装成200图片；不启动浏览器、不连真实 TMDB。
+- [ ] **Step 3: red→实现→green**：`cargo test -j8 -p api --test protocol_person_images -- --test-threads=8`；复跑 Task 20 的图片集成测试目标。
+- [ ] **Step 4: perfgate**：`python3 scripts/e2e/perfgate.py idle --only jellyfin-persons-name-images-primary --out .e2e/perf/task12-3-idle.json`；诊断记录最终 body bytes/源耗时，不改完整响应计时口径。
+- [ ] **Step 5: 提交** `perf(api): cache Jellyfin Person image delivery locally`。
+
+### Task 12.4: Ledger 管理读批量事实与页内观察
+
+**Files:**
+- Modify: `crates/api/src/http/library_admin.rs`、store file coverage/ownership 读模块、`schema/v1/library.sql`
+- Create: `crates/store/tests/ledger_page.rs`、`crates/api/tests/ledger_paging.rs`
+- 如实测必须引入分页，再 Modify: `web/lib/api/*` 及真实 ledger consumer、普通 perfgate 请求；禁止只有闸门使用的截断参数
+
+**行为：** 先在既有响应合同下把 per-row Media/ownership 查询改为 batch JOIN，完整保留 transfer_mode、size、所属 Library 和 Media 字段；只在锁外做文件观察，优先使用已持久化 size。复用 Task 5 的有界文件枚举，不混同 probe 与 HTTP caller。若完整管理列表的序列化/传输仍无法达标，再将真实页面和 API 一起改为有界 keyset 页，零兼容，不保留旧无界分支；该决定须以完整 body 字节数及分段耗时为依据。
+
+- [ ] **Step 1: 写失败测试**：`ledger_statement_count_is_constant`，10 条与大规模覆盖事实下，语句数不随每文件增加；`ledger_rows_preserve_owner_media_transfer_and_size`，通过 API JSON 验证字段及真实文件观察。
+- [ ] **Step 2: 写失败测试**：`ledger_fact_lookups_use_indexes`，batch lookup 不扫大型表；采用分页时增加 `ledger_keyset_pages_are_complete_and_disjoint`，25 项按10项翻页并集完整无重复，排序 ties 正确，真实 consumer 能继续取下一页。
+- [ ] **Step 3: red→实现→green**：`cargo test -j8 -p store --test ledger_page -- --test-threads=8`；`cargo test -j8 -p api --test ledger_paging -- --test-threads=8`。如改前端合同，再跑对应 `pnpm test`、`pnpm typecheck`，不跑页面/e2e。
+- [ ] **Step 4: perfgate**：`python3 scripts/e2e/perfgate.py idle --only self-ledger --out .e2e/perf/task12-4-idle.json`；记录 body bytes、SQL/观察/序列化耗时，确认优化没有默默少返回数据。
+- [ ] **Step 5: 提交** `perf(api): batch ledger facts and bound management read work`。
+
+### Task 12.5: Catalog 冷读执行器隔离、缓存与独立请求并发
+
+**Files:**
+- Modify: `crates/api/src/http/{discover.rs,library_config.rs,scrape_settings.rs,media.rs,media/douban.rs,search.rs}`
+- Modify: `crates/media/src/{cache.rs,client.rs}`，给 Douban transport 提供 fake 注入入口
+- Create: `crates/api/tests/catalog_read_latency.rs`、`crates/media/tests/catalog_cache_contract.rs`
+
+**行为：** 保持既有真实响应结构，优先复用持久缓存、过期可用结果、有界合并刷新。Discover 各独立 section、Douban subject/credits 可以在固定并发内并行，不能顺序累加每次外网延迟；同步 client 调用必须离开 Tokio async worker。Countries/genres/person 的首个冷请求与热请求分别报告。不能把随机上游404/超时缓存为正常空数据，也不能靠预热让 cold 用例消失。
+
+- [ ] **Step 1: 写失败测试**：`catalog_configuration_does_not_block_async_worker`，fake source被屏障阻塞，独立runtime任务仍推进；`discover_sections_have_bounded_parallelism_and_complete_results`，有限fake section检查完整结果与有界资源，不只断言mock调用次数；`catalog_title_search_preserves_results_without_blocking_async_worker`，有限 fake catalog 搜索保持完整标题结果及既有错误语义，独立 runtime 任务仍推进。
+- [ ] **Step 2: 写失败测试**：`douban_subject_and_cast_use_persistent_cache`，fresh/stale命中返回正确两部分数据、源不可用时保留既有可用缓存及错误语义；`catalog_not_found_and_transport_failure_remain_distinct`；`cold_person_and_routing_results_keep_existing_fields`。
+- [ ] **Step 3: red→实现→green**：`cargo test -j8 -p api --test catalog_read_latency -- --test-threads=8`；`cargo test -j8 -p media --test catalog_cache_contract -- --test-threads=8`。不得在 cargo test 中访问真实供应商。
+- [ ] **Step 4: perfgate**：逐个过滤 `self-search-titles`、`self-discover-kind`、`self-libraries-routing-options`、`self-media-person-id`、`self-media-douban-id`、`self-settings-countries` 的 idle/cold，记录缓存状态与真实源耗时；标题搜索另跑 busy，验证其709ms基线缺口已关闭。
+- [ ] **Step 5: 未决条件核对**：若从未缓存的完整远程数据受上游耗时支配，现有合同无法同时保证既定冷SLO，列出准确证据与最小可选设计；本任务不能因此宣称全部达标。仅在确有需要时决定合同变更，不预先强制 pending API/UI，也不放宽SLO。
+- [ ] **Step 6: 提交** `perf(media): cache catalog reads and isolate bounded upstream work`。
+
+### Task 12.6: 日志导出完整响应吞吐与有界资源
+
+**Files:**
+- Modify: `crates/api/src/http/system_logs.rs`
+- Create: `crates/api/tests/log_export.rs`
+- 仅实测证明需要范围导出时，联动实际 logs download API/UI consumer 和普通用例合同；不得只给基准加减少返回量的参数
+
+**行为：** export 已使用 ReaderStream，闸门计时到完整 body读完，不能把重复实现流式返回或改测TTFB当作修复。先记录字节数和首字节/完整下载耗时（不打印日志内容），再检查流块大小、重复复制、锁/执行器等待及文件观察。优先保留完整日志下载合同，提高吞吐并保持内存有界。若无限增长文件无法有固定完整下载SLO，明确记录限制，再评估真实页面需要的范围/续传；不能默认截断日志或假称已达标。
+
+- [ ] **Step 1: 写失败测试**：`log_export_returns_complete_large_file_with_bounded_streaming`，有限大文件逐块消费，内容/长度完整；`log_export_does_not_wait_for_writer_or_block_async_worker`；`log_export_buffer_fallback_preserves_content`。
+- [ ] **Step 2: 范围设计确有必要时补失败测试**：`log_export_ranges_are_complete_and_disjoint`，多段完整覆盖输入并保持下载文件名/header正确；完整下载功能仍可用，范围需由真实consumer消费。
+- [ ] **Step 3: red→实现→green**：`cargo test -j8 -p api --test log_export -- --test-threads=8`。文件内容为本地生成fixture，不读取或打印真实日志/密钥。
+- [ ] **Step 4: perfgate**：`python3 scripts/e2e/perfgate.py idle --only self-system-logs-export --out .e2e/perf/task12-6-idle.json`，记录相同body体积下完整响应吞吐；最终cold/busy也保留该用例。
+- [ ] **Step 5: 提交** `perf(api): improve complete log export throughput with bounded resources`。
+
+---
+
 ## 阶段 D：约束、零兼容、文档、尺寸
 
 ### Task 13: S-DB4 / S-DB5 状态列 CHECK 与 app.db 外键
@@ -490,25 +647,25 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
    - 零兼容：Z1–Z7 → Task 14。文档：D1–D13 → Task 15。
    - 未单独建任务的项：F9、F10、F12、F13、P-J3（GeneralExact 的 k 路归并）、O-DB1/2/3（时间列统一、jobs FK、`library_members` 表）、报告 3.2 / 4.2 的可选优化。这些都是可选优化，等阶段 C 完成后用基线数据重新评估，不进入本计划。
 2. **步骤检查**：每个测试步骤都给了测试名和断言要点；每个实现步骤都给了文件和签名。Task 7 规模较大，已注明可拆成 7a/7b。测试目标名以 `ls crates/*/tests` 为准的地方都已标注，没有凭空写名字。
-3. **类型一致**：`PageSnapshot`、`PageValidation`、`page_hydration` 在 Task 3 定义，Task 8 复用；`ContinueEntry` 只在 Task 8 使用；`Db` 和 `with_writer` 只在 Task 7 定义，之后的任务不依赖它们，因此 Task 7 可以推迟。
+3. **类型一致**：`PageSnapshot`、`PageValidation`、`page_hydration` 在 Task 3 定义，Task 8 复用；`ContinueEntry` 只在 Task 8 使用；`Db` 和 `with_writer` 在 Task 7 定义；按用户指定阶段顺序，Task 7 在阶段 B 完成后才进入阶段 C。
 4. **Review Focus**：5 条都已落到对应任务的测试里（Task 1 / 2 / 3 / 4 / 6）。
 5. **篇幅**：只在算法会影响结果的地方给出 SQL 和顺序，其余只写签名和断言。
 6. **性能可验收**：Task 0 定义了 SLO 表，数据集规格写进了文档，闸门脚本做全路由覆盖检查（漏一个 GET 路由就失败）。阶段 A、B、C 结束时各有一次阶段闸门。修复前先测一次基线，用基线校正阶段 C 的任务顺序：有不达标用例而报告里没有对应条目的，新增任务补上。目前覆盖不到的只剩视频流、SSE、WebSocket、外网图片代理四类，已在豁免里写明原因。
 
 ## Execution Handoff
 
-Task 0 必须最先做，并且基线要在修复前的 HEAD 上测，否则就没有可对比的数据。Task 0 只改脚本和文档，不改 crate 代码。之后的阶段 A（Task 1–3）是合并前必须完成的，三者互相独立，可以按 1 → 2 → 3 的顺序实施。阶段 B 起，Task 7 会改动 Store 的公共形态，后续任务都应在它之后开始，或者在它之前完成。
+Task 0 必须最先做，并且基线要在修复前的 HEAD 上测，否则就没有可对比的数据。Task 0 只改脚本和文档，不改 crate 代码。之后严格执行阶段 A（Task 1 → 2 → 3），接着阶段 E（Task 17 → 18 → 19 → 20），再阶段 B → C → D。阶段 B 的 Task 7 会改动 Store 的公共形态，阶段 C 在其完成之后开始；阶段 C 内按 Step 7 实测排序执行，Tasks 8–12 全部保留。审核报告缺失的 Task 13–15 清单条目按 Global Constraints 延后到最后 pull 后再检查。
 
 ---
 
 ## 阶段 E：r5 e2e 发现（docs/test-reports/2026-10-29-e2e-r5.md，本地未提交）
 
-> 与阶段 A 并行优先级：E1 视为合并阻塞项。
+> 执行位置按用户要求：阶段 A 完成之后、阶段 B 之前。E1 仍视为合并阻塞项。页面/e2e验收由其他执行者负责，本执行提供对应单元/集成测试与 perfgate 证据。
 
 ### Task 17 (E1, 高): Scrape 期浏览器同源连接池被占满，页面 p95 35.8s、5 页白屏
 现象：服务器首字节 1–5ms，但 API 在浏览器排队 10.4–10.7s；页面、API、图片代理共用同一 origin 的 6 条 HTTP/1.1 连接，部分图片代理请求挂 15s。
 方案（择优组合，需在报告中说明取舍）：前端图片加载并发上限（如 4，视口优先，离开视口取消）；图片代理请求不得长时间挂起（见 Task 20）；评估生产服务启用 HTTP/2（h2c/TLS）或图片走独立 origin。
-验收：按 e2e-runbook 在 scrape 期跑页面测试，p95 ≤ 1.5s，0 白屏。
+验收：由页面/e2e执行者按 e2e-runbook 在 scrape 期跑页面测试，p95 ≤ 1.5s，0 白屏；本执行验证图片并发/取消的单元或集成测试及相关 perfgate。
 
 ### Task 18 (E2, 中): 关闭片头检测/指纹后，已排队的约 300 个探测任务不取消
 关闭对应功能时立即取消该库/该类型已排队与运行中的任务（与删除库取消任务同一机制）。先写失败测试。
@@ -517,4 +674,9 @@ Task 0 必须最先做，并且基线要在修复前的 HEAD 上测，否则就�
 统一走图片代理，先写失败测试。
 
 ### Task 20 (E4, 低): 图片仍在缓存填充时后端先返回 503，依赖前端重试
-改为不返回 503：等待填充完成（有界）或直接回源转发，避免请求挂起占连接。与 Task 17 一起考虑。
+改为不返回 warming 503：等待填充完成（有界）或直接回源转发，避免请求挂起占连接。与 Task 17 一起考虑；真实不可用/超时仍应返回明确错误，不能伪装成200图片。
+
+**实测补充范围：** 明确包含 `GET /api/v1/media/{MediaId}/poster` 的冷 miss（`crates/api/src/http/media_posters.rs`、`crates/api/src/media_posters/service.rs`、`crates/api/src/media_posters/service/delivery.rs`）。真实 catalog 夹具首次填充约398ms，而冷miss快速返回503让40个请求全失败。不能只改前端重试或 native `/posters/{file}`，也不能通过预热掩盖此端点。
+
+- [ ] **先写失败测试**：`media_poster_cold_fill_returns_image_without_warming_503`，fake图片源有有限延迟，首个请求最终200且bytes/content-type正确；`media_poster_concurrent_cold_requests_share_fill`，并发请求获得相同图片，观察真实服务结果/资源占用，不只测mock调用次数；`media_poster_stalled_source_releases_waiters_at_deadline`，取消/超时后无悬挂填充/请求许可，错误不当作成功。
+- [ ] **验证**：新增 `crates/api/tests/media_poster_delivery.rs`，red→green运行 `cargo test -j8 -p api --test media_poster_delivery -- --test-threads=8`；与其他图片改动相关测试串行运行。然后 `python3 scripts/e2e/perfgate.py idle --only self-media-id-poster --out .e2e/perf/task20-media-poster-idle.json`，最终阶段busy/cold继续覆盖，不使用预热作为通过前提。

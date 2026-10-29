@@ -84,3 +84,20 @@ DATA_DIR=../../../Downloads/crawler-media/data ./start-test.sh stop
 rm -rf /tmp/e2e /tmp/e2e-stress
 git status   # 确认报告、手册和脚本都未提交
 ```
+
+## 性能闸门
+
+全路由性能基线、数据规格、各 class 的 SLO 和 idle/busy/cold 判定见 [performance-slo.md](performance-slo.md)。入口是 `scripts/e2e/stress-up.sh`（独立 release 实例 :18766）、`seed-activity.py`（只经 API 写 50 用户的活动数据）、`list-routes.py`（从源码提取路由）和 `perfgate.py`（覆盖检查、分位数、阶段对比）。
+
+```sh
+python3 -m unittest scripts/e2e/test_perfgate.py
+python3 scripts/e2e/perfgate.py idle --dry-run
+zsh scripts/e2e/stress-up.sh /tmp/e2e-stress
+python3 scripts/e2e/perfgate.py idle --out .e2e/perf/baseline-idle.json
+python3 scripts/e2e/perfgate.py busy --out .e2e/perf/baseline-busy.json
+python3 scripts/e2e/perfgate.py cold \
+  --restart-command 'zsh scripts/e2e/stress-up.sh /tmp/e2e-stress restart' \
+  --out .e2e/perf/baseline-cold.json
+```
+
+每阶段与上一阶段 JSON 对比，任何用例 p95 退化超过 20% 即失败。cold 每个用例都重启，busy 样本必须落在扫描任务运行期间。不要把缺失资源的 404 当成功。性能报告放 `.e2e/perf/`，不提交；临时数据放 `/tmp`，用完停止实例并删除。cargo 只允许一个进程，release 构建 `-j8`。本轮页面/e2e 另由负责人执行，P 类这里只测静态核对的 API 请求集合，不代表页面白屏或渲染验收。

@@ -1,0 +1,1317 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "jellyfin-displaypreferences-id",
+      "surface": "jellyfin",
+      "route": "/DisplayPreferences/{id}",
+      "class": "A",
+      "url": "/DisplayPreferences/{jf_movie}"
+    },
+    {
+      "id": "jellyfin-genres",
+      "surface": "jellyfin",
+      "route": "/Genres",
+      "class": "A",
+      "url": "/Genres"
+    },
+    {
+      "id": "jellyfin-genres-name",
+      "surface": "jellyfin",
+      "route": "/Genres/{name}",
+      "class": "A",
+      "url": "/Genres/{genre}"
+    },
+    {
+      "id": "jellyfin-genres-name-images-backdrop",
+      "surface": "jellyfin",
+      "route": "/Genres/{name}/Images/Backdrop",
+      "class": "D",
+      "url": "/Genres/{image_genre}/Images/Backdrop"
+    },
+    {
+      "id": "jellyfin-genres-name-images-primary",
+      "surface": "jellyfin",
+      "route": "/Genres/{name}/Images/Primary",
+      "class": "D",
+      "url": "/Genres/{image_genre}/Images/Primary"
+    },
+    {
+      "id": "jellyfin-items",
+      "surface": "jellyfin",
+      "route": "/Items",
+      "class": "L",
+      "url": "/Items?Limit=50&Recursive=true"
+    },
+    {
+      "id": "jellyfin-items-counts",
+      "surface": "jellyfin",
+      "route": "/Items/Counts",
+      "class": "L",
+      "url": "/Items/Counts"
+    },
+    {
+      "id": "jellyfin-items-id",
+      "surface": "jellyfin",
+      "route": "/Items/{id}",
+      "class": "D",
+      "url": "/Items/{jf_movie}"
+    },
+    {
+      "id": "jellyfin-items-id-images-backdrop",
+      "surface": "jellyfin",
+      "route": "/Items/{id}/Images/Backdrop",
+      "class": "D",
+      "url": "/Items/{jf_movie}/Images/Backdrop"
+    },
+    {
+      "id": "jellyfin-items-id-images-backdrop-index",
+      "surface": "jellyfin",
+      "route": "/Items/{id}/Images/Backdrop/{index}",
+      "class": "D",
+      "url": "/Items/{jf_movie}/Images/Backdrop/0"
+    },
+    {
+      "id": "jellyfin-items-id-images-primary",
+      "surface": "jellyfin",
+      "route": "/Items/{id}/Images/Primary",
+      "class": "D",
+      "url": "/Items/{jf_movie}/Images/Primary"
+    },
+    {
+      "id": "jellyfin-items-id-images-thumb",
+      "surface": "jellyfin",
+      "route": "/Items/{id}/Images/Thumb",
+      "class": "D",
+      "url": "/Items/{jf_movie}/Images/Thumb"
+    },
+    {
+      "id": "jellyfin-library-mediafolders",
+      "surface": "jellyfin",
+      "route": "/Library/MediaFolders",
+      "class": "A",
+      "url": "/Library/MediaFolders"
+    },
+    {
+      "id": "jellyfin-library-virtualfolders",
+      "surface": "jellyfin",
+      "route": "/Library/VirtualFolders",
+      "class": "A",
+      "url": "/Library/VirtualFolders"
+    },
+    {
+      "id": "jellyfin-persons-name",
+      "surface": "jellyfin",
+      "route": "/Persons/{name}",
+      "class": "A",
+      "url": "/Persons/{image_person}"
+    },
+    {
+      "id": "jellyfin-persons-name-images-primary",
+      "surface": "jellyfin",
+      "route": "/Persons/{name}/Images/Primary",
+      "class": "D",
+      "url": "/Persons/{image_person}/Images/Primary"
+    },
+    {
+      "id": "jellyfin-quickconnect-enabled",
+      "surface": "jellyfin",
+      "route": "/QuickConnect/Enabled",
+      "class": "U",
+      "url": "/QuickConnect/Enabled"
+    },
+    {
+      "id": "jellyfin-search-hints",
+      "surface": "jellyfin",
+      "route": "/Search/Hints",
+      "class": "S",
+      "url": "/Search/Hints?SearchTerm=压测&Limit=50"
+    },
+    {
+      "id": "jellyfin-shows-nextup",
+      "surface": "jellyfin",
+      "route": "/Shows/NextUp",
+      "class": "L",
+      "url": "/Shows/NextUp?Limit=50"
+    },
+    {
+      "id": "jellyfin-shows-id-episodes",
+      "surface": "jellyfin",
+      "route": "/Shows/{id}/Episodes",
+      "class": "D",
+      "url": "/Shows/{jf_series}/Episodes",
+      "expected_items": 70
+    },
+    {
+      "id": "jellyfin-shows-id-seasons",
+      "surface": "jellyfin",
+      "route": "/Shows/{id}/Seasons",
+      "class": "L",
+      "url": "/Shows/{jf_series}/Seasons"
+    },
+    {
+      "id": "jellyfin-studios",
+      "surface": "jellyfin",
+      "route": "/Studios",
+      "class": "A",
+      "url": "/Studios"
+    },
+    {
+      "id": "jellyfin-studios-name",
+      "surface": "jellyfin",
+      "route": "/Studios/{name}",
+      "class": "A",
+      "url": "/Studios/{image_studio}"
+    },
+    {
+      "id": "jellyfin-studios-name-images-backdrop",
+      "surface": "jellyfin",
+      "route": "/Studios/{name}/Images/Backdrop",
+      "class": "D",
+      "url": "/Studios/{image_studio}/Images/Backdrop"
+    },
+    {
+      "id": "jellyfin-studios-name-images-primary",
+      "surface": "jellyfin",
+      "route": "/Studios/{name}/Images/Primary",
+      "class": "D",
+      "url": "/Studios/{image_studio}/Images/Primary"
+    },
+    {
+      "id": "jellyfin-system-info-public",
+      "surface": "jellyfin",
+      "route": "/System/Info/Public",
+      "class": "U",
+      "url": "/System/Info/Public",
+      "auth": false
+    },
+    {
+      "id": "jellyfin-system-ping",
+      "surface": "jellyfin",
+      "route": "/System/Ping",
+      "class": "U",
+      "url": "/System/Ping",
+      "auth": false
+    },
+    {
+      "id": "jellyfin-userviews",
+      "surface": "jellyfin",
+      "route": "/UserViews",
+      "class": "U",
+      "url": "/UserViews"
+    },
+    {
+      "id": "jellyfin-users-me",
+      "surface": "jellyfin",
+      "route": "/Users/Me",
+      "class": "U",
+      "url": "/Users/Me"
+    },
+    {
+      "id": "jellyfin-users-user-id",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}",
+      "class": "U",
+      "url": "/Users/{user}"
+    },
+    {
+      "id": "jellyfin-users-user-id-items",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Items",
+      "class": "L",
+      "url": "/Users/{user}/Items?ParentId={movie_library}&Limit=50"
+    },
+    {
+      "id": "jellyfin-users-user-id-items-counts",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Items/Counts",
+      "class": "L",
+      "url": "/Users/{user}/Items/Counts"
+    },
+    {
+      "id": "jellyfin-users-user-id-items-latest",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Items/Latest",
+      "class": "L",
+      "url": "/Users/{user}/Items/Latest?ParentId={movie_library}&Limit=50"
+    },
+    {
+      "id": "jellyfin-users-user-id-items-resume",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Items/Resume",
+      "class": "L",
+      "url": "/Users/{user}/Items/Resume?Limit=50"
+    },
+    {
+      "id": "jellyfin-users-user-id-items-id",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Items/{id}",
+      "class": "D",
+      "url": "/Users/{user}/Items/{jf_movie}"
+    },
+    {
+      "id": "jellyfin-users-user-id-views",
+      "surface": "jellyfin",
+      "route": "/Users/{user_id}/Views",
+      "class": "U",
+      "url": "/Users/{user}/Views"
+    },
+    {
+      "id": "jellyfin-jellyfin",
+      "surface": "jellyfin",
+      "route": "/jellyfin",
+      "class": "U",
+      "url": "/jellyfin",
+      "auth": false
+    },
+    {
+      "id": "jellyfin-playback-files-id-fonts",
+      "surface": "jellyfin",
+      "route": "/playback/files/{id}/fonts",
+      "class": "A",
+      "url": "/playback/files/{local_file}/fonts"
+    },
+    {
+      "id": "jellyfin-playback-files-id-trickplay",
+      "surface": "jellyfin",
+      "route": "/playback/files/{id}/trickplay",
+      "class": "A",
+      "url": "/playback/files/{local_file}/trickplay"
+    },
+    {
+      "id": "self-auth-me",
+      "surface": "self",
+      "route": "/auth/me",
+      "class": "U",
+      "url": "/api/v1/auth/me"
+    },
+    {
+      "id": "self-catalog-cache",
+      "surface": "self",
+      "route": "/catalog/cache",
+      "class": "A",
+      "url": "/api/v1/catalog/cache"
+    },
+    {
+      "id": "self-chapters-ledger-id-index",
+      "surface": "self",
+      "route": "/chapters/{ledger_id}/{index}",
+      "class": "D",
+      "url": "/api/v1/chapters/{chapter_file}/0",
+      "auth": false
+    },
+    {
+      "id": "self-collections",
+      "surface": "self",
+      "route": "/collections",
+      "class": "L",
+      "url": "/api/v1/collections"
+    },
+    {
+      "id": "self-collections-id-gallery",
+      "surface": "self",
+      "route": "/collections/{id}/gallery",
+      "class": "L",
+      "url": "/api/v1/collections/{collection}/gallery"
+    },
+    {
+      "id": "self-collections-id-items",
+      "surface": "self",
+      "route": "/collections/{id}/items",
+      "class": "L",
+      "url": "/api/v1/collections/{collection}/items?limit=50"
+    },
+    {
+      "id": "self-discover-kind",
+      "surface": "self",
+      "route": "/discover/{kind}",
+      "class": "A",
+      "url": "/api/v1/discover/movie"
+    },
+    {
+      "id": "self-discover-kind-collection-id",
+      "surface": "self",
+      "route": "/discover/{kind}/collection/{id}",
+      "class": "A",
+      "url": "/api/v1/discover/movie/collection/{catalog_collection}"
+    },
+    {
+      "id": "self-discover-kind-filtered",
+      "surface": "self",
+      "route": "/discover/{kind}/filtered",
+      "class": "A",
+      "url": "/api/v1/discover/movie/filtered"
+    },
+    {
+      "id": "self-downloaders",
+      "surface": "self",
+      "route": "/downloaders",
+      "class": "A",
+      "url": "/api/v1/downloaders"
+    },
+    {
+      "id": "self-downloaders-limits",
+      "surface": "self",
+      "route": "/downloaders/limits",
+      "class": "A",
+      "url": "/api/v1/downloaders/limits",
+      "admin": true
+    },
+    {
+      "id": "self-downloaders-target-prefs",
+      "surface": "self",
+      "route": "/downloaders/target-prefs",
+      "class": "A",
+      "url": "/api/v1/downloaders/target-prefs"
+    },
+    {
+      "id": "self-downloaders-tasks",
+      "surface": "self",
+      "route": "/downloaders/tasks",
+      "class": "A",
+      "url": "/api/v1/downloaders/tasks"
+    },
+    {
+      "id": "self-downloaders-id",
+      "surface": "self",
+      "route": "/downloaders/{id}",
+      "class": "A",
+      "url": "/api/v1/downloaders/{downloader}"
+    },
+    {
+      "id": "self-fanart-ledger-id",
+      "surface": "self",
+      "route": "/fanart/{ledger_id}",
+      "class": "D",
+      "url": "/api/v1/fanart/{movie_file}",
+      "auth": false
+    },
+    {
+      "id": "self-fs-browse",
+      "surface": "self",
+      "route": "/fs/browse",
+      "class": "A",
+      "url": "/api/v1/fs/browse?path=/tmp/e2e-stress/media",
+      "admin": true
+    },
+    {
+      "id": "self-genres-kind",
+      "surface": "self",
+      "route": "/genres/{kind}",
+      "class": "A",
+      "url": "/api/v1/genres/movie"
+    },
+    {
+      "id": "self-health",
+      "surface": "self",
+      "route": "/health",
+      "class": "A",
+      "url": "/api/v1/health",
+      "auth": false
+    },
+    {
+      "id": "self-jobs",
+      "surface": "self",
+      "route": "/jobs",
+      "class": "A",
+      "url": "/api/v1/jobs"
+    },
+    {
+      "id": "self-jobs-id",
+      "surface": "self",
+      "route": "/jobs/{id}",
+      "class": "A",
+      "url": "/api/v1/jobs/{job}",
+      "admin": true
+    },
+    {
+      "id": "self-ledger",
+      "surface": "self",
+      "route": "/ledger",
+      "class": "A",
+      "url": "/api/v1/ledger",
+      "admin": true
+    },
+    {
+      "id": "self-libraries",
+      "surface": "self",
+      "route": "/libraries",
+      "class": "A",
+      "url": "/api/v1/libraries"
+    },
+    {
+      "id": "self-libraries-routing-options",
+      "surface": "self",
+      "route": "/libraries/routing-options",
+      "class": "A",
+      "url": "/api/v1/libraries/routing-options",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-cover",
+      "surface": "self",
+      "route": "/libraries/{id}/cover",
+      "class": "D",
+      "url": "/api/v1/libraries/{movie_library}/cover",
+      "auth": false
+    },
+    {
+      "id": "self-libraries-id-duplicates",
+      "surface": "self",
+      "route": "/libraries/{id}/duplicates",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/duplicates",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-facets",
+      "surface": "self",
+      "route": "/libraries/{id}/facets",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/facets"
+    },
+    {
+      "id": "self-libraries-id-gallery",
+      "surface": "self",
+      "route": "/libraries/{id}/gallery",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/gallery"
+    },
+    {
+      "id": "self-libraries-id-item-index",
+      "surface": "self",
+      "route": "/libraries/{id}/item-index",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/item-index?sort=title"
+    },
+    {
+      "id": "self-libraries-id-items",
+      "surface": "self",
+      "route": "/libraries/{id}/items",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50"
+    },
+    {
+      "id": "self-libraries-id-items-item-id",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}",
+      "class": "D",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}"
+    },
+    {
+      "id": "self-libraries-id-items-item-id-artwork-candidates",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/artwork/candidates",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/artwork/candidates?kind=poster"
+    },
+    {
+      "id": "self-libraries-id-items-item-id-chapters",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/chapters",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/chapters"
+    },
+    {
+      "id": "self-libraries-id-items-item-id-episodes",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/episodes",
+      "class": "D",
+      "url": "/api/v1/libraries/{tv_library}/items/{series}/episodes"
+    },
+    {
+      "id": "self-libraries-id-items-item-id-files",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/files",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/files"
+    },
+    {
+      "id": "self-libraries-id-items-item-id-probe-status",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/probe-status",
+      "class": "L",
+      "url": "/api/v1/libraries/{tv_library}/items/{series}/probe-status?season=1",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-items-item-id-reidentification-preview",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/reidentification-preview",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/reidentification-preview",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-items-item-id-similar",
+      "surface": "self",
+      "route": "/libraries/{id}/items/{item_id}/similar",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/similar"
+    },
+    {
+      "id": "self-libraries-id-missing",
+      "surface": "self",
+      "route": "/libraries/{id}/missing",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/missing"
+    },
+    {
+      "id": "self-libraries-id-operations-operation-id",
+      "surface": "self",
+      "route": "/libraries/{id}/operations/{operation_id}",
+      "class": "A",
+      "url": "/api/v1/libraries/{operation_library}/operations/{library_operation}",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-organize-preview",
+      "surface": "self",
+      "route": "/libraries/{id}/organize-preview",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/organize-preview",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-path-reconciliation-preview",
+      "surface": "self",
+      "route": "/libraries/{id}/path-reconciliation-preview",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/path-reconciliation-preview",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-root-consolidation-preview",
+      "surface": "self",
+      "route": "/libraries/{id}/root-consolidation-preview",
+      "class": "A",
+      "url": "/api/v1/libraries/{movie_library}/root-consolidation-preview",
+      "admin": true
+    },
+    {
+      "id": "self-libraries-id-scan-operations-operation-id",
+      "surface": "self",
+      "route": "/libraries/{id}/scan-operations/{operation_id}",
+      "class": "A",
+      "url": "/api/v1/libraries/{scan_library}/scan-operations/{scan_operation}",
+      "admin": true
+    },
+    {
+      "id": "self-library-removals-operation-id",
+      "surface": "self",
+      "route": "/library-removals/{operation_id}",
+      "class": "A",
+      "url": "/api/v1/library-removals/{library_removal}",
+      "admin": true
+    },
+    {
+      "id": "self-library-pending-deletions",
+      "surface": "self",
+      "route": "/library/pending-deletions",
+      "class": "A",
+      "url": "/api/v1/library/pending-deletions",
+      "admin": true
+    },
+    {
+      "id": "self-media-douban-id",
+      "surface": "self",
+      "route": "/media/douban/{id}",
+      "class": "A",
+      "url": "/api/v1/media/douban/{catalog_douban}"
+    },
+    {
+      "id": "self-media-operations-id",
+      "surface": "self",
+      "route": "/media/operations/{id}",
+      "class": "A",
+      "url": "/api/v1/media/operations/{media_operation}",
+      "admin": true
+    },
+    {
+      "id": "self-media-person-id",
+      "surface": "self",
+      "route": "/media/person/{id}",
+      "class": "A",
+      "url": "/api/v1/media/person/{catalog_person}"
+    },
+    {
+      "id": "self-media-tv-id-season-season",
+      "surface": "self",
+      "route": "/media/tv/{id}/season/{season}",
+      "class": "A",
+      "url": "/api/v1/media/tv/{catalog_tv}/season/1"
+    },
+    {
+      "id": "self-media-id-poster",
+      "surface": "self",
+      "route": "/media/{id}/poster",
+      "class": "D",
+      "url": "/api/v1/media/{poster_media}/poster"
+    },
+    {
+      "id": "self-media-kind-id",
+      "surface": "self",
+      "route": "/media/{kind}/{id}",
+      "class": "A",
+      "url": "/api/v1/media/movie/{catalog_movie}"
+    },
+    {
+      "id": "self-notify-config",
+      "surface": "self",
+      "route": "/notify/config",
+      "class": "A",
+      "url": "/api/v1/notify/config"
+    },
+    {
+      "id": "self-playback-activity",
+      "surface": "self",
+      "route": "/playback/activity",
+      "class": "A",
+      "url": "/api/v1/playback/activity"
+    },
+    {
+      "id": "self-playback-chapters",
+      "surface": "self",
+      "route": "/playback/chapters",
+      "class": "A",
+      "url": "/api/v1/playback/chapters?play_session_id={play_session}&device_id=perfgate"
+    },
+    {
+      "id": "self-playback-devices",
+      "surface": "self",
+      "route": "/playback/devices",
+      "class": "A",
+      "url": "/api/v1/playback/devices"
+    },
+    {
+      "id": "self-playback-favorites",
+      "surface": "self",
+      "route": "/playback/favorites",
+      "class": "L",
+      "url": "/api/v1/playback/favorites?limit=50"
+    },
+    {
+      "id": "self-playback-favorites-gallery",
+      "surface": "self",
+      "route": "/playback/favorites/gallery",
+      "class": "L",
+      "url": "/api/v1/playback/favorites/gallery"
+    },
+    {
+      "id": "self-playback-hardware",
+      "surface": "self",
+      "route": "/playback/hardware",
+      "class": "A",
+      "url": "/api/v1/playback/hardware"
+    },
+    {
+      "id": "self-playback-history",
+      "surface": "self",
+      "route": "/playback/history",
+      "class": "A",
+      "url": "/api/v1/playback/history"
+    },
+    {
+      "id": "self-playback-items-id",
+      "surface": "self",
+      "route": "/playback/items/{id}",
+      "class": "D",
+      "url": "/api/v1/playback/items/{movie}?library_id={movie_library}"
+    },
+    {
+      "id": "self-playback-items-id-episodes",
+      "surface": "self",
+      "route": "/playback/items/{id}/episodes",
+      "class": "D",
+      "url": "/api/v1/playback/items/{series}/episodes?library_id={tv_library}"
+    },
+    {
+      "id": "self-playback-marks",
+      "surface": "self",
+      "route": "/playback/marks",
+      "class": "A",
+      "url": "/api/v1/playback/marks?media_item_id={movie}"
+    },
+    {
+      "id": "self-playback-policy",
+      "surface": "self",
+      "route": "/playback/policy",
+      "class": "A",
+      "url": "/api/v1/playback/policy"
+    },
+    {
+      "id": "self-playback-resume",
+      "surface": "self",
+      "route": "/playback/resume",
+      "class": "L",
+      "url": "/api/v1/playback/resume?media_item_id={movie}"
+    },
+    {
+      "id": "self-playback-stats-watch",
+      "surface": "self",
+      "route": "/playback/stats/watch",
+      "class": "A",
+      "url": "/api/v1/playback/stats/watch"
+    },
+    {
+      "id": "self-playback-up-next",
+      "surface": "self",
+      "route": "/playback/up-next",
+      "class": "L",
+      "url": "/api/v1/playback/up-next?limit=20"
+    },
+    {
+      "id": "self-posters-ledger-id",
+      "surface": "self",
+      "route": "/posters/{ledger_id}",
+      "class": "D",
+      "url": "/api/v1/posters/{movie_file}",
+      "auth": false
+    },
+    {
+      "id": "self-rule-sets",
+      "surface": "self",
+      "route": "/rule-sets",
+      "class": "A",
+      "url": "/api/v1/rule-sets"
+    },
+    {
+      "id": "self-rule-sets-id",
+      "surface": "self",
+      "route": "/rule-sets/{id}",
+      "class": "A",
+      "url": "/api/v1/rule-sets/{filter}"
+    },
+    {
+      "id": "self-search-history",
+      "surface": "self",
+      "route": "/search/history",
+      "class": "S",
+      "url": "/api/v1/search/history?limit=50"
+    },
+    {
+      "id": "self-search-history-id",
+      "surface": "self",
+      "route": "/search/history/{id}",
+      "class": "S",
+      "url": "/api/v1/search/history/{history_entry}",
+      "admin": true
+    },
+    {
+      "id": "self-search-library-items",
+      "surface": "self",
+      "route": "/search/library-items",
+      "class": "S",
+      "url": "/api/v1/search/library-items?keyword=压测电影&limit=50"
+    },
+    {
+      "id": "self-search-presets",
+      "surface": "self",
+      "route": "/search/presets",
+      "class": "S",
+      "url": "/api/v1/search/presets"
+    },
+    {
+      "id": "self-search-titles",
+      "surface": "self",
+      "route": "/search/titles",
+      "class": "S",
+      "url": "/api/v1/search/titles?keyword=压测电影"
+    },
+    {
+      "id": "self-search-torrents",
+      "surface": "self",
+      "route": "/search/torrents",
+      "class": "S",
+      "url": "/api/v1/search/torrents?keyword=压测电影"
+    },
+    {
+      "id": "self-settings-browser",
+      "surface": "self",
+      "route": "/settings/browser",
+      "class": "A",
+      "url": "/api/v1/settings/browser",
+      "admin": true
+    },
+    {
+      "id": "self-settings-browser-obscura",
+      "surface": "self",
+      "route": "/settings/browser/obscura",
+      "class": "A",
+      "url": "/api/v1/settings/browser/obscura",
+      "admin": true
+    },
+    {
+      "id": "self-settings-countries",
+      "surface": "self",
+      "route": "/settings/countries",
+      "class": "A",
+      "url": "/api/v1/settings/countries"
+    },
+    {
+      "id": "self-settings-languages",
+      "surface": "self",
+      "route": "/settings/languages",
+      "class": "A",
+      "url": "/api/v1/settings/languages"
+    },
+    {
+      "id": "self-settings-metadata",
+      "surface": "self",
+      "route": "/settings/metadata",
+      "class": "A",
+      "url": "/api/v1/settings/metadata",
+      "admin": true
+    },
+    {
+      "id": "self-settings-metadata-language",
+      "surface": "self",
+      "route": "/settings/metadata-language",
+      "class": "A",
+      "url": "/api/v1/settings/metadata-language",
+      "admin": true
+    },
+    {
+      "id": "self-settings-proxy",
+      "surface": "self",
+      "route": "/settings/proxy",
+      "class": "A",
+      "url": "/api/v1/settings/proxy",
+      "admin": true
+    },
+    {
+      "id": "self-settings-scrape",
+      "surface": "self",
+      "route": "/settings/scrape",
+      "class": "A",
+      "url": "/api/v1/settings/scrape"
+    },
+    {
+      "id": "self-settings-transfer",
+      "surface": "self",
+      "route": "/settings/transfer",
+      "class": "A",
+      "url": "/api/v1/settings/transfer"
+    },
+    {
+      "id": "self-sites",
+      "surface": "self",
+      "route": "/sites",
+      "class": "A",
+      "url": "/api/v1/sites"
+    },
+    {
+      "id": "self-sites-boost-stats",
+      "surface": "self",
+      "route": "/sites/boost-stats",
+      "class": "A",
+      "url": "/api/v1/sites/boost-stats"
+    },
+    {
+      "id": "self-sites-catalog",
+      "surface": "self",
+      "route": "/sites/catalog",
+      "class": "A",
+      "url": "/api/v1/sites/catalog"
+    },
+    {
+      "id": "self-sites-id",
+      "surface": "self",
+      "route": "/sites/{id}",
+      "class": "A",
+      "url": "/api/v1/sites/{site}"
+    },
+    {
+      "id": "self-stills-ledger-id",
+      "surface": "self",
+      "route": "/stills/{ledger_id}",
+      "class": "D",
+      "url": "/api/v1/stills/{tv_file}",
+      "auth": false
+    },
+    {
+      "id": "self-subscriptions",
+      "surface": "self",
+      "route": "/subscriptions",
+      "class": "A",
+      "url": "/api/v1/subscriptions"
+    },
+    {
+      "id": "self-subscriptions-automation-readiness",
+      "surface": "self",
+      "route": "/subscriptions/automation-readiness",
+      "class": "A",
+      "url": "/api/v1/subscriptions/automation-readiness",
+      "admin": true
+    },
+    {
+      "id": "self-subscriptions-today-arrivals",
+      "surface": "self",
+      "route": "/subscriptions/today-arrivals",
+      "class": "A",
+      "url": "/api/v1/subscriptions/today-arrivals",
+      "admin": true
+    },
+    {
+      "id": "self-subscriptions-id",
+      "surface": "self",
+      "route": "/subscriptions/{id}",
+      "class": "A",
+      "url": "/api/v1/subscriptions/{subscription}",
+      "admin": true
+    },
+    {
+      "id": "self-subscriptions-id-activities",
+      "surface": "self",
+      "route": "/subscriptions/{id}/activities",
+      "class": "A",
+      "url": "/api/v1/subscriptions/{subscription}/activities",
+      "admin": true
+    },
+    {
+      "id": "self-subscriptions-id-release-forecast",
+      "surface": "self",
+      "route": "/subscriptions/{id}/release-forecast",
+      "class": "A",
+      "url": "/api/v1/subscriptions/{subscription}/release-forecast",
+      "admin": true
+    },
+    {
+      "id": "self-subscriptions-id-removal-preview",
+      "surface": "self",
+      "route": "/subscriptions/{id}/removal-preview",
+      "class": "A",
+      "url": "/api/v1/subscriptions/{subscription}/removal-preview",
+      "admin": true
+    },
+    {
+      "id": "self-system-logs",
+      "surface": "self",
+      "route": "/system/logs",
+      "class": "A",
+      "url": "/api/v1/system/logs",
+      "admin": true
+    },
+    {
+      "id": "self-system-logs-export",
+      "surface": "self",
+      "route": "/system/logs/export",
+      "class": "A",
+      "url": "/api/v1/system/logs/export",
+      "admin": true
+    },
+    {
+      "id": "self-ui-preferences",
+      "surface": "self",
+      "route": "/ui/preferences",
+      "class": "A",
+      "url": "/api/v1/ui/preferences"
+    },
+    {
+      "id": "self-unidentified",
+      "surface": "self",
+      "route": "/unidentified",
+      "class": "A",
+      "url": "/api/v1/unidentified",
+      "admin": true
+    },
+    {
+      "id": "self-users",
+      "surface": "self",
+      "route": "/users",
+      "class": "A",
+      "url": "/api/v1/users",
+      "admin": true
+    },
+    {
+      "id": "self-users-removals-operation-id",
+      "surface": "self",
+      "route": "/users/removals/{operation_id}",
+      "class": "A",
+      "url": "/api/v1/users/removals/{user_removal}",
+      "admin": true
+    },
+    {
+      "id": "self-list-title",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50&sort=title&order=asc"
+    },
+    {
+      "id": "self-list-rating",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50&sort=rating"
+    },
+    {
+      "id": "self-list-last-played",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50&sort=last_played"
+    },
+    {
+      "id": "self-list-genre",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50&g={genre}"
+    },
+    {
+      "id": "self-list-decade",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{movie_library}/items?limit=50&d=1990s"
+    },
+    {
+      "id": "self-list-tv",
+      "surface": "self",
+      "class": "L",
+      "url": "/api/v1/libraries/{tv_library}/items?limit=50"
+    },
+    {
+      "id": "self-search-prefix",
+      "surface": "self",
+      "class": "S",
+      "url": "/api/v1/search/library-items?keyword=压测"
+    },
+    {
+      "id": "self-search-person",
+      "surface": "self",
+      "class": "S",
+      "url": "/api/v1/search/library-items?keyword=演员001"
+    },
+    {
+      "id": "jellyfin-items-played",
+      "surface": "jellyfin",
+      "class": "L",
+      "url": "/Users/{user}/Items?Limit=50&IsPlayed=true"
+    },
+    {
+      "id": "jellyfin-items-unplayed",
+      "surface": "jellyfin",
+      "class": "L",
+      "url": "/Users/{user}/Items?Limit=50&IsPlayed=false"
+    },
+    {
+      "id": "jellyfin-items-favorite",
+      "surface": "jellyfin",
+      "class": "L",
+      "url": "/Users/{user}/Items?Limit=50&IsFavorite=true"
+    },
+    {
+      "id": "jellyfin-items-search",
+      "surface": "jellyfin",
+      "class": "S",
+      "url": "/Users/{user}/Items?Limit=50&SearchTerm=压测"
+    },
+    {
+      "id": "self-login",
+      "surface": "self",
+      "class": "U*",
+      "url": "/api/v1/auth/login",
+      "method": "POST",
+      "auth": false,
+      "body": {
+        "username": "{login}",
+        "password": "{password}"
+      }
+    },
+    {
+      "id": "jellyfin-login",
+      "surface": "jellyfin",
+      "class": "U*",
+      "url": "/Users/AuthenticateByName",
+      "method": "POST",
+      "auth": false,
+      "body": {
+        "Username": "{login}",
+        "Pw": "{password}"
+      }
+    },
+    {
+      "id": "jellyfin-playback-info",
+      "surface": "jellyfin",
+      "class": "D",
+      "url": "/Items/{jf_movie}/PlaybackInfo",
+      "method": "POST",
+      "body": {}
+    },
+    {
+      "id": "self-write-favorite",
+      "surface": "self",
+      "class": "W",
+      "url": "/api/v1/playback/marks",
+      "method": "POST",
+      "body": {
+        "media_item_id": "{write_movie}",
+        "favorite": true
+      }
+    },
+    {
+      "id": "self-write-played",
+      "surface": "self",
+      "class": "W",
+      "url": "/api/v1/playback/marks",
+      "method": "POST",
+      "body": {
+        "media_item_id": "{write_movie}",
+        "played": true
+      }
+    },
+    {
+      "id": "self-write-progress",
+      "surface": "self",
+      "class": "W",
+      "url": "/api/v1/playback/progress",
+      "method": "POST",
+      "body": {
+        "media_item_id": "{session_movie}",
+        "device_id": "perfgate",
+        "play_session_id": "{play_session}",
+        "file_id": "{session_file}",
+        "event_sequence": "{sequence}",
+        "event": "progress",
+        "position_ms": "{position}",
+        "duration_ms": 7200000
+      },
+      "prepare": "heartbeat"
+    },
+    {
+      "id": "page-home",
+      "surface": "self",
+      "class": "P",
+      "source": "web/app/(app)/page.tsx redirects /library; web/components/library-view.tsx reload and rowFetches, default visible rows",
+      "requests": [
+        {
+          "url": "/api/v1/libraries"
+        },
+        {
+          "url": "/api/v1/playback/up-next?limit=20"
+        },
+        {
+          "url": "/api/v1/playback/favorites?limit=20"
+        },
+        {
+          "url": "/api/v1/libraries/{movie_library}/items?sort=added_at&limit=20"
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items?sort=added_at&limit=20"
+        }
+      ]
+    },
+    {
+      "id": "page-library",
+      "surface": "self",
+      "class": "P",
+      "source": "web/components/library-detail-view.tsx reload/fetchWall; web/lib/api/libraries.ts; member visibility",
+      "requests": [
+        {
+          "url": "/api/v1/libraries"
+        },
+        {
+          "url": "/api/v1/libraries/{movie_library}/items?limit=50"
+        },
+        {
+          "url": "/api/v1/libraries/{movie_library}/items?identity=provisional&sort=added_at&limit=50"
+        },
+        {
+          "url": "/api/v1/libraries/{movie_library}/facets"
+        },
+        {
+          "url": "/api/v1/libraries/{movie_library}/item-index?sort=title"
+        }
+      ]
+    },
+    {
+      "id": "page-detail",
+      "surface": "self",
+      "class": "P",
+      "source": "web/components/library-item-detail-view.tsx fetchDetail, marks/resume and TV episode list; web/lib/api/libraries.ts; detail follows next_file_cursor through files pages (libraries.ts:1332); similar/chapter/probe effects (detail-view:345,488,505)",
+      "requests": [
+        {
+          "url": "/api/v1/libraries"
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items/{series}",
+          "follow_file_pages": true
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items/{series}/episodes"
+        },
+        {
+          "url": "/api/v1/playback/marks?media_item_id={series}"
+        },
+        {
+          "url": "/api/v1/playback/resume?media_item_id={series}&season_number=1&episode_number=1"
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items/{series}/similar"
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items/{series}/probe-status?season=1",
+          "admin": true
+        },
+        {
+          "url": "/api/v1/libraries/{tv_library}/items/{series}/chapters?season=1&episode=1"
+        }
+      ]
+    },
+    {
+      "id": "jellyfin-subtitle",
+      "surface": "jellyfin",
+      "route": "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
+      "class": "D",
+      "url": "/Videos/{subtitle_item}/Subtitles/{subtitle_index}/Stream.{subtitle_codec}"
+    },
+    {
+      "id": "self-subtitle",
+      "surface": "self",
+      "route": "/playback/subtitles/{ledger_id}/{index}",
+      "class": "D",
+      "url": "/api/v1/playback/subtitles/{subtitle_file}/{subtitle_index}"
+    },
+    {
+      "id": "self-write-history",
+      "surface": "self",
+      "class": "W",
+      "url": "/api/v1/search/torrents?keyword=perfgate&save_history=true",
+      "method": "GET"
+    }
+  ],
+  "exemptions": [
+    {
+      "surface": "jellyfin",
+      "route": "/Videos/{id}/stream",
+      "reason": "Streaming video or subtitle response"
+    },
+    {
+      "surface": "jellyfin",
+      "route": "/socket",
+      "reason": "WebSocket is an unbounded connection"
+    },
+    {
+      "surface": "self",
+      "route": "/images/proxy",
+      "reason": "External upstream image network"
+    },
+    {
+      "surface": "self",
+      "route": "/jobs/stream",
+      "reason": "SSE is an unbounded response"
+    },
+    {
+      "surface": "self",
+      "route": "/playback/sessions/{play_session_id}/stream",
+      "reason": "Streaming video or subtitle response"
+    },
+    {
+      "surface": "self",
+      "route": "/search/torrents/stream",
+      "reason": "SSE is an unbounded response"
+    },
+    {
+      "surface": "self",
+      "route": "/system/logs/stream",
+      "reason": "SSE is an unbounded response"
+    }
+  ]
+}
