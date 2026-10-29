@@ -126,6 +126,9 @@ async fn member_is_forbidden_on_the_admin_surface() {
     }
 
     // 对照组：管理员不受影响。
+    // The root must exist; never depend on host paths such as /tmp.
+    let movies = tmp.path().join("movies");
+    std::fs::create_dir_all(&movies).unwrap();
     let admin = login_token(&app, "admin", "management-secret").await;
     let response = app
         .clone()
@@ -133,7 +136,7 @@ async fn member_is_forbidden_on_the_admin_surface() {
             "POST",
             "/api/v1/libraries",
             Some(&admin),
-            json!({ "kind": "movie", "name": "电影", "root_paths": ["/tmp/movies"] }),
+            json!({ "kind": "movie", "name": "电影", "root_paths": [movies] }),
         ))
         .await
         .unwrap();
