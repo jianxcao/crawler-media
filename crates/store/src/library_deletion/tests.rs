@@ -100,13 +100,14 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
     assert!(store.file_coverage_by_path(&row.path).unwrap().is_none());
-    assert!(
-        store.get_media(media.id).unwrap().is_none(),
-        "orphan Media is purged with the Library"
-    );
-    assert!(
-        store.unit_state(user, media.id, -1, -1).unwrap().is_none(),
-        "playback owned by the purged Media leaves with it"
+    assert!(store.get_media(media.id).unwrap().is_some());
+    assert_eq!(
+        store
+            .unit_state(user, media.id, -1, -1)
+            .unwrap()
+            .unwrap()
+            .position_ms,
+        1_000
     );
 }
 
@@ -141,7 +142,7 @@ fn interruption_between_databases_recovers_original_operation_and_count() {
         store.clean_library_removal(&removal.operation_id).unwrap(),
         done
     );
-    assert!(store.get_media(row.media_id).unwrap().is_none());
+    assert!(store.get_media(row.media_id).unwrap().is_some());
 }
 
 #[test]
@@ -177,7 +178,7 @@ fn changed_snapshot_identity_rejects_cleanup_before_any_row_is_removed() {
 }
 
 #[test]
-fn removal_reduces_preferred_file_summaries_and_purges_orphan_media() {
+fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (library, row) = fixture(&store, &temp.path().join("tv"));
@@ -226,15 +227,12 @@ fn removal_reduces_preferred_file_summaries_and_purges_orphan_media() {
     );
     assert_eq!(summary_rows(&store, &library.id, row.media_id), (0, 0));
 
-    // Orphan Media (and the playback rows it owns) leave with the Library.
-    assert!(store.get_media(row.media_id).unwrap().is_none());
-    assert!(
-        store
-            .unit_state(user, row.media_id, 1, 1)
-            .unwrap()
-            .is_none(),
-        "playback owned by purged Media must leave with it"
-    );
+    assert!(store.get_media(row.media_id).unwrap().is_some());
+    let unit = store.unit_state(user, row.media_id, 1, 1).unwrap().unwrap();
+    assert_eq!(unit.position_ms, 120_000);
+    assert_eq!(unit.duration_ms, Some(600_000));
+    assert!(unit.favorite);
+    assert_eq!(unit.play_count, 1);
 
     // A retried removal reports the same succeeded operation.
     assert_eq!(
@@ -306,12 +304,12 @@ fn large_removal_commits_bounded_batches_and_resumes() {
 }
 
 #[test]
-fn library_removal_purges_orphan_media_and_owned_rows() {
+fn library_removal_preserves_media_identity_and_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (library, row) = fixture(&store, &temp.path().join("tv"));
     let media = row.media_id.to_string();
-    // Seed the owned rows the e2e residual scan still finds after a whole-library delete.
+    // Canonical metadata survives to reconnect the Media on reimport.
     store
         .library
         .execute(
@@ -355,10 +353,7 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
     assert!(store.get_library(&library.id).unwrap().is_none());
-    assert!(
-        store.get_media(row.media_id).unwrap().is_none(),
-        "orphan Media must leave with the Library that owned its only files"
-    );
+    assert!(store.get_media(row.media_id).unwrap().is_some());
     for (table, sql) in [
         (
             "media_aliases",
@@ -381,6 +376,6 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
             .library
             .query_row(sql, [&media], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 0, "{table} still has rows for purged media {media}");
+        assert_eq!(count, 1, "{table} must survive Library removal for {media}");
     }
 }

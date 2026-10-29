@@ -304,9 +304,7 @@ pub(crate) async fn item_detail(
         Err(_) => return missing_library(),
     };
     let loaded = super::store_wait::store_read(&state, move |store| {
-        if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return Err(response);
-        }
+        require_visible_library(&store, &id, user_id)?;
         let detail = match store.library_item_detail(lib_id, media_id, "") {
             Ok(Some(detail)) => detail,
             Ok(None) => {

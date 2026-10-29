@@ -29,15 +29,11 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
             .iter()
             .map(|r| r.ledger_id.parse())
             .collect::<Result<Vec<domain::LedgerId>, _>>()?;
-        let (_removed, affected) = crate::library_write::delete::delete_files_in_tx(
+        crate::library_write::delete::delete_files_in_tx(
             &tx,
             operation.library_id.parse()?,
             &files,
         )?;
-        // Same orphan purge as single-file delete: Media that lost its last file
-        // (and is not kept by a collection/subscription) must leave with the Library.
-        let subscribed = store.subscribed_media(&affected)?;
-        crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &affected, &subscribed)?;
         clean_unit_facts(&tx, rows.iter())?;
         for row in &rows {
             tx.execute(
