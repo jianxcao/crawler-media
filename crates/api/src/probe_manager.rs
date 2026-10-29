@@ -399,6 +399,9 @@ impl ProbeManager {
     }
 
     /// 是否已在排队/执行（前端「探测中」状态用）。
+    ///
+    /// Takes the writer `Store` lock with no bound. HTTP GET handlers must not
+    /// call this — use `Store::probe_queued_among` on a reader inside `store_read`.
     pub fn is_queued(&self, ledger_id: &str) -> bool {
         let queued = self.store.lock().is_probe_queued(ledger_id);
         match queued {

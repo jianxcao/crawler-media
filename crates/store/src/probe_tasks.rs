@@ -569,6 +569,41 @@ impl Store {
         Ok(active)
     }
 
+    /// File ids that currently have a queued or running probe unit.
+    ///
+    /// One round-trip for the detail / files pages: callers must run this on a
+    /// reader (or inside `store_read`), never by taking the writer lock per file.
+    pub fn probe_queued_among(
+        &self,
+        file_ids: &[domain::LedgerId],
+    ) -> Result<std::collections::HashSet<domain::LedgerId>, StoreError> {
+        let mut queued = std::collections::HashSet::new();
+        if file_ids.is_empty() {
+            return Ok(queued);
+        }
+        const CHUNK: usize = 400;
+        for chunk in file_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT DISTINCT file_id FROM probe_job_units
+                 WHERE status IN ('queued', 'running')
+                   AND file_id IN ({placeholders})"
+            );
+            let mut stmt = self.library.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().map(domain::LedgerId::to_string)),
+                |row| row.get::<_, String>(0),
+            )?;
+            for row in rows {
+                let id = row?;
+                if let Ok(ledger_id) = id.parse::<domain::LedgerId>() {
+                    queued.insert(ledger_id);
+                }
+            }
+        }
+        Ok(queued)
+    }
+
     /// Whether this exact unit still belongs to an active job.
     pub fn is_probe_unit_active(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
         self.library

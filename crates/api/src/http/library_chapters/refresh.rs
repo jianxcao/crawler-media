@@ -198,78 +198,54 @@ pub(crate) async fn probe_status(
     Path((id, item_id)): Path<(String, String)>,
     Query(query): Query<ChapterQuery>,
 ) -> Response {
-    let worker = state.clone();
-    let reservation = match state
-        .http_work
-        .reserve(std::time::Duration::from_secs(5))
-        .await
-    {
-        Ok(reservation) => reservation,
-        Err(_) => return crate::http::store_wait::busy_response(),
-    };
-    match reservation
-        .run_to_completion(move || probe_status_blocking(&worker, user_id, id, item_id, query))
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => crate::http::library::browse_work_error(error),
-    }
-}
-
-fn probe_status_blocking(
-    state: &ApiState,
-    user_id: Option<domain::UserId>,
-    id: String,
-    item_id: String,
-    query: ChapterQuery,
-) -> Response {
     let media_id = match domain::MediaId::from_str(&item_id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
     let season = query.season.unwrap_or(1);
-    {
-        let handle = state.store();
-        let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_READ_WAIT) else {
-            return crate::http::store_wait::busy_response();
+    let loaded = crate::http::store_wait::store_read(&state, move |store| {
+        let library = require_visible_library(store, &id, user_id)?;
+        let Some(_media) = store.get_media(media_id).map_err(chapter_store_error)? else {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "library.item_missing",
+                "条目不存在",
+            ));
         };
-        let library = match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        };
-        let Some(_media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let library_id = match library.id.parse::<domain::LibraryId>() {
-            Ok(id) => id,
-            Err(error) => return chapter_store_error(error.into()),
-        };
-        let rows = match store.file_coverage_in_library_season(library_id, media_id, season) {
-            Ok(rows) => rows,
-            Err(error) => return chapter_store_error(error),
-        };
+        let library_id = library
+            .id
+            .parse::<domain::LibraryId>()
+            .map_err(|error| chapter_store_error(error.into()))?;
+        let rows = store
+            .file_coverage_in_library_season(library_id, media_id, season)
+            .map_err(chapter_store_error)?;
         let visible = rows
             .iter()
             .any(|row| covers_season(row, season) && row.file.library_id.to_string() == library.id);
         if !visible {
-            return err(
+            return Err(err(
                 StatusCode::NOT_FOUND,
                 "library.item_missing",
                 "该季没有在位文件",
-            );
+            ));
         }
-    }
-    let job = match state.probe.marker_refresh_job(media_id, season) {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.probe_status_failed",
-                "读取片头片尾任务状态失败，请稍后重试",
-            )
-            .into_response();
-        }
+        let job = store
+            .latest_marker_refresh_for_season(&media_id.to_string(), season)
+            .map_err(|error| {
+                tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "library.probe_status_failed",
+                    "读取片头片尾任务状态失败，请稍后重试",
+                )
+            })?;
+        Ok(job)
+    })
+    .await;
+    let job = match loaded {
+        Ok(Ok(job)) => job,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let active = job.as_ref().is_some_and(|job| job.is_active());
     ok(json!({

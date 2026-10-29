@@ -328,10 +328,14 @@ pub(crate) async fn item_detail(
             Ok(details) => details,
             Err(error) => return Err(browse_store_error(error)),
         };
-        Ok((detail, media, details))
+        let probe_queued = match store.probe_queued_among(&file_ids) {
+            Ok(probe_queued) => probe_queued,
+            Err(error) => return Err(browse_store_error(error)),
+        };
+        Ok((detail, media, details, probe_queued))
     })
     .await;
-    let (detail, media, details) = match loaded {
+    let (detail, media, details, probe_queued) = match loaded {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
@@ -351,7 +355,12 @@ pub(crate) async fn item_detail(
             },
             None => library::Tracks::default(),
         };
-        files.push(item_file_json(&state, file, units, &tracks));
+        files.push(item_file_json(
+            file,
+            units,
+            &tracks,
+            probe_queued.contains(&file.file_id),
+        ));
     }
     let metadata = &detail.metadata;
     let cast = detail_cast(metadata);
@@ -465,10 +474,13 @@ pub(crate) async fn item_files(
         let details = store
             .file_details_batch(&file_ids)
             .map_err(browse_store_error)?;
-        Ok::<_, Response>((page, units, details))
+        let probe_queued = store
+            .probe_queued_among(&file_ids)
+            .map_err(browse_store_error)?;
+        Ok::<_, Response>((page, units, details, probe_queued))
     })
     .await;
-    let (page, file_units, details) = match loaded {
+    let (page, file_units, details, probe_queued) = match loaded {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
@@ -487,17 +499,24 @@ pub(crate) async fn item_files(
             },
             None => library::Tracks::default(),
         };
-        files.push(item_file_json(&state, file, units, &tracks));
+        files.push(item_file_json(
+            file,
+            units,
+            &tracks,
+            probe_queued.contains(&file.file_id),
+        ));
     }
     ok(json!({ "files": files, "next_cursor": page.next_cursor })).into_response()
 }
 
 /// One file of the detail view: stored quality facts plus whatever the probe has cached.
+/// `probe_queued` is resolved on the reader inside `store_read` — this helper
+/// must not touch `ApiState` / the writer lock.
 fn item_file_json(
-    state: &ApiState,
     file: &domain::LibraryFile,
     units: &[domain::UnitKey],
     tracks: &library::Tracks,
+    probe_queued: bool,
 ) -> Value {
     let unit = units
         .iter()
@@ -526,7 +545,7 @@ fn item_file_json(
         "probed": tracks.video.is_some()
             || !tracks.audio.is_empty()
             || !tracks.subtitles.is_empty(),
-        "probe_queued": state.probe.is_queued(&file.file_id.to_string()),
+        "probe_queued": probe_queued,
         "video_track": tracks.video.as_ref().map(|v| json!({
             "codec": v.codec, "width": v.width, "height": v.height,
             "frame_rate": v.frame_rate, "bit_rate": v.bit_rate,

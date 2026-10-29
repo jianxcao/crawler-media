@@ -214,3 +214,122 @@ fn metadata_language_requests_leave_the_executor_responsive() {
         );
     }
 }
+
+/// Detail / files / probe-status must stay on the reader pool even when they
+/// report `probe_queued` / marker-refresh state. Holding the writer lock plus an
+/// open write transaction must not make any of them wait.
+#[test]
+fn series_detail_and_files_answer_while_the_writer_is_busy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, token) = state_with_admin(tmp.path());
+    let (library_id, media_id) = {
+        let store = state.store();
+        let guard = store.lock();
+        let library = guard
+            .default_library(domain::MediaKind::Tv)
+            .unwrap()
+            .expect("default tv library");
+        std::fs::create_dir_all(&library.root_paths[0]).unwrap();
+        let media_id = domain::MediaId::new();
+        guard
+            .insert_media(&domain::Media {
+                id: media_id,
+                kind: domain::MediaKind::Tv,
+                title: "Busy Detail Series".into(),
+                year: Some(2024),
+                original_title: None,
+                aliases: vec![],
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let path = library.root_paths[0].join("S01E01.mkv");
+        std::fs::write(&path, b"fixture").unwrap();
+        store::test_support::publish_fixture_file(
+            &guard,
+            &store::test_support::FixtureFile {
+                media_id,
+                path: path.display().to_string(),
+                season: Some(1),
+                episode: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (library.id, media_id)
+    };
+
+    let app = router(state.clone());
+
+    let held_store = state.store();
+    let library_db = tmp.path().join("data/library.db");
+    let (locked, acquired) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = held_store.lock();
+        let writer = rusqlite::Connection::open(library_db).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Stay held long enough that a hanging request cannot free itself by
+        // waiting out this timeout the way a 60s probe worker panic would.
+        let _ = released.recv_timeout(Duration::from_secs(30));
+        writer.execute_batch("ROLLBACK").unwrap();
+    });
+    acquired.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let detail = format!("/api/v1/libraries/{library_id}/items/{media_id}");
+    let files = format!("/api/v1/libraries/{library_id}/items/{media_id}/files");
+    let probe_status =
+        format!("/api/v1/libraries/{library_id}/items/{media_id}/probe-status?season=1");
+
+    for uri in [detail, files, probe_status] {
+        let app = app.clone();
+        let token = token.clone();
+        let request_uri = uri.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(async {
+                let response = app
+                    .oneshot(request("GET", &request_uri, Some(&token)))
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                (status, body)
+            });
+            let _ = tx.send(result);
+        });
+        let (status, body) = rx
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{uri} timed out behind the writer lock after {:?}",
+                    started.elapsed()
+                )
+            });
+        let waited = started.elapsed();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{uri}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            waited < Duration::from_millis(500),
+            "{uri} waited {waited:?} behind the writer lock"
+        );
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap();
+
+}
