@@ -684,7 +684,7 @@ pub(crate) async fn item_episodes(
                     .unwrap_or_else(|| format!("第 {} 集", episode.episode)),
                 "overview": episode.overview,
                 "air_date": episode.air_date,
-                "still_url": episode.still_url.as_deref().map(still_url),
+                "still_url": episode.still_url.as_deref().map(super::media::episode_still_url),
                 "owned": episode.owned,
                 "file_ids": episode.file_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
                 "position_ms": position_ms,
@@ -698,16 +698,4 @@ pub(crate) async fn item_episodes(
         })
         .collect();
     ok_list(rows).into_response()
-}
-
-/// A still reference is either a full URL or a TMDB path.
-fn still_url(reference: &str) -> String {
-    if reference.starts_with("http://")
-        || reference.starts_with("https://")
-        || reference.starts_with('/')
-    {
-        reference.to_string()
-    } else {
-        format!("https://image.tmdb.org/t/p/w300{reference}")
-    }
 }

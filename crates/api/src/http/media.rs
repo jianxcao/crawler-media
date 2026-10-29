@@ -81,7 +81,7 @@ pub(crate) async fn season_detail(
                                 "episode_number": ep_num,
                                 "name": meta.and_then(|m| m.name.clone()),
                                 "overview": meta.and_then(|m| m.overview.clone()),
-                                "still_url": meta.and_then(|m| m.still_path.as_deref().map(|p| format!("https://image.tmdb.org/t/p/w300{p}"))),
+                                "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
                                 "air_date": ep.air_date,
                             })
                         })
@@ -409,6 +409,27 @@ fn image_json(candidate: &crate::catalog::ArtworkCandidate) -> Value {
         "width": candidate.width,
         "height": candidate.height,
     })
+}
+
+/// Episode stills use public local delivery or the same-origin image cache.
+pub(super) fn episode_still_url(reference: &str) -> String {
+    if reference.starts_with("/stills/") {
+        return reference.to_string();
+    }
+    let remote = if reference.starts_with("http://") || reference.starts_with("https://") {
+        reference.to_string()
+    } else if reference.starts_with("/t/p/") {
+        format!("https://image.tmdb.org{reference}")
+    } else {
+        format!(
+            "https://image.tmdb.org/t/p/w300/{}",
+            reference.trim_start_matches('/')
+        )
+    };
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", &remote)
+        .finish();
+    format!("/images/proxy?{query}")
 }
 
 fn remote_or_prefixed(path: Option<&str>, prefix: &str) -> Option<String> {

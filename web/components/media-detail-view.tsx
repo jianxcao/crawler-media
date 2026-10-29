@@ -42,7 +42,7 @@ import { useBackNavigation } from "@/lib/back-navigation";
 import { useBackdrop } from "@/lib/backdrop";
 import { buildDiscoveryReturnPath } from "@/lib/discovery-return-path";
 import { useDoubanAppHref } from "@/lib/douban-app-link";
-import { upgradedTmdbOriginalUrl } from "@/lib/image-proxy";
+import { imageUrl, upgradedTmdbOriginalUrl } from "@/lib/image-proxy";
 import { getMediaSeed } from "@/lib/media-detail";
 import { useTapGuard } from "@/lib/use-tap-guard";
 import { usePageTitle } from "@/lib/use-page-title";
@@ -1222,7 +1222,7 @@ function SeasonsSection({
               {ep.still_url ? (
                 <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.04]">
                   <ArtworkImage
-                    src={ep.still_url}
+                    src={imageUrl(ep.still_url ?? null)}
                     alt={ep.name || `第 ${ep.episode_number} 集`}
                     className="size-full object-cover transition duration-300 group-hover:scale-105"
                     loading="lazy"
