@@ -6,6 +6,8 @@ pub(crate) use trace::{QueryWorkCapture, QueryWorkScope};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryWorkStats {
+    /// Successful reader admissions for the selected databases in this scope.
+    pub reader_checkouts: u64,
     pub fullscan_steps: u64,
     pub vm_steps: u64,
     pub sort_operations: u64,

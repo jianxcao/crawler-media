@@ -38,6 +38,42 @@ fn scoped_reader_reuses_one_lease_and_allows_another_database_inside_sql() {
 }
 
 #[test]
+fn a_bound_reader_keeps_one_snapshot_across_store_methods() {
+    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
+    std::fs::create_dir_all(root).unwrap();
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let writer = Store::open(dir.path()).unwrap();
+    one_reader(&store);
+    let pool = store.reader_pool(Db::Library);
+    let lease = pool.try_checkout().unwrap();
+    let before = store
+        .with_reader_lease(Db::Library, lease, |store| {
+            let before = store.list_libraries().unwrap();
+            writer
+                .create_library(
+                    domain::MediaKind::Movie,
+                    "Committed during request",
+                    &["/reader-snapshot/new"],
+                    "everyone",
+                    true,
+                    &[],
+                )
+                .unwrap();
+            let during = store.list_libraries().unwrap();
+            assert_eq!(
+                during, before,
+                "one admitted reader must retain its snapshot between Store methods"
+            );
+            assert_eq!(pool.available(), 0);
+            before
+        })
+        .unwrap();
+    assert_eq!(pool.available(), 1);
+    assert_eq!(store.list_libraries().unwrap().len(), before.len() + 1);
+}
+
+#[test]
 fn a_scope_rejects_a_reader_from_another_database_or_store() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(dir.path().join("one")).unwrap();

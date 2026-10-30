@@ -6,7 +6,9 @@ impl ApiServerProvider {
         work: impl FnOnce(&crate::Store) -> Result<T, String>,
     ) -> Result<T, String> {
         crate::http::store_wait::with_foreground_store(&self.state, |store| {
-            read_store(&self.state, |_| work(store))
+            store
+                .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || work(store))
+                .map_err(|error| error.to_string())?
         })
         .map_err(admission_error)?
     }
@@ -294,7 +296,7 @@ pub(super) fn read_store<T>(
 ) -> Result<T, String> {
     state
         .store
-        .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+        .with_read_snapshot(crate::http::store_wait::STORE_READ_WAIT, || {
             work(&state.store)
         })
         .map_err(|error| error.to_string())?

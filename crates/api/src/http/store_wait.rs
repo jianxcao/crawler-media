@@ -108,7 +108,7 @@ pub(crate) fn with_store_read<T>(
 ) -> Result<T, Response> {
     state
         .store
-        .with_read_scope(STORE_READ_WAIT, || work(&state.store))
+        .with_read_snapshot(STORE_READ_WAIT, || work(&state.store))
         .map_err(|error| match error {
             store::StoreError::ReadBusy
             | store::StoreError::ReadClosed
@@ -246,12 +246,13 @@ where
             cancelled,
         };
         store.with_query_budget(&budget, |store| {
-            store
-                .with_read_scope(
+            observe_store_work(store, metrics, |store| {
+                store.with_read_snapshot(
                     reader_deadline.saturating_duration_since(std::time::Instant::now()),
-                    || observe_store_work(store, metrics, work),
+                    || work(store),
                 )
-                .map_err(store::LibraryReadError::Store)
+            })
+            .map_err(store::LibraryReadError::Store)
         })
     });
     match tokio::time::timeout(deadline, task).await {

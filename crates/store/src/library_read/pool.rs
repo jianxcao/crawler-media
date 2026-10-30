@@ -41,7 +41,7 @@ pub(super) struct State {
 pub(super) struct Inner {
     path: PathBuf,
     identity: FileIdentity,
-    /// Header values of the library file as of the last full layout validation. A
+    /// Header values of the database file as of the last full layout validation. A
     /// lease compares them instead of re-walking ~127 schema objects twice per
     /// lease (D3).
     validated_stamp: Mutex<LayoutStamp>,
@@ -81,12 +81,12 @@ impl ReaderPool {
         let file_id = identity(&path)?;
         let conn = open_reader_for(&path, validate)?;
         if identity(&path)? != file_id {
-            return Err(StoreError::Invalid(
-                "library.db changed during reader open".into(),
-            ));
+            return Err(StoreError::Invalid(format!(
+                "{database}.db changed during reader open"
+            )));
         }
         let validated_stamp = layout_stamp(&conn)?;
-        tracing::info!(path = %path.display(), capacity = size.get(), "library reader pool opened");
+        tracing::info!(path = %path.display(), database, capacity = size.get(), "reader pool opened");
         Ok(Self {
             inner: Arc::new(Inner {
                 path,
@@ -247,8 +247,9 @@ impl Inner {
             Err(error) => {
                 tracing::error!(
                     path = %self.path.display(),
+                    database = self.database,
                     error = %error,
-                    "library reader layout rejected; closing pool"
+                    "reader layout rejected; closing pool"
                 );
                 self.close();
                 Err(error)
@@ -258,9 +259,10 @@ impl Inner {
 
     pub(super) fn check_identity_raw(&self) -> Result<(), StoreError> {
         if identity(&self.path)? != self.identity {
-            return Err(StoreError::Invalid(
-                "library.db file identity changed".into(),
-            ));
+            return Err(StoreError::Invalid(format!(
+                "{}.db file identity changed",
+                self.database
+            )));
         }
         Ok(())
     }
@@ -270,7 +272,7 @@ impl Inner {
             return Err(LibraryReadError::Closed);
         }
         if let Err(error) = self.check_identity_raw() {
-            tracing::error!(path = %self.path.display(), error = %error, "library reader identity rejected");
+            tracing::error!(path = %self.path.display(), database = self.database, error = %error, "reader identity rejected");
             self.close();
             return Err(error.into());
         }
@@ -346,7 +348,12 @@ fn open_reader_for(
     path: &Path,
     validate: fn(&Connection) -> Result<(), StoreError>,
 ) -> Result<Connection, StoreError> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )?;
     conn.pragma_update(None, "query_only", "ON")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
@@ -387,12 +394,12 @@ struct LayoutStamp {
 
 fn layout_stamp(conn: &Connection) -> Result<LayoutStamp, StoreError> {
     let read = |name: &str| -> Result<i64, StoreError> {
-        Ok(conn.pragma_query_value(None, name, |row| row.get(0))?)
+        Ok(conn.prepare_cached(name)?.query_row([], |row| row.get(0))?)
     };
     Ok(LayoutStamp {
-        application_id: read("application_id")?,
-        user_version: read("user_version")?,
-        schema_version: read("schema_version")?,
+        application_id: read("PRAGMA application_id")?,
+        user_version: read("PRAGMA user_version")?,
+        schema_version: read("PRAGMA schema_version")?,
     })
 }
 

@@ -9,6 +9,8 @@ use axum::http::StatusCode;
 
 use super::{STORE_READ_WAIT, STORE_WRITE_WAIT, StoreCallError, store_read_handle};
 
+mod request_snapshot;
+
 fn store(root: &std::path::Path) -> Arc<crate::Store> {
     Arc::new(crate::Store::open(root.join("data")).unwrap())
 }

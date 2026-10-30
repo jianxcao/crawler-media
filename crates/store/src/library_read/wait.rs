@@ -51,6 +51,7 @@ impl Ticket {
             state.waiters.pop_front();
             drop(state);
             self.pool.wake();
+            crate::stats::record_reader_checkout(self.pool.database);
             return Ok(Some(ReaderLease::new(conn, Arc::clone(&self.pool), epoch)));
         }
         if state.total >= self.pool.capacity() {
@@ -63,7 +64,10 @@ impl Ticket {
         let opened = self.pool.open_connection();
         let valid = self.pool.check_identity();
         match (opened, valid) {
-            (Ok(conn), Ok(())) => Ok(Some(ReaderLease::new(conn, Arc::clone(&self.pool), epoch))),
+            (Ok(conn), Ok(())) => {
+                crate::stats::record_reader_checkout(self.pool.database);
+                Ok(Some(ReaderLease::new(conn, Arc::clone(&self.pool), epoch)))
+            }
             (opened, valid) => {
                 self.pool.retired();
                 valid?;

@@ -40,6 +40,8 @@ pub struct ReaderLease {
     pool: Arc<Inner>,
     clean: bool,
     epoch: u64,
+    session: Option<QueryBudget>,
+    execution_policy: Option<QueryBudget>,
     #[cfg(test)]
     fail_cleanup: bool,
 }
@@ -51,6 +53,8 @@ impl ReaderLease {
             pool,
             clean: true,
             epoch,
+            session: None,
+            execution_policy: None,
             #[cfg(test)]
             fail_cleanup: false,
         }
@@ -96,6 +100,56 @@ impl ReaderLease {
         stats: Option<&mut crate::library_query::items::stats::QueryWorkStats>,
         library_query: bool,
     ) -> Result<T, LibraryReadError> {
+        if let Some(session) = &self.session {
+            let effective = QueryBudget {
+                deadline: budget.deadline.min(session.deadline),
+                cancelled: if super::active_query_budget().is_some() {
+                    budget.cancelled.clone()
+                } else {
+                    session.cancelled.clone()
+                },
+            };
+            let conn = self.conn.as_ref().ok_or(LibraryReadError::Closed)?;
+            let _scoped_capture = crate::stats::LeaseStats::for_database(self.pool.database, conn);
+            let _capture = stats
+                .map(|out| crate::library_query::items::stats::QueryWorkCapture::new(conn, out));
+            effective.check()?;
+            if self.pool.stopped.load(Ordering::Acquire) {
+                return Err(LibraryReadError::Closed);
+            }
+            // SQLite's busy wait does not call the progress handler. Keep its
+            // remaining wait bounded even when the execution policy is unchanged.
+            conn.busy_timeout(effective.busy_wait()?)
+                .map_err(StoreError::from)?;
+            // Normal repeated reads retain the installed policy. A nested tighter
+            // budget or different cancellation token must still interrupt active SQL.
+            if self.execution_policy.as_ref().is_none_or(|installed| {
+                installed.deadline != effective.deadline
+                    || !Arc::ptr_eq(&installed.cancelled, &effective.cancelled)
+            }) {
+                install_progress(conn, &effective, &self.pool, true, false);
+                self.execution_policy = Some(effective.clone());
+            }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if library_query {
+                    install_progress(conn, &effective, &self.pool, true, true);
+                    observe_snapshot(conn, &self.pool)?;
+                }
+                work(conn)
+            }));
+            if library_query {
+                install_progress(conn, &effective, &self.pool, true, false);
+            }
+            let result = match outcome {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            effective.check()?;
+            return result.map_err(|error| {
+                tracing::error!(database = self.pool.database, %error, "reader SQL failed");
+                error.into()
+            });
+        }
         let conn = self.conn.as_ref().ok_or(LibraryReadError::Closed)?;
         let _scoped_capture = crate::stats::LeaseStats::for_database(self.pool.database, conn);
         let _capture =
@@ -109,6 +163,60 @@ impl ReaderLease {
             }
             work(conn)
         }));
+        Self::finish_outcome(
+            conn,
+            &self.pool,
+            &mut self.clean,
+            budget,
+            outcome,
+            #[cfg(test)]
+            &mut self.fail_cleanup,
+        )
+    }
+
+    /// Establish one transaction and execution policy for a synchronous read stage.
+    pub(crate) fn begin_session(
+        &mut self,
+        owner: &QueryBudget,
+        budget: &QueryBudget,
+    ) -> Result<(), LibraryReadError> {
+        let conn = self.conn.as_ref().ok_or(LibraryReadError::Closed)?;
+        let _capture = crate::stats::LeaseStats::for_database(self.pool.database, conn);
+        Self::prepare(conn, &self.pool, &mut self.clean, budget)?;
+        // Record the policy before BEGIN so even a failed BEGIN is cleaned on drop.
+        self.session = Some(owner.clone());
+        self.execution_policy = Some(budget.clone());
+        let begin = conn.execute_batch("BEGIN").map_err(StoreError::from);
+        budget.check()?;
+        begin?;
+        install_progress(conn, budget, &self.pool, true, false);
+        Ok(())
+    }
+
+    pub(crate) fn finish_session(&mut self) -> Result<(), LibraryReadError> {
+        let budget = self.session.take().ok_or(LibraryReadError::Closed)?;
+        self.execution_policy = None;
+        let conn = self.conn.as_ref().ok_or(LibraryReadError::Closed)?;
+        let _capture = crate::stats::LeaseStats::for_database(self.pool.database, conn);
+        Self::finish_outcome(
+            conn,
+            &self.pool,
+            &mut self.clean,
+            &budget,
+            Ok(Ok(())),
+            #[cfg(test)]
+            &mut self.fail_cleanup,
+        )
+    }
+
+    fn finish_outcome<T>(
+        conn: &Connection,
+        pool: &Arc<Inner>,
+        clean: &mut bool,
+        budget: &QueryBudget,
+        outcome: std::thread::Result<Result<T, StoreError>>,
+        #[cfg(test)] fail_cleanup: &mut bool,
+    ) -> Result<T, LibraryReadError> {
         // The callback owns only this attempt's cancellation state. Remove it before
         // rollback so a late cancellation cannot interrupt cleanup or the next lease.
         conn.progress_handler(0, None::<fn() -> bool>);
@@ -120,24 +228,24 @@ impl ReaderLease {
             conn.execute_batch("ROLLBACK")
         };
         #[cfg(test)]
-        if std::mem::take(&mut self.fail_cleanup) {
+        if std::mem::take(fail_cleanup) {
             cleanup = Err(rusqlite::Error::ExecuteReturnedResults);
         }
         #[cfg(test)]
-        wait_gate(&self.pool.postcheck_gate);
+        wait_gate(&pool.postcheck_gate);
         let mut post_policy = Ok(());
         let postcheck = if cleanup.is_ok() && matches!(outcome, Ok(Ok(_))) {
             post_policy = conn.busy_timeout(remaining_wait(budget));
             if post_policy.is_ok() {
                 #[cfg(test)]
-                if let Some(observed) = self.pool.postcheck_timeout_ms.lock().unwrap().as_ref() {
+                if let Some(observed) = pool.postcheck_timeout_ms.lock().unwrap().as_ref() {
                     let configured: u64 = conn
                         .pragma_query_value(None, "busy_timeout", |row| row.get(0))
                         .unwrap();
                     observed.store(configured, Ordering::Release);
                 }
-                install_progress(conn, budget, &self.pool, false, false);
-                let result = self.pool.check_layout(conn);
+                install_progress(conn, budget, pool, false, false);
+                let result = pool.check_layout(conn);
                 conn.progress_handler(0, None::<fn() -> bool>);
                 Some(result)
             } else {
@@ -148,18 +256,19 @@ impl ReaderLease {
         };
         let reset = conn.busy_timeout(Duration::from_millis(5000));
         if cleanup_policy.is_err() || cleanup.is_err() || post_policy.is_err() || reset.is_err() {
-            self.clean = false;
+            *clean = false;
             tracing::error!(
+                database = pool.database,
                 ?cleanup_policy,
                 ?cleanup,
                 ?post_policy,
                 ?reset,
-                "library reader cleanup failed; retiring connection"
+                "reader cleanup failed; retiring connection"
             );
         }
-        let identity = self.pool.check_identity();
+        let identity = pool.check_identity();
         if identity.is_err() {
-            self.clean = false;
+            *clean = false;
         }
         match outcome {
             Ok(result) => {
@@ -178,23 +287,26 @@ impl ReaderLease {
                 identity?;
                 if let Some(Err(error)) = postcheck {
                     if error.is_layout_refusal() {
-                        tracing::error!(error = %error, "library reader layout changed before publication");
-                        self.pool.close();
+                        tracing::error!(database = pool.database, error = %error, "reader layout changed before publication");
+                        pool.close();
                     }
                     budget.check()?;
                     return Err(error.into());
                 }
                 budget.check()?;
-                if self.pool.stopped.load(Ordering::Acquire) {
+                if pool.stopped.load(Ordering::Acquire) {
                     return Err(LibraryReadError::Closed);
                 }
                 result.map_err(|error| {
-                    tracing::error!(error = %error, "library reader SQL failed");
+                    tracing::error!(database = pool.database, error = %error, "reader SQL failed");
                     error.into()
                 })
             }
             Err(panic) => {
-                tracing::error!("library reader work panicked after cleanup");
+                tracing::error!(
+                    database = pool.database,
+                    "reader work panicked after cleanup"
+                );
                 std::panic::resume_unwind(panic)
             }
         }
@@ -221,7 +333,7 @@ impl ReaderLease {
                 *clean = false;
             }
             if error.is_layout_refusal() {
-                tracing::error!(error = %error, "library reader layout rejected at execution");
+                tracing::error!(database = pool.database, error = %error, "reader layout rejected at execution");
                 pool.close();
             }
             budget.check()?;
@@ -257,6 +369,9 @@ fn remaining_wait(budget: &QueryBudget) -> Duration {
 
 impl Drop for ReaderLease {
     fn drop(&mut self) {
+        if self.session.is_some() {
+            let _ = self.finish_session();
+        }
         if let Some(conn) = self.conn.take() {
             if self.clean {
                 self.pool.put_back(conn, self.epoch);

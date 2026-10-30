@@ -16,6 +16,32 @@ struct Frame {
     totals: Rc<RefCell<QueryWorkStats>>,
 }
 thread_local! { static FRAMES:RefCell<Vec<Frame>>=const { RefCell::new(Vec::new()) }; }
+
+pub(crate) fn record_reader_checkout(database: &str) {
+    let db = match database {
+        "app" => Db::App,
+        "library" => Db::Library,
+        "subscribe" => Db::Subscribe,
+        _ => Db::Cache,
+    };
+    FRAMES.with(|frames| {
+        for frame in frames.borrow().iter() {
+            if selected(frame.scope, db) {
+                frame.totals.borrow_mut().reader_checkouts += 1;
+            }
+        }
+    });
+}
+
+fn selected(scope: StatsScope, db: Db) -> bool {
+    matches!(
+        (scope, db),
+        (StatsScope::Both, Db::App | Db::Library)
+            | (StatsScope::App, Db::App)
+            | (StatsScope::Library, Db::Library)
+    )
+}
+
 pub(crate) struct LeaseStats<'a> {
     db: Db,
     scope: Option<QueryWorkScope<'a>>,
@@ -31,14 +57,10 @@ impl<'a> LeaseStats<'a> {
     }
     pub(crate) fn new(db: Db, conn: &'a Connection) -> Self {
         let enabled = FRAMES.with(|frames| {
-            frames.borrow().iter().any(|frame| {
-                matches!(
-                    (frame.scope, db),
-                    (StatsScope::Both, Db::App | Db::Library)
-                        | (StatsScope::App, Db::App)
-                        | (StatsScope::Library, Db::Library)
-                )
-            })
+            frames
+                .borrow()
+                .iter()
+                .any(|frame| selected(frame.scope, db))
         });
         Self {
             db,
@@ -54,13 +76,7 @@ impl Drop for LeaseStats<'_> {
         let measured = scope.stats(0);
         FRAMES.with(|frames| {
             for frame in frames.borrow().iter() {
-                let selected = matches!(
-                    (frame.scope, self.db),
-                    (StatsScope::Both, Db::App | Db::Library)
-                        | (StatsScope::App, Db::App)
-                        | (StatsScope::Library, Db::Library)
-                );
-                if selected {
+                if selected(frame.scope, self.db) {
                     add(&mut frame.totals.borrow_mut(), measured);
                 }
             }
@@ -68,6 +84,7 @@ impl Drop for LeaseStats<'_> {
     }
 }
 fn add(to: &mut QueryWorkStats, value: QueryWorkStats) {
+    to.reader_checkouts += value.reader_checkouts;
     to.statements += value.statements;
     to.fullscan_steps += value.fullscan_steps;
     to.vm_steps += value.vm_steps;
