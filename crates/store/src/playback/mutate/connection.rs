@@ -114,12 +114,7 @@ impl crate::LibraryConnection<'_> {
                 params![user_id, media_id],
             )?;
         }
-        let summary = if change.favorite == Some(false) && change.scope == UnitScope::Whole {
-            SummaryScope::Whole
-        } else {
-            SummaryScope::for_unit(season, episode)
-        };
-        self.refresh_user_library_summary(change.user_id, media, summary)?;
+        self.refresh_user_library_summary(change.user_id, media)?;
         tx.commit()?;
         Ok(())
     }

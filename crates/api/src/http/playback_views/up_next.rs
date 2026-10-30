@@ -12,13 +12,10 @@ use std::sync::LazyLock;
 /// A local up-next plan, with a separate key for background name enrichment.
 #[derive(Clone)]
 struct UpNextPlan {
-    media_id: domain::MediaId,
     kind: domain::MediaKind,
     tmdb_id: Option<String>,
     season: u32,
     next_episode: i32,
-    advanced: bool,
-    last_activity: i64,
 }
 
 type EpisodeTitleKey = (String, u32, i32);
@@ -67,15 +64,12 @@ fn reserve_enrichment_attempt(tmdb_id: &str, season: u32) -> bool {
     attempts.insert(key, now);
     true
 }
-/// GET /playback/up-next?limit= — next unwatched unit per in-progress TV / Movie
-/// subscription or watched local library items, with poster + resume position.
-///
-/// 全程按当前用户隔离：既包含用户播放历史（playback_units）中未看完的电影或
-/// 已看集数的下一集（支持本地扫库作品），也包含用户的在追订阅。
-/// 下一集只在**真的在库**（台账里有该集文件）时才展示，避免给出无法播放的卡片。
+mod read;
+
+/// Select continuation references in one read snapshot, then render the returned page.
 pub(crate) async fn up_next(
     State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
+    axum::Extension(user): axum::Extension<domain::UserId>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let limit = query
@@ -83,249 +77,95 @@ pub(crate) async fn up_next(
         .and_then(|v| v.parse().ok())
         .unwrap_or(20)
         .clamp(1, 100);
-    // 阶段一：锁内只做快 DB 读，收集每条的 (media_id, season, next_episode)。
-    let plans = match super::super::store_wait::store_read(&state, move |store| {
-        collect_plans(store, user_id, limit)
-    })
-    .await
-    {
-        Ok(Ok(plans)) => plans,
-        Ok(Err(_)) => return store_failed(),
-        Err(error) => return error.response(),
-    };
-    // 阶段二：本地缓存补集名；未命中后台补全。
-    let cache_state = state.clone();
-    let (plans, titles) = match state
-        .http_work
-        .run_to_completion(move || {
-            let titles = cached_episode_titles(&cache_state, &plans);
-            (plans, titles)
+    for attempt in 0..2 {
+        let captured = match super::super::store_wait::store_read(&state, move |store| {
+            read::capture(store, user, limit)
         })
         .await
-    {
-        Ok(result) => result,
-        Err(error) => return blocking_failed(error),
-    };
-    // 阶段三：锁内物化行与状态（纯 DB 读，无 IO）。
-    let candidates = match super::super::store_wait::store_read(&state, move |store| {
-        materialize_candidates(store, user_id, plans, &titles, limit)
-    })
-    .await
-    {
-        Ok(Ok(candidates)) => candidates,
-        Ok(Err(_)) => return store_failed(),
-        Err(error) => return error.response(),
-    };
-    // 阶段四：有界 blocking 观测 artwork
-    let files = state.file_stats.clone();
-    let state_for_work = state.clone();
-    let items_res = state
-        .http_work
-        .run(std::time::Duration::from_secs(30), move || {
-            candidates
-                .into_iter()
-                .map(|cand| render_item(&state_for_work, files.as_ref(), cand))
-                .collect::<Vec<_>>()
-        })
-        .await;
-    match items_res {
-        Ok(items) => ok(json!({ "items": items })).into_response(),
-        Err(error) => blocking_failed(error),
-    }
-}
-
-struct StoreFailed;
-
-fn collect_plans(
-    store: &crate::Store,
-    user_id: domain::UserId,
-    limit: usize,
-) -> Result<Vec<UpNextPlan>, StoreFailed> {
-    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))
-        .map_err(|_| StoreFailed)?;
-    let mut plans: Vec<UpNextPlan> = Vec::new();
-    let mut seen_media: HashSet<domain::MediaId> = HashSet::new();
-    // 1. 当前用户的活跃播放记录（本地扫库作品与已有进度的条目，按最近活跃倒序）
-    for (media_id, last_activity) in store.user_active_media_ids(user_id).unwrap_or_default() {
-        if seen_media.contains(&media_id) {
-            continue;
-        }
-        if let Some(plan) = plan_from_activity(&store, &visible, user_id, media_id, last_activity)?
         {
-            seen_media.insert(plan.media_id);
-            plans.push(plan);
-        }
-        if plans.len() >= limit * 2 {
-            break;
-        }
-    }
-    // 2. 补充尚未开播、但在追的电视剧订阅 (Coverage::Tv)
-    for subscribe in store.list_subscribes_for_user(user_id).unwrap_or_default() {
-        if seen_media.contains(&subscribe.media_id) {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                tracing::error!(%error, %user, "up-next selection failed");
+                return store_failed();
+            }
+            Err(error) => return error.response(),
+        };
+        let snapshot = captured.snapshot;
+        let files = state.file_stats.clone();
+        let cold_state = state.clone();
+        let rendered = match state
+            .http_work
+            .run(std::time::Duration::from_secs(30), move || {
+                render_page(&cold_state, files.as_ref(), captured.candidates)
+            })
+            .await
+        {
+            Ok(items) => items,
+            Err(error) => return blocking_failed(error),
+        };
+        let validation = match super::super::store_wait::store_read(&state, move |store| {
+            read::validate(store, user, &snapshot)
+        })
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                tracing::error!(%error, %user, "up-next validation failed");
+                return store_failed();
+            }
+            Err(error) => return error.response(),
+        };
+        if matches!(validation, store::PageValidation::Stale { .. }) && attempt == 0 {
             continue;
         }
-        if let Some(plan) = plan_from_subscribe(&store, &visible, user_id, &subscribe)? {
-            seen_media.insert(plan.media_id);
-            plans.push(plan);
-        }
-        if plans.len() >= limit * 2 {
-            break;
-        }
+        let gone: HashSet<_> = match validation {
+            store::PageValidation::Fresh => HashSet::new(),
+            store::PageValidation::Stale { gone } => gone.into_iter().collect(),
+        };
+        let items: Vec<_> = rendered
+            .into_iter()
+            .filter(|(sources, _)| !sources.iter().any(|source| gone.contains(source)))
+            .map(|(_, item)| item)
+            .collect();
+        return ok(json!({"items": items})).into_response();
     }
-    Ok(plans)
+    store_failed()
 }
 
-fn plan_from_activity(
-    store: &store::Store,
-    visible: &crate::visible_scope::VisibleLibraries,
-    user_id: domain::UserId,
-    media_id: domain::MediaId,
-    last_activity: i64,
-) -> Result<Option<UpNextPlan>, StoreFailed> {
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return Ok(None);
-    };
-    // 媒体须在当前用户可见、未设 exclude_from_home 的库里有文件
-    let media_rows = visible
-        .media_coverage(store, media_id, |lib| !lib.exclude_from_home)
-        .map_err(|_| StoreFailed)?;
-    if media_rows.is_empty() {
-        return Ok(None);
-    }
-    let plan = |season, next_episode, advanced| UpNextPlan {
-        media_id: media.id,
-        kind: media.kind,
-        tmdb_id: media.tmdb_id.clone(),
-        season,
-        next_episode,
-        advanced,
-        last_activity,
-    };
-    match media.kind {
-        // 电影 / 单片：只有看了一部分（!played && position_ms > 0）时进入「接下来看」
-        domain::MediaKind::Movie | domain::MediaKind::Video => {
-            let whole = store.unit_state(user_id, media.id, -1, -1).ok().flatten();
-            Ok(whole
-                .filter(|u| !u.played && u.position_ms > 0)
-                .map(|_| plan(0, 0, false)))
-        }
-        domain::MediaKind::Tv => {
-            let owned: HashSet<(u32, u32)> = media_rows
+fn render_page(
+    state: &ApiState,
+    files: &dyn crate::file_stat_read::FileStatRead,
+    candidates: Vec<UpNextCandidate>,
+) -> Vec<(Vec<domain::LedgerId>, serde_json::Value)> {
+    let plans = candidates
+        .iter()
+        .map(|cand| UpNextPlan {
+            kind: cand.media.kind,
+            tmdb_id: cand.media.tmdb_id.clone(),
+            season: cand.plan_season,
+            next_episode: cand.plan_next_episode,
+        })
+        .collect::<Vec<_>>();
+    let titles = cached_episode_titles(state, &plans);
+    candidates
+        .into_iter()
+        .map(|mut cand| {
+            let sources = cand
+                .next_row
                 .iter()
-                .flat_map(|r| &r.units)
-                .filter(|u| !u.is_whole())
-                .map(|u| (u.season.max(0) as u32, u.episode.max(0) as u32))
+                .chain(cand.preferred_coverage.iter())
+                .map(|row| row.file.file_id)
                 .collect();
-            let units = store.unit_rows(user_id, media.id).map_err(|error| {
-                tracing::error!(%error, %media_id, "读取播放记录失败");
-                StoreFailed
-            })?;
-            let latest = units
-                .iter()
-                .filter(|u| u.season >= 0 && u.episode >= 0)
-                .max_by_key(|u| u.updated_at);
-            // A season or item mark is an assertion, not a coordinate: it excludes
-            // episodes from the recommendation instead of naming the next one.
-            let start = latest
-                .map(|u| (u.season as u32, u.episode as u32))
-                .unwrap_or((0, 0));
-            let mut candidates: Vec<_> = owned.into_iter().filter(|unit| *unit >= start).collect();
-            candidates.sort_unstable();
-            let keys: Vec<domain::UnitKey> = candidates
-                .iter()
-                .map(|(season, episode)| domain::UnitKey::new(*season as i32, *episode as i32))
-                .collect();
-            let states = store
-                .effective_unit_states(user_id, media.id, &keys)
-                .map_err(|error| {
-                    tracing::error!(%error, %media_id, "读取有效播放状态失败");
-                    StoreFailed
-                })?;
-            for ((season, episode), state) in candidates.into_iter().zip(states) {
-                if !state.is_some_and(|state| state.played) {
-                    return Ok(Some(plan(
-                        season,
-                        episode as i32,
-                        latest.is_some_and(|u| {
-                            (season, episode) != (u.season as u32, u.episode as u32)
-                        }),
-                    )));
-                }
-            }
-            Ok(None)
-        }
-    }
-}
-
-fn plan_from_subscribe(
-    store: &store::Store,
-    visible: &crate::visible_scope::VisibleLibraries,
-    user_id: domain::UserId,
-    subscribe: &domain::Subscribe,
-) -> Result<Option<UpNextPlan>, StoreFailed> {
-    let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {
-        return Ok(None);
-    };
-    let domain::Coverage::Tv {
-        season,
-        episode_from,
-        episode_to,
-    } = subscribe.coverage
-    else {
-        return Ok(None);
-    };
-    let units = store.unit_rows(user_id, media.id).unwrap_or_default();
-    let last_played = units
-        .iter()
-        .filter(|u| u.season == season as i32 && u.episode >= 0 && u.played)
-        .map(|u| u.episode)
-        .max();
-    let last_activity = units.iter().map(|u| u.updated_at).max().unwrap_or(0);
-    let start_from = episode_from as i32;
-    let home_rows = visible
-        .media_coverage(store, media.id, |lib| !lib.exclude_from_home)
-        .map_err(|_| StoreFailed)?;
-    let owned: HashSet<u32> = home_rows
-        .iter()
-        .flat_map(|r| &r.units)
-        .filter(|u| !u.is_whole() && u.season.max(0) as u32 == season)
-        .map(|u| u.episode.max(0) as u32)
-        .collect();
-    let cap = start_from.saturating_add(domain::Coverage::MAX_EPISODES as i32 - 1);
-    let window_to = owned
-        .iter()
-        .copied()
-        .max()
-        .map(|m| m as i32)
-        .unwrap_or_else(|| episode_to.map(|t| t as i32).unwrap_or(start_from))
-        .min(cap)
-        .max(start_from);
-    // The window is a range of owned episodes, not a per-episode probe: mark the
-    // whole season and every candidate is already effectively played.
-    let keys: Vec<domain::UnitKey> = (start_from..=window_to)
-        .filter(|ep| owned.contains(&(*ep as u32)))
-        .map(|ep| domain::UnitKey::new(season as i32, ep))
-        .collect();
-    let states = store
-        .effective_unit_states(user_id, media.id, &keys)
-        .map_err(|error| {
-            tracing::error!(%error, media_id = %media.id, "读取有效播放状态失败");
-            StoreFailed
-        })?;
-    let next_episode = keys
-        .iter()
-        .zip(states)
-        .find(|(_, state)| !state.as_ref().is_some_and(|state| state.played))
-        .map(|(unit, _)| unit.episode);
-    Ok(next_episode.map(|next_episode| UpNextPlan {
-        media_id: media.id,
-        kind: media.kind,
-        tmdb_id: media.tmdb_id.clone(),
-        season,
-        next_episode,
-        advanced: last_played.is_some(),
-        last_activity,
-    }))
+            cand.episode_title = cand
+                .media
+                .tmdb_id
+                .as_ref()
+                .and_then(|id| titles.get(&(id.clone(), cand.plan_season, cand.plan_next_episode)))
+                .cloned()
+                .flatten();
+            (sources, render_item(state, files, cand))
+        })
+        .collect()
 }
 
 /// A local cache hit may supply the episode name; misses are refreshed asynchronously.
@@ -380,93 +220,6 @@ struct UpNextCandidate {
     progress: Option<i64>,
     advanced: bool,
     last_played_at: String,
-}
-
-fn materialize_candidates(
-    store: &crate::Store,
-    user_id: domain::UserId,
-    plans: Vec<UpNextPlan>,
-    titles: &HashMap<EpisodeTitleKey, Option<String>>,
-    limit: usize,
-) -> Result<Vec<UpNextCandidate>, StoreFailed> {
-    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))
-        .map_err(|_| StoreFailed)?;
-    let mut cands = Vec::new();
-    for plan in plans {
-        let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
-            continue;
-        };
-        let rows = visible
-            .media_coverage(&store, media.id, |_| true)
-            .map_err(|_| StoreFailed)?;
-        if rows.is_empty() {
-            continue;
-        }
-        let is_movie = matches!(
-            media.kind,
-            domain::MediaKind::Movie | domain::MediaKind::Video
-        );
-        let (target_season, target_episode) = if is_movie {
-            (-1, -1)
-        } else {
-            (plan.season as i32, plan.next_episode)
-        };
-        let unit = store
-            .unit_state(user_id, media.id, target_season, target_episode)
-            .ok()
-            .flatten();
-        let episode_title = plan
-            .tmdb_id
-            .as_ref()
-            .and_then(|tmdb_id| titles.get(&(tmdb_id.clone(), plan.season, plan.next_episode)))
-            .cloned()
-            .flatten();
-        let library_id = rows[0].file.library_id.to_string();
-        let refs: Vec<&domain::FileCoverage> = rows.iter().collect();
-        let preferred_coverage = crate::http::library::preferred_coverage(&refs).cloned();
-        let next_row = if media.kind == domain::MediaKind::Tv {
-            rows.iter()
-                .find(|r| {
-                    r.units.iter().any(|u| {
-                        !u.is_whole()
-                            && u.season.max(0) as u32 == plan.season
-                            && u.episode.max(0) == plan.next_episode
-                    })
-                })
-                .cloned()
-        } else {
-            rows.first().cloned()
-        };
-        let position = unit.as_ref().map(|u| u.position_ms).unwrap_or(0);
-        let duration = unit.as_ref().and_then(|u| u.duration_ms);
-        let progress = duration
-            .filter(|d| *d > 0)
-            .map(|d| ((position as f64 / d as f64) * 100.0).round() as i64)
-            .filter(|p| (0..=100).contains(p));
-        let last_played_at = if plan.last_activity > 0 {
-            millis(plan.last_activity)
-        } else {
-            String::new()
-        };
-        cands.push(UpNextCandidate {
-            media,
-            library_id,
-            preferred_coverage,
-            next_row,
-            plan_season: plan.season,
-            plan_next_episode: plan.next_episode,
-            episode_title,
-            position,
-            duration,
-            progress,
-            advanced: plan.advanced,
-            last_played_at,
-        });
-        if cands.len() >= limit {
-            break;
-        }
-    }
-    Ok(cands)
 }
 
 fn render_item(

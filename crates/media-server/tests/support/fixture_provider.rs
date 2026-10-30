@@ -190,3 +190,22 @@ pub async fn next_up_items(
     }
     Ok(first_unwatched_per_media(episodes, offset, limit))
 }
+
+/// Test-only snapshot fixture; production providers must select their own bounded page.
+pub async fn resume_items(
+    provider: &(impl MediaServerProvider + ?Sized),
+    user: domain::UserId,
+    parent: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<media_server::provider::ServerItemPage, String> {
+    let rows = provider
+        .list_visible_items(user, parent)
+        .await?
+        .into_iter()
+        .filter(|item| item.ticks > 0 && !item.played)
+        .collect();
+    Ok(media_server::provider::ServerItemPage::from_rows(
+        rows, offset, limit,
+    ))
+}

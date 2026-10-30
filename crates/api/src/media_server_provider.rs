@@ -444,10 +444,11 @@ impl MediaServerProvider for ApiServerProvider {
     async fn resumable_items_page(
         &self,
         user_id: UserId,
+        parent_id: Option<&str>,
         offset: usize,
         limit: usize,
     ) -> Result<ServerItemPage, String> {
-        selection::resumable_items(self, user_id, offset, limit).await
+        selection::resumable_items(self, user_id, parent_id, offset, limit).await
     }
     async fn resolve_single_item(
         &self,
@@ -745,17 +746,6 @@ impl ApiServerProvider {
             unplayed_item_count: Some(unplayed_item_count),
             played_percentage: (total > 0).then(|| played as f64 / total as f64 * 100.0),
         })
-    }
-}
-
-/// Logical identity of one stored watch unit.
-fn resume_item_id(media_id: domain::MediaId, season: i32, episode: i32) -> domain::TypedItemId {
-    if season < 0 || episode < 0 {
-        return domain::TypedItemId::Work(media_id);
-    }
-    domain::TypedItemId::Unit {
-        media: media_id,
-        key: domain::UnitKey::new(season, episode),
     }
 }
 

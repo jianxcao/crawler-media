@@ -27,7 +27,11 @@ fn measured_page(fixture: &Fixture, runtime: &tokio::runtime::Runtime, page: Pag
         .block_on(async {
             match page {
                 Page::NextUp => provider.next_up_items(fixture.user, None, 0, 1).await,
-                Page::Resume => provider.resumable_items_page(fixture.user, 0, 1).await,
+                Page::Resume => {
+                    provider
+                        .resumable_items_page(fixture.user, None, 0, 1)
+                        .await
+                }
             }
         })
         .unwrap();

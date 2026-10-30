@@ -3,7 +3,6 @@ use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
 use super::unit_resume::{ResumeProgress, UnitIdentity};
-use super::user_summary::SummaryScope;
 use super::{Store, StoreError};
 use super::{UnitRow, UnitState};
 

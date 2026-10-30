@@ -454,23 +454,14 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         limit: usize,
     ) -> Result<ServerItemPage, String>;
 
-    /// 续播页：按「最近观看倒序、每个 Media 只出第一条」选出完整条数与请求页。
-    ///
-    /// 默认实现用一次 `list_visible_items` 过滤后取页，**不承诺有界**；生产 provider
-    /// 覆盖它，在 store 的一次短读里完成过滤与分页。
+    /// Select partial unplayed units within the parent scope before deduplication and paging.
     async fn resumable_items_page(
         &self,
         user_id: UserId,
+        parent_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String> {
-        let items = self.list_visible_items(user_id, None).await?;
-        let resumable: Vec<MediaItemSnapshot> = items
-            .into_iter()
-            .filter(|item| item.ticks > 0 && !item.played)
-            .collect();
-        Ok(ServerItemPage::from_rows(resumable, offset, limit))
-    }
+    ) -> Result<ServerItemPage, String>;
     async fn resolve_single_item(
         &self,
         user_id: UserId,

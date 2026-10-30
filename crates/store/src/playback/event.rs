@@ -19,7 +19,6 @@ use domain::{MediaId, TypedItemId, UnitKey};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::types::{BoundPlaybackEvent, EventOutcome, PlaybackEventType};
-use super::user_summary::SummaryScope;
 use super::{PlayLogRow, Store, StoreError, UnitState};
 
 /// What the session was issued for.

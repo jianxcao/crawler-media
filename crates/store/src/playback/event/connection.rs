@@ -60,11 +60,7 @@ impl crate::LibraryConnection<'_> {
         }
         advance_session_state(self, &tx, event, &binding, now_ms)?;
 
-        self.refresh_user_library_summary(
-            event.user_id,
-            media_id,
-            SummaryScope::for_unit(unit.season, unit.episode),
-        )?;
+        self.refresh_user_library_summary(event.user_id, media_id)?;
         tx.commit()?;
         tracing::debug!(
             session_id = %event.session_id,

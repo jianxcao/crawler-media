@@ -142,11 +142,7 @@ impl crate::LibraryConnection<'_> {
                 now,
                 source,
             )?;
-            store.refresh_user_library_summary(
-                user_id,
-                media_id,
-                SummaryScope::for_unit(season, episode),
-            )?;
+            store.refresh_user_library_summary(user_id, media_id)?;
             Ok(state)
         })
     }
@@ -408,7 +404,7 @@ impl crate::LibraryConnection<'_> {
                 .library
                 .execute(&sql, rusqlite::params_from_iter(values))?;
             for media_id in affected {
-                store.refresh_user_library_summary(user_id, media_id, SummaryScope::Whole)?;
+                store.refresh_user_library_summary(user_id, media_id)?;
             }
             Ok(changed)
         })

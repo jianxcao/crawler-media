@@ -52,6 +52,7 @@ pub(super) fn snapshot_unit_coords(unit: Option<domain::UnitKey>) -> (i32, i32) 
 ///
 /// 无兼容切换：没有任何 unit 行的文件是“未知覆盖”，不生成任何逻辑可播身份，
 /// 也不能被当成整片（work）借用人物图片等元数据。
+#[cfg(test)]
 pub(super) fn coverage_units(coverage: &domain::FileCoverage) -> Vec<(i32, i32)> {
     coverage
         .units

@@ -1,5 +1,5 @@
-//! N04: user summaries are scoped to the seasons/episodes a Library owns, so a
-//! Library without any of the user's units legally has no user row.
+//! Sparse continuation state belongs to touched user/Media pairs across all real
+//! owning Libraries; browse fields still describe only each Library's own units.
 use domain::{LibraryId, Media, MediaId, MediaKind, UserId};
 use rusqlite::{Connection, params};
 use store::Store;
@@ -49,7 +49,7 @@ fn fixture() -> Fx {
             anilist_id: None,
         })
         .unwrap();
-    for (dir, season) in [("a", 1), ("b", 2)] {
+    for (dir, season) in [("a", 3), ("b", 2)] {
         let path = tmp.path().join(dir).join(format!("Show/S0{season}E01.mkv"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"x").unwrap();
@@ -102,7 +102,7 @@ fn run(
 }
 
 #[test]
-fn library_without_users_units_is_not_reported_missing() {
+fn all_owning_libraries_have_clean_sparse_user_continuation() {
     let fx = fixture();
     let report = run(&fx.store, fx.a, false, "check-a");
     assert!(!report.has_issues(), "{report:?}");
@@ -132,14 +132,129 @@ fn really_missing_user_row_is_found_and_repaired_stably() {
         let report = run(&fx.store, lib, false, op);
         assert!(!report.has_issues(), "{report:?}");
     }
-    let rows: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM user_library_items WHERE media_id = ?1",
-            params![fx.media.to_string()],
-            |r| r.get(0),
+    for library in [fx.a, fx.b] {
+        let row = fx
+            .store
+            .get_user_library_summary(fx.user, library, fx.media)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.favorite, library == fx.b, "browse favorite stays local");
+        assert!(!row.seen && !row.played);
+        assert_eq!(row.last_played_at, 0);
+    }
+    let untouched_user = UserId::new();
+    for library in [fx.a, fx.b] {
+        assert!(
+            fx.store
+                .get_user_library_summary(untouched_user, library, fx.media)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let unrelated = publish_untouched_media(&fx);
+    assert!(
+        fx.store
+            .get_user_library_summary(fx.user, fx.a, unrelated)
+            .unwrap()
+            .is_none()
+    );
+    assert_global_continuation_uses_other_season_owner(&fx);
+}
+
+fn publish_untouched_media(fx: &Fx) -> MediaId {
+    let mut media = fx.store.get_media(fx.media).unwrap().unwrap();
+    media.id = MediaId::new();
+    media.title = "Untouched show".into();
+    fx.store.insert_media(&media).unwrap();
+    let path = fx.tmp.path().join("a/Untouched/S01E01.mkv");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"unstarted").unwrap();
+    publish_fixture_file(
+        &fx.store,
+        &FixtureFile {
+            media_id: media.id,
+            path: path.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    media.id
+}
+
+fn assert_global_continuation_uses_other_season_owner(fx: &Fx) {
+    fx.store
+        .upsert_unit(
+            fx.user,
+            fx.media,
+            2,
+            1,
+            30_000,
+            None,
+            None,
+            Some(600_000),
+            None,
+            None,
+            false,
+            10,
         )
         .unwrap();
-    assert_eq!(rows, 1, "repair must not fabricate a row for library A");
+    fx.store
+        .mutate_playback(
+            fx.media,
+            &store::playback::PlaybackMutation::marks(fx.user, 2, 1, Some(true), None),
+            20_000,
+        )
+        .unwrap();
+    let next = fx
+        .store
+        .next_up_page(&store::ContinueQuery {
+            user_id: fx.user,
+            libraries: vec![fx.a, fx.b],
+            parent: domain::ProtocolParent::Root,
+            media_id: Some(fx.media),
+            season: None,
+            limit: 20,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(next.total, 1);
+    assert_eq!(next.items[0].reference.library_id, fx.a);
+    assert_eq!(
+        next.items[0].reference.item,
+        domain::TypedItemId::Unit {
+            media: fx.media,
+            key: domain::UnitKey::new(3, 1),
+        }
+    );
+    assert_eq!(next.items[0].last_played_at, 10);
+    let home = fx
+        .store
+        .home_activity_page(&store::HomeQuery {
+            user_id: fx.user,
+            libraries: vec![fx.a, fx.b],
+            limit: 20,
+        })
+        .unwrap();
+    assert_eq!(
+        home.len(),
+        1,
+        "future owning Library needs global continuation even without local viewing facts"
+    );
+    assert_eq!(home[0].reference, next.items[0].reference);
+    assert_eq!(home[0].last_activity, 10);
+    assert!(home[0].advanced);
+    let future = fx
+        .store
+        .get_user_library_summary(fx.user, fx.a, fx.media)
+        .unwrap()
+        .unwrap();
+    assert!(!future.seen && !future.played && !future.favorite);
+    assert_eq!(
+        future.last_played_at, 0,
+        "global continuation must not become local viewing activity"
+    );
 }
 
 /// R07: a derived summary whose raw playback facts were removed out of band is an orphan;

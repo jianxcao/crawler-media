@@ -54,6 +54,14 @@ pub(crate) fn repair_projection(
         &expected.users,
         &["user_id"],
     )?;
+    sync_rows(
+        tx,
+        "user_library_continue_units",
+        &lib,
+        &media,
+        &expected.continue_units,
+        &["user_id", "season", "episode"],
+    )?;
     super::browse::sync_terms(
         tx,
         "library_item_terms",
@@ -81,30 +89,34 @@ pub(crate) fn repair_projection(
 fn write_row(tx: &Connection, table: &str, row: &OwnedRow) -> Result<(), StoreError> {
     let mut row = row.clone();
     let revision = match table {
-        "library_items" => "item_revision",
-        "library_units" => "unit_revision",
-        _ => "summary_revision",
+        "library_items" => Some("item_revision"),
+        "library_units" => Some("unit_revision"),
+        "user_library_items" => Some("summary_revision"),
+        _ => None,
     };
-    let keys = if table == "library_units" {
-        vec!["library_id", "media_id", "season", "episode"]
-    } else if table == "user_library_items" {
-        vec!["library_id", "media_id", "user_id"]
-    } else {
-        vec!["library_id", "media_id"]
+    let keys = match table {
+        "library_units" => vec!["library_id", "media_id", "season", "episode"],
+        "user_library_items" => vec!["library_id", "media_id", "user_id"],
+        "user_library_continue_units" => {
+            vec!["library_id", "media_id", "user_id", "season", "episode"]
+        }
+        _ => vec!["library_id", "media_id"],
     };
-    let predicate = keys
-        .iter()
-        .map(|key| format!("{key}=?"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let prior: Option<i64> = tx
-        .query_row(
-            &format!("SELECT {revision} FROM {table} WHERE {predicate}"),
-            params_from_iter(keys.iter().map(|key| &row[*key])),
-            |r| r.get(0),
-        )
-        .optional()?;
-    row.insert(revision.into(), prior.unwrap_or(0).saturating_add(1).into());
+    if let Some(revision) = revision {
+        let predicate = keys
+            .iter()
+            .map(|key| format!("{key}=?"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let prior: Option<i64> = tx
+            .query_row(
+                &format!("SELECT {revision} FROM {table} WHERE {predicate}"),
+                params_from_iter(keys.iter().map(|key| &row[*key])),
+                |row| row.get(0),
+            )
+            .optional()?;
+        row.insert(revision.into(), prior.unwrap_or(0).saturating_add(1).into());
+    }
     let names = row.keys().cloned().collect::<Vec<_>>();
     let columns = names.join(",");
     let placeholders = vec!["?"; row.len()].join(",");
@@ -160,6 +172,10 @@ pub(crate) fn projection_matches(
         ("library_items", expected.card.clone().into_iter().collect()),
         ("library_units", expected.units.clone()),
         ("user_library_items", expected.users.clone()),
+        (
+            "user_library_continue_units",
+            expected.continue_units.clone(),
+        ),
     ] {
         let actual = actual_rows(tx, table, &lib, &media)?;
         if actual.len() != rows.len() || actual.iter().any(|row| !rows.contains(row)) {

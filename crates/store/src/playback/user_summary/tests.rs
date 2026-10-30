@@ -155,7 +155,7 @@ fn season_mark_completes_the_owned_season_and_advances_next_up() {
 }
 
 #[test]
-fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
+fn season_mark_preserves_other_season_display_while_advancing_global_continuation() {
     let (temp, store) = open();
     let (season_one, season_one_root) = tv_library(&store, &temp, "s1");
     let (season_two, season_two_root) = tv_library(&store, &temp, "s2");
@@ -163,9 +163,8 @@ fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
     seed_episode(&store, &season_one_root, media, 1, 1);
     seed_episode(&store, &season_two_root, media, 2, 1);
     let user = UserId::new();
-
-    // Give the S02 Library a row of its own, then plant a sentinel: a
-    // season-1 write must not touch it at all.
+    let one_id = season_one.parse().unwrap();
+    let two_id = season_two.parse().unwrap();
     store
         .mutate_playback(
             media,
@@ -173,32 +172,89 @@ fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
             1_000,
         )
         .unwrap();
-    store
-        .with_writer(crate::Db::Library, |conn| {
-            conn.execute(
-                "UPDATE user_library_items SET last_played_at = 7_777, summary_revision = 9
-                 WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3",
-                params![user.to_string(), &season_two, media.to_string()],
-            )
-            .map_err(Into::into)
-        })
+    let before = store
+        .get_user_library_summary(user, two_id, media)
+        .unwrap()
         .unwrap();
-
+    let local_display = |row: &UserLibrarySummary| {
+        (
+            row.seen,
+            row.played,
+            row.favorite,
+            row.last_played_at,
+            row.favorite_at,
+            row.owned_episode_count,
+            row.completed_episode_count,
+        )
+    };
+    assert_eq!(favorite_page(&store, &season_two, user), 1);
+    store
+        .upsert_unit(
+            user,
+            media,
+            1,
+            1,
+            30_000,
+            None,
+            None,
+            Some(600_000),
+            None,
+            None,
+            false,
+            10,
+        )
+        .unwrap();
     store
         .mutate_playback(
             media,
             &crate::playback::PlaybackMutation::marks(user, 1, UNIT_WHOLE, Some(true), None),
-            2_000,
+            20_000,
         )
         .unwrap();
-
-    let (_, one) = summary_row(&store, user, &season_one, media).expect("S01 library updated");
+    let one = store
+        .get_user_library_summary(user, one_id, media)
+        .unwrap()
+        .unwrap();
     assert_eq!(one.completed_episode_count, 1);
     assert!(one.played);
-
-    let (revision, two) = summary_row(&store, user, &season_two, media).expect("S02 row survives");
-    assert_eq!(revision, 9);
-    assert_eq!(two.last_played_at, 7_777);
+    let after = store
+        .get_user_library_summary(user, two_id, media)
+        .unwrap()
+        .unwrap();
+    assert_eq!(local_display(&after), local_display(&before));
+    assert_eq!(favorite_page(&store, &season_two, user), 1);
+    let next = store
+        .next_up_page(&crate::ContinueQuery {
+            user_id: user,
+            libraries: vec![one_id, two_id],
+            parent: domain::ProtocolParent::Root,
+            media_id: None,
+            season: None,
+            limit: 20,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(next.total, 1);
+    assert_eq!(next.items[0].reference.library_id, two_id);
+    assert_eq!(
+        next.items[0].reference.item,
+        domain::TypedItemId::Unit {
+            media,
+            key: domain::UnitKey::new(2, 1),
+        }
+    );
+    assert_eq!(next.items[0].last_played_at, 10);
+    let home = store
+        .home_activity_page(&crate::HomeQuery {
+            user_id: user,
+            libraries: vec![one_id, two_id],
+            limit: 20,
+        })
+        .unwrap();
+    assert_eq!(home.len(), 1);
+    assert_eq!(home[0].reference, next.items[0].reference);
+    assert_eq!(home[0].last_activity, 10);
+    assert!(home[0].advanced);
 }
 
 #[test]

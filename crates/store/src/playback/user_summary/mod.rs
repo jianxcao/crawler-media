@@ -2,7 +2,7 @@
 //!
 //! Browse readers (`library_query::items`, `library_query::facets`) treat a
 //! missing row as "not favourite / not seen", so this module only materialises
-//! a row while the user actually carries state for the media in one Library.
+//! a row only for user/Media pairs with raw facts, in every owning Library.
 //! Every user-fact write calls [`Store::refresh_user_library_summary`] inside
 //! its own transaction. The reduction reads the Library's owned units plus the
 //! user's `playback_units` facts; it never derives a value from an existing
@@ -15,26 +15,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{Store, StoreError, UNIT_WHOLE};
 
-/// Which units a user-fact write touched.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SummaryScope {
-    Episode { season: i32, episode: i32 },
-    Season(i32),
-    Whole,
-}
-
-impl SummaryScope {
-    /// Scope of one written `playback_units` coordinate.
-    pub(crate) fn for_unit(season: i32, episode: i32) -> Self {
-        if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-            Self::Whole
-        } else if episode == UNIT_WHOLE {
-            Self::Season(season)
-        } else {
-            Self::Episode { season, episode }
-        }
-    }
-}
+mod continuation;
+mod rows;
+mod units;
+const SUMMARY_COLUMNS: &str = "summary_revision,seen,played,favorite,last_played_at,favorite_at,owned_episode_count,completed_episode_count,next_season,next_episode,resume_season,resume_episode,activity_next_season,activity_next_episode,activity_season,activity_episode,activity_at,activity_present,all_watch_at,resume_activity_at";
 
 /// One reduced row of `user_library_items`, compared field by field so an
 /// unchanged write does not bump `summary_revision`.
@@ -51,19 +35,14 @@ struct Summary {
     next_episode: Option<i32>,
     resume_season: Option<i32>,
     resume_episode: Option<i32>,
-}
-
-impl Summary {
-    /// Ownership and pointer fields alone are not user state: without a
-    /// favourite or a viewing fact the row is deleted and readers fall back to
-    /// their "missing = default" branch.
-    fn is_empty(&self) -> bool {
-        !self.seen
-            && !self.played
-            && !self.favorite
-            && self.last_played_at == 0
-            && self.favorite_at == 0
-    }
+    activity_next_season: Option<i32>,
+    activity_next_episode: Option<i32>,
+    activity_season: Option<i32>,
+    activity_episode: Option<i32>,
+    activity_at: i64,
+    activity_present: bool,
+    all_watch_at: i64,
+    resume_activity_at: i64,
 }
 
 /// One `playback_units` row of the current user and media.
@@ -77,6 +56,7 @@ pub(crate) struct PlaybackFact {
     favorite_at: i64,
     position_ms: i64,
     watch_activity_at: i64,
+    play_count: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,48 +88,14 @@ impl Store {
         self.with_library_read(|db| db.get_user_library_summary(user_id, library_id, media_id))
     }
 
-    /// Libraries owning the media within the written scope, in a deterministic
+    /// Every Library owning the Media, in a deterministic
     /// order so concurrent writers take the same rows in the same sequence.
-    fn summary_libraries(
-        tx: &Connection,
-        media_id: MediaId,
-        scope: SummaryScope,
-        is_tv: bool,
-    ) -> Result<Vec<String>, StoreError> {
-        let media = media_id.to_string();
-        // A movie/video has one logical whole unit.
-        let (sql, values): (&str, Vec<rusqlite::types::Value>) = if !is_tv {
-            (
-                "SELECT library_id FROM library_items WHERE media_id = ?1 ORDER BY library_id",
-                vec![media.into()],
-            )
-        } else {
-            match scope {
-                SummaryScope::Whole => (
-                    "SELECT library_id FROM library_items WHERE media_id = ?1 ORDER BY library_id",
-                    vec![media.into()],
-                ),
-                SummaryScope::Season(season) => (
-                    "SELECT DISTINCT library_id FROM library_units
-                     WHERE media_id = ?1 AND season = ?2 ORDER BY library_id",
-                    vec![media.into(), i64::from(season).into()],
-                ),
-                SummaryScope::Episode { season, episode } => (
-                    "SELECT DISTINCT library_id FROM library_units
-                     WHERE media_id = ?1 AND season = ?2 AND episode = ?3 ORDER BY library_id",
-                    vec![
-                        media.into(),
-                        i64::from(season).into(),
-                        i64::from(episode).into(),
-                    ],
-                ),
-            }
-        };
-        let mut statement = tx.prepare(sql)?;
-        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
-            row.get::<_, String>(0)
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    fn summary_libraries(tx: &Connection, media_id: MediaId) -> Result<Vec<String>, StoreError> {
+        query_ids(
+            tx,
+            "SELECT library_id FROM library_items WHERE media_id=?1 ORDER BY library_id",
+            media_id,
+        )
     }
 
     pub(crate) fn summary_facts(
@@ -159,7 +105,7 @@ impl Store {
     ) -> Result<HashMap<(i32, i32), PlaybackFact>, StoreError> {
         let mut statement = tx.prepare(
             "SELECT season, episode, played, has_played_assertion, played_changed_at_ms,
-                    favorite, favorite_at, position_ms, watch_activity_at
+                    favorite, favorite_at, position_ms, watch_activity_at, play_count
              FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
         )?;
         let rows =
@@ -174,6 +120,7 @@ impl Store {
                     favorite_at: row.get(6)?,
                     position_ms: row.get(7)?,
                     watch_activity_at: row.get(8)?,
+                    play_count: row.get(9)?,
                 })
             })?;
         let mut facts = HashMap::new();
@@ -206,11 +153,10 @@ impl Store {
         media_id: MediaId,
     ) -> Result<Option<(i64, Summary)>, StoreError> {
         tx.query_row(
-            "SELECT summary_revision, seen, played, favorite, last_played_at, favorite_at,
-                        owned_episode_count, completed_episode_count, next_season, next_episode,
-                        resume_season, resume_episode
-                 FROM user_library_items
-                 WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3",
+            &format!(
+                "SELECT {SUMMARY_COLUMNS} FROM user_library_items
+                 WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3"
+            ),
             params![user_id.to_string(), library_id, media_id.to_string()],
             |row| Ok((row.get::<_, i64>(0)?, map_summary(row)?)),
         )
@@ -223,6 +169,7 @@ impl Store {
         library: &str,
         media_id: MediaId,
         owned: &[(i32, i32)],
+        available: &[(i32, i32)],
         is_tv: bool,
     ) -> Result<Vec<crate::query_projection::expected::OwnedRow>, StoreError> {
         let users = query_ids(
@@ -233,36 +180,35 @@ impl Store {
         let mut rows = Vec::new();
         for user in users {
             let facts = Self::summary_facts(tx, user.parse()?, media_id)?;
-            let summary = summarize(is_tv, owned, &facts);
-            if summary.is_empty() {
+            if facts.is_empty() {
                 continue;
             }
-            use rusqlite::types::Value;
-            let values = [
-                ("user_id", Value::from(user)),
-                ("library_id", library.to_string().into()),
-                ("media_id", media_id.to_string().into()),
-                ("seen", i64::from(summary.seen).into()),
-                ("played", i64::from(summary.played).into()),
-                ("favorite", i64::from(summary.favorite).into()),
-                ("last_played_at", summary.last_played_at.into()),
-                ("favorite_at", summary.favorite_at.into()),
-                ("owned_episode_count", summary.owned_episode_count.into()),
-                (
-                    "completed_episode_count",
-                    summary.completed_episode_count.into(),
-                ),
-                ("next_season", summary.next_season.into()),
-                ("next_episode", summary.next_episode.into()),
-                ("resume_season", summary.resume_season.into()),
-                ("resume_episode", summary.resume_episode.into()),
-            ];
-            rows.push(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value))
-                    .collect(),
-            );
+            let summary = summarize(is_tv, owned, available, &facts);
+            rows.push(rows::owned(&summary, &user, library, media_id));
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn expected_continue_rows(
+        tx: &Connection,
+        library: &str,
+        media_id: MediaId,
+        available: &[(i32, i32)],
+        is_tv: bool,
+    ) -> Result<Vec<crate::query_projection::expected::OwnedRow>, StoreError> {
+        let users = query_ids(
+            tx,
+            "SELECT DISTINCT user_id FROM playback_units WHERE media_id=?1 ORDER BY user_id",
+            media_id,
+        )?;
+        let mut rows = Vec::new();
+        for user in users {
+            let facts = Self::summary_facts(tx, user.parse()?, media_id)?;
+            if !facts.is_empty() {
+                rows.extend(units::expected(
+                    &user, library, media_id, is_tv, available, &facts,
+                ));
+            }
         }
         Ok(rows)
     }
@@ -276,77 +222,25 @@ impl Store {
         facts: &HashMap<(i32, i32), PlaybackFact>,
     ) -> Result<(), StoreError> {
         let owned = Self::library_units(tx, library_id, media_id)?;
-        let summary = summarize(is_tv, &owned, facts);
+        let available = units::available(tx, library_id, media_id)?;
         let existing = Self::existing_summary(tx, user_id, library_id, media_id)?;
-        let user = user_id.to_string();
-        let media = media_id.to_string();
-
-        if summary.is_empty() {
-            if existing.is_some() {
-                tx.execute(
-                    "DELETE FROM user_library_items
-                     WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3",
-                    params![user, library_id, media],
-                )?;
-                tracing::debug!(
-                    %user_id,
-                    library_id,
-                    %media_id,
-                    "removed user library summary without state"
-                );
-            }
+        if facts.is_empty() {
+            tx.execute(
+                "DELETE FROM user_library_items WHERE user_id=?1 AND library_id=?2 AND media_id=?3",
+                params![user_id.to_string(), library_id, media_id.to_string()],
+            )?;
             return Ok(());
         }
-
+        let summary = summarize(is_tv, &owned, &available, facts);
         let revision = match existing {
-            Some((_revision, previous)) if previous == summary => return Ok(()),
+            Some((revision, previous)) if previous == summary => revision,
             Some((revision, _)) => revision + 1,
             None => 1,
         };
-        tx.execute(
-            "INSERT INTO user_library_items
-                (user_id, library_id, media_id, seen, played, favorite, last_played_at,
-                 favorite_at, owned_episode_count, completed_episode_count,
-                 next_season, next_episode, resume_season, resume_episode, summary_revision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-             ON CONFLICT(user_id, library_id, media_id) DO UPDATE SET
-                seen = excluded.seen,
-                played = excluded.played,
-                favorite = excluded.favorite,
-                last_played_at = excluded.last_played_at,
-                favorite_at = excluded.favorite_at,
-                owned_episode_count = excluded.owned_episode_count,
-                completed_episode_count = excluded.completed_episode_count,
-                next_season = excluded.next_season,
-                next_episode = excluded.next_episode,
-                resume_season = excluded.resume_season,
-                resume_episode = excluded.resume_episode,
-                summary_revision = excluded.summary_revision",
-            params![
-                user,
-                library_id,
-                media,
-                i64::from(summary.seen),
-                i64::from(summary.played),
-                i64::from(summary.favorite),
-                summary.last_played_at,
-                summary.favorite_at,
-                summary.owned_episode_count,
-                summary.completed_episode_count,
-                summary.next_season,
-                summary.next_episode,
-                summary.resume_season,
-                summary.resume_episode,
-                revision,
-            ],
-        )?;
-        tracing::debug!(
-            %user_id,
-            library_id,
-            %media_id,
-            revision,
-            "wrote user library summary"
-        );
+        if existing.is_none_or(|(_, previous)| previous != summary) {
+            rows::write(tx, &summary, user_id, library_id, media_id, revision)?;
+        }
+        units::sync(tx, user_id, library_id, media_id, is_tv, &available, facts)?;
         Ok(())
     }
 }
@@ -371,6 +265,14 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
         next_episode: row.get(9)?,
         resume_season: row.get(10)?,
         resume_episode: row.get(11)?,
+        activity_next_season: row.get(12)?,
+        activity_next_episode: row.get(13)?,
+        activity_season: row.get(14)?,
+        activity_episode: row.get(15)?,
+        activity_at: row.get(16)?,
+        activity_present: row.get::<_, i64>(17)? != 0,
+        all_watch_at: row.get(18)?,
+        resume_activity_at: row.get(19)?,
     })
 }
 
@@ -418,12 +320,15 @@ pub(crate) fn effective_played(
 
 /// Reduce the Library's owned units and the user's facts into one summary row.
 ///
-/// Only facts whose coordinate the Library owns contribute (a whole mark
-/// applies to every Library owning the media). This is why a season mark never
-/// changes a Library that only owns another season.
+/// Browse display fields use only facts whose coordinate the Library owns
+/// (whole marks apply to every owner). Continuation separately uses the user's
+/// global Media activity/anchor plus this Library's available coordinates, so a
+/// write to another season can advance continuation without changing local
+/// seen/played/favorite/last-played display values.
 fn summarize(
     is_tv: bool,
     owned: &[(i32, i32)],
+    available: &[(i32, i32)],
     facts: &HashMap<(i32, i32), PlaybackFact>,
 ) -> Summary {
     let episodes: Vec<(i32, i32)> = owned
@@ -477,36 +382,7 @@ fn summarize(
         .max()
         .unwrap_or(0);
 
-    // Resume points at the newest unit that is in progress and not effectively
-    // played. A movie has no episode coordinate, so it points at the whole unit.
-    let resume = facts
-        .values()
-        .filter(|fact| applies(fact) && fact.position_ms > 0)
-        .filter(|fact| !effective_played(is_tv, facts, fact.season, fact.episode))
-        .max_by_key(|fact| (fact.watch_activity_at, fact.season, fact.episode));
-    let (resume_season, resume_episode) = match resume {
-        Some(fact) if is_tv => (Some(fact.season), Some(fact.episode)),
-        Some(_) => (Some(UNIT_WHOLE), Some(UNIT_WHOLE)),
-        None => (None, None),
-    };
-
-    // Next-up only exists once something was completed; the pointer is the
-    // first owned episode that is not effectively played.
-    let next = if is_tv && completed_episode_count > 0 {
-        episodes
-            .iter()
-            .copied()
-            .filter(|(season, episode)| !effective_played(true, facts, *season, *episode))
-            .min()
-    } else {
-        None
-    };
-    let (next_season, next_episode) = match next {
-        Some((season, episode)) => (Some(season), Some(episode)),
-        None => (None, None),
-    };
-
-    Summary {
+    let mut summary = Summary {
         seen,
         played,
         favorite,
@@ -514,11 +390,10 @@ fn summarize(
         favorite_at,
         owned_episode_count,
         completed_episode_count,
-        next_season,
-        next_episode,
-        resume_season,
-        resume_episode,
-    }
+        ..Default::default()
+    };
+    continuation::apply(&mut summary, is_tv, available, facts);
+    summary
 }
 
 #[cfg(test)]

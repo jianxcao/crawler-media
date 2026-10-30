@@ -1,5 +1,6 @@
 //! Atomic query membership and distinct per-Library counter settlement.
 mod browse;
+mod continuation;
 mod counts;
 mod entities;
 pub(crate) mod entity_integrity;
@@ -116,6 +117,7 @@ pub(crate) fn remove(
     })
 }
 fn mark_current(tx: &Connection, lib: &str, media: &str) -> Result<(), StoreError> {
+    continuation::refresh_default_unit(tx, lib, media)?;
     let title: String = tx.query_row(
         "SELECT title FROM library_items WHERE library_id=?1 AND media_id=?2",
         params![lib, media],

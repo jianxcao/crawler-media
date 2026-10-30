@@ -174,6 +174,7 @@ CREATE TABLE library_items (
  distinct_episode_count INTEGER NOT NULL DEFAULT 0, distinct_season_count INTEGER NOT NULL DEFAULT 0,
  preferred_file_id TEXT, poster_ref TEXT, backdrop_ref TEXT, has_still INTEGER NOT NULL DEFAULT 0,
  search_text TEXT NOT NULL DEFAULT '',
+ first_owned_season INTEGER, first_owned_episode INTEGER,
  UNIQUE(library_id,media_id),
  FOREIGN KEY(preferred_file_id,library_id,media_id) REFERENCES library_files(file_id,library_id,media_id) DEFERRABLE INITIALLY DEFERRED,
  CHECK(available_file_count>=0 AND missing_file_count>=0 AND unknown_file_count>=0),
@@ -294,11 +295,30 @@ CREATE TABLE user_library_items (
  seen INTEGER NOT NULL, played INTEGER NOT NULL, favorite INTEGER NOT NULL, last_played_at INTEGER NOT NULL DEFAULT 0,
  favorite_at INTEGER NOT NULL DEFAULT 0, owned_episode_count INTEGER NOT NULL DEFAULT 0, completed_episode_count INTEGER NOT NULL DEFAULT 0,
  next_season INTEGER, next_episode INTEGER, resume_season INTEGER, resume_episode INTEGER, summary_revision INTEGER NOT NULL,
+ activity_next_season INTEGER, activity_next_episode INTEGER, activity_season INTEGER, activity_episode INTEGER,
+ activity_at INTEGER NOT NULL DEFAULT 0, activity_present INTEGER NOT NULL DEFAULT 0 CHECK(activity_present IN(0,1)),
+ all_watch_at INTEGER NOT NULL DEFAULT 0, resume_activity_at INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(user_id,library_id,media_id), FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE,
  CHECK(completed_episode_count BETWEEN 0 AND owned_episode_count)
 ) WITHOUT ROWID;
 CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id);
 CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id);
+CREATE INDEX user_items_next ON user_library_items(user_id,activity_at DESC,media_id,library_id) WHERE next_season IS NOT NULL;
+CREATE INDEX user_items_resume ON user_library_items(user_id,resume_activity_at DESC,media_id,library_id) WHERE resume_season IS NOT NULL;
+CREATE INDEX user_items_home ON user_library_items(user_id,activity_at DESC,media_id,library_id)
+ WHERE activity_present=1 AND (activity_next_season IS NOT NULL OR resume_season IS NOT NULL);
+CREATE TABLE user_library_continue_units (
+ user_id TEXT NOT NULL, library_id TEXT NOT NULL, media_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL,
+ position_ms INTEGER NOT NULL CHECK(position_ms>=0), watch_activity_at INTEGER NOT NULL,
+ PRIMARY KEY(user_id,library_id,media_id,season,episode),
+ FOREIGN KEY(user_id,library_id,media_id) REFERENCES user_library_items(user_id,library_id,media_id) ON DELETE CASCADE,
+ FOREIGN KEY(library_id,media_id,season,episode) REFERENCES library_units(library_id,media_id,season,episode) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX user_continue_scope ON user_library_continue_units(user_id,media_id,season,episode,library_id);
+CREATE INDEX user_continue_resume ON user_library_continue_units(user_id,watch_activity_at DESC,media_id,library_id,season,episode) WHERE position_ms>0;
+CREATE INDEX user_continue_owner_resume ON user_library_continue_units(user_id,library_id,media_id,watch_activity_at DESC,season DESC,episode DESC) WHERE position_ms>0;
+CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(user_id,library_id,media_id,season,watch_activity_at DESC,episode DESC) WHERE position_ms>0;
+CREATE INDEX playback_played_episodes ON playback_units(user_id,media_id,season,episode) WHERE played<>0 AND season>=0 AND episode>=0;
 CREATE TABLE playback_session_ids (
  user_id TEXT NOT NULL, device_id TEXT NOT NULL, play_session_id TEXT NOT NULL, item_id TEXT NOT NULL,
  media_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, file_id TEXT NOT NULL, file_revision INTEGER NOT NULL CHECK(file_revision>0),

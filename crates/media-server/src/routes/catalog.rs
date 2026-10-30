@@ -125,41 +125,20 @@ pub(super) async fn resume_items(
     .await?;
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let start_index = query.start_index.unwrap_or(0);
-    if query.parent_id.is_none() {
-        // 无 ParentId：选页在 store 侧完成，只为返回页建重元数据。
-        let page = state
-            .provider
-            .resumable_items_page(user.id, start_index, limit)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, user_id = %user.id, "Jellyfin 续播选页失败");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
-        return Ok(Json(
-            json!({ "Items": listed, "TotalRecordCount": page.total }),
-        ));
-    }
-    let mut rows = {
-        let root_rows = state
-            .provider
-            .list_visible_items(user.id, query.parent_id.as_deref())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        root_rows
-            .into_iter()
-            .filter(|item| item.ticks > 0 && !item.played)
-            .collect::<Vec<_>>()
-    };
-    let total = rows.len();
-    let listed: Vec<Value> = rows
-        .drain(..)
-        .skip(start_index)
-        .take(limit)
-        .map(item_dto_json)
-        .collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": total })))
+    let page = state
+        .provider
+        .resumable_items_page(user.id, query.parent_id.as_deref(), start_index, limit)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, "Jellyfin 续播选页失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
+    Ok(Json(
+        json!({ "Items": listed, "TotalRecordCount": page.total }),
+    ))
 }
+
 pub(super) async fn latest_items(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,

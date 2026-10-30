@@ -1,3 +1,4 @@
+pub mod continue_watching;
 pub mod details;
 pub mod facets;
 pub mod files;
@@ -13,6 +14,9 @@ pub mod protocol;
 pub mod series_scalar;
 pub mod types;
 
+pub use continue_watching::{
+    ContinueEntry, ContinuePage, ContinueQuery, HomeEntry, HomeQuery, HomeWindow,
+};
 pub use details::{AdoptedFilterFacts, library_display_locale};
 pub use items::page::IndexBucket;
 pub use playback_views::{FavoriteOrder, PlaybackViewPage, PlaybackViewQuery, PlaybackViewRow};

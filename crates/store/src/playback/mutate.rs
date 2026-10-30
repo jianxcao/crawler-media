@@ -6,7 +6,6 @@ use rusqlite::{OptionalExtension, params};
 use super::super::{Store, StoreError};
 use super::source::PlaybackSource;
 use super::types::{PlaybackMutation, PlaybackTarget, ResolvedResume, ResumeStatus};
-use super::user_summary::SummaryScope;
 
 /// Resume facts stored on `playback_units`, with the source binding they were
 /// written against.

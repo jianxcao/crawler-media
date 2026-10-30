@@ -54,7 +54,7 @@ pub fn marks_and_versions(runtime: &tokio::runtime::Runtime) {
                 .await
                 .unwrap(),
             provider
-                .resumable_items_page(fixture.user, 0, 1)
+                .resumable_items_page(fixture.user, None, 0, 1)
                 .await
                 .unwrap(),
         )
@@ -67,7 +67,7 @@ pub fn marks_and_versions(runtime: &tokio::runtime::Runtime) {
     assert!(resume.items[0].metadata.is_favorite);
     mark(&fixture, 1, 2, true, 4000);
     let resume = runtime
-        .block_on(provider.resumable_items_page(fixture.user, 0, 1))
+        .block_on(provider.resumable_items_page(fixture.user, None, 0, 1))
         .unwrap();
     assert_eq!(resume.total, 0);
     assert!(resume.items.is_empty());
@@ -154,7 +154,10 @@ pub fn acl_and_user_state(runtime: &tokio::runtime::Runtime) {
     let (next, resume) = runtime.block_on(async {
         (
             provider.next_up_items(member, None, 0, 1).await.unwrap(),
-            provider.resumable_items_page(member, 0, 1).await.unwrap(),
+            provider
+                .resumable_items_page(member, None, 0, 1)
+                .await
+                .unwrap(),
         )
     });
     for page in [&next, &resume] {

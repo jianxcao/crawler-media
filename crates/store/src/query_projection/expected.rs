@@ -9,6 +9,7 @@ pub(crate) struct ExpectedProjection {
     pub card: Option<OwnedRow>,
     pub units: Vec<OwnedRow>,
     pub users: Vec<OwnedRow>,
+    pub continue_units: Vec<OwnedRow>,
     pub web: Terms,
     pub protocol: Terms,
     pub people: BTreeSet<Person>,
@@ -21,6 +22,7 @@ impl ExpectedProjection {
             card: None,
             units: vec![],
             users: vec![],
+            continue_units: vec![],
             web: Terms::new(),
             protocol: Terms::new(),
             people: BTreeSet::new(),
@@ -54,6 +56,25 @@ pub(crate) fn expected_projection(
         .len() as i64;
     let episodes = owned.iter().filter(|(s, e)| *s >= 0 && *e >= 0).count() as i64;
     let (kind, identity) = raw::media_identity(tx, &media)?;
+    let available: Vec<(i32, i32)> = units
+        .iter()
+        .filter(|row| integer(row, "available_file_count") > 0)
+        .map(|row| {
+            (
+                integer(row, "season") as i32,
+                integer(row, "episode") as i32,
+            )
+        })
+        .collect();
+    let first = (kind == "tv")
+        .then(|| {
+            available
+                .iter()
+                .copied()
+                .filter(|&(season, episode)| season >= 0 && episode >= 0)
+                .min()
+        })
+        .flatten();
     let mut web = raw_terms(tx, &lib, &media, &facts)?;
     web.extend(super::browse::buckets(
         facts.year,
@@ -69,11 +90,19 @@ pub(crate) fn expected_projection(
     let entities = super::entities::derive(tx, &lib, &media, &web)?;
     let mut members = super::counts::members(&kind, &web, &protocol);
     members.extend(super::entities::members(&entities));
-    let users = Store::expected_user_rows(tx, &lib, key.media_id, &owned, kind == "tv")?;
+    let users =
+        Store::expected_user_rows(tx, &lib, key.media_id, &owned, &available, kind == "tv")?;
+    let continue_units =
+        Store::expected_continue_rows(tx, &lib, key.media_id, &available, kind == "tv")?;
     let mut card = card_row(
         tx, &lib, &media, &counts, &facts, preferred, seasons, episodes, kind, identity,
     )?;
     card.insert("search_text".into(), search.into());
+    card.insert("first_owned_season".into(), first.map(|unit| unit.0).into());
+    card.insert(
+        "first_owned_episode".into(),
+        first.map(|unit| unit.1).into(),
+    );
     card.insert(
         "protocol_original_title_key".into(),
         super::protocol::original_title(tx, &lib, &media)?.into(),
@@ -82,6 +111,7 @@ pub(crate) fn expected_projection(
         card: Some(card),
         units,
         users,
+        continue_units,
         web,
         protocol,
         people,

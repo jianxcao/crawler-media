@@ -1,21 +1,6 @@
 //! Batch database facts; filesystem rendering happens after the reader is returned.
 use super::*;
 
-pub(super) fn load(
-    state: &ApiState,
-    items: &[LightItem],
-) -> Result<HashMap<domain::LedgerId, store::HydratedFile>, String> {
-    let files = items
-        .iter()
-        .map(|item| item.coverage.file.file_id)
-        .collect::<Vec<_>>();
-    super::super::sync_operations::read_store(state, |reader| {
-        reader
-            .page_hydration(&files)
-            .map_err(|error| error.to_string())
-    })
-}
-
 pub(super) fn facts<'a>(
     item: &LightItem,
     hydration: Option<&'a store::HydratedFile>,

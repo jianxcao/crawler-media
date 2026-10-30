@@ -58,6 +58,7 @@ pub const LIBRARY_TABLES: &[&str] = &[
     "collection_items",
     "playback_units",
     "user_library_items",
+    "user_library_continue_units",
     "playback_session_ids",
     "playback_sessions",
     "playback_logs",
@@ -90,6 +91,14 @@ pub const LIBRARY_TABLES: &[&str] = &[
 ];
 
 pub const LIBRARY_INDEXES: &[&str] = &[
+    "user_items_next",
+    "user_items_resume",
+    "user_items_home",
+    "user_continue_scope",
+    "user_continue_resume",
+    "user_continue_owner_resume",
+    "user_continue_owner_season_resume",
+    "playback_played_episodes",
     "items_search_prefix",
     "items_search_title",
     "protocol_entities_name",

@@ -20,6 +20,16 @@ struct DirectStreamProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for DirectStreamProvider {
+    async fn resumable_items_page(
+        &self,
+        user_id: domain::UserId,
+        parent_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, String> {
+        fixture_provider::resume_items(self, user_id, parent_id, offset, limit).await
+    }
+
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
@@ -253,6 +263,16 @@ struct MultiVersionStreamProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for MultiVersionStreamProvider {
+    async fn resumable_items_page(
+        &self,
+        user_id: domain::UserId,
+        parent_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, String> {
+        fixture_provider::resume_items(self, user_id, parent_id, offset, limit).await
+    }
+
     async fn next_up_items(
         &self,
         user_id: domain::UserId,
