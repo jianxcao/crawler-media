@@ -520,6 +520,15 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         Ok(None)
     }
 
+    async fn deliver_person_image(
+        &self,
+        _user: Option<UserId>,
+        _query: &str,
+        _headers: axum::http::HeaderMap,
+    ) -> Result<Option<axum::response::Response>, String> {
+        Err("person image delivery unsupported".into())
+    }
+
     async fn resolve_person(
         &self,
         _user: UserId,

@@ -1,3 +1,4 @@
+mod image_delivery;
 mod startup;
 
 use std::collections::{HashMap, HashSet};
@@ -101,6 +102,8 @@ pub struct ApiState {
     /// Fanart cache connection opened once per service lifetime (C03).
     pub(crate) fanart_cache: Arc<std::sync::OnceLock<Arc<media::cache::CatalogCache>>>,
     pub(crate) media_posters: Arc<dyn crate::media_posters::MediaPosterSource>,
+    /// Remote artwork delivery shares one cache, fill registry and admission gate.
+    pub(crate) image_delivery: Arc<crate::http::image_proxy::ImageProxy>,
     pub log_buffer: LogBuffer,
     pub obscura: Arc<crate::obscura_manager::ObscuraManager>,
     pub browser: Arc<indexer::Browser>,
@@ -352,6 +355,7 @@ impl ApiState {
             poster_fetch: Arc::new(HttpPoster),
             fanart_cache: Arc::default(),
             media_posters,
+            image_delivery: crate::http::image_proxy::new(&data_dir),
             log_buffer: LogBuffer::new(DEFAULT_CAPACITY),
             obscura: Arc::new(crate::obscura_manager::ObscuraManager::new(&data_dir)),
             browser: Arc::new(startup_browser.0),

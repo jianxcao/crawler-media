@@ -40,23 +40,29 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
 
 async fn person_primary_image(
     State(state): State<AppState>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     user_id: Option<Extension<Option<domain::UserId>>>,
     Path(name): Path<String>,
 ) -> Result<Response, StatusCode> {
     let user_id = user_id.and_then(|extension| extension.0);
-    match state
+    deliver_person_image(&state, user_id, &name, headers).await
+}
+
+async fn deliver_person_image(
+    state: &AppState,
+    user: Option<domain::UserId>,
+    query: &str,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    state
         .provider
-        .resolve_person_image_url(user_id, &name)
+        .deliver_person_image(user, query, headers)
         .await
-    {
-        Ok(Some(url)) => Ok(Redirect::temporary(&url).into_response()),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(error) => {
-            tracing::warn!(%error, person = %name, "failed to resolve Jellyfin person image");
-            Err(StatusCode::NOT_FOUND)
-        }
-    }
+        .map_err(|error| {
+            tracing::error!(%error, person=%query, "failed to deliver Jellyfin person image");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 async fn genre_primary_image(
     State(state): State<AppState>,
@@ -151,14 +157,7 @@ async fn primary_image(
     {
         return Ok(res);
     }
-    match state.provider.resolve_person_image_url(user_id, &id).await {
-        Ok(Some(url)) => Ok(Redirect::temporary(&url).into_response()),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(error) => {
-            tracing::warn!(%error, person = %id, "failed to resolve Jellyfin person image by item id");
-            Err(StatusCode::NOT_FOUND)
-        }
-    }
+    deliver_person_image(&state, user_id, &id, headers).await
 }
 
 async fn backdrop_image(

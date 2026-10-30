@@ -16,10 +16,10 @@ use crate::http::library_artwork::image_response::conditional_image;
 mod fill;
 pub(super) use fill::DeliveryError;
 use fill::Fill;
-type FetchImage = Arc<dyn Fn(&str) -> Result<Image, DeliveryError> + Send + Sync>;
+pub(super) type FetchImage = Arc<dyn Fn(&str) -> Result<Image, DeliveryError> + Send + Sync>;
 const DELIVERY_DEADLINE: Duration = Duration::from_secs(2);
 
-pub(super) struct ImageProxy {
+pub(crate) struct ImageProxy {
     cache: Arc<ImageCache>,
     reads: crate::blocking_budget::BlockingBudget,
     gate: Arc<Semaphore>,
@@ -28,6 +28,14 @@ pub(super) struct ImageProxy {
 }
 
 impl ImageProxy {
+    pub(crate) async fn response_for_url(
+        self: &Arc<Self>,
+        url: String,
+        headers: HeaderMap,
+    ) -> Response {
+        self.response(ProxyQuery { url }, headers).await
+    }
+
     pub(super) fn new(cache: Arc<ImageCache>, gate: Arc<Semaphore>, fetch: FetchImage) -> Self {
         Self {
             cache,

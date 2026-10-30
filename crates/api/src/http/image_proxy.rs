@@ -2,16 +2,19 @@
 //! Fetched bytes are cached on disk under `{CRAWLER_MEDIA_DATA}/cache/images`
 //! so a second visit never re-fetches the upstream image.
 
-use std::sync::{Arc, OnceLock};
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod cache;
 mod runtime;
+pub(crate) use runtime::ImageProxy;
+pub type ImageFetch = Arc<dyn Fn(&str) -> Result<(String, Vec<u8>), String> + Send + Sync>;
 
 const IMAGE_RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
 const IMAGE_CONCURRENCY: usize = 8;
 
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use serde::Deserialize;
@@ -40,33 +43,35 @@ const ALLOWED_HOSTS: &[&str] = &[
     "s4.anilist.co",
 ];
 
-pub(crate) async fn proxy_image(headers: HeaderMap, query: Query<ProxyQuery>) -> Response {
-    static PROXY: OnceLock<Arc<runtime::ImageProxy>> = OnceLock::new();
-    PROXY
-        .get_or_init(|| {
-            Arc::new(runtime::ImageProxy::new(
-                image_cache(),
-                Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
-                Arc::new(fetch_image),
-            ))
-        })
-        .response(query.0, headers)
-        .await
+pub(crate) async fn proxy_image(
+    State(state): State<crate::management::ApiState>,
+    headers: HeaderMap,
+    query: Query<ProxyQuery>,
+) -> Response {
+    state.image_delivery.response(query.0, headers).await
 }
 
-fn image_cache() -> Arc<cache::ImageCache> {
-    static CACHE: OnceLock<Arc<cache::ImageCache>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            Arc::new(cache::ImageCache::new(
-                crate::config::data_dir_from_env()
-                    .join("cache")
-                    .join("images"),
-                IMAGE_CACHE_BUDGET_BYTES,
-                IMAGE_RESPONSE_LIMIT,
-            ))
-        })
-        .clone()
+pub(crate) fn new(data_dir: &Path) -> Arc<ImageProxy> {
+    with_transport(data_dir, Arc::new(fetch_image))
+}
+
+pub(crate) fn with_fetch(data_dir: &Path, fetch: ImageFetch) -> Arc<ImageProxy> {
+    with_transport(
+        data_dir,
+        Arc::new(move |url| fetch(url).map_err(Into::into)),
+    )
+}
+
+fn with_transport(data_dir: &Path, fetch: runtime::FetchImage) -> Arc<ImageProxy> {
+    Arc::new(ImageProxy::new(
+        Arc::new(cache::ImageCache::new(
+            data_dir.join("cache").join("images"),
+            IMAGE_CACHE_BUDGET_BYTES,
+            IMAGE_RESPONSE_LIMIT,
+        )),
+        Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
+        fetch,
+    ))
 }
 
 #[cfg(test)]

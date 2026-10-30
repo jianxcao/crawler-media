@@ -134,11 +134,11 @@ async fn nfo_people_are_clickable_and_filter_related_items() {
         )
         .await
         .unwrap();
-    assert_eq!(image_response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(
-        image_response.headers()["location"],
-        "https://image.tmdb.org/t/p/w185/profile.jpg"
-    );
+    assert_delivered_person_image(
+        image_response,
+        "https://image.tmdb.org/t/p/w185/profile.jpg",
+    )
+    .await;
 
     let matches = get(&app, &format!("/Items?PersonIds={person_id}")).await;
     assert_eq!(matches["TotalRecordCount"], 1);

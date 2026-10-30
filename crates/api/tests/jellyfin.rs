@@ -198,9 +198,22 @@ fn app_seeded(root: &Path, seed: impl FnOnce(&Path)) -> (axum::Router, MediaId, 
             Arc::new(MemoryDownloader::new(root.join("stage"))),
             root.join("library"),
         )
-        .unwrap(),
+        .unwrap()
+        .with_image_fetch(Arc::new(|url| {
+            Ok(("image/png".into(), url.as_bytes().to_vec()))
+        })),
     );
     (router, media.id, compact)
+}
+
+async fn assert_delivered_person_image(response: axum::response::Response, url: &str) {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert!(response.headers().get("location").is_none());
+    assert_eq!(
+        &to_bytes(response.into_body(), 1024).await.unwrap()[..],
+        url.as_bytes()
+    );
 }
 
 struct FakeClock(std::sync::atomic::AtomicI64);

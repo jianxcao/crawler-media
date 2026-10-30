@@ -582,6 +582,15 @@ impl MediaServerProvider for ApiServerProvider {
         person_images::resolve_person_image_url(self, user_id, name).await
     }
 
+    async fn deliver_person_image(
+        &self,
+        user: Option<UserId>,
+        query: &str,
+        headers: axum::http::HeaderMap,
+    ) -> Result<Option<axum::response::Response>, String> {
+        person_images::deliver_person_image(self, user, query, headers).await
+    }
+
     async fn resolve_person(
         &self,
         user_id: UserId,

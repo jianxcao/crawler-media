@@ -213,6 +213,9 @@ fn rich_tv_app(
         root.join("library"),
     )
     .unwrap()
+    .with_image_fetch(Arc::new(|url| {
+        Ok(("image/png".into(), url.as_bytes().to_vec()))
+    }))
     .with_catalog(Arc::new(RichCatalog {
         show: show.clone(),
         metadata,
@@ -365,12 +368,8 @@ async fn assert_adopted_person_routes(app: &axum::Router, person_id: &str) {
             .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(image.status(), StatusCode::TEMPORARY_REDIRECT, "{uri}");
-        assert_eq!(
-            image.headers()["location"],
-            "https://image.tmdb.org/t/p/w185/catalog-only.jpg",
-            "{uri}"
-        );
+        assert_delivered_person_image(image, "https://image.tmdb.org/t/p/w185/catalog-only.jpg")
+            .await;
     }
 
     let person = json_get(app, "/Persons/Paul%20Dano").await;
@@ -386,11 +385,7 @@ async fn assert_adopted_person_routes(app: &axum::Router, person_id: &str) {
         )
         .await
         .unwrap();
-    assert_eq!(person_image.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(
-        person_image.headers()["location"],
-        "https://image.tmdb.org/t/p/w185/paul.jpg"
-    );
+    assert_delivered_person_image(person_image, "https://image.tmdb.org/t/p/w185/paul.jpg").await;
 
     let rose_image = app
         .clone()
@@ -402,9 +397,5 @@ async fn assert_adopted_person_routes(app: &axum::Router, person_id: &str) {
         )
         .await
         .unwrap();
-    assert_eq!(rose_image.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(
-        rose_image.headers()["location"],
-        "https://image.tmdb.org/t/p/w185/rose.jpg"
-    );
+    assert_delivered_person_image(rose_image, "https://image.tmdb.org/t/p/w185/rose.jpg").await;
 }
