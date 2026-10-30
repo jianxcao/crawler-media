@@ -62,7 +62,7 @@ fn seed_query_rows(db: &Connection) {
     }
     for role in ["Actor", "Director", "Writer"] {
         db.execute(
-            "INSERT INTO library_protocol_people VALUES ('query-library','query-media',?1,'person','','wire')",
+            "INSERT INTO library_protocol_people VALUES ('query-library','query-media',?1,'person','','wire','Person',NULL,NULL)",
             [role],
         )
         .unwrap();
@@ -214,8 +214,8 @@ fn query_members_and_counts_enforce_constraints_and_cascade() {
         "INSERT INTO library_item_terms VALUES ('query-library','person_tmdb_id','retired','query-media')",
         "INSERT INTO library_protocol_terms VALUES ('query-library','query-media','country','US')",
         "INSERT INTO library_protocol_terms VALUES ('query-library','missing','genre','drama')",
-        "INSERT INTO library_protocol_people VALUES ('query-library','query-media','Producer','person','','wire')",
-        "INSERT INTO library_protocol_people VALUES ('query-library','query-media','Actor','other',NULL,'wire')",
+        "INSERT INTO library_protocol_people VALUES ('query-library','query-media','Producer','person','','wire','Person',NULL,NULL)",
+        "INSERT INTO library_protocol_people VALUES ('query-library','query-media','Actor','other',NULL,'wire','Other',NULL,NULL)",
         "INSERT INTO library_query_counts VALUES ('query-library','unknown','all','*',1)",
         "INSERT INTO library_query_counts VALUES ('query-library','browse','genre','negative',-1)",
         "INSERT INTO library_query_counts VALUES ('missing','browse','all','*',1)",

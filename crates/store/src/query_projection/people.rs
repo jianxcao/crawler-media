@@ -2,9 +2,9 @@ use super::types::Person;
 use crate::StoreError;
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 pub(super) fn derive(nfo: &Value, adopted: &Value) -> BTreeSet<Person> {
-    let mut out = BTreeSet::new();
+    let mut out = BTreeMap::<(String, String, String), Person>::new();
     for fields in [nfo, adopted] {
         for (path, role) in [
             ("cast", "Actor"),
@@ -30,23 +30,40 @@ pub(super) fn derive(nfo: &Value, adopted: &Value) -> BTreeSet<Person> {
                         name,
                         (!tmdb.is_empty()).then_some(tmdb.as_str()),
                     ));
-                out.insert(Person {
+                let person = Person {
                     role: role.into(),
                     name: name.to_lowercase(),
                     tmdb,
                     wire,
-                });
+                    display: name.to_string(),
+                    character: value["role"].as_str().map(str::to_string),
+                    image: value["thumb"].as_str().map(str::to_string),
+                };
+                out.entry((
+                    person.role.clone(),
+                    person.name.clone(),
+                    person.tmdb.clone(),
+                ))
+                .and_modify(|old| {
+                    if old.character.is_none() {
+                        old.character = person.character.clone();
+                    }
+                    if old.image.is_none() {
+                        old.image = person.image.clone();
+                    }
+                })
+                .or_insert(person);
             }
         }
     }
-    out
+    out.into_values().collect()
 }
 pub(super) fn read(
     tx: &Connection,
     lib: &str,
     media: &str,
 ) -> Result<BTreeSet<Person>, StoreError> {
-    Ok(tx.prepare_cached("SELECT role,name_key,tmdb_id,wire_id FROM library_protocol_people WHERE library_id=?1 AND media_id=?2")?.query_map(params![lib,media], |r|Ok(Person{role:r.get(0)?,name:r.get(1)?,tmdb:r.get(2)?,wire:r.get(3)?}))?.collect::<Result<_,_>>()?)
+    Ok(tx.prepare_cached("SELECT role,name_key,tmdb_id,wire_id,display_name,character,image_url FROM library_protocol_people WHERE library_id=?1 AND media_id=?2")?.query_map(params![lib,media], |r|Ok(Person{role:r.get(0)?,name:r.get(1)?,tmdb:r.get(2)?,wire:r.get(3)?,display:r.get(4)?,character:r.get(5)?,image:r.get(6)?}))?.collect::<Result<_,_>>()?)
 }
 pub(super) fn sync(
     tx: &Connection,
@@ -59,7 +76,7 @@ pub(super) fn sync(
         tx.execute("DELETE FROM library_protocol_people WHERE library_id=?1 AND media_id=?2 AND role=?3 AND name_key=?4 AND tmdb_id=?5",params![lib,media,p.role,p.name,p.tmdb])?;
     }
     for p in after.difference(&before) {
-        tx.execute("INSERT INTO library_protocol_people(library_id,media_id,role,name_key,tmdb_id,wire_id) VALUES(?1,?2,?3,?4,?5,?6)",params![lib,media,p.role,p.name,p.tmdb,p.wire])?;
+        tx.execute("INSERT INTO library_protocol_people(library_id,media_id,role,name_key,tmdb_id,wire_id,display_name,character,image_url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(library_id,media_id,role,name_key,tmdb_id) DO UPDATE SET display_name=excluded.display_name,character=excluded.character,image_url=excluded.image_url",params![lib,media,p.role,p.name,p.tmdb,p.wire,p.display,p.character,p.image])?;
     }
     Ok(())
 }

@@ -231,11 +231,14 @@ fn extract_credits(
     fields: &mut MetadataFields,
     origins: &mut BTreeMap<String, SourceFieldOrigin>,
 ) {
-    let cast_arr = json
-        .pointer("/credits/cast")
-        .and_then(Value::as_array)
-        .or_else(|| json.get("cast").and_then(Value::as_array));
-    if let Some(arr) = cast_arr {
+    let cast_arr = ["/aggregate_credits/cast", "/credits/cast", "/cast"]
+        .into_iter()
+        .find_map(|pointer| {
+            json.pointer(pointer)
+                .and_then(Value::as_array)
+                .map(|cast| (pointer, cast))
+        });
+    if let Some((pointer, arr)) = cast_arr {
         let mut cast = Vec::new();
         for c in arr {
             let name = c
@@ -246,7 +249,23 @@ fn extract_credits(
             let role = c
                 .get("character")
                 .and_then(Value::as_str)
-                .map(ToString::to_string);
+                .filter(|role| !role.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    let mut roles = Vec::new();
+                    for role in c
+                        .get("roles")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|role| role.get("character").and_then(Value::as_str))
+                        .filter(|role| !role.is_empty())
+                    {
+                        if !roles.contains(&role) {
+                            roles.push(role);
+                        }
+                    }
+                    (!roles.is_empty()).then(|| roles.join(" / "))
+                });
             let tmdb_id = c.get("id").and_then(|v| v.as_i64()).map(|n| n.to_string());
             let thumb = c
                 .get("profile_path")
@@ -266,7 +285,7 @@ fn extract_credits(
             "cast".into(),
             SourceFieldOrigin {
                 selection: SourceSelection::Direct,
-                response_pointer: "/credits/cast".into(),
+                response_pointer: pointer.into(),
                 actual_locale: None,
                 certification_country: None,
             },

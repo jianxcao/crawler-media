@@ -208,51 +208,45 @@ pub(super) async fn genres(
     Extension(user): Extension<AuthUser>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
+    entity_page(state, user.id, query, crate::provider::EntityKind::Genre).await
+}
+async fn entity_page(
+    state: AppState,
+    user: domain::UserId,
+    query: ItemsQuery,
+    kind: crate::provider::EntityKind,
+) -> Result<Json<Value>, StatusCode> {
     let libraries = state
         .provider
-        .list_visible_libraries(user.id)
+        .list_visible_libraries(user)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let parent_id = query::library_parent(query.parent_id.as_deref(), &libraries);
-    let items = state
+    let parent = query::library_parent(query.parent_id.as_deref(), &libraries);
+    let page = state
         .provider
-        .list_visible_items(user.id, parent_id)
+        .query_entities(
+            user,
+            kind,
+            parent,
+            query.search_term.as_deref(),
+            query.start_index.unwrap_or(0),
+            query.limit.unwrap_or(100).clamp(1, 200),
+        )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut genre_counts: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    for it in items {
-        for g in it.metadata.genres {
-            if !g.trim().is_empty() {
-                *genre_counts.entry(g).or_insert(0) += 1;
-            }
-        }
-    }
+        .map_err(|error| {
+            tracing::error!(%error,user_id=%user,"Jellyfin entity projection read failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let (item_type, tag) = match kind {
+        crate::provider::EntityKind::Genre => ("Genre", "genre"),
+        crate::provider::EntityKind::Studio => ("Studio", "studio"),
+    };
     let server_id = state.provider.server_id();
-    let search = query.search_term.as_deref().map(|s| s.to_lowercase());
-    let mut dtos = Vec::new();
-    for (name, count) in genre_counts {
-        if let Some(term) = &search
-            && !name.to_lowercase().contains(term)
-        {
-            continue;
-        }
-        dtos.push(json!({
-            "Name": name,
-            "ServerId": server_id,
-            "Id": uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes()).hyphenated().to_string(),
-            "Type": "Genre",
-            "IsFolder": true,
-            "ChildCount": count,
-            "ImageTags": { "Primary": "genre" },
-            "BackdropImageTags": ["genre"],
-        }));
-    }
-    let total = dtos.len();
-    let start_index = query.start_index.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100).clamp(1, 200);
-    let listed: Vec<Value> = dtos.into_iter().skip(start_index).take(limit).collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": total })))
+    let items:Vec<_>=page.items.into_iter().map(|entity|json!({
+        "Name":entity.name,"ServerId":server_id,"Id":entity.wire_id,"Type":item_type,"IsFolder":true,
+        "ChildCount":entity.child_count,"ImageTags":{"Primary":tag},"BackdropImageTags":[tag],
+    })).collect();
+    Ok(Json(json!({"Items":items,"TotalRecordCount":page.total})))
 }
 pub(super) async fn genre_by_name(
     State(state): State<AppState>,
@@ -274,51 +268,7 @@ pub(super) async fn studios(
     Extension(user): Extension<AuthUser>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libraries = state
-        .provider
-        .list_visible_libraries(user.id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let parent_id = query::library_parent(query.parent_id.as_deref(), &libraries);
-    let items = state
-        .provider
-        .list_visible_items(user.id, parent_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut studio_counts: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    for it in items {
-        for s in it.metadata.studios {
-            if !s.trim().is_empty() {
-                *studio_counts.entry(s).or_insert(0) += 1;
-            }
-        }
-    }
-    let server_id = state.provider.server_id();
-    let search = query.search_term.as_deref().map(|s| s.to_lowercase());
-    let mut dtos = Vec::new();
-    for (name, count) in studio_counts {
-        if let Some(term) = &search
-            && !name.to_lowercase().contains(term)
-        {
-            continue;
-        }
-        dtos.push(json!({
-            "Name": name,
-            "ServerId": server_id,
-            "Id": uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes()).hyphenated().to_string(),
-            "Type": "Studio",
-            "IsFolder": true,
-            "ChildCount": count,
-            "ImageTags": { "Primary": "studio" },
-            "BackdropImageTags": ["studio"],
-        }));
-    }
-    let total = dtos.len();
-    let start_index = query.start_index.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100).clamp(1, 200);
-    let listed: Vec<Value> = dtos.into_iter().skip(start_index).take(limit).collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": total })))
+    entity_page(state, user.id, query, crate::provider::EntityKind::Studio).await
 }
 pub(super) async fn studio_by_name(
     State(state): State<AppState>,
@@ -356,47 +306,26 @@ pub(super) async fn search_hints(
     else {
         return Ok(Json(json!({ "SearchHints": [], "TotalRecordCount": 0 })));
     };
-    let items = state
+    let page = state
         .provider
-        .list_visible_items(user.id, None)
+        .search_hints_page(
+            user.id,
+            &term,
+            query.start_index.unwrap_or(0),
+            query.limit.unwrap_or(20).clamp(1, 100),
+        )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut hints = Vec::new();
-    for it in items {
-        let title_match = it.media.title.to_lowercase().contains(&term);
-        let orig_match = it
-            .metadata
-            .original_title
-            .as_deref()
-            .map(|s| s.to_lowercase().contains(&term))
-            .unwrap_or(false);
-        if title_match || orig_match {
-            let id = it.protocol_id();
-            let item_type = if it.is_series {
-                "Series"
-            } else if it.media.kind == domain::MediaKind::Tv {
-                "Episode"
-            } else {
-                "Movie"
-            };
-            hints.push(json!({
-                "ItemId": id,
-                "Id": id,
-                "Name": it.media.title,
-                "Type": item_type,
-                "IsFolder": it.is_series,
-                "RunTimeTicks": it.metadata.runtime_ticks,
-                "ProductionYear": it.metadata.production_year,
-                "MatchedTerm": term,
-            }));
-        }
-    }
-    let total = hints.len();
-    let start_index = query.start_index.unwrap_or(0);
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let listed: Vec<Value> = hints.into_iter().skip(start_index).take(limit).collect();
+        .map_err(|error| {
+            tracing::error!(%error,user_id=%user.id,"Jellyfin search hints failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let hints:Vec<_>=page.items.into_iter().map(|item| {
+        let id=item.protocol_id();
+        let item_type=if item.is_series {"Series"} else if item.media.kind==domain::MediaKind::Tv {"Episode"} else {"Movie"};
+        json!({"ItemId":id,"Id":id,"Name":item.media.title,"Type":item_type,"IsFolder":item.is_series,"RunTimeTicks":item.metadata.runtime_ticks,"ProductionYear":item.metadata.production_year,"MatchedTerm":term})
+    }).collect();
     Ok(Json(
-        json!({ "SearchHints": listed, "TotalRecordCount": total }),
+        json!({"SearchHints":hints,"TotalRecordCount":page.total}),
     ))
 }
 pub(super) async fn item_by_id(

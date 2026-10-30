@@ -2,6 +2,47 @@ use domain::{EntityScope, FieldValue, MetadataPreferences, SourceSelection};
 use media::normalize_metadata;
 
 #[test]
+fn normalized_tv_cast_preserves_aggregate_roles_and_person_identity() {
+    let normalized = normalize_metadata(
+        "tmdb",
+        EntityScope::Work,
+        include_str!("fixtures/rich_tv_details.json"),
+        &MetadataPreferences {
+            language_priority: vec!["en-US".into()],
+            cert_country_priority: vec!["US".into()],
+        },
+    )
+    .unwrap();
+    let cast = normalized.fields.cast.value().expect("TV cast adopted");
+    assert_eq!(cast.len(), 2);
+    assert_eq!(cast[0].name, "Bryan Cranston");
+    assert_eq!(cast[0].role.as_deref(), Some("Walter White"));
+    assert_eq!(cast[0].tmdb_id.as_deref(), Some("17419"));
+    assert_eq!(cast[0].thumb.as_deref(), Some("/bryan.jpg"));
+    assert_eq!(cast[0].order, Some(0));
+    assert_eq!(cast[1].name, "Aaron Paul");
+    assert_eq!(cast[1].role.as_deref(), Some("Jesse Pinkman"));
+    assert_eq!(
+        normalized.field_origins["cast"].response_pointer,
+        "/aggregate_credits/cast"
+    );
+
+    let full_cast = normalize_metadata(
+        "tmdb",
+        EntityScope::Work,
+        include_str!("fixtures/tv_aggregate_credits.json"),
+        &MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: vec!["CN".into()],
+        },
+    )
+    .unwrap();
+    let cast = full_cast.fields.cast.value().unwrap();
+    assert_eq!(cast.len(), 33);
+    assert_eq!(cast[0].role.as_deref(), Some("Shen Run / Yan Rui"));
+}
+
+#[test]
 fn tmdb_movie_certification_priorities_pick_first_matching_country() {
     let raw_payload = r#"{
         "title": "Inception",

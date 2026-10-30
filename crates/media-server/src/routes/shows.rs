@@ -45,32 +45,27 @@ pub(super) async fn show_seasons(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let series_id = domain::TypedItemId::Work(item.media.id).to_wire_string();
-    let episodes = state
-        .provider
-        .list_visible_items(user.id, Some(&series_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut season_numbers: std::collections::BTreeSet<u32> = episodes
-        .iter()
-        .map(|episode| episode.unit.map(|u| u.season as u32).unwrap_or(1))
-        .collect();
-    if season_numbers.is_empty() {
-        season_numbers.insert(item.unit.map(|u| u.season as u32).unwrap_or(1));
+    let mut seasons = state.provider.query_seasons(user.id,item.media.id).await.map_err(|error|{
+        tracing::error!(%error,user_id=%user.id,media_id=%item.media.id,"Jellyfin season projection read failed");StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if seasons.is_empty() {
+        seasons.push(crate::provider::Season {
+            season: item.unit.map(|unit| unit.season as u32).unwrap_or(1),
+            total: 0,
+            played: 0,
+        });
     }
     let server_id = state.provider.server_id();
     let mut seasons_json: Vec<Value> = Vec::new();
-    for season_num in season_numbers {
+    for season in seasons {
+        let season_num = season.season;
         let season_id = domain::TypedItemId::Season {
             media: item.media.id,
             season: season_num,
         }
         .to_wire_string();
-        let season_episodes: Vec<&crate::provider::MediaItemSnapshot> = episodes
-            .iter()
-            .filter(|e| e.unit.map(|u| u.season as u32) == Some(season_num))
-            .collect();
-        let played_count = season_episodes.iter().filter(|e| e.played).count();
-        let season_total = season_episodes.len();
+        let played_count = season.played;
+        let season_total = season.total;
         let unplayed = season_total.saturating_sub(played_count);
         let user_data = json!({
             "PlaybackPositionTicks": 0,

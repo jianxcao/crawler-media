@@ -20,7 +20,9 @@ use super::item_metadata;
 use super::items::{snapshot_unit_coords, unit_columns, with_date_created};
 use super::*;
 
+mod hints;
 mod hydration;
+pub(super) use hints::hints;
 mod light;
 mod page;
 mod request;

@@ -147,7 +147,7 @@ pub(crate) fn apply_integrity_batch(
         };
         let expected = integrity_query::expected(tx, key)?;
         let probe = probe_media(tx, key, &expected)?;
-        integrity_query::stage(tx, operation_id, &expected)?;
+        integrity_query::stage(tx, operation_id, &expected, key)?;
         let mut issues = record_presence_issues(&probe, media_id, &mut state.report);
         if probe.drift() {
             let report = &mut state.report;
@@ -402,6 +402,8 @@ fn next_media_page(
              UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_item_terms
               WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
              UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_protocol_terms
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
+             UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_protocol_entities
               WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
              UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_protocol_people
               WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)

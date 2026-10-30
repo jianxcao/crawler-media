@@ -351,14 +351,15 @@ fn person_filter_work_is_bounded_by_scoped_people_not_library_people() {
     for (n, id) in ids.iter().enumerate().skip(40) {
         for k in 0..10 {
             db.execute(
-                "INSERT INTO library_protocol_people(library_id,media_id,role,name_key,tmdb_id,wire_id) \
-                 VALUES(?1,?2,'Actor',?3,?4,?5)",
+                "INSERT INTO library_protocol_people(library_id,media_id,role,name_key,tmdb_id,wire_id,display_name) \
+                 VALUES(?1,?2,'Actor',?3,?4,?5,?6)",
                 rusqlite::params![
                     library.to_string(),
                     id,
                     format!("stranger {n} {k}"),
                     format!("{}", 90_000 + n * 10 + k),
                     format!("Actor:s{}", 90_000 + n * 10 + k),
+                    format!("Stranger {n} {k}"),
                 ],
             )
             .unwrap();

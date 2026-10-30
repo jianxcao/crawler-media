@@ -1,6 +1,8 @@
 //! Atomic query membership and distinct per-Library counter settlement.
 mod browse;
 mod counts;
+mod entities;
+pub(crate) mod entity_integrity;
 pub(crate) mod expected;
 mod people;
 mod protocol;
@@ -22,7 +24,7 @@ pub(crate) fn capture(tx: &Connection, key: ProjectionKey) -> Result<ProjectionB
             |r| r.get(0),
         )
         .optional()?;
-    let members = match &kind {
+    let mut members = match &kind {
         Some(kind) => counts::members(
             kind,
             &browse::read_terms(tx, "library_item_terms", &lib, &media)?,
@@ -30,7 +32,9 @@ pub(crate) fn capture(tx: &Connection, key: ProjectionKey) -> Result<ProjectionB
         ),
         None => Default::default(),
     };
+    members.extend(entities::members(&entities::read(tx, &lib, &media)?));
     Ok(ProjectionBefore {
+        entities: entities::ownership(tx, &media)?,
         card_exists: kind.is_some(),
         members,
     })
@@ -68,12 +72,11 @@ pub(crate) fn settle(
     inserted += delta.0;
     deleted += delta.1;
     people::sync(tx, &lib, &media, &people)?;
-    let counters = counts::apply(
-        tx,
-        &lib,
-        &before.members,
-        &counts::members(&kind, &web, &protocol),
-    )?;
+    let entities = entities::derive(tx, &lib, &media, &web)?;
+    entities::sync(tx, &lib, &media, &entities, &before.entities)?;
+    let mut after_members = counts::members(&kind, &web, &protocol);
+    after_members.extend(entities::members(&entities));
+    let counters = counts::apply(tx, &lib, &before.members, &after_members)?;
     mark_current(tx, &lib, &media)?;
     tracing::debug!(library_id=%key.library_id,media_id=%key.media_id,inserted,deleted,counters,"settled query projection");
     Ok(ProjectionDelta {
@@ -88,6 +91,13 @@ pub(crate) fn remove(
     key: ProjectionKey,
     before: ProjectionBefore,
 ) -> Result<ProjectionDelta, StoreError> {
+    entities::sync(
+        tx,
+        &key.library_id.to_string(),
+        &key.media_id.to_string(),
+        &Default::default(),
+        &before.entities,
+    )?;
     let counters = counts::apply(
         tx,
         &key.library_id.to_string(),
@@ -106,7 +116,8 @@ fn mark_current(tx: &Connection, lib: &str, media: &str) -> Result<(), StoreErro
         params![lib, media],
         |r| r.get(0),
     )?;
-    tx.execute("UPDATE library_items SET protocol_title_key=?3,query_projection_revision=item_revision,query_config_revision=(SELECT revision FROM library_query_config WHERE id=1) WHERE library_id=?1 AND media_id=?2",params![lib,media,title.to_lowercase()])?;
+    let original = protocol::original_title(tx, lib, media)?;
+    tx.execute("UPDATE library_items SET protocol_title_key=?3,protocol_original_title_key=?4,query_projection_revision=item_revision,query_config_revision=(SELECT revision FROM library_query_config WHERE id=1) WHERE library_id=?1 AND media_id=?2",params![lib,media,title.to_lowercase(),original])?;
     Ok(())
 }
 

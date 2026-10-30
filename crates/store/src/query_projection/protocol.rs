@@ -68,3 +68,25 @@ fn add_studio(terms: &mut Terms, name: &str) {
         terms.insert(("studio".into(), name.to_lowercase()));
     }
 }
+
+/// Original display title follows the selected observation, then adopted fields.
+pub(super) fn original_title(
+    tx: &Connection,
+    lib: &str,
+    media: &str,
+) -> Result<String, StoreError> {
+    let (nfo, adopted, _) = selected(tx, lib, media)?;
+    let selected = nfo["original_title"]["value"]
+        .as_str()
+        .or_else(|| adopted["fields"]["original_title"]["value"].as_str());
+    if let Some(title) = selected {
+        return Ok(title.to_lowercase());
+    }
+    Ok(tx
+        .query_row(
+            "SELECT COALESCE(original_title,'') FROM media WHERE media_id=?1",
+            [media],
+            |r| r.get::<_, String>(0),
+        )?
+        .to_lowercase())
+}

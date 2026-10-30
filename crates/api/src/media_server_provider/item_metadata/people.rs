@@ -1,7 +1,4 @@
-use domain::{LibraryFile, Media};
 use media_server::provider::MediaPerson;
-
-use super::nfo::file_nfo_metadata;
 
 pub(super) fn merge_people(people: &mut Vec<MediaPerson>, catalog_people: Vec<MediaPerson>) {
     for catalog_person in catalog_people {
@@ -140,60 +137,7 @@ fn people_from_parts<'a>(parts: impl Iterator<Item = PersonParts<'a>>) -> Vec<Me
     people
 }
 
-pub(in crate::media_server_provider) fn person_image_url(
-    file: &LibraryFile,
-    unit: (i32, i32),
-    media: &Media,
-    name: &str,
-) -> Option<String> {
-    file_nfo_metadata(file, unit, media, false)?
-        .cast
-        .into_iter()
-        .find(|member| member.name.eq_ignore_ascii_case(name))
-        .and_then(|member| member.thumb)
-        .and_then(|thumb| person_thumb_url(&thumb))
-}
-
-pub(in crate::media_server_provider) fn person_tmdb_id(
-    file: &LibraryFile,
-    unit: (i32, i32),
-    media: &Media,
-    name: &str,
-) -> Option<Option<String>> {
-    file_nfo_metadata(file, unit, media, false)?
-        .cast
-        .into_iter()
-        .find(|member| member.name.eq_ignore_ascii_case(name))
-        .map(|member| member.tmdb_id)
-}
-
-pub(in crate::media_server_provider) fn catalog_person_image_url(
-    metadata: &media::ItemMeta,
-    name: &str,
-    tmdb_person_id: Option<&str>,
-) -> Option<String> {
-    metadata
-        .cast
-        .iter()
-        .find(|member| match tmdb_person_id {
-            Some(person_id) => member.person_id.is_some_and(|id| {
-                id.to_string() == person_id
-                    || catalog_person_id(id)
-                        .replace('-', "")
-                        .eq_ignore_ascii_case(&person_id.replace('-', ""))
-            }),
-            None => member.name.eq_ignore_ascii_case(name),
-        })
-        .and_then(|member| member.avatar_path.as_deref())
-        .and_then(person_thumb_url)
-}
-
-fn catalog_person_id(tmdb_id: i64) -> String {
-    let key = format!("tmdb:{tmdb_id}:Actor");
-    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string()
-}
-
-fn person_thumb_url(thumb: &str) -> Option<String> {
+pub(in crate::media_server_provider) fn person_thumb_url(thumb: &str) -> Option<String> {
     if thumb.starts_with("https://image.tmdb.org/") {
         Some(thumb.to_string())
     } else if thumb.starts_with("/t/p/") {

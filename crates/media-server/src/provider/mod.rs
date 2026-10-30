@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod entities;
 pub mod query;
+pub use entities::{Entity, EntityKind, EntityPage, ItemCounts, Season};
 
 pub use query::{ServerItemPage, ServerItemQuery};
 
@@ -368,6 +370,46 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         principal: QueryPrincipal,
     ) -> Result<Vec<ServerLibrary>, QueryError>;
 
+    /// These reads must select bounded projection facts, never enumerate snapshots.
+    async fn query_entities(
+        &self,
+        _user: UserId,
+        _kind: EntityKind,
+        _parent: Option<&str>,
+        _search: Option<&str>,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<EntityPage, String> {
+        Err("entity projection queries unsupported".into())
+    }
+    async fn query_item_counts(&self, _user: UserId) -> Result<ItemCounts, String> {
+        Err("protocol count queries unsupported".into())
+    }
+    async fn query_seasons(
+        &self,
+        _user: UserId,
+        _media: domain::MediaId,
+    ) -> Result<Vec<Season>, String> {
+        Err("season projection queries unsupported".into())
+    }
+    async fn search_hints_page(
+        &self,
+        _user: UserId,
+        _term: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<ServerItemPage, String> {
+        Err("bounded search hints unsupported".into())
+    }
+    async fn resolve_entity_image(
+        &self,
+        _user: Option<UserId>,
+        _kind: EntityKind,
+        _query: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("entity image queries unsupported".into())
+    }
+
     /// Lists media item snapshots visible to this user
     async fn list_visible_items(
         &self,
@@ -480,26 +522,10 @@ pub trait MediaServerProvider: Send + Sync + 'static {
 
     async fn resolve_person(
         &self,
-        user_id: UserId,
-        query: &str,
+        _user: UserId,
+        _query: &str,
     ) -> Result<Option<MediaPerson>, String> {
-        let compact_query = query.replace('-', "");
-        let items = self.list_visible_items(user_id, None).await?;
-        Ok(items
-            .iter()
-            .flat_map(|item| &item.metadata.people)
-            .find(|person| {
-                person.name.eq_ignore_ascii_case(query)
-                    || person
-                        .id
-                        .replace('-', "")
-                        .eq_ignore_ascii_case(&compact_query)
-                    || person
-                        .tmdb_id
-                        .as_deref()
-                        .is_some_and(|id| id.eq_ignore_ascii_case(query))
-            })
-            .cloned())
+        Err("person projection queries unsupported".into())
     }
 
     async fn resolve_backdrop_bytes(

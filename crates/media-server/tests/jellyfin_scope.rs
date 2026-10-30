@@ -305,6 +305,27 @@ impl MediaServerProvider for FakeProvider {
         ])
     }
 
+    async fn query_item_counts(
+        &self,
+        _user: UserId,
+    ) -> Result<media_server::provider::ItemCounts, String> {
+        Ok(media_server::provider::ItemCounts {
+            movies: self
+                .items
+                .iter()
+                .filter(|item| item.media.kind == MediaKind::Movie)
+                .count() as u64,
+            series: self.items.iter().filter(|item| item.is_series).count() as u64,
+            episodes: self
+                .items
+                .iter()
+                .filter(|item| item.is_series)
+                .map(|item| item.metadata.child_count.unwrap_or(0) as u64)
+                .sum(),
+            items: self.items.len() as u64,
+        })
+    }
+
     async fn list_visible_items(
         &self,
         _user_id: UserId,

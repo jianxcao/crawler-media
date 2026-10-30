@@ -9,6 +9,7 @@ pub(crate) fn reduce_library_media(
     media_id: MediaId,
 ) -> Result<(), StoreError> {
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[library_id])?;
+    crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, media_id)?;
     let key = crate::query_projection::ProjectionKey {
         library_id,
         media_id,

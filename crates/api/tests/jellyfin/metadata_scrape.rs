@@ -47,6 +47,45 @@ impl api::catalog::Catalog for RichCatalog {
     ) -> Result<Option<media::ItemMeta>, String> {
         self.metadata(kind, id)
     }
+    fn normalized_metadata(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        if !self.origin_available.load(Ordering::SeqCst) {
+            return Err("catalog origin offline; durable cache remains available".into());
+        }
+        let cast: Vec<_> = self
+            .metadata
+            .cast
+            .iter()
+            .map(|actor| {
+                serde_json::json!({
+                    "name": actor.name, "id": actor.person_id,
+                    "profile_path": actor.avatar_path, "order": actor.order,
+                    "roles": [{"character": actor.role, "episode_count": 16}],
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "name": self.show.title, "original_name": self.show.original_title,
+            "overview": self.metadata.overview, "first_air_date": self.metadata.release_date,
+            "last_air_date": self.metadata.last_air_date,
+            "vote_average": 8.5, "vote_count": self.metadata.vote_count,
+            "original_language": self.metadata.original_language,
+            "status": self.metadata.status, "tagline": self.metadata.tagline,
+            "genres": [{"id": 16, "name": "Animation"}, {"id": 878, "name": "Science Fiction"}],
+            "networks": [{"name": "Netflix"}], "origin_country": ["US"],
+            "created_by": [{"name": "Craig Silverstein"}],
+            "aggregate_credits": {"cast": cast},
+            "content_ratings": {"results": [{"iso_3166_1": "US", "rating": "TV-14"}]},
+        });
+        media::normalize_metadata("tmdb", scope, &body.to_string(), preferences)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
     fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
         Ok(vec![media::EpisodeMeta {
             episode_number: 1,
@@ -248,6 +287,59 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(catalog_person["PrimaryImageTag"], "profile");
     let person_id = catalog_person["Id"].as_str().unwrap();
 
+    // Person lookup/filtering use published adopted facts, not optional detail enrichment.
+    let before_person = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/Persons/Catalog%20Only%20Actor")
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before_person.status(), StatusCode::NOT_FOUND);
+    // R24: PersonIds reads local observed facts only; a person known solely to the live
+    // catalog does not match (local hits are covered by
+    // jellyfin_paged_metadata::audit::person_filter_is_local_and_survives_catalog_failure).
+    let before_adoption = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
+    assert_eq!(before_adoption["TotalRecordCount"], 0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/libraries/{library_id}/items/{media_id}/metadata/refresh"
+                ))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_adopted_person_routes(&app, person_id).await;
+
+    let show = library::read_nfo(&show_root.join("tvshow.nfo")).unwrap();
+    assert_eq!(show.tagline.as_deref(), Some("What makes us human?"));
+    assert_eq!(show.end_date.as_deref(), Some("2025-02-21"));
+    assert_eq!(show.vote_count, Some(1200));
+    assert_eq!(show.cast.len(), 3);
+    assert!(
+        show.cast
+            .iter()
+            .any(|person| person.name == "Catalog Only Actor")
+    );
+    let episode = library::read_nfo(&episode_path.with_extension("nfo")).unwrap();
+    assert_eq!(episode.title.as_deref(), Some("Zero Day"));
+    assert_eq!(episode.aired.as_deref(), Some("2022-09-01"));
+    assert_eq!(episode.runtime_minutes.as_deref(), Some("42"));
+}
+
+async fn assert_adopted_person_routes(app: &axum::Router, person_id: &str) {
     let person_response = app
         .clone()
         .oneshot(
@@ -263,12 +355,6 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     let person_details = json(person_response).await;
     assert_eq!(person_details["Id"], person_id);
     assert_eq!(person_details["ImageTags"]["Primary"], "profile");
-
-    // R24: PersonIds reads local observed facts only; a person known solely to the live
-    // catalog does not match (local hits are covered by
-    // jellyfin_paged_metadata::audit::person_filter_is_local_and_survives_catalog_failure).
-    let before_adoption = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
-    assert_eq!(before_adoption["TotalRecordCount"], 0);
 
     for uri in [
         "/Persons/Catalog%20Only%20Actor/Images/Primary".to_string(),
@@ -287,7 +373,7 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
         );
     }
 
-    let person = json_get(&app, "/Persons/Paul%20Dano").await;
+    let person = json_get(app, "/Persons/Paul%20Dano").await;
     assert_eq!(person["ImageTags"]["Primary"], "profile");
 
     let person_image = app
@@ -321,35 +407,4 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
         rose_image.headers()["location"],
         "https://image.tmdb.org/t/p/w185/rose.jpg"
     );
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/v1/libraries/{library_id}/items/{media_id}/metadata/refresh"
-                ))
-                .header("authorization", "Bearer admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let show = library::read_nfo(&show_root.join("tvshow.nfo")).unwrap();
-    assert_eq!(show.tagline.as_deref(), Some("What makes us human?"));
-    assert_eq!(show.end_date.as_deref(), Some("2025-02-21"));
-    assert_eq!(show.vote_count, Some(1200));
-    assert_eq!(show.cast.len(), 3);
-    assert!(
-        show.cast
-            .iter()
-            .any(|person| person.name == "Catalog Only Actor")
-    );
-    let episode = library::read_nfo(&episode_path.with_extension("nfo")).unwrap();
-    assert_eq!(episode.title.as_deref(), Some("Zero Day"));
-    assert_eq!(episode.aired.as_deref(), Some("2022-09-01"));
-    assert_eq!(episode.runtime_minutes.as_deref(), Some("42"));
 }

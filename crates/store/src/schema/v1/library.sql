@@ -162,7 +162,7 @@ CREATE TABLE library_items (
  library_id TEXT NOT NULL REFERENCES libraries(library_id), media_id TEXT NOT NULL REFERENCES media(media_id), kind TEXT NOT NULL,
  title TEXT NOT NULL, title_sort TEXT NOT NULL, year INTEGER, identity_state TEXT NOT NULL,
  metadata_revision INTEGER NOT NULL, item_revision INTEGER NOT NULL,
- protocol_title_key TEXT NOT NULL DEFAULT '', query_projection_revision INTEGER NOT NULL DEFAULT 0,
+ protocol_title_key TEXT NOT NULL DEFAULT '', protocol_original_title_key TEXT NOT NULL DEFAULT '', query_projection_revision INTEGER NOT NULL DEFAULT 0,
  query_config_revision INTEGER NOT NULL DEFAULT 0,
  release_date_sort TEXT NOT NULL DEFAULT '', rating_sort REAL NOT NULL DEFAULT -1, runtime_sort INTEGER NOT NULL DEFAULT 0,
  language TEXT, added_at_sort INTEGER NOT NULL, size_bytes INTEGER, size_sort INTEGER NOT NULL DEFAULT 0,
@@ -230,10 +230,11 @@ CREATE TABLE library_protocol_people (
  library_id TEXT NOT NULL, media_id TEXT NOT NULL,
  role TEXT NOT NULL CHECK(role IN ('Actor','Director','Writer')),
  name_key TEXT NOT NULL, tmdb_id TEXT NOT NULL, wire_id TEXT NOT NULL,
+ display_name TEXT NOT NULL, character TEXT, image_url TEXT,
  PRIMARY KEY(library_id,media_id,role,name_key,tmdb_id),
  FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE
 ) WITHOUT ROWID;
-CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,library_id,media_id,role,name_key,tmdb_id);
+CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,image_url DESC,library_id,media_id,role,name_key,tmdb_id);
 -- `protocol_people_name` (role,name_key,...) was dropped by the 2026-10-26 schema
 -- audit: nothing seeks it. The only person predicate
 -- (`library_query/protocol/membership.rs:21`) starts from `wire_id`/`tmdb_id` and
@@ -246,7 +247,7 @@ CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,library_id,
 CREATE INDEX protocol_people_tmdb ON library_protocol_people(tmdb_id,role,library_id,media_id);
 CREATE TABLE library_query_counts (
  library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE,
- surface TEXT NOT NULL CHECK(surface IN ('browse','protocol_work')),
+ surface TEXT NOT NULL CHECK(surface IN ('browse','protocol_work','protocol_entity')),
  dimension TEXT NOT NULL, value TEXT NOT NULL, member_count INTEGER NOT NULL CHECK(member_count>=0),
  PRIMARY KEY(library_id,surface,dimension,value)
 );
@@ -488,3 +489,25 @@ CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms
  WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
 CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id)
  WHERE status IN ('completed','partial','cancelled','failed');
+
+-- Display-preserving entity memberships and grouped overlap correction.
+CREATE TABLE library_protocol_entities (
+ library_id TEXT NOT NULL,media_id TEXT NOT NULL,entity_kind TEXT NOT NULL CHECK(entity_kind IN ('genre','studio')),
+ name TEXT NOT NULL,name_key TEXT NOT NULL,wire_id TEXT NOT NULL,poster_file_id TEXT,
+ PRIMARY KEY(library_id,media_id,entity_kind,name),
+ FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX protocol_entities_name ON library_protocol_entities(entity_kind,name_key,poster_file_id DESC,library_id,media_id,name);
+CREATE INDEX protocol_entities_wire ON library_protocol_entities(entity_kind,wire_id,poster_file_id DESC,library_id,media_id,name);
+CREATE INDEX protocol_entities_media ON library_protocol_entities(media_id,entity_kind,name,library_id);
+CREATE TABLE protocol_entity_overlap_counts (
+ entity_kind TEXT NOT NULL,name TEXT NOT NULL,owner_libraries_json TEXT NOT NULL CHECK(json_valid(owner_libraries_json)),
+ member_count INTEGER NOT NULL CHECK(member_count>0),PRIMARY KEY(entity_kind,name,owner_libraries_json)
+) WITHOUT ROWID;
+CREATE INDEX protocol_people_name ON library_protocol_people(name_key,image_url DESC,library_id,media_id,role,tmdb_id);
+CREATE INDEX protocol_people_image_tmdb ON library_protocol_people(tmdb_id,image_url DESC,library_id,media_id);
+CREATE TABLE protocol_entity_overlap_rebuild (
+ operation_id TEXT NOT NULL,entity_kind TEXT NOT NULL,name TEXT NOT NULL,
+ owner_libraries_json TEXT NOT NULL CHECK(json_valid(owner_libraries_json)),member_count INTEGER NOT NULL CHECK(member_count>0),
+ PRIMARY KEY(operation_id,entity_kind,name,owner_libraries_json)
+) WITHOUT ROWID;

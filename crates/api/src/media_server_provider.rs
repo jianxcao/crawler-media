@@ -37,6 +37,7 @@ use item_metadata::{
 };
 
 mod enrichment;
+mod entities;
 pub(crate) mod items;
 mod selection;
 mod user_marks;
@@ -353,6 +354,48 @@ impl MediaServerProvider for ApiServerProvider {
             .map_err(|error| error.to_string())?
     }
 
+    async fn query_entities(
+        &self,
+        user: UserId,
+        kind: media_server::provider::EntityKind,
+        parent: Option<&str>,
+        search: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::EntityPage, String> {
+        entities::entities(self, user, kind, parent, search, offset, limit).await
+    }
+    async fn query_item_counts(
+        &self,
+        user: UserId,
+    ) -> Result<media_server::provider::ItemCounts, String> {
+        entities::counts(self, user).await
+    }
+    async fn query_seasons(
+        &self,
+        user: UserId,
+        media: domain::MediaId,
+    ) -> Result<Vec<media_server::provider::Season>, String> {
+        entities::seasons(self, user, media).await
+    }
+    async fn search_hints_page(
+        &self,
+        user: UserId,
+        term: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ServerItemPage, String> {
+        entities::hints(self, user, term, offset, limit).await
+    }
+    async fn resolve_entity_image(
+        &self,
+        user: Option<UserId>,
+        kind: media_server::provider::EntityKind,
+        query: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        entities::image(self, user, kind, query).await
+    }
+
     async fn list_visible_items(
         &self,
         user_id: UserId,
@@ -664,15 +707,13 @@ impl ApiServerProvider {
         media: domain::MediaId,
         season: u32,
     ) -> Result<media_server::provider::UserItemData, String> {
-        let series_id = domain::TypedItemId::Work(media).to_wire_string();
-        let episodes: Vec<MediaItemSnapshot> = self
-            .list_visible_items(user_id, Some(&series_id))
+        let summary = entities::seasons(self, user_id, media)
             .await?
             .into_iter()
-            .filter(|episode| episode.unit.map(|unit| unit.season) == Some(season as i32))
-            .collect();
-        let total = episodes.len();
-        let played = episodes.iter().filter(|episode| episode.played).count();
+            .find(|row| row.season == season);
+        let (total, played) = summary
+            .map(|row| (row.total as usize, row.played as usize))
+            .unwrap_or_default();
         let favorite = self
             .run_sync(move |provider| {
                 provider.bounded_reader(|store| {

@@ -10,6 +10,7 @@ pub(crate) fn repair_projection(
 ) -> Result<(), StoreError> {
     owner.validate(tx, key.library_id)?;
     let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
+    let old_entities = super::entities::ownership(tx, &media)?;
     // Counters are intentionally untouched: corrupt undercounts cannot prevent repair.
     for table in [
         "library_item_terms",
@@ -21,6 +22,7 @@ pub(crate) fn repair_projection(
             params![lib, media],
         )?;
     }
+    super::entities::sync(tx, &lib, &media, &Default::default(), &old_entities)?;
     let Some(card) = &expected.card else {
         tx.execute(
             "DELETE FROM library_units WHERE library_id=?1 AND media_id=?2",
@@ -66,6 +68,8 @@ pub(crate) fn repair_projection(
         &expected.protocol,
     )?;
     super::people::sync(tx, &lib, &media, &expected.people)?;
+    let before = super::entities::ownership(tx, &media)?;
+    super::entities::sync(tx, &lib, &media, &expected.entities, &before)?;
     super::mark_current(tx, &lib, &media)?;
     Ok(())
 }
@@ -161,7 +165,9 @@ pub(crate) fn projection_matches(
         && super::browse::read_terms(tx, "library_item_terms", &lib, &media)? == expected.web
         && super::browse::read_terms(tx, "library_protocol_terms", &lib, &media)?
             == expected.protocol
-        && super::people::read(tx, &lib, &media)? == expected.people)
+        && super::people::read(tx, &lib, &media)? == expected.people
+        && super::entities::read(tx, &lib, &media)? == expected.entities
+        && super::entities::sources_match(tx, &lib, &media)?)
 }
 
 fn sync_rows(

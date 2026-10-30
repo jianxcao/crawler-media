@@ -61,95 +61,50 @@ async fn person_primary_image(
 async fn genre_primary_image(
     State(state): State<AppState>,
     headers: HeaderMap,
-    user_id: Option<Extension<Option<domain::UserId>>>,
+    user: Option<Extension<Option<domain::UserId>>>,
     Path(name): Path<String>,
 ) -> Result<Response, StatusCode> {
-    let user_id = user_id
-        .and_then(|extension| extension.0)
-        .unwrap_or_else(|| domain::UserId::from_uuid(uuid::Uuid::nil()));
-    let items = state
-        .provider
-        .list_visible_items(user_id, None)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    for it in items {
-        let matches_genre = it.metadata.genres.iter().any(|g| {
-            let u = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, g.as_bytes())
-                .hyphenated()
-                .to_string();
-            let s = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, g.as_bytes())
-                .simple()
-                .to_string();
-            g.eq_ignore_ascii_case(&name)
-                || u.eq_ignore_ascii_case(&name)
-                || s.eq_ignore_ascii_case(&name)
-        });
-        if matches_genre {
-            let id = it.protocol_id();
-            if let Ok(Some(url)) = state
-                .provider
-                .resolve_primary_image_url(Some(user_id), &id)
-                .await
-            {
-                return Ok(Redirect::temporary(&url).into_response());
-            }
-            if let Ok(Some(bytes)) = state
-                .provider
-                .resolve_poster_bytes(Some(user_id), &id)
-                .await
-            {
-                return Ok(image_response(&headers, bytes));
-            }
-        }
-    }
-    Err(StatusCode::NOT_FOUND)
+    entity_image(
+        state,
+        headers,
+        user.and_then(|extension| extension.0),
+        crate::provider::EntityKind::Genre,
+        &name,
+    )
+    .await
 }
-
 async fn studio_primary_image(
     State(state): State<AppState>,
     headers: HeaderMap,
-    user_id: Option<Extension<Option<domain::UserId>>>,
+    user: Option<Extension<Option<domain::UserId>>>,
     Path(name): Path<String>,
 ) -> Result<Response, StatusCode> {
-    let user_id = user_id
-        .and_then(|extension| extension.0)
-        .unwrap_or_else(|| domain::UserId::from_uuid(uuid::Uuid::nil()));
-    let items = state
+    entity_image(
+        state,
+        headers,
+        user.and_then(|extension| extension.0),
+        crate::provider::EntityKind::Studio,
+        &name,
+    )
+    .await
+}
+async fn entity_image(
+    state: AppState,
+    headers: HeaderMap,
+    user: Option<domain::UserId>,
+    kind: crate::provider::EntityKind,
+    name: &str,
+) -> Result<Response, StatusCode> {
+    let bytes = state
         .provider
-        .list_visible_items(user_id, None)
+        .resolve_entity_image(user, kind, name)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    for it in items {
-        let matches_studio = it.metadata.studios.iter().any(|st| {
-            let u = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, st.as_bytes())
-                .hyphenated()
-                .to_string();
-            let s = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, st.as_bytes())
-                .simple()
-                .to_string();
-            st.eq_ignore_ascii_case(&name)
-                || u.eq_ignore_ascii_case(&name)
-                || s.eq_ignore_ascii_case(&name)
-        });
-        if matches_studio {
-            let id = it.protocol_id();
-            if let Ok(Some(url)) = state
-                .provider
-                .resolve_primary_image_url(Some(user_id), &id)
-                .await
-            {
-                return Ok(Redirect::temporary(&url).into_response());
-            }
-            if let Ok(Some(bytes)) = state
-                .provider
-                .resolve_poster_bytes(Some(user_id), &id)
-                .await
-            {
-                return Ok(image_response(&headers, bytes));
-            }
-        }
-    }
-    Err(StatusCode::NOT_FOUND)
+        .map_err(|error| {
+            tracing::warn!(%error,entity=%name,"failed to deliver Jellyfin entity artwork");
+            StatusCode::NOT_FOUND
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(image_response(&headers, bytes))
 }
 
 async fn primary_image(
@@ -240,7 +195,7 @@ async fn resolve_backdrop(
             tracing::warn!(%error, item_id = %id, "failed to read Jellyfin backdrop image")
         }
     }
-    // 只有自身没有图时才回落到 genre/studio 扫描（fallback 能力保留）。
+    // 只有自身没有图时才回落到 genre/studio 定向投影读。
     if let Ok(res) = genre_primary_image(
         State(state.clone()),
         headers.clone(),

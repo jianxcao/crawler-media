@@ -23,6 +23,7 @@ impl crate::LibraryConnection<'_> {
             return Err(StoreError::Missing(format!("library {library}")));
         };
         super::super::integrity_guard::ensure_no_operation(&tx, library)?;
+        super::super::integrity_guard::ensure_no_shared_integrity(&tx, library)?;
         super::super::integrity_guard::ensure_no_root_reassignment(&tx, library)?;
         if lifecycle != "ready" {
             return Err(StoreError::Protected(format!(

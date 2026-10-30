@@ -5,12 +5,11 @@ use std::collections::BTreeMap;
 use crate::Store;
 
 mod artwork;
-mod nfo;
 mod people;
 
 pub(super) use artwork::{backdrop_path, local_primary_image, primary_image_url};
 use artwork::{primary_image_metadata, series_primary_image_tag};
-pub(super) use people::{catalog_person_image_url, person_image_url, person_tmdb_id};
+pub(super) use people::person_thumb_url;
 use people::{merge_people, people_from_fields, people_from_nfo};
 
 use super::items::is_whole_unit;

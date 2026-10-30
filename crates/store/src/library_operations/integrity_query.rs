@@ -11,10 +11,12 @@ pub(super) fn stage(
     tx: &Connection,
     operation: &str,
     expected: &ExpectedProjection,
+    key: ProjectionKey,
 ) -> Result<(), StoreError> {
     for m in &expected.members {
         tx.execute("INSERT INTO library_query_count_rebuild(operation_id,surface,dimension,value,member_count) VALUES(?1,?2,?3,?4,1) ON CONFLICT(operation_id,surface,dimension,value) DO UPDATE SET member_count=member_count+1",params![operation,m.surface,m.dimension,m.value])?;
     }
+    crate::query_projection::entity_integrity::stage(tx, operation, key, expected)?;
     Ok(())
 }
 pub(super) fn finish_counts(
@@ -29,6 +31,8 @@ pub(super) fn finish_counts(
     let actual = counts(tx, "library_query_counts", "library_id", &lib)?;
     let expected = counts(tx, "library_query_count_rebuild", "operation_id", operation)?;
     let mismatch = actual != expected;
+    let overlap_mismatch =
+        crate::query_projection::entity_integrity::finish(tx, operation, &lib, repair)?;
     if repair {
         tx.execute(
             "DELETE FROM library_query_counts WHERE library_id=?1",
@@ -40,7 +44,7 @@ pub(super) fn finish_counts(
         "DELETE FROM library_query_count_rebuild WHERE operation_id=?1",
         [operation],
     )?;
-    Ok(mismatch)
+    Ok(mismatch || overlap_mismatch)
 }
 fn counts(
     tx: &Connection,

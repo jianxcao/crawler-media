@@ -15,6 +15,15 @@
 //! - `metadata`：页内条目落库快照的水合（观测输入 + 采纳合成，不读现场）。
 
 mod count;
+mod entities;
+mod entity_counts;
+mod hints;
+mod seasons;
+pub use entities::{
+    ProtocolEntity, ProtocolEntityKind, ProtocolEntityPage, ProtocolEntityQuery, ProtocolPerson,
+};
+pub use entity_counts::ProtocolCounts;
+pub use seasons::ProtocolSeason;
 mod folder;
 mod latest;
 mod membership;

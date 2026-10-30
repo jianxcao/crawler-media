@@ -362,3 +362,8 @@ impl Store {
 
 mod metadata_language;
 pub use metadata_language::{MetadataLanguageOperation, MetadataLanguageState};
+
+pub use library_query::protocol::{
+    ProtocolCounts, ProtocolEntity, ProtocolEntityKind, ProtocolEntityPage, ProtocolEntityQuery,
+    ProtocolPerson, ProtocolSeason,
+};

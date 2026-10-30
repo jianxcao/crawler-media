@@ -45,6 +45,8 @@ pub(super) fn reduce_publication_batch(
     let mut affected = affected.into_iter().collect::<Vec<_>>();
     affected.sort_by_key(|(id, _)| id.to_string());
     for (media_id, changes) in affected {
+        crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[library_id])?;
+        crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, media_id)?;
         counters.media_reduced();
         let key = crate::query_projection::ProjectionKey {
             library_id,

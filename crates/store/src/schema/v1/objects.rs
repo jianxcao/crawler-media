@@ -43,6 +43,9 @@ pub const LIBRARY_TABLES: &[&str] = &[
     "library_item_terms",
     "library_protocol_terms",
     "library_protocol_people",
+    "library_protocol_entities",
+    "protocol_entity_overlap_counts",
+    "protocol_entity_overlap_rebuild",
     "library_query_counts",
     "library_query_config",
     "library_query_count_rebuild",
@@ -82,6 +85,11 @@ pub const LIBRARY_TABLES: &[&str] = &[
 ];
 
 pub const LIBRARY_INDEXES: &[&str] = &[
+    "protocol_entities_name",
+    "protocol_entities_wire",
+    "protocol_entities_media",
+    "protocol_people_name",
+    "protocol_people_image_tmdb",
     "media_title",
     "alias_media",
     "alias_target",

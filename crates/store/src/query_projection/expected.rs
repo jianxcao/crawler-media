@@ -12,6 +12,7 @@ pub(crate) struct ExpectedProjection {
     pub web: Terms,
     pub protocol: Terms,
     pub people: BTreeSet<Person>,
+    pub entities: super::entities::Entities,
     pub members: BTreeSet<CounterMember>,
 }
 impl ExpectedProjection {
@@ -23,6 +24,7 @@ impl ExpectedProjection {
             web: Terms::new(),
             protocol: Terms::new(),
             people: BTreeSet::new(),
+            entities: Default::default(),
             members: BTreeSet::new(),
         }
     }
@@ -64,12 +66,18 @@ pub(crate) fn expected_projection(
     ));
     let search = crate::protocol_index::expected_search(tx, &lib, &media, &facts.title)?;
     let (protocol, people) = super::protocol::derive(tx, &lib, &media, &web)?;
-    let members = super::counts::members(&kind, &web, &protocol);
+    let entities = super::entities::derive(tx, &lib, &media, &web)?;
+    let mut members = super::counts::members(&kind, &web, &protocol);
+    members.extend(super::entities::members(&entities));
     let users = Store::expected_user_rows(tx, &lib, key.media_id, &owned, kind == "tv")?;
     let mut card = card_row(
         tx, &lib, &media, &counts, &facts, preferred, seasons, episodes, kind, identity,
     )?;
     card.insert("search_text".into(), search.into());
+    card.insert(
+        "protocol_original_title_key".into(),
+        super::protocol::original_title(tx, &lib, &media)?.into(),
+    );
     Ok(ExpectedProjection {
         card: Some(card),
         units,
@@ -77,6 +85,7 @@ pub(crate) fn expected_projection(
         web,
         protocol,
         people,
+        entities,
         members,
     })
 }

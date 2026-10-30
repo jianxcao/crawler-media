@@ -97,3 +97,43 @@ pub(crate) fn ensure_no_root_reassignment(
     }
     Ok(())
 }
+
+/// Shared projection aggregates cannot be staged while another owner may repair
+/// the same Media. Unrelated Libraries keep independent maintenance admission.
+pub(crate) fn ensure_no_shared_integrity(
+    tx: &Connection,
+    library: LibraryId,
+) -> Result<(), StoreError> {
+    let tables = [
+        "library_files",
+        "library_items",
+        "library_units",
+        "library_metadata_inputs",
+        "library_item_terms",
+        "library_protocol_terms",
+        "library_protocol_people",
+        "library_protocol_entities",
+        "user_library_items",
+    ];
+    let target = tables
+        .iter()
+        .map(|table| format!("SELECT media_id FROM {table} WHERE library_id=?1"))
+        .collect::<Vec<_>>()
+        .join(" UNION ");
+    let overlapping=tables.iter().map(|table|format!("EXISTS(SELECT 1 FROM {table} other WHERE other.library_id=o.library_id AND other.media_id=t.media_id)")).collect::<Vec<_>>().join(" OR ");
+    let sql = format!(
+        "WITH target AS ({target}) SELECT o.library_id FROM library_operations o
+        WHERE o.library_id<>?1 AND o.kind='integrity' AND o.state<>'succeeded'
+        AND EXISTS(SELECT 1 FROM target t WHERE {overlapping}) LIMIT 1"
+    );
+    let owner: Option<String> = tx
+        .query_row(&sql, [library.to_string()], |row| row.get(0))
+        .optional()?;
+    if let Some(owner) = owner {
+        tracing::warn!(library_id=%library,owner_library_id=%owner,"Integrity admission rejected by shared Media owner");
+        return Err(StoreError::Protected(format!(
+            "library {owner} has an Integrity owner over shared Media"
+        )));
+    }
+    Ok(())
+}

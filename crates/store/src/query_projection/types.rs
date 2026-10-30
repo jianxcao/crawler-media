@@ -25,6 +25,7 @@ impl CounterMember {
 pub(crate) struct ProjectionBefore {
     pub card_exists: bool,
     pub members: BTreeSet<CounterMember>,
+    pub entities: super::entities::Ownership,
 }
 #[derive(Default)]
 #[allow(dead_code)]
@@ -41,4 +42,7 @@ pub(crate) struct Person {
     pub name: String,
     pub tmdb: String,
     pub wire: String,
+    pub display: String,
+    pub character: Option<String>,
+    pub image: Option<String>,
 }
