@@ -11,7 +11,7 @@ use crate::library_query::{
         page::{library_item_index_on, library_item_page_on},
     },
     page_inputs::{ProtocolPageInputs, page_inputs_on},
-    protocol::select_protocol,
+    protocol::{select_latest, select_protocol},
     series_scalar::{ProtocolSeriesScalar, series_scalar_on},
     types::{ItemPage, LibraryFacets, LibraryItemFacts, LibraryStill},
 };
@@ -117,7 +117,8 @@ fn execute_on(
             }
             Ok(LibraryReadResult::Facets(library_facets_on(conn, request)?))
         }
-        LibraryReadRequest::Protocol(request) => protocol_on(conn, context, request),
+        LibraryReadRequest::Protocol(request) => protocol_on(conn, context, request, false),
+        LibraryReadRequest::ProtocolLatest(request) => protocol_on(conn, context, request, true),
     }
 }
 
@@ -125,9 +126,14 @@ fn protocol_on(
     conn: &Connection,
     context: &LibraryReadContext,
     request: &domain::ProtocolItemQuery,
+    latest: bool,
 ) -> Result<LibraryReadResult, LibraryReadError> {
     let allowed = context.authorized();
-    let page = select_protocol(conn, &allowed, request)?;
+    let page = if latest {
+        select_latest(conn, &allowed, request)?
+    } else {
+        select_protocol(conn, &allowed, request)?
+    };
     let inputs = page_inputs_on(
         conn,
         &allowed,

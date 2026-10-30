@@ -60,7 +60,6 @@ async fn query_response(
             explicit_library: &mut explicit_library,
             contexts: Vec::new(),
             references: Vec::new(),
-            latest_total: None,
             snapshot: None,
         };
         let result = async {
@@ -70,7 +69,7 @@ async fn query_response(
             };
             let total = match kind {
                 ResponseKind::Page => Some(page.total as u64),
-                ResponseKind::Latest => work.latest_total,
+                ResponseKind::Latest => None,
             };
             if let store::PageValidation::Stale { gone } = work.validate().await? {
                 if attempt == 0 {
@@ -157,36 +156,25 @@ struct Attempt<'a> {
     explicit_library: &'a mut Option<LibraryId>,
     contexts: Vec<LibraryReadContext>,
     references: Vec<ProtocolItemRef>,
-    latest_total: Option<u64>,
     snapshot: Option<store::PageSnapshot>,
 }
 impl Attempt<'_> {
     async fn latest(&mut self, query: &ServerItemQuery) -> Result<ServerItemPage, AttemptError> {
-        let mut segment = query.clone();
-        segment.sort_by = Some("DateCreated,SortName".into());
-        segment.sort_order = Some("Descending".into());
-        if query.is_played.is_some() {
-            let page = self.segment(segment).await?;
-            self.latest_total = Some(page.total as u64);
-            return Ok(page);
-        }
-        segment.is_played = Some(false);
-        let mut unplayed = self.segment(segment.clone()).await?;
-        if unplayed.items.len() < query.limit {
-            let taken = unplayed.items.len();
-            segment.is_played = Some(true);
-            segment.offset = (query.offset + taken).saturating_sub(unplayed.total);
-            segment.limit = query.limit - taken;
-            let played = self.segment(segment).await?;
-            self.latest_total = Some(unplayed.total as u64 + played.total as u64);
-            unplayed.items.extend(played.items);
-        }
-        // An unselected played segment has no measured total. Latest's array
-        // wire response has no total; do not add a query just for instrumentation.
-        Ok(unplayed)
+        let mut query = query.clone();
+        query.sort_by = Some("DateCreated,SortName".into());
+        query.sort_order = Some("Descending".into());
+        self.segment_with_mode(query, true).await
     }
 
     async fn segment(&mut self, query: ServerItemQuery) -> Result<ServerItemPage, AttemptError> {
+        self.segment_with_mode(query, false).await
+    }
+
+    async fn segment_with_mode(
+        &mut self,
+        query: ServerItemQuery,
+        latest: bool,
+    ) -> Result<ServerItemPage, AttemptError> {
         let user_id = self.principal.user_id;
         let deadline = self.principal.deadline;
         let credential = ReadCredential::new(user_id, self.principal.token.clone());
@@ -211,20 +199,26 @@ impl Attempt<'_> {
         if let ProtocolParent::Library(id) = request.parent {
             *self.explicit_library = Some(id);
         }
-        let mut result = self.lease(&credential, request.clone()).await?;
+        let mut result = self.lease(&credential, request.clone(), latest).await?;
         if matches!(&result, LibraryReadResult::Protocol { page, .. } if page.total == 0)
             && matches!(request.parent, ProtocolParent::Genre(_))
             && query.parent_id.is_some()
         {
             let mut fallback = request;
             fallback.parent = ProtocolParent::Studio(query.parent_id.clone().unwrap_or_default());
-            result = self.lease(&credential, fallback).await?;
+            result = self.lease(&credential, fallback, latest).await?;
+        }
+        // Latest's references already represent the final offset slice. Its
+        // local cardinality is not a global total, so rendering starts at zero.
+        let mut render_query = query;
+        if latest {
+            render_query.offset = 0;
         }
         let (page, references, snapshot) = super::finish_protocol(
             self.state,
             deadline,
             user_id,
-            query,
+            render_query,
             result,
             self.probe_budget.clone(),
         )
@@ -242,9 +236,14 @@ impl Attempt<'_> {
         &mut self,
         credential: &ReadCredential,
         request: domain::ProtocolItemQuery,
+        latest: bool,
     ) -> Result<LibraryReadResult, AttemptError> {
         let credential = credential.clone();
-        let context_request = LibraryReadRequest::Protocol(request);
+        let context_request = if latest {
+            LibraryReadRequest::ProtocolLatest(request)
+        } else {
+            LibraryReadRequest::Protocol(request)
+        };
         let known_library = *self.explicit_library;
         let context = run_store_query_stage(self.state, self.principal.deadline, move |store| {
             let context = store.prepare_library_read(&credential, &context_request)?;

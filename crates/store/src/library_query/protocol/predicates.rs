@@ -236,13 +236,14 @@ fn played_clause(branch: Branch, user: &str, value: i64, bindings: &mut Bindings
     if branch.unit() {
         return format!("{} = {expected}", effective_played_sql(user, Some("u")));
     }
+    // Work summaries already reduce inherited episode assertions at write time.
+    // Preserve the protocol's vacuous-played rule for a TV work with no units.
     format!(
-        "(CASE WHEN s.kind = 'tv' THEN NOT EXISTS (SELECT 1 FROM library_units ue \
+        "((s.kind = 'tv' AND NOT EXISTS (SELECT 1 FROM library_units ue \
            WHERE ue.library_id = s.library_id AND ue.media_id = s.media_id \
-             AND ue.season >= 0 AND ue.episode >= 0 AND {} = 0) \
-         ELSE {} END) = {expected}",
-        effective_played_sql(user, Some("ue")),
-        effective_played_sql(user, None)
+             AND ue.season >= 0 AND ue.episode >= 0)) OR \
+         EXISTS (SELECT 1 FROM user_library_items ui WHERE ui.user_id = {user} \
+           AND ui.library_id = s.library_id AND ui.media_id = s.media_id AND ui.played = 1)) = {expected}"
     )
 }
 
@@ -283,10 +284,19 @@ fn favorite_clause(branch: Branch, user: &str, value: i64) -> String {
     } else {
         "pu.season = -1 AND pu.episode = -1"
     };
-    let exists = format!(
+    let exact = format!(
         "EXISTS (SELECT 1 FROM playback_units pu WHERE pu.user_id = {user} \
            AND pu.media_id = s.media_id AND {unit} AND pu.favorite = 1)"
     );
+    let exists = if branch.unit() {
+        exact
+    } else {
+        // A summary can also be favorite because of one episode. The whole-work
+        // assertion keeps protocol favorites exact while the summary bounds work.
+        format!(
+            "(EXISTS (SELECT 1 FROM user_library_items ui WHERE ui.user_id = {user} AND ui.library_id = s.library_id AND ui.media_id = s.media_id AND ui.favorite = 1) AND {exact})"
+        )
+    };
     if value == 1 {
         exists
     } else {

@@ -47,6 +47,7 @@ pub(super) struct Scope {
     pub(super) instance_locale: String,
     pub(super) library_ids: Vec<String>,
     pub(super) pinned: bool,
+    pub(super) pinned_media: bool,
 }
 
 impl Scope {
@@ -125,6 +126,7 @@ impl Scope {
             granularity: granularity(request),
             instance_locale,
             library_ids,
+            pinned_media: pinned_media(request).is_some(),
             pinned: pinned_media(request).is_some()
                 || matches!(request.parent, ProtocolParent::Folder { .. }),
         }))

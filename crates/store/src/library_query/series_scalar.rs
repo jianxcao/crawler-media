@@ -62,11 +62,13 @@ pub(crate) fn series_scalar_on(
     };
     // Separate full-key seeks prevent an unanalysed database from scanning all
     // of this User/Media's assertions once for every owned episode.
+    // As in protocol::source, state filters must not prefer the Library-wide
+    // presence index over this selected Media's files_library_media seek.
     let sql = format!(
         "WITH scoped_files AS (
                SELECT f.file_id, f.created_ns FROM library_files f
                WHERE f.media_id=?2 AND f.library_id IN ({placeholders})
-                 AND f.publication_state='published' AND f.presence_state='present' {scope}
+                 AND +f.publication_state='published' AND +f.presence_state='present' {scope}
              ), covered_files AS (
                SELECT f.file_id,f.created_ns FROM scoped_files f
                WHERE EXISTS (SELECT 1 FROM library_file_units u WHERE u.file_id=f.file_id

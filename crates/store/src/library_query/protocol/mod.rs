@@ -16,7 +16,9 @@
 
 mod count;
 mod folder;
+mod latest;
 mod membership;
+pub(crate) use latest::select_latest;
 pub(crate) mod metadata;
 mod order;
 mod page;
@@ -74,6 +76,15 @@ pub(crate) fn select_protocol(
     authorized: &HashSet<LibraryId>,
     request: &ProtocolItemQuery,
 ) -> Result<ProtocolItemPage, StoreError> {
+    select_protocol_inner(tx, authorized, request, true)
+}
+
+fn select_protocol_inner(
+    tx: &Connection,
+    authorized: &HashSet<LibraryId>,
+    request: &ProtocolItemQuery,
+    exact_total: bool,
+) -> Result<ProtocolItemPage, StoreError> {
     let normalized = request::normalize(request)?;
     let request = &normalized.original;
     let Some(scope) = scope::Scope::resolve(tx, authorized, request)? else {
@@ -107,7 +118,11 @@ pub(crate) fn select_protocol(
         rows = format!("{extra}, {rows}");
     }
     let values = bindings.values().collect::<Vec<_>>();
-    let total = count::count(tx, &plan, &scope, &scoped, &rows, &values)?;
+    let total = if exact_total {
+        count::count(tx, &plan, &scope, &scoped, &rows, &values)?
+    } else {
+        0
+    };
     let items = page::read(
         tx,
         request,
@@ -126,6 +141,11 @@ pub(crate) fn select_protocol(
         granularity = ?scope.granularity,
         "protocol_item_page"
     );
+    let total = if exact_total {
+        total
+    } else {
+        items.len() as u64
+    };
     Ok(ProtocolItemPage { items, total })
 }
 

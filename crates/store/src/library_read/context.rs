@@ -27,6 +27,8 @@ pub enum LibraryReadRequest {
     ItemIndex(LibraryQuery),
     Facets(FacetRequest),
     Protocol(ProtocolItemQuery),
+    /// Latest returns an array, so selection uses lookahead without exact counts.
+    ProtocolLatest(ProtocolItemQuery),
 }
 
 impl LibraryReadRequest {
@@ -60,7 +62,7 @@ impl LibraryReadRequest {
             Self::Browse(q) => Some(q.library_id),
             Self::ItemIndex(q) => Some(q.library_id),
             Self::Facets(q) => Some(q.library_id),
-            Self::Protocol(q) => match q.parent {
+            Self::Protocol(q) | Self::ProtocolLatest(q) => match q.parent {
                 ProtocolParent::Library(id) => Some(id),
                 _ => None,
             },
@@ -71,7 +73,7 @@ impl LibraryReadRequest {
             Self::Browse(q) => q.user_id,
             Self::ItemIndex(q) => q.user_id,
             Self::Facets(q) => q.user_id,
-            Self::Protocol(q) => Some(q.user_id),
+            Self::Protocol(q) | Self::ProtocolLatest(q) => Some(q.user_id),
         }
     }
 }

@@ -178,13 +178,18 @@ pub(super) fn read(
         && scope.granularity == Granularity::Unit
     {
         let predicate = unit_predicate.unwrap_or("1=0").replace("s.", "i.");
+        let index = if scope.pinned_media {
+            "units_media_scope"
+        } else {
+            "units_protocol_order"
+        };
         let direct_order = order
             .replace("r.season", "u.season")
             .replace("r.episode", "u.episode")
             .replace("r.library_id", "i.library_id")
             .replace("r.media_id", "i.media_id");
         format!(
-            "SELECT i.library_id,i.media_id,i.kind,i.title,i.protocol_title_key,i.added_at_sort,u.season,u.episode FROM library_units u INDEXED BY units_protocol_order JOIN library_items i ON i.library_id=u.library_id AND i.media_id=u.media_id WHERE u.library_id=?1 AND {} AND u.season>=0 AND u.episode>=0 AND COALESCE({},'') IS NOT NULL AND {predicate} ORDER BY {direct_order} LIMIT {limit_ph} OFFSET {offset_ph}",
+            "SELECT i.library_id,i.media_id,i.kind,i.title,i.protocol_title_key,i.added_at_sort,u.season,u.episode FROM library_units u INDEXED BY {index} JOIN library_items i ON i.library_id=u.library_id AND i.media_id=u.media_id WHERE u.library_id=?1 AND {} AND u.season>=0 AND u.episode>=0 AND COALESCE({},'') IS NOT NULL AND {predicate} ORDER BY {direct_order} LIMIT {limit_ph} OFFSET {offset_ph}",
             scope.where_sql, scope.instance_locale
         )
     } else {

@@ -502,6 +502,8 @@ async fn nfo_only_remote_thumb_keeps_the_page_primary_image() {
 
 #[path = "jellyfin_paged_metadata/audit.rs"]
 mod audit;
+#[path = "jellyfin_paged_metadata/latest_work.rs"]
+mod latest_work;
 #[path = "jellyfin_paged_metadata/next_up.rs"]
 mod next_up;
 #[path = "jellyfin_paged_metadata/paged.rs"]
