@@ -37,16 +37,31 @@ fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
         return media_detail_inner(state, kind, &tmdb_id);
     }
 
-    // 豆瓣 Rexxar 移动 API：实时拉取该条目详情与演职员表（带头像）
-    let (douban_rexxar, douban_celebrities) = {
-        let rexxar = fetch_douban_rexxar(id);
-        let celeb = fetch_douban_celebrities(id);
-        (rexxar, celeb)
-    };
-
-    match douban_rexxar {
-        Some(data) => douban_subject_response(id, &data, douban_celebrities.as_ref()),
-        None => empty_douban_response(id),
+    match state.catalog.douban_subject_with_credits(id) {
+        Ok(pair) => douban_subject_response(id, &pair.subject, Some(&pair.celebrities)),
+        Err(media::TmdbError::NotFound(_)) => {
+            err(StatusCode::NOT_FOUND, "media.missing", "条目不存在")
+        }
+        Err(
+            error @ (media::TmdbError::Http(_)
+            | media::TmdbError::Parse(_)
+            | media::TmdbError::Json(_)),
+        ) => {
+            tracing::warn!(subject_id = id, error_kind = ?std::mem::discriminant(&error), "Douban subject source failed");
+            err(
+                StatusCode::BAD_GATEWAY,
+                "media.upstream",
+                "豆瓣详情暂时不可用",
+            )
+        }
+        Err(error) => {
+            tracing::error!(subject_id = id, error_kind = ?std::mem::discriminant(&error), "Douban subject cache failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "media.cache",
+                "豆瓣详情缓存读取失败",
+            )
+        }
     }
 }
 
@@ -120,70 +135,6 @@ fn douban_subject_response(id: &str, data: &Value, douban_celebrities: Option<&V
         "library_links": [],
     }))
     .into_response()
-}
-
-fn empty_douban_response(id: &str) -> Response {
-    ok(json!({
-        "item": {
-            "id": id,
-            "title": Value::Null,
-            "year": Value::Null,
-            "kind": "movie",
-            "tmdb_id": Value::Null,
-            "poster_url": Value::Null,
-            "backdrop_url": Value::Null,
-            "rating": Value::Null,
-        },
-        "info": {
-            "overview": Value::Null,
-            "rating": Value::Null,
-            "runtime": Value::Null,
-            "genres": [],
-            "cast": [],
-            "directors": [],
-            "director_credits": [],
-            "country": "",
-            "language": "",
-            "released": "",
-            "aliases": [],
-        },
-        "videos": [],
-        "backdrops": [],
-        "posters": [],
-        "related": [],
-        "library_links": [],
-    }))
-    .into_response()
-}
-
-fn fetch_douban_rexxar(id: &str) -> Option<Value> {
-    const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";
-    let url = format!("https://m.douban.com/rexxar/api/v2/movie/{id}?for_mobile=1");
-    let response = crate::http_agent::call_douban(|agent| {
-        agent
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Referer", "https://m.douban.com/movie/")
-            .call()
-    })
-    .ok()?;
-    let body = response.into_body().read_to_string().ok()?;
-    serde_json::from_str(&body).ok()
-}
-
-fn fetch_douban_celebrities(id: &str) -> Option<Value> {
-    const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";
-    let url = format!("https://m.douban.com/rexxar/api/v2/movie/{id}/celebrities?for_mobile=1");
-    let response = crate::http_agent::call_douban(|agent| {
-        agent
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Referer", "https://m.douban.com/movie/")
-            .call()
-    })
-    .ok()?;
-    let body = response.into_body().read_to_string().ok()?;
-    serde_json::from_str(&body).ok()
 }
 
 fn douban_cast(data: &Value, douban_celebrities: Option<&Value>) -> Vec<Value> {

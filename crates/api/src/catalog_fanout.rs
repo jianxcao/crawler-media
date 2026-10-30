@@ -16,6 +16,12 @@ impl<H: media::CatalogGet + Send + Sync> DoubanCatalog<H> {
 }
 
 impl<H: media::CatalogGet + Send + Sync> Catalog for DoubanCatalog<H> {
+    fn douban_subject_with_credits(
+        &self,
+        id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        self.inner.subject_with_credits(id)
+    }
     fn source_name(&self) -> &'static str {
         "douban"
     }
@@ -227,6 +233,16 @@ impl FanoutCatalog {
 }
 
 impl Catalog for FanoutCatalog {
+    fn douban_subject_with_credits(
+        &self,
+        id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        self.source("douban")
+            .ok_or_else(|| {
+                media::TmdbError::Http("Douban catalog source is not configured".into())
+            })?
+            .douban_subject_with_credits(id)
+    }
     fn source_name(&self) -> &'static str {
         "fanout"
     }

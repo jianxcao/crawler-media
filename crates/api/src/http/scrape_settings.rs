@@ -9,7 +9,6 @@ use axum::response::{IntoResponse, Response};
 use domain::{Media, MediaId, MediaKind, Release};
 use serde_json::{Value, json};
 
-use crate::catalog::Catalog;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::scrape_config::{ScrapeConfigSetting, compose_config};
@@ -265,36 +264,62 @@ fn sample_release(kind: MediaKind) -> Release {
     }
 }
 
-/// GET /settings/languages — TMDB configuration 语种全表（设置页「更多语言」）。
+/// GET /settings/languages — complete catalog language configuration.
 pub(crate) async fn languages(State(state): State<ApiState>) -> Response {
-    let catalog: &dyn Catalog = state.catalog.as_ref();
-    let rows = catalog.configuration_languages().unwrap_or_default();
-    let languages: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "code": row.code,
-                "name": row.name,
-                "english_name": row.english_name,
-            })
-        })
-        .collect();
-    ok(json!({ "languages": languages })).into_response()
+    configuration(&state, Configuration::Languages).await
 }
 
-/// GET /settings/countries — TMDB configuration 地区全表（设置页「更多地区」）。
+/// GET /settings/countries — complete catalog country configuration.
 pub(crate) async fn countries(State(state): State<ApiState>) -> Response {
-    let catalog: &dyn Catalog = state.catalog.as_ref();
-    let rows = catalog.configuration_countries().unwrap_or_default();
-    let countries: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "code": row.code,
-                "name": row.native_name,
-                "english_name": row.english_name,
-            })
+    configuration(&state, Configuration::Countries).await
+}
+
+#[derive(Clone, Copy)]
+enum Configuration {
+    Languages,
+    Countries,
+}
+
+async fn configuration(state: &ApiState, kind: Configuration) -> Response {
+    let catalog = state.catalog.clone();
+    let result = state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || match kind {
+            Configuration::Languages => catalog.configuration_languages().map(|rows| {
+                json!({"languages": rows.into_iter().map(|row| json!({
+                    "code": row.code, "name": row.name, "english_name": row.english_name,
+                })).collect::<Vec<_>>()})
+            }),
+            Configuration::Countries => catalog.configuration_countries().map(|rows| {
+                json!({"countries": rows.into_iter().map(|row| json!({
+                    "code": row.code, "name": row.native_name, "english_name": row.english_name,
+                })).collect::<Vec<_>>()})
+            }),
         })
-        .collect();
-    ok(json!({ "countries": countries })).into_response()
+        .await;
+    match result {
+        Ok(Ok(value)) => ok(value).into_response(),
+        Ok(Err(error)) => {
+            let configuration = match kind {
+                Configuration::Languages => "languages",
+                Configuration::Countries => "countries",
+            };
+            tracing::warn!(%error, configuration, "catalog configuration read failed");
+            err(StatusCode::BAD_GATEWAY, "catalog.upstream", &error)
+        }
+        Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
+        Err(crate::blocking_budget::BlockingError::Timeout) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "catalog.timeout",
+            "目录配置读取超时",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "catalog configuration worker failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                &error.to_string(),
+            )
+        }
+    }
 }

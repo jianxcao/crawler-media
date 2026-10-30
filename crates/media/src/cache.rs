@@ -1,4 +1,5 @@
 mod backend;
+mod refresh;
 pub use backend::CacheBackend;
 
 use std::path::Path;
@@ -23,6 +24,7 @@ pub fn unix_now() -> i64 {
 }
 
 pub struct CatalogCache {
+    flights: refresh::Flights,
     backend: Arc<dyn CacheBackend>,
     ttl_secs: i64,
     /// 测试用固定时钟。`None` = 每次访问都取实时时钟（生产路径），
@@ -56,6 +58,7 @@ impl CatalogCache {
         now: i64,
     ) -> Self {
         Self {
+            flights: refresh::Flights::default(),
             backend,
             ttl_secs: DEFAULT_TTL_SECS,
             now: Mutex::new((now != 0).then_some(now)),
@@ -107,11 +110,54 @@ impl CatalogCache {
                 }
             }
         }
-        let fetched = match http.get(key) {
+        let refresh = self.flights.run(key, || {
+            // Recheck after election: another leader may have populated the cache.
+            if let Some(body) = self.get_fresh(key)? {
+                match decode(&body) {
+                    Ok(_) => return Ok(Arc::from(body)),
+                    Err(error @ TmdbError::NotFound(_)) => return Err(error),
+                    Err(_) => {}
+                }
+            }
+            self.refresh_body(http, key, &decode)
+        });
+        let body = match refresh {
+            Ok(result) => result?,
+            Err(refresh::CapacityExhausted) => {
+                // Admission failed before any work: retain valid stale results,
+                // while backend failures and completed refresh errors stay typed.
+                if let Some(body) = self.get_stale(key)? {
+                    match decode(&body) {
+                        Ok(value) => {
+                            tracing::warn!(source = %self.source, path = key, "Catalog refresh capacity exhausted; using valid stale Metadata cache");
+                            return Ok(value);
+                        }
+                        Err(error) => {
+                            tracing::warn!(source = %self.source, path = key, %error, "Rejected stale Metadata cache after refresh admission failure");
+                        }
+                    }
+                }
+                return Err(TmdbError::Http("catalog refresh capacity exhausted".into()));
+            }
+        };
+        decode(&body)
+    }
+
+    fn refresh_body<T>(
+        &self,
+        http: &impl crate::client::CatalogGet,
+        key: &str,
+        decode: &impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<Arc<str>, TmdbError> {
+        let response = {
+            let _permit = refresh::OriginPermit::acquire();
+            http.get(key)
+        };
+        let fetched = match response {
             Ok(body) => match decode(&body) {
-                Ok(value) => {
+                Ok(_) => {
                     self.put(key, &body)?;
-                    Ok(value)
+                    Ok(Arc::from(body))
                 }
                 Err(error @ TmdbError::NotFound(_)) => {
                     self.put(key, &body)?;
@@ -131,18 +177,14 @@ impl CatalogCache {
             Err(error) => Err(error),
         };
         match fetched {
-            Ok(value) => Ok(value),
+            Ok(body) => Ok(body),
             Err(error) => {
                 tracing::warn!(source = %self.source, path = key, %error, "Metadata refresh failed; trying valid stale cache");
                 if let Some(body) = self.get_stale(key)? {
                     match decode(&body) {
-                        Ok(value) => {
-                            tracing::info!(
-                                source = %self.source,
-                                path = key,
-                                "Using valid stale Metadata cache"
-                            );
-                            return Ok(value);
+                        Ok(_) => {
+                            tracing::info!(source = %self.source, path = key, "Using valid stale Metadata cache");
+                            return Ok(Arc::from(body));
                         }
                         Err(stale_error) => {
                             tracing::warn!(source = %self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");

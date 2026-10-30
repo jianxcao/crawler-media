@@ -115,6 +115,16 @@ pub trait Catalog: Send + Sync {
         Ok(Vec::new())
     }
     fn details(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<Media>, String>;
+    /// Complete typed Douban subject and credits from the configured source.
+    fn douban_subject_with_credits(
+        &self,
+        _id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        Err(media::TmdbError::Http(
+            "configured catalog does not support Douban subjects".into(),
+        ))
+    }
+
     fn normalized_metadata(
         &self,
         _kind: MediaKind,

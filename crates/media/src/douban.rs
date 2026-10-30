@@ -1,3 +1,6 @@
+mod subject;
+pub use subject::DoubanSubject;
+
 use std::path::Path;
 
 use domain::{Media, MediaId, MediaKind};

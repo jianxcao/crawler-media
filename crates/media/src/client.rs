@@ -17,7 +17,7 @@ struct Genre {
     name: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum TmdbError {
     #[error("not found: {0}")]
     NotFound(String),
@@ -28,14 +28,28 @@ pub enum TmdbError {
     #[error("cache backend: {0}")]
     CacheBackend(String),
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::sync::Arc<std::io::Error>),
     #[error(transparent)]
-    Json(#[from] serde_json::Error),
+    Json(std::sync::Arc<serde_json::Error>),
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(std::sync::Arc<rusqlite::Error>),
     #[error(transparent)]
-    CacheDb(#[from] crate::response_cache::CacheDbError),
+    CacheDb(std::sync::Arc<crate::response_cache::CacheDbError>),
 }
+
+macro_rules! shared_error_from {
+    ($error:ty, $variant:ident) => {
+        impl From<$error> for TmdbError {
+            fn from(error: $error) -> Self {
+                Self::$variant(std::sync::Arc::new(error))
+            }
+        }
+    };
+}
+shared_error_from!(std::io::Error, Io);
+shared_error_from!(serde_json::Error, Json);
+shared_error_from!(rusqlite::Error, Sqlite);
+shared_error_from!(crate::response_cache::CacheDbError, CacheDb);
 
 pub trait CatalogGet {
     fn get(&self, path: &str) -> Result<String, TmdbError>;
