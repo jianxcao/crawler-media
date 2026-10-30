@@ -66,6 +66,7 @@ pub(crate) fn purge_orphan_media_in_tx(
             [&id],
         )?;
         tx.execute("DELETE FROM probe_jobs WHERE media_id=?1", [&id])?;
+        crate::query_projection::search::remove_media(tx, &id)?;
         for table in OWNED {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE media_id=?1"),

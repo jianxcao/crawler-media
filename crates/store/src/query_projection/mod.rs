@@ -7,6 +7,8 @@ pub(crate) mod expected;
 mod people;
 mod protocol;
 mod repair;
+pub(crate) mod search;
+pub(crate) mod search_integrity;
 mod types;
 use crate::StoreError;
 pub(crate) use browse::sync_terms;
@@ -36,6 +38,7 @@ pub(crate) fn capture(tx: &Connection, key: ProjectionKey) -> Result<ProjectionB
     Ok(ProjectionBefore {
         entities: entities::ownership(tx, &media)?,
         card_exists: kind.is_some(),
+        search_rowid: search::rowid(tx, key)?,
         members,
     })
 }
@@ -78,6 +81,7 @@ pub(crate) fn settle(
     after_members.extend(entities::members(&entities));
     let counters = counts::apply(tx, &lib, &before.members, &after_members)?;
     mark_current(tx, &lib, &media)?;
+    search::sync(tx, key, &people)?;
     tracing::debug!(library_id=%key.library_id,media_id=%key.media_id,inserted,deleted,counters,"settled query projection");
     Ok(ProjectionDelta {
         cards: 1,
@@ -91,6 +95,7 @@ pub(crate) fn remove(
     key: ProjectionKey,
     before: ProjectionBefore,
 ) -> Result<ProjectionDelta, StoreError> {
+    search::remove(tx, before.search_rowid)?;
     entities::sync(
         tx,
         &key.library_id.to_string(),

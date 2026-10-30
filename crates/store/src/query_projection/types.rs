@@ -24,6 +24,7 @@ impl CounterMember {
 }
 pub(crate) struct ProjectionBefore {
     pub card_exists: bool,
+    pub search_rowid: Option<i64>,
     pub members: BTreeSet<CounterMember>,
     pub entities: super::entities::Ownership,
 }

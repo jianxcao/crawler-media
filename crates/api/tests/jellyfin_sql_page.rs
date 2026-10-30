@@ -666,44 +666,8 @@ fn episode_search_reads_episode_level_fields() {
     assert_eq!(page.total, 0, "the series title is not an episode field");
 }
 
-/// R23: adopted work fields are read in the Library display locale, not the
-/// lexically first locale.
-#[test]
-fn search_reads_the_library_display_locale() {
-    let fx = Fx::new();
-    let movie = fx.add_movie("Localized");
-    let db = library_db(&fx);
-    for (locale, overview) in [("en-US", "english plot"), ("zh-CN", "chinese plot")] {
-        db.execute(
-            "INSERT INTO media_metadata (media_id, locale, title, overview, revision)
-             VALUES (?1, ?2, 'Localized', ?3, 1)",
-            rusqlite::params![movie.to_string(), locale, overview],
-        )
-        .unwrap();
-    }
-    db.execute(
-        "UPDATE libraries SET display_locale = 'zh-CN' WHERE library_id = ?1",
-        rusqlite::params![fx.alpha.to_string()],
-    )
-    .unwrap();
-    // Raw-SQL fixture bypasses the card reduction, so write the cross-locale haystack
-    // the reduction would have stored; the locale chain itself is still the query's job.
-    db.execute(
-        "UPDATE library_items SET search_text = 'localized' || char(31) || 'english plot' \
-           || char(31) || 'chinese plot' WHERE media_id = ?1",
-        rusqlite::params![movie.to_string()],
-    )
-    .unwrap();
-    let mut query = base_query(ProtocolParent::Library(fx.alpha));
-    query.search_term = Some("chinese".into());
-    assert_eq!(fx.store.protocol_item_page(&query).unwrap().total, 1);
-    query.search_term = Some("english".into());
-    assert_eq!(
-        fx.store.protocol_item_page(&query).unwrap().total,
-        0,
-        "the lexically first locale must not stand in for the display locale"
-    );
-}
+#[path = "jellyfin_sql_page/locale.rs"]
+mod locale;
 
 /// R12: a Series row's played filter is reduced per episode: the series is played
 /// only when every episode's effective assertion (newest wins, then the more

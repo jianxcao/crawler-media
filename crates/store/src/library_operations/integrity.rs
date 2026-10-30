@@ -132,6 +132,7 @@ pub(crate) fn apply_integrity_batch(
 ) -> Result<OperationStatus, StoreError> {
     let owner = IntegrityOwner::acquire(tx, operation_id, library.parse()?)?;
     let mut state = read_integrity_cursor(tx, operation_id)?;
+    crate::query_projection::search_integrity::prepare(tx, operation_id, library)?;
 
     // One keyset page over every Media the Library has a raw or derived row for; the
     // page is bounded by `batch_size`, never a full-Library materialisation (S02).
@@ -165,6 +166,11 @@ pub(crate) fn apply_integrity_batch(
             );
             issues = issues.max(1);
         }
+        if plan.repair && issues == 0 {
+            crate::query_projection::search_integrity::rewrite_document(
+                tx, &owner, key, &expected,
+            )?;
+        }
         if issues > 0 {
             state.issues_found += issues;
             if plan.repair {
@@ -180,6 +186,24 @@ pub(crate) fn apply_integrity_batch(
         state.last_media_id = Some(media_str.clone());
     }
 
+    let mut has_more = has_more;
+    if !has_more {
+        let (search_damage, more) = crate::query_projection::search_integrity::finish(
+            tx,
+            operation_id,
+            plan.repair,
+            batch_size.max(1),
+        )?;
+        if search_damage {
+            state.report.query_count_mismatch = true;
+            state.report.totals.query_projection_mismatches += 1;
+            state.issues_found += 1;
+            if plan.repair {
+                state.issues_repaired += 1;
+            }
+        }
+        has_more = more;
+    }
     if has_more {
         write_integrity_cursor(tx, operation_id, &state, "applying", now_ms)?;
         Ok(OperationStatus {

@@ -183,11 +183,16 @@ fn search_clause(
         .iter()
         .map(|field| format!("instr(casefold({field}), {needle}) > 0"))
         .collect();
-    // 作品支先用写入期 `search_text`（跨语言的折叠干草堆）收窄，再跑按语言链的精确判断。
+    // FTS only narrows Work candidates; selected-locale fields below retain the
+    // protocol predicate. Episode-only text need not occur in the Work index.
     let prefilter = if branch.unit() {
         String::new()
+    } else if let Some(phrase) = crate::library_search::fts_phrase(term) {
+        let parameter = bindings.push(SqlValue::Text(phrase));
+        let rowids = crate::library_search::fts_rowids(&parameter);
+        format!("s.search_rowid IN ({rowids}) AND ")
     } else {
-        format!("instr(s.search_text, {needle}) > 0 AND ")
+        String::new()
     };
     clauses.push(format!("({prefilter}({}))", parts.join(" OR ")));
 }

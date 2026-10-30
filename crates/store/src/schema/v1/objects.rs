@@ -40,6 +40,11 @@ pub const LIBRARY_TABLES: &[&str] = &[
     "library_units",
     "library_metadata_inputs",
     "library_items",
+    "library_search_fts",
+    "library_search_fts_data",
+    "library_search_fts_idx",
+    "library_search_fts_docsize",
+    "library_search_fts_config",
     "library_item_terms",
     "library_protocol_terms",
     "library_protocol_people",
@@ -85,6 +90,8 @@ pub const LIBRARY_TABLES: &[&str] = &[
 ];
 
 pub const LIBRARY_INDEXES: &[&str] = &[
+    "items_search_prefix",
+    "items_search_title",
     "protocol_entities_name",
     "protocol_entities_wire",
     "protocol_entities_media",

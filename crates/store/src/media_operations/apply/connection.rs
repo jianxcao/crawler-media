@@ -158,6 +158,18 @@ impl crate::LibraryConnection<'_> {
              WHERE media_id = ?1 AND identity_state = 'merging'",
             params![survivor.to_string(), frozen.survivor_before],
         )?;
+        // The library phase reduced cards while the survivor was frozen. Identity
+        // does not change search content or memberships, but must be published
+        // alongside the final raw identity in this transaction.
+        tx.execute(
+            "UPDATE library_items SET identity_state = ?2,
+                 item_revision = item_revision + 1,
+                 query_projection_revision = CASE
+                     WHEN query_projection_revision = item_revision THEN item_revision + 1
+                     ELSE query_projection_revision END
+             WHERE media_id = ?1 AND identity_state = 'merging'",
+            params![survivor.to_string(), frozen.survivor_before],
+        )?;
         tx.execute(
             "UPDATE media_operations
              SET state = 'succeeded', phase_cursor = ?2, error = NULL, updated_at_ms = ?3

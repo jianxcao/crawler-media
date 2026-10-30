@@ -119,6 +119,11 @@ impl Fixture {
             .unwrap();
         let path = library.root_paths[0].join("actor.mkv");
         std::fs::write(&path, b"fixture").unwrap();
+        std::fs::write(
+            path.with_extension("nfo"),
+            "<movie><title>无关片名</title><actor><name>演员001</name></actor></movie>",
+        )
+        .unwrap();
         store::test_support::publish_fixture_file(
             store,
             &store::test_support::FixtureFile {
@@ -128,17 +133,6 @@ impl Fixture {
             },
         )
         .unwrap();
-        let library_id = library.id.clone();
-        let data_dir = store.data_dir().to_path_buf();
-        let conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
-        conn.execute(
-            "INSERT INTO library_protocol_people
-             (library_id, media_id, role, name_key, tmdb_id, wire_id)
-             VALUES (?1, ?2, 'Actor', '演员001', '', 'actor-001')",
-            rusqlite::params![library_id, actor_media.to_string()],
-        )
-        .unwrap();
-
         Self {
             _dir: dir,
             state,

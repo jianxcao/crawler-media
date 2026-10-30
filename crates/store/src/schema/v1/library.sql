@@ -159,6 +159,7 @@ CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);
 -- Cards store only consumed identity/sort/display fields. Alias membership and
 -- NFO inputs remain in their authoritative tables instead of copied columns.
 CREATE TABLE library_items (
+ search_rowid INTEGER PRIMARY KEY,
  library_id TEXT NOT NULL REFERENCES libraries(library_id), media_id TEXT NOT NULL REFERENCES media(media_id), kind TEXT NOT NULL,
  title TEXT NOT NULL, title_sort TEXT NOT NULL, year INTEGER, identity_state TEXT NOT NULL,
  metadata_revision INTEGER NOT NULL, item_revision INTEGER NOT NULL,
@@ -173,12 +174,15 @@ CREATE TABLE library_items (
  distinct_episode_count INTEGER NOT NULL DEFAULT 0, distinct_season_count INTEGER NOT NULL DEFAULT 0,
  preferred_file_id TEXT, poster_ref TEXT, backdrop_ref TEXT, has_still INTEGER NOT NULL DEFAULT 0,
  search_text TEXT NOT NULL DEFAULT '',
- PRIMARY KEY(library_id,media_id),
+ UNIQUE(library_id,media_id),
  FOREIGN KEY(preferred_file_id,library_id,media_id) REFERENCES library_files(file_id,library_id,media_id) DEFERRABLE INITIALLY DEFERRED,
  CHECK(available_file_count>=0 AND missing_file_count>=0 AND unknown_file_count>=0),
  CHECK(available_file_count+missing_file_count+unknown_file_count=file_count), CHECK(available_file_count=0 OR preferred_file_id IS NOT NULL),
  CHECK(missing=(missing_file_count>0))
 );
+CREATE VIRTUAL TABLE library_search_fts USING fts5(search_text,people,content='',contentless_delete=1,tokenize='trigram');
+CREATE INDEX items_search_prefix ON library_items(library_id,protocol_title_key,title_sort,media_id);
+CREATE INDEX items_search_title ON library_items(title_sort,media_id,library_id,search_rowid);
 CREATE INDEX items_media ON library_items(media_id,library_id);
 CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
 CREATE INDEX items_added ON library_items(library_id,added_at_sort,media_id);

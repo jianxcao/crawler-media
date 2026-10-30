@@ -10,6 +10,8 @@ pub(crate) fn repair_projection(
 ) -> Result<(), StoreError> {
     owner.validate(tx, key.library_id)?;
     let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
+    let old_search_rowid = super::search::rowid(tx, key)?;
+    super::search::remove(tx, old_search_rowid)?;
     let old_entities = super::entities::ownership(tx, &media)?;
     // Counters are intentionally untouched: corrupt undercounts cannot prevent repair.
     for table in [
@@ -32,6 +34,7 @@ pub(crate) fn repair_projection(
             "DELETE FROM library_items WHERE library_id=?1 AND media_id=?2",
             params![lib, media],
         )?;
+        super::search_integrity::refresh(tx, key, old_search_rowid, expected)?;
         return Ok(());
     };
     write_row(tx, "library_items", card)?;
@@ -71,6 +74,8 @@ pub(crate) fn repair_projection(
     let before = super::entities::ownership(tx, &media)?;
     super::entities::sync(tx, &lib, &media, &expected.entities, &before)?;
     super::mark_current(tx, &lib, &media)?;
+    super::search::sync(tx, key, &expected.people)?;
+    super::search_integrity::refresh(tx, key, old_search_rowid, expected)?;
     Ok(())
 }
 fn write_row(tx: &Connection, table: &str, row: &OwnedRow) -> Result<(), StoreError> {
@@ -131,7 +136,8 @@ pub(crate) fn actual_rows(
             for (index, name) in names.iter().enumerate() {
                 if matches!(
                     name.as_str(),
-                    "item_revision"
+                    "search_rowid"
+                        | "item_revision"
                         | "unit_revision"
                         | "summary_revision"
                         | "query_projection_revision"
@@ -167,7 +173,8 @@ pub(crate) fn projection_matches(
             == expected.protocol
         && super::people::read(tx, &lib, &media)? == expected.people
         && super::entities::read(tx, &lib, &media)? == expected.entities
-        && super::entities::sources_match(tx, &lib, &media)?)
+        && super::entities::sources_match(tx, &lib, &media)?
+        && super::search_integrity::matches(tx, key, expected)?)
 }
 
 fn sync_rows(

@@ -16,92 +16,34 @@ impl crate::LibraryConnection<'_> {
                 next_cursor: None,
             });
         }
-        let needle = keyword.trim().to_lowercase();
-        let (after_sort, after_media) = parse_cursor(cursor)?;
-
-        let mut binds: Vec<rusqlite::types::Value> = vec![needle.into()];
-        let mut next = 2usize;
-        let mut in_parts = Vec::with_capacity(libraries.len());
-        for id in libraries {
-            in_parts.push(format!("?{next}"));
-            binds.push(id.to_string().into());
-            next += 1;
+        for library in libraries {
+            crate::library_query::items::page::ensure_library_query_ready_on(
+                self.library,
+                *library,
+            )?;
         }
-        let sort_ph = next;
-        next += 1;
-        let media_ph = next;
-        next += 1;
-        let limit_ph = next;
-        binds.push(match after_sort {
-            Some(value) => value.into(),
-            None => rusqlite::types::Value::Null,
-        });
-        binds.push(match after_media {
-            Some(value) => value.into(),
-            None => rusqlite::types::Value::Null,
-        });
-        binds.push(((limit + 1) as i64).into());
-
-        let sql = format!(
-            "SELECT i.library_id, i.media_id, i.title, i.kind, i.year, i.title_sort,
-                    CASE
-                      WHEN ?1 = '' OR instr(i.search_text, ?1) > 0 THEN 'title'
-                      ELSE 'person'
-                    END AS matched_by
-             FROM library_items i
-             WHERE i.library_id IN ({libs})
-               AND (
-                 ?1 = ''
-                 OR instr(i.search_text, ?1) > 0
-                 OR EXISTS (
-                   SELECT 1 FROM library_protocol_people p
-                   WHERE p.library_id = i.library_id
-                     AND p.media_id = i.media_id
-                     AND instr(p.name_key, ?1) > 0
-                 )
-               )
-               AND (
-                 ?{sort_ph} IS NULL
-                 OR i.title_sort > ?{sort_ph}
-                 OR (i.title_sort = ?{sort_ph} AND i.media_id > ?{media_ph})
-               )
-             ORDER BY i.title_sort ASC, i.media_id ASC
-             LIMIT ?{limit_ph}",
-            libs = in_parts.join(", ")
-        );
-
-        let mut stmt = self.library.prepare(&sql)?;
-        let mapped = stmt.query_map(params_from_iter(binds), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })?;
-
-        let mut rows = Vec::new();
-        for row in mapped {
-            let (library_id, media_id, title, kind, year, title_sort, matched_by) = row?;
-            rows.push(Row {
-                hit: LibrarySearchHit {
-                    library_id: library_id.parse()?,
-                    media_id: media_id.parse()?,
-                    title,
-                    kind: MediaKind::from_str(&kind).map_err(StoreError::MediaKind)?,
-                    year: year.and_then(|y| u16::try_from(y).ok()),
-                    matched_by: if matched_by == "person" {
-                        "person"
-                    } else {
-                        "title"
-                    },
-                },
-                title_sort,
-            });
-        }
+        let queries = super::sql::queries(libraries, keyword, limit, cursor)?;
+        let candidates = self
+            .library
+            .prepare_cached(&queries.probe.0)?
+            .query_map(params_from_iter(queries.probe.1.iter()), |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = if candidates.len() > limit {
+            let window = read_rows(self.library, &queries.window)?;
+            if window.len() > limit {
+                window
+            } else {
+                read_rows(self.library, &queries.fallback)?
+            }
+        } else {
+            // The bounded probe exhausted every potential hit. Reuse those keys
+            // instead of initializing/seeking the FTS posting lists a second time.
+            let query = super::sql::candidate_page(libraries, keyword, limit, cursor, &candidates)?;
+            read_rows(self.library, &query)?
+        };
+        let mut rows = rows;
 
         let next_cursor = if rows.len() > limit {
             rows.pop();
@@ -115,4 +57,42 @@ impl crate::LibraryConnection<'_> {
             next_cursor,
         })
     }
+}
+
+fn read_rows(
+    connection: &rusqlite::Connection,
+    query: &super::sql::Query,
+) -> Result<Vec<Row>, StoreError> {
+    let mut statement = connection.prepare_cached(&query.0)?;
+    let mapped = statement.query_map(params_from_iter(query.1.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    mapped
+        .map(|row| {
+            let (library_id, media_id, title, kind, year, title_sort, matched_by) = row?;
+            Ok(Row {
+                hit: LibrarySearchHit {
+                    library_id: library_id.parse()?,
+                    media_id: media_id.parse()?,
+                    title,
+                    kind: MediaKind::from_str(&kind).map_err(StoreError::MediaKind)?,
+                    year: year.and_then(|year| u16::try_from(year).ok()),
+                    matched_by: if matched_by == "person" {
+                        "person"
+                    } else {
+                        "title"
+                    },
+                },
+                title_sort,
+            })
+        })
+        .collect()
 }

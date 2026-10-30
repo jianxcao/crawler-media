@@ -46,13 +46,13 @@ const NFO_JSON: &str = "COALESCE(\
 pub(super) fn scoped_cte(scope: &Scope, work_search: bool) -> String {
     if !work_search {
         return format!(
-            "scoped AS (SELECT i.library_id, i.media_id, i.kind, i.title, i.protocol_title_key, i.added_at_sort, i.pref_locale, i.search_text FROM {} WHERE {})",
+            "scoped AS (SELECT i.search_rowid, i.library_id, i.media_id, i.kind, i.title, i.protocol_title_key, i.added_at_sort, i.pref_locale, i.search_text FROM {} WHERE {})",
             items_with_locale_sql(scope),
             scope.where_sql
         );
     }
     format!(
-        "scoped AS (SELECT i.library_id AS library_id, i.media_id AS media_id, i.kind AS kind, \
+        "scoped AS (SELECT i.search_rowid AS search_rowid, i.library_id AS library_id, i.media_id AS media_id, i.kind AS kind, \
            i.title AS title, i.protocol_title_key AS protocol_title_key, i.added_at_sort AS added_at_sort, \
            {NFO_JSON} AS nfo_json, \
            mm.details_json AS adopted_json, mm.genres_json AS adopted_genres, \
