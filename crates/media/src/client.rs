@@ -19,6 +19,8 @@ struct Genre {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TmdbError {
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("http: {0}")]
     Http(String),
     #[error("parse: {0}")]
@@ -207,6 +209,23 @@ impl<H: CatalogGet> Tmdb<H> {
         })
     }
 
+    /// Read previously fetched artwork without initiating a catalog request.
+    pub fn cached_details_poster(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<String>, TmdbError> {
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
+            MediaKind::Tv => format!("/tv/{tmdb_id}"),
+        };
+        self.cached_fetch(&path, &self.language, |body| {
+            crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
+            parse::details_poster_path(body)
+        })
+        .map(Option::flatten)
+    }
+
     pub fn movie_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
         let path = format!("/movie/{tmdb_id}?append_to_response=translations,alternative_titles");
         match self.cached_details(MediaKind::Movie, &path) {
@@ -247,6 +266,19 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Vec<parse::SeasonEpisode>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
         self.fetch(&path, |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_episodes(body)
+        })
+    }
+
+    /// Read adopted-display episode facts from any retained valid cache entry.
+    pub fn cached_season_episodes(
+        &self,
+        tmdb_id: &str,
+        season: u32,
+    ) -> Result<Option<Vec<parse::SeasonEpisode>>, TmdbError> {
+        let path = format!("/tv/{tmdb_id}/season/{season}");
+        self.cached_fetch(&path, &self.language, |body| {
             crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
             parse::season_episodes(body)
         })
@@ -315,6 +347,44 @@ impl<H: CatalogGet> Tmdb<H> {
             ),
         };
         self.fetch_with_language(&path, request_language, |body| {
+            crate::contracts::metadata(body)?;
+            parse::details_meta_for(body, languages, countries)
+        })
+    }
+
+    /// Optional enrichment consumes retained metadata and never waits for origin.
+    pub fn cached_details_with_meta_for(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+        metadata_languages: &[&str],
+        rating_countries: &[&str],
+    ) -> Result<Option<parse::ItemMeta>, TmdbError> {
+        let default_languages = [self.language.as_str(), "en-US"];
+        let languages = if metadata_languages.is_empty() {
+            &default_languages[..]
+        } else {
+            metadata_languages
+        };
+        let countries = if rating_countries.is_empty() {
+            &["CN", "US"][..]
+        } else {
+            rating_countries
+        };
+        let language = languages
+            .iter()
+            .copied()
+            .find(|language| !language.trim().is_empty())
+            .unwrap_or(&self.language);
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => {
+                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+            }
+            MediaKind::Tv => format!(
+                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
+            ),
+        };
+        self.cached_fetch(&path, language, |body| {
             crate::contracts::metadata(body)?;
             parse::details_meta_for(body, languages, countries)
         })
@@ -403,18 +473,20 @@ impl<H: CatalogGet> Tmdb<H> {
         tmdb_id: &str,
         season: u32,
     ) -> Result<Option<Vec<parse::EpisodeMeta>>, TmdbError> {
+        self.cached_season_details_lang(tmdb_id, season, None)
+    }
+
+    pub fn cached_season_details_lang(
+        &self,
+        tmdb_id: &str,
+        season: u32,
+        lang: Option<&str>,
+    ) -> Result<Option<Vec<parse::EpisodeMeta>>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
-        let join = if path.contains('?') { '&' } else { '?' };
-        let key = format!("{path}{join}language={}", self.language);
-        let body = match self.cache.get_fresh(&key)? {
-            Some(body) => body,
-            None => match self.cache.get_stale(&key)? {
-                Some(body) => body,
-                None => return Ok(None),
-            },
-        };
-        crate::contracts::object(&body, &["episodes", "id", "name", "season_number"])?;
-        parse::season_details(&body).map(Some)
+        self.cached_fetch(&path, lang.unwrap_or(&self.language), |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_details(body)
+        })
     }
 
     /// TMDB episode still file paths (`/tv/{id}/season/{s}/episode/{e}/images`).
@@ -456,6 +528,27 @@ impl<H: CatalogGet> Tmdb<H> {
     }
     fn cached_search(&self, kind: MediaKind, path: &str) -> Result<Vec<CatalogHit>, TmdbError> {
         self.fetch(path, |body| parse::search_results(kind, body))
+    }
+
+    fn cached_fetch<T>(
+        &self,
+        path: &str,
+        language: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<Option<T>, TmdbError> {
+        let join = if path.contains('?') { '&' } else { '?' };
+        let key = if language.is_empty() {
+            path.to_string()
+        } else {
+            format!("{path}{join}language={language}")
+        };
+        self.cache
+            .get_stale(&key)?
+            .map(|body| {
+                crate::contracts::json(&body)?;
+                decode(&body)
+            })
+            .transpose()
     }
 
     fn paged_search(

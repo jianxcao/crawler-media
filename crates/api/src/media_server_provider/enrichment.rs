@@ -5,6 +5,7 @@
 //! 页面重元数据上各应用一次，结果一致。
 
 use super::*;
+use crate::scrape_store::ScrapeStoreExt;
 
 /// 一次 catalog 合并的载荷（幂等：对同一 metadata 再合并一次结果相同）。
 pub(super) struct CatalogMerge {
@@ -22,7 +23,7 @@ impl CatalogMerge {
     }
 }
 
-/// 锁外同步取载荷：catalog 缓存/网络都在这里，调用方不得持有 Store 锁。
+/// 锁外同步取载荷：只读取现有 catalog 缓存，调用方不得持有 Store 锁。
 ///
 /// 单条目 enrich 把读取失败当成「没有 catalog」：那只影响可选字段。选择路径在
 /// person 过滤需要这份事实时必须用 [`catalog_merge_required`]，失败要向上抛。
@@ -47,10 +48,16 @@ pub(super) fn catalog_merge_required(
     let Some(tmdb_id) = snapshot.media.tmdb_id.clone() else {
         return Ok(None);
     };
-    let metadata = match crate::scrape_metadata::fetch_tmdb_metadata(
-        state,
+    let preferences = state
+        .store
+        .get_scrape_config()
+        .map_err(|error| error.to_string())?
+        .effective;
+    let metadata = match state.catalog.cached_metadata_with_preferences(
         snapshot.media.kind,
         &tmdb_id,
+        &preferences.language_priority,
+        &preferences.cert_country_priority,
     ) {
         Ok(Some(metadata)) => metadata,
         Ok(None) => {
@@ -122,27 +129,26 @@ fn catalog_episode(
     episode: u32,
 ) -> Option<media::EpisodeMeta> {
     let language = crate::scrape_metadata::preferred_language(state);
-    let translated = match state
-        .catalog
-        .season_details_lang(tmdb_lookup_id, season, &language)
-    {
-        Ok(episodes) if !episodes.is_empty() => episodes,
-        Ok(_) => Vec::new(),
+    let translated = match state.catalog.cached_season_details_lang(
+        tmdb_lookup_id,
+        season,
+        &language,
+    ) {
+        Ok(episodes) => episodes,
         Err(error) => {
-            tracing::warn!(%error, tmdb_id = %tmdb_lookup_id, season, "failed to load translated episode metadata");
-            Vec::new()
+            tracing::warn!(%error, tmdb_id = %tmdb_lookup_id, season, "failed to read translated cached episode metadata");
+            None
         }
     };
-    let episodes = if translated.is_empty() {
-        match state.catalog.season_details(tmdb_lookup_id, season) {
-            Ok(episodes) => episodes,
+    let episodes = match translated {
+        Some(episodes) if !episodes.is_empty() => episodes,
+        _ => match state.catalog.cached_season_details(tmdb_lookup_id, season) {
+            Ok(episodes) => episodes.unwrap_or_default(),
             Err(error) => {
-                tracing::warn!(%error, tmdb_id = %tmdb_lookup_id, season, "failed to load episode metadata");
+                tracing::warn!(%error, tmdb_id = %tmdb_lookup_id, season, "failed to read cached episode metadata");
                 Vec::new()
             }
-        }
-    } else {
-        translated
+        },
     };
     episodes
         .into_iter()

@@ -429,10 +429,17 @@ fn similar_inner(
     let Some(tmdb_id) = media.tmdb_id.clone() else {
         return ok_list(Vec::new()).into_response();
     };
-    let hits = state
-        .catalog
-        .similar(media.kind, &tmdb_id)
-        .unwrap_or_default();
+    let hits = match state.catalog.similar(media.kind, &tmdb_id) {
+        Ok(hits) => hits,
+        Err(error) => {
+            tracing::warn!(%error, %media_id, %tmdb_id, "similar catalog request failed");
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "catalog.unavailable",
+                "相似推荐数据源暂不可用",
+            );
+        }
+    };
     let items: Vec<Value> = hits
         .into_iter()
         .map(|hit| {

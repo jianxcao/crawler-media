@@ -2,6 +2,43 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    pub fn adopted_episode_metadata(
+        &self,
+        media_id: MediaId,
+        season: u32,
+        library_id: Option<LibraryId>,
+        locale: &str,
+    ) -> Result<Vec<LibraryEpisode>, StoreError> {
+        let mut statement = self.library.prepare_cached(
+            "SELECT DISTINCT locale FROM media_episodes WHERE media_id = ?1 AND season = ?2 ORDER BY locale",
+        )?;
+        let locales = statement
+            .query_map(params![media_id.to_string(), season], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let library_locale = library_id
+            .map(|id| crate::library_query::library_display_locale_on(self.library, id))
+            .transpose()?
+            .flatten();
+        let chain = [
+            Some(locale.to_string()),
+            library_locale,
+            crate::library_query::instance_default_locale_on(self.library)?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let Some(locale) = crate::metadata::locale::select_locale(
+            &locales,
+            &chain,
+            crate::metadata::locale::LocaleFallback::AdoptedFirst,
+        ) else {
+            return Ok(Vec::new());
+        };
+        self.episode_metadata(media_id, &locale, Some(season))
+    }
+
     pub fn library_unit_page(
         &self,
         library_id: LibraryId,

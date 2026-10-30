@@ -331,6 +331,34 @@ impl Catalog for FanoutCatalog {
         }
         Ok(Vec::new())
     }
+    fn cached_metadata_with_preferences(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        languages: &[String],
+        countries: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_metadata_with_preferences(kind, id, languages, countries),
+            None => Ok(None),
+        }
+    }
+    fn cached_poster_url(&self, kind: MediaKind, id: &str) -> Result<Option<String>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_poster_url(kind, id),
+            None => Ok(None),
+        }
+    }
+    fn cached_season_episodes(
+        &self,
+        id: &str,
+        season: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_season_episodes(id, season),
+            None => Ok(None),
+        }
+    }
     fn cached_season_details(
         &self,
         tmdb_id: &str,
@@ -340,6 +368,17 @@ impl Catalog for FanoutCatalog {
             return tmdb.cached_season_details(tmdb_id, season);
         }
         Ok(None)
+    }
+    fn cached_season_details_lang(
+        &self,
+        id: &str,
+        season: u32,
+        language: &str,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_season_details_lang(id, season, language),
+            None => Ok(None),
+        }
     }
     fn season_details_lang(
         &self,

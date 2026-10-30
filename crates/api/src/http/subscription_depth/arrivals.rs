@@ -23,6 +23,7 @@ pub(crate) struct ArrivalSnapshot {
     pub(crate) pending: Vec<(i32, crate::store::PendingDownload)>,
     pub(crate) facts: subscribe::SubscribeFacts,
     pub(crate) rows: Vec<domain::FileCoverage>,
+    pub(crate) episodes: Vec<media::SeasonEpisode>,
 }
 
 /// 只在持有 Store 锁时读取/Clone；DB 错误向上传播（handler 记 500，不静默空集合）。
@@ -60,7 +61,9 @@ pub(crate) fn load_arrivals(
             .get(&subscribe.media_id)
             .cloned()
             .unwrap_or_default();
+        let episodes = super::catalog_facts::adopted_episodes(store, &subscribe, &rows)?;
         snapshots.push(ArrivalSnapshot {
+            episodes,
             subscribe,
             media,
             pending,
@@ -87,6 +90,7 @@ pub(crate) fn build_arrivals(
             pending,
             facts,
             rows,
+            episodes,
         } = snapshot;
         let forecast_basis = ForecastBasis::new(&pending);
         // 在途（grabbing）：有 pending 种子的订阅，status=grabbed。
@@ -121,14 +125,25 @@ pub(crate) fn build_arrivals(
         if media.kind != domain::MediaKind::Tv {
             continue;
         }
-        let Some(tmdb_id) = media.tmdb_id.as_deref() else {
-            continue;
-        };
         let season = match subscribe.coverage {
             domain::Coverage::Tv { season, .. } => season,
             _ => continue,
         };
-        for episode in episodes_for(catalog, &mut episodes_cache, tmdb_id, season) {
+        let mut available: std::collections::BTreeMap<u32, media::SeasonEpisode> = media
+            .tmdb_id
+            .as_deref()
+            .map(|tmdb_id| episodes_for(catalog, &mut episodes_cache, tmdb_id, season))
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .map(|episode| (episode.episode_number, episode))
+            .collect();
+        available.extend(
+            episodes
+                .into_iter()
+                .map(|episode| (episode.episode_number, episode)),
+        );
+        for episode in available.into_values() {
             if facts
                 .get(Some(season), Some(episode.episode_number))
                 .is_some()
@@ -172,8 +187,8 @@ fn episodes_for<'a>(
 ) -> &'a [media::SeasonEpisode] {
     cache
         .entry((tmdb_id.to_string(), season))
-        .or_insert_with(|| match catalog.season_episodes(tmdb_id, season) {
-            Ok(episodes) => episodes,
+        .or_insert_with(|| match catalog.cached_season_episodes(tmdb_id, season) {
+            Ok(episodes) => episodes.unwrap_or_default(),
             Err(error) => {
                 tracing::warn!(
                     %error,

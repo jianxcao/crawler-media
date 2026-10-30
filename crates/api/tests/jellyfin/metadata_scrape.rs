@@ -1,8 +1,10 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct RichCatalog {
     show: Media,
     metadata: media::ItemMeta,
+    origin_available: Arc<AtomicBool>,
 }
 
 impl api::catalog::Catalog for RichCatalog {
@@ -22,6 +24,18 @@ impl api::catalog::Catalog for RichCatalog {
         Ok(Some(self.show.clone()))
     }
     fn metadata(&self, _kind: MediaKind, _id: &str) -> Result<Option<media::ItemMeta>, String> {
+        if !self.origin_available.load(Ordering::SeqCst) {
+            return Err("catalog origin offline; durable cache remains available".into());
+        }
+        Ok(Some(self.metadata.clone()))
+    }
+    fn cached_metadata_with_preferences(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        _languages: &[String],
+        _countries: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
         Ok(Some(self.metadata.clone()))
     }
     fn metadata_with_preferences(
@@ -56,7 +70,11 @@ impl api::catalog::Catalog for RichCatalog {
 }
 
 /// `tvshow_nfo` 必须在写文件之前落盘：Task 8/17 只在 publish_fixture_file 时观测旁车。
-fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
+fn rich_tv_app(
+    root: &Path,
+    tvshow_nfo: &str,
+    origin_available: Arc<AtomicBool>,
+) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
     let store = Store::open(root.join("data")).unwrap();
     let library_root = root.join("library/tv");
     let show_root = library_root.join("Pantheon");
@@ -159,6 +177,7 @@ fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId,
     .with_catalog(Arc::new(RichCatalog {
         show: show.clone(),
         metadata,
+        origin_available,
     }));
     (
         router(api_state),
@@ -188,9 +207,11 @@ async fn json_get(app: &axum::Router, uri: &str) -> Value {
 #[tokio::test]
 async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_episode_nfo() {
     let tmp = tempfile::tempdir().unwrap();
+    let origin_available = Arc::new(AtomicBool::new(false));
     let (app, library_id, media_id, show_root, episode_path) = rich_tv_app(
         tmp.path(),
         "<tvshow><title>Pantheon</title><actor><name>Legacy Actor</name><order>0</order></actor><actor><name>Paul Dano</name><role>Caspian</role><tmdbid>6384</tmdbid><order>1</order></actor><actor><name>Rose McEwen</name><role>Maddie</role><order>2</order></actor></tvshow>",
+        origin_available.clone(),
     );
 
     let before_refresh = json_get(&app, &format!("/Items/{}", work_id(media_id))).await;
@@ -214,6 +235,11 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(people[2]["ProviderIds"]["Tmdb"], "12345");
     assert!(people.iter().any(|person| person["Type"] == "Director"));
     assert!(people.iter().any(|person| person["Type"] == "Writer"));
+
+    // The complete detail above came from durable cached metadata while origin was
+    // unavailable. Explicit refresh and the remaining catalog-focused routes may
+    // now contact the source; their existing response/NFO assertions stay intact.
+    origin_available.store(true, Ordering::SeqCst);
 
     let catalog_person = people
         .iter()

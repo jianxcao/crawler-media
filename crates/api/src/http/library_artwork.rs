@@ -96,7 +96,7 @@ pub(crate) async fn artwork_candidates(
             }
             // Remote metadata candidate
             if let Some(tmdb_id) = media.tmdb_id.clone()
-                && let Ok(Some(url)) = state_for_blocking.catalog.poster_url(media.kind, &tmdb_id) {
+                && let Ok(Some(url)) = state_for_blocking.catalog.cached_poster_url(media.kind, &tmdb_id) {
                     posters.push(json!({
                         "file_path": url,
                         "preview_url": url,

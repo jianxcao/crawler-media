@@ -7,6 +7,7 @@ use index::Unit;
 
 pub(crate) struct WantedSnapshot {
     pending: Vec<(i32, crate::store::PendingDownload)>,
+    air_dates: HashMap<u32, Option<String>>,
     history: HashMap<Unit, crate::store::WantedHistory>,
     ledger: Vec<domain::FileCoverage>,
     target_score: i32,
@@ -19,10 +20,16 @@ pub(crate) fn capture(
     subscribe: &Subscribe,
 ) -> Result<WantedSnapshot, crate::store::StoreError> {
     let (target_score, target_label) = wash_target(store, subscribe);
+    let ledger = store.file_coverage_for_media(media.id)?;
+    let air_dates = super::catalog_facts::adopted_episodes(store, subscribe, &ledger)?
+        .into_iter()
+        .map(|episode| (episode.episode_number, episode.air_date))
+        .collect();
     Ok(WantedSnapshot {
+        air_dates,
         pending: store.load_pending(subscribe.id)?,
         history: store.load_wanted_history(subscribe.id)?,
-        ledger: store.file_coverage_for_media(media.id)?,
+        ledger,
         target_score,
         target_label,
     })
@@ -47,8 +54,9 @@ pub(crate) fn render(
     media: &domain::Media,
     subscribe: &Subscribe,
     facts: &subscribe::SubscribeFacts,
-    air_dates: HashMap<u32, Option<String>>,
+    mut air_dates: HashMap<u32, Option<String>>,
 ) -> Vec<Value> {
+    air_dates.extend(snapshot.air_dates.clone());
     let units = crate::open_coverage::units(
         subscribe,
         media,

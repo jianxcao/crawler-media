@@ -16,6 +16,7 @@ use crate::management::ApiState;
 
 mod activity;
 mod arrivals;
+mod catalog_facts;
 mod cleanup;
 mod forecast;
 mod removal_preview;

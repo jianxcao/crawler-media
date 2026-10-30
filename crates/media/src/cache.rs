@@ -101,16 +101,35 @@ impl CatalogCache {
                     tracing::debug!(source = %self.source, path = key, "Metadata cache hit");
                     return Ok(value);
                 }
+                Err(error @ TmdbError::NotFound(_)) => return Err(error),
                 Err(error) => {
                     tracing::warn!(source = %self.source, path = key, %error, "Malformed fresh Metadata cache; refetching");
                 }
             }
         }
-        let fetched = http.get(key).and_then(|body| {
-            let value = decode(&body)?;
-            self.put(key, &body)?;
-            Ok(value)
-        });
+        let fetched = match http.get(key) {
+            Ok(body) => match decode(&body) {
+                Ok(value) => {
+                    self.put(key, &body)?;
+                    Ok(value)
+                }
+                Err(error @ TmdbError::NotFound(_)) => {
+                    self.put(key, &body)?;
+                    return Err(error);
+                }
+                Err(error) => Err(error),
+            },
+            Err(TmdbError::NotFound(message)) => {
+                let body = serde_json::json!({
+                    "success": false,
+                    "status_code": 34,
+                    "status_message": message,
+                });
+                self.put(key, &body.to_string())?;
+                return Err(TmdbError::NotFound(message));
+            }
+            Err(error) => Err(error),
+        };
         match fetched {
             Ok(value) => Ok(value),
             Err(error) => {

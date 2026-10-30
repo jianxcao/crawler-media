@@ -17,6 +17,20 @@ struct UnitCursor {
 const UNIT_CURSOR_ORDER: &str = "season_episode_asc";
 
 impl Store {
+    /// Adopted episode facts independent of whether a Library owns a file.
+    /// Optional Library identity contributes only a locale preference.
+    pub fn adopted_episode_metadata(
+        &self,
+        media_id: MediaId,
+        season: u32,
+        library_id: Option<LibraryId>,
+        locale: &str,
+    ) -> Result<Vec<LibraryEpisode>, StoreError> {
+        self.with_library_read(|db| {
+            db.adopted_episode_metadata(media_id, season, library_id, locale)
+        })
+    }
+
     pub fn library_unit_page(
         &self,
         library_id: LibraryId,

@@ -41,8 +41,11 @@ impl CatalogGet for TmdbHttp {
         // would double-apply it (and break /images which must stay unqualified).
         let join = if path.contains('?') { '&' } else { '?' };
         let url = format!("https://api.themoviedb.org/3{path}{join}api_key={api_key}");
-        let response = http_agent::call(|agent| agent.get(&url).call())
-            .map_err(|err| TmdbError::Http(err.to_string()))?;
+        let response =
+            http_agent::call(|agent| agent.get(&url).call()).map_err(|error| match error {
+                ureq::Error::StatusCode(404) => TmdbError::NotFound(path.to_string()),
+                error => TmdbError::Http(error.to_string()),
+            })?;
         response
             .into_body()
             .read_to_string()

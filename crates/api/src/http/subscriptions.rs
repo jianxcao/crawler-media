@@ -395,8 +395,9 @@ pub(crate) async fn get_subscription(
                 &snapshot.subscribe.coverage,
             ) {
                 (domain::MediaKind::Tv, Some(tmdb), domain::Coverage::Tv { season, .. }) => catalog
-                    .season_episodes(tmdb, *season)
+                    .cached_season_episodes(tmdb, *season)
                     .map(|episodes| {
+                        let episodes = episodes.unwrap_or_default();
                         episodes
                             .into_iter()
                             .map(|ep| (ep.episode_number, ep.air_date))
