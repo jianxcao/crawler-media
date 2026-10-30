@@ -346,7 +346,14 @@ async fn collections_hide_items_after_library_access_is_revoked() {
             .unwrap(),
     )
     .await;
-    assert!(collection_items["data"].as_array().unwrap().is_empty());
+    assert!(
+        collection_items["data"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(collection_items["data"]["total"], 0);
+    assert_eq!(collection_items["data"]["next_cursor"], Value::Null);
 }
 
 #[tokio::test]

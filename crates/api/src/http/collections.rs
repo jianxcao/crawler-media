@@ -11,7 +11,6 @@ pub(crate) use writes::{
 
 use axum::http::StatusCode;
 use axum::response::Response;
-use std::str::FromStr;
 
 use crate::ApiState;
 use crate::http::library::{library_for_file, library_visible};
@@ -55,74 +54,25 @@ fn ensure_collection_owner(
     }
 }
 
-struct VisibleCollectionItem {
-    media: domain::Media,
-    library_id: String,
-    coverages: Vec<domain::FileCoverage>,
-    is_favorite: bool,
-}
-
 fn visible_collection_item(
     store: &crate::Store,
     media_id: domain::MediaId,
     user_id: domain::UserId,
-    include_favorite: bool,
-) -> Result<Option<VisibleCollectionItem>, Response> {
+) -> Result<bool, Response> {
     let Some(media) = store.get_media(media_id).map_err(store_error)? else {
-        return Ok(None);
+        return Ok(false);
     };
     let coverages = store
         .file_coverage_for_media(media_id)
         .map_err(store_error)?;
-    let Some(library) = coverages
+    let Some(_library) = coverages
         .iter()
         .filter_map(|coverage| library_for_file(store, &coverage.file, &media))
         .find(|library| library_visible(store, library, Some(user_id)))
     else {
-        return Ok(None);
+        return Ok(false);
     };
-    let coverages = coverages
-        .into_iter()
-        .filter(|coverage| coverage.file.library_id.to_string() == library.id)
-        .collect();
-    let is_favorite = if include_favorite {
-        crate::http::playback::effective_watch_state(
-            store,
-            user_id,
-            media_id,
-            crate::store::UNIT_WHOLE,
-            crate::store::UNIT_WHOLE,
-        )
-        .map_err(store_error)?
-        .is_some_and(|unit| unit.favorite)
-    } else {
-        false
-    };
-    Ok(Some(VisibleCollectionItem {
-        media,
-        library_id: library.id,
-        coverages,
-        is_favorite,
-    }))
-}
-
-fn visible_collection_items(
-    store: &crate::Store,
-    collection_id: &str,
-    user_id: domain::UserId,
-    include_favorite: bool,
-) -> Result<Vec<VisibleCollectionItem>, Response> {
-    let mut items = Vec::new();
-    for raw in store
-        .collection_item_ids(collection_id)
-        .map_err(store_error)?
-    {
-        let media = domain::MediaId::from_str(&raw).map_err(store_error)?;
-        if let Some(item) = visible_collection_item(store, media, user_id, include_favorite)? {
-            items.push(item);
-        }
-    }
-    Ok(items)
+    Ok(true)
 }
 
 async fn read<T: Send + 'static>(

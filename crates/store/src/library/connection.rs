@@ -237,16 +237,6 @@ impl crate::LibraryConnection<'_> {
         Ok((missing, restored))
     }
 
-    pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT path_key, missing_at FROM library_files WHERE missing_at IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
     pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
         let mut owners = Vec::new();

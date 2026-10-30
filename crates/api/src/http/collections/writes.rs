@@ -111,9 +111,9 @@ pub(crate) async fn add_collection_item(
         if let Err(response) = ensure_collection_owner(store, &id, user) {
             return response;
         }
-        match visible_collection_item(store, media, user, false) {
-            Ok(Some(_)) => {}
-            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+        match visible_collection_item(store, media, user) {
+            Ok(true) => {}
+            Ok(false) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
             Err(response) => return response,
         }
         match store.add_collection_item(&id, &media.to_string()) {

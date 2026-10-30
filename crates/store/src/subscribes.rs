@@ -466,3 +466,4 @@ impl Store {
 mod connection;
 
 mod admission;
+mod media_batch;

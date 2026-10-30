@@ -199,7 +199,7 @@ pub(crate) fn with_write_admission<T>(
     })
 }
 
-fn observe_store_work<T>(
+pub(super) fn observe_store_work<T>(
     store: &crate::Store,
     metrics: Option<media_server::query_metrics::QueryMetrics>,
     work: impl FnOnce(&crate::Store) -> T,

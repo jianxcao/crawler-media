@@ -410,3 +410,18 @@ pub fn reader_pool_for_fixture(
         .unwrap();
     store.reader_pool(crate::Db::Library)
 }
+
+/// Raw missing facts for lifecycle assertions; never compiled into production.
+impl Store {
+    #[doc(hidden)]
+    pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        self.with_read(crate::Db::Library, |conn| {
+            let mut statement = conn.prepare(
+                "SELECT path_key,missing_at FROM library_files WHERE missing_at IS NOT NULL",
+            )?;
+            Ok(statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?)
+        })
+    }
+}

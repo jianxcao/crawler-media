@@ -210,8 +210,10 @@ async fn collections_crud_and_items() {
             .unwrap(),
     )
     .await;
-    assert_eq!(items["data"].as_array().unwrap().len(), 1);
-    assert_eq!(items["data"][0]["title"], "The Matrix");
+    assert_eq!(items["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(items["data"]["items"][0]["title"], "The Matrix");
+    assert_eq!(items["data"]["total"], 1);
+    assert_eq!(items["data"]["next_cursor"], Value::Null);
 
     let list = json_body(
         app.clone()

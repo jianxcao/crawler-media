@@ -31,6 +31,7 @@ mod protocol_index;
 mod query_projection;
 pub use chapter_frame_tasks::{ChapterFrameTask, ChapterFrameTaskCounts};
 mod collections;
+pub use collections::{CollectionItemFacts, CollectionItemPage, CollectionRead, UserCollection};
 mod data_retention;
 mod downloaders;
 mod fingerprint_attempts;
@@ -148,8 +149,8 @@ pub use fingerprint_models::{StoredFingerprintModel, StoredFingerprintModelMembe
 pub use fingerprint_samples::{FingerprintSampleQuery, StoredFingerprintSample};
 pub use libraries::{Library, PreparedLibraryRoots};
 pub use library::{
-    MarkerResultReplacement, SourceObservation, SourceSnapshot, StoredMediaMarker, observe_sources,
-    observe_sources_with,
+    MarkerResultReplacement, MissingFile, SourceObservation, SourceSnapshot, StoredMediaMarker,
+    observe_sources, observe_sources_with,
 };
 pub use library_ownership::{LibraryOwnership, classify_new_file};
 pub use playback::{

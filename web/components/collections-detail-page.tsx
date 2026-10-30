@@ -1,7 +1,7 @@
 "use client";
 
 import { ArtworkImage } from "@/components/artwork-image";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { BrandLoader } from "@/components/brand-loader";
@@ -11,38 +11,42 @@ import {
   removeCollectionItem,
   type CollectionItem,
 } from "@/lib/api/collections";
+import { CollectionPager } from "@/lib/collection-pager";
 import { imageUrl } from "@/lib/image-proxy";
 
 export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: string }> }) {
   const navigate = useNavigate();
   const toast = useToast();
   const [id, setId] = useState<string | null>(null);
-  const [items, setItems] = useState<CollectionItem[] | null>(null);
+  const pager = useMemo(() => new CollectionPager(listCollectionItems), []);
+  const [page, setPage] = useState(pager.state);
+  const items = page.items;
   const [removing, setRemoving] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
+    pager.clear();
+    const unsubscribe = pager.subscribe(setPage);
+    setId(null);
+    setRemoving(null);
     void idPromise.then((params) => {
       if (!alive) return;
       setId(params.id);
-      listCollectionItems(params.id)
-        .then((rows) => alive && setItems(rows))
-        .catch((error) => {
-          toast.error(error instanceof Error ? error.message : "加载失败");
-          if (alive) setItems([]);
-        });
+      void pager.reset(params.id);
     });
     return () => {
       alive = false;
+      unsubscribe();
+      pager.clear();
     };
-  }, [idPromise, toast]);
+  }, [idPromise, pager]);
 
   const removeItem = async (item: CollectionItem) => {
     if (!id) return;
     setRemoving(item.media_item_id);
     try {
       await removeCollectionItem(id, item.media_item_id);
-      setItems((current) => (current ?? []).filter((row) => row.media_item_id !== item.media_item_id));
+      await pager.refresh(id);
       toast.success(`已从合集移除「${item.title}」`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "移除失败");
@@ -66,7 +70,12 @@ export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: s
       >
         ← 返回合集
       </button>
-      {items === null ? (
+      {items === null && page.error ? (
+        <div className="mt-8 text-ui text-[var(--text-muted)]" role="alert">
+          <p>{page.error}</p>
+          <button type="button" onClick={() => void pager.refresh()} className="mt-3 text-white">重试</button>
+        </div>
+      ) : items === null ? (
         <div className="flex flex-1 items-center justify-center gap-2.5 text-ui text-[var(--text-muted)]">
           <BrandLoader className="size-5" />
           正在加载…
@@ -74,7 +83,7 @@ export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: s
       ) : (
         <>
           <h2 className="text-[26px] font-bold leading-tight tracking-[-0.02em] text-white max-md:text-[21px]">
-            合集 · {items.length} 部
+            合集 · {page.total} 部
           </h2>
           {items.length === 0 ? (
             <p className="mt-8 text-ui text-[var(--text-muted)]">
@@ -112,6 +121,17 @@ export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: s
                 </div>
               ))}
             </div>
+          )}
+          {page.error && <p role="alert" className="mt-4 text-ui text-red-300">{page.error}</p>}
+          {page.nextCursor && (
+            <button
+              type="button"
+              disabled={page.loading}
+              onClick={() => void pager.loadMore()}
+              className="mt-6 rounded-xl border border-white/10 px-5 py-2 text-ui text-white/80 disabled:opacity-40"
+            >
+              {page.loading ? "正在加载…" : page.error ? "重试加载更多" : "加载更多"}
+            </button>
           )}
         </>
       )}

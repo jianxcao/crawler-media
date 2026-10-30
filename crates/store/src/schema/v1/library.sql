@@ -110,6 +110,7 @@ CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
+CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE missing_at IS NOT NULL;
 CREATE TABLE file_details (
  file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,
  source_revision INTEGER NOT NULL, source_version TEXT NOT NULL, tracks_version INTEGER NOT NULL,
@@ -271,6 +272,7 @@ CREATE TABLE collection_items (
  sort_order INTEGER NOT NULL DEFAULT 0, added_at TEXT NOT NULL, PRIMARY KEY(collection_id,media_id)
 );
 CREATE INDEX collection_media ON collection_items(media_id,collection_id);
+CREATE INDEX collection_items_order ON collection_items(collection_id,sort_order,added_at,media_id);
 CREATE TABLE playback_units (
  user_id TEXT NOT NULL, media_id TEXT NOT NULL REFERENCES media(media_id), season INTEGER NOT NULL, episode INTEGER NOT NULL,
  played INTEGER NOT NULL DEFAULT 0 CHECK(played IN (0,1)), has_played_assertion INTEGER NOT NULL DEFAULT 0 CHECK(has_played_assertion IN (0,1)),

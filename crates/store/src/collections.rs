@@ -5,6 +5,11 @@ use rusqlite::params;
 use super::Store;
 use super::StoreError;
 
+mod cursor;
+mod facts;
+mod reads;
+pub use reads::{CollectionItemFacts, CollectionItemPage, CollectionRead};
+
 pub struct UserCollection {
     pub id: String,
     pub name: String,

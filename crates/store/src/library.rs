@@ -4,10 +4,12 @@ use domain::MediaKind;
 use rusqlite::{OptionalExtension, params};
 
 pub mod markers;
+mod missing;
 pub use markers::{
     MarkerResultReplacement, SourceObservation, SourceSnapshot, StoredMediaMarker, observe_sources,
     observe_sources_with,
 };
+pub use missing::MissingFile;
 
 pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
 
@@ -120,11 +122,6 @@ impl Store {
             })
             .collect::<Vec<_>>();
         self.with_library_write(|db| db.apply_file_verification(&observed, now))
-    }
-
-    /// path → missing_at 映射（接口打「文件缺失」标用）。
-    pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
-        self.with_library_read(|db| db.missing_at_by_path())
     }
 
     /// 文件重新入库后清除缺失标记（摘要随事实在同一事务里重算）。

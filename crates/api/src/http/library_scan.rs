@@ -18,8 +18,7 @@ pub(crate) mod runner;
 pub(crate) mod scope;
 pub(crate) mod video;
 use super::library::{
-    browse_filter_from_query, browse_order_from_query, coverages_in_library, missing_library,
-    require_visible_library,
+    browse_filter_from_query, browse_order_from_query, missing_library, require_visible_library,
 };
 use crate::store::library_query;
 pub(crate) use runner::scan_library_leased_resumable;
@@ -411,47 +410,67 @@ pub(crate) async fn missing(
             Ok(library) => library,
             Err(response) => return response,
         };
-        let missing_map = store.missing_at_by_path().unwrap_or_default();
-        let mut media_groups: HashMap<domain::MediaId, (domain::Media, Vec<Value>)> =
-            HashMap::new();
-        for coverage in coverages_in_library(&store, &library) {
-            if !missing_map.contains_key(coverage.file.path.to_string_lossy().as_ref()) {
-                continue;
+        let items = match missing_file_groups(store, &library.id) {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::error!(%error, library_id=%library.id, "Missing file facts query failed");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    "缺失文件读取失败",
+                );
             }
-            let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
-                continue;
-            };
-            let entry = media_groups
-                .entry(coverage.file.media_id)
-                .or_insert_with(|| (media, Vec::new()));
-            // 旧读模型里每个 (file × unit) 一条 JSON：整片（旧 season/episode 皆 None）
-            // 记 (0, 0)，其余记 unit 的季/集，逐条展开保持条目集合不变。
-            for unit in &coverage.units {
-                entry.1.push(json!({
-                    "id": coverage.file.file_id.to_string(),
-                    "file_path": coverage.file.path,
+        };
+        ok_list(items).into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
+}
+
+/// The HTTP contract is a complete grouped array; page physical files inside one
+/// read snapshot, then expand each file's full set of units exactly once.
+fn missing_file_groups(
+    store: &crate::Store,
+    library: &str,
+) -> Result<Vec<Value>, store::StoreError> {
+    type Group = (domain::MediaKind, String, Option<u16>, Vec<Value>);
+    let library = library.parse()?;
+    let mut after = None;
+    let mut groups: HashMap<domain::MediaId, Group> = HashMap::new();
+    loop {
+        let page = store.missing_files_page(library, after, 512)?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = Some((last.missing_at, last.file_id));
+        let complete = page.len() < 512;
+        for row in page {
+            let group = groups
+                .entry(row.media_id)
+                .or_insert_with(|| (row.kind, row.title, row.year, Vec::new()));
+            for unit in row.units {
+                group.3.push(json!({
+                    "id": row.file_id.to_string(),
+                    "file_path": row.path,
                     "season_number": if unit.is_whole() { 0 } else { unit.season },
                     "episode_number": if unit.is_whole() { 0 } else { unit.episode },
                     "size_bytes": 0,
                 }));
             }
         }
-        let items: Vec<Value> = media_groups
-            .into_values()
-            .map(|(media, files)| {
-                json!({
-                    "media_item_id": media.id.to_string(),
-                    "kind": media.kind.as_str(),
-                    "title": media.title,
-                    "year": media.year,
-                    "files": files,
-                })
+        if complete {
+            break;
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(media, (kind, title, year, files))| {
+            json!({
+                "media_item_id": media.to_string(), "kind": kind.as_str(),
+                "title": title, "year": year, "files": files,
             })
-            .collect();
-        ok_list(items).into_response()
-    })
-    .await
-    .unwrap_or_else(|error| error.response())
+        })
+        .collect())
 }
 
 /// GET /libraries/{id}/item-index — first-letter index buckets of owned items.

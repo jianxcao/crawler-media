@@ -4,6 +4,8 @@
 //! under the 800-line limit: this module only renders snapshots, it never
 //! mutates the queue.
 
+mod titles;
+
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -244,13 +246,18 @@ pub(crate) async fn list_jobs(
     State(state): State<ApiState>,
     Extension(user_id): Extension<UserId>,
     Query(query): Query<ListJobsQuery>,
+    metrics: Option<Extension<media_server::query_metrics::QueryMetrics>>,
 ) -> Response {
     // Review L2: Queue / Store 两把锁都是阻塞的，整个快照在 blocking 池上取。
     let work_state = state.clone();
     match state
         .http_work
         .run(JOBS_READ_DEADLINE, move || {
-            list_jobs_blocking(&work_state, user_id, &query)
+            super::store_wait::observe_store_work(
+                &work_state.store,
+                metrics.map(|Extension(metrics)| metrics),
+                |_| list_jobs_blocking(&work_state, user_id, &query),
+            )
         })
         .await
     {
@@ -282,13 +289,14 @@ fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) 
     };
     let selected = select_rows(visible_defs, children, query);
     // 4) Store 只读 scope：只取渲染所需的 media title。
-    let titles = match with_bounded_store(state, |store| {
-        selected
-            .iter()
-            .map(|(def, _, _)| def_media_title(def, store))
-            .collect::<Vec<Option<String>>>()
-    }) {
-        Ok(titles) => titles,
+    let titles = match with_bounded_store(state, |store| titles::selected_titles(store, &selected))
+    {
+        Ok(Ok(titles)) => titles,
+        Ok(Err(error)) => {
+            return jobs_budget_response(crate::blocking_budget::BlockingError::Worker(
+                error.to_string(),
+            ));
+        }
         Err(error) => return jobs_budget_response(error),
     };
     // 5) 释放 reader 后渲染。

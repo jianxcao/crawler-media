@@ -16,6 +16,12 @@ export interface CollectionItem {
   poster_url: string | null;
 }
 
+export interface CollectionItemPage {
+  items: CollectionItem[];
+  total: number;
+  next_cursor: string | null;
+}
+
 interface ApiEnvelope<T> {
   ok: boolean;
   data: T;
@@ -49,8 +55,14 @@ export function deleteCollection(id: string): Promise<{ deleted: boolean }> {
   );
 }
 
-export function listCollectionItems(id: string): Promise<CollectionItem[]> {
-  return unwrap(request<ApiEnvelope<CollectionItem[]>>(`/collections/${id}/items`));
+export function listCollectionItems(
+  id: string,
+  options: { limit?: number; cursor?: string } = {},
+): Promise<CollectionItemPage> {
+  const query = new URLSearchParams();
+  query.set("limit", String(options.limit ?? 40));
+  if (options.cursor) query.set("cursor", options.cursor);
+  return unwrap(request<ApiEnvelope<CollectionItemPage>>(`/collections/${id}/items?${query}`));
 }
 
 export function addCollectionItem(id: string, mediaItemId: string): Promise<{ added: boolean }> {

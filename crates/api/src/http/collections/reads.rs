@@ -1,12 +1,12 @@
 use super::*;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use serde_json::{Value, json};
 
 use crate::file_stat_read::FileStatRead;
 use crate::http::library::{BROWSE_DEADLINE, poster_path_with, preferred_coverage};
-use crate::http::ok_list;
+use crate::http::{ok, ok_list};
 
 fn poster_url(coverages: &[domain::FileCoverage], files: &dyn FileStatRead) -> Option<String> {
     let coverage = preferred_coverage(coverages)?;
@@ -43,21 +43,13 @@ async fn validate(
         if let Some(collection) = collection {
             ensure_collection_owner(store, &collection, user)?;
         }
-        for id in libraries
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>()
-        {
-            if !store
-                .get_library(&id)
-                .map_err(store_error)?
-                .is_some_and(|library| library_visible(store, &library, Some(user)))
-            {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "library.item_missing",
-                    "条目已不可见",
-                ));
-            }
+        let allowed = store.authorized_library_ids(user).map_err(store_error)?;
+        if libraries.into_iter().any(|id| !allowed.contains(&id)) {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "library.item_missing",
+                "条目已不可见",
+            ));
         }
         Ok(())
     })
@@ -70,15 +62,10 @@ pub(crate) async fn list_collections(
     axum::Extension(token): axum::Extension<String>,
 ) -> Response {
     let facts = match read(&state, user, token.clone(), move |store| {
+        let libraries = authorized_libraries(store, user)?;
         store
-            .list_collections(user)
-            .map_err(store_error)?
-            .into_iter()
-            .map(|collection| {
-                let items = visible_collection_items(store, &collection.id, user, false)?;
-                Ok((collection, items))
-            })
-            .collect::<Result<Vec<_>, Response>>()
+            .collection_summaries(user, &libraries)
+            .map_err(store_error)
     })
     .await
     {
@@ -87,13 +74,13 @@ pub(crate) async fn list_collections(
     };
     let libraries = facts
         .iter()
-        .flat_map(|(_, items)| items.iter().map(|item| item.library_id.clone()))
+        .flat_map(|row| row.items.iter().map(|item| item.library_id.to_string()))
         .collect();
     let files = state.file_stats.clone();
     let items = match observe(&state, move || {
-        facts.into_iter().map(|(collection, items)| json!({
-        "id": collection.id, "name": collection.name, "item_count": items.len(),
-        "cover_url": items.iter().find_map(|item| poster_url(&item.coverages, files.as_ref())),
+        facts.into_iter().map(|row| json!({
+        "id": row.collection.id, "name": row.collection.name, "item_count": row.items.len(),
+        "cover_url": row.items.iter().find_map(|item| poster_url(&item.coverages, files.as_ref())),
     })).collect()
     })
     .await
@@ -112,13 +99,34 @@ async fn capture(
     user: domain::UserId,
     token: String,
     id: String,
-    include_favorite: bool,
-) -> Result<Vec<VisibleCollectionItem>, Response> {
+) -> Result<Vec<store::CollectionItemFacts>, Response> {
     read(state, user, token, move |store| {
         ensure_collection_owner(store, &id, user)?;
-        visible_collection_items(store, &id, user, include_favorite)
+        let libraries = authorized_libraries(store, user)?;
+        store
+            .collection_items_all(user, &id, &libraries)
+            .map_err(store_error)
     })
     .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CollectionPageQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+fn authorized_libraries(
+    store: &crate::Store,
+    user: domain::UserId,
+) -> Result<Vec<domain::LibraryId>, Response> {
+    store
+        .authorized_library_ids(user)
+        .map_err(store_error)?
+        .into_iter()
+        .map(|id| id.parse().map_err(store_error))
+        .collect()
 }
 
 pub(crate) async fn collection_items(
@@ -126,19 +134,52 @@ pub(crate) async fn collection_items(
     axum::Extension(user): axum::Extension<domain::UserId>,
     axum::Extension(token): axum::Extension<String>,
     Path(id): Path<String>,
+    Query(query): Query<CollectionPageQuery>,
 ) -> Response {
-    let facts = match capture(&state, user, token.clone(), id.clone(), false).await {
-        Ok(facts) => facts,
+    let limit = query.limit.unwrap_or(40);
+    if !(1..=200).contains(&limit) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "collection.invalid",
+            "limit 必须为 1–200",
+        );
+    }
+    let collection = id.clone();
+    let page = match read(&state, user, token.clone(), move |store| {
+        ensure_collection_owner(store, &collection, user)?;
+        let libraries = authorized_libraries(store, user)?;
+        store
+            .collection_items_page(
+                user,
+                &collection,
+                &libraries,
+                limit,
+                query.cursor.as_deref(),
+            )
+            .map_err(|error| match error {
+                store::StoreError::Invalid(message) => {
+                    err(StatusCode::BAD_REQUEST, "collection.invalid", &message)
+                }
+                error => store_error(error),
+            })
+    })
+    .await
+    {
+        Ok(page) => page,
         Err(response) => return response,
     };
-    let libraries = facts.iter().map(|item| item.library_id.clone()).collect();
+    let libraries = page
+        .items
+        .iter()
+        .map(|item| item.library_id.to_string())
+        .collect();
     let files = state.file_stats.clone();
     let items = match observe(&state, move || {
-        facts.into_iter().map(|item| json!({
-        "media_item_id": item.media.id.to_string(), "library_id": item.library_id,
-        "kind": item.media.kind.as_str(), "title": item.media.title, "year": item.media.year,
-        "poster_url": poster_url(&item.coverages, files.as_ref()),
-    })).collect()
+        page.items.into_iter().map(|item| json!({
+            "media_item_id": item.media.id.to_string(), "library_id": item.library_id.to_string(),
+            "kind": item.media.kind.as_str(), "title": item.media.title, "year": item.media.year,
+            "poster_url": poster_url(&item.coverages, files.as_ref()),
+        })).collect()
     })
     .await
     {
@@ -148,10 +189,10 @@ pub(crate) async fn collection_items(
     if let Err(response) = validate(&state, user, token, Some(id), libraries).await {
         return response;
     }
-    ok_list(items).into_response()
+    ok(json!({"items":items,"total":page.total,"next_cursor":page.next_cursor})).into_response()
 }
 
-fn gallery_item(item: VisibleCollectionItem, files: &dyn FileStatRead) -> Value {
+fn gallery_item(item: store::CollectionItemFacts, files: &dyn FileStatRead) -> Value {
     let mut images = Vec::new();
     if let Some(coverage) = preferred_coverage(&item.coverages)
         && let Some(dir) = coverage.file.path.parent()
@@ -167,7 +208,7 @@ fn gallery_item(item: VisibleCollectionItem, files: &dyn FileStatRead) -> Value 
             }
         }
     }
-    json!({"media_item_id":item.media.id.to_string(), "library_id":item.library_id,
+    json!({"media_item_id":item.media.id.to_string(), "library_id":item.library_id.to_string(),
         "kind":item.media.kind.as_str(), "title":item.media.title, "year":item.media.year,
         "is_favorite":item.is_favorite, "images":images})
 }
@@ -178,11 +219,14 @@ pub(crate) async fn collection_gallery(
     axum::Extension(token): axum::Extension<String>,
     Path(id): Path<String>,
 ) -> Response {
-    let facts = match capture(&state, user, token.clone(), id.clone(), true).await {
+    let facts = match capture(&state, user, token.clone(), id.clone()).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    let libraries = facts.iter().map(|item| item.library_id.clone()).collect();
+    let libraries = facts
+        .iter()
+        .map(|item| item.library_id.to_string())
+        .collect();
     let files = state.file_stats.clone();
     let groups = match observe(&state, move || {
         facts
