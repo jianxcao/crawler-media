@@ -22,7 +22,7 @@ pub(crate) fn start(state: &ApiState) {
                 break;
             };
             let result = budget
-                .run_to_completion(move || shared.lock().drain_one_root_batch())
+                .run_to_completion(move || (&shared).drain_one_root_batch())
                 .await;
             match result {
                 Ok(Ok(Some(true))) => {

@@ -113,7 +113,7 @@ pub(crate) fn scan_library_subdir(
     target_dir: &std::path::Path,
 ) -> Result<(), String> {
     let (library_id, kind, scrape) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let library = store
             .list_libraries()
             .map_err(|error| error.to_string())?
@@ -164,7 +164,7 @@ pub(crate) fn scan_library_subdir(
         .map_err(|e| format!("{:?}", e))?;
 
     let plan = lease.publish(|| {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         scan_scope
             .validate(&store)
             .map_err(|e| format!("{:?}", e))?;
@@ -172,13 +172,13 @@ pub(crate) fn scan_library_subdir(
     })?;
     let observed = plan.observe()?;
     let inserted = lease.publish(|| {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
         observed.record(&store)
     })?;
 
     let scan_media = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let mut map = HashMap::new();
         for file in &filtered_transferred {
             let Some(coverage) = coverage_by_path(&store, &file.path.display().to_string()) else {
@@ -204,7 +204,7 @@ pub(crate) fn scan_library_subdir(
     );
     crate::http::library::enqueue_probes_for_paths(state, inserted);
     {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if let Some(library) = library_by_id(&store, &library_id) {
             crate::http::library::clear_library_cover_checked(&store, &library.id);
             let _ = crate::http::library::library_cover_path(&store, &library);
@@ -227,7 +227,7 @@ fn scan_video_subdir(
         .filter_paths(files)
         .map_err(|e| format!("{:?}", e))?;
     let plan = lease.publish(|| {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         scan_scope
             .validate(&store)
             .map_err(|e| format!("{:?}", e))?;
@@ -235,14 +235,14 @@ fn scan_video_subdir(
     })?;
     let observed = plan.observe()?;
     let inserted = lease.publish(|| {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
         observed.record(&store)
     })?;
     tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
         inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");
     crate::http::library::enqueue_probes_for_paths(state, inserted);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     if let Some(library) = store
         .get_library(library_id)
         .map_err(|error| error.to_string())?
@@ -295,7 +295,7 @@ fn resolve_and_scrape_subdir(
             let _ = crate::poster_fetch::attach_poster(state, &resolved_media, &path);
             let _ = crate::poster_fetch::attach_backdrop(state, &resolved_media, &path);
             let (target_coverage, all_coverages) = {
-                let store = state.store.lock();
+                let store = state.store.as_ref();
                 let coverages = match store.file_coverage_for_media(resolved_media.id) {
                     Ok(coverages) => coverages,
                     Err(error) => {

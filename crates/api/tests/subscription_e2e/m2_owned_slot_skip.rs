@@ -30,7 +30,7 @@ async fn pack_over_owned_episode_transfers_only_the_missing_one() {
     h.transfer(id).await.unwrap();
     let owned = video_files(&h, "E01");
     assert_eq!(owned.len(), 1, "E01 imported once");
-    let facts_before = h.state.store().lock().load_subscribe_facts(id).unwrap();
+    let facts_before = h.state.store().load_subscribe_facts(id).unwrap();
     let e01_before = facts_before.get(Some(1), Some(1)).cloned();
 
     h.set_search_rows(&[(PACK, 2)]);
@@ -52,7 +52,7 @@ async fn pack_over_owned_episode_transfers_only_the_missing_one() {
         "owned E01 untouched, no duplicate"
     );
     assert_eq!(video_files(&h, "E02").len(), 1, "E02 imported");
-    let facts = h.state.store().lock().load_subscribe_facts(id).unwrap();
+    let facts = h.state.store().load_subscribe_facts(id).unwrap();
     assert_eq!(
         facts.get(Some(1), Some(1)).cloned(),
         e01_before,

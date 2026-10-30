@@ -7,7 +7,6 @@ use marker::fingerprint::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -185,7 +184,7 @@ impl FingerprintCaptureEngine for FixtureEngine {
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     manager: ProbeManager,
     media_id: MediaId,
     units: Vec<ProbeUnit>,
@@ -204,14 +203,14 @@ fn setup_with_digest_versions(case: &'static str, episodes: &[u32]) -> Fixture {
 
 fn setup_with_versions(case: &'static str, episodes: &[u32], digest_versions: bool) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     let engine = Arc::new(FixtureEngine {
         case,
         reads: Arc::new(AtomicUsize::new(0)),
     });
     let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone()).unwrap();
-    let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
+    let tv_root = store.as_ref().library_root(MediaKind::Tv).unwrap();
     let mut specs: Vec<FixtureFile> = episodes
         .iter()
         .enumerate()
@@ -407,12 +406,12 @@ fn spec_units(spec: &FixtureFile) -> Vec<UnitKey> {
 }
 
 fn seed_store(
-    store: &Arc<Mutex<Store>>,
+    store: &Arc<Store>,
     media_id: MediaId,
     specs: &[FixtureFile],
     digest_versions: bool,
 ) -> Vec<FileCoverage> {
-    let st = store.lock();
+    let st = store.as_ref();
     let mut config = st.get_scrape_config().unwrap().setting;
     config.fingerprint_sampling_mode = Some("adaptive".into());
     st.save_scrape_config(&config).unwrap();
@@ -436,16 +435,16 @@ fn seed_store(
         let file = if digest_versions {
             let source_version =
                 api::fingerprint_job::current_source_version(std::path::Path::new(&spec.path));
-            publish_row_with_version(&st, spec, &source_version)
+            publish_row_with_version(st, spec, &source_version)
         } else {
-            publish_fixture_file(&st, spec).unwrap()
+            publish_fixture_file(st, spec).unwrap()
         };
         let coverage = FileCoverage {
             path_key: String::new(),
             file,
             units: spec_units(spec),
         };
-        seed_probe(&st, &coverage, Some(1_000_000));
+        seed_probe(st, &coverage, Some(1_000_000));
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,

@@ -10,7 +10,6 @@ fn cancellation_before_control_registration_prevents_scan() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let controls = fix.state.scan_coordinator.active_controls.lock();
@@ -28,7 +27,7 @@ fn cancellation_before_control_registration_prevents_scan() {
         assert!(Instant::now() < deadline, "scan did not acquire its lease");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(fix.state.store().lock().cancel_scan(&op.id, 2000).unwrap());
+    assert!(fix.state.store().cancel_scan(&op.id, 2000).unwrap());
     drop(controls);
     fix.state.scan_coordinator.cancel_operation(&op.id);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -45,7 +44,7 @@ fn cancellation_before_control_registration_prevents_scan() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let store = fix.state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     assert_eq!(
         store.scan_operation(&op.id).unwrap().unwrap().status,
         ScanOperationStatus::Cancelled
@@ -100,7 +99,7 @@ async fn scope_change_between_admission_and_capture_cancels_without_ledgering() 
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -117,7 +116,7 @@ async fn scope_change_between_admission_and_capture_cancels_without_ledgering() 
         &hook_op_id,
         Box::new(move || {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .update_library(&library_id, None, Some(&[moved.as_str()]), None)
                 .unwrap();
@@ -141,29 +140,23 @@ async fn scope_change_between_admission_and_capture_cancels_without_ledgering() 
         done.report
     );
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
 
-/// P2-NEW-2：文件版本观察（模拟慢 NAS stat）期间不得持有 Store 锁。
+/// P2-NEW-2：文件版本观察（模拟慢 NAS stat）期间不得持有 Library writer。
 ///
-/// 屏障阻塞在观察点；测试线程必须仍能立刻拿到 Store 锁，否则说明慢观察把共享
-/// Store 拖住了（auth 等其他请求会被阻塞）。
+/// 屏障阻塞在观察点；其他读取与 Library 写入仍须继续。
 #[tokio::test]
-async fn slow_file_observation_keeps_the_store_lock_free() {
+async fn slow_file_observation_keeps_the_library_writer_free() {
     let fix = Fixture::new();
     let file = fix.root.join("Movie1 (2024).mkv");
     std::fs::write(&file, b"1").unwrap();
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -189,17 +182,19 @@ async fn slow_file_observation_keeps_the_store_lock_free() {
         .expect("worker did not enter the observation gate")
         .expect("observation worker stopped before entering the gate");
 
-    {
-        let store = fix.state.store();
-        let guard = store
-            .try_lock_for(std::time::Duration::from_secs(2))
-            .expect("慢文件观察期间 Store 锁必须可用（P2-NEW-2）");
-        assert!(
-            guard.scan_operation(&op.id).unwrap().is_some(),
-            "慢观察期间其他 Store 使用者必须仍能读"
-        );
-    }
+    let store = fix.state.store();
+    // Exercise the actual database writer rather than a removed outer Store mutex.
+    let writer_available = store.with_writer(store::Db::Library, |_| Ok(()));
+    let readable = store.scan_operation(&op.id);
     release_tx.send(()).unwrap();
+    assert!(
+        writer_available.is_ok(),
+        "慢文件观察期间 Library writer 必须可用（P2-NEW-2）: {writer_available:?}"
+    );
+    assert!(
+        readable.unwrap().is_some(),
+        "慢观察期间其他 Store 使用者必须仍能读"
+    );
 
     let done = fix.wait_terminal(&op.id).await;
     assert_eq!(
@@ -220,7 +215,7 @@ async fn video_scope_change_between_admission_and_capture_cancels_without_ledger
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -238,7 +233,7 @@ async fn video_scope_change_between_admission_and_capture_cancels_without_ledger
         &hook_op_id,
         Box::new(move || {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .update_library(&library_id, None, Some(&[moved.as_str()]), None)
                 .unwrap();
@@ -261,12 +256,7 @@ async fn video_scope_change_between_admission_and_capture_cancels_without_ledger
         done.report
     );
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 Video operation 不得登记任何文件"
     );
 }

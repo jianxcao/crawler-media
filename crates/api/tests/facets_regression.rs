@@ -34,7 +34,6 @@ fn base_state(tmp: &tempfile::TempDir) -> ApiState {
 fn movie_library_id(state: &ApiState) -> String {
     state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -46,7 +45,6 @@ fn movie_library_id(state: &ApiState) -> String {
 fn library_root(state: &ApiState, library_id: &str) -> PathBuf {
     state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -92,7 +90,6 @@ fn seed_movie(
     let media_id = MediaId::new();
     state
         .store()
-        .lock()
         .insert_media(&Media {
             id: media_id,
             kind: MediaKind::Movie,
@@ -116,7 +113,7 @@ fn seed_movie(
         std::fs::write(path.with_extension("nfo"), nfo).unwrap();
         let _ = index;
         publish_fixture_file(
-            &state.store().lock(),
+            &state.store(),
             &FixtureFile {
                 file_id: Some(LedgerId::new()),
                 media_id,
@@ -384,7 +381,6 @@ async fn hidden_library_does_not_contribute_candidates() {
     std::fs::create_dir_all(&hidden_root).unwrap();
     let hidden = state
         .store()
-        .lock()
         .create_library(
             MediaKind::Movie,
             "Hidden",
@@ -406,7 +402,7 @@ async fn hidden_library_does_not_contribute_candidates() {
 
     let member_token = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let user = domain::User {
             id: domain::UserId::new(),
             login: "facet-member".into(),

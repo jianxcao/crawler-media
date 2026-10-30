@@ -105,7 +105,7 @@ fn make_state(root: &Path, files: Arc<GatedFileStatRead>) -> ApiState {
 
 fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let lib_dir = tmp.join("movies");
     std::fs::create_dir_all(&lib_dir).unwrap();
     let library = guard
@@ -139,7 +139,7 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     guard.insert_media(&media).unwrap();
 
     publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             media_id,
             path: movie_file.to_str().unwrap().into(),
@@ -175,7 +175,7 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(
         tmp.path(),
@@ -203,7 +203,10 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "Store lock must be free while out-of-lock facts evaluation is blocked"
         );
     }
@@ -249,7 +252,7 @@ impl LibraryPathResolver for FailingResolver {
 
 #[test]
 fn failing_resolver_propagates_permission_denied() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let broader_root = tmp.path().join("media");
     let deeper_root = broader_root.join("special");
@@ -302,7 +305,7 @@ fn failing_resolver_propagates_permission_denied() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscribe_read_rejects_facts_changed_during_unlocked_io() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(
         tmp.path(),
@@ -323,10 +326,11 @@ async fn subscribe_read_rejects_facts_changed_during_unlocked_io() {
     .unwrap();
     let handle = state.store();
     {
-        let store = handle
-            .try_lock_for(Duration::from_secs(1))
-            .expect("IO must not hold Store");
-        store.delete_ledger_path(path.to_str().unwrap()).unwrap();
+        handle
+            .writers()
+            .with_writer_timeout(Duration::from_secs(1), store::Db::Library, |_| Ok(()))
+            .expect("IO must not hold the Library writer");
+        handle.delete_ledger_path(path.to_str().unwrap()).unwrap();
     }
     gate.release();
     assert!(

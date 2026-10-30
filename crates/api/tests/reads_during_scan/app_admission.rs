@@ -67,11 +67,7 @@ async fn queued_password_login(maintenance: bool, jellyfin: bool) {
             1,
         )));
     let app = api::router(state.clone());
-    let token_before = state
-        .store()
-        .lock()
-        .latest_token_for_user(fixture.user)
-        .unwrap();
+    let token_before = state.store().latest_token_for_user(fixture.user).unwrap();
     let held = HeldAppWriter::acquire(&state);
     let mut request = Box::pin(app.clone().oneshot(password_request(jellyfin)));
     // Poll both futures: verification must finish while the actual app writer is
@@ -95,11 +91,7 @@ async fn queued_password_login(maintenance: bool, jellyfin: bool) {
     };
     drop(held);
     assert_refused(request.await.unwrap(), maintenance).await;
-    let token_after = state
-        .store()
-        .lock()
-        .latest_token_for_user(fixture.user)
-        .unwrap();
+    let token_after = state.store().latest_token_for_user(fixture.user).unwrap();
     assert!(
         token_after == token_before,
         "refused login must not persist a token"
@@ -136,7 +128,7 @@ async fn queued_app_history_write_rechecks_admission_after_acquiring_its_writer(
         let history = json!([{"id": history_id, "query": "preserve me"}]).to_string();
         {
             let handle = fixture.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store.put_setting(&history_key, &history).unwrap();
             store
                 .insert_search_snapshot(history_id, "torrents", "preserve me", "{}", 1)
@@ -167,7 +159,7 @@ async fn queued_app_history_write_rechecks_admission_after_acquiring_its_writer(
         assert_refused(request.await.unwrap(), maintenance).await;
         {
             let handle = fixture.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             assert_eq!(
                 store.get_setting(&history_key).unwrap().as_deref(),
                 Some(history.as_str())
@@ -181,7 +173,6 @@ async fn queued_app_history_write_rechecks_admission_after_acquiring_its_writer(
             fixture
                 .state
                 .store()
-                .lock()
                 .get_search_snapshot(history_id)
                 .unwrap()
                 .is_none()
@@ -260,7 +251,7 @@ async fn queued_app_logout_rechecks_instance_after_acquiring_its_writer() {
 async fn queued_transfer_settings(maintenance: bool) {
     let fixture = Fixture::new();
     let app = api::router(fixture.state.clone());
-    let before = fixture.state.store().lock().transfer_settings().unwrap();
+    let before = fixture.state.store().transfer_settings().unwrap();
     let input = || {
         Request::patch("/api/v1/settings/transfer")
             .header("authorization", "Bearer interactive-admin-fixture-token")
@@ -291,14 +282,11 @@ async fn queued_transfer_settings(maintenance: bool) {
     };
     drop(held);
     assert_refused(request.await.unwrap(), maintenance).await;
-    assert_eq!(
-        fixture.state.store().lock().transfer_settings().unwrap(),
-        before
-    );
+    assert_eq!(fixture.state.store().transfer_settings().unwrap(), before);
     drop(closed);
     let _ = fixture.state.clone().with_instance_writable(true);
     assert_eq!(app.oneshot(input()).await.unwrap().status(), StatusCode::OK);
-    let after = fixture.state.store().lock().transfer_settings().unwrap();
+    let after = fixture.state.store().transfer_settings().unwrap();
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.transfer_mode, "copy");
     assert!(after.scrape);

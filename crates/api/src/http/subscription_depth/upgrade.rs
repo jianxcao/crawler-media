@@ -30,7 +30,7 @@ fn capture(
     user: domain::UserId,
     body: axum::body::Bytes,
 ) -> Result<Snapshot, Response> {
-    crate::http::store_wait::with_bounded_store(state.store(), |store| {
+    crate::http::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         let (mut subscribe, media) = resolve_subscribe_on(store, id, user)?;
@@ -79,8 +79,7 @@ fn capture(
             target_score,
             target_label,
         })
-    })
-    .ok_or_else(crate::http::store_wait::busy_response)?
+    })?
 }
 
 fn upgrade_blocking(

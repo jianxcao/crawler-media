@@ -103,7 +103,7 @@ fn batch(users: usize, protocol: bool) -> (u64, i64) {
             )
             .unwrap();
     }
-    let db = measure_protocol_writes(tmp.path().join("library.db"), media.id, protocol);
+    let (db, protocol_writes) = measure_protocol_writes(&store, media.id, protocol);
     let files: Vec<_> = (1..=100)
         .map(|ep| {
             (
@@ -125,7 +125,7 @@ fn batch(users: usize, protocol: bool) -> (u64, i64) {
             .map(|m| m.len())
             .ok()
     );
-    check_protocol_writes(&db, media.id, protocol);
+    check_protocol_writes(&db, &protocol_writes, media.id, protocol);
     if protocol {
         check_indexed_queries(&store, lib.id.parse().unwrap());
         store
@@ -166,12 +166,15 @@ fn batch_protocol_index_cost_tracks_cards_instead_of_files_times_people() {
     batch(0, true);
 }
 
+type ProtocolWrites = std::sync::Arc<[std::sync::atomic::AtomicU64; 2]>;
+
 fn measure_protocol_writes(
-    path: std::path::PathBuf,
+    store: &Store,
     media: MediaId,
     protocol: bool,
-) -> rusqlite::Connection {
-    let db = rusqlite::Connection::open(path).unwrap();
+) -> (rusqlite::Connection, ProtocolWrites) {
+    let db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
+    let writes: ProtocolWrites = Default::default();
     if protocol {
         let cast: Vec<_> = (0..100)
             .map(|i| serde_json::json!({"name": format!("Actor {i}")}))
@@ -183,29 +186,36 @@ fn measure_protocol_writes(
             rusqlite::params![media.to_string(), fields.to_string()],
         )
         .unwrap();
-        db.execute_batch("CREATE TABLE measured_protocol_writes(kind TEXT);
-            CREATE TRIGGER measured_person_insert AFTER INSERT ON library_protocol_people BEGIN INSERT INTO measured_protocol_writes VALUES('insert'); END;
-            CREATE TRIGGER measured_person_delete AFTER DELETE ON library_protocol_people BEGIN INSERT INTO measured_protocol_writes VALUES('delete'); END;").unwrap();
+        // WITHOUT ROWID tables do not invoke SQLite's update_hook. Observe real
+        // trigger events through a function on the one writer, without adding a
+        // table outside the sole supported storage layout.
+        let observed = writes.clone();
+        store.with_writer(store::Db::Library, |conn| {
+            conn.create_scalar_function(
+                "measure_protocol_write", 1, rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |ctx| {
+                    let index: usize = ctx.get(0)?;
+                    observed[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(0_i64)
+                },
+            )?;
+            conn.execute_batch("CREATE TRIGGER measured_person_insert AFTER INSERT ON library_protocol_people BEGIN SELECT measure_protocol_write(0); END;
+                CREATE TRIGGER measured_person_delete AFTER DELETE ON library_protocol_people BEGIN SELECT measure_protocol_write(1); END;")?;
+            Ok(())
+        }).unwrap();
     }
-    db
+    (db, writes)
 }
 
-fn check_protocol_writes(db: &rusqlite::Connection, media: MediaId, protocol: bool) {
+fn check_protocol_writes(
+    db: &rusqlite::Connection,
+    writes: &ProtocolWrites,
+    media: MediaId,
+    protocol: bool,
+) {
     if protocol {
-        let inserts: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM measured_protocol_writes WHERE kind='insert'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let deletes: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM measured_protocol_writes WHERE kind='delete'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let inserts = writes[0].load(std::sync::atomic::Ordering::Relaxed);
+        let deletes = writes[1].load(std::sync::atomic::Ordering::Relaxed);
         let terms: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM library_protocol_people WHERE media_id=?1",

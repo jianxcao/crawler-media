@@ -227,7 +227,7 @@ async fn unknown_requested_http_reference_must_still_protect() {
 }
 
 struct SwitchFixture {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     app: axum::Router,
     deletes_a: Arc<Mutex<Vec<String>>>,
     deletes_b: Arc<Mutex<Vec<String>>>,
@@ -236,7 +236,7 @@ struct SwitchFixture {
 }
 
 fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
-    let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let id_a = DownloaderId::new();
     let id_b = DownloaderId::new();
     let hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -255,7 +255,7 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
             let info_hits = info_hits.clone();
             move || {
                 if info_hits.fetch_add(1, Ordering::SeqCst) == 1 {
-                    switch_store.lock().set_default_downloader(id_b).unwrap();
+                    switch_store.as_ref().set_default_downloader(id_b).unwrap();
                 }
             }
         },
@@ -271,11 +271,11 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
         || {},
     );
     store
-        .lock()
+        .as_ref()
         .insert_downloader(&qbit_row(id_a, "a", url_a, true))
         .unwrap();
     store
-        .lock()
+        .as_ref()
         .insert_downloader(&qbit_row(id_b, "b", url_b, false))
         .unwrap();
     let app = router(
@@ -314,7 +314,7 @@ async fn cleanup_keeps_planned_client_after_default_downloader_switch() {
     for enclosure in ["https://pt.example/a", "https://pt.example/b"] {
         fixture
             .store
-            .lock()
+            .as_ref()
             .record_pending_submission(subscribe, 80, &pending(enclosure))
             .unwrap();
     }
@@ -338,7 +338,7 @@ async fn cleanup_keeps_planned_client_after_default_downloader_switch() {
     assert!(
         fixture
             .store
-            .lock()
+            .as_ref()
             .load_pending(subscribe)
             .unwrap()
             .is_empty()
@@ -352,15 +352,15 @@ async fn switched_default_must_not_skip_surviving_explicit_old_route() {
     let subscribe = subscribe_id(&create_subscribe(&fixture.app, "search").await);
     let mut survivor = fixture
         .store
-        .lock()
+        .as_ref()
         .get_subscribe(subscribe)
         .unwrap()
         .unwrap();
     survivor.id = SubscribeId::new();
-    fixture.store.lock().insert_subscribe(&survivor).unwrap();
+    fixture.store.as_ref().insert_subscribe(&survivor).unwrap();
     let old_id = fixture
         .store
-        .lock()
+        .as_ref()
         .default_downloader()
         .unwrap()
         .unwrap()
@@ -368,7 +368,7 @@ async fn switched_default_must_not_skip_surviving_explicit_old_route() {
     for enclosure in ["https://pt.example/a", "https://pt.example/b"] {
         fixture
             .store
-            .lock()
+            .as_ref()
             .record_pending_submission(subscribe, 80, &pending(enclosure))
             .unwrap();
     }
@@ -376,7 +376,7 @@ async fn switched_default_must_not_skip_surviving_explicit_old_route() {
     shared.downloader_id = Some(old_id);
     fixture
         .store
-        .lock()
+        .as_ref()
         .record_pending_submission(survivor.id, 80, &shared)
         .unwrap();
     let response = delete_response(&fixture.app, subscribe).await;
@@ -389,7 +389,7 @@ async fn switched_default_must_not_skip_surviving_explicit_old_route() {
     assert_eq!(
         fixture
             .store
-            .lock()
+            .as_ref()
             .load_pending(survivor.id)
             .unwrap()
             .len(),

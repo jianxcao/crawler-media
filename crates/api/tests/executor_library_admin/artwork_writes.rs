@@ -48,7 +48,6 @@ fn artwork_mutations_require_a_filesystem_worker_before_writing() {
         assert!(
             f.state
                 .store()
-                .lock()
                 .get_setting(&format!("artwork.{}", f.file.media_id))
                 .unwrap()
                 .is_none()
@@ -57,7 +56,7 @@ fn artwork_mutations_require_a_filesystem_worker_before_writing() {
     }
 }
 
-struct ObservedFiles(Arc<parking_lot::Mutex<Store>>);
+struct ObservedFiles(Arc<Store>);
 impl api::file_stat_read::FileStatRead for ObservedFiles {
     fn read_nfo(&self, _: &std::path::Path) -> Option<library::NfoMeta> {
         None
@@ -67,7 +66,10 @@ impl api::file_stat_read::FileStatRead for ObservedFiles {
     }
     fn is_file(&self, path: &std::path::Path) -> bool {
         assert!(
-            self.0.try_lock_for(Duration::from_millis(100)).is_some(),
+            self.0
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "artwork observation held Store across filesystem work"
         );
         std::thread::sleep(Duration::from_millis(10));
@@ -96,7 +98,7 @@ fn uploaded_artwork_observation_allows_other_store_reads_and_records_its_file() 
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let file = store.file_coverage_by_id(f.file.file_id).unwrap().unwrap();
     assert!(file.file.poster_path.is_some());
     assert_eq!(

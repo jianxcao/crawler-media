@@ -6,7 +6,7 @@ use domain::{Site, SiteId};
 use hooks::{PluginError, SiteCredentials};
 
 use crate::ApiState;
-use crate::http::store_wait::{STORE_READ_WAIT, busy_response, with_foreground_store};
+use crate::http::store_wait::with_foreground_store;
 
 pub(super) struct AdmittedCredentials<'a> {
     state: &'a ApiState,
@@ -56,11 +56,7 @@ impl SiteCredentials for AdmittedCredentials<'_> {
             .require_writable()
             .and_then(|_| self.state.require_write_admitted())
             .map_err(|response| self.refused(response))?;
-        let reader = self
-            .state
-            .store_readers
-            .checkout(STORE_READ_WAIT)
-            .ok_or_else(|| self.refused(busy_response()))?;
+        let reader = self.state.store.clone();
         self.unchanged_site(&reader)
     }
     fn save(&self, site: &Site) -> Result<(), PluginError> {

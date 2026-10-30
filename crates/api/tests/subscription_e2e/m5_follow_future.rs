@@ -19,7 +19,7 @@ async fn tracks_e04(follow: bool) -> bool {
         ("The.Long.Watch.S01E03.1080p.WEB-DL.x264-GRP", 3),
     ]);
     h.scheduled_search(id).await.unwrap();
-    let history = h.state.store().lock().load_wanted_history(id).unwrap();
+    let history = h.state.store().load_wanted_history(id).unwrap();
     history
         .get(&(Some(1), Some(4)))
         .is_some_and(|row| row.search_attempts > 0)

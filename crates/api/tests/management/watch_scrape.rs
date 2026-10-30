@@ -271,10 +271,10 @@ async fn scrape_job_records_directories_larger_than_one_batch() {
         set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true})).await;
     assert_eq!(saved.status(), StatusCode::OK);
     add_default_root(&app, "tv", &extra).await;
-    state.store().lock().reset_root_ledger_scans();
+    state.store().reset_root_ledger_scans();
     tick(&app, 1).await;
     assert_eq!(
-        state.store().lock().root_ledger_scans(),
+        state.store().root_ledger_scans(),
         0,
         "a Scrape round must not scan the whole Library ledger"
     );
@@ -390,11 +390,11 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
 
     {
         let store_arc = state.store();
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store.insert_media(&old_canonical).unwrap();
         // 预存 canonical Media 在已有其它目录的既有分集（Season 1 Episode 2），使 rows 非空
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 file_id: Some(domain::LedgerId::new()),
                 media_id: old_canonical.id,
@@ -434,7 +434,7 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
     tick(&app, 1).await;
 
     let store_arc = state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     let video_path = video.display().to_string();
     let coverage = store
         .file_coverage_by_path(&video_path)

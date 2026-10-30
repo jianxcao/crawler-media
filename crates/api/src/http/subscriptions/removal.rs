@@ -111,7 +111,7 @@ pub(super) fn route_endpoint(
 type PendingReference = (domain::SubscribeId, crate::store::PendingDownload);
 
 fn pending_references(state: &ApiState) -> Result<Vec<PendingReference>, DownloaderError> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let result = (|| {
         let mut references = Vec::new();
         for subscribe in store.list_all_subscribes()? {

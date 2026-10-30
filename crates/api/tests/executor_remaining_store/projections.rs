@@ -2,7 +2,7 @@ use super::*;
 
 fn check_projection(f: &Fixture, method: &str, uri: String, body: Value, expected: StatusCode) {
     let app = router(f.state.clone());
-    let holder = hold_store(&f.state, Duration::from_millis(500));
+    let holder = hold_store(&f.state, store::Db::Library, Duration::from_millis(500));
     let (response, elapsed) = runtime().block_on(async {
         let started = Instant::now();
         tokio::join!(app.oneshot(request(method, &uri, &f.token, body)), async {
@@ -44,7 +44,6 @@ fn library_preview_and_missing_reads_keep_executor_responsive() {
         let library = f
             .state
             .store()
-            .lock()
             .default_library(MediaKind::Movie)
             .unwrap()
             .unwrap()
@@ -74,7 +73,6 @@ fn metadata_override_and_library_order_keep_executor_responsive() {
     let ids: Vec<_> = f
         .state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -174,7 +172,6 @@ fn retired_root_writer_is_unavailable() {
     let library = f
         .state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap()
@@ -196,7 +193,7 @@ fn metadata_refresh_and_extras_keep_executor_responsive() {
         let f = Fixture::new();
         let (uri, body) = {
             let handle = f.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             let library = store.default_library(MediaKind::Movie).unwrap().unwrap();
             if refresh {
                 (
@@ -224,7 +221,7 @@ fn metadata_refresh_and_extras_keep_executor_responsive() {
 fn anonymous_person_image_lookup_does_not_park_executor() {
     let f = Fixture::new();
     let provider = api::media_server_provider::ApiServerProvider::new(f.state.clone());
-    let holder = hold_store(&f.state, Duration::from_millis(500));
+    let holder = hold_store(&f.state, store::Db::Library, Duration::from_millis(500));
     use media_server::provider::MediaServerProvider;
     let (result, elapsed) = runtime().block_on(async {
         let started = Instant::now();

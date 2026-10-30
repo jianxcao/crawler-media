@@ -306,29 +306,28 @@ impl MediaServerProvider for ApiServerProvider {
         let budget = state.http_work.clone();
         budget
             .run(std::time::Duration::from_secs(30), move || {
-                let store = state
-                    .store_readers
-                    .checkout(crate::http::store_wait::STORE_READ_WAIT)
-                    .ok_or_else(|| "Store read pool busy".to_string())?;
-                let ownership = store
-                    .library_ownership()
-                    .map_err(|error| error.to_string())?;
-                let role = store
-                    .user_role(user_id)
-                    .map_err(|error| error.to_string())?;
-                let libraries = store.list_libraries().map_err(|error| error.to_string())?;
-                let libraries = libraries
-                    .into_iter()
-                    .filter(|lib| {
-                        ownership.accepts_work(&lib.id)
-                            && if role == "admin" {
-                                lib.admin_visible
-                            } else {
-                                lib.access_mode == "everyone" || lib.member_ids.contains(&user_id)
-                            }
-                    })
-                    .collect::<Vec<_>>();
-                drop(store);
+                let libraries = sync_operations::read_store(&state, |store| {
+                    let ownership = store
+                        .library_ownership()
+                        .map_err(|error| error.to_string())?;
+                    let role = store
+                        .user_role(user_id)
+                        .map_err(|error| error.to_string())?;
+                    let libraries = store.list_libraries().map_err(|error| error.to_string())?;
+                    let libraries = libraries
+                        .into_iter()
+                        .filter(|lib| {
+                            ownership.accepts_work(&lib.id)
+                                && if role == "admin" {
+                                    lib.admin_visible
+                                } else {
+                                    lib.access_mode == "everyone"
+                                        || lib.member_ids.contains(&user_id)
+                                }
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(libraries)
+                })?;
                 let mut list = Vec::new();
                 for lib in libraries {
                     let cover_path = lib
@@ -470,32 +469,36 @@ impl MediaServerProvider for ApiServerProvider {
         let id = id.to_owned();
         let facts = self
             .run_sync(move |provider| -> Result<_, String> {
-                let store = provider.bounded_store()?;
-                let entry = items::resolve_entry(&store, user_id, &id)?;
-                let Some(entry) = entry else {
+                let facts = provider.bounded_reader(|store| {
+                    let Some(entry) = items::resolve_entry(store, user_id, &id)? else {
+                        return Ok(None);
+                    };
+                    if entry.media.kind != MediaKind::Tv || entry.is_series {
+                        return Ok(None);
+                    }
+                    // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
+                    let Some((season, episode)) = items::snapshot_unit(entry.unit)
+                        .and_then(|unit| unit.episode_coordinates())
+                    else {
+                        return Ok(None);
+                    };
+                    // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
+                    let adopted_still = item_metadata::page_fields(
+                        store,
+                        &entry.file,
+                        entry.unit,
+                        &entry.media,
+                        entry.is_series,
+                    )
+                    .ok()
+                    .and_then(|fields| fields.still_url.value().cloned());
+                    let adopted_url =
+                        primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
+                    Ok(Some((entry, adopted_url, season, episode)))
+                })?;
+                let Some((entry, adopted_url, season, episode)) = facts else {
                     return Ok(None);
                 };
-                if entry.media.kind != MediaKind::Tv || entry.is_series {
-                    return Ok(None);
-                }
-                // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
-                let Some((season, episode)) =
-                    items::snapshot_unit(entry.unit).and_then(|unit| unit.episode_coordinates())
-                else {
-                    return Ok(None);
-                };
-                // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
-                let adopted_still = item_metadata::page_fields(
-                    &store,
-                    &entry.file,
-                    entry.unit,
-                    &entry.media,
-                    entry.is_series,
-                )
-                .ok()
-                .and_then(|fields| fields.still_url.value().cloned());
-                let adopted_url =
-                    primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
                 let local_still =
                     crate::episode_still::existing(entry.file.path.as_path()).is_some();
                 let tmdb_episode = entry
@@ -672,11 +675,12 @@ impl ApiServerProvider {
         let played = episodes.iter().filter(|episode| episode.played).count();
         let favorite = self
             .run_sync(move |provider| {
-                provider
-                    .bounded_store()?
-                    .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
-                    .map(|state| state.is_some_and(|state| state.favorite))
-                    .map_err(|error| error.to_string())
+                provider.bounded_reader(|store| {
+                    store
+                        .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
+                        .map(|state| state.is_some_and(|state| state.favorite))
+                        .map_err(|error| error.to_string())
+                })
             })
             .await??;
         let unplayed_item_count = total.saturating_sub(played);

@@ -87,7 +87,12 @@ async fn late_sql_duration_is_pending_then_logged_after_actual_worker_exit() {
     logs();
     let fixture = support::Fixture::new(1);
     let pool = fixture.state.library_read_pool_weak().upgrade().unwrap();
-    let capacity = pool.available();
+    let capacity = 8;
+    let warm = (0..capacity)
+        .map(|_| pool.try_checkout().unwrap())
+        .collect::<Vec<_>>();
+    drop(warm);
+    assert_eq!(pool.available(), capacity);
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -122,6 +127,15 @@ async fn late_sql_duration_is_pending_then_logged_after_actual_worker_exit() {
     let completion = record(id, "Library read request completed").unwrap();
     release_tx.send(()).unwrap();
     let late = stopped(id).await;
+    let returned = (0..capacity)
+        .map(|_| pool.try_checkout().unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        pool.try_checkout(),
+        Err(store::LibraryReadError::Busy)
+    ));
+    drop(returned);
+    assert_eq!(pool.available(), capacity);
     assert_eq!(
         completion.get("sql_ms").map(String::as_str),
         Some("None"),

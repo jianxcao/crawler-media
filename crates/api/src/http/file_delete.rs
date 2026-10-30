@@ -25,11 +25,10 @@ fn remove_physical_file(path: &str) -> Result<(), String> {
 /// A storage error is reported instead of guessing: an unreadable identity must
 /// never be mistaken for "the queued file is still there".
 fn queued_path_was_reused(
-    store: &parking_lot::Mutex<Store>,
+    store: &Store,
     entry: &store::QueuedFileDeletion,
 ) -> Result<bool, store::StoreError> {
     let current = {
-        let store = store.lock();
         store
             .file_id_at_deletion_path(entry)?
             .map(|id| store.file_coverage_by_id(id.parse()?))
@@ -75,12 +74,12 @@ fn queued_path_was_reused(
 
 /// Drop a stale queue row; the file and its file row are kept.
 fn abandon_queued_deletion(
-    store: &parking_lot::Mutex<Store>,
+    store: &Store,
     entry: &store::QueuedFileDeletion,
 ) -> Result<(), store::StoreError> {
     let path = entry.path.as_str();
     tracing::warn!(path = %path, "待删除路径已被新文件复用，放弃删除");
-    store.lock().abandon_file_deletion(entry)
+    store.abandon_file_deletion(entry)
 }
 
 /// M6: retry every queued Library file deletion. Filesystem work happens
@@ -89,13 +88,11 @@ fn abandon_queued_deletion(
 ///
 /// Queue read failures and queue write failures are returned to the caller so a
 /// broken storage layer cannot look like "nothing to delete".
-pub(crate) fn retry_queued_deletions(
-    store: &parking_lot::Mutex<Store>,
-) -> Result<(), store::StoreError> {
+pub(crate) fn retry_queued_deletions(store: &Store) -> Result<(), store::StoreError> {
     let now = crate::job_loop::unix_now();
     // Review M-3: only rows whose backoff expired. The Store lock is released
     // at the end of this statement, before any filesystem work below.
-    let queued = { store.lock().list_due_file_deletions(now)? };
+    let queued = { store.list_due_file_deletions(now)? };
     for entry in queued {
         process_queued_deletion(store, &entry, now)?;
     }
@@ -105,19 +102,14 @@ pub(crate) fn retry_queued_deletions(
 /// Execute one just-queued deletion intent now (off the Store lock). The
 /// intent stays queued on failure, so the periodic retry and restart recovery
 /// finish it. Returns an error message when the bytes are not yet gone.
-pub(crate) fn retry_queued_deletions_for(
-    store: &parking_lot::Mutex<Store>,
-    path: &str,
-) -> Result<(), String> {
+pub(crate) fn retry_queued_deletions_for(store: &Store, path: &str) -> Result<(), String> {
     let now = crate::job_loop::unix_now();
     let entry = store
-        .lock()
         .due_file_deletion(path, now)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("删除意图不存在 {path}"))?;
     process_queued_deletion(store, &entry, now).map_err(|e| e.to_string())?;
     let still_queued = store
-        .lock()
         .file_deletion_intent_pending(&entry)
         .map_err(|e| e.to_string())?;
 
@@ -128,14 +120,14 @@ pub(crate) fn retry_queued_deletions_for(
 }
 
 fn process_queued_deletion(
-    store: &parking_lot::Mutex<Store>,
+    store: &Store,
     entry: &store::QueuedFileDeletion,
     now: i64,
 ) -> Result<(), store::StoreError> {
     let claim = claims::path_claim(&entry.path_key);
     let _guard = claim.lock();
     let path = entry.path.as_str();
-    if store.lock().due_file_deletion_intent(entry, now)?.as_ref() != Some(entry) {
+    if store.due_file_deletion_intent(entry, now)?.as_ref() != Some(entry) {
         return Ok(());
     }
     match queued_path_was_reused(store, entry) {
@@ -146,16 +138,13 @@ fn process_queued_deletion(
         Ok(false) => {}
         Err(error) => {
             tracing::error!(path = %path, %error, "读取待删除文件身份失败，保留删除意图并退避");
-            store
-                .lock()
-                .record_file_deletion_failure(entry, now, &error.to_string())?;
+            store.record_file_deletion_failure(entry, now, &error.to_string())?;
             return Ok(());
         }
     }
     let result = remove_physical_file(path);
     let mut completed = false;
     {
-        let store = store.lock();
         // A replacement may publish while filesystem work is outside the lock. Never
         // clear its file row after the accepted intent was cancelled or replaced.
         if store.due_file_deletion_intent(entry, now)?.as_ref() != Some(entry) {
@@ -189,8 +178,8 @@ fn process_queued_deletion(
 /// Removes the deleted source's sidecars (nfo/artwork/subtitles) and the
 /// directories they leave empty, up to (never including) its Library root.
 /// Filesystem work runs outside the Store lock; failures only log.
-pub(crate) fn prune_disk_leftovers(store: &parking_lot::Mutex<Store>, deleted: &std::path::Path) {
-    let roots = match store.lock().list_library_roots() {
+pub(crate) fn prune_disk_leftovers(store: &Store, deleted: &std::path::Path) {
+    let roots = match store.list_library_roots() {
         Ok(roots) => roots,
         Err(error) => {
             tracing::warn!(path = %deleted.display(), %error, "读取 Library 根失败，跳过附属文件清理");
@@ -302,51 +291,50 @@ fn queue_observed_deletions(
     observed: &[ObservedDeletion],
     reason: &str,
 ) -> Result<(), Response> {
-    super::store_wait::with_bounded_store(state.store(), |store| {
-        state.require_writable()?;
-        state.require_write_admitted()?;
-        for row in observed {
-            let expected = &row.coverage;
-            let current = store
-                .file_coverage_by_id(expected.file.file_id)
-                .map_err(deletion_store_error)?
-                .ok_or_else(|| deletion_conflict("文件已被删除或替换"))?;
-            if !same_recorded_source(expected, &current) {
-                return Err(deletion_conflict("文件版本或归属已变化，拒绝删除"));
-            }
-            let library = current.file.library_id.to_string();
-            if !store
-                .library_accepts_work(&library)
-                .map_err(deletion_store_error)?
-                || store
-                    .library_lifecycle_state(&library)
+    super::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(deletion_store_error, |store| {
+            for row in observed {
+                let expected = &row.coverage;
+                let current = store
+                    .file_coverage_by_id(expected.file.file_id)
                     .map_err(deletion_store_error)?
-                    != "ready"
-            {
-                return Err(deletion_conflict("Library 当前不接受文件删除"));
+                    .ok_or_else(|| deletion_conflict("文件已被删除或替换"))?;
+                if !same_recorded_source(expected, &current) {
+                    return Err(deletion_conflict("文件版本或归属已变化，拒绝删除"));
+                }
+                let library = current.file.library_id.to_string();
+                if !store
+                    .library_accepts_work(&library)
+                    .map_err(deletion_store_error)?
+                    || store
+                        .library_lifecycle_state(&library)
+                        .map_err(deletion_store_error)?
+                        != "ready"
+                {
+                    return Err(deletion_conflict("Library 当前不接受文件删除"));
+                }
+                let media = store
+                    .get_media(current.file.media_id)
+                    .map_err(deletion_store_error)?
+                    .ok_or_else(|| deletion_conflict("Media 已不存在"))?;
+                if super::library::library_for_recorded_file(store, &current, &media).is_none() {
+                    return Err(deletion_conflict("文件当前不属于已登记的 Library root"));
+                }
             }
-            let media = store
-                .get_media(current.file.media_id)
-                .map_err(deletion_store_error)?
-                .ok_or_else(|| deletion_conflict("Media 已不存在"))?;
-            if super::library::library_for_file_strict(store, &current.file, &media).is_none() {
-                return Err(deletion_conflict("文件当前不属于已登记的 Library root"));
+            for row in observed {
+                let path = row.coverage.file.path.to_string_lossy();
+                store
+                    .enqueue_file_deletion_observed(&path, reason, row.identity)
+                    .map_err(deletion_store_error)?;
+                // Only explicit cleanup requests reset an exhausted intent;
+                // periodic background drains preserve their backoff.
+                store
+                    .reset_file_deletion_backoff(&path)
+                    .map_err(deletion_store_error)?;
             }
-        }
-        for row in observed {
-            let path = row.coverage.file.path.to_string_lossy();
-            store
-                .enqueue_file_deletion_observed(&path, reason, row.identity)
-                .map_err(deletion_store_error)?;
-            // Only explicit cleanup requests reset an exhausted intent;
-            // periodic background drains preserve their backoff.
-            store
-                .reset_file_deletion_backoff(&path)
-                .map_err(deletion_store_error)?;
-        }
-        Ok(())
-    })
-    .unwrap_or_else(|| Err(super::store_wait::busy_response()))
+            Ok(())
+        })
+    })?
 }
 
 fn delete_coverages_blocking(
@@ -368,11 +356,7 @@ fn delete_coverages_blocking(
             report.errors.push(error);
             continue;
         }
-        match state
-            .store
-            .lock()
-            .file_coverage_by_id(row.coverage.file.file_id)
-        {
+        match state.store.file_coverage_by_id(row.coverage.file.file_id) {
             Ok(None) => {
                 report.removed += 1;
                 report.freed_bytes += row.size;

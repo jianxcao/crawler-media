@@ -85,7 +85,7 @@ async fn an_in_flight_lease_is_cancelled_and_drained_before_the_first_batch() {
         "frozen",
         "no batch may be applied before the Library work is drained"
     );
-    let old_root_id = root_id_of(&state.store().lock(), &seeded.library_id, &seeded.old_root);
+    let old_root_id = root_id_of(&state.store(), &seeded.library_id, &seeded.old_root);
     let conn = rusqlite::Connection::open(temp.path().join("data").join("library.db")).unwrap();
     let owner: String = conn
         .query_row(

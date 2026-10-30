@@ -162,7 +162,7 @@ impl RenameFixture {
 
         let app = router(api_state.clone());
         let store_guard = api_state.store();
-        let store = store_guard.lock();
+        let store = store_guard.as_ref();
 
         let tv_lib = store
             .list_libraries()
@@ -191,12 +191,11 @@ impl RenameFixture {
             anilist_id: None,
         };
         store.insert_media(&media).unwrap();
-        seed_layout(&store, media_id, layout, &old_root);
+        seed_layout(store, media_id, layout, &old_root);
         std::fs::rename(&old_root, &live_root).unwrap();
-        seed_layout(&store, media_id, layout, &live_root);
+        seed_layout(store, media_id, layout, &live_root);
         let media_clone = media.clone();
 
-        drop(store);
         drop(store_guard);
 
         Self {
@@ -258,7 +257,7 @@ impl RenameFixture {
             self.old_root.display()
         );
         let store_guard = self.state.store();
-        let store = store_guard.lock();
+        let store = store_guard.as_ref();
         assert_eq!(
             store.file_coverage_for_media(self.media.id).unwrap().len(),
             4,

@@ -13,7 +13,7 @@ use support::library_presence::PresenceFixture;
 /// 建一个 Video 库并返回它；调用方自行准备根目录内容。
 fn create_video_library(fix: &PresenceFixture, root: &Path) -> Library {
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .create_library(
             MediaKind::Video,
@@ -28,7 +28,7 @@ fn create_video_library(fix: &PresenceFixture, root: &Path) -> Library {
 
 fn signature(fix: &PresenceFixture, library_id: &str) -> String {
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard.get_library(library_id).unwrap().expect("library");
     api::scan_operations::scan_scope_signature(&library)
 }
@@ -40,7 +40,7 @@ fn enqueue(
     targets: &[PathBuf],
 ) -> ScanOperation {
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard.enqueue_scan(library_id, sig, targets, 1000).unwrap()
 }
 
@@ -54,7 +54,7 @@ fn seed_file_meta(fix: &PresenceFixture, ledger_id: &str) {
         ..Default::default()
     };
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let file_id: domain::LedgerId = ledger_id.parse().expect("ledger id");
     let file = guard
         .published_files(&[file_id])
@@ -103,7 +103,7 @@ async fn targeted_video_scan_walks_only_its_targets() {
     );
 
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard
             .file_coverage_by_path(&target_file.display().to_string())
@@ -119,7 +119,6 @@ async fn targeted_video_scan_walks_only_its_targets() {
         "定向 Video 扫描不得触碰无关目录: {:?}",
         done.report
     );
-    drop(guard);
     assert_eq!(
         done.report["scanned"], 1,
         "被遍历的文件集合必须恰好是目标: {}",
@@ -151,7 +150,7 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
     assert_eq!(first.report["scanned"], 1, "{}", first.report);
     let ledger_id = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
@@ -166,7 +165,7 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
     let resume_op = enqueue(&fix, &library.id, &sig, &[]);
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .record_scan_seen(&resume_op.id, std::slice::from_ref(&clip))
             .unwrap();
@@ -187,7 +186,6 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
     assert!(
         fix.state
             .store()
-            .lock()
             .get_file_meta(&ledger_id)
             .unwrap()
             .is_some(),
@@ -198,7 +196,7 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
     let changed_op = enqueue(&fix, &library.id, &sig, &[]);
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .record_scan_seen(&changed_op.id, std::slice::from_ref(&clip))
             .unwrap();
@@ -218,7 +216,7 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
         changed.report
     );
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard.get_file_meta(&ledger_id).unwrap().is_none(),
         "变化 Video 文件的派生探测事实必须失效"

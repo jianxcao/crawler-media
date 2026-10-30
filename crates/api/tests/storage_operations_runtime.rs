@@ -194,7 +194,7 @@ fn seed_library(state: &ApiState, temp: &tempfile::TempDir) -> Seeded {
     let old_root = temp.path().join(OLD_ROOT);
     std::fs::create_dir_all(&old_root).unwrap();
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let library = store
         .create_library(
             MediaKind::Movie,
@@ -205,17 +205,16 @@ fn seed_library(state: &ApiState, temp: &tempfile::TempDir) -> Seeded {
             &[],
         )
         .unwrap();
-    let root_id = root_id_of(&store, &library.id, &old_root);
-    let media = media(&store, "00000000-0000-0000-0000-0000000000c1");
+    let root_id = root_id_of(store, &library.id, &old_root);
+    let media = media(store, "00000000-0000-0000-0000-0000000000c1");
     let file_path = old_root.join("movie.mkv");
     let file_id = publish_one(
-        &store,
+        store,
         library.id.parse().unwrap(),
         &media,
         &root_id,
         file_path.to_str().unwrap(),
     );
-    drop(store);
     seed_nfo_input(
         temp,
         &library.id,
@@ -293,7 +292,6 @@ async fn patch_without_roots_stays_synchronous() {
     assert_eq!(
         state
             .store()
-            .lock()
             .library_lifecycle_state(&seeded.library_id)
             .unwrap(),
         "ready"
@@ -335,7 +333,7 @@ async fn patch_with_roots_is_accepted_and_migrates_files() {
     assert_eq!(status["data"]["library_id"], seeded.library_id);
 
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let library = store.get_library(&seeded.library_id).unwrap().unwrap();
     assert_eq!(library.root_paths, vec![target.clone()]);
     assert_eq!(
@@ -355,7 +353,7 @@ async fn patch_with_roots_is_accepted_and_migrates_files() {
     assert_eq!(page.files[0].file_id, seeded.file_id);
     assert_eq!(
         page.files[0].root_id,
-        root_id_of(&store, &seeded.library_id, &target)
+        root_id_of(store, &seeded.library_id, &target)
     );
     let nfo: (String, String) = {
         let conn = rusqlite::Connection::open(temp.path().join("data").join("library.db")).unwrap();
@@ -385,7 +383,7 @@ async fn conflicting_write_is_refused_while_reindexing() {
     let target = new_root(&temp);
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let revision = store.library_config_revision(&seeded.library_id).unwrap();
         store
             .begin_library_reconfiguration(
@@ -443,7 +441,7 @@ async fn unknown_or_foreign_operation_is_not_found() {
     let target = new_root(&temp);
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let revision = store.library_config_revision(&seeded.library_id).unwrap();
         store
             .begin_library_reconfiguration(
@@ -472,7 +470,6 @@ async fn unknown_or_foreign_operation_is_not_found() {
     }
     let other = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -521,7 +518,7 @@ async fn reindexing_refuses_library_writes_without_half_applying_them() {
     let target = new_root(&temp);
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let revision = store.library_config_revision(&seeded.library_id).unwrap();
         store
             .begin_library_reconfiguration(
@@ -553,7 +550,6 @@ async fn reindexing_refuses_library_writes_without_half_applying_them() {
 
     let library = state
         .store()
-        .lock()
         .get_library(&seeded.library_id)
         .unwrap()
         .unwrap();
@@ -574,7 +570,7 @@ async fn startup_recovery_advances_unfinished_operation_once() {
     // driver is running for it in this process.
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let revision = store.library_config_revision(&seeded.library_id).unwrap();
         store
             .begin_library_reconfiguration(
@@ -606,7 +602,7 @@ async fn startup_recovery_advances_unfinished_operation_once() {
 
     let settled = {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert_eq!(
             store.library_lifecycle_state(&seeded.library_id).unwrap(),
             "ready",
@@ -622,7 +618,7 @@ async fn startup_recovery_advances_unfinished_operation_once() {
             .unwrap();
         assert_eq!(
             page.files[0].root_id,
-            root_id_of(&store, &seeded.library_id, &target),
+            root_id_of(store, &seeded.library_id, &target),
             "recovery must finish the migration the previous process started"
         );
         store
@@ -636,7 +632,6 @@ async fn startup_recovery_advances_unfinished_operation_once() {
     api::storage_operations::resume_library_reconfigurations(&state).unwrap();
     let again = state
         .store()
-        .lock()
         .library_operation_view("op-crash")
         .unwrap()
         .unwrap();

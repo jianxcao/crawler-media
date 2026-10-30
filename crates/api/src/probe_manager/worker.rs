@@ -83,12 +83,11 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
             }
         }
         let configured = step(&bootstrap, |manager| {
-            manager.dispatch_reader().and_then(|store| {
-                store
-                    .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
-                    .ok()
-                    .flatten()
-            })
+            manager
+                .store
+                .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
+                .ok()
+                .flatten()
         })
         .await
         .map(|setting| metadata_worker_count(setting.as_deref()));
@@ -341,32 +340,36 @@ async fn retry_dispatch(
         let result = step(manager, {
             let id = id.clone();
             move |manager| {
-                let mut seen = manager.seen.lock();
-                // Never wait for Store while holding seen: other admission paths
-                // can need both locks, and the retry loop can yield between attempts.
-                let store = manager.store.try_lock().ok_or(())?;
-                let active =
-                    store
-                        .active_probe_unit_for_ledger(&id.ledger_id)
-                        .map_err(|error| {
+                manager.store.library_write(|store| {
+                    // Acquire the SQL scope first; never wait for seen while holding it.
+                    let Some(mut seen) = manager.seen.try_lock() else {
+                        return Err(store::StoreError::WriteBusy);
+                    };
+                    let active = store.active_probe_unit_for_ledger(&id.ledger_id).map_err(
+                        |error| {
                             tracing::error!(%error, job_id = %id.job_id, "读取待重试探测单元失败");
+                            error
+                        },
+                    )?;
+                    if active
+                        .as_ref()
+                        .is_none_or(|unit| unit.job_id != id.job_id || unit.stage != id.stage)
+                    {
+                        return Ok(());
+                    }
+                    if active.as_ref().is_some_and(|unit| unit.status == "running") && !owns_running
+                    {
+                        return Ok(());
+                    }
+                    store
+                        .retry_probe_unit(&id.job_id, &id.ledger_id)
+                        .map_err(|error| {
+                            tracing::error!(%error, job_id = %id.job_id, "重排探测单元失败");
+                            error
                         })?;
-                if active
-                    .as_ref()
-                    .is_none_or(|unit| unit.job_id != id.job_id || unit.stage != id.stage)
-                {
-                    return Ok::<(), ()>(());
-                }
-                if active.as_ref().is_some_and(|unit| unit.status == "running") && !owns_running {
-                    return Ok(());
-                }
-                store
-                    .retry_probe_unit(&id.job_id, &id.ledger_id)
-                    .map_err(|error| {
-                        tracing::error!(%error, job_id = %id.job_id, "重排探测单元失败");
-                    })?;
-                seen.remove(&id.ledger_id);
-                Ok(())
+                    seen.remove(&id.ledger_id);
+                    Ok(())
+                })
             }
         })
         .await;
@@ -381,46 +384,34 @@ async fn retry_dispatch(
     }
 }
 fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
-    let Some(reader) = manager.dispatch_reader() else {
+    let Some(file_id) = super::ledger_id(&id.ledger_id) else {
         return;
     };
-    let missing = match super::ledger_id(&id.ledger_id) {
-        Some(file_id) => match reader.file_coverage_by_id(file_id) {
-            Ok(row) => row.is_none(),
-            Err(error) => {
-                tracing::error!(%error, ledger_id = %id.ledger_id, "检查待派发文件失败");
-                return;
-            }
-        },
-        None => false,
-    };
-    drop(reader);
-    if !missing {
+    if !matches!(manager.store.file_coverage_by_id(file_id), Ok(None)) {
         return;
     }
-    let Some(store) = manager.dispatch_store() else {
-        return;
-    };
-    // The source may have been republished while waiting for the writer.
-    let still_missing = super::ledger_id(&id.ledger_id)
-        .is_some_and(|file_id| matches!(store.file_coverage_by_id(file_id), Ok(None)));
-    if !still_missing {
-        return;
+    let cancelled = manager.store.library_write(|store| {
+        if store.file_coverage_by_id(file_id)?.is_some() {
+            return Ok(false);
+        }
+        store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")?;
+        let refresh = store
+            .get_probe_job(&id.job_id)?
+            .is_some_and(|job| job.kind == "marker_refresh" && job.is_active());
+        if refresh {
+            store.cancel_probe_job(&id.job_id, "file_deleted")?;
+        }
+        Ok(true)
+    });
+    match cancelled {
+        Ok(true) => {
+            manager.seen.lock().remove(&id.ledger_id);
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, job_id=%id.job_id, ledger_id=%id.ledger_id, "删除文件后取消探测单元失败")
+        }
     }
-    if let Err(error) = store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted") {
-        tracing::error!(%error, job_id = %id.job_id, ledger_id = %id.ledger_id, "删除文件后取消探测单元失败");
-        return;
-    }
-    let refresh = store
-        .get_probe_job(&id.job_id)
-        .ok()
-        .flatten()
-        .is_some_and(|job| job.kind == "marker_refresh" && job.is_active());
-    if refresh && let Err(error) = store.cancel_probe_job(&id.job_id, "file_deleted") {
-        tracing::error!(%error, job_id = %id.job_id, "删除文件后取消刷新任务失败");
-    }
-    drop(store);
-    manager.seen.lock().remove(&id.ledger_id);
 }
 
 struct MetadataStageGuard(Arc<ProbeManager>);
@@ -483,8 +474,7 @@ fn refresh_leases(
     // Refresh expands its requested units to every row of the same Media.
     // Hold every original owner until publication, not only during capture.
     let rows = manager
-        .reader()
-        .map_err(|error| error.to_string())?
+        .store
         .file_coverage_for_media(unit.row.file.media_id)
         .map_err(|e| e.to_string())?;
     let units: Vec<_> = rows
@@ -509,36 +499,42 @@ pub(super) fn work_lease(
         return Ok(None);
     };
     let library_id = {
-        let store = manager.reader().map_err(|error| error.to_string())?;
+        let store = manager.store.as_ref();
         crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
         unit.row.file.library_id.to_string()
     };
     let acquired = if optional {
-        registry.acquire_optional_from_readers(
-            &manager.readers,
+        registry.acquire_optional(
+            &manager.store,
             &library_id,
             super::tracks::optional_work_kind(unit),
         )
     } else {
-        registry.acquire_from_readers(&manager.readers, &library_id)
+        registry.acquire_bounded(&manager.store, &library_id)
     };
     acquired.map(Some).map_err(|error| error.to_string())
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
-    let Some(store) = manager.dispatch_reader() else {
-        return false;
+    let recorded = manager.store.library_read_snapshot(|store| {
+        if !unit_is_active(store, unit) {
+            return None;
+        }
+        Some(crate::fingerprint_job::source::ensure_source_recorded_on(
+            store, &unit.row,
+        ))
+    });
+    let recorded = match recorded {
+        Ok(Some(recorded)) => recorded,
+        Ok(None) => {
+            manager
+                .seen
+                .lock()
+                .remove(&unit.row.file.file_id.to_string());
+            return false;
+        }
+        Err(error) => Err(error.to_string()),
     };
-    if !unit_is_active(&store, unit) {
-        drop(store);
-        manager
-            .seen
-            .lock()
-            .remove(&unit.row.file.file_id.to_string());
-        return false;
-    }
-    let recorded = crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row);
-    drop(store);
     let availability =
         recorded.and_then(|()| crate::fingerprint_job::source::observe_source(&unit.row));
     match availability {
@@ -556,7 +552,7 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
 }
 
 /// Check the unit while holding the same Store guard used for publication.
-pub(super) fn unit_is_active(store: &crate::Store, unit: &ProbeUnit) -> bool {
+pub(super) fn unit_is_active(store: &store::LibraryConnection<'_>, unit: &ProbeUnit) -> bool {
     let Some(job_id) = unit.job_id.as_deref() else {
         return true;
     };
@@ -607,9 +603,7 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
 
 fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
     let ledger_id = unit.row.file.file_id.to_string();
-    let Some(store) = manager.dispatch_store() else {
-        return false;
-    };
+    let store = manager.store.as_ref();
     let started = match unit.job_id.as_deref() {
         Some(job_id) => store.start_probe_unit(job_id, &ledger_id),
         None => {
@@ -617,7 +611,7 @@ fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
             return false;
         }
     };
-    drop(store);
+
     match started {
         Ok(true) => true,
         Ok(false) => {

@@ -128,7 +128,6 @@ impl TransferFixture {
     pub fn pending(&self, torrent: &Torrent) {
         self.state
             .store()
-            .lock()
             .record_pending_submission(
                 self.id,
                 100,
@@ -156,7 +155,7 @@ impl TransferFixture {
 
     pub fn assert_pending(&self, active: usize, imported: usize) {
         let store = self.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         assert_eq!(store.load_pending(self.id).unwrap().len(), active);
         assert_eq!(
             store.load_pending_state(self.id, "imported").unwrap().len(),
@@ -165,7 +164,7 @@ impl TransferFixture {
     }
 
     pub fn assert_sources(&self, expected: &[(&Path, &Path)]) {
-        let rows = self.state.store().lock().list_file_coverage().unwrap();
+        let rows = self.state.store().list_file_coverage().unwrap();
         assert_eq!(rows.len(), expected.len(), "No duplicate video ledger");
         for (source, destination) in expected {
             let coverage = rows

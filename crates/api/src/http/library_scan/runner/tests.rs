@@ -81,7 +81,7 @@ fn video_fixture() -> (tempfile::TempDir, ApiState, String, std::path::PathBuf) 
     std::fs::create_dir_all(&root).unwrap();
     let library_id = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         guard
             .create_library(
                 MediaKind::Video,
@@ -130,19 +130,14 @@ fn cancelled_video_scan_fails_without_ledgering() {
     assert_eq!(failure.totals.scanned, 0);
     assert_eq!(failure.totals.inserted, 0);
     assert!(
-        state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 Video 扫描不得登记任何文件"
     );
 }
 
 fn set_mirror_images(state: &ApiState, enabled: bool) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = &store;
     let mut setting = guard.get_scrape_config().unwrap().setting;
     setting.mirror_images = Some(enabled);
     guard.save_scrape_config(&setting).unwrap();
@@ -191,7 +186,7 @@ fn unchanged_video_file_is_artwork_attempted_without_reregistration() {
     set_mirror_images(&state, true);
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         let row = guard
             .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
@@ -215,7 +210,7 @@ fn unchanged_video_file_is_artwork_attempted_without_reregistration() {
 struct CheckpointFaultFixture {
     _dir: tempfile::TempDir,
     state: ApiState,
-    db_path: std::path::PathBuf,
+    read_faults: Arc<[std::sync::atomic::AtomicBool; 2]>,
     file_path: std::path::PathBuf,
     file: library::TransferredFile,
     op_id: &'static str,
@@ -251,7 +246,7 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
     };
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         guard.insert_media(&media).unwrap();
         // 夹具直接用 `FixtureFile`（规则 §2③）：season/episode 皆 None ⇒ 落 `UnitKey::WHOLE`，
         // 与旧台账行「season、episode 都是 None」逐字等价。
@@ -268,53 +263,59 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
             )
             .unwrap();
     }
-    let db_path = dir.path().join("data").join("library.db");
+    state
+        .store()
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
     CheckpointFaultFixture {
         _dir: dir,
         state,
-        db_path,
+        read_faults: Default::default(),
         file_path,
         file,
         op_id,
     }
 }
 
-fn set_scan_seen_disabled(db_path: &std::path::Path, disabled: bool) {
-    let conn = rusqlite::Connection::open(db_path).unwrap();
-    if disabled {
-        conn.execute("ALTER TABLE scan_seen RENAME TO scan_seen_disabled", [])
-            .unwrap();
-    } else {
-        conn.execute("ALTER TABLE scan_seen_disabled RENAME TO scan_seen", [])
-            .unwrap();
-    }
+/// Fault the real pooled reader without changing the supported database layout.
+/// Reinstalling the authorizer invalidates cached statements when flags change.
+fn set_checkpoint_read_fault(fix: &CheckpointFaultFixture, index: usize, disabled: bool) {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::Ordering;
+    fix.read_faults[index].store(disabled, Ordering::SeqCst);
+    let faults = fix.read_faults.clone();
+    fix.state
+        .store()
+        .with_read(store::Db::Library, |conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "scan_seen",
+                    ..
+                } if faults[0].load(Ordering::SeqCst) => Authorization::Deny,
+                AuthAction::Read {
+                    table_name: "library_files",
+                    column_name: "source_digest",
+                } if faults[1].load(Ordering::SeqCst) => Authorization::Deny,
+                _ => Authorization::Allow,
+            }));
+            Ok(())
+        })
+        .unwrap();
 }
 
-/// 只让 durable 源版本查询失败：重命名 `library_files.source_digest`。
-/// `scan_seen_checkpoints` 只读 `scan_seen`，不读该列，因此断点查询仍然成功——
-/// 这是真实 SQL 故障，不需要在生产代码里留测试钩子（也不会有跨测试的全局状态）。
-fn set_durable_disabled(db_path: &std::path::Path, disabled: bool) {
-    let conn = rusqlite::Connection::open(db_path).unwrap();
-    if disabled {
-        conn.execute(
-            "ALTER TABLE library_files RENAME COLUMN source_digest TO source_digest_disabled",
-            [],
-        )
-        .unwrap();
-    } else {
-        conn.execute(
-            "ALTER TABLE library_files RENAME COLUMN source_digest_disabled TO source_digest",
-            [],
-        )
-        .unwrap();
-    }
+fn set_scan_seen_disabled(fix: &CheckpointFaultFixture, disabled: bool) {
+    set_checkpoint_read_fault(fix, 0, disabled);
+}
+
+fn set_durable_disabled(fix: &CheckpointFaultFixture, disabled: bool) {
+    set_checkpoint_read_fault(fix, 1, disabled);
 }
 
 /// 组合 1：断点成功且命中 + durable 成功
 #[test]
 fn checkpoint_decision_both_ok_hits() {
     let fix = checkpoint_fault_fixture();
-    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file]);
+    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file.clone()]);
     assert!(dec.checkpoints_ok, "断点查询必须成功");
     assert!(dec.durable_ok, "durable 查询必须成功");
     assert_eq!(dec.skipped, 1, "断点命中必须跳过");
@@ -326,7 +327,7 @@ fn checkpoint_decision_both_ok_hits() {
 #[test]
 fn checkpoint_decision_checkpoint_err_durable_ok() {
     let fix = checkpoint_fault_fixture();
-    set_scan_seen_disabled(&fix.db_path, true);
+    set_scan_seen_disabled(&fix, true);
 
     let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file.clone()]);
     assert!(!dec.checkpoints_ok, "断点查询必须失败");
@@ -352,17 +353,17 @@ fn checkpoint_decision_checkpoint_err_durable_ok() {
     );
     assert_eq!(dec_changed.changed[0], fix.file_path);
 
-    set_scan_seen_disabled(&fix.db_path, false);
+    set_scan_seen_disabled(&fix, false);
 }
 
 /// 组合 3：断点成功且命中 + durable 失败 → 不跳过、全部 fresh、全部 changed
 #[test]
 fn checkpoint_decision_checkpoint_hit_durable_err() {
     let fix = checkpoint_fault_fixture();
-    set_durable_disabled(&fix.db_path, true);
+    set_durable_disabled(&fix, true);
 
-    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file]);
-    set_durable_disabled(&fix.db_path, false);
+    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file.clone()]);
+    set_durable_disabled(&fix, false);
 
     assert!(dec.checkpoints_ok, "断点查询必须成功且命中");
     assert!(!dec.durable_ok, "durable 查询必须失败");
@@ -380,12 +381,12 @@ fn checkpoint_decision_checkpoint_hit_durable_err() {
 #[test]
 fn checkpoint_decision_both_err() {
     let fix = checkpoint_fault_fixture();
-    set_scan_seen_disabled(&fix.db_path, true);
-    set_durable_disabled(&fix.db_path, true);
+    set_scan_seen_disabled(&fix, true);
+    set_durable_disabled(&fix, true);
 
-    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file]);
-    set_durable_disabled(&fix.db_path, false);
-    set_scan_seen_disabled(&fix.db_path, false);
+    let dec = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![fix.file.clone()]);
+    set_durable_disabled(&fix, false);
+    set_scan_seen_disabled(&fix, false);
 
     assert!(!dec.checkpoints_ok, "断点查询必须失败");
     assert!(!dec.durable_ok, "durable 查询必须失败");
@@ -437,7 +438,7 @@ fn set_mtime_ms(path: &std::path::Path, mtime_ms: i64) {
 fn assert_not_confirmed(state: &ApiState, op_id: &str, path: &std::path::Path) {
     let key = path.display().to_string();
     let store = state.store();
-    let guard = store.lock();
+    let guard = &store;
     assert!(
         guard
             .scan_seen_checkpoints(op_id, std::slice::from_ref(&key))
@@ -494,7 +495,7 @@ fn unchanged_sibling_keeps_checkpoint_while_changed_file_is_reprocessed() {
     let keep_stamp = store::Store::scan_seen_stamp(&keep);
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         assert!(
             guard
                 .scan_seen_checkpoints("toctou-mixed", std::slice::from_ref(&keep_key))

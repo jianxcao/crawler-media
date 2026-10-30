@@ -55,7 +55,7 @@ async fn integrity_check_and_repair_http_endpoints() {
     // Advance check via background or driver
     let status = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store.advance_library_operation(&op_id, 1000, 100).unwrap()
     };
     assert_eq!(status.state, "succeeded");
@@ -84,7 +84,7 @@ async fn integrity_check_and_repair_http_endpoints() {
 
     let r_status = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store
             .advance_library_operation(&repair_op_id, 2000, 100)
             .unwrap()
@@ -104,7 +104,7 @@ async fn integrity_check_and_repair_http_endpoints() {
 
 fn seed_integrity_movie(state: &api::ApiState) -> (LibraryId, MediaId) {
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     let lib = store
         .list_libraries()
         .unwrap()

@@ -14,37 +14,7 @@ impl Store {
         now: i64,
         user_id: Option<UserId>,
     ) -> Result<Vec<PlayLogRow>, StoreError> {
-        let mut sql = String::from(
-            "SELECT id, user_id, media_id, season, episode, client, device_name,
-                    play_method, started_at, ended_at, watched_ms, start_position_ms,
-                    end_position_ms, duration_ms, completed, device_id
-             FROM playback_logs WHERE 1=1",
-        );
-        let mut args: Vec<rusqlite::types::Value> = Vec::new();
-        if let (Some(before), Some(bid)) = (before, before_id) {
-            // Composite cursor: skip records at exactly `before` that have
-            // id >= before_id, and all records strictly before `before`.
-            sql.push_str(" AND (started_at < ? OR (started_at = ? AND id < ?))");
-            args.push(rusqlite::types::Value::Integer(before));
-            args.push(rusqlite::types::Value::Integer(before));
-            args.push(rusqlite::types::Value::Text(bid.to_string()));
-        } else if let Some(before) = before {
-            sql.push_str(" AND started_at < ?");
-            args.push(rusqlite::types::Value::Integer(before));
-        }
-        if let Some(days) = days {
-            sql.push_str(" AND started_at >= ?");
-            args.push(rusqlite::types::Value::Integer(now - days * 86_400));
-        }
-        if let Some(user_id) = user_id {
-            sql.push_str(" AND user_id = ?");
-            args.push(rusqlite::types::Value::Text(user_id.to_string()));
-        }
-        sql.push_str(" ORDER BY started_at DESC, id DESC LIMIT ?");
-        args.push(rusqlite::types::Value::Integer(limit as i64));
-        let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(args), map_log)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.with_library_read(|db| db.list_logs(limit, before, before_id, days, now, user_id))
     }
 
     pub fn delete_logs(
@@ -53,28 +23,7 @@ impl Store {
         media_ids: Option<&[MediaId]>,
         since_ms: Option<i64>,
     ) -> Result<usize, StoreError> {
-        let mut sql = String::from("DELETE FROM playback_logs WHERE user_id = ?");
-        let mut values: Vec<rusqlite::types::Value> =
-            vec![rusqlite::types::Value::Text(user_id.to_string())];
-        if let Some(since) = since_ms {
-            sql.push_str(" AND started_at >= ?");
-            values.push(rusqlite::types::Value::Integer(since));
-        }
-        if let Some(ids) = media_ids {
-            if ids.is_empty() {
-                return Ok(0);
-            }
-            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            sql.push_str(&format!(" AND media_id IN ({marks})"));
-            values.extend(
-                ids.iter()
-                    .map(|id| rusqlite::types::Value::Text(id.to_string())),
-            );
-        }
-        let changed = self
-            .library
-            .execute(&sql, rusqlite::params_from_iter(values))?;
-        Ok(changed)
+        self.with_library_write(|db| db.delete_logs(user_id, media_ids, since_ms))
     }
 
     pub fn delete_metrics(
@@ -83,28 +32,7 @@ impl Store {
         media_ids: Option<&[MediaId]>,
         since_ms: Option<i64>,
     ) -> Result<usize, StoreError> {
-        let mut sql = String::from("DELETE FROM playback_metrics WHERE user_id = ?");
-        let mut values: Vec<rusqlite::types::Value> =
-            vec![rusqlite::types::Value::Text(user_id.to_string())];
-        if let Some(since) = since_ms {
-            sql.push_str(" AND recorded_at >= ?");
-            values.push(rusqlite::types::Value::Integer(since));
-        }
-        if let Some(ids) = media_ids {
-            if ids.is_empty() {
-                return Ok(0);
-            }
-            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            sql.push_str(&format!(" AND media_id IN ({marks})"));
-            values.extend(
-                ids.iter()
-                    .map(|id| rusqlite::types::Value::Text(id.to_string())),
-            );
-        }
-        let changed = self
-            .library
-            .execute(&sql, rusqlite::params_from_iter(values))?;
-        Ok(changed)
+        self.with_library_write(|db| db.delete_metrics(user_id, media_ids, since_ms))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -123,31 +51,21 @@ impl Store {
         watched_ms: i64,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.playback_write(|store| {
-            crate::library_write::publish::ensure_media_writable(&store.library, media_id)?;
-            self.library.execute(
-                "INSERT INTO playback_metrics
-                (id, user_id, media_id, tier, engine, ttff_ms, rebuffer_ms,
-                 rebuffer_count, seek_count, dropped_frames, total_frames,
-                 watched_ms, recorded_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    uuid::Uuid::new_v4().to_string(),
-                    user_id.to_string(),
-                    media_id.to_string(),
-                    tier,
-                    engine,
-                    ttff_ms,
-                    rebuffer_ms,
-                    rebuffer_count,
-                    seek_count,
-                    dropped_frames,
-                    total_frames,
-                    watched_ms,
-                    now,
-                ],
-            )?;
-            Ok(())
+        self.with_library_write(|db| {
+            db.insert_metric(
+                user_id,
+                media_id,
+                tier,
+                engine,
+                ttff_ms,
+                rebuffer_ms,
+                rebuffer_count,
+                seek_count,
+                dropped_frames,
+                total_frames,
+                watched_ms,
+                now,
+            )
         })
     }
 }
@@ -172,3 +90,6 @@ fn map_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlayLogRow> {
         device_id: row.get(15)?,
     })
 }
+
+#[path = "logs/connection.rs"]
+mod connection;

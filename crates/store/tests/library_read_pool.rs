@@ -21,9 +21,7 @@ fn budget() -> QueryBudget {
 fn steady_state_lease_runs_constant_validation_statements() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     let (value, stats) = lease
         .with_connection_counted(&budget(), |conn| {
@@ -61,9 +59,7 @@ fn steady_state_lease_runs_constant_validation_statements() {
 fn schema_change_forces_revalidation() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     writer.execute_batch("CREATE TABLE zz(x)").unwrap();
     let mut lease = pool.try_checkout().unwrap();
@@ -86,9 +82,7 @@ fn schema_change_forces_revalidation() {
 fn pool_exhaustion_is_busy_and_closed_pool_never_reopens_database() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(2).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(2).unwrap());
     let a = pool.try_checkout().unwrap();
     let b = pool.try_checkout().unwrap();
     assert!(matches!(pool.try_checkout(), Err(LibraryReadError::Busy)));
@@ -105,9 +99,7 @@ fn custom_app_path_and_missing_library_never_create_a_database() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("custom").join("application.sqlite");
     let store = Store::open_at(dir.path(), &app).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     assert!(pool.try_checkout().is_ok());
     std::fs::remove_file(dir.path().join("library.db")).unwrap();
     assert!(pool.try_checkout().is_err());
@@ -118,9 +110,7 @@ fn custom_app_path_and_missing_library_never_create_a_database() {
 fn normal_wal_writes_preserve_reader_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     writer
         .execute("UPDATE libraries SET name = name || ' updated'", [])
@@ -134,9 +124,7 @@ fn normal_wal_writes_preserve_reader_identity() {
 fn replacing_database_with_old_layout_closes_pool() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let path = dir.path().join("library.db");
     std::fs::rename(&path, dir.path().join("retired.db")).unwrap();
     let old = rusqlite::Connection::open(&path).unwrap();

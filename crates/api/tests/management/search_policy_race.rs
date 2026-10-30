@@ -200,7 +200,10 @@ async fn season_policy_changed_during_search_is_reloaded_before_admission() {
         added
     );
     let store = api_state.store();
-    let pending = store.lock().load_pending(sub_id.parse().unwrap()).unwrap();
+    let pending = store
+        .as_ref()
+        .load_pending(sub_id.parse().unwrap())
+        .unwrap();
     assert!(
         pending.is_empty(),
         "Pending must be empty since S01 was rejected"

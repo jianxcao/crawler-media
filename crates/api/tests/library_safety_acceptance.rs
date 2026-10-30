@@ -14,7 +14,7 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
     let user2 = domain::UserId::new();
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .set_playback_state(user1, media_id, 1000, Some(true), Some(true), None, None)
             .unwrap();
@@ -45,7 +45,7 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
     let store_arc = fix.state.store();
     assert!(
         !store_arc
-            .lock()
+            .as_ref()
             .missing_at_by_path()
             .unwrap()
             .keys()
@@ -64,7 +64,7 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
     assert_eq!(res["data"]["deleted"], 0);
 
     // Both users' playback facts and Media record preserved!
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let loaded_row = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded_row.file.file_id, row.file_id);
     assert_eq!(loaded_row.file.media_id, media_id);
@@ -87,7 +87,7 @@ async fn frozen_library_rejects_presence_and_scan_publication() {
     // Freeze library
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.begin_library_removal(&fix.library_id).unwrap();
     }
 

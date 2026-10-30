@@ -5,17 +5,15 @@
 //! - 按 `job.kind` 严格解析版本化策略；解析失败**直接失败**，绝不回退成更激进的策略。
 //! - 固定本轮的 `now`（取 claim 时的 `started_at`）与 `cutoff`，避免执行期间窗口漂移。
 //! - 每批只持一次短锁，批间释放；不在持 Store 锁时取 Queue 锁，反之亦然。
-//! - Queue 的访问一律走 [`QueueGuard`]：`jobs::Queue::tick` 已在调用 runner **之前**
-//!   释放 Queue 锁，因此这里再接一次短锁不会自锁（Review L6）。
+//! - Jobs 只读观察走统一读池；写入走 [`QueueGuard`]，runner 不继承 Queue 锁。
 //! - 每轮结束把汇总报告写进 `job.progress`（成功与失败都写）。
 //!
-//! 数据库维护的重活跑在**独立连接**上，不在全局 Store/Queue 锁内；但检查 Library 工作
-//! 只是降低冲突，不是与扫描互斥的证明，SQLite busy 与有界执行仍然必须存在。
+//! 数据库维护逐库借用唯一 writer；文件/磁盘观察在 writer 外进行。
+//! 其他数据库与只读池继续服务，SQLite busy 与有界执行仍然必须存在。
 
 use std::time::Instant;
 
 use jobs::{Job, JobStatus};
-use parking_lot::Mutex;
 
 use super::data_retention::run_data_retention;
 use super::database::{
@@ -66,11 +64,18 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
                 .map(|def_id| def_id.to_string())
                 .unwrap_or_else(|| "__adhoc__".to_string());
             run_batches(&mut report, dry_run, &check_stop, || {
-                queue
-                    .lock()
-                    .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, dry_run)
-                    .map(BatchCounts::from_jobs_window)
-                    .map_err(|error| error.to_string())
+                let window = if dry_run {
+                    crate::jobs_readers::read(&state.jobs_readers, |queue| {
+                        queue.preview_terminal_window(&cursor_key, cutoff, BATCH_SIZE)
+                    })
+                    .map_err(|error| error.to_string())?
+                } else {
+                    queue
+                        .lock()
+                        .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, false)
+                        .map_err(|error| error.to_string())?
+                };
+                Ok(BatchCounts::from_jobs_window(window))
             })
         }
         MaintenancePolicy::PlaybackHistory(policy) => {
@@ -79,7 +84,7 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
             report.dry_run = policy.dry_run;
             let dry_run = policy.dry_run;
             run_batches(&mut report, dry_run, &check_stop, || {
-                let store = state.store.lock();
+                let store = state.store.as_ref();
                 store
                     .prune_playback_logs(cutoff, BATCH_SIZE, dry_run)
                     .map(BatchCounts::from_playback)
@@ -118,23 +123,23 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
     }
 }
 
-/// 维护任务访问 Queue 的唯一入口。
+/// 维护任务写入 Queue 的唯一入口。
 ///
 /// Review L6: 旧实现靠 `try_lock` 探测"调用方是否持锁"，既是竞态也表达不了约定。
 /// 现在 `jobs::Queue::tick` 在调用 runner 前就释放了 Queue 锁，所以维护任务可以
 /// 直接取短锁；把 Queue 包成这个类型，是为了让"维护代码只能通过它取锁"成为类型约定，
 /// 而不是每个调用点各自凭记忆加锁。
 pub(crate) struct QueueGuard<'a> {
-    queue: &'a Mutex<jobs::Queue>,
+    queue: &'a crate::JobsWriter,
 }
 
 impl<'a> QueueGuard<'a> {
-    fn new(queue: &'a Mutex<jobs::Queue>) -> Self {
+    fn new(queue: &'a crate::JobsWriter) -> Self {
         Self { queue }
     }
 
     /// 取一次 Queue 短锁（批处理边界上释放）。
-    fn lock(&self) -> parking_lot::MutexGuard<'a, jobs::Queue> {
+    fn lock(&self) -> crate::JobsWriterGuard<'a> {
         self.queue.lock()
     }
 }
@@ -166,35 +171,28 @@ impl MaintenanceStop {
 /// 3. 本次 job 状态是否已被取消或变更 (cancelled)
 /// 4. 状态读取失败保守停止 (read failed)
 pub fn check_maintenance_stop(state: &ApiState, job: &Job) -> MaintenanceStop {
-    let queue = QueueGuard::new(&state.jobs);
-    check_stop(state, &queue, job)
-}
-
-fn check_stop(state: &ApiState, guard: &QueueGuard<'_>, job: &Job) -> MaintenanceStop {
     if state.job_loop_control().is_stopping() {
         return MaintenanceStop::ShuttingDown;
     }
-    let queue = guard.lock();
-    if let Some(def_id) = job.def_id {
-        match queue.def(def_id) {
-            Ok(Some(def)) if !def.enabled => return MaintenanceStop::Disabled,
-            Ok(None) => return MaintenanceStop::Cancelled,
-            Err(error) => {
-                tracing::warn!(job_id = %job.id, %error, "读取维护任务定义失败，保守停止");
-                return MaintenanceStop::ReadFailed;
+    let observation = crate::jobs_readers::read(&state.jobs_readers, |queue| {
+        if let Some(def_id) = job.def_id {
+            match queue.def(def_id)? {
+                Some(def) if !def.enabled => return Ok(MaintenanceStop::Disabled),
+                None => return Ok(MaintenanceStop::Cancelled),
+                _ => {}
             }
-            _ => {}
         }
-    }
-    match queue.get(job.id) {
-        Ok(Some(current)) => {
-            if current.status != JobStatus::Running || current.attempt != job.attempt {
-                MaintenanceStop::Cancelled
-            } else {
+        Ok(match queue.get(job.id)? {
+            Some(current)
+                if current.status == JobStatus::Running && current.attempt == job.attempt =>
+            {
                 MaintenanceStop::Active
             }
-        }
-        Ok(None) => MaintenanceStop::Cancelled,
+            _ => MaintenanceStop::Cancelled,
+        })
+    });
+    match observation {
+        Ok(stop) => stop,
         Err(error) => {
             tracing::warn!(job_id = %job.id, %error, "读取维护任务状态失败，保守停止");
             MaintenanceStop::ReadFailed
@@ -241,7 +239,7 @@ fn run_database(
 ) -> Result<(), String> {
     // 只把 owned 路径带出 Store 锁，随后立刻释放。
     let (data_dir, app_path) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             store.data_dir().to_path_buf(),
             store.app_db_path().to_path_buf(),
@@ -267,7 +265,10 @@ fn run_database(
     }
 
     let mut failures = Vec::new();
-    let cancelled = || check_stop() != MaintenanceStop::Active;
+    // Cancellation/disable is observed at database boundaries. During SQL only
+    // the atomic shutdown flag is consulted, so Jobs maintenance never reenters
+    // its own writer or performs a filesystem-backed reader checkout under it.
+    let cancelled = || state.job_loop_control().is_stopping();
     for target in database_targets(&data_dir, &app_path) {
         let stop = check_stop();
         if let Some(note) = stop.stop_note("库") {
@@ -281,16 +282,15 @@ fn run_database(
             vacuum_history_unreadable: history.unreadable,
             cancelled: &cancelled,
         };
-        let result = state
-            .maintenance_executor
-            .execute(&target, vacuum_enabled, &context);
-        let entry = match result {
+        let result = execute_database_target(state, &target, vacuum_enabled, &context);
+        let mut entry = match result {
             Ok(entry) => entry,
             Err(error) => {
                 tracing::error!(database = target.name.as_str(), %error, "维护执行器无法打开数据库");
                 DatabaseReport::failed(target.name.as_str(), error)
             }
         };
+        target.finish_report(&mut entry);
         if entry.outcome == DatabaseOutcome::Vacuumed {
             record_vacuum_success(state, target.name, now);
         }
@@ -326,6 +326,42 @@ fn run_database(
     }
 }
 
+fn execute_database_target(
+    state: &ApiState,
+    target: &super::database::DatabaseTarget,
+    vacuum_enabled: bool,
+    context: &MaintenanceContext<'_>,
+) -> Result<DatabaseReport, String> {
+    let execute = |conn: &rusqlite::Connection| {
+        state
+            .maintenance_executor
+            .execute(conn, target, vacuum_enabled, context)
+    };
+    let db = match target.name {
+        DatabaseName::App => store::Db::App,
+        DatabaseName::Subscribe => store::Db::Subscribe,
+        DatabaseName::Library => store::Db::Library,
+        DatabaseName::Cache => store::Db::Cache,
+        DatabaseName::Jobs => {
+            return match state.jobs.try_lock_for(std::time::Duration::from_secs(1)) {
+                Some(queue) => queue.with_connection(execute),
+                None => Ok(DatabaseReport::skipped(
+                    target.name.as_str(),
+                    "Jobs writer 繁忙，下轮再试",
+                )),
+            };
+        }
+    };
+    match state.store.with_writer(db, |conn| Ok(execute(conn))) {
+        Ok(result) => result,
+        Err(store::StoreError::WriteBusy) => Ok(DatabaseReport::skipped(
+            target.name.as_str(),
+            "数据库 writer 繁忙，下轮再试",
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn vacuum_setting_key(name: DatabaseName) -> String {
     format!("maintenance.vacuum_last_success.{}", name.as_str())
 }
@@ -336,7 +372,7 @@ struct VacuumHistory {
 }
 
 fn read_vacuum_history(state: &ApiState, name: DatabaseName) -> VacuumHistory {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     match store.get_setting(&vacuum_setting_key(name)) {
         Ok(None) => VacuumHistory {
             last_success: None,
@@ -374,7 +410,7 @@ fn read_vacuum_history(state: &ApiState, name: DatabaseName) -> VacuumHistory {
 
 /// VACUUM 成功才推进冷却；跳过/失败不写，避免"没做也当作做过"。
 fn record_vacuum_success(state: &ApiState, name: DatabaseName, now: i64) {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     if let Err(error) = store.put_setting(&vacuum_setting_key(name), &now.to_string()) {
         tracing::error!(database = name.as_str(), %error, "记录 VACUUM 成功时间失败");
     }

@@ -151,7 +151,7 @@ fn preview_facts(
     current_user_id: Option<domain::UserId>,
     season: Option<u32>,
 ) -> Option<PreviewFacts> {
-    super::store_wait::with_bounded_store(state.store(), |store| {
+    super::store_wait::with_store_read(state, |store| {
         // 收敛到库内已有 Media 行（按 tmdb 别名 **带 kind**）：相同数字的
         // movie/TV id 不得互相顶替（P2：preview tmdb:tv:123 不应命中 movie:123）。
         let media = resolved
@@ -190,6 +190,7 @@ fn preview_facts(
         let movie_owned = media.kind == MediaKind::Movie && has_owned;
         (media, existing, owned_seasons, movie_owned)
     })
+    .ok()
 }
 
 fn preview_seasons(

@@ -193,7 +193,6 @@ impl Harness {
         let media_id = self
             .state
             .store()
-            .lock()
             .get_subscribe(id)
             .unwrap()
             .unwrap()
@@ -220,9 +219,9 @@ impl Harness {
             release::parse(&format!("The.Matrix.1999.{height}p.WEB-DL.{codec_tag}")),
         );
         let store = self.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 file_id: Some(domain::LedgerId::new()),
                 media_id,
@@ -242,7 +241,6 @@ impl Harness {
     pub fn owned_movie_path(&self, id: SubscribeId) -> Option<String> {
         self.state
             .store()
-            .lock()
             .load_subscribe_facts(id)
             .unwrap()
             .movie()
@@ -374,13 +372,12 @@ impl Harness {
     }
 
     pub fn pending(&self, id: SubscribeId) -> Vec<(i32, api::store::PendingDownload)> {
-        self.state.store().lock().load_pending(id).unwrap()
+        self.state.store().load_pending(id).unwrap()
     }
 
     pub fn pending_state(&self, id: SubscribeId, state: &str) -> usize {
         self.state
             .store()
-            .lock()
             .load_pending_state(id, state)
             .unwrap()
             .len()
@@ -390,7 +387,7 @@ impl Harness {
     /// active pending row's `submitted_at` by `secs`.
     pub fn age_pending(&self, id: SubscribeId, secs: i64) {
         let store = self.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         for (score, mut pending) in store.load_pending(id).unwrap() {
             pending.submitted_at = Some(api::job_loop::unix_now() - secs);
             store
@@ -402,7 +399,6 @@ impl Harness {
     pub fn movie_library_root(&self) -> PathBuf {
         self.state
             .store()
-            .lock()
             .default_library(MediaKind::Movie)
             .unwrap()
             .unwrap()
@@ -413,7 +409,6 @@ impl Harness {
     pub fn ledger_paths(&self) -> Vec<String> {
         self.state
             .store()
-            .lock()
             .list_file_coverage()
             .unwrap()
             .into_iter()
@@ -437,7 +432,7 @@ impl Harness {
         }
         let mut out = Vec::new();
         walk(&self.movie_library_root(), &mut out);
-        let tv = self.state.store().lock().default_library(MediaKind::Tv);
+        let tv = self.state.store().default_library(MediaKind::Tv);
         if let Ok(Some(tv)) = tv {
             let tv = tv.root_paths[0].clone();
             if tv != self.movie_library_root() {

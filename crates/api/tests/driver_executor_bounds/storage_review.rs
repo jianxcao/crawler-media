@@ -3,9 +3,7 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_publication_retries_after_store_is_busy() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let row = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
@@ -31,7 +29,8 @@ async fn metadata_publication_retries_after_store_is_busy() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let held_store = store.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = held_store.lock();
+        let _guard =
+            crate::writer_hold::WriterHold::acquire(held_store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         release_rx.recv().unwrap();
     });
@@ -42,7 +41,12 @@ async fn metadata_publication_retries_after_store_is_busy() {
     holder.join().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let status = store.lock().get_probe_job(&job_id).unwrap().unwrap().status;
+            let status = store
+                .as_ref()
+                .get_probe_job(&job_id)
+                .unwrap()
+                .unwrap()
+                .status;
             if status == "succeeded" {
                 break;
             }
@@ -64,10 +68,11 @@ fn configured_metadata_concurrency_runs_two_gated_probes() {
         .enable_all()
         .build()
         .unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
-    store.lock().put_setting("probe.concurrency", "2").unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    store
+        .as_ref()
+        .put_setting("probe.concurrency", "2")
+        .unwrap();
     let first = seed_probe_candidate_in(&store);
     let second = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
@@ -126,7 +131,6 @@ fn reconfiguration_driver_leaves_timers_responsive_behind_store_contention() {
     let (runtime, state) = boot_inside_runtime(temp.path());
     let library = state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap();
@@ -146,7 +150,7 @@ fn reconfiguration_driver_leaves_timers_responsive_behind_store_contention() {
     let held = state.store();
     let (locked, acquired) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         locked.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(800));
     });
@@ -166,7 +170,7 @@ fn reconfiguration_driver_leaves_timers_responsive_behind_store_contention() {
                     let operation = operation.clone();
                     let view = tokio::task::spawn_blocking(move || {
                         handle
-                            .lock()
+                            .as_ref()
                             .library_operation_view(&operation)
                             .unwrap()
                             .unwrap()
@@ -197,7 +201,6 @@ fn reconfiguration_driver_leaves_timers_responsive_behind_store_contention() {
     assert_eq!(
         state
             .store()
-            .lock()
             .library_operation_view(&id)
             .unwrap()
             .unwrap()
@@ -210,9 +213,7 @@ fn reconfiguration_driver_leaves_timers_responsive_behind_store_contention() {
 async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
     use api::fingerprint_job::CaptureGate;
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let first = seed_probe_candidate_in(&store);
     let second = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
@@ -269,7 +270,12 @@ async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
     );
     let _replacement = api::probe_manager::ProbeManager::new(store.clone()).unwrap();
     assert_eq!(
-        store.lock().get_probe_job(&job_id).unwrap().unwrap().status,
+        store
+            .as_ref()
+            .get_probe_job(&job_id)
+            .unwrap()
+            .unwrap()
+            .status,
         "succeeded"
     );
     tokio::time::timeout(Duration::from_millis(200), waiting)
@@ -281,7 +287,7 @@ async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
 #[tokio::test]
 async fn shutdown_completes_when_workers_are_waiting_for_queue_items() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = Arc::new(api::probe_manager::ProbeManager::new(store).unwrap());
     manager.try_start_workers();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -300,9 +306,7 @@ async fn shutdown_completes_when_workers_are_waiting_for_queue_items() {
 #[tokio::test]
 async fn timed_out_shutdown_blocks_recovery_until_old_probe_exits() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let row = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
@@ -326,11 +330,9 @@ async fn timed_out_shutdown_blocks_recovery_until_old_probe_exits() {
     .unwrap();
     let shutdown = tokio::time::timeout(Duration::from_secs(4), manager.shutdown_workers()).await;
     let returned_error = matches!(shutdown, Ok(Err(_)));
-    let replacement_store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let replacement_store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let replacement = Arc::new(api::probe_manager::ProbeManager::new(replacement_store).unwrap());
-    let old_still_running = store.lock().probe_job_units(&job_id).unwrap()[0].status == "running";
+    let old_still_running = store.as_ref().probe_job_units(&job_id).unwrap()[0].status == "running";
     let refused_start = !replacement.try_start_workers();
     probe.release();
     assert!(
@@ -370,9 +372,7 @@ impl api::probe_manager::TracksProbe for FailedTracks {
 async fn failed_metadata_probe_releases_capture_gate_and_finishes_job() {
     use api::fingerprint_job::CaptureGate;
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let row = seed_probe_candidate_in(&store);
     let manager = Arc::new(
         api::probe_manager::ProbeManager::new(store.clone())
@@ -390,7 +390,14 @@ async fn failed_metadata_probe_releases_capture_gate_and_finishes_job() {
     tokio::time::timeout(Duration::from_secs(3), async {
         gate.wait_before_capture().await;
         loop {
-            if store.lock().get_probe_job(&job_id).unwrap().unwrap().status == "failed" {
+            if store
+                .as_ref()
+                .get_probe_job(&job_id)
+                .unwrap()
+                .unwrap()
+                .status
+                == "failed"
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

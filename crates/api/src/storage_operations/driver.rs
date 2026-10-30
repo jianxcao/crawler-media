@@ -88,11 +88,7 @@ pub(super) fn current_view(
     state: &ApiState,
     operation_id: &str,
 ) -> Result<Option<LibraryOperationView>, String> {
-    state
-        .store
-        .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-        .ok_or_else(|| "Store busy while reading Library operation".to_string())?
-        .library_operation_view(operation_id)
+    operation_read(state, |store| store.library_operation_view(operation_id))
         .map_err(|error| error.to_string())
 }
 
@@ -121,10 +117,7 @@ async fn driver_step(
                 &library_id,
                 &operation_id,
             )?;
-            let store = owned
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or_else(|| "Store busy while advancing Library operation".to_string())?;
+            let store = owned.store.as_ref();
             store
                 .advance_library_operation(
                     &operation_id,

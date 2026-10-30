@@ -34,7 +34,7 @@ fn reconcile(
     held: Option<&crate::library_lifecycle::LibraryWorkLease>,
 ) -> Result<LedgerPresenceResult, PresenceError> {
     let (target_lib, snapshot) = {
-        let guard = state.store.lock();
+        let guard = state.store.as_ref();
         let snapshot = guard.library_ownership()?;
         let lib = snapshot
             .library(library_id)
@@ -70,7 +70,7 @@ fn reconcile(
     let mut total = LedgerPresenceResult::default();
     loop {
         let mut observations = publish_presence(lease, || {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             ensure_scope(&store, &scope, library_id)?;
             store
                 .ledger_presence_page(id, target_media_id, cursor, 100)
@@ -83,7 +83,7 @@ fn reconcile(
         observe_window(state, &mut observations, mode);
         let now = crate::job_loop::unix_now();
         let result = publish_presence(lease, || {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             ensure_scope(&store, &scope, library_id)?;
             store
                 .apply_ledger_presence(&observations, mode, now)

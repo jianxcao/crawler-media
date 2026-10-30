@@ -238,8 +238,8 @@ fn fixture(count: usize, mode: &str) -> (tempfile::TempDir, ApiState, axum::Rout
     // ApiState 启动时会 seed admin 用户，fixture 需要它的 id 来写 playback logs。
     let state = open_state(&root);
     let store = state.store();
-    let store = store.lock();
-    let admin = admin_user(&store);
+    let store = store.as_ref();
+    let admin = admin_user(store);
 
     let primary_root = root.join("media").join(mode);
     let second_root = root.join("media").join(format!("{mode}-second"));
@@ -270,7 +270,7 @@ fn fixture(count: usize, mode: &str) -> (tempfile::TempDir, ApiState, axum::Rout
     let mut rng = Lcg(SEED);
     for index in 0..count {
         seed_media(
-            &store,
+            store,
             &mut rng,
             index,
             kind,
@@ -281,10 +281,9 @@ fn fixture(count: usize, mode: &str) -> (tempfile::TempDir, ApiState, axum::Rout
             now,
         );
     }
-    seed_catalog_cache(&store, now);
+    seed_catalog_cache(store, now);
 
     let library_id = primary.id.clone();
-    drop(store);
     let app = router(state.clone());
     (tmp, state, app, library_id)
 }

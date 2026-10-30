@@ -15,7 +15,7 @@ impl ProbeManager {
         self.assessments.fetch_add(1, Ordering::SeqCst);
         let source_version = crate::fingerprint_job::current_source_version(&row.file.path);
         let need = {
-            let store = self.reader()?;
+            let store = self.store.as_ref();
             policy::assess_probe_need(&store, &row.file, origin, now_ms, source_version)
         };
         if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
@@ -226,20 +226,21 @@ impl ProbeManager {
         // Presence may have changed after policy assessment. Keep this final check and
         // persistence under the same Store lock that presence writes take: a source
         // recorded missing must never gain probe work, whichever admission path asked.
-        let store = self.writer()?;
-        if store.ledger_is_missing(&ledger_id)? {
-            tracing::info!(ledger_id, "源文件已标记缺失，拒绝创建探测任务");
-            return Ok(None);
-        }
-        store
-            .create_probe_job(
-                &job_id,
-                kind,
-                &unit.row.file.media_id.to_string(),
-                single_season_opt(&unit.row),
-                &scope,
-                &[spec],
-            )
-            .map(|created| created.then_some(job_id))
+        self.store.library_write(|store| {
+            if store.ledger_is_missing(&ledger_id)? {
+                tracing::info!(ledger_id, "源文件已标记缺失，拒绝创建探测任务");
+                return Ok(None);
+            }
+            store
+                .create_probe_job(
+                    &job_id,
+                    kind,
+                    &unit.row.file.media_id.to_string(),
+                    single_season_opt(&unit.row),
+                    &scope,
+                    &[spec],
+                )
+                .map(|created| created.then_some(job_id))
+        })
     }
 }

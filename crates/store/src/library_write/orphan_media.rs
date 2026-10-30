@@ -33,24 +33,7 @@ const OWNED: &[&str] = &[
     "media_aliases",
 ];
 
-impl crate::Store {
-    /// Media among `candidates` that a subscription references (subscribe.db).
-    pub(crate) fn subscribed_media(
-        &self,
-        candidates: &HashSet<MediaId>,
-    ) -> Result<HashSet<MediaId>, StoreError> {
-        let mut kept = HashSet::new();
-        let mut stmt = self
-            .subscribe
-            .prepare_cached("SELECT 1 FROM subscribes WHERE media_id = ?1 LIMIT 1")?;
-        for id in candidates {
-            if stmt.exists([id.to_string()])? {
-                kept.insert(*id);
-            }
-        }
-        Ok(kept)
-    }
-}
+impl crate::Store {}
 
 /// Purge every candidate Media that has no file, no collection entry, no
 /// subscription (`subscribed`) and is not a merge survivor. Returns the purged ids.
@@ -95,3 +78,6 @@ pub(crate) fn purge_orphan_media_in_tx(
     }
     Ok(purged)
 }
+
+#[path = "orphan_media/connection.rs"]
+mod connection;

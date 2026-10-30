@@ -114,7 +114,7 @@ fn resolve_media(
     // External IDs are aliases: an online match may already have a canonical
     // Media with Playback history. The scan caller rebinds only its new rows.
     let updated = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if lease
             .as_ref()
             .is_some_and(|lease| lease.control().is_cancelled())
@@ -175,7 +175,7 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
 
     if media.kind == MediaKind::Tv {
         let (coverages, sample_coverage) = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             let all = store.file_coverage_for_media(media.id).unwrap_or_default();
             let sample_path_str = sample_path.display().to_string();
             let sample = all
@@ -219,7 +219,7 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
     } else {
         let nfo_enabled = state
             .store
-            .lock()
+            .as_ref()
             .get_scrape_config()
             .ok()
             .map(|config| config.effective.mirror_nfo)
@@ -265,7 +265,7 @@ fn synthetic_coverage(
     episode: Option<u32>,
 ) -> Option<domain::FileCoverage> {
     let (library_id, root_id) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let library = store.library_for_path_strict(path, kind).ok().flatten()?;
         // The root is stored with the operator's spelling while the sample path may
         // be spelled differently (`/var` vs `/private/var`): compare resolved paths,
@@ -334,9 +334,9 @@ fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::pat
     // Pure read: a read-only Store and a directory-range query, never the writer
     // lock or a whole-Library ledger scan (L1a).
     let paths = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        .and_then(|store| store.file_media_under(dir).ok())
+        .store
+        .file_media_under(dir)
+        .ok()
         .unwrap_or_default()
         .into_iter()
         .filter(|(media_id, path)| *media_id == media.id && path.parent() == Some(dir))
@@ -377,7 +377,7 @@ pub(crate) fn has_local_scan_metadata(
     path: &std::path::Path,
 ) -> bool {
     let root = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store
             .library_for_path_strict(path, media.kind)
             .ok()
@@ -421,7 +421,7 @@ pub(crate) fn rebind_scan_rows(
     if previous == canonical {
         return Ok(());
     }
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     for path in inserted {
         let Some(coverage) = store
             .file_coverage_by_path(&path.display().to_string())

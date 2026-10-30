@@ -22,7 +22,7 @@ async fn rescan_purges_vanished_file_media_and_sidecars() {
     assert_eq!(status, StatusCode::OK);
 
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard.file_coverage_by_id(row.file_id).unwrap().is_none(),
         "vanished file row must be removed by the rescan, not flagged missing"
@@ -63,12 +63,5 @@ async fn deleting_an_item_removes_its_sidecars_and_directory() {
         "sidecars and the empty directory are removed"
     );
     assert!(fix.root.exists());
-    assert!(
-        fix.state
-            .store()
-            .lock()
-            .get_media(media_id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(fix.state.store().get_media(media_id).unwrap().is_none());
 }

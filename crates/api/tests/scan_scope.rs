@@ -13,7 +13,7 @@ async fn full_movie_scan_skips_nested_independent_library() {
     std::fs::create_dir_all(&nested_root).unwrap();
     let _nested_lib = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .create_library(
                 MediaKind::Movie,
@@ -38,7 +38,7 @@ async fn full_movie_scan_skips_nested_independent_library() {
 
     // Parent ledger contains parent_file, but does NOT contain nested_file!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let rows = guard.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].file.path, parent_file);
@@ -63,7 +63,7 @@ async fn full_video_scan_skips_nested_independent_library() {
 
     let (video_lib, _nested_video_lib) = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let v1 = guard
             .create_library(
                 MediaKind::Video,
@@ -96,7 +96,7 @@ async fn full_video_scan_skips_nested_independent_library() {
     assert_eq!(status, axum::http::StatusCode::OK);
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(
         guard
             .file_coverage_by_path(&p_file.display().to_string())
@@ -120,7 +120,7 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
     // Mark missing
     let store_arc = fix.state.store();
     let path_key = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let coverage = guard
             .file_coverage_by_id(row.file_id)
             .unwrap()
@@ -154,7 +154,7 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
     assert_eq!(status, axum::http::StatusCode::OK);
 
     // missing_at must be cleared, ledger row and media id preserved
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(!guard.missing_at_by_path().unwrap().contains_key(&path_key));
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);

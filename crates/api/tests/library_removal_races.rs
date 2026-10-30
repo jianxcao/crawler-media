@@ -30,7 +30,6 @@ async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
     std::fs::create_dir_all(&root).unwrap();
     let library = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Tv,
             "Extra",
@@ -48,7 +47,6 @@ async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
         loop {
             let current = state
                 .store()
-                .lock()
                 .library_removal(&removal.operation_id)
                 .unwrap()
                 .unwrap();
@@ -61,14 +59,7 @@ async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
     })
     .await
     .expect("removal must finish while the work still holds its lease");
-    assert!(
-        state
-            .store()
-            .lock()
-            .get_library(&library.id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(state.store().get_library(&library.id).unwrap().is_none());
     assert!(
         lease.publish(|| Ok(())).is_err(),
         "late work must not publish into a removed Library"
@@ -95,7 +86,6 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
     std::fs::create_dir_all(&root).unwrap();
     let library = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Tv,
             "Stuck",
@@ -105,14 +95,9 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
             &[],
         )
         .unwrap();
-    let removal = state
-        .store()
-        .lock()
-        .begin_library_removal(&library.id)
-        .unwrap();
+    let removal = state.store().begin_library_removal(&library.id).unwrap();
     state
         .store()
-        .lock()
         .set_removal_state(&removal.operation_id, "failed", Some("timeout"))
         .unwrap();
     api::library_lifecycle::resume_library_removals(&state).unwrap();
@@ -120,7 +105,6 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
         loop {
             let op = state
                 .store()
-                .lock()
                 .library_removal(&removal.operation_id)
                 .unwrap()
                 .unwrap();
@@ -132,12 +116,5 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
     })
     .await
     .expect("failed removal must be retried on startup");
-    assert!(
-        state
-            .store()
-            .lock()
-            .get_library(&library.id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(state.store().get_library(&library.id).unwrap().is_none());
 }

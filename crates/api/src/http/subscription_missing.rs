@@ -78,7 +78,7 @@ fn queue_missing_search(
     }
     let reset_count = match state
         .store
-        .lock()
+        .as_ref()
         .reset_wanted_search_cooldowns(subscribe.id, &missing)
     {
         Ok(count) => count,
@@ -105,7 +105,7 @@ fn missing_units(
     media: &domain::Media,
 ) -> Result<Vec<Unit>, crate::store::StoreError> {
     let cap = crate::air_gate::aired_cap(state, subscribe, media);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let facts = store.load_subscribe_facts(subscribe.id)?;
     let pending = store.load_pending(subscribe.id)?;
     let history = store.load_wanted_history(subscribe.id)?;

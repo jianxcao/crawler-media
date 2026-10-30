@@ -31,6 +31,7 @@ struct BlockingVacuum {
 impl DatabaseExecutor for BlockingVacuum {
     fn execute(
         &self,
+        _conn: &rusqlite::Connection,
         target: &DatabaseTarget,
         _vacuum_enabled: bool,
         _context: &MaintenanceContext<'_>,

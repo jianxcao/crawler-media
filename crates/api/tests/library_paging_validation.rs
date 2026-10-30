@@ -36,7 +36,6 @@ fn base_state(tmp: &tempfile::TempDir) -> ApiState {
 fn movie_library(state: &ApiState) -> (String, PathBuf) {
     let library = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -59,7 +58,7 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
     let dir = root.join(title);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("{title}.mkv"));
@@ -68,7 +67,7 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
         std::fs::write(dir.join("poster.jpg"), b"poster").unwrap();
     }
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,

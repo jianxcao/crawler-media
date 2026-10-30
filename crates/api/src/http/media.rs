@@ -268,7 +268,7 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
 
     let (posters, backdrops, poster_url, backdrop_url, related) =
         fetch_images_and_related(catalog, media_kind, &tmdb_id);
-    let library_links = find_library_links(&state.store.lock(), &media);
+    let library_links = find_library_links(&state.store.as_ref(), &media);
     let cast = fetch_cast(&meta);
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
     let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id);
@@ -353,13 +353,12 @@ fn tmdb_id_for(
         return Ok(Some(tid));
     }
     // Douban id: alias lookup in local media table, then catalog search.
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     if let Some(media) = store.get_media_by_alias("douban", &tid).ok().flatten()
         && let Some(tmdb) = media.tmdb_id
     {
         return Ok(Some(tmdb));
     }
-    drop(store);
     match kind {
         domain::MediaKind::Movie => catalog.search_movie(raw).map(|hits| {
             hits.into_iter()

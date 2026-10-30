@@ -26,7 +26,7 @@ async fn api_query_scale_page_and_cursor() {
 
     let library_id = {
         let binding = state.store();
-        let store = binding.lock();
+        let store = binding.as_ref();
         let lib = store
             .list_libraries()
             .unwrap()
@@ -41,7 +41,7 @@ async fn api_query_scale_page_and_cursor() {
     {
         let db = rusqlite::Connection::open(temp.path().join("data/library.db")).unwrap();
         let tx = db.unchecked_transaction().unwrap();
-        let roots = state.store().lock().list_library_roots().unwrap();
+        let roots = state.store().list_library_roots().unwrap();
         let root = roots
             .into_iter()
             .find(|r| r.library_id.as_str() == library_id.to_string().as_str())
@@ -138,7 +138,7 @@ struct LibCoords {
 
 fn lib_coords_for(state: &api::ApiState, library_id: &str) -> LibCoords {
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     let root = store
         .list_library_roots()
         .unwrap()
@@ -155,7 +155,6 @@ fn lib_coords_for(state: &api::ApiState, library_id: &str) -> LibCoords {
 fn movie_library_id(state: &api::ApiState) -> String {
     state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -357,7 +356,6 @@ async fn admin_session(app: &axum::Router, state: &api::ApiState) -> (String, St
         .to_string();
     let user_id = state
         .store()
-        .lock()
         .user_id_by_token(&token)
         .unwrap()
         .unwrap()
@@ -620,7 +618,6 @@ async fn api_cross_library_media_keeps_one_card_per_library() {
     let first = lib_coords_for(&state, &movie_library_id(&state));
     let created = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Movie,
             "Second",

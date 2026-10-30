@@ -10,7 +10,7 @@
 
 use super::{MarkerResultReplacement, Store, StoreError};
 use domain::{FilePresence, FileVersion, LedgerId};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -67,32 +67,7 @@ impl Store {
         &self,
         file_ids: &[LedgerId],
     ) -> Result<Vec<SourceSnapshot>, StoreError> {
-        let mut statement = self.library.prepare_cached(
-            "SELECT file_revision, source_version, display_path FROM library_files WHERE file_id = ?1",
-        )?;
-        let mut snapshots = Vec::with_capacity(file_ids.len());
-        for file_id in file_ids {
-            let row = statement
-                .query_row([file_id.to_string()], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()?;
-            if let Some((revision, source_version, path)) = row {
-                snapshots.push(SourceSnapshot {
-                    file_id: *file_id,
-                    version: FileVersion {
-                        revision,
-                        source_version,
-                    },
-                    path: PathBuf::from(path),
-                });
-            }
-        }
-        Ok(snapshots)
+        self.with_library_read(|db| db.source_snapshots(file_ids))
     }
 
     pub fn complete_marker_refresh_checked(
@@ -101,7 +76,9 @@ impl Store {
         replacements: &[MarkerResultReplacement],
         members: &[SourceObservation],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, Some(job_id), Some(members))
+        self.with_library_write(|db| {
+            db.complete_marker_refresh_checked(job_id, replacements, members)
+        })
     }
 
     pub fn replace_marker_results_batch_checked(
@@ -109,13 +86,13 @@ impl Store {
         replacements: &[MarkerResultReplacement],
         members: &[SourceObservation],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, None, Some(members))
+        self.with_library_write(|db| db.replace_marker_results_batch_checked(replacements, members))
     }
 }
 
 /// Compare one published file against its out-of-lock observation.
 pub(super) fn check_observed(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     file_id: &str,
     members: &[SourceObservation],
 ) -> Result<(), StoreError> {
@@ -147,7 +124,7 @@ pub(super) fn check_observed(
 }
 
 pub(super) fn validate_members(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacements: &[MarkerResultReplacement],
     members: &[SourceObservation],
 ) -> Result<(), StoreError> {
@@ -182,7 +159,7 @@ pub(super) fn validate_members(
 }
 
 pub(super) fn validate_job_members(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     job_id: &str,
     replacements: &[MarkerResultReplacement],
     members: &[SourceObservation],
@@ -219,7 +196,7 @@ pub(super) fn validate_job_members(
 }
 
 pub(super) fn validate_published_rows(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacements: &[MarkerResultReplacement],
     members: &[SourceObservation],
 ) -> Result<(), StoreError> {
@@ -230,3 +207,6 @@ pub(super) fn validate_published_rows(
     }
     Ok(())
 }
+
+#[path = "source_guard/connection.rs"]
+mod connection;

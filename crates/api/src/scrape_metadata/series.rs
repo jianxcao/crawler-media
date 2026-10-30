@@ -79,7 +79,7 @@ fn adopt_tmdb_episode(
         expected_revision: Some(expected_revision),
         preferences,
     };
-    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
+    if let Err(error) = state.store.as_ref().adopt_metadata(&adoption, fetched_at) {
         tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata adoption failed");
     }
 }
@@ -136,7 +136,7 @@ fn adopt_tmdb_season(
         expected_revision: Some(expected_revision),
         preferences,
     };
-    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
+    if let Err(error) = state.store.as_ref().adopt_metadata(&adoption, fetched_at) {
         tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata adoption failed");
     }
 }
@@ -350,7 +350,7 @@ pub(crate) fn scrape_tv_sidecars(
         return;
     }
     tracing::info!(media = %media.title, "开始电视剧刮削与附属文件处理");
-    let scrape_config = state.store.lock().get_scrape_config().ok();
+    let scrape_config = state.store.as_ref().get_scrape_config().ok();
     let (mirror_nfo, mirror_thumbs, mirror_images, still_size, fanart_api_key, fanart_lang) =
         match scrape_config {
             Some(ref c) => (
@@ -558,7 +558,7 @@ fn scrape_tv_stills_with(
     extract: impl Fn(&Path, i64, &Path) -> Result<(), String>,
 ) {
     let is_allowed = |path: &Path| -> bool {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if let Ok(libraries) = store.list_libraries() {
             libraries
                 .into_iter()
@@ -690,7 +690,7 @@ fn scrape_tv_fanart(
                     kind: media.kind,
                     external_id: id.clone(),
                 };
-                let _ = state.store.lock().add_media_alias(media.id, &alias);
+                let _ = state.store.as_ref().add_media_alias(media.id, &alias);
                 Some(id)
             }
             _ => None,
@@ -710,23 +710,14 @@ fn scrape_tv_fanart(
         lease: lease.as_ref(),
     };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
-    match state
-        .fanart_cache()
-        .map(|cache| media::fanart::FanartClient::with_cache(getter, cache, api_key))
-    {
-        Ok(client) => {
-            let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
-            match client.tv(&tvdb_id, &lang_refs) {
-                Ok(set) => {
-                    crate::fanart_artwork::save_fanart_files(&fetch, show_root, rows, &set);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
-                }
-            }
+    let client = media::fanart::FanartClient::with_cache(getter, state.fanart_cache(), api_key);
+    let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
+    match client.tv(&tvdb_id, &lang_refs) {
+        Ok(set) => {
+            crate::fanart_artwork::save_fanart_files(&fetch, show_root, rows, &set);
         }
         Err(error) => {
-            tracing::warn!(%error, "初始化 FanartClient 失败");
+            tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
         }
     }
 }

@@ -58,7 +58,7 @@ async fn progress(
 /// ——否则「观看时间没变」还可能只是事件被整体忽略，断言会变成假绿。
 fn session_state(fix: &PresenceFixture, user_id: UserId, device: &str) -> (i64, i64) {
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let row = guard
         .get_session(user_id, device)
         .unwrap()
@@ -68,7 +68,7 @@ fn session_state(fix: &PresenceFixture, user_id: UserId, device: &str) -> (i64, 
 
 fn admin_user(fix: &PresenceFixture) -> UserId {
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
 }
 
@@ -80,8 +80,8 @@ async fn watched_time_accumulates_correctly_and_ignores_seeks() {
 
     let session_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev_clock", row.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev_clock", row.file_id, 1000)
     };
 
     // 1. Start at t = 1000s, position 0：只开会话，不进账。
@@ -183,7 +183,7 @@ async fn missing_session_events_do_not_create_watch_time_or_resume_facts() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     let shared = fix.state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     assert!(store.get_session(user, "unbound").unwrap().is_none());
     assert!(
         store

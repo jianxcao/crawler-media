@@ -11,7 +11,7 @@ fn disabling_optional_work(field: &str) {
         fixture.patch(field, false).await;
         {
             let handle = fixture.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             for job in &fixture.jobs {
                 let expected = if job.library == fixture.target && job.kind != "media_probe" {
                     "cancelled"
@@ -44,8 +44,8 @@ fn disabling_optional_work(field: &str) {
             .file;
         let fresh_id = uuid::Uuid::new_v4().to_string();
         let handle = fixture.state.store();
-        let store = handle.lock();
-        create_job(&store, &fresh_id, "fingerprint_probe", file);
+        let store = handle.as_ref();
+        create_job(store, &fresh_id, "fingerprint_probe", file);
         assert_eq!(
             store.get_probe_job(&fresh_id).unwrap().unwrap().status,
             "queued"
@@ -89,7 +89,7 @@ fn metadata_completion_obeys_switch(field: &str) {
             .unwrap();
         let successor = uuid::Uuid::new_v4().to_string();
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let queued = store
             .complete_media_probe_and_enqueue_fingerprint(
                 &parent.id,
@@ -136,7 +136,7 @@ fn optional_admission_obeys_disabled_switches(kind: &str) {
                 })
                 .unwrap();
             let handle = fixture.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             let ledger = parent.file.file_id.to_string();
             // Release the mandatory unit's unique active-file slot first, so
             // optional admission cannot accidentally fail for a duplicate.

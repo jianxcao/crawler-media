@@ -157,7 +157,7 @@ async fn injected_clock_drives_activity_devices_and_end_session() {
     assert_eq!(ended.status(), StatusCode::OK);
     let session = env
         .store
-        .lock()
+        .as_ref()
         .get_session(env.user, "web-1")
         .unwrap()
         .expect("会话行仍在（admin_ended），只是不再活跃");
@@ -177,7 +177,7 @@ async fn injected_clock_drives_revoke_device() {
     let env = ClockEnv::new(&tmp).await;
     // 注销需要已绑定的会话凭据（web 会话本身不可注销）。
     {
-        let guard = env.store.lock();
+        let guard = env.store.as_ref();
         guard.set_user_token(env.user, "tv-token").unwrap();
         guard
             .bind_playback_credential(env.user, "web-1", "tv-token")
@@ -187,7 +187,7 @@ async fn injected_clock_drives_revoke_device() {
 
     let session_id = env
         .store
-        .lock()
+        .as_ref()
         .get_session(env.user, "web-1")
         .unwrap()
         .unwrap()
@@ -347,7 +347,7 @@ async fn session_issue_uses_injected_clock() {
 
     let store = st.store();
     let user = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .user_by_token("management-secret")
             .unwrap()
@@ -355,7 +355,7 @@ async fn session_issue_uses_injected_clock() {
             .id
     };
     let binding = store
-        .lock()
+        .as_ref()
         .play_session_binding(user, "clock-device", &session_id)
         .unwrap()
         .expect("签发的会话必须落库");
@@ -443,14 +443,14 @@ async fn heartbeat_persists_sub_second_report_time() {
 
     let store = st.store();
     let user = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .user_by_token("management-secret")
             .unwrap()
             .unwrap()
             .id
     };
-    let session = store.lock().get_session(user, "web-ms").unwrap().unwrap();
+    let session = store.as_ref().get_session(user, "web-ms").unwrap().unwrap();
     assert_eq!(
         session.last_report_at_ms,
         base_ms + 500,
@@ -479,7 +479,7 @@ async fn web_marks_persist_injected_clock_units() {
     let media_id: domain::MediaId = env.media_id.parse().unwrap();
     let unit = env
         .store
-        .lock()
+        .as_ref()
         .unit_state(env.user, media_id, -1, -1)
         .unwrap()
         .expect("marks 必须写入 playback_units");

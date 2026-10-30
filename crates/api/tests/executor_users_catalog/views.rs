@@ -5,7 +5,7 @@ fn aggregate_cache_preserves_provider_fields_and_deduplicates_keys() {
     let f = Fixture::new();
     {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         for (source, key, body, at) in [
             (
                 "tmdb",

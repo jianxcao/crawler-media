@@ -134,3 +134,54 @@ fn library_file(file_id: LedgerId, media_id: MediaId, path: &str) -> LibraryFile
         still_path: None,
     }
 }
+
+/// Hold the genuine Library writer on a peer thread until dropped.
+pub(super) struct HeldWriter {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(super) fn hold_writer(store: std::sync::Arc<store::Store>) -> HeldWriter {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        store
+            .with_writer(store::Db::Library, |_| {
+                ready_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    HeldWriter {
+        release: Some(release_tx),
+        worker: Some(worker),
+    }
+}
+
+impl Drop for HeldWriter {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+
+pub(super) fn writer_available(store: &store::Store, wait: std::time::Duration) -> bool {
+    store
+        .writers()
+        .with_write_admission(
+            wait,
+            || Ok(()),
+            || store.with_writer(store::Db::Library, |_| Ok(())),
+        )
+        .is_ok_and(|result| result.is_ok())
+}

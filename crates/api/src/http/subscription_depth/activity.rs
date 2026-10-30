@@ -42,21 +42,16 @@ fn activities_blocking(
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
-    let jobs = {
-        let Some(queue) = state
-            .jobs
-            .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
-        else {
-            return crate::http::store_wait::busy_response();
-        };
+    let jobs = match crate::jobs_readers::read(&state.jobs_readers, |queue| {
         queue.jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit)
+    }) {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            tracing::warn!(%error, subscribe_id=%subscribe.id, "subscription activity query failed");
+            return crate::library_read_work::stage_response(error);
+        }
     };
-    let Some(store) = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-    else {
-        return crate::http::store_wait::busy_response();
-    };
+    let store = state.store.clone();
     let facts_count = store
         .load_subscribe_facts(subscribe.id)
         .unwrap_or_default()

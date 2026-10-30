@@ -10,13 +10,13 @@ async fn job_updates_shared_subscriber_bounded() {
     let rx1 = fix
         .state
         .job_updates
-        .subscribe(fix.state.jobs.clone())
+        .subscribe(fix.state.jobs_readers())
         .await
         .unwrap();
     let rx2 = fix
         .state
         .job_updates
-        .subscribe(fix.state.jobs.clone())
+        .subscribe(fix.state.jobs_readers())
         .await
         .unwrap();
 

@@ -314,13 +314,16 @@ kill $(cat /tmp/e2e-stress/pid); rm -rf /tmp/e2e-stress
 - 顺序常量（写进 store 的模块文档并加 debug 断言）：app → subscribe → library → cache → jobs。
 - 这是最大的一个任务。如果单个 PR 过大，可以拆成 7a（store 内拆 writer）和 7b（读池 + jobs）。
 
-- [ ] **Step 1: 写失败测试**：`cache_write_does_not_block_library_heartbeat`。拿住 cache writer 2s，期间心跳写（library）断言 < 200ms 成功。
-- [ ] **Step 2: 写失败测试**：`job_claim_and_job_list_do_not_serialize`。持有 jobs 写事务期间 `GET /api/v1/jobs`，断言 < 200ms。
-- [ ] **Step 3: 写失败测试**：`transfer_releases_subscribe_guard_during_downloader_io`。用 fake downloader 阻塞 2s，期间对同一订阅 `GET /api/v1/subscriptions/{id}`，断言 < 200ms。
-- [ ] **Step 4: 运行，确认失败**：`cargo test -j8 -p api --test writer_isolation -- --test-threads=8`。
-- [ ] **Step 5: 实现**。
-- [ ] **Step 6: 验证**：先跑 store 和 api 两个 crate 的全部测试，`cargo test -j8 -p store -- --test-threads=8`，再 `cargo test -j8 -p api -- --test-threads=8`。PASS。
-- [ ] **Step 7: 提交** `refactor(store): one writer per database and unified reader pools`。
+- [x] **Step 1: 写失败测试**：`cache_write_does_not_block_library_heartbeat`。拿住 cache writer 2s，期间心跳写（library）断言 < 200ms 成功。
+- [x] **Step 2: 写失败测试**：`job_claim_and_job_list_do_not_serialize`。持有 jobs 写事务期间 `GET /api/v1/jobs`，断言 < 200ms。
+- [x] **Step 3: 写失败测试**：`transfer_releases_subscribe_guard_during_downloader_io`。用 fake downloader 阻塞 2s，期间对同一订阅 `GET /api/v1/subscriptions/{id}`，断言 < 200ms。
+- [x] **Step 4: 运行，确认失败**：`cargo test -j8 -p api --test writer_isolation -- --test-threads=8`。
+- [x] **Step 5: 实现**。
+- [x] **Step 6: 验证**：先跑 store 和 api 两个 crate 的全部测试，`cargo test -j8 -p store -- --test-threads=8`，再 `cargo test -j8 -p api -- --test-threads=8`。PASS。
+- [x] **Step 7: 提交** `refactor(store): one writer per database and unified reader pools`。
+
+
+执行记录（2026-10-30）：Store 全套 837 passed / 0 failed；API、media、jobs 全套合计 2162 passed / 0 failed。新增覆盖 writer 取消与 panic 后事务清理、文件核验锁外观察及陈旧事实拒绝、并发订阅覆盖准入；`jobs_reader_failures`、`maintenance_writer_isolation`、`writer_isolation` 均通过。只完成 Task 7，阶段 C 尚未开始。
 
 ---
 

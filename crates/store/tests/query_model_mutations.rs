@@ -68,7 +68,19 @@ fn one_hundred_file_window_settles_one_card() {
         })
         .collect::<Vec<_>>();
     let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute_batch("CREATE TABLE query_marks(n INTEGER); CREATE TRIGGER count_marks AFTER UPDATE OF query_projection_revision ON library_items BEGIN INSERT INTO query_marks VALUES(1); END;").unwrap();
+    let settlements = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed = settlements.clone();
+    store.with_writer(store::Db::Library, |conn| {
+        conn.create_scalar_function(
+            "measure_projection_settlement", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |_| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(0_i64)
+            },
+        )?;
+        conn.execute_batch("CREATE TRIGGER count_marks AFTER UPDATE OF query_projection_revision ON library_items BEGIN SELECT measure_projection_settlement(); END;")?;
+        Ok(())
+    }).unwrap();
     let publications = files
         .iter()
         .map(|file| store::library_write::FilePublication {
@@ -89,12 +101,16 @@ fn one_hundred_file_window_settles_one_card() {
             1,
         )
         .unwrap();
+    let (revision, projection): (i64, i64) = db.query_row(
+        "SELECT item_revision,query_projection_revision FROM library_items WHERE library_id=?1 AND media_id=?2",
+        rusqlite::params![lib.to_string(), media.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
     assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM query_marks", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
+        settlements.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the whole window settles one query projection"
     );
+    assert_eq!(projection, revision);
     assert_eq!(db.query_row("SELECT member_count FROM library_query_counts WHERE surface='browse' AND dimension='all'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(
         store

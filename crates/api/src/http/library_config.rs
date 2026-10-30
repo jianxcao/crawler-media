@@ -97,19 +97,13 @@ pub(crate) async fn create_library(
         .fs_work
         .run_to_completion(move || {
             let refs: Vec<&str> = root_paths.iter().map(String::as_str).collect();
-            let roots = store::PreparedLibraryRoots::observe(&refs)?;
+            let roots = store::PreparedLibraryRoots::observe(&refs).map_err(create_error)?;
             create_library_record(&work_state, &body, kind, &name, &roots)
         })
         .await;
     let library = match created {
         Ok(Ok(library)) => library,
-        Ok(Err(error)) => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "library.invalid_roots",
-                &error.to_string(),
-            );
-        }
+        Ok(Err(response)) => return response,
         Err(error) => return super::library::browse_work_error(error),
     };
     crate::root_reassign_work::notify(&state);
@@ -123,57 +117,70 @@ fn create_library_record(
     kind: MediaKind,
     name: &str,
     roots: &store::PreparedLibraryRoots,
-) -> Result<crate::store::Library, StoreError> {
+) -> Result<crate::store::Library, Response> {
     let members = parse_member_ids(body);
     let rules = body["match_rules"].as_array().cloned().unwrap_or_default();
     let filter = body
         .get("default_filter_id")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
-    let store = state.store.lock();
-    let library = store.create_library_full_prepared(
-        kind,
-        name,
-        roots,
-        body["access_mode"].as_str().unwrap_or("everyone"),
-        body["admin_visible"].as_bool().unwrap_or(true),
-        &members,
-        &rules,
-        filter,
-    )?;
-    store.set_library_intro_settings(
-        &library.id,
-        body["detect_intros"].as_bool().unwrap_or(false),
-        body["enable_fingerprint"].as_bool().unwrap_or(false),
-    )?;
-    store.set_library_switch_settings(
-        &library.id,
-        body["realtime_watch"].as_bool(),
-        body["generate_thumbnails"].as_bool(),
-        body["extract_chapter_images"].as_bool(),
-        body["exclude_from_home"].as_bool(),
-        body["auto_series_collections"].as_bool(),
-    )?;
-    let library = store
-        .get_library(&library.id)?
-        .ok_or_else(|| StoreError::Missing(library.id))?;
-    let signature = crate::scan_operations::scan_scope_signature(&library);
-    if let Err(error) = store.enqueue_scan(
-        &library.id,
-        &signature,
-        &[],
-        crate::job_loop::unix_now() * 1000,
-    ) {
-        tracing::error!(library_id = %library.id, %error, "初始扫描入队失败");
-    }
-    Ok(library)
+    super::store_wait::with_foreground_store(state, |store| {
+        store
+            .library_write(|store| {
+                let library = store.create_library_full_prepared(
+                    kind,
+                    name,
+                    roots,
+                    body["access_mode"].as_str().unwrap_or("everyone"),
+                    body["admin_visible"].as_bool().unwrap_or(true),
+                    &members,
+                    &rules,
+                    filter,
+                )?;
+                store.set_library_intro_settings(
+                    &library.id,
+                    body["detect_intros"].as_bool().unwrap_or(false),
+                    body["enable_fingerprint"].as_bool().unwrap_or(false),
+                )?;
+                store.set_library_switch_settings(
+                    &library.id,
+                    body["realtime_watch"].as_bool(),
+                    body["generate_thumbnails"].as_bool(),
+                    body["extract_chapter_images"].as_bool(),
+                    body["exclude_from_home"].as_bool(),
+                    body["auto_series_collections"].as_bool(),
+                )?;
+                let library = store
+                    .get_library(&library.id)?
+                    .ok_or_else(|| StoreError::Missing(library.id))?;
+                let signature = crate::scan_operations::scan_scope_signature(&library);
+                if let Err(error) = store.enqueue_scan(
+                    &library.id,
+                    &signature,
+                    &[],
+                    crate::job_loop::unix_now() * 1000,
+                ) {
+                    tracing::error!(library_id = %library.id, %error, "初始扫描入队失败");
+                }
+                Ok(library)
+            })
+            .map_err(create_error)
+    })?
+}
+
+fn create_error(error: StoreError) -> Response {
+    err(
+        StatusCode::BAD_REQUEST,
+        "library.invalid_roots",
+        &error.to_string(),
+    )
 }
 
 async fn render_library(state: &ApiState, library: &crate::store::Library) -> Response {
     let library_snapshot = library.clone();
     let loaded = super::store_wait::store_read(state, move |store| {
         let library = &library_snapshot;
-        let stats = match crate::library_statistics::statistics_for(&store, library) {
+        let stats = match crate::library_statistics::statistics_for(store, library) {
             Ok(stats) => stats,
             Err(error) => {
                 return Err(err(
@@ -273,6 +280,7 @@ pub(crate) async fn patch_library(
     match begun {
         Ok(operation) => (StatusCode::ACCEPTED, ok(operation)).into_response(),
         Err(StorageOperationError::Busy) => super::store_wait::busy_response(),
+        Err(StorageOperationError::Admission(response)) => response,
         Err(StorageOperationError::MissingLibrary) => missing_library(),
         Err(StorageOperationError::Invalid(message)) => err(
             StatusCode::BAD_REQUEST,
@@ -324,73 +332,83 @@ fn apply_library_settings(
             }
         }
     }
-    let store = state
-        .store
-        .try_lock_for(super::store_wait::STORE_WRITE_WAIT)
-        .ok_or_else(super::store_wait::busy_response)?;
-    state.require_writable()?;
-    state.require_write_admitted()?;
-    let Some(current) = (match store.get_library(id) {
-        Ok(library) => library,
-        Err(error) => {
-            return Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            ));
-        }
-    }) else {
-        return Err(missing_library());
-    };
-    apply_library_toggles(&store, id, body)?;
-    let access = ["access_mode", "admin_visible", "member_ids"]
-        .iter()
-        .any(|field| body.get(*field).is_some())
-        .then(|| {
-            (
-                body["access_mode"].as_str().unwrap_or(&current.access_mode),
-                body["admin_visible"]
-                    .as_bool()
-                    .unwrap_or(current.admin_visible),
-                if body.get("member_ids").is_some() {
-                    parse_member_ids(body)
-                } else {
-                    current.member_ids.clone()
-                },
-            )
-        });
-    let match_rules = body["match_rules"].as_array().cloned();
-    let default_filter_id_update: Option<Option<&str>> = if body.get("default_filter_id").is_some()
-    {
-        Some(body["default_filter_id"].as_str().filter(|s| !s.is_empty()))
-    } else {
-        None
-    };
-    match store.update_library_full(
-        id,
-        name.as_deref(),
-        None,
-        access
-            .as_ref()
-            .map(|(mode, visible, ids)| (*mode, *visible, ids.as_slice())),
-        match_rules.as_deref(),
-        default_filter_id_update,
-    ) {
-        Ok(library) => Ok(library),
-        Err(StoreError::Missing(_)) => Err(missing_library()),
-        Err(StoreError::Protected(message)) => {
-            Err(err(StatusCode::BAD_REQUEST, "library.protected", &message))
-        }
-        Err(error) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        )),
-    }
+    super::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(
+            |error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                )
+            },
+            |store| {
+                let Some(current) = (match store.get_library(id) {
+                    Ok(library) => library,
+                    Err(error) => {
+                        return Err(err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "store.error",
+                            &error.to_string(),
+                        ));
+                    }
+                }) else {
+                    return Err(missing_library());
+                };
+                apply_library_toggles(store, id, body)?;
+                let access = ["access_mode", "admin_visible", "member_ids"]
+                    .iter()
+                    .any(|field| body.get(*field).is_some())
+                    .then(|| {
+                        (
+                            body["access_mode"].as_str().unwrap_or(&current.access_mode),
+                            body["admin_visible"]
+                                .as_bool()
+                                .unwrap_or(current.admin_visible),
+                            if body.get("member_ids").is_some() {
+                                parse_member_ids(body)
+                            } else {
+                                current.member_ids.clone()
+                            },
+                        )
+                    });
+                let match_rules = body["match_rules"].as_array().cloned();
+                let default_filter_id_update: Option<Option<&str>> =
+                    if body.get("default_filter_id").is_some() {
+                        Some(body["default_filter_id"].as_str().filter(|s| !s.is_empty()))
+                    } else {
+                        None
+                    };
+                match store.update_library_settings(
+                    id,
+                    name.as_deref(),
+                    access
+                        .as_ref()
+                        .map(|(mode, visible, ids)| (*mode, *visible, ids.as_slice())),
+                    match_rules.as_deref(),
+                    default_filter_id_update,
+                ) {
+                    Ok(library) => Ok(library),
+                    Err(StoreError::Missing(_)) => Err(missing_library()),
+                    Err(StoreError::Protected(message)) => {
+                        Err(err(StatusCode::BAD_REQUEST, "library.protected", &message))
+                    }
+                    Err(error) => Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    )),
+                }
+            },
+        )
+    })?
 }
 
 /// Apply the ordinary switches a PATCH may carry.
-fn apply_library_toggles(store: &crate::Store, id: &str, body: &Value) -> Result<(), Response> {
+fn apply_library_toggles(
+    store: &store::LibraryConnection<'_>,
+    id: &str,
+    body: &Value,
+) -> Result<(), Response> {
     let switch_fields = [
         "realtime_watch",
         "generate_thumbnails",
@@ -423,7 +441,20 @@ pub(crate) async fn delete_library(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let preflight = state.library_work.freeze(&state.store, &id);
+    let worker = state.clone();
+    let preflight = match state
+        .http_work
+        .run_to_completion(move || {
+            super::store_wait::with_foreground_store(&worker, |store| {
+                worker.library_work.freeze(store, &id)
+            })
+        })
+        .await
+    {
+        Ok(Ok(preflight)) => preflight,
+        Ok(Err(response)) => return response,
+        Err(error) => return super::library::browse_work_error(error),
+    };
     match preflight {
         Ok(operation) => match crate::library_lifecycle::launch_library_removal(
             &state,

@@ -162,22 +162,13 @@ fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Respo
     delivery.submit(&scored.torrent, &url)?;
     // This closes an already admitted side effect. A new maintenance/readonly gate
     // must not discard its result; the persisted intent survives any confirmation failure.
-    match crate::http::store_wait::with_bounded_store(state.store(), |store| {
-        store.confirm_pending_submission(
-            subscribe.id,
-            &scored.torrent.enclosure,
-            crate::job_loop::unix_now(),
-        )
-    }) {
-        Some(Ok(())) => {}
-        Some(Err(error)) => {
-            tracing::error!(%error, subscribe_id=%subscribe.id, enclosure=%scored.torrent.enclosure, "Submitted manual Torrent retains unconfirmed pending intent");
-            return Err(ApiError::from(error).into_response());
-        }
-        None => {
-            tracing::error!(subscribe_id=%subscribe.id, enclosure=%scored.torrent.enclosure, "Submitted manual Torrent confirmation busy; pending intent retained");
-            return Err(crate::http::store_wait::busy_response());
-        }
+    if let Err(error) = state.store.confirm_pending_submission(
+        subscribe.id,
+        &scored.torrent.enclosure,
+        crate::job_loop::unix_now(),
+    ) {
+        tracing::error!(%error, subscribe_id=%subscribe.id, "Submitted manual Torrent retains unconfirmed pending intent");
+        return Err(ApiError::from(error).into_response());
     }
     tracing::info!(subscribe_id=%subscribe.id, title=%scored.torrent.title, score=scored.score, "Manual Torrent admitted and submitted");
     Ok(Json(json!({
@@ -203,10 +194,9 @@ fn admitted_store<T>(
     state: &ApiState,
     work: impl FnOnce(&crate::Store) -> Result<T, ApiError>,
 ) -> Result<T, Response> {
-    crate::http::store_wait::with_bounded_store(state.store(), |store| {
+    crate::http::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         work(store).map_err(IntoResponse::into_response)
-    })
-    .ok_or_else(crate::http::store_wait::busy_response)?
+    })?
 }

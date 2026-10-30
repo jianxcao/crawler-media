@@ -41,13 +41,9 @@ fn metadata_and_browser_settings_keep_executor_responsive() {
         ),
     ] {
         let f = Fixture::new();
-        f.state
-            .store()
-            .lock()
-            .put_setting("tmdb.api_key", "")
-            .unwrap();
+        f.state.store().put_setting("tmdb.api_key", "").unwrap();
         let app = router(f.state.clone());
-        let holder = hold_store(&f.state, Duration::from_millis(500));
+        let holder = hold_store(&f.state, store::Db::App, Duration::from_millis(500));
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, uri, &f.token, body)), async {
@@ -98,7 +94,7 @@ fn notify_proxy_and_scrape_settings_keep_executor_responsive() {
     ] {
         let f = Fixture::new();
         let app = router(f.state.clone());
-        let holder = hold_store(&f.state, Duration::from_millis(500));
+        let holder = hold_store(&f.state, store::Db::App, Duration::from_millis(500));
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, uri, &f.token, body)), async {
@@ -121,7 +117,7 @@ fn proxy_diagnosis_reads_off_executor_and_obeys_capacity_without_network() {
     let budget = Arc::new(api::blocking_budget::BlockingBudget::new(1));
     let reservation = budget.try_reserve().unwrap();
     let state = f.state.clone().with_http_work(budget);
-    let holder = hold_store(&state, Duration::from_millis(500));
+    let holder = hold_store(&state, store::Db::App, Duration::from_millis(500));
     let (response, elapsed) = runtime().block_on(async {
         let app = router(state);
         let started = Instant::now();
@@ -160,7 +156,6 @@ fn metadata_key_hint_handles_unicode_without_panicking() {
     let f = Fixture::new();
     f.state
         .store()
-        .lock()
         .put_setting("tmdb.api_key", "密钥测试")
         .unwrap();
     let response = runtime()

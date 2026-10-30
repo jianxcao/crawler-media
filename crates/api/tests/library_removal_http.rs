@@ -38,7 +38,6 @@ async fn delete_returns_operation_and_status_then_preserves_files() {
     std::fs::write(root.join("movie.mkv"), b"unchanged").unwrap();
     let library = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Movie,
             "Extra",

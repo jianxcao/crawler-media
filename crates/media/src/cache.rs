@@ -1,8 +1,13 @@
+mod backend;
+pub use backend::CacheBackend;
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+#[cfg(test)]
 use rusqlite::Connection;
+use std::sync::Arc;
 
 use crate::client::TmdbError;
 
@@ -18,7 +23,7 @@ pub fn unix_now() -> i64 {
 }
 
 pub struct CatalogCache {
-    conn: Mutex<Connection>,
+    backend: Arc<dyn CacheBackend>,
     ttl_secs: i64,
     /// 测试用固定时钟。`None` = 每次访问都取实时时钟（生产路径），
     /// 避免「进程启动时钉死的 now 让缓存永不过期」。
@@ -38,13 +43,24 @@ impl CatalogCache {
     ) -> Result<Self, TmdbError> {
         let cache_source = source.parse::<crate::response_cache::CacheSource>()?;
         let conn = crate::response_cache::open(path)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
+        Ok(Self::with_backend(
+            Arc::new(backend::OwnedSqlite(Mutex::new(conn))),
+            cache_source,
+            now,
+        ))
+    }
+
+    pub fn with_backend(
+        backend: Arc<dyn CacheBackend>,
+        source: crate::response_cache::CacheSource,
+        now: i64,
+    ) -> Self {
+        Self {
+            backend,
             ttl_secs: DEFAULT_TTL_SECS,
-            // now == 0 → 实时时钟（生产）；非 0 → 测试钉住的时钟。
             now: Mutex::new((now != 0).then_some(now)),
-            source: cache_source,
-        })
+            source,
+        }
     }
 
     /// 测试用：把时钟钉到指定值（生产不要调用，0 表示实时）。
@@ -67,8 +83,8 @@ impl CatalogCache {
     pub fn put(&self, key: &str, body: &str) -> Result<(), TmdbError> {
         let now = self.now_secs();
         let expires = now + self.ttl_secs;
-        let conn = self.conn.lock();
-        crate::response_cache::put(&conn, self.source, key, body, now, Some(expires))?;
+        self.backend
+            .put(self.source, key, body, now, Some(expires))?;
         Ok(())
     }
 
@@ -122,8 +138,7 @@ impl CatalogCache {
 
     fn load(&self, key: &str, allow_stale: bool) -> Result<Option<String>, TmdbError> {
         let now = self.now_secs();
-        let conn = self.conn.lock();
-        let row = crate::response_cache::get(&conn, self.source, key)?;
+        let row = self.backend.get(self.source, key)?;
         let Some(row) = row else {
             return Ok(None);
         };

@@ -43,10 +43,7 @@ impl Store {
         expected: &FileVersion,
         artwork: &FileArtwork<'_>,
     ) -> Result<bool, StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let changed = record_file_artwork_in(&tx, file_id, expected, artwork)?;
-        tx.commit()?;
-        Ok(changed)
+        self.with_library_write(|db| db.record_file_artwork(file_id, expected, artwork))
     }
 }
 
@@ -127,3 +124,6 @@ pub(crate) fn record_file_artwork_in(
 
 #[cfg(test)]
 mod tests;
+
+#[path = "artwork/connection.rs"]
+mod connection;

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 /// Automatic season detection cannot assign physical offsets to merged units.
 /// Reject before deleting any existing facts, including an empty detection result.
 pub(super) fn ensure_supported(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacement: &MarkerResultReplacement,
 ) -> Result<(), StoreError> {
     let unsupported: bool = tx.query_row(
@@ -26,7 +26,7 @@ pub(super) fn ensure_supported(
 
 /// Job publication can only replace facts within this Media and this season.
 pub(super) fn covered_episodes(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacement: &MarkerResultReplacement,
 ) -> Result<BTreeSet<i64>, StoreError> {
     let mut episodes = BTreeSet::new();

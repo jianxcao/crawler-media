@@ -10,21 +10,18 @@ use crate::http_agent;
 /// restart. main.rs seeds the KV from the `CRAWLER_MEDIA_TMDB_KEY` env var
 /// at startup when the env is present.
 pub struct TmdbHttp {
-    readers: Arc<crate::store_readers::StoreReaders>,
+    store: Arc<crate::Store>,
 }
 
 impl TmdbHttp {
     pub fn new(state: &ApiState) -> Self {
         Self {
-            readers: state.store_readers.clone(),
+            store: state.store.clone(),
         }
     }
 
     fn api_key(&self) -> Option<String> {
-        let store = self
-            .readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)?;
-        store
+        self.store
             .get_setting(crate::settings_keys::TMDB_API_KEY)
             .ok()
             .flatten()

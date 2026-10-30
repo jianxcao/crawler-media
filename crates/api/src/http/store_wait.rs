@@ -1,22 +1,9 @@
-//! Off-executor `Store` access for latency-sensitive handlers (Review L2).
+//! Off-executor Store access with per-database reader and writer admission.
 //!
-//! A handler must not take the process-wide `Store` lock on a tokio worker. A long
-//! batch (scan, integrity, DRM probe) holds that mutex for seconds; waiting for it
-//! parks the *worker*, so every other task scheduled on the runtime is delayed —
-//! including requests that never touch the store. The lock is taken on the blocking
-//! pool with a bounded wait instead, and a lock that stays contended is reported as
-//! "busy, retry" rather than as a failure of the request.
-//!
-//! This is the Task 7 seam (`http/auth.rs::auth_store_lookup`, `http/jobs*::with_bounded_store`)
-//! generalised into one place: blocking pool + bounded `try_lock_for` + `runtime.busy`.
-//! Do not grow another flavour per handler.
-//!
-//! Request reads use [`store_read`] and wait up to [`STORE_READ_WAIT`] (5 s) for a
-//! pooled reader, without waiting for the writer. Request writes use [`store_write`]
-//! with a [`STORE_WRITE_WAIT`] (1 s) lock budget and recheck instance/maintenance
-//! admission while holding the writer lock. Queued writes cannot land after
-//! admission closes. Work already on a blocking budget uses [`with_bounded_store`]
-//! for the same bounded lock wait and must check admission inside its closure.
+//! Request reads use [`store_read`] and borrow only the database each SQL method
+//! needs. Request writes use [`store_write`]; admission is checked again while
+//! holding the actual database writer. Callers already on a blocking worker use
+//! [`with_store_read`] or [`with_foreground_store`] for the same policy.
 
 use std::time::Duration;
 
@@ -111,48 +98,27 @@ where
     F: FnOnce(&crate::Store) -> T + Send + 'static,
     T: Send + 'static,
 {
-    store_read_readers(state.store_readers.clone(), STORE_READ_WAIT, work).await
+    store_read_handle(state.store(), STORE_READ_WAIT, work).await
 }
 
-/// L1 read side: run `work` on a pooled read-only `Store`. It never touches the
-/// writer lock; `Busy` only means every reader stayed checked out for the budget.
-async fn store_read_readers<T, F>(
-    readers: std::sync::Arc<crate::store_readers::StoreReaders>,
-    deadline: Duration,
-    work: F,
-) -> Result<T, StoreCallError>
-where
-    F: FnOnce(&crate::Store) -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let wait = deadline.saturating_sub(LOCK_SLACK);
-    let metrics = media_server::query_metrics::QueryMetrics::current()
-        .filter(media_server::query_metrics::QueryMetrics::diagnostic);
-    let started = std::time::Instant::now();
-    let Some(reader) = readers.checkout_async(wait).await else {
-        tracing::warn!(
-            wait_ms = wait.as_millis() as u64,
-            "Store read pool stayed busy within the wait budget"
-        );
-        return Err(StoreCallError::Busy);
-    };
-    let remaining = deadline.saturating_sub(started.elapsed());
-    if remaining.is_zero() {
-        tracing::warn!("Store read deadline passed before worker dispatch");
-        return Err(StoreCallError::Deadline);
-    }
-    let task = tokio::task::spawn_blocking(move || observe_store_work(&reader, metrics, work));
-    match tokio::time::timeout(remaining, task).await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(error)) => Err(StoreCallError::Worker(error.to_string())),
-        Err(_) => {
-            tracing::warn!(
-                wait_ms = deadline.as_millis() as u64,
-                "Store read exceeded its deadline"
-            );
-            Err(StoreCallError::Deadline)
-        }
-    }
+/// Reader admission for callers that already run on a blocking worker.
+pub(crate) fn with_store_read<T>(
+    state: &ApiState,
+    work: impl FnOnce(&crate::Store) -> T,
+) -> Result<T, Response> {
+    state
+        .store
+        .with_read_scope(STORE_READ_WAIT, || work(&state.store))
+        .map_err(|error| match error {
+            store::StoreError::ReadBusy
+            | store::StoreError::ReadClosed
+            | store::StoreError::ReadDeadline
+            | store::StoreError::ReadCancelled => busy_response(),
+            error => {
+                tracing::error!(%error, "Store reader scope failed");
+                err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取失败")
+            }
+        })
 }
 
 /// A bounded off-executor mutation. Admission is rechecked after acquiring the
@@ -179,22 +145,19 @@ where
 }
 
 /// Bounded foreground mutation for callers already on a blocking worker.
-/// Check admission at the outer Store and again at every actual App writer.
+/// Check admission at the outer Store and again at every actual database writer.
 pub(crate) fn with_foreground_store<T>(
     state: &ApiState,
     work: impl FnOnce(&crate::Store) -> T,
 ) -> Result<T, Response> {
-    with_bounded_store(state.store(), |store| {
-        state.require_writable()?;
-        state.require_write_admitted()?;
-        with_app_admission(state, || work(store))
-    })
-    .unwrap_or_else(|| Err(busy_response()))
+    state.require_writable()?;
+    state.require_write_admitted()?;
+    with_write_admission(state, || work(&state.store))
 }
 
-/// Apply the same foreground policy at every actual App writer acquisition.
+/// Apply the same foreground policy at every actual database writer acquisition.
 /// This scope is synchronous and runs only on a blocking worker.
-pub(crate) fn with_app_admission<T>(
+pub(crate) fn with_write_admission<T>(
     state: &ApiState,
     work: impl FnOnce() -> T,
 ) -> Result<T, Response> {
@@ -230,7 +193,7 @@ pub(crate) fn with_app_admission<T>(
     result.map_err(|error| match error {
         store::StoreError::WriteBusy => busy_response(),
         error => {
-            tracing::error!(%error, "App writer scope failed");
+            tracing::error!(%error, "database writer scope failed");
             err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "写入失败")
         }
     })
@@ -261,7 +224,7 @@ fn observe_store_work<T>(
 /// [`store_read`] on a bare `Store` handle, for callers (and tests) that hold the
 /// handle rather than the whole `ApiState`.
 pub(crate) async fn store_read_handle<T, F>(
-    store: std::sync::Arc<parking_lot::Mutex<crate::Store>>,
+    store: std::sync::Arc<crate::Store>,
     deadline: Duration,
     work: F,
 ) -> Result<T, StoreCallError>
@@ -269,71 +232,73 @@ where
     F: FnOnce(&crate::Store) -> T + Send + 'static,
     T: Send + 'static,
 {
-    // 锁等 deadline - slack：这样「锁拿不到」总是先于外层 timeout 报 Busy，
-    // `Deadline` 只描述「拿到锁之后 worker 超过了预算」。
-    let lock_wait = deadline.saturating_sub(LOCK_SLACK);
+    let wait = deadline.saturating_sub(LOCK_SLACK);
     let metrics = media_server::query_metrics::QueryMetrics::current()
         .filter(media_server::query_metrics::QueryMetrics::diagnostic);
-    let task = tokio::task::spawn_blocking(move || match store.try_lock_for(lock_wait) {
-        Some(guard) => Ok(observe_store_work(&guard, metrics, work)),
-        None => Err(StoreCallError::Busy),
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _cancel = CancelRead(cancelled.clone());
+    let started = std::time::Instant::now();
+    let absolute_deadline = started + deadline;
+    let reader_deadline = started + wait;
+    let task = tokio::task::spawn_blocking(move || {
+        let budget = store::QueryBudget {
+            deadline: absolute_deadline,
+            cancelled,
+        };
+        store.with_query_budget(&budget, |store| {
+            store
+                .with_read_scope(
+                    reader_deadline.saturating_duration_since(std::time::Instant::now()),
+                    || observe_store_work(store, metrics, work),
+                )
+                .map_err(store::LibraryReadError::Store)
+        })
     });
     match tokio::time::timeout(deadline, task).await {
         Ok(Ok(Ok(value))) => Ok(value),
         Ok(Ok(Err(error))) => {
-            tracing::warn!(
-                wait_ms = lock_wait.as_millis() as u64,
-                "Store 锁未在预算内拿到，请求按繁忙重试"
-            );
-            Err(error)
+            tracing::warn!(%error, "Store reader could not finish within its budget");
+            match error {
+                store::LibraryReadError::Busy
+                | store::LibraryReadError::Closed
+                | store::LibraryReadError::Store(
+                    store::StoreError::ReadBusy | store::StoreError::ReadClosed,
+                )
+                | store::LibraryReadError::Store(store::StoreError::WriteBusy) => {
+                    Err(StoreCallError::Busy)
+                }
+                store::LibraryReadError::Cancelled
+                | store::LibraryReadError::Deadline
+                | store::LibraryReadError::Store(
+                    store::StoreError::ReadDeadline | store::StoreError::ReadCancelled,
+                ) => Err(StoreCallError::Deadline),
+                error => Err(StoreCallError::Worker(error.to_string())),
+            }
         }
         Ok(Err(error)) => Err(StoreCallError::Worker(error.to_string())),
-        Err(_) => {
-            tracing::warn!(
-                wait_ms = deadline.as_millis() as u64,
-                "Store 调用超过预算，请求按繁忙重试"
-            );
-            Err(StoreCallError::Deadline)
-        }
+        Err(_) => Err(StoreCallError::Deadline),
     }
 }
 
-/// Run `work(&Store)` on the blocking pool, waiting for the lock as long as it takes.
-///
-/// Background drivers (scan rounds, Library removal) have no client waiting on their
-/// latency, so they may wait; what they must not do is park a runtime worker on the
-/// process-wide mutex. A worker failure is reported, the lock wait is not a `Busy`.
+struct CancelRead(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelRead {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Background work owns only its actual per-database SQL leases.
 pub(crate) async fn store_blocking<T, F>(
-    store: std::sync::Arc<parking_lot::Mutex<crate::Store>>,
+    store: std::sync::Arc<crate::Store>,
     work: F,
 ) -> Result<T, StoreCallError>
 where
     F: FnOnce(&crate::Store) -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let guard = store.lock();
-        work(&guard)
-    })
-    .await
-    .map_err(|error| StoreCallError::Worker(error.to_string()))
-}
-
-/// Bounded `Store` lock for code that is already off the executor.
-///
-/// `None` means the lock stayed contended for [`STORE_WRITE_WAIT`]; the caller answers
-/// 503 via [`busy_response`]. Use this from `state.http_work.run*` / `search_work.run`
-/// closures only — calling it on a tokio worker reintroduces the stall this module
-/// exists to remove.
-///
-/// 写侧用更短的预算：这里的工作通常带写，等到 `Deadline` 时结果已经无法描述
-/// （见 [`StoreCallError::Deadline`]），所以早退早重试。
-pub(crate) fn with_bounded_store<T>(
-    store: std::sync::Arc<parking_lot::Mutex<crate::Store>>,
-    work: impl FnOnce(&crate::Store) -> T,
-) -> Option<T> {
-    let guard = store.try_lock_for(STORE_WRITE_WAIT)?;
-    Some(work(&guard))
+    tokio::task::spawn_blocking(move || work(&store))
+        .await
+        .map_err(|error| StoreCallError::Worker(error.to_string()))
 }
 
 #[cfg(test)]

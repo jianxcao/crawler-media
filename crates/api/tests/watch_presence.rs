@@ -27,7 +27,7 @@ async fn directory_event_reconciles_all_pages_without_touching_sibling() {
     api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(directory.clone())]);
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let missing = guard.missing_at_by_path().unwrap();
         for row in &rows {
             let key = guard.recorded_path_key(&row.path.to_string_lossy());
@@ -45,7 +45,7 @@ async fn directory_event_reconciles_all_pages_without_touching_sibling() {
     }
     api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(directory)]);
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let missing = guard.missing_at_by_path().unwrap();
     for row in &rows {
         let key = guard.recorded_path_key(&row.path.to_string_lossy());
@@ -66,7 +66,7 @@ async fn last_local_file_missing_keeps_media_and_all_user_facts() {
     let user_id = domain::UserId::new();
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .set_playback_state(user_id, media_id, 5000, Some(true), Some(true), None, None)
             .unwrap();
@@ -79,7 +79,7 @@ async fn last_local_file_missing_keeps_media_and_all_user_facts() {
 
     // Ledger row still exists, but missing_at is set!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);
     assert!(
@@ -106,7 +106,7 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
     let user_id = domain::UserId::new();
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .set_playback_state(user_id, media_id, 2500, Some(false), Some(true), None, None)
             .unwrap();
@@ -125,7 +125,7 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
 
     // Ledger row and user facts MUST STILL EXIST!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
     assert!(guard.get_media(media_id).unwrap().is_some());
     assert_eq!(
@@ -142,7 +142,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     // Populate the probe cache through the public writer: the fixture is a probed file.
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .put_file_meta_versioned(
                 &row.file_id.to_string(),
@@ -166,7 +166,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     let store_arc = fix.state.store();
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .missing_at_by_path()
             .unwrap()
             .keys()
@@ -182,7 +182,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     // missing_at is cleared
     assert!(
         !store_arc
-            .lock()
+            .as_ref()
             .missing_at_by_path()
             .unwrap()
             .keys()
@@ -192,7 +192,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     // probe cache is preserved
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .get_file_meta(&row.file_id.to_string())
             .unwrap()
             .is_some()

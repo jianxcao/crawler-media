@@ -14,7 +14,7 @@ fn filter_routes_keep_executor_responsive() {
                 rule: domain::AtomRule::Resolution("1080p".into()),
             }],
         };
-        f.state.store().lock().insert_filter(&filter).unwrap();
+        f.state.store().insert_filter(&filter).unwrap();
         let body = json!({"name":"Edited", "atoms":[{"kind":"hdr","value":"HDR10","priority":10,"exclude":false}]});
         let uri = format!("/api/v1/rule-sets/{}", filter.id);
         let (method, uri, body, status) = match route {
@@ -41,7 +41,7 @@ fn filter_routes_keep_executor_responsive() {
             ),
         };
         let app = router(f.state.clone());
-        let holder = hold_store(&f.state, Duration::from_millis(500));
+        let holder = hold_store(&f.state, store::Db::App, Duration::from_millis(500));
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, &uri, &f.token, body)), async {

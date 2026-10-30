@@ -68,76 +68,54 @@ pub(crate) async fn cancel_scan_operation(
 
 fn cancel_scan_blocking(state: &ApiState, lib_id: String, op_id: String) -> Response {
     let now_ms = crate::job_loop::unix_now() * 1000;
-    let cancel_res = {
-        let Some(store) = state
-            .store
-            .try_lock_for(super::super::store_wait::STORE_WRITE_WAIT)
-        else {
-            return super::super::store_wait::busy_response();
-        };
-        let op_opt = match store.scan_operation(&op_id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                return err(
+    let cancelled = super::super::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(
+            |error| {
+                err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
-                    &e.to_string(),
-                );
-            }
-        };
-        let Some(op) = op_opt else {
-            return err(
-                StatusCode::NOT_FOUND,
-                "scan_operation.missing",
-                "未找到可取消的扫描操作",
-            );
-        };
-        if op.library_id != lib_id {
-            return err(
-                StatusCode::NOT_FOUND,
-                "scan_operation.missing",
-                "未找到可取消的扫描操作",
-            );
-        }
-        store.cancel_scan(&op_id, now_ms)
-    };
-
-    match cancel_res {
-        Ok(true) => {
+                    &error.to_string(),
+                )
+            },
+            |db| {
+                let op = db
+                    .scan_operation(&op_id)
+                    .map_err(|error| {
+                        err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "store.error",
+                            &error.to_string(),
+                        )
+                    })?
+                    .filter(|op| op.library_id == lib_id)
+                    .ok_or_else(|| {
+                        err(
+                            StatusCode::NOT_FOUND,
+                            "scan_operation.missing",
+                            "未找到可取消的扫描操作",
+                        )
+                    })?;
+                let cancelled = db.cancel_scan(&op_id, now_ms).map_err(|error| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    )
+                })?;
+                Ok((cancelled, op.status))
+            },
+        )
+    });
+    match cancelled {
+        Ok(Ok((true, _))) => {
             state.scan_coordinator.cancel_operation(&op_id);
             ok(json!({ "cancelled": true })).into_response()
         }
-        Ok(false) => {
-            // 幂等：操作存在但已处于终态（completed/failed/cancelled）时不再改状态，
-            // 也不该报 404 —— 重复取消同一个操作是合法请求。
-            let Some(store) = state
-                .store
-                .try_lock_for(super::super::store_wait::STORE_WRITE_WAIT)
-            else {
-                return super::super::store_wait::busy_response();
-            };
-            match store.scan_operation(&op_id) {
-                Ok(Some(op)) if op.library_id == lib_id => ok(json!({
-                    "cancelled": false,
-                    "status": op.status.as_str(),
-                }))
-                .into_response(),
-                Ok(_) => err(
-                    StatusCode::NOT_FOUND,
-                    "scan_operation.missing",
-                    "未找到可取消的扫描操作",
-                ),
-                Err(e) => err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &e.to_string(),
-                ),
-            }
-        }
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &e.to_string(),
-        ),
+        Ok(Ok((false, status))) => ok(json!({
+            "cancelled": false,
+            "status": status.as_str(),
+        }))
+        .into_response(),
+        Ok(Err(response)) | Err(response) => response,
     }
 }

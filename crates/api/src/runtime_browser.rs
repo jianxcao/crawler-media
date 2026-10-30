@@ -2,7 +2,6 @@
 use std::sync::Arc;
 
 use indexer::{Browser, BrowserConfig, IndexerError};
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::{Store, settings_keys as keys};
@@ -249,29 +248,29 @@ fn apply_route(
 }
 
 /// Shared startup and request-time configuration path, also usable with an injected transport.
-pub fn configure(browser: Browser, store: Arc<Mutex<Store>>) -> Result<Browser, IndexerError> {
+pub fn configure(browser: Browser, store: Arc<Store>) -> Result<Browser, IndexerError> {
     browser.validate_timing()?;
-    load_config(&store.lock())?;
-    Ok(browser.with_config_provider(move || load_config(&store.lock())))
+    load_config(&store.as_ref())?;
+    Ok(browser.with_config_provider(move || load_config(&store.as_ref())))
 }
 
 /// Startup path: never silently swap in a permanently disabled Browser. A bad
 /// initial config is logged and returned as an error string for status; the
 /// returned Browser still reads settings on every use, so fixing them in the
 /// UI takes effect without a restart.
-pub fn startup_browser(store: Arc<Mutex<Store>>) -> (Browser, Option<String>) {
+pub fn startup_browser(store: Arc<Store>) -> (Browser, Option<String>) {
     match production_browser(store.clone()) {
         Ok(browser) => (browser, None),
         Err(error) => {
             tracing::error!(%error, "Browser construction failed at startup; settings will be re-read on use");
             let browser = Browser::new(BrowserConfig::disabled())
-                .with_config_provider(move || load_config(&store.lock()));
+                .with_config_provider(move || load_config(&store.as_ref()));
             (browser, Some(format!("Browser 初始化失败: {error}")))
         }
     }
 }
 
-pub fn production_browser(store: Arc<Mutex<Store>>) -> Result<Browser, IndexerError> {
+pub fn production_browser(store: Arc<Store>) -> Result<Browser, IndexerError> {
     configure(Browser::new(BrowserConfig::disabled()), store)
 }
 

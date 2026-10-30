@@ -34,16 +34,6 @@ pub(super) fn channels() -> DispatchChannels {
 }
 
 impl ProbeManager {
-    pub(super) fn dispatch_store(&self) -> Option<parking_lot::MutexGuard<'_, store::Store>> {
-        let guard = self
-            .store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT);
-        if guard.is_none() {
-            tracing::warn!("探测 Store 等待预算耗尽，保留持久任务等待重试");
-        }
-        guard
-    }
-
     /// How many ledger ids are queued or running in this process.
     pub fn queued_ledger_count(&self) -> usize {
         self.seen.lock().len()
@@ -144,11 +134,9 @@ impl ProbeManager {
             self.seen.lock().remove(&ledger_id);
             return false;
         };
-        let Some(store) = self.dispatch_reader() else {
-            return false;
-        };
+        let store = self.store.as_ref();
         let current_job = store.get_probe_job(&current_job_id);
-        drop(store);
+
         let current_job = match current_job {
             Ok(Some(job)) => job,
             Ok(None) => {
@@ -165,9 +153,7 @@ impl ProbeManager {
 
         if current_job.kind == "media_probe" {
             let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
-            let Some(store) = self.dispatch_store() else {
-                return false;
-            };
+            let store = self.store.as_ref();
             let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
                 &current_job_id,
                 &ledger_id,
@@ -179,7 +165,7 @@ impl ProbeManager {
                     false
                 }
             };
-            drop(store);
+
             if !transitioned {
                 return false;
             }
@@ -221,9 +207,7 @@ impl ProbeManager {
     }
 
     fn advance_running_unit(&self, job_id: &str, ledger_id: &str) -> bool {
-        let Some(store) = self.dispatch_store() else {
-            return false;
-        };
+        let store = self.store.as_ref();
         match store.advance_probe_unit_to_fingerprint(job_id, ledger_id) {
             Ok(true) => true,
             Ok(false) => false,
@@ -302,9 +286,7 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let Some(store) = self.dispatch_reader() else {
-            return;
-        };
+        let store = self.store.as_ref();
         let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, free) {
             Ok(ids) => ids,
             Err(error) => {
@@ -312,7 +294,7 @@ impl ProbeManager {
                 return;
             }
         };
-        drop(store);
+
         let mut seen = self.seen.lock();
         for id in ids {
             if !seen.insert(id.ledger_id.clone()) {
@@ -334,9 +316,7 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let Some(store) = self.dispatch_reader() else {
-            return;
-        };
+        let store = self.store.as_ref();
         let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, free) {
             Ok(ids) => ids,
             Err(error) => {
@@ -344,7 +324,7 @@ impl ProbeManager {
                 return;
             }
         };
-        drop(store);
+
         let mut ready = Vec::new();
         for id in ids {
             if self.seen.lock().contains(&id.ledger_id) {
@@ -387,13 +367,9 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        let Some(store) = self.dispatch_reader() else {
-            self.seen.lock().remove(&id.ledger_id);
-            self.wake.notify_one();
-            return None;
-        };
+        let store = self.store.as_ref();
         let snapshot = store.load_probe_dispatch_snapshot(id);
-        drop(store);
+
         let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
@@ -420,7 +396,7 @@ impl ProbeManager {
             Ok(kind) => kind,
             Err(_) => {
                 tracing::error!(ledger_id = %id.ledger_id, kind = %snapshot.unit.kind, "派发单元媒体类型无效");
-                let _ = self.dispatch_store()?.finish_probe_unit(
+                let _ = self.store.finish_probe_unit(
                     &id.job_id,
                     &id.ledger_id,
                     false,
@@ -474,12 +450,7 @@ impl ProbeManager {
         ledger_id: &str,
         source_version: &str,
     ) -> Result<(Option<i64>, u32), store::StoreError> {
-        let store = self.dispatch_reader().ok_or_else(|| {
-            store::StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "probe Store busy",
-            ))
-        })?;
+        let store = self.store.as_ref();
         let media_duration_ms = store
             .get_media_info_cache_version(ledger_id)?
             .filter(|version| version.source_version == source_version)

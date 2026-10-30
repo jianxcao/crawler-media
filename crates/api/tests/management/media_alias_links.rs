@@ -113,9 +113,9 @@ async fn assert_detail_links(requested_kind: MediaKind, first_kind: MediaKind) {
     };
     let (expected, other) = {
         let shared_store = state.store();
-        let store = shared_store.lock();
-        let first = seed_owned_media(&store, tmp.path(), first_kind);
-        let second = seed_owned_media(&store, tmp.path(), second_kind);
+        let store = shared_store.as_ref();
+        let first = seed_owned_media(store, tmp.path(), first_kind);
+        let second = seed_owned_media(store, tmp.path(), second_kind);
         // The fixture must contain two distinct canonical identities and two
         // independent owners, even though their numeric TMDB aliases collide.
         assert_ne!(first["media_item_id"], second["media_item_id"]);
@@ -138,14 +138,7 @@ async fn assert_detail_links(requested_kind: MediaKind, first_kind: MediaKind) {
         temporary.id.to_string(),
         other["media_item_id"].as_str().unwrap()
     );
-    assert!(
-        state
-            .store()
-            .lock()
-            .get_media(temporary.id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(state.store().get_media(temporary.id).unwrap().is_none());
 
     let response = router(state)
         .oneshot(request(

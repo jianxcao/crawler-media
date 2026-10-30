@@ -41,6 +41,7 @@ pub enum StorageOperationError {
     /// The request carries nothing usable.
     Invalid(String),
     Store(StoreError),
+    Admission(axum::response::Response),
 }
 
 impl std::fmt::Display for StorageOperationError {
@@ -54,6 +55,11 @@ impl std::fmt::Display for StorageOperationError {
             },
             Self::Invalid(message) => f.write_str(message),
             Self::Store(error) => write!(f, "{error}"),
+            Self::Admission(response) => write!(
+                f,
+                "operation write admission refused: {}",
+                response.status()
+            ),
         }
     }
 }
@@ -74,29 +80,26 @@ pub fn begin_library_reconfiguration(
             "root_paths or display_locale is required".into(),
         ));
     }
-    let (expected_revision, operation_id) = {
-        let store = operation_store(state)?;
-        if store
-            .get_library(library_id)
-            .map_err(StorageOperationError::Store)?
-            .is_none()
-        {
-            return Err(StorageOperationError::MissingLibrary);
-        }
-        let lifecycle = store
-            .library_lifecycle_state(library_id)
-            .map_err(StorageOperationError::Store)?;
-        if lifecycle != "ready" {
-            let operation_id = store
-                .active_library_operation(library_id)
-                .map_err(StorageOperationError::Store)?;
-            return Err(StorageOperationError::Reindexing { operation_id });
-        }
-        let revision = store
-            .library_config_revision(library_id)
-            .map_err(StorageOperationError::Store)?;
-        (revision, uuid::Uuid::new_v4().to_string())
+    let observation = operation_read(state, |store| {
+        store.library_read_snapshot(|db| {
+            if db.get_library(library_id)?.is_none() {
+                return Ok(None);
+            }
+            let lifecycle = db.library_lifecycle_state(library_id)?;
+            let active = db.active_library_operation(library_id)?;
+            let revision = db.library_config_revision(library_id)?;
+            Ok(Some((lifecycle, active, revision)))
+        })?
+    })?;
+    let Some((lifecycle, active, expected_revision)) = observation else {
+        return Err(StorageOperationError::MissingLibrary);
     };
+    if lifecycle != "ready" {
+        return Err(StorageOperationError::Reindexing {
+            operation_id: active,
+        });
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
     let now_ms = state.playback_clock.now_ms();
     // 上面的 `get_library` 已经确认该 id 存在，因此解析失败只可能来自畸形输入，
     // 一律按“不存在”回答，绝不 panic。
@@ -113,21 +116,23 @@ pub fn begin_library_reconfiguration(
     }
     .prepare()
     .map_err(StorageOperationError::Store)?;
-    let started = operation_store(state)?.begin_library_reconfiguration_prepared(&prepared, now_ms);
+    let started = operation_write(state, |store| {
+        store.begin_library_reconfiguration_prepared(&prepared, now_ms)
+    });
     let status = match started {
         Ok(status) => status,
         // Another request began between the check above and the CAS (or the revision moved
         // under us): report the operation that won instead of pretending we started one.
-        Err(StoreError::Protected(_)) => {
-            let operation_id = operation_store(state)?
-                .active_library_operation(library_id)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%library_id, %error, "重配置冲突后读取活动操作失败");
-                    None
-                });
+        Err(StorageOperationError::Store(StoreError::Protected(_))) => {
+            let operation_id =
+                operation_read(state, |store| store.active_library_operation(library_id))
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%library_id, %error, "重配置冲突后读取活动操作失败");
+                        None
+                    });
             return Err(StorageOperationError::Reindexing { operation_id });
         }
-        Err(error) => return Err(StorageOperationError::Store(error)),
+        Err(error) => return Err(error),
     };
     // `block` only after the Store committed the freeze: the registry mirror must never
     // refuse writes for an operation that does not exist.
@@ -174,10 +179,7 @@ pub fn library_operation(
     library_id: &str,
     operation_id: &str,
 ) -> Result<Option<Value>, String> {
-    let view = state
-        .store
-        .lock()
-        .library_operation_view(operation_id)
+    let view = operation_read(state, |store| store.library_operation_view(operation_id))
         .map_err(|error| error.to_string())?;
     Ok(view
         .filter(|view| view.library_id == library_id)
@@ -203,8 +205,8 @@ pub enum WriteVerdict {
 /// unknown Library must still be 404, never 409); the Store write barrier remains the last
 /// line of defence either way.
 pub fn write_verdict(state: &ApiState, library_id: &str) -> WriteVerdict {
-    let store = state.store.lock();
-    write_verdict_for_store(&store, library_id)
+    let store = state.store.as_ref();
+    write_verdict_for_store(store, library_id)
 }
 
 pub(crate) fn write_verdict_for_store(store: &crate::Store, library_id: &str) -> WriteVerdict {
@@ -232,10 +234,7 @@ pub(crate) fn write_verdict_for_store(store: &crate::Store, library_id: &str) ->
 /// this returns. Terminal operations are never touched, so a restart cannot re-apply an
 /// already applied rewrite.
 pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
-    let unfinished = state
-        .store
-        .lock()
-        .unfinished_library_operations()
+    let unfinished = operation_read(state, |store| store.unfinished_library_operations())
         .map_err(|error| error.to_string())?;
     for operation_id in unfinished {
         let Some(view) = current_view(state, &operation_id)? else {
@@ -275,7 +274,7 @@ pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
 /// 合并把 loser 的台账并进了 survivor，但队列里排着的 catalog 刷新等任务仍指着
 /// loser，不收敛就会在下一轮去刷一个已被退休的 Media。
 pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
-    let unfinished = match state.store.lock().unfinished_media_merges() {
+    let unfinished = match state.store.as_ref().unfinished_media_merges() {
         Ok(unfinished) => unfinished,
         Err(error) => {
             tracing::warn!(%error, "读取未完成的 Media 合并操作失败，跳过本轮");
@@ -286,7 +285,7 @@ pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
     for operation_id in unfinished {
         match state
             .store
-            .lock()
+            .as_ref()
             .advance_media_merge(&operation_id, now_ms)
         {
             Ok(status) => {
@@ -315,7 +314,7 @@ pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
 /// 去取 jobs 锁——jobs 与 store 是两把独立的锁，同时持有会和其他路径的取锁顺序打架。
 pub fn converge_retired_media_refs(state: &ApiState) -> usize {
     let pairs = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.retired_media_survivors()
     };
     let pairs = match pairs {
@@ -359,20 +358,22 @@ pub fn begin_library_integrity(
         .map_err(|_| StorageOperationError::MissingLibrary)?;
     let now_ms = state.playback_clock.now_ms();
 
-    let started =
-        operation_store(state)?.begin_library_integrity(library_ref, repair, &operation_id, now_ms);
+    let started = operation_write(state, |store| {
+        store.begin_library_integrity(library_ref, repair, &operation_id, now_ms)
+    });
     let status = match started {
         Ok(status) => status,
-        Err(StoreError::Missing(_)) => return Err(StorageOperationError::MissingLibrary),
-        Err(StoreError::Protected(_)) => {
-            let active = operation_store(state)?
-                .active_library_operation(library_id)
+        Err(StorageOperationError::Store(StoreError::Missing(_))) => {
+            return Err(StorageOperationError::MissingLibrary);
+        }
+        Err(StorageOperationError::Store(StoreError::Protected(_))) => {
+            let active = operation_read(state, |store| store.active_library_operation(library_id))
                 .unwrap_or(None);
             return Err(StorageOperationError::Reindexing {
                 operation_id: active,
             });
         }
-        Err(e) => return Err(StorageOperationError::Store(e)),
+        Err(error) => return Err(error),
     };
 
     state.library_work.block(library_id, &operation_id);
@@ -397,14 +398,35 @@ mod driver;
 use driver::current_view;
 pub(crate) use driver::spawn_driver;
 
-fn operation_store(
+fn operation_read<T>(
     state: &ApiState,
-) -> Result<parking_lot::MutexGuard<'_, crate::Store>, StorageOperationError> {
+    work: impl FnOnce(&crate::Store) -> Result<T, StoreError>,
+) -> Result<T, StorageOperationError> {
     state
         .store
-        .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-        .ok_or_else(|| {
-            tracing::warn!("Store 等待预算耗尽，操作尚未受理");
-            StorageOperationError::Busy
+        .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+            work(&state.store)
         })
+        .map_err(map_store_error)?
+        .map_err(map_store_error)
+}
+
+fn operation_write<T>(
+    state: &ApiState,
+    work: impl FnOnce(&crate::Store) -> Result<T, StoreError>,
+) -> Result<T, StorageOperationError> {
+    crate::http::store_wait::with_foreground_store(state, work)
+        .map_err(StorageOperationError::Admission)?
+        .map_err(map_store_error)
+}
+
+fn map_store_error(error: StoreError) -> StorageOperationError {
+    match error {
+        StoreError::ReadBusy
+        | StoreError::ReadClosed
+        | StoreError::ReadDeadline
+        | StoreError::ReadCancelled
+        | StoreError::WriteBusy => StorageOperationError::Busy,
+        error => StorageOperationError::Store(error),
+    }
 }

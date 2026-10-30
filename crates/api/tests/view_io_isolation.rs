@@ -111,7 +111,7 @@ async fn wait_entered(gate: &Arc<Gate>) {
 }
 fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, String, MediaId) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let user_id = guard
         .user_id_by_token("management-secret")
         .unwrap()
@@ -168,7 +168,7 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
         filter_score: None,
         ..Default::default()
     };
-    publish_fixture_file(&guard, &spec).unwrap();
+    publish_fixture_file(guard, &spec).unwrap();
 
     guard
         .mutate_playback(
@@ -188,7 +188,7 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_gallery_and_episodes_do_not_hold_store() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let gated_read = Arc::new(GatedFileRead { gate: gate.clone() });
     let state = make_state(tmp.path(), gated_read);
@@ -215,7 +215,10 @@ async fn slow_gallery_and_episodes_do_not_hold_store() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "Store lock must not be held while favorites_gallery is performing filesystem checks"
         );
     }
@@ -271,14 +274,12 @@ async fn slow_gallery_and_episodes_do_not_hold_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn playback_item_observes_poster_without_holding_store() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let gated_read = Arc::new(GatedFileRead { gate: gate.clone() });
     let state = make_state(tmp.path(), gated_read);
     let (_admin_user, library_id, media_id) = seed_movie(&state, tmp.path());
-    let ledger_id = state.store().lock().list_file_coverage().unwrap()[0]
-        .file
-        .file_id;
+    let ledger_id = state.store().list_file_coverage().unwrap()[0].file.file_id;
     let app = router(state.clone());
     let item_app = app.clone();
     let _release = ReleaseOnDrop(gate.clone());
@@ -292,7 +293,11 @@ async fn playback_item_observes_poster_without_holding_store() {
     });
 
     wait_entered(&gate).await;
-    let store_available = state.store().try_lock().is_some();
+    let store_available = state
+        .store()
+        .writers()
+        .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+        .is_ok();
     if !store_available {
         gate.release();
     }

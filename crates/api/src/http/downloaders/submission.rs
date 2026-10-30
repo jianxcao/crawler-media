@@ -23,11 +23,11 @@ fn resolve_subscribe_and_check_owner(
     };
     let id = domain::SubscribeId::from_str(raw)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "subscribe.invalid", "订阅 id 无效"))?;
-    let loaded = state.store.lock().get_subscribe(id);
+    let loaded = state.store.as_ref().get_subscribe(id);
     let subscribe = match loaded {
         Ok(Some(s)) => {
             if let Some(uid) = user_id {
-                let store = state.store.lock();
+                let store = state.store.as_ref();
                 let is_admin = store.user_role(uid).map(|r| r == "admin").unwrap_or(false);
                 if !is_admin && s.user_id != uid {
                     return Err(err(
@@ -54,7 +54,7 @@ fn resolve_subscribe_and_check_owner(
             ));
         }
     };
-    let media = match state.store.lock().get_media(subscribe.media_id) {
+    let media = match state.store.as_ref().get_media(subscribe.media_id) {
         Ok(Some(m)) => m,
         Ok(None) => return Err(err(StatusCode::NOT_FOUND, "media.missing", "媒体不存在")),
         Err(e) => {
@@ -88,7 +88,7 @@ fn resolve_downloader_and_save_path(
         Some(id)
             if state
                 .store
-                .lock()
+                .as_ref()
                 .get_downloader(id)
                 .ok()
                 .flatten()
@@ -129,7 +129,7 @@ fn resolve_downloader_and_save_path(
                 "没有可用的下载器",
             ));
         };
-        let maps = match state.store.lock().get_downloader(id) {
+        let maps = match state.store.as_ref().get_downloader(id) {
             Ok(Some(row)) => row.path_maps,
             Ok(None) => {
                 return Err(err(
@@ -167,7 +167,7 @@ fn record_submitted_pending(
     parsed: &Release,
     score: i32,
 ) -> Result<(), Response> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     state.require_writable()?;
     state.require_write_admitted()?;
     if let Err(error) = store.record_pending_submission(
@@ -223,7 +223,7 @@ fn slot_taken(
     parsed: &Release,
 ) -> Result<(bool, store::SubscribeLibrarySnapshot), String> {
     let (media, pending) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let media = store
             .get_media(subscribe.media_id)
             .map_err(|error| error.to_string())?
@@ -246,7 +246,7 @@ fn slot_taken(
 
 /// D-M5: score the manual torrent with the subscription's filter (0 if rejected).
 fn filter_score(state: &ApiState, subscribe: &domain::Subscribe, torrent: &Torrent) -> i32 {
-    let Ok(Some(filter)) = state.store.lock().get_filter(subscribe.filter_id) else {
+    let Ok(Some(filter)) = state.store.as_ref().get_filter(subscribe.filter_id) else {
         return 0;
     };
     filter::admit(vec![torrent.clone()], &filter)
@@ -512,7 +512,7 @@ impl SubmissionDelivery {
             None => 0,
         };
         if let Some(snapshot) = snapshot {
-            let store = self.state.store.lock();
+            let store = self.state.store.as_ref();
             let current = store
                 .subscribe_snapshot_is_current(&snapshot, &Default::default())
                 .map_err(|error| {

@@ -1,3 +1,5 @@
+mod admission;
+
 use std::str::FromStr;
 
 use axum::Json;
@@ -39,7 +41,7 @@ pub(crate) async fn run_subscribe(
     }
     let state_for_work = state.clone();
     // 整段同步业务 pipeline（搜索 → 准入 → 海报）都在 blocking worker 上跑到
-    // 结束：订阅 guard / LibraryLease 在闭包内持有，响应语义不变（不是排队返回）。
+    // 结束：LibraryLease / 执行标记由闭包持有；订阅 guard 仅包住短 SQL 决策。
     let work = state
         .http_work
         .run_to_completion(move || {
@@ -115,7 +117,7 @@ fn load_owned_subscribe(
     id: SubscribeId,
     user_id: UserId,
 ) -> Result<(Subscribe, Media, Filter, Option<Filter>, Vec<Site>), ApiError> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let subscribe = store
         .get_subscribe(id)?
         .ok_or_else(|| ApiError::missing("subscription.missing", "Subscribe not found".into()))?;
@@ -200,9 +202,14 @@ fn admit_after_search(
     torrents: Vec<domain::Torrent>,
     search_keywords: Vec<String>,
 ) -> Result<AdmittedRun, ApiError> {
-    let guard = state.subscribe_guard(id);
-    let _guard = guard.lock();
-    let context = reload_locked(state, id, user_id)?;
+    let (context, _active) = {
+        let guard = state.subscribe_guard(id);
+        let _guard = guard.lock();
+        (
+            reload_locked(state, id, user_id)?,
+            admission::ActiveRun::begin(state, id)?,
+        )
+    };
     let routed = RoutedDownloader::new(state, Some(&context.subscribe));
     let (outcome, scrape, library_lease, plan) =
         execute(state, id, &context, &routed, torrents, search_keywords)?;
@@ -215,7 +222,14 @@ fn admit_after_search(
         .chain(outcome.collection_errors.iter())
         .cloned()
         .collect::<Vec<_>>();
-    persist(state, id, outcome, &routed, &library_lease, &plan)?;
+    persist(
+        state,
+        &context.subscribe,
+        outcome,
+        &routed,
+        &library_lease,
+        &plan,
+    )?;
     Ok(AdmittedRun {
         media: context.media,
         scrape,
@@ -284,7 +298,10 @@ fn execute(
         .imported_destinations()
         .map_err(|error| ApiError::internal(error.to_string()))?;
     {
-        let store = state.store.lock();
+        let guard = state.subscribe_guard(id);
+        let _guard = guard.lock();
+        admission::ensure_current(state, &context.subscribe)?;
+        let store = state.store.as_ref();
         validate_facts_observation(&store, context, &facts)?;
         crate::worker::transfer::validate_transfer_plan(
             &store,
@@ -312,6 +329,12 @@ fn execute(
         torrents.iter().map(|t| t.title.as_str()),
     );
     let chooser = crate::pack_fallback::effective(state, &context.subscribe);
+    let downloader = admission::AdmittedDownloader {
+        state,
+        expected: &context.subscribe,
+        routed,
+        control: library_lease.control(),
+    };
     let added = subscribe::admit_and_add(RunInput {
         subscribe: &chooser,
         media: &context.media,
@@ -320,7 +343,7 @@ fn execute(
         torrents,
         search_keywords,
         facts: facts.facts.clone(),
-        downloader: routed,
+        downloader: &downloader,
         library_root: &plan.root,
         library_id: plan.library_id.parse().ok(),
         root_id: Some(plan.root_id.clone()),
@@ -333,13 +356,30 @@ fn execute(
         overlap,
         absolute: absolute.as_ref(),
     })?;
-    let mut outcome = subscribe::collect_completed_recorded(
+    admission::record_accepted(state, id, &added.outcome, routed)?;
+    {
+        let guard = state.subscribe_guard(id);
+        let _guard = guard.lock();
+        admission::ensure_current(state, &context.subscribe)?;
+    }
+    let outcome = subscribe::collect_completed_recorded(
         added,
         &library::Ffprobe::default(),
         &destinations,
         library_lease.control(),
         Some(&recorder),
     )?;
+    finish_collection(state, context, outcome, &library_lease, &plan)
+        .map(|outcome| (outcome, plan.scrape, library_lease, plan))
+}
+
+fn finish_collection(
+    state: &ApiState,
+    context: &RunContext,
+    mut outcome: subscribe::RunOutcome,
+    library_lease: &crate::library_lifecycle::LibraryWorkLease,
+    plan: &crate::worker::transfer::TransferPlan,
+) -> Result<subscribe::RunOutcome, ApiError> {
     if !outcome.submission_errors.is_empty() && outcome.torrents_added.is_empty() {
         return Err(
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(
@@ -352,22 +392,21 @@ fn execute(
         .control()
         .check()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    {
-        // The transfer above published this round's file rows, so the scoped file
-        // fingerprint legitimately moved. Re-check only the parts publication does
-        // not touch (Library lifecycle, roots, transfer settings, Subscribe).
-        let store = state.store.lock();
-        crate::worker::transfer::validate_committed_transfer_plan(
-            &store,
-            &context.subscribe,
-            &library_lease,
-            &plan,
-        )
-        .map_err(ApiError::internal)?;
-    }
+    let guard = state.subscribe_guard(context.subscribe.id);
+    let _guard = guard.lock();
+    admission::ensure_current(state, &context.subscribe)?;
+    // Publication legitimately changes the file fingerprint. Revalidate the
+    // Subscribe and publication-independent plan before publishing final facts.
+    crate::worker::transfer::validate_committed_transfer_plan(
+        state.store.as_ref(),
+        &context.subscribe,
+        library_lease,
+        plan,
+    )
+    .map_err(ApiError::internal)?;
     outcome.facts.retain_owned();
     outcome.completed = subscribe::is_complete(&context.subscribe, &outcome.facts);
-    Ok((outcome, plan.scrape, library_lease, plan))
+    Ok(outcome)
 }
 
 fn load_run_facts(
@@ -375,10 +414,10 @@ fn load_run_facts(
     id: SubscribeId,
     context: &RunContext,
 ) -> Result<RunFactsObservation, ApiError> {
-    let existing = state.store.lock().load_pending(id)?;
+    let existing = state.store.as_ref().load_pending(id)?;
     let snapshot = state
         .store
-        .lock()
+        .as_ref()
         .subscribe_library_snapshot(&context.subscribe, context.media.kind)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let facts = crate::subscribe_library_read::evaluate_subscribe_facts_out_of_lock_with(
@@ -479,8 +518,8 @@ fn exclude_pending(
     id: SubscribeId,
     torrents: &mut Vec<domain::Torrent>,
 ) -> Result<(), ApiError> {
-    let existing = state.store.lock().load_pending(id)?;
-    let rejected = state.store.lock().load_rejected_enclosures(id)?;
+    let existing = state.store.as_ref().load_pending(id)?;
+    let rejected = state.store.as_ref().load_rejected_enclosures(id)?;
     let enclosures: std::collections::HashSet<&str> = existing
         .iter()
         .map(|(_, pending)| pending.torrent.enclosure.as_str())
@@ -496,15 +535,16 @@ fn exclude_pending(
 
 fn persist(
     state: &ApiState,
-    id: SubscribeId,
+    expected: &Subscribe,
     outcome: subscribe::RunOutcome,
     routed: &RoutedDownloader<'_>,
     lease: &crate::library_lifecycle::LibraryWorkLease,
     plan: &crate::worker::transfer::TransferPlan,
 ) -> Result<(), ApiError> {
+    let id = expected.id;
     // Transfer-mode observation is filesystem work: observe it before taking the lock.
     let default_transfer_mode = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.transfer_mode().unwrap_or_else(|_| "copy".into())
     };
     let observations = crate::worker::transfer::observe_transfer_files(
@@ -522,62 +562,78 @@ fn persist(
         crate::worker::transfer::observe_transfer_removals(state, plan, &outcome.removed_paths)
             .map_err(ApiError::internal)?;
 
-    let store = state.store.lock();
-    lease
-        .control()
-        .check()
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if !store.library_accepts_work(lease.library_id())? {
-        return Err(lifecycle_conflict(
-            "library.deleting",
-            "目标 Library 正在删除或已不存在",
-        ));
-    }
-    // The transfer above published this round's file rows; the scoped file
-    // fingerprint legitimately moved. Only publication-independent facts remain.
-    crate::worker::transfer::validate_committed_transfer_plan(
-        &store,
-        &store
-            .get_subscribe(id)?
-            .ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
-        lease,
-        plan,
-    )
-    .map_err(ApiError::internal)?;
-    let mut published = Vec::with_capacity(outcome.files.len());
-    for (coverage, observation) in outcome.files.iter().zip(&observations) {
-        let path = coverage.file.path.to_string_lossy().to_string();
-        let source_path =
-            crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
-                .map(|source| source.display().to_string());
-        let existing = store.file_coverage_by_path(&path)?;
-        let existing_key = existing.as_ref().map(|existing| {
-            (
-                existing.file.file_id,
-                existing.file.media_id,
-                existing.file.path.to_string_lossy().into_owned(),
-            )
-        });
-        if existing_key != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
-            || !store.ledger_source_path_matches(&path, source_path.as_deref())?
-        {
-            return Err(ApiError::internal(format!(
-                "Transfer reservation missing or replaced: {path}"
-            )));
+    let published = {
+        let guard = state.subscribe_guard(id);
+        let _guard = guard.lock();
+        admission::ensure_current(state, expected)?;
+        let store = state.store.as_ref();
+        lease
+            .control()
+            .check()
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !store.library_accepts_work(lease.library_id())? {
+            return Err(lifecycle_conflict(
+                "library.deleting",
+                "目标 Library 正在删除或已不存在",
+            ));
         }
-        published.push(crate::worker::transfer::publish_transfer_file(
-            &store,
-            &plan.library_id,
-            plan.config_revision,
-            coverage,
-            source_path.as_deref().map(std::path::Path::new),
-            observation,
-        )?);
-    }
-    crate::worker::transfer::queue_transfer_removals(state, &store, &removed)
+        // The transfer above published this round's file rows; the scoped file
+        // fingerprint legitimately moved. Only publication-independent facts remain.
+        crate::worker::transfer::validate_committed_transfer_plan(&store, expected, lease, plan)
+            .map_err(ApiError::internal)?;
+        let published = crate::worker::transfer::with_plan_write(
+            store,
+            lease,
+            None,
+            &Default::default(),
+            plan,
+            |store| {
+                let mut published = Vec::with_capacity(outcome.files.len());
+                for (coverage, observation) in outcome.files.iter().zip(&observations) {
+                    let path = coverage.file.path.to_string_lossy().to_string();
+                    let source_path = crate::worker::transfer::recorded_file_source(
+                        &outcome,
+                        coverage.file.file_id,
+                    )
+                    .map(|source| source.display().to_string());
+                    let existing = store
+                        .file_coverage_by_path(&path)
+                        .map_err(|error| error.to_string())?;
+                    let existing_key = existing.as_ref().map(|existing| {
+                        (
+                            existing.file.file_id,
+                            existing.file.media_id,
+                            existing.file.path.to_string_lossy().into_owned(),
+                        )
+                    });
+                    if existing_key
+                        != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
+                        || !store
+                            .ledger_source_path_matches(&path, source_path.as_deref())
+                            .map_err(|error| error.to_string())?
+                    {
+                        return Err(format!("Transfer reservation missing or replaced: {path}"));
+                    }
+                    published.push(
+                        crate::worker::transfer::publish_transfer_file(
+                            store,
+                            &plan.library_id,
+                            plan.config_revision,
+                            coverage,
+                            source_path.as_deref().map(std::path::Path::new),
+                            observation,
+                        )
+                        .map_err(|error| error.to_string())?,
+                    );
+                }
+                crate::worker::transfer::queue_transfer_removals(state, store, &removed)?;
+                Ok(published)
+            },
+        )
         .map_err(ApiError::internal)?;
-    persist_pending(&store, id, &outcome, routed)?;
-    drop(store);
+        persist_pending(&store, id, &outcome, routed)?;
+        published
+    };
     crate::http::file_delete::retry_queued_deletions(&state.store)?;
     crate::http::library::enqueue_probes_for_files(state, &published);
     Ok(())
@@ -592,24 +648,6 @@ fn persist_pending(
     let now = crate::job_loop::unix_now();
     let transferred = &outcome.transferred_enclosures;
     let rejected = &outcome.rejected_enclosures;
-    let pending_items: Vec<_> = outcome
-        .torrents_added
-        .iter()
-        .cloned()
-        .map(|(score, torrent)| {
-            let downloader_id = routed.used_id(&torrent);
-            (
-                score,
-                crate::store::PendingDownload {
-                    torrent,
-                    release_override: None,
-                    downloader_id,
-                    submitted_at: Some(now),
-                },
-            )
-        })
-        .collect();
-    store.record_pending_submissions(id, &pending_items)?;
     // G-M2: a broken existing task becomes a rejected source here too.
     let broken: Vec<_> = routed
         .broken_torrents()

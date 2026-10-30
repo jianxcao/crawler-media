@@ -121,7 +121,6 @@ fn seed(path: &Path, unrelated: usize) -> (ApiState, domain::UserId, String) {
     .unwrap();
     let user = state
         .store()
-        .lock()
         .user_id_by_token("management-secret")
         .unwrap()
         .unwrap();
@@ -189,7 +188,7 @@ fn fixed_parent_sql_candidate_work_ignores_unrelated_rows() {
     let small = tempfile::tempdir().unwrap();
     let (small_state, _, _) = seed(small.path(), 0);
     let small_store = small_state.store();
-    let small_guard = small_store.lock();
+    let small_guard = small_store.as_ref();
     let ownership = small_guard.library_ownership().unwrap();
     let parent_id = ownership
         .libraries()
@@ -206,7 +205,7 @@ fn fixed_parent_sql_candidate_work_ignores_unrelated_rows() {
     let large = tempfile::tempdir().unwrap();
     let (large_state, _, _) = seed(large.path(), 300);
     let large_store = large_state.store();
-    let large_guard = large_store.lock();
+    let large_guard = large_store.as_ref();
     let large_ownership = large_guard.library_ownership().unwrap();
     // 大库必须用**它自己**的库 id：否则 scoped 读会走 "该库不在本 ownership" 的
     // 提前返回，测出 0 步，断言恒真（测不到退化）。
@@ -319,7 +318,7 @@ fn seed_tv_library(
     title: &str,
 ) -> domain::MediaId {
     let guard = state.store();
-    let store = guard.lock();
+    let store = guard.as_ref();
     store
         .create_library(
             MediaKind::Tv,
@@ -363,7 +362,7 @@ fn seed_tv_library(
             file_id: Some(LedgerId::new()),
             ..Default::default()
         };
-        publish_fixture_file(&store, &ep_spec).unwrap();
+        publish_fixture_file(store, &ep_spec).unwrap();
     }
     media.id
 }
@@ -458,7 +457,7 @@ fn resume_scale(in_progress: usize, played: usize) -> ScaleResume {
     let mut media_ids = Vec::new();
     {
         let guard = state.store();
-        let store = guard.lock();
+        let store = guard.as_ref();
         store
             .create_library(
                 MediaKind::Movie,
@@ -500,19 +499,18 @@ fn resume_scale(in_progress: usize, played: usize) -> ScaleResume {
                 file_id: Some(LedgerId::new()),
                 ..Default::default()
             };
-            publish_fixture_file(&store, &movie_spec).unwrap();
+            publish_fixture_file(store, &movie_spec).unwrap();
             media_ids.push(media.id);
         }
     }
     let user = state
         .store()
-        .lock()
         .user_id_by_token("management-secret")
         .unwrap()
         .unwrap();
     {
         let guard = state.store();
-        let store = guard.lock();
+        let store = guard.as_ref();
         for (index, media_id) in media_ids.iter().enumerate().take(in_progress) {
             store
                 .upsert_unit(

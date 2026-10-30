@@ -70,7 +70,7 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
     let state = state.with_catalog(catalog.clone());
     let shared = state.store();
     let (root, id, old) = {
-        let store = shared.lock();
+        let store = shared.as_ref();
         let library = store
             .list_libraries()
             .unwrap()
@@ -102,7 +102,7 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
     std::fs::write(root.join("fanart.jpg"), b"local-fanart").unwrap();
     let app = api::router(state);
     common::scan_and_wait(&app, &id).await;
-    let store = shared.lock();
+    let store = shared.as_ref();
     let row = store
         .file_coverage_by_path(&path.display().to_string())
         .unwrap()
@@ -253,7 +253,7 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
     let state = state.with_catalog(Arc::new(ScanCatalog::default()));
     let shared = state.store();
     let (root, library_id) = {
-        let store = shared.lock();
+        let store = shared.as_ref();
         let library = store
             .list_libraries()
             .unwrap()
@@ -272,7 +272,7 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
     let app = api::router(state);
     common::scan_and_wait(&app, &library_id).await;
     let media_id = {
-        let store = shared.lock();
+        let store = shared.as_ref();
         store
             .file_coverage_by_path(&video.display().to_string())
             .unwrap()
@@ -288,7 +288,7 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
             .unwrap()
     };
     assert_eq!(
-        detail(&shared.lock())
+        detail(shared.as_ref())
             .metadata
             .overview
             .value()
@@ -296,11 +296,11 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
         Some("X"),
         "首次入库必须观察 sidecar"
     );
-    adopt_provider_overview(&shared.lock(), media_id);
+    adopt_provider_overview(shared.as_ref(), media_id);
 
     std::fs::write(&sidecar, body("Y")).unwrap();
     common::scan_and_wait(&app, &library_id).await;
-    let edited = detail(&shared.lock());
+    let edited = detail(shared.as_ref());
     assert_eq!(
         edited.metadata.overview.value().map(String::as_str),
         Some("Y")
@@ -309,18 +309,18 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
     // 无法读成 NFO 文档：不采纳也不删除，保留上一份有效输入。
     std::fs::write(&sidecar, "not xml at all").unwrap();
     common::scan_and_wait(&app, &library_id).await;
-    let invalid = detail(&shared.lock());
+    let invalid = detail(shared.as_ref());
     assert_eq!(invalid.metadata.overview, edited.metadata.overview);
 
     // 合法的 XML，但在电影库里是剧集坐标：无法确定实体层，同样不动已有输入。
     std::fs::write(&sidecar, "<episodedetails><plot>Z</plot></episodedetails>").unwrap();
     common::scan_and_wait(&app, &library_id).await;
-    let unknown = detail(&shared.lock());
+    let unknown = detail(shared.as_ref());
     assert_eq!(unknown.metadata.overview, edited.metadata.overview);
 
     std::fs::remove_file(&sidecar).unwrap();
     common::scan_and_wait(&app, &library_id).await;
-    let deleted = detail(&shared.lock());
+    let deleted = detail(shared.as_ref());
     assert_eq!(
         deleted.metadata.overview.value().map(String::as_str),
         Some("Provider")
@@ -339,7 +339,7 @@ async fn incomplete_nfo_online_alias_rebinds_only_new_scanned_rows() {
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     );
     let shared = state.store();
-    let (root, id, old, provisional, unrelated) = setup_rebind_movies(&shared.lock(), temp.path());
+    let (root, id, old, provisional, unrelated) = setup_rebind_movies(shared.as_ref(), temp.path());
     let mut hit = old.clone();
     hit.title = "English Name".into();
     let catalog = Arc::new(ScanCatalog {
@@ -369,7 +369,7 @@ async fn incomplete_nfo_online_alias_rebinds_only_new_scanned_rows() {
             .iter()
             .any(|request| request.starts_with("search:"))
     );
-    let store = shared.lock();
+    let store = shared.as_ref();
     for path in &paths {
         let row = store
             .file_coverage_by_path(&path.display().to_string())

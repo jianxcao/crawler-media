@@ -89,89 +89,75 @@ fn init_logging(
     (log_buffer, guard)
 }
 
-fn seed_store_settings(store: &parking_lot::Mutex<Store>, config: &ServerConfig) {
+fn seed_store_settings(store: &Store, config: &ServerConfig) {
     if let Some(key) = &config.tmdb_key {
-        let _ = store
-            .lock()
-            .put_setting(api::settings_keys::TMDB_API_KEY, key);
+        let _ = store.put_setting(api::settings_keys::TMDB_API_KEY, key);
     }
     if let Some(proxy) = &config.metadata_proxy {
-        let _ = store
-            .lock()
-            .put_setting(api::settings_keys::PROXY_METADATA, proxy);
+        let _ = store.put_setting(api::settings_keys::PROXY_METADATA, proxy);
     }
     if let Some(user) = &config.metadata_proxy_user {
-        let _ = store
-            .lock()
-            .put_setting(api::settings_keys::PROXY_USERNAME, user);
+        let _ = store.put_setting(api::settings_keys::PROXY_USERNAME, user);
     }
     if let Some(pass) = &config.metadata_proxy_pass {
-        let _ = store
-            .lock()
-            .put_setting(api::settings_keys::PROXY_PASSWORD, pass);
+        let _ = store.put_setting(api::settings_keys::PROXY_PASSWORD, pass);
     }
     if store
-        .lock()
         .get_setting(api::settings_keys::CDP_ENABLED)
         .ok()
         .flatten()
         .is_none()
     {
         let val = if config.browser_enabled { "1" } else { "0" };
-        let _ = store
-            .lock()
-            .put_setting(api::settings_keys::CDP_ENABLED, val);
+        let _ = store.put_setting(api::settings_keys::CDP_ENABLED, val);
     }
-    api::http_agent::sync_from_store(&store.lock());
-    api::user_agent::sync_user_agent(&store.lock());
+    api::http_agent::sync_from_store(store);
+    api::user_agent::sync_user_agent(store);
 }
 
 fn load_catalog_sources(
     state: &ApiState,
-    catalog_db: &std::path::Path,
     tvdb_key: Option<&str>,
 ) -> Vec<Arc<dyn api::catalog::Catalog>> {
+    use media::response_cache::CacheSource;
     let mut sources: Vec<Arc<dyn api::catalog::Catalog>> = Vec::new();
     let store = state.store();
     let metadata_language = store
-        .lock()
         .metadata_language()
         .ok()
         .map(|state| state.language)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "zh-CN".to_string());
-    match media::Tmdb::new(TmdbHttp::new(state), catalog_db) {
-        Ok(tmdb) => sources.push(TmdbCatalog::new(tmdb.with_language(&metadata_language))),
-        Err(error) => tracing::error!(%error, "跳过 TMDB：无法打开 catalog 缓存"),
-    }
-    match media::Douban::new(DoubanHttp, catalog_db) {
-        Ok(douban) => sources.push(DoubanCatalog::new(douban)),
-        Err(error) => tracing::error!(%error, "跳过豆瓣：无法打开 catalog 缓存"),
-    }
+    let tmdb =
+        media::Tmdb::with_cache(TmdbHttp::new(state), state.catalog_cache(CacheSource::Tmdb));
+    sources.push(TmdbCatalog::new(tmdb.with_language(&metadata_language)));
+    sources.push(DoubanCatalog::new(media::Douban::with_cache(
+        DoubanHttp,
+        state.catalog_cache(CacheSource::Douban),
+    )));
     let effective_tvdb_key = tvdb_key
-        .map(|k| k.to_string())
+        .map(str::to_string)
         .or_else(|| {
             store
-                .lock()
                 .get_setting(api::settings_keys::TVDB_API_KEY)
                 .ok()
                 .flatten()
         })
-        .filter(|k| !k.trim().is_empty());
+        .filter(|key| !key.trim().is_empty());
     if let Some(key) = effective_tvdb_key {
-        match media::Tvdb::new(TvdbHttp::new(key), catalog_db) {
-            Ok(tvdb) => sources.push(TvdbCatalog::new(tvdb)),
-            Err(error) => tracing::error!(%error, "跳过 TVDB：无法打开 catalog 缓存"),
-        }
+        sources.push(TvdbCatalog::new(media::Tvdb::with_cache(
+            TvdbHttp::new(key),
+            state.catalog_cache(CacheSource::Tvdb),
+        )));
     }
-    match media::Bangumi::new(BangumiHttp, catalog_db) {
-        Ok(bangumi) => sources.push(BangumiCatalog::new(bangumi)),
-        Err(error) => tracing::error!(%error, "跳过 Bangumi：无法打开 catalog 缓存"),
-    }
-    match media::Anilist::new(AnilistHttp, catalog_db) {
-        Ok(anilist) => sources.push(AnilistCatalog::new(anilist)),
-        Err(error) => tracing::error!(%error, "跳过 AniList：无法打开 catalog 缓存"),
-    }
+    sources.push(BangumiCatalog::new(media::Bangumi::with_cache(
+        BangumiHttp,
+        state.catalog_cache(CacheSource::Bangumi),
+    )));
+    sources.push(AnilistCatalog::new(media::Anilist::with_cache(
+        AnilistHttp,
+        state.catalog_cache(CacheSource::Anilist),
+    )));
     sources
 }
 
@@ -215,7 +201,7 @@ fn create_api_state(
     config: &ServerConfig,
     data_dir: &std::path::Path,
     overlay_dir: &std::path::Path,
-    store: std::sync::Arc<parking_lot::Mutex<Store>>,
+    store: std::sync::Arc<Store>,
     action: api::bootstrap_credentials::AdminBootstrapAction,
     log_buffer: api::system_logs::LogBuffer,
 ) -> Result<ApiState, Box<dyn std::error::Error>> {
@@ -236,11 +222,7 @@ fn create_api_state(
     .with_log_buffer(log_buffer)
     .with_browser(Arc::new(browser));
 
-    let sources = load_catalog_sources(
-        &state,
-        &data_dir.join("cache.db"),
-        config.tvdb_key.as_deref(),
-    );
+    let sources = load_catalog_sources(&state, config.tvdb_key.as_deref());
     if !sources.is_empty() {
         state = state.with_catalog(FanoutCatalog::new(sources));
     }
@@ -268,11 +250,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let store = std::sync::Arc::new(parking_lot::Mutex::new(Store::open(&data_dir)?));
+    let store = std::sync::Arc::new(Store::open(&data_dir)?);
     seed_store_settings(&store, &config);
 
     let action = api::bootstrap_credentials::prepare_admin_credentials(
-        &store.lock(),
+        store.as_ref(),
         &token,
         config.admin_password.as_deref(),
         api::bootstrap_credentials::BootstrapMode::Production,

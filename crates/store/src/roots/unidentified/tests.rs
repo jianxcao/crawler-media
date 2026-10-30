@@ -31,9 +31,9 @@ fn window_work(preceding: usize, unrelated: usize) -> u64 {
         .into_iter()
         .find(|r| r.library_id.as_str() == library.id.as_str())
         .unwrap();
-    let key =
-        crate::path_key::canonical_recorded_key(&store.library, &root.path.display().to_string());
-    let tx = crate::write_tx(&store.library).unwrap();
+    store.with_writer(crate::Db::Library, |conn| {
+    let key = crate::path_key::canonical_recorded_key(conn, &root.path.display().to_string());
+    let tx = crate::write_tx(conn).unwrap();
     for i in 0..preceding + 100 {
         let path = format!("{key}/p{i:06}.mkv");
         tx.execute("INSERT INTO unidentified(library_id,root_id,path,path_key,confidence,unidentified_id) VALUES(?1,?2,?3,?3,'low',?3)",
@@ -52,12 +52,22 @@ fn window_work(preceding: usize, unrelated: usize) -> u64 {
     tx.execute("INSERT INTO pending_root_reassignments(kind,root_key,cursor_key,unidentified_cursor_key,unidentified_cursor_id)
         VALUES('movie',?1,?1,?2,?3)",rusqlite::params![key,cursor,cursor]).unwrap();
     tx.commit().unwrap();
+    Ok(())
+    }).unwrap();
     VM.with(|counter| counter.set(0));
     store
-        .library
-        .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(observe));
+        .with_writer(crate::Db::Library, |conn| {
+            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(observe));
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(store.drain_one_root_batch().unwrap(), Some(true));
-    store.library.trace_v2(TraceEventCodes::empty(), None);
+    store
+        .with_writer(crate::Db::Library, |conn| {
+            conn.trace_v2(TraceEventCodes::empty(), None);
+            Ok(())
+        })
+        .unwrap();
     let vm = VM.with(Cell::get);
     assert_eq!(
         store.list_unidentified(None).unwrap().len(),

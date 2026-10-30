@@ -13,12 +13,12 @@ fn control_uniform_season_publishes_all_markers() {
         4
     );
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     assert_eq!(
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -41,7 +41,7 @@ fn duplicate_episode_versions_publish_without_unique_key_failure() {
     );
     let result = f
         .store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement]);
     println!("publication: {result:?}");
     assert!(
@@ -83,12 +83,12 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .filter(|marker| marker.intro_start_ms.is_some())
         .count();
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -98,7 +98,7 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         f.engine.reads.load(Ordering::Relaxed),
         after.intro_start_ms,
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -121,7 +121,7 @@ fn unlocked_timeline_uses_the_known_media_duration() {
     let f = setup("no-outro", &[1, 2, 3]);
     let replacement = run(&f);
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let chapters =
@@ -151,7 +151,7 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     let f = setup("uniform", &[1, 2, 3]);
     let first = &f.units[0].row;
     {
-        let st = f.store.lock();
+        let st = f.store.as_ref();
         let version = st
             .get_file_version(first.file.file_id)
             .unwrap()
@@ -182,13 +182,13 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     );
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     let status = f
         .store
-        .lock()
+        .as_ref()
         .get_probe_job("review9-job")
         .unwrap()
         .unwrap()
@@ -239,12 +239,12 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .map(|marker| marker.episode)
         .collect();
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -254,7 +254,7 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         f.engine.reads.load(Ordering::Relaxed),
         after.intro_start_ms,
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -278,7 +278,7 @@ fn new_variant_with_inconclusive_boundary_does_not_clear_old_intro() {
     assert!(try_run(&f).is_err());
     let old = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -311,7 +311,7 @@ fn missing_duration_preserves_start_only_outro_marker() {
     let f = setup("uniform", &[1, 2, 3]);
     let first = &f.units[0].row;
     {
-        let st = f.store.lock();
+        let st = f.store.as_ref();
         let version = st
             .get_file_version(first.file.file_id)
             .unwrap()
@@ -342,7 +342,7 @@ fn missing_duration_preserves_start_only_outro_marker() {
     );
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -391,12 +391,12 @@ fn conflicting_version_boundaries_do_not_publish_one_versions_range_for_both() {
             .collect();
         println!("conflicting ledger chapter intros={ranges:?}");
         f.store
-            .lock()
+            .as_ref()
             .complete_marker_refresh("review9-job", &[replacement])
             .unwrap();
         let canonical = f
             .store
-            .lock()
+            .as_ref()
             .get_media_marker(f.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap();
@@ -405,7 +405,7 @@ fn conflicting_version_boundaries_do_not_publish_one_versions_range_for_both() {
             canonical.intro_start_ms,
             canonical.intro_end_ms,
             f.store
-                .lock()
+                .as_ref()
                 .get_probe_job("review9-job")
                 .unwrap()
                 .unwrap()

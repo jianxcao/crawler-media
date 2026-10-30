@@ -284,10 +284,9 @@ async fn browser_maintenance_falls_back_to_http_when_browser_fails() {
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Browser,
     };
-    state.store().lock().insert_site(&site).unwrap();
+    state.store().insert_site(&site).unwrap();
     state
         .store()
-        .lock()
         .put_setting(api::settings_keys::CDP_ENABLED, "1")
         .unwrap();
 

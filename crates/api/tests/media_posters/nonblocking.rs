@@ -35,7 +35,6 @@ async fn cold_public_media_poster_times_out_without_blocking_the_async_worker() 
     let media_id = MediaId::new();
     state
         .store()
-        .lock()
         .insert_media(&Media {
             id: media_id,
             kind: MediaKind::Movie,
@@ -64,7 +63,6 @@ async fn cold_public_media_poster_times_out_without_blocking_the_async_worker() 
                 entered: std::sync::Mutex::new(Some(entered)),
             }),
         )
-        .unwrap()
         .with_wait_deadline(Duration::from_millis(80)),
     );
     let app = api::router(state.with_media_posters(service.clone()));
@@ -123,19 +121,16 @@ async fn cached_public_media_poster_returns_etag_and_not_modified() {
     api::media_posters::cache::DiskPosterCache::new(&cache_dir)
         .put(id, "image/png", &[0x89, 0x50, 0x4e, 0x47])
         .unwrap();
-    let service = Arc::new(
-        MediaPosterService::with_custom_fetcher(
-            state.store(),
-            Arc::new(MockCatalog {
-                poster_calls: AtomicUsize::new(0),
-            }),
-            cache_dir,
-            Arc::new(MockFetcher {
-                fetch_calls: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap(),
-    );
+    let service = Arc::new(MediaPosterService::with_custom_fetcher(
+        state.store(),
+        Arc::new(MockCatalog {
+            poster_calls: AtomicUsize::new(0),
+        }),
+        cache_dir,
+        Arc::new(MockFetcher {
+            fetch_calls: AtomicUsize::new(0),
+        }),
+    ));
     let app = api::router(state.with_media_posters(service.clone()));
     let response = app
         .clone()
@@ -184,7 +179,6 @@ async fn cold_media_poster_reads_identity_without_the_writer_lock() {
     let media_id = MediaId::new();
     state
         .store()
-        .lock()
         .insert_media(&Media {
             id: media_id,
             kind: MediaKind::Movie,
@@ -199,25 +193,22 @@ async fn cold_media_poster_reads_identity_without_the_writer_lock() {
             anilist_id: None,
         })
         .unwrap();
-    let service = Arc::new(
-        MediaPosterService::with_custom_fetcher(
-            state.store(),
-            Arc::new(MockCatalog {
-                poster_calls: AtomicUsize::new(0),
-            }),
-            tmp.path().join("cache"),
-            Arc::new(MockFetcher {
-                fetch_calls: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap(),
-    );
+    let service = Arc::new(MediaPosterService::with_custom_fetcher(
+        state.store(),
+        Arc::new(MockCatalog {
+            poster_calls: AtomicUsize::new(0),
+        }),
+        tmp.path().join("cache"),
+        Arc::new(MockFetcher {
+            fetch_calls: AtomicUsize::new(0),
+        }),
+    ));
     let handle = state.store();
     let app = api::router(state.with_media_posters(service.clone()));
     let (locked, lock_ready) = std::sync::mpsc::channel();
     let (release, finish) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = handle.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(handle.clone(), store::Db::Library);
         locked.send(()).unwrap();
         finish.recv_timeout(Duration::from_secs(3)).unwrap();
     });

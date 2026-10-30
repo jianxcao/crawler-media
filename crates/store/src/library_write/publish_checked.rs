@@ -18,8 +18,8 @@ impl Store {
         expected: Option<&LibraryFile>,
         now_ms: i64,
     ) -> Result<PublishReport, StoreError> {
-        self.publish_files_with_validation(scope, std::slice::from_ref(publication), now_ms, |tx| {
-            validate_context(tx, publication.file, expected)
+        self.with_library_write(|db| {
+            db.publish_file_checked_context(scope, publication, expected, now_ms)
         })
     }
     /// Consume the originally observed parked identity atomically with the file.
@@ -31,9 +31,8 @@ impl Store {
         source: &crate::UnidentifiedRow,
         now_ms: i64,
     ) -> Result<PublishReport, StoreError> {
-        self.publish_files_with_validation(scope, std::slice::from_ref(publication), now_ms, |tx| {
-            validate_context(tx, publication.file, expected)?;
-            crate::unidentified::consume(tx, source)
+        self.with_library_write(|db| {
+            db.publish_unidentified_checked_context(scope, publication, expected, source, now_ms)
         })
     }
 }
@@ -88,3 +87,6 @@ pub(crate) fn validate_context(
     }
     Ok(())
 }
+
+#[path = "publish_checked/connection.rs"]
+mod connection;

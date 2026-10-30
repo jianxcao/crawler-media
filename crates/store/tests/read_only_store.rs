@@ -1,5 +1,5 @@
-//! L1: request reads run on a read-only `Store` facade that never takes the
-//! shared writer lock. It must see committed writes and refuse to write.
+//! Request reads use Store-owned read-only connections. They see committed
+//! writes without taking a writer and refuse accidental SQL writes.
 use domain::{Media, MediaId, MediaKind};
 use store::Store;
 
@@ -23,7 +23,7 @@ fn media(title: &str) -> Media {
 fn reader_sees_committed_writes_and_refuses_to_write() {
     let tmp = tempfile::tempdir().unwrap();
     let writer = Store::open(tmp.path().join("data")).unwrap();
-    let reader = writer.open_reader().unwrap();
+    let reader = &writer;
     let first = media("First");
     writer.insert_media(&first).unwrap();
     assert_eq!(reader.get_media(first.id).unwrap().unwrap().title, "First");
@@ -44,7 +44,19 @@ fn reader_sees_committed_writes_and_refuses_to_write() {
         writer.list_library_roots().unwrap().len()
     );
     assert!(
-        reader.insert_media(&media("Nope")).is_err(),
+        {
+            let pool = reader.reader_pool(store::Db::Library);
+            let mut lease = pool.try_checkout().unwrap();
+            lease
+                .with_connection(
+                    &store::QueryBudget {
+                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    },
+                    |conn| conn.execute("DELETE FROM media", []).map_err(Into::into),
+                )
+                .is_err()
+        },
         "reader must be read-only"
     );
 }
@@ -53,7 +65,7 @@ fn reader_sees_committed_writes_and_refuses_to_write() {
 fn reader_is_not_blocked_by_an_open_write_transaction() {
     let tmp = tempfile::tempdir().unwrap();
     let writer = Store::open(tmp.path().join("data")).unwrap();
-    let reader = writer.open_reader().unwrap();
+    let reader = &writer;
     let seen = media("Seen");
     writer.insert_media(&seen).unwrap();
     // Another writer holds library.db's write lock (as a long scan batch would).

@@ -1,16 +1,19 @@
 //! Task 22 slice 2: the drivers `ApiState::new` starts must not hold the executor.
 //!
-//! Slice 1 fixed the request path: no handler waits for the process-wide `Store`
-//! lock on a tokio worker. But the drivers themselves (`chapter_frame_service`,
-//! the probe workers, the obligation dispatcher) are tasks on the *same* runtime,
-//! so a driver that calls `store.lock()` inside an async fn parks a worker while a
-//! scan-sized write is in flight — and `/health`, which touches no store at all,
-//! stops being scheduled. A request then stalls with no request doing anything
-//! wrong.
+//! Request handlers and background drivers (`chapter_frame_service`, probe workers,
+//! obligation dispatcher) must move blocking database work off the tokio executor.
+//! A driver waiting for a Library writer on the executor would delay `/health` and
+//! unrelated timers while a scan is writing.
 //!
 //! The measurement is bounded on purpose: an executor parked by a driver would
 //! otherwise hang the test, so the request runs on the runtime thread while the
 //! test thread waits on a channel with a deadline.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::path::Path;
 use std::sync::Arc;
@@ -67,7 +70,7 @@ fn boot_inside_runtime(root: &std::path::Path) -> (tokio::runtime::Runtime, ApiS
 /// the metadata worker, which reads the store from its async loop.
 fn seed_probe_candidate(state: &ApiState) -> domain::FileCoverage {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let root = guard
         .list_libraries()
         .unwrap()
@@ -93,7 +96,7 @@ fn seed_probe_candidate(state: &ApiState) -> domain::FileCoverage {
     let path = root.join("drivers.mkv");
     std::fs::write(&path, b"video-bytes").unwrap();
     let file = publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
@@ -136,7 +139,7 @@ fn health_answers_while_a_driver_polls_the_store_behind_a_write() {
     // A scan-sized write in flight: another thread holds the process-wide Store.
     let held = state.store();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         std::thread::sleep(Duration::from_millis(2000));
     });
     std::thread::sleep(Duration::from_millis(50));
@@ -186,7 +189,7 @@ fn health_answers_while_a_driver_polls_the_store_behind_a_write() {
     // unit: its job must have left `queued`.
     let store_handle = state.store();
     let status = {
-        let guard = store_handle.lock();
+        let guard = store_handle.as_ref();
         guard
             .get_probe_job(&job_id)
             .expect("probe job read")
@@ -215,7 +218,7 @@ fn probe_resumes_after_store_contention_without_cancelling_the_job() {
     let held = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(2500));
     });
@@ -228,7 +231,12 @@ fn probe_resumes_after_store_contention_without_cancelling_the_job() {
             let store = store.clone();
             let job_id = job_id.clone();
             let status = tokio::task::spawn_blocking(move || {
-                store.lock().get_probe_job(&job_id).unwrap().unwrap().status
+                store
+                    .as_ref()
+                    .get_probe_job(&job_id)
+                    .unwrap()
+                    .unwrap()
+                    .status
             })
             .await
             .unwrap();
@@ -277,9 +285,7 @@ fn chapter_frame_worker_does_not_park_the_executor() {
         .build()
         .unwrap();
     let (service, store) = runtime.block_on(async {
-        let store = Arc::new(parking_lot::Mutex::new(
-            Store::open(tmp.path().join("data")).unwrap(),
-        ));
+        let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
         let registry = Arc::new(api::library_lifecycle::LibraryWorkRegistry::default());
         let service = Arc::new(
             api::chapter_frame_service::ChapterFrameService::with_runner(
@@ -292,7 +298,7 @@ fn chapter_frame_worker_does_not_park_the_executor() {
         (service, store)
     });
     let file_id = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         let root = guard
             .list_libraries()
             .unwrap()
@@ -318,7 +324,7 @@ fn chapter_frame_worker_does_not_park_the_executor() {
         let path = root.join("chapters.mkv");
         std::fs::write(&path, b"video-bytes").unwrap();
         publish_fixture_file(
-            &guard,
+            guard,
             &FixtureFile {
                 file_id: Some(LedgerId::new()),
                 media_id: media.id,
@@ -346,7 +352,7 @@ fn chapter_frame_worker_does_not_park_the_executor() {
 
     let held = store.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         std::thread::sleep(Duration::from_millis(1500));
     });
     std::thread::sleep(Duration::from_millis(50));
@@ -477,7 +483,7 @@ impl api::probe_manager::TracksProbe for GatedTracksProbe {
 ///
 /// To un-ignore: hold the `Store` for **less than `STORE_WRITE_WAIT`** (e.g. 700 ms)
 /// and start the tick window after the gate release, so the post-fix path completes
-/// within budget while the pre-fix unbounded `store.lock()` still parks the executor
+/// within budget while an unbounded writer wait on the executor would still park it
 /// for the whole hold. Then this test should be red on the pre-fix code and green on
 /// the current code, and the vacuity assertion below proves the stage really
 /// published.
@@ -489,9 +495,7 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
         .enable_all()
         .build()
         .unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let coverage = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
@@ -529,7 +533,7 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
     // 2. Hold the Store, then release the gate: the publish now runs with it held.
     let held = store.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         std::thread::sleep(Duration::from_millis(2000));
     });
     std::thread::sleep(Duration::from_millis(50));
@@ -563,7 +567,7 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
     // its version are written by that step), so "no park" is not "nothing happened".
     let ledger_id = coverage.file.file_id.to_string();
     let published = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .get_media_info_cache_version(&ledger_id)
             .ok()
@@ -582,8 +586,8 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
 
 /// Publish one ledgered file under the default movie Library root, for a store the
 /// test owns directly (no `ApiState`).
-fn seed_probe_candidate_in(store: &Arc<parking_lot::Mutex<Store>>) -> domain::FileCoverage {
-    let guard = store.lock();
+fn seed_probe_candidate_in(store: &Arc<Store>) -> domain::FileCoverage {
+    let guard = store.as_ref();
     let root = guard
         .list_libraries()
         .unwrap()
@@ -609,7 +613,7 @@ fn seed_probe_candidate_in(store: &Arc<parking_lot::Mutex<Store>>) -> domain::Fi
     let path = root.join(format!("stage-{}.mkv", media.id));
     std::fs::write(&path, b"video-bytes").unwrap();
     let file = publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,

@@ -18,7 +18,7 @@ impl Store {
         media_ids: &[MediaId],
         user_id: Option<UserId>,
     ) -> Result<HashMap<MediaId, LibraryItemFacts>, StoreError> {
-        library_item_facts_on(&self.library, library_id, media_ids, user_id)
+        self.with_library_read(|db| db.library_item_facts(library_id, media_ids, user_id))
     }
 
     /// Stills of the page's media ids: published files whose `has_still` is set, with the
@@ -28,7 +28,7 @@ impl Store {
         library_id: LibraryId,
         media_ids: &[MediaId],
     ) -> Result<Vec<LibraryStill>, StoreError> {
-        library_item_stills_on(&self.library, library_id, media_ids)
+        self.with_library_read(|db| db.library_item_stills(library_id, media_ids))
     }
 }
 
@@ -280,3 +280,6 @@ fn library_display_locale_on(
         None => crate::metadata_language::default_locale(conn),
     }
 }
+
+#[path = "hydration/connection.rs"]
+mod connection;

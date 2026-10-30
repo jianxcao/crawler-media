@@ -188,7 +188,7 @@ impl ScanContext<'_> {
         let plan = self
             .lease
             .publish(|| {
-                let store = self.state.store.lock();
+                let store = self.state.store.as_ref();
                 let _hold = trace_lock_section("plan");
                 self.scan_scope
                     .validate(&store)
@@ -200,7 +200,7 @@ impl ScanContext<'_> {
         let inserted = self
             .lease
             .publish(|| {
-                let store = self.state.store.lock();
+                let store = self.state.store.as_ref();
                 let _hold = trace_lock_section("record");
                 self.scan_scope
                     .validate(&store)
@@ -377,7 +377,7 @@ impl ScanContext<'_> {
         if entries.is_empty() {
             return;
         }
-        let store = self.state.store.lock();
+        let store = self.state.store.as_ref();
         let _hold = trace_lock_section("seen");
         if let Err(error) = store.record_scan_seen_stamps(op_id, &entries) {
             tracing::error!(%error, %op_id, "写入扫描断点失败");

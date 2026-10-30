@@ -570,11 +570,8 @@ async fn production_dynamic_downloader_delegates_owned_removal_to_the_selected_c
             enabled: true,
         })
         .unwrap();
-    let client = api::DynamicDownloader::new(
-        Arc::new(Mutex::new(store)),
-        api::DownloaderEnv::default(),
-        tmp.path(),
-    );
+    let client =
+        api::DynamicDownloader::new(Arc::new(store), api::DownloaderEnv::default(), tmp.path());
     let torrent = pending(
         "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
         None,

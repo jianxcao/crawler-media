@@ -1,4 +1,10 @@
 //! Media operations and background artwork must keep a single Tokio worker free.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,7 +51,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let token = "artwork-admin-session".to_string();
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .insert_user_with_password(&user, "admin-pass")
             .unwrap();
@@ -79,7 +85,7 @@ fn assert_contended_operation_stays_responsive(method: &str, uri: &str, body: Va
     let store = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -130,13 +136,13 @@ fn library_detail_and_file_page_do_not_park_executor() {
     for suffix in ["", "/files?limit=1"] {
         let tmp = tempfile::tempdir().unwrap();
         let (state, token) = state_with_admin(tmp.path());
-        let library_id = state.store().lock().list_libraries().unwrap()[0].id.clone();
+        let library_id = state.store().list_libraries().unwrap()[0].id.clone();
         let app = router(state.clone());
         let runtime = runtime();
         let store = state.store();
         let (tx, rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
             tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
         });
@@ -204,7 +210,7 @@ impl api::catalog::Catalog for SlowArtwork {
 
 fn publish_in_progress_movie(state: &ApiState, token: &str, name: &str) -> std::path::PathBuf {
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let library = store.default_library(MediaKind::Movie).unwrap().unwrap();
     let dir = library.root_paths[0].join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -227,7 +233,7 @@ fn publish_in_progress_movie(state: &ApiState, token: &str, name: &str) -> std::
         })
         .unwrap();
     store::test_support::publish_fixture_file(
-        &store,
+        store,
         &store::test_support::FixtureFile {
             media_id,
             path: video.to_string_lossy().into_owned(),

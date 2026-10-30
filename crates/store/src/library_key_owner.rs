@@ -14,9 +14,7 @@ impl Store {
         path: &std::path::Path,
         kind: MediaKind,
     ) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .library_root_owning_key(path, kind)?
-            .map(|(library, _)| library))
+        self.with_library_read(|db| db.library_owning_key(path, kind))
     }
 
     /// Deepest root of the requested kind, including frozen roots so callers cannot
@@ -26,7 +24,7 @@ impl Store {
         path: &std::path::Path,
         kind: MediaKind,
     ) -> Result<Option<(String, String)>, StoreError> {
-        owning_root_key(&self.library, path, kind)
+        self.with_library_read(|db| db.library_root_owning_key(path, kind))
     }
 }
 
@@ -78,3 +76,6 @@ pub(crate) fn owning_root_key(
     }
     Ok(best.map(|(_, library, root)| (library, root)))
 }
+
+#[path = "library_key_owner/connection.rs"]
+mod connection;

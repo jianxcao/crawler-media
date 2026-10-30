@@ -203,19 +203,15 @@ fn next_up_blocking(
     limit: usize,
 ) -> Result<ServerItemPage, String> {
     let query = next_up_query(series_id);
-    let scope = {
-        let store = state
-            .store_readers
-            .checkout(SELECTION_DEADLINE)
-            .ok_or("Library reader pool busy")?;
-        match read_scope(&store, user_id, &query) {
-            Ok(scope) => scope,
+    let scope = super::sync_operations::read_store(state, |store| {
+        match read_scope(store, user_id, &query) {
+            Ok(scope) => Ok(scope),
             Err(error) => {
                 count_candidates(state, error.rows_read);
-                return Err(error.to_string());
+                Err(error.to_string())
             }
         }
-    };
+    })?;
     count_candidates(state, scope.rows_read);
     if scope.unresolved {
         return Ok(ServerItemPage::default());
@@ -368,7 +364,6 @@ fn heavy_snapshot(
         if state.instance_writable() {
             state.probe.schedule_page_probe(
                 coverage.as_ref().clone(),
-                state.store_readers.clone(),
                 state.instance_writable.clone(),
                 probe_budget,
             );

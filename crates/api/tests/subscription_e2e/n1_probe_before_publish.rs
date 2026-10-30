@@ -28,7 +28,6 @@ async fn unprobeable_arrival_is_never_published_and_rejected_after_cap() {
     let owned = h.seed_owned_movie(id, 1080, "h264", 1);
     h.state
         .store()
-        .lock()
         .put_setting("subscribe.probe_wait_max_attempts", "3")
         .unwrap();
     let before = {
@@ -69,7 +68,6 @@ async fn unprobeable_arrival_is_never_published_and_rejected_after_cap() {
         assert!(
             h.state
                 .store()
-                .lock()
                 .list_pending_file_deletions()
                 .unwrap()
                 .is_empty(),

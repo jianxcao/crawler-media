@@ -125,19 +125,14 @@ fn setup_service_and_store(
     fetcher: Arc<dyn ImageFetcher>,
     catalog: Arc<dyn Catalog>,
     deadline: Duration,
-) -> (
-    tempfile::TempDir,
-    Arc<Mutex<Store>>,
-    Arc<MediaPosterService>,
-) {
+) -> (tempfile::TempDir, Arc<Store>, Arc<MediaPosterService>) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let cache_dir = tmp.path().join("cache");
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
 
     let service = Arc::new(
         MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher)
-            .unwrap()
             .with_wait_deadline(deadline),
     );
 
@@ -187,10 +182,10 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
     let (_tmp, store, service) =
         setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(10));
 
-    let m1 = insert_media(&store.lock(), "m1");
-    let m2 = insert_media(&store.lock(), "m2");
-    let m3 = insert_media(&store.lock(), "m3");
-    let m4 = insert_media(&store.lock(), "m4");
+    let m1 = insert_media(store.as_ref(), "m1");
+    let m2 = insert_media(store.as_ref(), "m2");
+    let m3 = insert_media(store.as_ref(), "m3");
+    let m4 = insert_media(store.as_ref(), "m4");
 
     // Spawn 4 requests and abort them
     let mut handles = Vec::new();
@@ -217,10 +212,10 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
     );
 
     // Now request 4 MORE media
-    let m5 = insert_media(&store.lock(), "m5");
-    let m6 = insert_media(&store.lock(), "m6");
-    let m7 = insert_media(&store.lock(), "m7");
-    let m8 = insert_media(&store.lock(), "m8");
+    let m5 = insert_media(store.as_ref(), "m5");
+    let m6 = insert_media(store.as_ref(), "m6");
+    let m7 = insert_media(store.as_ref(), "m7");
+    let m8 = insert_media(store.as_ref(), "m8");
 
     let mut second_handles = Vec::new();
     for id in [m5, m6, m7, m8] {
@@ -293,7 +288,7 @@ async fn same_media_after_timeout_joins_running_fetch() {
         Duration::from_millis(50), // short injected wait deadline
     );
 
-    let m1 = insert_media(&store.lock(), "join_test");
+    let m1 = insert_media(store.as_ref(), "join_test");
 
     // Request 1: will time out at 50ms wait deadline
     let s1 = service.clone();
@@ -351,7 +346,7 @@ async fn follower_after_cancelled_leader_receives_outcome() {
     let (_tmp, store, service) =
         setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(10));
 
-    let m1 = insert_media(&store.lock(), "follower_outcome_test");
+    let m1 = insert_media(store.as_ref(), "follower_outcome_test");
 
     let s1 = service.clone();
     let h_leader = tokio::spawn(async move { s1.get(m1).await });
@@ -417,7 +412,7 @@ async fn leader_and_follower_share_one_published_outcome() {
         catalog.clone(),
         Duration::from_secs(10),
     );
-    let m_long = insert_media(&store_long.lock(), "replay_proof");
+    let m_long = insert_media(store_long.as_ref(), "replay_proof");
 
     let s_leader = service_long.clone();
     let h_leader = tokio::spawn(async move { s_leader.get(m_long).await });
@@ -476,7 +471,7 @@ async fn cache_write_failure_fails_leader_and_follower() {
     let data_dir_fail = tmp_fail.path().join("data");
     let cache_file_blocker = tmp_fail.path().join("cache_blocker");
     std::fs::write(&cache_file_blocker, b"blocking_file").unwrap();
-    let store_fail = Arc::new(Mutex::new(Store::open(&data_dir_fail).unwrap()));
+    let store_fail = Arc::new(Store::open(&data_dir_fail).unwrap());
     let service_fail = Arc::new(
         MediaPosterService::with_custom_fetcher(
             store_fail.clone(),
@@ -484,10 +479,9 @@ async fn cache_write_failure_fails_leader_and_follower() {
             cache_file_blocker,
             fetcher_fail.clone(),
         )
-        .unwrap()
         .with_wait_deadline(Duration::from_secs(10)),
     );
-    let m_fail = insert_media(&store_fail.lock(), "fail_cache_media");
+    let m_fail = insert_media(store_fail.as_ref(), "fail_cache_media");
 
     let s_fail_leader = service_fail.clone();
     let h_fail_leader = tokio::spawn(async move { s_fail_leader.get(m_fail).await });
@@ -538,7 +532,7 @@ async fn error_outcome_replays_and_releases_permits() {
     let (_tmp, store, service) =
         setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(5));
 
-    let m_err = insert_media(&store.lock(), "err");
+    let m_err = insert_media(store.as_ref(), "err");
 
     // Leader request
     let s1 = service.clone();
@@ -570,10 +564,10 @@ async fn error_outcome_replays_and_releases_permits() {
 
     // R2-03: prove permit and entry release on the SAME service
     *fetcher.gate.released.lock() = false;
-    let cap_m1 = insert_media(&store.lock(), "err_cap1");
-    let cap_m2 = insert_media(&store.lock(), "err_cap2");
-    let cap_m3 = insert_media(&store.lock(), "err_cap3");
-    let cap_m4 = insert_media(&store.lock(), "err_cap4");
+    let cap_m1 = insert_media(store.as_ref(), "err_cap1");
+    let cap_m2 = insert_media(store.as_ref(), "err_cap2");
+    let cap_m3 = insert_media(store.as_ref(), "err_cap3");
+    let cap_m4 = insert_media(store.as_ref(), "err_cap4");
 
     let mut cap_handles = Vec::new();
     for id in [cap_m1, cap_m2, cap_m3, cap_m4] {
@@ -625,7 +619,7 @@ async fn worker_panic_releases_resources_and_replays_failure() {
     let (_tmp, store, service) =
         setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(5));
 
-    let m_panic = insert_media(&store.lock(), "panic");
+    let m_panic = insert_media(store.as_ref(), "panic");
 
     let s1 = service.clone();
     let h1 = tokio::spawn(async move { s1.get(m_panic).await });
@@ -664,10 +658,10 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     // Assert capacity is intact on the SAME service by submitting four distinct new media
     // and observing active == 4 with max_active == 4 while gated
-    let cap_m1 = insert_media(&store.lock(), "cap1");
-    let cap_m2 = insert_media(&store.lock(), "cap2");
-    let cap_m3 = insert_media(&store.lock(), "cap3");
-    let cap_m4 = insert_media(&store.lock(), "cap4");
+    let cap_m1 = insert_media(store.as_ref(), "cap1");
+    let cap_m2 = insert_media(store.as_ref(), "cap2");
+    let cap_m3 = insert_media(store.as_ref(), "cap3");
+    let cap_m4 = insert_media(store.as_ref(), "cap4");
 
     // Reset gate for the second capacity batch on the same service/fetcher
     let gate2 = Arc::new(TestGate::new());
@@ -727,7 +721,7 @@ async fn worker_panic_releases_resources_and_replays_failure() {
     let fetcher3 = Arc::new(GatedFetcher::new(gate3.clone()));
     let (_tmp3, store3, service3) =
         setup_service_and_store(fetcher3.clone(), catalog.clone(), Duration::from_secs(5));
-    let m_retry = insert_media(&store3.lock(), "retry_test");
+    let m_retry = insert_media(store3.as_ref(), "retry_test");
     gate3.release();
 
     let first_res = service3.get(m_retry).await;

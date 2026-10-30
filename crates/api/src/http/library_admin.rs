@@ -350,6 +350,27 @@ fn retransfer_target(
     ledger_id: domain::LedgerId,
 ) -> Result<RetransferTarget, Response> {
     let target = store
+        .library_read_snapshot(|store| retransfer_target_on(store, ledger_id))
+        .map_err(admin_store_error)??;
+    let media = store
+        .get_media(target.coverage.file.media_id)
+        .map_err(admin_store_error)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "ledger.missing", "Media 已不存在"))?;
+    if super::library::library_for_file_strict(store, &target.coverage.file, &media).is_none() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "library.outside_root",
+            "无法确认媒体库归属",
+        ));
+    }
+    Ok(target)
+}
+
+fn retransfer_target_on(
+    store: &store::LibraryConnection<'_>,
+    ledger_id: domain::LedgerId,
+) -> Result<RetransferTarget, Response> {
+    let target = store
         .file_coverage_by_id(ledger_id)
         .map_err(admin_store_error)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在"))?;
@@ -370,7 +391,7 @@ fn retransfer_target(
                 "无法确认媒体库归属，拒绝重新生成",
             )
         })?;
-    if super::library::library_for_file_strict(store, &target.file, &media).is_none() {
+    if super::library::library_for_recorded_file(store, &target, &media).is_none() {
         return Err(err(
             StatusCode::FORBIDDEN,
             "library.outside_root",
@@ -428,12 +449,12 @@ pub(crate) async fn retransfer_ledger_row(
 }
 
 fn retransfer_blocking(state: &ApiState, ledger_id: domain::LedgerId) -> Response {
-    let target = match super::store_wait::with_bounded_store(state.store(), |store| {
+    let target = match super::store_wait::with_foreground_store(state, |store| {
         retransfer_target(store, ledger_id)
     }) {
-        Some(Ok(target)) => target,
-        Some(Err(response)) => return response,
-        None => return super::store_wait::busy_response(),
+        Ok(Ok(target)) => target,
+        Ok(Err(response)) => return response,
+        Err(response) => return response,
     };
     let claim = super::file_delete::path_claim(&target.coverage.path_key);
     let _claim = claim.lock();
@@ -454,7 +475,7 @@ fn retransfer_blocking(state: &ApiState, ledger_id: domain::LedgerId) -> Respons
             );
         }
     };
-    let admitted = super::store_wait::with_bounded_store(state.store(), |store| {
+    let admitted = super::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         let current = retransfer_target(store, ledger_id)?;
@@ -470,9 +491,9 @@ fn retransfer_blocking(state: &ApiState, ledger_id: domain::LedgerId) -> Respons
         Ok(())
     });
     match admitted {
-        Some(Ok(())) => {}
-        Some(Err(response)) => return response,
-        None => return super::store_wait::busy_response(),
+        Ok(Ok(())) => {}
+        Ok(Err(response)) => return response,
+        Err(response) => return response,
     }
     if !state.file_stats.is_file(&target.source) {
         return err(
@@ -526,36 +547,35 @@ fn publish_retransfer(
     target: &RetransferTarget,
     observed: &library::SourceObservation,
 ) -> Result<(), Response> {
-    super::store_wait::with_bounded_store(state.store(), |store| {
-        state.require_writable()?;
-        state.require_write_admitted()?;
-        let ledger_id = target.coverage.file.file_id;
-        let current = retransfer_target(store, ledger_id)?;
-        if !super::file_delete::same_recorded_source(&target.coverage, &current.coverage) {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "ledger.changed",
-                "文件归属或版本已变化",
-            ));
-        }
-        if observed.source_version != target.coverage.file.version.source_version {
+    super::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(admin_store_error, |store| {
+            let ledger_id = target.coverage.file.file_id;
+            let current = retransfer_target_on(store, ledger_id)?;
+            if !super::file_delete::same_recorded_source(&target.coverage, &current.coverage) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "ledger.changed",
+                    "文件归属或版本已变化",
+                ));
+            }
+            if observed.source_version != target.coverage.file.version.source_version {
+                store
+                    .replace_file_source(
+                        &store::library_write::WriteScope {
+                            library_id: target.coverage.file.library_id,
+                            config_revision: target.config_revision,
+                        },
+                        ledger_id,
+                        &target.coverage.file.version,
+                        observed,
+                        crate::job_loop::unix_now() * 1000,
+                    )
+                    .map_err(admin_store_error)?;
+            }
             store
-                .replace_file_source(
-                    &store::library_write::WriteScope {
-                        library_id: target.coverage.file.library_id,
-                        config_revision: target.config_revision,
-                    },
-                    ledger_id,
-                    &target.coverage.file.version,
-                    observed,
-                    crate::job_loop::unix_now() * 1000,
-                )
+                .clear_ledger_missing(&target.coverage.file.path.to_string_lossy())
                 .map_err(admin_store_error)?;
-        }
-        store
-            .clear_ledger_missing(&target.coverage.file.path.to_string_lossy())
-            .map_err(admin_store_error)?;
-        Ok(())
-    })
-    .unwrap_or_else(|| Err(super::store_wait::busy_response()))
+            Ok(())
+        })
+    })?
 }

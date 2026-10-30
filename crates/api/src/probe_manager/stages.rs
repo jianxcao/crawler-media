@@ -44,25 +44,26 @@ pub(super) fn record_fingerprint_stages(
         context_key: cache_key.to_string(),
         stage: ProbeStage::Intro,
     };
-    let store = mgr.writer()?;
-    store.adopt_probe_context(ledger_id, cache_key)?;
-    store.claim_probe_stage(&intro_key, job_id, now_ms)?;
-    store.finish_probe_stage(&intro_key, job_id, &ProbeStageCompletion::Succeeded, now_ms)?;
-    let outro_key = ProbeStageKey {
-        ledger_id: ledger_id.to_string(),
-        context_key: cache_key.to_string(),
-        stage: ProbeStage::Outro,
-    };
-    store.claim_probe_stage(&outro_key, job_id, now_ms)?;
-    let completion = match outro_error {
-        Some(error) => ProbeStageCompletion::Failed {
-            error_kind: classify_fingerprint_error(error).to_string(),
-            error: error.to_string(),
-        },
-        None => ProbeStageCompletion::Succeeded,
-    };
-    store.finish_probe_stage(&outro_key, job_id, &completion, now_ms)?;
-    Ok(())
+    mgr.store.library_write(|store| {
+        store.adopt_probe_context(ledger_id, cache_key)?;
+        store.claim_probe_stage(&intro_key, job_id, now_ms)?;
+        store.finish_probe_stage(&intro_key, job_id, &ProbeStageCompletion::Succeeded, now_ms)?;
+        let outro_key = ProbeStageKey {
+            ledger_id: ledger_id.to_string(),
+            context_key: cache_key.to_string(),
+            stage: ProbeStage::Outro,
+        };
+        store.claim_probe_stage(&outro_key, job_id, now_ms)?;
+        let completion = match outro_error {
+            Some(error) => ProbeStageCompletion::Failed {
+                error_kind: classify_fingerprint_error(error).to_string(),
+                error: error.to_string(),
+            },
+            None => ProbeStageCompletion::Succeeded,
+        };
+        store.finish_probe_stage(&outro_key, job_id, &completion, now_ms)?;
+        Ok(())
+    })
 }
 
 pub(super) fn classify_fingerprint_error(error: &str) -> &'static str {

@@ -16,7 +16,7 @@ async fn probe_obligation_is_created_on_scan_and_recovered() {
 
     let store_arc = fix.state.store();
     let _row = store_arc
-        .lock()
+        .as_ref()
         .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .expect("row must exist");
@@ -28,7 +28,7 @@ async fn probe_obligation_is_created_on_scan_and_recovered() {
         .await
         .unwrap();
     let ledger_id = _row.file.file_id.to_string();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let remaining = guard.scan_probe_obligations(10).unwrap();
     let in_flight = guard
         .active_probe_unit_for_ledger(&ledger_id)
@@ -54,19 +54,19 @@ async fn deleted_ledger_cleans_obligation_without_probe() {
 
     let store_arc = fix.state.store();
     let row = store_arc
-        .lock()
+        .as_ref()
         .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .unwrap();
 
     // Delete ledger path
     store_arc
-        .lock()
+        .as_ref()
         .delete_ledger_path(&row.file.path.to_string_lossy())
         .unwrap();
 
     // Verify obligation is cleaned up by delete_ledger_path
-    let obs = store_arc.lock().scan_probe_obligations(10).unwrap();
+    let obs = store_arc.as_ref().scan_probe_obligations(10).unwrap();
     assert!(
         obs.is_empty(),
         "obligation must be deleted when ledger row is deleted"

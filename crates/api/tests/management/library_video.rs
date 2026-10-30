@@ -126,7 +126,7 @@ struct VideoArtworkFixture {
 
 fn media_id_for(state: &ApiState, path: &std::path::Path) -> domain::MediaId {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .file_coverage_by_path(&path.display().to_string())
         .unwrap()
@@ -163,7 +163,7 @@ async fn video_artwork_fixture() -> VideoArtworkFixture {
     put_scrape_setting(&app, true).await;
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let coverage = guard
             .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
@@ -258,7 +258,7 @@ async fn rescan_keeps_a_locked_video_poster() {
     let media_id = media_id_for(&fix.state, &fix.clip);
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .put_setting(
                 &format!("artwork.{media_id}"),
@@ -318,9 +318,9 @@ async fn video_scan_clears_only_the_retryable_cover_marker() {
     let id = create_video_library(&app, &root).await;
     let key = format!("library_cover_checked.{id}");
     let set_marker = |value: &str| {
-        state.store().lock().put_setting(&key, value).unwrap();
+        state.store().put_setting(&key, value).unwrap();
     };
-    let marker = || state.store().lock().get_setting(&key).unwrap();
+    let marker = || state.store().get_setting(&key).unwrap();
 
     set_marker("auto");
     scan_and_wait(&app, &id).await;
@@ -376,7 +376,7 @@ async fn video_artwork_first_candidate_failure_does_not_starve_sibling() {
     let m2_id = media_id_for(&state, &clip2);
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let mut m2 = guard.get_media(m2_id).unwrap().unwrap();
         m2.tmdb_id = Some("12345".into());
         guard.update_media(&m2).unwrap();

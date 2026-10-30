@@ -9,6 +9,12 @@
 //! 2. 没有 token 时仍然是 401——鉴权中间件照常工作，不是整条路径被短路；
 //! 3. 真正的繁忙（读连接拿不到一致快照 / 预算已过期）仍然是 503 `runtime.busy`，
 //!    这个错误码没有被删掉。
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,12 +67,12 @@ async fn json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// 把 `Store` 锁按住 `hold` 时长，返回「已持锁」信号。
-fn hold_store_lock(state: &ApiState, hold: Duration) -> std::sync::mpsc::Receiver<()> {
+/// 把 App writer 按住 `hold` 时长，返回「已持锁」信号。
+fn hold_app_writer(state: &ApiState, hold: Duration) -> std::sync::mpsc::Receiver<()> {
     let store = state.store();
     let (ready, wait) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let guard = store.lock();
+        let guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::App);
         ready.send(()).unwrap();
         std::thread::sleep(hold);
         drop(guard);
@@ -79,7 +85,7 @@ async fn member_request_authenticates_while_store_lock_is_held_past_the_old_budg
     let (_dir, state) = fixture();
     let app = router(state.clone());
     // 旧预算 1 s；按住 2 s 保证「超过旧预算」是事实，而不是时序巧合。
-    let holding = hold_store_lock(&state, Duration::from_millis(2_000));
+    let holding = hold_app_writer(&state, Duration::from_millis(2_000));
     holding
         .recv_timeout(Duration::from_secs(5))
         .expect("扫描线程必须先进到持锁状态");
@@ -119,7 +125,6 @@ async fn expired_auth_budget_still_answers_runtime_busy() {
     let (_dir, state) = fixture();
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .unwrap()
@@ -140,28 +145,29 @@ async fn expired_auth_budget_still_answers_runtime_busy() {
     );
 }
 
-/// 旧路径的实测形状：同一个 `Store` 锁被按住时，`try_lock_for(1 s)` 会**等满**整个
-/// 预算再放弃，上层据此 503。这条用例把「修复前每个请求付出的代价」量出来，
-/// 与新读连接（同一时刻几毫秒内成功）形成同场景 A/B。
+/// Writer admission honors its configured wait while the App writer is occupied.
 #[test]
-fn old_store_lock_path_burns_the_whole_auth_budget_when_the_lock_is_held() {
+fn app_writer_wait_honors_its_configured_budget() {
     let (_dir, state) = fixture();
     let budget = Duration::from_millis(1_000);
-    let holding = hold_store_lock(&state, budget + Duration::from_millis(500));
+    let holding = hold_app_writer(&state, budget + Duration::from_millis(500));
     holding
         .recv_timeout(Duration::from_secs(5))
         .expect("扫描线程必须先进到持锁状态");
     let started = Instant::now();
     let store = state.store();
-    let acquired = store.try_lock_for(budget).is_some();
+    let acquired = store
+        .writers()
+        .with_writer_timeout(budget, store::Db::App, |_| Ok(()))
+        .is_ok();
     let waited = started.elapsed();
-    println!("OLD_LOCK_PATH: try_lock_for({budget:?}) -> acquired={acquired} waited={waited:?}");
+    println!("APP_WRITER_WAIT: budget={budget:?} acquired={acquired} waited={waited:?}");
     assert!(
         !acquired,
-        "持锁期间 try_lock_for 必然拿不到——这就是旧路径 503 的来源"
+        "held App writer must refuse another writer within the configured budget"
     );
     assert!(
         waited >= Duration::from_millis(900),
-        "旧路径会等满整个预算（实测 {waited:?}），期间请求只能 503"
+        "App writer must wait for the configured budget: {waited:?}"
     );
 }

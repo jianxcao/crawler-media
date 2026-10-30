@@ -74,41 +74,41 @@ fn fixture(root: &std::path::Path) -> ApiState {
 }
 
 #[tokio::test]
-async fn target_library_snapshot_preserves_binding_through_freeze_failure_and_deletion() {
+async fn target_library_snapshot_preserves_binding_until_deletion_then_uses_default() {
     let tmp = tempfile::tempdir().unwrap();
     let state = fixture(tmp.path());
     let app = router(state.clone());
     let store = state.store();
     let library = store
-        .lock()
+        .as_ref()
         .create_library(MediaKind::Movie, "Target", &[], "everyone", true, &[])
         .unwrap();
     let id = create(&app, Some(&library.id)).await;
     assert_target(&app, &id, Some(&library.id), "ready").await;
-    let removal = store.lock().begin_library_removal(&library.id).unwrap();
+    let removal = store.as_ref().begin_library_removal(&library.id).unwrap();
     assert_target(&app, &id, Some(&library.id), "deleting").await;
     store
-        .lock()
+        .as_ref()
         .set_removal_state(&removal.operation_id, "failed", Some("fixture failure"))
         .unwrap();
     assert_target(&app, &id, Some(&library.id), "deleting").await;
     store
-        .lock()
+        .as_ref()
         .set_removal_state(&removal.operation_id, "cleaning", None)
         .unwrap();
     store
-        .lock()
+        .as_ref()
         .clean_library_removal(&removal.operation_id)
         .unwrap();
-    assert_target(&app, &id, Some(&library.id), "missing").await;
+    assert_target(&app, &id, None, "ready").await;
     let sub = store
-        .lock()
+        .as_ref()
         .get_subscribe(id.parse().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(sub.library_id.unwrap().to_string(), library.id);
+    assert_eq!(sub.library_id, None);
     let replacement = store
-        .lock()
+        .as_ref()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap();

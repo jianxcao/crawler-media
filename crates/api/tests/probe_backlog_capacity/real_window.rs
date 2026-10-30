@@ -3,17 +3,17 @@ use api::probe_manager::ProbeUnit;
 
 fn fixture() -> (
     tempfile::TempDir,
-    Arc<Mutex<Store>>,
+    Arc<Store>,
     Vec<(domain::FileCoverage, String)>,
 ) {
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(temp.path().join("data")).unwrap()));
+    let store = Arc::new(Store::open(temp.path().join("data")).unwrap());
     let root = temp.path().join("tv");
     std::fs::create_dir_all(&root).unwrap();
     let media_id = MediaId::new();
     let mut rows = Vec::new();
     {
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .insert_media(&Media {
                 id: media_id,
@@ -46,7 +46,7 @@ fn fixture() -> (
             let path = root.join(format!("episode-{episode}.mkv"));
             std::fs::write(&path, b"video").unwrap();
             let file = publish_fixture_file(
-                &store,
+                store,
                 &FixtureFile {
                     media_id,
                     path: path.to_string_lossy().into_owned(),
@@ -128,7 +128,7 @@ async fn full_fingerprint_window_preserves_completed_metadata() {
     let target = &rows[17].0;
     assert!(manager.enqueue(unit(target.clone())));
     let metadata = store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&target.file.file_id.to_string())
         .unwrap()
         .unwrap()
@@ -136,7 +136,7 @@ async fn full_fingerprint_window_preserves_completed_metadata() {
     let handed_off = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let ready = {
-                let store = store.lock();
+                let store = store.as_ref();
                 let metadata_done =
                     store.get_probe_job(&metadata).unwrap().unwrap().status == "succeeded";
                 let fingerprint = store
@@ -157,7 +157,7 @@ async fn full_fingerprint_window_preserves_completed_metadata() {
     .await;
     gate.release();
     if handed_off.is_err() {
-        let store = store.lock();
+        let store = store.as_ref();
         panic!(
             "metadata handoff timed out: job={:?}, unit={:?}",
             store.get_probe_job(&metadata).unwrap(),

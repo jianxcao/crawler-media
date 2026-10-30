@@ -156,7 +156,7 @@ impl StrmGraceTracker {
 pub fn spawn_fs_watcher(state: ApiState) {
     tokio::spawn(async move {
         let tracker = Arc::new(StrmGraceTracker::new());
-        if let Ok(rows) = state.store.lock().list_file_coverage() {
+        if let Ok(rows) = state.store.as_ref().list_file_coverage() {
             for row in rows {
                 let path = row.file.path.as_path();
                 if path
@@ -252,7 +252,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
 }
 
 fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::StoreError> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let mut dirs = HashSet::new();
     if let Some(intake) = store.watch_intake()?
         && !intake.is_empty()
@@ -276,7 +276,7 @@ fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::St
 }
 
 fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
-    let Ok(Some(intake)) = state.store.lock().watch_intake() else {
+    let Ok(Some(intake)) = state.store.as_ref().watch_intake() else {
         return false;
     };
     if intake.is_empty() {
@@ -290,7 +290,7 @@ fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
 
 pub(crate) fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathBuf> {
     let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let libraries = { state.store.lock().list_libraries().ok()? };
+    let libraries = { state.store.as_ref().list_libraries().ok()? };
     libraries
         .into_iter()
         .filter(|library| library.realtime_watch)
@@ -306,7 +306,7 @@ pub(crate) fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> O
 pub(crate) fn realtime_library_id_for_root(state: &ApiState, root: &Path) -> Option<String> {
     state
         .store
-        .lock()
+        .as_ref()
         .list_libraries()
         .ok()?
         .into_iter()
@@ -652,7 +652,7 @@ fn note_present_path_presence(state: &ApiState, path: &Path) {
 /// 这些缓存按 ledger 行挂载，清理后下次访问详情页/播放时会按新 URL 重新探测。
 fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
     let path_str = path.display().to_string();
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Ok(Some(coverage)) = store.file_coverage_by_path(&path_str) else {
         return;
     };

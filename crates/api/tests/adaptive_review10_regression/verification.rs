@@ -37,7 +37,7 @@ fn ambiguous_final_verification_does_not_publish_an_earlier_provisional_match() 
     ));
     let old = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(4))
         .unwrap()
         .unwrap();
@@ -108,19 +108,19 @@ fn unresolved_final_verification_cannot_mark_forced_refresh_successful() {
     let rejected = result.is_err();
     if let Ok(replacement) = result {
         f.store
-            .lock()
+            .as_ref()
             .complete_marker_refresh("review9-job", &[replacement])
             .unwrap();
         let marker = f
             .store
-            .lock()
+            .as_ref()
             .get_media_marker(f.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap();
         println!(
             "unresolved E1 job={} source={} intro={:?}..{:?}",
             f.store
-                .lock()
+                .as_ref()
                 .get_probe_job("review9-job")
                 .unwrap()
                 .unwrap()

@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -122,15 +128,12 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
     )
     .unwrap();
 
-    let poster_service = Arc::new(
-        MediaPosterService::with_custom_fetcher(
-            state.store(),
-            catalog.clone(),
-            cache_dir,
-            fetcher.clone(),
-        )
-        .unwrap(),
-    );
+    let poster_service = Arc::new(MediaPosterService::with_custom_fetcher(
+        state.store(),
+        catalog.clone(),
+        cache_dir,
+        fetcher.clone(),
+    ));
 
     let state = state.with_media_posters(poster_service);
     let app = api::router(state);

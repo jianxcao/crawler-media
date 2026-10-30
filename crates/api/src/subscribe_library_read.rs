@@ -42,7 +42,7 @@ pub fn observe_subscribe_library_facts(
     kind: MediaKind,
 ) -> Result<SubscribeLibraryObservation, String> {
     let snapshot = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store
             .subscribe_library_snapshot(subscribe, kind)
             .map_err(|e| e.to_string())?
@@ -72,7 +72,7 @@ pub fn observe_subscribe_library_facts(
         .map_err(|e| e.to_string())?;
 
     {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if !store
             .subscribe_snapshot_is_current(&snapshot, &Default::default())
             .map_err(|e| e.to_string())?

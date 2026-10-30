@@ -2,7 +2,7 @@ use super::*;
 
 fn seed_subscribe(f: &Fixture) -> domain::SubscribeId {
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let id = domain::SubscribeId::new();
     store
         .insert_subscribe(&domain::Subscribe {
@@ -23,7 +23,6 @@ fn seed_subscribe(f: &Fixture) -> domain::SubscribeId {
             search_interval_secs: 1800,
         })
         .unwrap();
-    drop(store);
     f.state
         .jobs()
         .lock()
@@ -73,7 +72,7 @@ fn subscription_detail_and_depth_routes_keep_executor_responsive() {
             ),
         };
         let app = router(f.state.clone());
-        let holder = hold_store(&f.state, Duration::from_millis(500));
+        let holder = hold_store(&f.state, store::Db::Subscribe, Duration::from_millis(500));
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, &uri, &f.token, body)), async {
@@ -93,7 +92,7 @@ fn subscription_detail_and_depth_routes_keep_executor_responsive() {
     }
 }
 
-struct SlowCatalog(Arc<parking_lot::Mutex<Store>>);
+struct SlowCatalog(Arc<Store>);
 impl api::catalog::Catalog for SlowCatalog {
     fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
         Ok(vec![])
@@ -112,7 +111,10 @@ impl api::catalog::Catalog for SlowCatalog {
     }
     fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
         assert!(
-            self.0.try_lock_for(Duration::from_millis(100)).is_some(),
+            self.0
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "Catalog called under Store"
         );
         std::thread::sleep(Duration::from_millis(500));
@@ -129,7 +131,7 @@ fn subscription_detail_catalog_is_off_executor_and_outside_store() {
     let id = seed_subscribe(&f);
     let id = {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let media = Media {
             id: MediaId::new(),
             kind: MediaKind::Tv,
@@ -184,7 +186,7 @@ fn subscription_detail_catalog_is_off_executor_and_outside_store() {
     );
 }
 
-struct SlowPoster(Arc<parking_lot::Mutex<Store>>);
+struct SlowPoster(Arc<Store>);
 impl api::file_stat_read::FileStatRead for SlowPoster {
     fn read_nfo(&self, _: &std::path::Path) -> Option<library::NfoMeta> {
         None
@@ -194,7 +196,10 @@ impl api::file_stat_read::FileStatRead for SlowPoster {
     }
     fn is_file(&self, path: &std::path::Path) -> bool {
         assert!(
-            self.0.try_lock_for(Duration::from_millis(100)).is_some(),
+            self.0
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "poster observed under Store"
         );
         std::thread::sleep(Duration::from_millis(300));
@@ -208,7 +213,6 @@ fn subscription_list_detail_create_and_patch_observe_posters_outside_store() {
         let mut f = Fixture::new();
         f.state
             .store()
-            .lock()
             .add_media_alias(
                 f.media,
                 &domain::MediaAlias {
@@ -275,7 +279,7 @@ fn subscription_list_detail_create_and_patch_observe_posters_outside_store() {
     }
 }
 
-struct SlowDownloader(std::sync::OnceLock<Arc<parking_lot::Mutex<Store>>>);
+struct SlowDownloader(std::sync::OnceLock<Arc<Store>>);
 impl downloader::Downloader for SlowDownloader {
     fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
         Ok(())
@@ -291,8 +295,9 @@ impl downloader::Downloader for SlowDownloader {
             self.0
                 .get()
                 .unwrap()
-                .try_lock_for(Duration::from_millis(100))
-                .is_some(),
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::Subscribe, |_| Ok(()))
+                .is_ok(),
             "Downloader under Store"
         );
         std::thread::sleep(Duration::from_millis(500));
@@ -303,7 +308,7 @@ impl downloader::Downloader for SlowDownloader {
 #[test]
 fn subscription_removal_preview_downloader_is_off_executor_and_outside_store() {
     let mut f = Fixture::new();
-    let media = f.state.store().lock().get_media(f.media).unwrap().unwrap();
+    let media = f.state.store().get_media(f.media).unwrap().unwrap();
     let downloader = Arc::new(SlowDownloader(std::sync::OnceLock::new()));
     f.state = ApiState::new(
         Store::open(f._tmp.path().join("preview-data")).unwrap(),
@@ -315,14 +320,8 @@ fn subscription_removal_preview_downloader_is_off_executor_and_outside_store() {
     )
     .unwrap();
     assert!(downloader.0.set(f.state.store()).is_ok());
-    f.user = f
-        .state
-        .store()
-        .lock()
-        .user_id_by_token(&f.token)
-        .unwrap()
-        .unwrap();
-    f.state.store().lock().insert_media(&media).unwrap();
+    f.user = f.state.store().user_id_by_token(&f.token).unwrap().unwrap();
+    f.state.store().insert_media(&media).unwrap();
     let id = seed_subscribe(&f);
     let (response, elapsed) = runtime().block_on(async {
         let started = Instant::now();

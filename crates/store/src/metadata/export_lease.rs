@@ -12,11 +12,8 @@ pub(super) struct ExportLease(Key);
 
 impl ExportLease {
     pub(super) fn acquire(store: &Store, request: &NfoExportRequest) -> Result<Self, StoreError> {
-        let database = std::fs::canonicalize(store.data_dir())?;
-        let path = crate::path_key::canonical_recorded_key(
-            &store.library,
-            &request.path.to_string_lossy(),
-        );
+        let database = store.data_dir().to_path_buf();
+        let path = store.recorded_path_key(&request.path.to_string_lossy());
         let key = (database, path);
         let mut active = ACTIVE
             .get_or_init(|| Mutex::new(HashSet::new()))
@@ -41,14 +38,11 @@ impl Drop for ExportLease {
 }
 
 pub(super) fn while_inactive<T>(
-    store: &Store,
+    database: &std::path::Path,
     path_key: &str,
     work: impl FnOnce() -> Result<T, StoreError>,
 ) -> Result<T, StoreError> {
-    let key = (
-        std::fs::canonicalize(store.data_dir())?,
-        path_key.to_string(),
-    );
+    let key = (database.to_path_buf(), path_key.to_string());
     let active = ACTIVE
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()

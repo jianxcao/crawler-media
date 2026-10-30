@@ -169,7 +169,7 @@ fn edit_plot(body: &str, value: &str) -> String {
 
 /// The default movie library seeded by `common::state`, plus its video + sidecar.
 fn movie_fixture(state: &ApiState) -> (LibraryId, PathBuf, PathBuf) {
-    let libraries = state.store().lock().list_libraries().unwrap();
+    let libraries = state.store().list_libraries().unwrap();
     let library = libraries
         .into_iter()
         .find(|library| library.kind == MediaKind::Movie)
@@ -185,7 +185,6 @@ fn movie_fixture(state: &ApiState) -> (LibraryId, PathBuf, PathBuf) {
 fn media_at(state: &ApiState, path: &Path) -> MediaId {
     state
         .store()
-        .lock()
         .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .expect("ledger row for the scanned video")
@@ -219,7 +218,7 @@ fn export_request(
     plot: &str,
 ) -> store::metadata::NfoExportRequest {
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     let root_id = store
         .list_library_roots()
         .unwrap()
@@ -256,7 +255,7 @@ fn export_request(
 
 #[tokio::test]
 async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("V1");
     let state = common::state(
@@ -285,7 +284,7 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
     catalog.set_overview("V2");
     common::scan_and_wait(&app, &library_id.to_string()).await;
     let unchanged_after_v2 = shared
-        .lock()
+        .as_ref()
         .library_item_detail(library_id, media, LOCALE)
         .unwrap()
         .unwrap();
@@ -295,7 +294,7 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
     std::fs::write(&nfo, edited).unwrap();
     refresh_item(&app, library_id, media).await;
     let edited_after_v2 = shared
-        .lock()
+        .as_ref()
         .library_item_detail(library_id, media, LOCALE)
         .unwrap()
         .unwrap();
@@ -328,7 +327,10 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
         "export-a",
         "A",
     );
-    shared.lock().begin_nfo_export(&boundary_a, 1_000).unwrap();
+    shared
+        .as_ref()
+        .begin_nfo_export(&boundary_a, 1_000)
+        .unwrap();
     api::storage_operations::resume_library_reconfigurations(&state).unwrap();
     assert!(
         std::fs::read_to_string(&nfo).unwrap().contains("A"),
@@ -347,7 +349,10 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
         &intended_export_id,
         "B",
     );
-    shared.lock().begin_nfo_export(&boundary_b, 2_000).unwrap();
+    shared
+        .as_ref()
+        .begin_nfo_export(&boundary_b, 2_000)
+        .unwrap();
     library::nfo::replace_nfo_atomically(&nfo, &boundary_b.body).unwrap();
     let replaced = std::fs::read_to_string(&nfo).unwrap();
     api::storage_operations::resume_library_reconfigurations(&state).unwrap();
@@ -357,7 +362,7 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
         "recovery must register an already replaced sidecar without rewriting it"
     );
     let registration = shared
-        .lock()
+        .as_ref()
         .nfo_export_registration("op-export-b")
         .unwrap()
         .expect("registration after recovery");
@@ -373,7 +378,7 @@ async fn generated_nfo_does_not_lock_provider_and_crash_recovery_preserves_edits
 /// to the sidecar: recovery must keep the user's text, not overwrite it.
 #[tokio::test]
 async fn crash_recovery_escalates_an_external_edit_instead_of_discarding_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("V1");
     let state = common::state(
@@ -403,7 +408,7 @@ async fn crash_recovery_escalates_an_external_edit_instead_of_discarding_it() {
         "export-c",
         "C",
     );
-    shared.lock().begin_nfo_export(&pending, 1_000).unwrap();
+    shared.as_ref().begin_nfo_export(&pending, 1_000).unwrap();
     let external = edit_plot(&std::fs::read_to_string(&nfo).unwrap(), "KEEPME");
     std::fs::write(&nfo, &external).unwrap();
 
@@ -415,7 +420,7 @@ async fn crash_recovery_escalates_an_external_edit_instead_of_discarding_it() {
         "an edit made during the crash window must survive recovery: {body}"
     );
     let after = shared
-        .lock()
+        .as_ref()
         .library_item_detail(library_id, media, LOCALE)
         .unwrap()
         .unwrap();
@@ -430,7 +435,7 @@ async fn crash_recovery_escalates_an_external_edit_instead_of_discarding_it() {
 /// stays byte-identical and the export stays unfinished for the next retry.
 #[tokio::test]
 async fn crash_recovery_refuses_to_overwrite_an_unreadable_sidecar() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("V1");
     let state = common::state(
@@ -458,7 +463,7 @@ async fn crash_recovery_refuses_to_overwrite_an_unreadable_sidecar() {
         "export-d",
         "D",
     );
-    shared.lock().begin_nfo_export(&pending, 1_000).unwrap();
+    shared.as_ref().begin_nfo_export(&pending, 1_000).unwrap();
     let garbage = "<movie><plot>half written".to_string();
     std::fs::write(&nfo, &garbage).unwrap();
 
@@ -471,7 +476,7 @@ async fn crash_recovery_refuses_to_overwrite_an_unreadable_sidecar() {
     );
     assert!(
         shared
-            .lock()
+            .as_ref()
             .nfo_export_registration("op-export-d")
             .unwrap()
             .is_none(),
@@ -494,7 +499,7 @@ fn export_state(temp: &Path, catalog: Arc<ExportCatalog>) -> ApiState {
 /// R17: a normal single-item refresh must not overwrite a sidecar it cannot read.
 #[tokio::test]
 async fn normal_refresh_preserves_invalid_external_sidecar() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("V1");
     let state = export_state(temp.path(), catalog.clone());
@@ -514,7 +519,7 @@ async fn normal_refresh_preserves_invalid_external_sidecar() {
 /// R18: an edit to the plot alone must not lock the title the provider later changes.
 #[tokio::test]
 async fn provider_title_changes_when_only_plot_was_edited() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("PLOT V1");
     catalog.set_title("TITLE V1");
@@ -531,7 +536,6 @@ async fn provider_title_changes_when_only_plot_was_edited() {
     refresh_item(&app, library_id, media).await;
     let after = state
         .store()
-        .lock()
         .library_item_detail(library_id, media, LOCALE)
         .unwrap()
         .unwrap()
@@ -543,21 +547,21 @@ async fn provider_title_changes_when_only_plot_was_edited() {
     );
 }
 
-/// S01: an export holds the Store mutex only for database phases. Every lock
-/// acquisition records whether the sidecar exists yet; the file must appear
-/// between two guards, never while one is alive.
+/// S01: the export driver borrows Store for separate database phases. Each
+/// phase records whether the sidecar exists yet; registration observes the file
+/// written between planning and registration, and phase borrows never nest.
 #[tokio::test]
 async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Tracked<'a> {
-        guard: parking_lot::MutexGuard<'a, store::Store>,
+        store: &'a store::Store,
         live: &'a AtomicUsize,
     }
     impl std::ops::Deref for Tracked<'_> {
         type Target = store::Store;
         fn deref(&self) -> &store::Store {
-            &self.guard
+            self.store
         }
     }
     impl Drop for Tracked<'_> {
@@ -566,7 +570,7 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
         }
     }
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("V1");
     let state = export_state(temp.path(), catalog);
@@ -597,7 +601,7 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
         );
         seen.lock().push(nfo.exists());
         Tracked {
-            guard: shared.lock(),
+            store: shared.as_ref(),
             live: &live,
         }
     };
@@ -620,11 +624,11 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
     assert_eq!(live.load(Ordering::SeqCst), 0);
     assert!(
         shared
-            .lock()
+            .as_ref()
             .nfo_export_registration("op-phased")
             .unwrap()
             .is_some(),
-        "the final locked phase registers the export"
+        "the final database phase registers the export"
     );
 }
 
@@ -633,7 +637,7 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
 /// Library renders it), and deleting the NFO drops it.
 #[tokio::test]
 async fn sidecar_edit_is_local_and_deleting_the_nfo_clears_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
     let catalog = Arc::new(ExportCatalog::default());
     catalog.set_overview("PLOT V1");
     catalog.set_title("TITLE V1");
@@ -661,7 +665,7 @@ async fn sidecar_edit_is_local_and_deleting_the_nfo_clears_it() {
     );
     let shared = state.store();
     {
-        let store = shared.lock();
+        let store = shared.as_ref();
         let detail = store
             .library_item_detail(library_id, media, LOCALE)
             .unwrap()
@@ -696,7 +700,7 @@ async fn sidecar_edit_is_local_and_deleting_the_nfo_clears_it() {
         "deleting the NFO clears the local edit: {body}"
     );
     let detail = shared
-        .lock()
+        .as_ref()
         .library_item_detail(library_id, media, LOCALE)
         .unwrap()
         .unwrap()

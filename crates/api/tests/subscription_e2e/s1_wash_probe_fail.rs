@@ -11,14 +11,7 @@ async fn wash_subscription_owning_1080p(h: &Harness) -> (SubscribeId, std::path:
     let id = h
         .create_movie_subscribe(serde_json::json!({ "wash_cut": true }))
         .await;
-    let media_id = h
-        .state
-        .store()
-        .lock()
-        .get_subscribe(id)
-        .unwrap()
-        .unwrap()
-        .media_id;
+    let media_id = h.state.store().get_subscribe(id).unwrap().unwrap().media_id;
     let owned = h
         .movie_library_root()
         .join("The Matrix (1999)")
@@ -41,9 +34,9 @@ async fn wash_subscription_owning_1080p(h: &Harness) -> (SubscribeId, std::path:
     );
     {
         let store = h.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 file_id: Some(LedgerId::new()),
                 media_id,
@@ -64,7 +57,6 @@ async fn wash_subscription_owning_1080p(h: &Harness) -> (SubscribeId, std::path:
 fn owned_fact_path(h: &Harness, id: SubscribeId) -> Option<String> {
     h.state
         .store()
-        .lock()
         .load_subscribe_facts(id)
         .unwrap()
         .movie()

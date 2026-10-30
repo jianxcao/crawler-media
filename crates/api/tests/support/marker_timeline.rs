@@ -5,7 +5,6 @@ use api::{ApiState, Store};
 use domain::FileCoverage;
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
-use parking_lot::Mutex;
 
 struct NoFetch;
 
@@ -16,12 +15,12 @@ impl Fetcher for NoFetch {
 }
 
 pub async fn resolved_chapters(
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     root: &Path,
     original: &FileCoverage,
 ) -> Vec<marker::ChapterMarker> {
     let (row, media) = {
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .file_coverage_by_id(original.file.file_id)
             .unwrap()

@@ -1,9 +1,8 @@
 use super::*;
-use parking_lot::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
+fn fixture() -> (tempfile::TempDir, Arc<crate::Store>, ProbeUnit) {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::Store::open(directory.path().join("data")).unwrap();
     let root = directory.path().join("shows");
@@ -50,7 +49,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
         marker_refresh_id: None,
         job_id: None,
     };
-    (directory, Arc::new(Mutex::new(store)), unit)
+    (directory, Arc::new(store), unit)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -64,12 +63,12 @@ async fn chapter_shutdown_recovers_claims_without_parking_the_executor() {
         targets_hash: "fixture".into(),
     };
     store
-        .lock()
+        .as_ref()
         .enqueue_chapter_frame_task(&obligation)
         .unwrap();
     assert!(
         store
-            .lock()
+            .as_ref()
             .claim_chapter_frame_task(&obligation.id)
             .unwrap()
     );
@@ -80,9 +79,13 @@ async fn chapter_shutdown_recovers_claims_without_parking_the_executor() {
     let (held, ready) = mpsc::channel();
     let occupied = store.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = occupied.lock();
-        held.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(500));
+        occupied
+            .with_writer(store::Db::Library, |_| {
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(())
+            })
+            .unwrap();
     });
     ready.recv_timeout(Duration::from_secs(2)).unwrap();
     let started = Instant::now();
@@ -92,7 +95,7 @@ async fn chapter_shutdown_recovers_claims_without_parking_the_executor() {
     task.await.unwrap().unwrap();
     holder.join().unwrap();
     assert_eq!(
-        store.lock().pending_chapter_frame_tasks(10).unwrap(),
+        store.as_ref().pending_chapter_frame_tasks(10).unwrap(),
         vec![obligation]
     );
     assert!(

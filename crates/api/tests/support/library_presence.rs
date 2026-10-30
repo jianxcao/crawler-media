@@ -117,7 +117,7 @@ impl PresenceFixture {
         let member_token = "member-secret-token".to_string();
         {
             let store_arc = state.store();
-            let guard = store_arc.lock();
+            let guard = store_arc.as_ref();
             let user = domain::User {
                 id: member_id,
                 login: "member".into(),
@@ -133,7 +133,7 @@ impl PresenceFixture {
         std::fs::create_dir_all(&root).unwrap();
         let lib = {
             let store_arc = state.store();
-            let guard = store_arc.lock();
+            let guard = store_arc.as_ref();
             let root_str = root.to_str().unwrap();
             guard
                 .create_library(
@@ -161,7 +161,7 @@ impl PresenceFixture {
     /// 当前 Library 的扫描 scope 指纹（与生产 `ScanCoordinator::enqueue` 同一构造）。
     pub fn scope_signature(&self) -> String {
         let store = self.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let library = guard
             .get_library(&self.library_id)
             .unwrap()
@@ -175,7 +175,7 @@ impl PresenceFixture {
     /// 用来构造「升级前遗留的 active operation」（P2-NEW-1）。
     pub fn legacy_scope_signature(&self) -> String {
         let store = self.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let library = guard
             .get_library(&self.library_id)
             .unwrap()
@@ -197,7 +197,7 @@ impl PresenceFixture {
     /// 轮询 store 直到 operation 进入终态，返回落库的 operation（含 report）。
     pub async fn wait_scan_terminal_op(&self, op_id: &str) -> store::ScanOperation {
         for _ in 0..600 {
-            let op = self.state.store().lock().scan_operation(op_id).unwrap();
+            let op = self.state.store().scan_operation(op_id).unwrap();
             if let Some(op) = op
                 && !op.status.is_active()
             {
@@ -240,9 +240,9 @@ impl PresenceFixture {
             ..Default::default()
         };
         let store_arc = self.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.insert_media(&media).unwrap();
-        let published = publish_fixture_file(&guard, &spec).unwrap();
+        let published = publish_fixture_file(guard, &spec).unwrap();
         (media_id, published)
     }
 

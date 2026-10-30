@@ -66,7 +66,7 @@ fn pinned(
     title_ref: &str,
 ) -> Value {
     let shared = state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let files: Vec<Value> = files
         .iter()
         .map(|id| {
@@ -108,7 +108,7 @@ fn setup_fixture() -> (
 
     let store = state.store();
     let (library_id, media, file_ids) = {
-        let store = store.lock();
+        let store = store.as_ref();
         let lib = store
             .list_libraries()
             .unwrap()
@@ -241,7 +241,7 @@ async fn reidentify_two_files_moves_only_listed_files_and_reports_honest_claimed
     assert_eq!(body["claimed"], 2);
 
     let shared = _state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
     let row2 = store.file_coverage_by_id(f2).unwrap().unwrap();
     let row3 = store.file_coverage_by_id(f3).unwrap().unwrap();
@@ -285,7 +285,7 @@ async fn reidentify_stale_file_version_returns_conflict_and_zero_moved() {
     assert_eq!(res.status(), StatusCode::CONFLICT);
 
     let shared = _state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
     let row2 = store.file_coverage_by_id(f2).unwrap().unwrap();
     assert_eq!(row1.file.media_id, media.id);
@@ -311,7 +311,7 @@ async fn reidentify_alias_conflict_returns_409_without_claimed() {
     };
     {
         let shared = _state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store.insert_media(&other_media).unwrap();
     }
 
@@ -342,7 +342,7 @@ async fn reidentify_alias_conflict_returns_409_without_claimed() {
     assert!(body.get("data").is_none() || body["data"].is_null());
 
     let shared = _state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
     assert_eq!(row1.file.media_id, media.id);
 }
@@ -371,7 +371,7 @@ async fn reidentify_invalid_or_cross_media_file_ids_returns_400() {
     let other_fid = LedgerId::new();
     {
         let shared = _state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         let other_m = Media {
             id: MediaId::new(),
             kind: MediaKind::Movie,
@@ -484,7 +484,7 @@ async fn reidentify_already_in_place_returns_claimed_zero_and_no_writes() {
     assert_eq!(body["claimed"], 0);
 
     let shared = _state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
     assert_eq!(row1.file.media_id, media.id);
 }
@@ -512,7 +512,7 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
     };
     {
         let shared = _state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store.insert_media(&tvdb_only).unwrap();
         assert!(
             store
@@ -546,7 +546,7 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
     assert_eq!(body["claimed"], 1);
 
     let shared = _state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let by_new_alias = store
         .get_media_by_alias_kind("tmdb", "2002", Some(MediaKind::Movie))
         .unwrap()
@@ -689,7 +689,7 @@ async fn reidentify_contract_is_pinned_by_the_preview() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT, "stale source revision");
     let shared = state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     for id in [f1, f2, f3] {
         assert_eq!(
             store
@@ -729,7 +729,7 @@ async fn reidentify_rejects_non_strict_title_ref_without_writes() {
         assert_eq!(error["code"], "title_ref.invalid", "{bad}");
     }
     let shared = state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     assert_eq!(
         store
             .file_coverage_by_id(f1)

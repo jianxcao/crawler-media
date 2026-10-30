@@ -1,93 +1,108 @@
-//! Explicit diagnostic SQL work scopes. Ordinary requests do not install a tracer.
-//!
-//! The gate can only assert what it can count, and wall clock cannot be asserted: a slow
-//! box would fail a healthy tree. Every hot path therefore has to expose two deterministic
-//! numbers — SQL statements executed and `FULLSCAN_STEP` rows walked.
-//!
-//! Two rules shape this seam:
-//!
-//! - The numbers come from SQLite's own trace (`QueryWorkScope`), never from counters the
-//!   path increments by hand. A hand-incremented counter only proves the path agrees with
-//!   itself; the trace reports what the database really prepared and ran.
-//! - It is a *closure* seam: the production entry point is called **inside** the closure, so
-//!   the measurement cannot drift from the statements the code actually executes.
-//!
-//! The same scope supports performance gates and explicitly opted-in request diagnostics.
-//! Normal request paths never install it. Progress injection stays test-support-only.
-//!
-//! [`PENDING_DISPATCH_SQL`]: crate::PENDING_DISPATCH_SQL
-
-use rusqlite::Connection;
-
+//! Scoped SQL measurements attach only while the operation owns a connection lease.
 use crate::library_query::items::stats::{QueryWorkScope, QueryWorkStats};
+use crate::{Db, Store};
+use rusqlite::Connection;
+use std::{cell::RefCell, rc::Rc};
 
-use crate::Store;
-
-/// Which store connection(s) one measured closure runs on.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatsScope {
-    /// `library.db`: browse, detail, facets, playback selection, publication, progress writes.
     Library,
-    /// `app.db`: authorization only (the role roster lives there).
     App,
-    /// Both connections, summed: a request that authorizes first and then reads.
     Both,
 }
-
-impl Store {
-    /// Install a temporary SQLite progress hook around a test operation.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn with_library_progress<T>(
-        &self,
-        interval: i32,
-        callback: impl FnMut() -> bool + Send + 'static,
-        work: impl FnOnce() -> T,
-    ) -> T {
-        struct ProgressGuard<'a>(&'a Connection);
-        impl Drop for ProgressGuard<'_> {
-            fn drop(&mut self) {
-                self.0.progress_handler(0, None::<fn() -> bool>);
-            }
+struct Frame {
+    scope: StatsScope,
+    totals: Rc<RefCell<QueryWorkStats>>,
+}
+thread_local! { static FRAMES:RefCell<Vec<Frame>>=const { RefCell::new(Vec::new()) }; }
+pub(crate) struct LeaseStats<'a> {
+    db: Db,
+    scope: Option<QueryWorkScope<'a>>,
+}
+impl<'a> LeaseStats<'a> {
+    pub(crate) fn for_database(database: &str, conn: &'a Connection) -> Self {
+        match database {
+            "app" => Self::new(Db::App, conn),
+            "library" => Self::new(Db::Library, conn),
+            "subscribe" => Self::new(Db::Subscribe, conn),
+            _ => Self::new(Db::Cache, conn),
         }
-        self.library.progress_handler(interval, Some(callback));
-        let _guard = ProgressGuard(&self.library);
-        work()
     }
-
-    /// Runs `work` and reports the deterministic SQL work it did.
-    ///
-    /// Use it in a test, around the public entry point under test:
-    ///
-    /// ```ignore
-    /// let (detail, stats) = store.with_stats(StatsScope::Library, || {
-    ///     store.library_item_detail(library, media, "en-US")
-    /// });
-    /// assert!(stats.fullscan_steps == 0, "detail must stay on its indexes");
-    /// ```
-    ///
-    /// `statements`, `fullscan_steps`, `vm_steps`, `sort_operations`, `sql_rows` and
-    /// `sql_duration_ns` are deltas for this closure only; connections the closure does not
-    /// touch contribute nothing. Nested scopes are supported (the trace keeps a per-connection
-    /// reference count), so measuring an operation that itself measures something is safe.
+    pub(crate) fn new(db: Db, conn: &'a Connection) -> Self {
+        let enabled = FRAMES.with(|frames| {
+            frames.borrow().iter().any(|frame| {
+                matches!(
+                    (frame.scope, db),
+                    (StatsScope::Both, Db::App | Db::Library)
+                        | (StatsScope::App, Db::App)
+                        | (StatsScope::Library, Db::Library)
+                )
+            })
+        });
+        Self {
+            db,
+            scope: enabled.then(|| QueryWorkScope::new(&[conn])),
+        }
+    }
+}
+impl Drop for LeaseStats<'_> {
+    fn drop(&mut self) {
+        let Some(scope) = &self.scope else {
+            return;
+        };
+        let measured = scope.stats(0);
+        FRAMES.with(|frames| {
+            for frame in frames.borrow().iter() {
+                let selected = matches!(
+                    (frame.scope, self.db),
+                    (StatsScope::Both, Db::App | Db::Library)
+                        | (StatsScope::App, Db::App)
+                        | (StatsScope::Library, Db::Library)
+                );
+                if selected {
+                    add(&mut frame.totals.borrow_mut(), measured);
+                }
+            }
+        });
+    }
+}
+fn add(to: &mut QueryWorkStats, value: QueryWorkStats) {
+    to.statements += value.statements;
+    to.fullscan_steps += value.fullscan_steps;
+    to.vm_steps += value.vm_steps;
+    to.sort_operations += value.sort_operations;
+    to.sql_rows += value.sql_rows;
+    to.sql_duration_ns += value.sql_duration_ns;
+    to.rows_returned += value.rows_returned;
+    to.hydrated_rows += value.hydrated_rows;
+}
+impl Store {
     #[doc(hidden)]
     pub fn with_stats<T>(
         &self,
         scope: StatsScope,
         work: impl FnOnce() -> T,
     ) -> (T, QueryWorkStats) {
-        let connections: Vec<&Connection> = match scope {
-            StatsScope::Library => vec![&self.library],
-            StatsScope::App => vec![&self.app],
-            StatsScope::Both => vec![&self.library, &self.app],
-        };
-        let measured = QueryWorkScope::new(&connections);
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                FRAMES.with(|frames| {
+                    frames.borrow_mut().pop();
+                });
+            }
+        }
+        let totals = Rc::new(RefCell::new(QueryWorkStats::default()));
+        FRAMES.with(|frames| {
+            frames.borrow_mut().push(Frame {
+                scope,
+                totals: Rc::clone(&totals),
+            })
+        });
+        let restore = Restore;
         let value = work();
-        let stats = measured.stats(0);
-        // Unregister before returning: a later operation on the same connection must not be
-        // attributed to this measurement.
-        drop(measured);
+        drop(restore);
+        let stats = *totals.borrow();
         (value, stats)
     }
 }

@@ -51,21 +51,17 @@ fn resume_page_blocking(
     offset: usize,
     limit: usize,
 ) -> Result<ServerItemPage, String> {
-    let (targets, scope) = {
-        let store = state
-            .store_readers
-            .checkout(SELECTION_DEADLINE)
-            .ok_or("Library reader pool busy")?;
+    let scoped = super::super::sync_operations::read_store(state, |store| {
         let targets = store.user_resumable_units(user_id).map_err(|error| {
             tracing::error!(%error, %user_id, "Jellyfin 续播候选读取失败");
             error.to_string()
         })?;
         if targets.is_empty() {
             tracing::debug!(%user_id, "Jellyfin 续播候选为空");
-            return Ok(ServerItemPage::default());
+            return Ok(None);
         }
         let media_ids = resume_media_ids(&targets);
-        let scope = match read_media_scope(&store, user_id, &media_ids) {
+        let scope = match read_media_scope(store, user_id, &media_ids) {
             Ok(scope) => scope,
             Err(error) => {
                 count_candidates(state, error.rows_read);
@@ -73,7 +69,10 @@ fn resume_page_blocking(
                 return Err(error.to_string());
             }
         };
-        (targets, scope)
+        Ok(Some((targets, scope)))
+    })?;
+    let Some((targets, scope)) = scoped else {
+        return Ok(ServerItemPage::default());
     };
     count_candidates(state, scope.rows_read);
     let selection = resume_selection(&scope, user_id, &targets, offset, limit);

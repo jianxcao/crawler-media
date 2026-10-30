@@ -83,7 +83,7 @@ fn resolve_with_details(
     )
     .with_catalog(Arc::new(NamesCatalog { hits, details }))
     .with_poster_fetch(Arc::new(OfflineArtwork));
-    state.store().lock().insert_media(wanted).unwrap();
+    state.store().insert_media(wanted).unwrap();
     api::auto_resolve::auto_resolve_media(&state, wanted, &tmp.path().join("movie.mkv"))
 }
 

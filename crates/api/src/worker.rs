@@ -21,7 +21,7 @@ pub(crate) fn notify(state: &ApiState, title: &str, content: &str) {
     // Extract config synchronously (parking_lot guard must not cross await),
     // then send best-effort on the current runtime.
     let (url, token): (Option<String>, Option<String>) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             crate::http::notify::notify_url(&store),
             crate::http::notify::notify_token(&store),
@@ -89,13 +89,12 @@ fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(
         Err(err) => return Err(err),
     };
     let (subscribe, media, _filter, sites) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let maybe_sub = store
             .get_subscribe(subscribe_id)
             .map_err(|e| e.to_string())?;
         let Some(subscribe) = maybe_sub else {
             // 订阅已被删除，自动清理残留孤儿 JobDef，避免循环调度与报警。
-            drop(store);
             let _ = state.jobs.lock().delete_defs_for_payload(&job.payload);
             return Ok(());
         };
@@ -180,7 +179,7 @@ fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(
 
 fn run_rss_for_subscriptions(state: &ApiState, job: &Job) -> Result<(), String> {
     let (subscriptions, sites) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             store
                 .list_all_subscribes()
@@ -241,7 +240,9 @@ pub(crate) fn notify_subscription_complete(
     subscribe: &domain::Subscribe,
     media: &domain::Media,
 ) -> Result<(), String> {
-    crate::completion::mark_if_complete(state, subscribe);
+    let Some(subscribe) = crate::completion::mark_if_complete(state, subscribe) else {
+        return Ok(());
+    };
     if matches!(
         subscribe.coverage,
         domain::Coverage::Tv {
@@ -251,20 +252,35 @@ pub(crate) fn notify_subscription_complete(
     ) {
         return Ok(());
     }
-    // L4: a unit only counts while its file is still on disk.
-    let done = crate::completion::units_on_disk(state, subscribe);
-    let store = state.store.lock();
-    let key = format!("subscribe.completed:{}", subscribe.id);
-    if !done {
-        // L4: no longer complete → the next completion notifies again.
-        let _ = store.delete_setting(&key);
-        return Ok(());
+    // L4: observe disk without holding the Subscribe decision guard.
+    let done = crate::completion::units_on_disk(state, &subscribe);
+    {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        if !crate::completion::current_is_unchanged(state, &subscribe)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+        let store = state.store.as_ref();
+        let key = format!("subscribe.completed:{}", subscribe.id);
+        if !done {
+            store
+                .delete_setting(&key)
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        if store
+            .get_setting(&key)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        store
+            .put_setting(&key, "1")
+            .map_err(|error| error.to_string())?;
     }
-    if store.get_setting(&key).ok().flatten().is_some() {
-        return Ok(()); // 已通知过
-    }
-    let _ = store.put_setting(&key, "1");
-    drop(store);
     notify(
         state,
         "订阅已完成",
@@ -279,11 +295,11 @@ fn record_wanted_round<D: downloader::Downloader + ?Sized>(
     state: &ApiState,
     subscribe: &domain::Subscribe,
     added: &subscribe::Added<'_, D>,
+    cap: Option<u32>,
+    catalog_max: Option<u32>,
 ) -> Result<(), String> {
     let now = crate::job_loop::unix_now();
-    let cap = crate::air_gate::aired_cap(state, subscribe, added.input.media);
-    let catalog_max = crate::air_gate::catalog_aired_max(state, subscribe, added.input.media);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let facts = store
         .load_subscribe_facts(subscribe.id)
         .map_err(|e| e.to_string())?;
@@ -370,7 +386,7 @@ fn covered_units(release: &domain::Release) -> Vec<(Option<u32>, Option<u32>)> {
 fn transfer(state: &ApiState) -> Result<(), String> {
     let subscribes = state
         .store
-        .lock()
+        .as_ref()
         .list_all_subscribes()
         .map_err(|e| e.to_string())?;
     let mut failures = 0usize;

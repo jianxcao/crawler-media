@@ -166,7 +166,7 @@ fn edit_plot(body: &str, value: &str) -> String {
 
 /// The default movie library seeded by `common::state`, plus its video + sidecar.
 fn movie_fixture(state: &ApiState) -> (LibraryId, PathBuf, PathBuf) {
-    let libraries = state.store().lock().list_libraries().unwrap();
+    let libraries = state.store().list_libraries().unwrap();
     let library = libraries
         .into_iter()
         .find(|library| library.kind == MediaKind::Movie)
@@ -182,7 +182,6 @@ fn movie_fixture(state: &ApiState) -> (LibraryId, PathBuf, PathBuf) {
 fn media_at(state: &ApiState, path: &Path) -> MediaId {
     state
         .store()
-        .lock()
         .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .expect("ledger row for the scanned video")

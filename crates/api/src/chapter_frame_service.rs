@@ -72,7 +72,7 @@ struct Inner {
 }
 
 pub struct ChapterFrameService {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     registry: Arc<LibraryWorkRegistry>,
     runner: Arc<dyn ChapterFrameRunner>,
     inner: Mutex<Inner>,
@@ -85,7 +85,7 @@ pub struct ChapterFrameService {
 }
 
 impl ChapterFrameService {
-    pub fn new(store: Arc<Mutex<Store>>, registry: Arc<LibraryWorkRegistry>) -> Self {
+    pub fn new(store: Arc<Store>, registry: Arc<LibraryWorkRegistry>) -> Self {
         Self::with_runner(
             store,
             registry,
@@ -94,7 +94,7 @@ impl ChapterFrameService {
     }
 
     pub fn with_runner(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         registry: Arc<LibraryWorkRegistry>,
         runner: Arc<dyn ChapterFrameRunner>,
     ) -> Self {
@@ -124,7 +124,7 @@ impl ChapterFrameService {
         }
         self.shutting_down.store(false, Ordering::SeqCst);
         // A previous process may have died between claim and ack.
-        if let Err(error) = self.store.lock().recover_chapter_frame_tasks() {
+        if let Err(error) = self.store.as_ref().recover_chapter_frame_tasks() {
             tracing::warn!(%error, "章节帧任务启动恢复失败");
         }
         let mut workers = self.workers.lock();
@@ -143,7 +143,7 @@ impl ChapterFrameService {
         }
         let file_id = file_id_from_str(file_id)?;
         let (path, enabled) = {
-            let store = self.store.lock();
+            let store = self.store.as_ref();
             let Some((path, _library_id)) = store
                 .get_file_path_and_library(file_id)
                 .map_err(|error| error.to_string())?
@@ -165,7 +165,7 @@ impl ChapterFrameService {
             return Ok(false);
         }
         let file_id = {
-            let store = self.store.lock();
+            let store = self.store.as_ref();
             store
                 .file_id_at_path(&path.to_string_lossy())
                 .map_err(|error| error.to_string())?
@@ -192,7 +192,7 @@ impl ChapterFrameService {
         };
         let inserted = self
             .store
-            .lock()
+            .as_ref()
             .enqueue_chapter_frame_task(&task)
             .map_err(|error| error.to_string())?;
         if inserted {
@@ -297,14 +297,14 @@ impl ChapterFrameService {
         }
         let pending = self
             .store
-            .lock()
+            .as_ref()
             .pending_chapter_frame_tasks(capacity)
             .map_err(|error| error.to_string())?;
         let mut claimed = 0;
         for task in pending {
             let owned = self
                 .store
-                .lock()
+                .as_ref()
                 .claim_chapter_frame_task(&task.id)
                 .map_err(|error| error.to_string())?;
             if owned {
@@ -430,7 +430,7 @@ impl ChapterFrameService {
         task: &ChapterFrameTask,
     ) -> Result<(PathBuf, Option<Arc<LibraryWorkLease>>), String> {
         let (path, library_id) = {
-            let store = self.store.lock();
+            let store = self.store.as_ref();
             let Some((path, lid)) = store
                 .get_file_path_and_library(task.file_id)
                 .map_err(|e| e.to_string())?

@@ -16,7 +16,6 @@ fn waited(h: &Harness, id: domain::SubscribeId, days: i64) {
         .as_secs() as i64;
     h.state
         .store()
-        .lock()
         .put_setting(
             &format!("subscribe.pack_wait_since:{id}"),
             &(now - days * 86_400).to_string(),

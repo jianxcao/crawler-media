@@ -197,7 +197,7 @@ async fn movie_resume_never_requests_tv_season() {
     let movie_id = {
         let store = state.store();
         let movie_id = seed_media(
-            &store.lock(),
+            store.as_ref(),
             &tmp.path().join("app"),
             MediaKind::Movie,
             "Film",
@@ -205,9 +205,9 @@ async fn movie_resume_never_requests_tv_season() {
             None,
             None,
         );
-        let user = store.lock().admin_user_id().unwrap();
+        let user = store.as_ref().admin_user_id().unwrap();
         store
-            .lock()
+            .as_ref()
             .upsert_unit(
                 user,
                 movie_id,
@@ -252,7 +252,7 @@ async fn blocked_metadata_does_not_delay_local_up_next() {
     let tv_id = {
         let store = state.store();
         let tv_id = seed_media(
-            &store.lock(),
+            store.as_ref(),
             &tmp.path().join("app"),
             MediaKind::Tv,
             "Series",
@@ -260,9 +260,9 @@ async fn blocked_metadata_does_not_delay_local_up_next() {
             Some(1),
             Some(1),
         );
-        let user = store.lock().admin_user_id().unwrap();
+        let user = store.as_ref().admin_user_id().unwrap();
         store
-            .lock()
+            .as_ref()
             .upsert_unit(
                 user,
                 tv_id,
@@ -315,7 +315,7 @@ async fn tv_episode_nfo_title_is_served_locally() {
     let tv_id = {
         let store = state.store();
         let tv_id = seed_media(
-            &store.lock(),
+            store.as_ref(),
             &root,
             MediaKind::Tv,
             "Series",
@@ -328,9 +328,9 @@ async fn tv_episode_nfo_title_is_served_locally() {
             "<episodedetails><title>Pilot From Nfo</title></episodedetails>",
         )
         .unwrap();
-        let user = store.lock().admin_user_id().unwrap();
+        let user = store.as_ref().admin_user_id().unwrap();
         store
-            .lock()
+            .as_ref()
             .upsert_unit(
                 user,
                 tv_id,
@@ -373,7 +373,7 @@ async fn unresolvable_season_is_enriched_at_most_once() {
     {
         let store = state.store();
         let tv_id = seed_media(
-            &store.lock(),
+            store.as_ref(),
             &root,
             MediaKind::Tv,
             "Cooldown",
@@ -381,9 +381,9 @@ async fn unresolvable_season_is_enriched_at_most_once() {
             Some(1),
             Some(1),
         );
-        let user = store.lock().admin_user_id().unwrap();
+        let user = store.as_ref().admin_user_id().unwrap();
         store
-            .lock()
+            .as_ref()
             .upsert_unit(
                 user,
                 tv_id,

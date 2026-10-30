@@ -169,6 +169,7 @@ async fn pool_rejection_has_no_fabricated_page_or_sql_work_and_recovery_is_measu
     assert_eq!(s.total, None);
     assert_eq!(s.vm_steps, None);
     drop(lease);
+    let timing = QueryTiming::start();
     let fresh = QueryMetrics::new(timing, true);
     let response = router(state)
         .oneshot(request(&uri, timing, fresh.clone()))

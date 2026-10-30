@@ -171,7 +171,7 @@ fn acquire_file_leases(
     state: &ApiState,
     file_ids: &[LedgerId],
 ) -> Result<Vec<LibraryWorkLease>, Response> {
-    let library_ids = super::store_wait::with_bounded_store(state.store(), |store| {
+    let library_ids = super::store_wait::with_store_read(state, |store| {
         let mut ids = HashSet::new();
         for file_id in file_ids {
             if let Some((_, library_id)) =
@@ -188,8 +188,7 @@ fn acquire_file_leases(
             }
         }
         Ok::<_, Response>(ids)
-    })
-    .ok_or_else(super::store_wait::busy_response)??;
+    })??;
     let mut leases = Vec::with_capacity(library_ids.len());
     for library_id in &library_ids {
         match state.library_work.acquire_bounded(&state.store, library_id) {
@@ -228,7 +227,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         Err(reason) => return invalid_title_ref(&reason),
     };
     let parsed = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         match parse_file_targets(&store, &request) {
             Ok(p) => p,
             Err((status, code, msg)) => return err(status, code, &msg),
@@ -254,7 +253,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         Err(e) => return err(StatusCode::BAD_GATEWAY, "reidentify.upstream", &e),
     };
 
-    let _from_media = match state.store.lock().get_media(parsed.from_media_id) {
+    let _from_media = match state.store.as_ref().get_media(parsed.from_media_id) {
         Ok(Some(m)) => m,
         _ => {
             return err(
@@ -267,7 +266,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
 
     let target_id = target_media.tmdb_id.as_deref().unwrap_or("");
     if !target_id.is_empty() {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if let Ok(Some(existing_media)) =
             store.get_media_by_alias_kind("tmdb", target_id, Some(target_media.kind))
         {
@@ -292,7 +291,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
     }
 
     let to_media = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         match store.ensure_media(target_media.clone()) {
             Ok(m) => m,
             Err(e) => {
@@ -327,7 +326,7 @@ fn reassign_parsed_files(
     };
 
     let now_ms = crate::job_loop::unix_now() * 1000;
-    let claimed = match state.store.lock().reassign_files(&reassign_req, now_ms) {
+    let claimed = match state.store.as_ref().reassign_files(&reassign_req, now_ms) {
         Ok(c) => c,
         Err(store::StoreError::Protected(msg)) => {
             return err(StatusCode::CONFLICT, "library.protected", &msg);
@@ -341,7 +340,7 @@ fn reassign_parsed_files(
             kind: target.kind,
             external_id: ext_id.to_string(),
         };
-        if let Err(e) = state.store.lock().add_media_alias(to_media.id, &alias) {
+        if let Err(e) = state.store.as_ref().add_media_alias(to_media.id, &alias) {
             match e {
                 store::StoreError::Protected(msg) => {
                     return err(StatusCode::CONFLICT, "reidentify.alias_conflict", &msg);

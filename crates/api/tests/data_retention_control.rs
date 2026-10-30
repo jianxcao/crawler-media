@@ -221,7 +221,7 @@ async fn preview_is_read_only_and_reports_classes() {
     insert_old_metrics(&state, 3, now - 100 * DAY);
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .put_catalog_cache(
                 "tmdb",

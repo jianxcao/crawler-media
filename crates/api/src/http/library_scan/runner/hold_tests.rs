@@ -40,7 +40,7 @@ fn tv_fixture() -> (tempfile::TempDir, ApiState, String, std::path::PathBuf) {
     std::fs::create_dir_all(root.join("Season 01")).unwrap();
     let library_id = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         guard
             .create_library(
                 MediaKind::Tv,
@@ -122,7 +122,7 @@ fn scan_once(
     // A real operation row: the chunk loop then exercises the checkpoint and scan_seen paths.
     let op_id = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         guard
             .enqueue_scan(library_id, "hold-fixture", &[], 1_000)
             .unwrap()

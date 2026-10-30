@@ -52,7 +52,7 @@ fn failed_stage(s: &ProbeScenario, ledger_id: String) -> ProbeStageKey {
         context_key: "ctx-deleted".into(),
         stage: ProbeStage::Metadata,
     };
-    let store = s.store.lock();
+    let store = s.store.as_ref();
     assert!(store.claim_probe_stage(&key, "job-1", 1_000_000).unwrap());
     assert!(
         store
@@ -73,7 +73,7 @@ fn failed_stage(s: &ProbeScenario, ledger_id: String) -> ProbeStageKey {
 fn dispatch_at_deadline_and_check(s: &ProbeScenario, key: &ProbeStageKey) {
     let deadline = s
         .store
-        .lock()
+        .as_ref()
         .get_probe_stage(key)
         .unwrap()
         .unwrap()
@@ -81,9 +81,11 @@ fn dispatch_at_deadline_and_check(s: &ProbeScenario, key: &ProbeStageKey) {
         .expect("failed stage has a retry deadline");
     let dispatched = s.manager.dispatch_due(deadline, 32);
     assert_eq!(dispatched.unwrap(), 0);
-    let store = s.store.try_lock_for(Duration::from_secs(1));
-    assert!(store.is_some(), "Store must be free after dispatch");
-    assert!(store.unwrap().get_probe_stage(key).unwrap().is_none());
+    s.store
+        .writers()
+        .with_writer_timeout(Duration::from_secs(1), store::Db::Library, |_| Ok(()))
+        .expect("Library writer must be free after dispatch");
+    assert!(s.store.get_probe_stage(key).unwrap().is_none());
 }
 
 #[test]
@@ -108,7 +110,7 @@ fn file_deleted_after_failure_retires_and_releases_store() {
     let file_id = row.file.file_id;
     let removed = s
         .store
-        .lock()
+        .as_ref()
         .delete_files(row.file.library_id, &[file_id])
         .unwrap();
     assert_eq!(removed, 1);

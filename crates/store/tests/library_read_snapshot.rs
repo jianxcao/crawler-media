@@ -146,9 +146,8 @@ fn revoked_role_token_or_library_acl_invalidates_context() {
             _ => unreachable!(),
         }
         if change == "acl" {
-            let pool = store
-                .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-                .unwrap();
+            let pool =
+                store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
             assert!(matches!(
                 pool.try_checkout().unwrap().execute(&context, &budget()),
                 Err(LibraryReadError::Unauthorized)
@@ -184,9 +183,7 @@ fn reader_and_store_share_page_facts_and_playback_does_not_invalidate() {
         .map(|item| item.media_id)
         .collect::<Vec<_>>();
     let expected_facts = store.library_item_facts(library, &ids, Some(user)).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     let LibraryReadResult::Browse {
         page,
@@ -199,6 +196,7 @@ fn reader_and_store_share_page_facts_and_playback_does_not_invalidate() {
     assert_eq!(page, expected);
     assert_eq!(facts, expected_facts);
     assert!(stills.is_empty());
+    drop(lease);
     let db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
     db.execute(
         "INSERT INTO playback_units(user_id,media_id,season,episode) VALUES (?1,?2,-1,-1)",
@@ -216,9 +214,7 @@ fn protocol_and_facets_use_the_same_borrowed_cores() {
     let store = Store::open(dir.path()).unwrap();
     let (credential, user) = admitted(&store);
     let library = support::seed(&store, MediaKind::Movie, 3);
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let facets = FacetRequest {
         library_id: library,
         user_id: Some(user),
@@ -235,6 +231,7 @@ fn protocol_and_facets_use_the_same_borrowed_cores() {
         panic!("wrong result")
     };
     assert_eq!(actual_facets, expected_facets);
+    drop(lease);
     let mut request = support::protocol();
     request.user_id = user;
     request.parent = ProtocolParent::Library(library);
@@ -245,6 +242,7 @@ fn protocol_and_facets_use_the_same_borrowed_cores() {
     let context = store
         .prepare_library_read(&credential, &LibraryReadRequest::Protocol(request))
         .unwrap();
+    let mut lease = pool.try_checkout().unwrap();
     let LibraryReadResult::Protocol {
         page,
         inputs,
@@ -300,9 +298,7 @@ fn gallery_stills_are_read_with_the_selected_page() {
     let context = store
         .prepare_library_read(&credential, &LibraryReadRequest::Browse(query))
         .unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let LibraryReadResult::Browse { page, stills, .. } = pool
         .try_checkout()
         .unwrap()
@@ -339,9 +335,7 @@ fn frozen_removal_is_absent_from_fresh_roster_and_invalidates_old_context() {
         store.validate_library_read(&old),
         Err(LibraryReadError::Unauthorized)
     ));
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     assert!(matches!(
         pool.try_checkout().unwrap().execute(&old, &budget()),
         Err(LibraryReadError::Unauthorized)
@@ -370,9 +364,7 @@ fn integrity_protection_is_preserved_as_store_error() {
     let context = store
         .prepare_library_read(&credential, &browse(library, Some(user)))
         .unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = store::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     assert!(matches!(
         pool.try_checkout().unwrap().execute(&context, &budget()),
         Err(LibraryReadError::Store(store::StoreError::Protected(_)))

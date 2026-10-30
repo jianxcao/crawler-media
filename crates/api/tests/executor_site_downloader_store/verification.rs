@@ -100,7 +100,7 @@ fn verification_is_offlock_and_does_not_publish_after_config_or_admission_change
         let mut server = LoginServer::new();
         {
             let handle = f.state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             let mut row = store.get_downloader(f.downloader).unwrap().unwrap();
             row.kind = "qbittorrent".into();
             row.url = server.url.clone();
@@ -116,9 +116,11 @@ fn verification_is_offlock_and_does_not_publish_after_config_or_admission_change
         server.wait();
         {
             let handle = f.state.store();
-            let store = handle
-                .try_lock()
-                .expect("network verification must not hold Store");
+            handle
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::App, |_| Ok(()))
+                .expect("network verification must not hold App writer");
+            let store = handle.as_ref();
             if change == 1 {
                 let mut row = store.get_downloader(f.downloader).unwrap().unwrap();
                 row.url = "https://changed.invalid/".into();
@@ -147,7 +149,6 @@ fn verification_is_offlock_and_does_not_publish_after_config_or_admission_change
         let verified = f
             .state
             .store()
-            .lock()
             .get_setting(&format!("downloader.{}.verified", f.downloader))
             .unwrap();
         assert_eq!(
@@ -166,7 +167,7 @@ fn verification_status_is_atomic_when_error_cleanup_fails() {
     let error_key = format!("downloader.{}.last_error", f.downloader);
     {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let mut row = store.get_downloader(f.downloader).unwrap().unwrap();
         row.kind = "qbittorrent".into();
         row.url = server.url.clone();
@@ -188,7 +189,7 @@ fn verification_status_is_atomic_when_error_cleanup_fails() {
     let response = response.join().unwrap();
     assert_eq!(response.status().as_u16(), 500);
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert_eq!(
         store.get_setting(&verified_key).unwrap().as_deref(),
         Some("false")

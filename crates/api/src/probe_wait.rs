@@ -10,7 +10,6 @@ const MAX_WAIT_SECS: i64 = 24 * 60 * 60;
 fn max_attempts(state: &ApiState) -> i64 {
     state
         .store
-        .lock()
         .get_setting(crate::settings_keys::SUBSCRIBE_PROBE_WAIT_MAX_ATTEMPTS)
         .ok()
         .flatten()
@@ -20,7 +19,8 @@ fn max_attempts(state: &ApiState) -> i64 {
 }
 
 /// Record one more waiting round for each awaiting enclosure and return the
-/// ones whose wait is exhausted (to be marked rejected). Notifies per item.
+/// ones whose wait is exhausted (to be marked rejected). Contains only DB work;
+/// the caller may hold its Subscribe decision guard.
 pub(crate) fn exhausted_probe_waits(
     state: &ApiState,
     subscribe_id: domain::SubscribeId,
@@ -33,10 +33,7 @@ pub(crate) fn exhausted_probe_waits(
     let now = crate::job_loop::unix_now();
     let mut exhausted = Vec::new();
     for enclosure in awaiting {
-        let noted = state
-            .store
-            .lock()
-            .note_probe_wait(subscribe_id, enclosure, now);
+        let noted = state.store.note_probe_wait(subscribe_id, enclosure, now);
         match noted {
             Ok(Some((attempts, since))) if attempts >= limit || now - since >= MAX_WAIT_SECS => {
                 tracing::warn!(%subscribe_id, %enclosure, attempts, "源文件多次 probe 失败，放弃替换并标记为 rejected");
@@ -46,7 +43,12 @@ pub(crate) fn exhausted_probe_waits(
             Err(error) => tracing::error!(%subscribe_id, %error, "记录 probe 等待次数失败"),
         }
     }
-    for enclosure in &exhausted {
+    exhausted
+}
+
+/// Notify after the caller releases its Subscribe decision guard.
+pub(crate) fn notify_exhausted_probe_waits(state: &ApiState, exhausted: &[String]) {
+    for enclosure in exhausted {
         crate::worker::notify(
             state,
             "洗版文件无法识别质量",
@@ -55,5 +57,4 @@ pub(crate) fn exhausted_probe_waits(
             ),
         );
     }
-    exhausted
 }

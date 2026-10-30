@@ -23,7 +23,6 @@ fn pack_files() -> Vec<String> {
 fn enable(h: &Harness, on: bool) {
     h.state
         .store()
-        .lock()
         .put_setting(
             api::settings_keys::SUBSCRIBE_SELECTIVE_FILES,
             if on { "true" } else { "false" },

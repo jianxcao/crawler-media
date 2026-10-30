@@ -241,7 +241,6 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
     .with_poster_fetch(Arc::new(StillBytes));
     let root = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -436,7 +435,6 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     // has no Library to write into and is skipped by design).
     let root = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()

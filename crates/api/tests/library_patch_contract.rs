@@ -21,7 +21,6 @@ async fn retired_and_invalid_patch_fields_do_not_write() {
     );
     let library = state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap();
@@ -47,7 +46,6 @@ async fn retired_and_invalid_patch_fields_do_not_write() {
         assert_eq!(
             state
                 .store()
-                .lock()
                 .get_library(&library.id)
                 .unwrap()
                 .unwrap()

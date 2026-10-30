@@ -26,9 +26,7 @@ fn add_running_job(store: &store::Store, job: &str, file: &str) {
 #[tokio::test]
 async fn driver_step_waits_for_blocking_capacity() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        store::Store::open(directory.path()).unwrap(),
-    ));
+    let store = Arc::new(store::Store::open(directory.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store).unwrap());
     let permits: Vec<_> = (0..12)
         .map(|_| manager.dispatch_work.try_reserve().unwrap())
@@ -50,20 +48,22 @@ async fn driver_step_waits_for_blocking_capacity() {
 #[tokio::test]
 async fn interrupted_unit_retries_after_store_contention_without_resetting_other_work() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        store::Store::open(directory.path()).unwrap(),
-    ));
+    let store = Arc::new(store::Store::open(directory.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
-    add_running_job(&store.lock(), "first", "file-1");
-    add_running_job(&store.lock(), "second", "file-2");
+    add_running_job(&store.as_ref(), "first", "file-1");
+    add_running_job(&store.as_ref(), "second", "file-2");
     manager.seen.lock().insert("file-1".into());
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let held_store = store.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = held_store.lock();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
+        held_store
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
     });
     held_rx.recv().unwrap();
     let task_manager = manager.clone();
@@ -88,7 +88,7 @@ async fn interrupted_unit_retries_after_store_contention_without_resetting_other
         .await
         .unwrap()
         .unwrap();
-    let store = store.lock();
+    let store = store.as_ref();
     assert_eq!(store.probe_job_units("first").unwrap()[0].status, "queued");
     assert_eq!(
         store.probe_job_units("second").unwrap()[0].status,
@@ -100,13 +100,11 @@ async fn interrupted_unit_retries_after_store_contention_without_resetting_other
 #[tokio::test]
 async fn old_cleanup_does_not_release_new_job_dispatch() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        store::Store::open(directory.path()).unwrap(),
-    ));
+    let store = Arc::new(store::Store::open(directory.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
-    add_running_job(&store.lock(), "old", "file");
-    store.lock().cancel_probe_job("old", "cancelled").unwrap();
-    add_running_job(&store.lock(), "new", "file");
+    add_running_job(&store.as_ref(), "old", "file");
+    store.as_ref().cancel_probe_job("old", "cancelled").unwrap();
+    add_running_job(&store.as_ref(), "new", "file");
     manager.seen.lock().insert("file".into());
     retry_dispatch(
         &manager,
@@ -120,7 +118,7 @@ async fn old_cleanup_does_not_release_new_job_dispatch() {
     .await;
     assert!(manager.seen.lock().contains("file"));
     assert_eq!(
-        store.lock().probe_job_units("new").unwrap()[0].status,
+        store.as_ref().probe_job_units("new").unwrap()[0].status,
         "running"
     );
 }

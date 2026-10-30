@@ -298,12 +298,12 @@ fn seed(
     let mut expected = HashMap::new();
     {
         let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
-        let primary = library_of(&guard, &seeded.fixture.library_id);
+        let guard = store_arc.as_ref();
+        let primary = library_of(guard, &seeded.fixture.library_id);
         expected.insert(
             primary.id.clone(),
             seed_rows(
-                &guard,
+                guard,
                 &primary,
                 &seeded.fixture.root,
                 "A",
@@ -315,18 +315,18 @@ fn seed(
         );
         for index in 1..libraries {
             let (id, root) = new_library(
-                &guard,
+                guard,
                 seeded.fixture.dir.path(),
                 &format!("Movies {index}"),
                 MediaKind::Movie,
                 "everyone",
                 true,
             );
-            let library = library_of(&guard, &id);
+            let library = library_of(guard, &id);
             expected.insert(
                 id,
                 seed_rows(
-                    &guard,
+                    guard,
                     &library,
                     &root,
                     &format!("B{index}"),
@@ -354,11 +354,11 @@ impl StatsFixture {
 
     /// 重置计数器 → 一次 `/libraries` → 读数。
     async fn list_with_work(&self) -> (Value, Work) {
-        self.fixture.state.store().lock().reset_root_ledger_scans();
+        self.fixture.state.store().reset_root_ledger_scans();
         self.files.reset();
         let body = self.list().await;
         let work = Work {
-            ledger_scans: self.fixture.state.store().lock().root_ledger_scans(),
+            ledger_scans: self.fixture.state.store().root_ledger_scans(),
             media_stats: self.files.total(),
         };
         eprintln!(
@@ -468,9 +468,9 @@ async fn same_media_in_two_libraries_is_counted_per_library() {
     let second;
     {
         let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let (id, root) = new_library(
-            &guard,
+            guard,
             seeded.fixture.dir.path(),
             "Second",
             MediaKind::Movie,
@@ -478,17 +478,17 @@ async fn same_media_in_two_libraries_is_counted_per_library() {
             true,
         );
         second = id;
-        let media_id = insert_media(&guard, MediaKind::Movie, "Shared");
-        let first_library = library_of(&guard, &first);
-        let second_library = library_of(&guard, &second);
-        let first_root = root_id_of(&guard, &first);
-        let second_root = root_id_of(&guard, &second);
+        let media_id = insert_media(guard, MediaKind::Movie, "Shared");
+        let first_library = library_of(guard, &first);
+        let second_library = library_of(guard, &second);
+        let first_root = root_id_of(guard, &first);
+        let second_root = root_id_of(guard, &second);
         for (library, root_id, root_path) in [
             (&first_library, &first_root, &seeded.fixture.root),
             (&second_library, &second_root, &root),
         ] {
             publish_file(
-                &guard,
+                guard,
                 library,
                 root_id,
                 media_id,
@@ -531,10 +531,10 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
     let blocked;
     {
         let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
-        let primary = library_of(&guard, &visible);
+        let guard = store_arc.as_ref();
+        let primary = library_of(guard, &visible);
         seed_rows(
-            &guard,
+            guard,
             &primary,
             &seeded.fixture.root,
             "V",
@@ -544,7 +544,7 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
             0,
         );
         let (id, root) = new_library(
-            &guard,
+            guard,
             seeded.fixture.dir.path(),
             "Hidden",
             MediaKind::Movie,
@@ -552,10 +552,10 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
             false,
         );
         hidden = id;
-        let library = library_of(&guard, &hidden);
-        seed_rows(&guard, &library, &root, "H", MediaKind::Movie, 3, 1, 0);
+        let library = library_of(guard, &hidden);
+        seed_rows(guard, &library, &root, "H", MediaKind::Movie, 3, 1, 0);
         let (id, root) = new_library(
-            &guard,
+            guard,
             seeded.fixture.dir.path(),
             "Blocked",
             MediaKind::Movie,
@@ -563,8 +563,8 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
             true,
         );
         blocked = id;
-        let library = library_of(&guard, &blocked);
-        seed_rows(&guard, &library, &root, "B", MediaKind::Movie, 4, 1, 0);
+        let library = library_of(guard, &blocked);
+        seed_rows(guard, &library, &root, "B", MediaKind::Movie, 4, 1, 0);
         guard.begin_library_removal(&blocked).unwrap();
     }
     let (status, body) = seeded
@@ -618,10 +618,10 @@ async fn cold_statistics_are_not_fake_zero() {
     let library = seeded.fixture.library_id.clone();
     {
         let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
-        let primary = library_of(&guard, &library);
+        let guard = store_arc.as_ref();
+        let primary = library_of(guard, &library);
         seed_rows(
-            &guard,
+            guard,
             &primary,
             &seeded.fixture.root,
             "A",
@@ -671,7 +671,7 @@ async fn ordinary_library_list_performs_one_role_lookup_for_many_libraries() {
     let seeded = seed(8, 0, 0, 0);
     {
         let store = seeded.fixture.state.store();
-        store.lock().reset_role_lookups();
+        store.as_ref().reset_role_lookups();
     }
     let (status, body) = seeded
         .fixture
@@ -682,7 +682,7 @@ async fn ordinary_library_list_performs_one_role_lookup_for_many_libraries() {
         )
         .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-    assert_eq!(seeded.fixture.state.store().lock().role_lookups(), 1);
+    assert_eq!(seeded.fixture.state.store().role_lookups(), 1);
 }
 
 #[path = "library_statistics_scale/freshness.rs"]

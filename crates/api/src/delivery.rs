@@ -34,10 +34,7 @@ pub(crate) fn target_id(
     subscribe: Option<&Subscribe>,
     torrent: &Torrent,
 ) -> Result<Option<DownloaderId>, DownloaderError> {
-    let store = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        .ok_or_else(|| error("Store read pool busy"))?;
+    let store = state.store.clone();
     target_id_from_store(&store, subscribe, torrent)
 }
 
@@ -70,10 +67,7 @@ pub(crate) fn client_for_id(
         return Ok(state.downloader.clone());
     };
     let row = {
-        let store = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| error("Store read pool busy"))?;
+        let store = state.store.clone();
         if store
             .default_downloader()
             .map_err(error)?
@@ -130,7 +124,7 @@ fn submit_on(
 ) -> Result<(), DownloaderError> {
     let site = state
         .store
-        .lock()
+        .as_ref()
         .get_site(torrent.site_id)
         .map_err(error)?;
     let resolved_url = site
@@ -210,11 +204,7 @@ impl<'a> RoutedDownloader<'a> {
         let Some(subscribe) = self.subscribe else {
             return Ok(Vec::new());
         };
-        let store = self
-            .state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| error("Store read pool busy"))?;
+        let store = self.state.store.clone();
         let media = store
             .get_media(subscribe.media_id)
             .map_err(error)?

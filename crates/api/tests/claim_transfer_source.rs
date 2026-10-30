@@ -112,7 +112,7 @@ async fn move_claim_rejects_a_source_replaced_after_copy_without_deleting_it() {
     );
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(std::fs::read(&source).unwrap(), b"replacement source bytes");
-    let store = shared.lock();
+    let store = shared.as_ref();
     assert!(
         store.list_file_coverage().unwrap().is_empty(),
         "stale destination must not publish"

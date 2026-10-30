@@ -31,7 +31,7 @@ struct ClaimFixture {
 }
 
 fn fixture() -> ClaimFixture {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let root = tmp.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("Claim.2024.mkv");
@@ -60,7 +60,7 @@ fn fixture() -> ClaimFixture {
     };
     let library_id = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store.insert_media(&media).unwrap();
         store
             .create_library(
@@ -76,7 +76,6 @@ fn fixture() -> ClaimFixture {
     };
     state
         .store()
-        .lock()
         .insert_unidentified(path.display().to_string(), domain::Confidence::Low)
         .unwrap();
     ClaimFixture {
@@ -165,6 +164,15 @@ fn start_claim(fixture: &ClaimFixture) -> mpsc::Receiver<StatusCode> {
     receiver
 }
 
+// Probe the actual Library writer, then release it before normal Store calls.
+// Read availability alone cannot detect a writer held across blocked NFO IO.
+fn library_writer_available(store: &Store, wait: Duration) -> bool {
+    store
+        .writers()
+        .with_writer_timeout(wait, store::Db::Library, |_| Ok(()))
+        .is_ok()
+}
+
 #[test]
 fn blocking_claim_nfo_read_keeps_store_available() {
     let fixture = fixture();
@@ -172,16 +180,15 @@ fn blocking_claim_nfo_read_keeps_store_available() {
     let result = start_claim(&fixture);
     gate.wait_for_reader();
     let shared = fixture.state.store();
-    let readable = shared
-        .try_lock_for(Duration::from_millis(250))
-        .is_some_and(|store| store.get_media(fixture.media.id).unwrap().is_some());
+    let readable = library_writer_available(&shared, Duration::from_millis(250))
+        && shared.get_media(fixture.media.id).unwrap().is_some();
     gate.release().unwrap();
     let status = result.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(readable, "NFO IO must not hold the shared Store mutex");
+    assert!(readable, "NFO IO must not hold the Library writer");
     assert_eq!(status, StatusCode::OK);
     assert!(
         shared
-            .lock()
+            .as_ref()
             .file_coverage_by_path(fixture.path.to_str().unwrap())
             .unwrap()
             .is_some()
@@ -206,7 +213,6 @@ fn changed_source_during_claim_nfo_read_is_not_published() {
         fixture
             .state
             .store()
-            .lock()
             .file_coverage_by_path(fixture.path.to_str().unwrap())
             .unwrap()
             .is_none()
@@ -220,7 +226,8 @@ fn reconfigured_library_during_claim_nfo_read_rejects_the_original_context() {
     let result = start_claim(&fixture);
     gate.wait_for_reader();
     let shared = fixture.state.store();
-    let reconfigured = if let Some(store) = shared.try_lock_for(Duration::from_millis(250)) {
+    let reconfigured = if library_writer_available(&shared, Duration::from_millis(250)) {
+        let store = shared.as_ref();
         let revision = store.library_config_revision(&fixture.library_id).unwrap();
         store
             .begin_library_reconfiguration(
@@ -258,7 +265,7 @@ fn reconfigured_library_during_claim_nfo_read_rejects_the_original_context() {
     let status = result.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
         reconfigured,
-        "claim observation must release the Store mutex"
+        "claim observation must release the Library writer"
     );
     assert_ne!(
         status,
@@ -267,7 +274,7 @@ fn reconfigured_library_during_claim_nfo_read_rejects_the_original_context() {
     );
     assert!(
         shared
-            .lock()
+            .as_ref()
             .file_coverage_by_path(fixture.path.to_str().unwrap())
             .unwrap()
             .is_none()
@@ -281,7 +288,8 @@ fn updated_parked_identity_during_claim_keeps_new_record_and_rejects_file() {
     let result = start_claim(&fixture);
     gate.wait_for_reader();
     let shared = fixture.state.store();
-    let changed = if let Some(store) = shared.try_lock_for(Duration::from_millis(250)) {
+    let changed = if library_writer_available(&shared, Duration::from_millis(250)) {
+        let store = shared.as_ref();
         store
             .insert_unidentified(fixture.path.display().to_string(), domain::Confidence::High)
             .unwrap();
@@ -290,12 +298,12 @@ fn updated_parked_identity_during_claim_keeps_new_record_and_rejects_file() {
         false
     };
     gate.release().unwrap();
-    assert!(changed, "Claim observation must release Store");
+    assert!(changed, "Claim observation must release the Library writer");
     assert_eq!(
         result.recv_timeout(Duration::from_secs(5)).unwrap(),
         StatusCode::CONFLICT
     );
-    let store = shared.lock();
+    let store = shared.as_ref();
     assert_eq!(
         store
             .get_unidentified(fixture.path.to_str().unwrap())
@@ -319,7 +327,7 @@ fn slow_claim_nfo_keeps_same_runtime_timer_and_store_responsive() {
     let shared = fixture.state.store();
     let release = std::thread::spawn(move || {
         gate.wait_for_reader();
-        let readable = shared.try_lock_for(Duration::from_millis(100)).is_some();
+        let readable = library_writer_available(&shared, Duration::from_millis(100));
         std::thread::sleep(Duration::from_millis(500));
         gate.release().unwrap();
         readable
@@ -347,7 +355,10 @@ fn slow_claim_nfo_keeps_same_runtime_timer_and_store_responsive() {
             started.elapsed()
         })
     });
-    assert!(release.join().unwrap(), "slow NFO must not hold Store");
+    assert!(
+        release.join().unwrap(),
+        "slow NFO must not hold the Library writer"
+    );
     assert_eq!(response.unwrap().status(), StatusCode::OK);
     assert!(
         elapsed < Duration::from_millis(200),
@@ -369,7 +380,7 @@ fn claim_rechecks_maintenance_after_nfo_read_before_publication() {
         StatusCode::SERVICE_UNAVAILABLE
     );
     let handle = fixture.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert!(
         store
             .file_coverage_by_path(fixture.path.to_str().unwrap())

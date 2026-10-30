@@ -42,7 +42,7 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
     std::fs::write(directory.join("movie.strm"), b"video").unwrap();
     std::fs::write(directory.join("poster.jpg"), b"original").unwrap();
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     let library = store
         .create_library(
             MediaKind::Movie,
@@ -68,7 +68,7 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
     };
     store.insert_media(&media).unwrap();
     publish_fixture_file(
-        &store,
+        store,
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
@@ -85,7 +85,6 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
         },
     )
     .unwrap();
-    drop(store);
     (state, library.id, media.id)
 }
 fn request(id: &str, media: MediaId, action: &str, body: Value) -> Request<Body> {
@@ -113,8 +112,8 @@ async fn frozen_artwork_mutations_preserve_sidecar_and_manual_lock() {
     let (state, id, media) = fixture(temp.path());
     let key = format!("artwork.{media}");
     let lock = json!({"poster_locked":true,"source":"existing"}).to_string();
-    state.store().lock().put_setting(&key, &lock).unwrap();
-    state.store().lock().begin_library_removal(&id).unwrap();
+    state.store().put_setting(&key, &lock).unwrap();
+    state.store().begin_library_removal(&id).unwrap();
     let app = router(state.clone());
     for (action, body) in [
         ("select", json!({"file_path":"https://offline/image"})),
@@ -133,7 +132,7 @@ async fn frozen_artwork_mutations_preserve_sidecar_and_manual_lock() {
         std::fs::read(temp.path().join("extra/poster.jpg")).unwrap(),
         b"original"
     );
-    assert_eq!(state.store().lock().get_setting(&key).unwrap(), Some(lock));
+    assert_eq!(state.store().get_setting(&key).unwrap(), Some(lock));
 }
 #[tokio::test]
 async fn selection_frozen_during_fetch_does_not_publish_bytes_or_lock() {
@@ -159,7 +158,6 @@ async fn selection_frozen_during_fetch_does_not_publish_bytes_or_lock() {
     assert!(
         state
             .store()
-            .lock()
             .get_setting(&format!("artwork.{media}"))
             .unwrap()
             .is_none()
@@ -195,7 +193,6 @@ async fn active_artwork_upload_and_selection_keep_manual_lock_contract() {
         );
         let raw = state
             .store()
-            .lock()
             .get_setting(&format!("artwork.{media}"))
             .unwrap()
             .unwrap();

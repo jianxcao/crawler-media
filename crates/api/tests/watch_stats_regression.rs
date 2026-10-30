@@ -39,7 +39,7 @@ fn unix_now() -> i64 {
 
 fn admin_id(state: &ApiState) -> UserId {
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     store
         .list_users()
         .unwrap()
@@ -140,12 +140,12 @@ fn seed(state: &ApiState, tmp: &tempfile::TempDir) -> Fixture {
     std::fs::write(&path_b, b"b").unwrap();
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         for item in [&media_a, &media_b, &media_hidden] {
             store.insert_media(item).unwrap();
         }
-        publish_fixture_file(&store, &fixture_file(media_a.id, &path_a)).unwrap();
-        publish_fixture_file(&store, &fixture_file(media_b.id, &path_b)).unwrap();
+        publish_fixture_file(store, &fixture_file(media_a.id, &path_a)).unwrap();
+        publish_fixture_file(store, &fixture_file(media_b.id, &path_b)).unwrap();
     }
     let now = unix_now();
     Fixture {

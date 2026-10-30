@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use api::{ApiState, Store};
 use domain::UserRole;
 use downloader::MemoryDownloader;
@@ -33,7 +39,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let token = "artwork-admin-session".to_string();
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .insert_user_with_password(&user, "admin-pass")
             .unwrap();
@@ -45,18 +51,17 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
 fn contended(kind: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let (state, token) = state_with_admin(tmp.path());
-    let user = state
-        .store()
-        .lock()
-        .user_by_token(&token)
-        .unwrap()
-        .unwrap()
-        .id;
+    let user = state.store().user_by_token(&token).unwrap().unwrap().id;
     let provider = api::media_server_provider::ApiServerProvider::new(state.clone());
     let store = state.store();
+    let db = if matches!(kind, "user" | "device" | "credential") {
+        store::Db::App
+    } else {
+        store::Db::Library
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), db);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -145,19 +150,16 @@ fn session_keeps_executor_free() {
 fn cancelled_read_holds_capacity_until_worker_finishes() {
     let tmp = tempfile::tempdir().unwrap();
     let (state, token) = state_with_admin(tmp.path());
-    let user = state
-        .store()
-        .lock()
-        .user_by_token(&token)
-        .unwrap()
-        .unwrap()
-        .id;
+    let user = state.store().user_by_token(&token).unwrap().unwrap().id;
     let budget = Arc::new(api::blocking_budget::BlockingBudget::new(1));
     let state = state.with_http_work(budget.clone());
-    let store = state.store();
+    let readers = state.store().reader_pool(store::Db::App);
+    readers
+        .set_capacity(std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _lease = readers.try_checkout().unwrap();
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });

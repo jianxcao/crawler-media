@@ -46,9 +46,11 @@ impl Store {
         &self,
         request: &ProtocolItemQuery,
     ) -> Result<(ProtocolItemPage, super::items::QueryWorkStats), StoreError> {
-        let observer = super::items::stats::QueryWorkScope::new(&[&self.app, &self.library]);
-        let page = self.protocol_item_page_inner(request)?;
-        let stats = observer.stats(page.items.len() as u64);
+        let (page, mut stats) = self.with_stats(crate::stats::StatsScope::Both, || {
+            self.protocol_item_page_inner(request)
+        });
+        let page = page?;
+        stats.rows_returned = page.items.len() as u64;
         Ok((page, stats))
     }
 
@@ -61,10 +63,9 @@ impl Store {
             .into_iter()
             .map(|id| id.parse())
             .collect::<Result<HashSet<LibraryId>, _>>()?;
-        let tx = self.library.unchecked_transaction()?;
-        let page = select_protocol(&tx, &authorized, request)?;
-        tx.commit()?;
-        Ok(page)
+        self.with_read(crate::Db::Library, |conn| {
+            select_protocol(conn, &authorized, request)
+        })
     }
 }
 

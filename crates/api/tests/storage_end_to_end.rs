@@ -114,7 +114,7 @@ impl Fixture {
         std::fs::create_dir_all(&root).unwrap();
         let library_id = {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .create_library(
                     MediaKind::Tv,
@@ -168,7 +168,7 @@ impl Fixture {
             anilist_id: None,
         };
         let handle = self.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.insert_media(&media).unwrap();
         let root = store
             .list_library_roots()
@@ -512,7 +512,7 @@ async fn clean_start_restart_clear_cache_remove_purges_orphan_media_and_reimport
     // 这里按 store 级清洗，用于证明 cache 不是身份的来源。
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.clear_search_snapshots().unwrap();
         store
             .delete_fingerprint_cache(&file_id.to_string())

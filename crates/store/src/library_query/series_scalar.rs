@@ -23,7 +23,9 @@ impl Store {
         parent: &ProtocolParent,
     ) -> Result<ProtocolSeriesScalar, StoreError> {
         let allowed = self.authorized_library_ids(user)?;
-        series_scalar_on(&self.library, &allowed, user, media, parent)
+        self.with_read(crate::Db::Library, |conn| {
+            series_scalar_on(conn, &allowed, user, media, parent)
+        })
     }
 }
 

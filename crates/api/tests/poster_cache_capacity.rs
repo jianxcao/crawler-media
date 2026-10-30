@@ -153,15 +153,14 @@ impl ImageFetcher for GatedFetcher {
 
 fn create_store_and_service(
     fetcher: Arc<dyn ImageFetcher>,
-) -> (tempfile::TempDir, Arc<Mutex<Store>>, MediaPosterService) {
+) -> (tempfile::TempDir, Arc<Store>, MediaPosterService) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let cache_dir = tmp.path().join("cache");
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
     let catalog = Arc::new(MockCatalog);
     let service =
-        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher)
-            .unwrap();
+        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher);
     (tmp, store, service)
 }
 
@@ -197,7 +196,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     let mut keys = Vec::with_capacity(4096);
     for i in 0..4096 {
         let tmdb = format!("not_found_{i}");
-        let media_id = insert_media(&store.lock(), &format!("not_found_{i}"), Some(&tmdb));
+        let media_id = insert_media(store.as_ref(), &format!("not_found_{i}"), Some(&tmdb));
         let res = service.get(media_id).await;
         assert!(matches!(res, Err(PosterError::NotFound)));
         keys.push(media_id);
@@ -211,7 +210,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     assert!(matches!(res0, Err(PosterError::NotFound)));
 
     // Insert a new key (4,097th). LRU must evict keys[1] (least recently used) while keys[0] survives
-    let new_key = insert_media(&store.lock(), "not_found_new", Some("not_found_new"));
+    let new_key = insert_media(store.as_ref(), "not_found_new", Some("not_found_new"));
     let res_new = service.get(new_key).await;
     assert!(matches!(res_new, Err(PosterError::NotFound)));
 
@@ -240,7 +239,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
 
     // A READ must sweep on its own, without relying on a later insert: query an absent
     // key (a miss that does not insert) and assert the expired entries are already gone.
-    let absent_id = insert_media(&store.lock(), "not_found_absent", Some("not_found_absent"));
+    let absent_id = insert_media(store.as_ref(), "not_found_absent", Some("not_found_absent"));
     assert!(!service.check_negative_cache_for_test(absent_id));
     assert_eq!(
         service.resource_counts().negative_entries,
@@ -249,7 +248,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     );
 
     // Next access to any key sweeps expired entries
-    let dummy_id = insert_media(&store.lock(), "not_found_dummy", Some("not_found_dummy"));
+    let dummy_id = insert_media(store.as_ref(), "not_found_dummy", Some("not_found_dummy"));
     let _ = service.get(dummy_id).await;
 
     let counts_after = service.resource_counts();
@@ -265,7 +264,7 @@ async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     let (_tmp, store, service) = create_store_and_service(fetcher.clone());
     let service = Arc::new(service.with_wait_deadline(Duration::from_millis(100)));
 
-    let media_id = insert_media(&store.lock(), "cancelled_waiter_test", Some("12345"));
+    let media_id = insert_media(store.as_ref(), "cancelled_waiter_test", Some("12345"));
 
     // Spawn waiter that will timeout / get cancelled
     let s = service.clone();
@@ -348,7 +347,7 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     let mut live_gates = Vec::new();
     for i in 0..32 {
         let tmdb = format!("100_{i}");
-        let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some(&tmdb));
+        let media_id = insert_media(store.as_ref(), &format!("live_gate_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new(
             std::time::Instant::now() + Duration::from_secs(30),
         ));
@@ -360,7 +359,7 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     assert_eq!(counts.registry_entries, 32);
 
     // Requesting a NEW key when registry is full of live gates yields Busy (mapped to 503)
-    let new_media_id = insert_media(&store.lock(), "new_gate_overflow", Some("200"));
+    let new_media_id = insert_media(store.as_ref(), "new_gate_overflow", Some("200"));
     let err = service.get(new_media_id).await;
     assert!(matches!(err, Err(PosterError::Busy)));
 
@@ -382,7 +381,7 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
 
     // Prove admission behaviour directly without any intervening diagnostic call:
     // requesting a NEW key must sweep dead entries during admission and succeed.
-    let admitted_id = insert_media(&store.lock(), "admitted_after_drop", Some("100"));
+    let admitted_id = insert_media(store.as_ref(), "admitted_after_drop", Some("100"));
     let admitted_res = service.get(admitted_id).await;
     assert!(
         admitted_res.is_ok(),
@@ -488,24 +487,21 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let cache_dir = tmp.path().join("cache");
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
     let catalog = Arc::new(MockCatalog);
 
-    let service = Arc::new(
-        MediaPosterService::with_custom_fetcher(
-            store.clone(),
-            catalog,
-            cache_dir,
-            Arc::new(SimpleFetcher),
-        )
-        .unwrap(),
-    );
+    let service = Arc::new(MediaPosterService::with_custom_fetcher(
+        store.clone(),
+        catalog,
+        cache_dir,
+        Arc::new(SimpleFetcher),
+    ));
 
     // Fill registry to 32 live gates
     let mut live_gates = Vec::new();
     for i in 0..32 {
         let tmdb = format!("100_{i}");
-        let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some(&tmdb));
+        let media_id = insert_media(store.as_ref(), &format!("h_live_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new(
             std::time::Instant::now() + Duration::from_secs(30),
         ));
@@ -513,7 +509,7 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
         live_gates.push(inflight);
     }
 
-    let overflow_id = insert_media(&store.lock(), "h_overflow", Some("100"));
+    let overflow_id = insert_media(store.as_ref(), "h_overflow", Some("100"));
 
     let state = ApiState::new_arc(
         store,

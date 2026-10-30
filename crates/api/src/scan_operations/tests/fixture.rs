@@ -50,7 +50,7 @@ impl Fixture {
         std::fs::create_dir_all(&root).unwrap();
         let library_id = {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .create_library(
                     kind,
@@ -73,7 +73,7 @@ impl Fixture {
 
     pub(crate) fn signature(&self) -> String {
         let store = self.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let library = guard.get_library(&self.library_id).unwrap().unwrap();
         scan_scope_signature(&library)
     }
@@ -101,7 +101,7 @@ impl Fixture {
             ..Default::default()
         };
         let store = self.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard.insert_media(&media).unwrap();
         store::test_support::publish_fixture_file(&guard, &spec).unwrap();
         let coverage = guard.file_coverage_by_path(&path).unwrap().unwrap();
@@ -110,7 +110,7 @@ impl Fixture {
 
     pub(crate) async fn wait_terminal(&self, op_id: &str) -> ScanOperation {
         for _ in 0..600 {
-            let op = self.state.store().lock().scan_operation(op_id).unwrap();
+            let op = self.state.store().scan_operation(op_id).unwrap();
             if let Some(op) = op
                 && !op.status.is_active()
             {

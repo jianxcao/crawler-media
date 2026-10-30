@@ -65,13 +65,15 @@ fn card_artwork(
     media_id: MediaId,
 ) -> (Option<String>, Option<String>, bool) {
     store
-        .library
-        .query_row(
-            "SELECT poster_ref, backdrop_ref, has_still FROM library_items
+        .with_read(crate::Db::Library, |conn| {
+            conn.query_row(
+                "SELECT poster_ref, backdrop_ref, has_still FROM library_items
              WHERE library_id = ?1 AND media_id = ?2",
-            params![library_id, media_id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
-        )
+                params![library_id, media_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(Into::into)
+        })
         .unwrap()
 }
 

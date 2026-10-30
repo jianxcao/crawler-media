@@ -65,7 +65,7 @@ pub fn temp_state(executor: Arc<dyn DatabaseExecutor>) -> (tempfile::TempDir, Ap
 }
 
 pub fn data_dir(state: &ApiState) -> PathBuf {
-    state.store().lock().data_dir().to_path_buf()
+    state.store().data_dir().to_path_buf()
 }
 
 pub fn unix_now() -> i64 {
@@ -174,6 +174,7 @@ impl Recorder {
 impl DatabaseExecutor for Recorder {
     fn execute(
         &self,
+        _conn: &rusqlite::Connection,
         target: &DatabaseTarget,
         vacuum_enabled: bool,
         _context: &MaintenanceContext<'_>,

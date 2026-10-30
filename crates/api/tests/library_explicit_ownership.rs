@@ -116,9 +116,9 @@ async fn orphaned_published_file_keeps_its_recorded_library() {
     let state = make_state(tmp.path());
     let store = state.store();
     let (member_user, outsider, library, media, file) = {
-        let guard = store.lock();
-        let member_user = member(&guard, "member");
-        let outsider = member(&guard, "outsider");
+        let guard = store.as_ref();
+        let member_user = member(guard, "member");
+        let outsider = member(guard, "outsider");
         let root = tmp.path().join("library-a");
         std::fs::create_dir_all(&root).unwrap();
         // Library A is restricted to `member_user`; the seeded default movie
@@ -135,15 +135,15 @@ async fn orphaned_published_file_keeps_its_recorded_library() {
             .unwrap();
         let media = movie("Secret");
         guard.insert_media(&media).unwrap();
-        let file = publish(&guard, &media, &root.join("secret.mkv"));
+        let file = publish(guard, &media, &root.join("secret.mkv"));
         assert_eq!(file.library_id, library.id.parse::<LibraryId>().unwrap());
         let outside = tmp.path().join("moved-away").join("secret.mkv");
-        let file = orphan(&guard, &file, &outside);
+        let file = orphan(guard, &file, &outside);
         (member_user.id, outsider.id, library, media, file)
     };
     assert_ne!(
         library.id,
-        default_movie_library(&store.lock()),
+        default_movie_library(store.as_ref()),
         "the restricted Library must not be the default one"
     );
     assert_eq!(file.library_id.to_string(), library.id);

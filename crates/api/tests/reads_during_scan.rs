@@ -1,4 +1,10 @@
 //! Interactive reads and durable login must remain usable during a Library write batch.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 #[path = "reads_during_scan/app_admission.rs"]
 mod app_admission;
 #[path = "reads_during_scan/app_heartbeat.rs"]

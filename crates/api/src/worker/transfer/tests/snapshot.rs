@@ -3,13 +3,12 @@ use super::*;
 #[test]
 fn changed_transfer_setting_is_rejected_before_reservation() {
     let (tmp, state, media, subscribe) = fixture();
-    state.store.lock().set_transfer_mode("copy").unwrap();
+    state.store.set_transfer_mode("copy").unwrap();
     let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
     let lease = state.acquire_library_work(&plan.library_id).unwrap();
-    state.store.lock().set_transfer_mode("move").unwrap();
+    state.store.set_transfer_mode("move").unwrap();
     let fingerprint = state
         .store
-        .lock()
         .read_fingerprint(&plan.library_id, media.id)
         .unwrap();
     assert_eq!(
@@ -24,7 +23,6 @@ fn changed_transfer_setting_is_rejected_before_reservation() {
             fingerprint,
             snapshot: state
                 .store
-                .lock()
                 .subscribe_library_snapshot(&subscribe, media.kind)
                 .unwrap(),
         },
@@ -42,7 +40,7 @@ fn changed_transfer_setting_is_rejected_before_reservation() {
         result.is_err(),
         "obsolete mode must not be reserved: {result:?}"
     );
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+    assert!(state.store.list_file_coverage().unwrap().is_empty());
     assert!(!candidate_cov.file.path.exists());
 }
 
@@ -63,7 +61,6 @@ fn changed_saved_facts_reject_transfer_reservation() {
     );
     state
         .store
-        .lock()
         .save_subscribe_facts(subscribe.id, &facts)
         .unwrap();
     let source = tmp.path().join("source.mkv");
@@ -77,7 +74,7 @@ fn changed_saved_facts_reject_transfer_reservation() {
         )
         .is_err()
     );
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+    assert!(state.store.list_file_coverage().unwrap().is_empty());
 }
 
 #[test]
@@ -90,7 +87,6 @@ fn changed_other_library_rejects_transfer_reservation() {
     std::fs::create_dir_all(&nested).unwrap();
     state
         .store
-        .lock()
         .create_library(
             media.kind,
             "Nested",
@@ -111,7 +107,7 @@ fn changed_other_library_rejects_transfer_reservation() {
         )
         .is_err()
     );
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+    assert!(state.store.list_file_coverage().unwrap().is_empty());
 }
 
 #[test]
@@ -132,5 +128,5 @@ fn same_transfer_round_can_reserve_multiple_files() {
         )
         .unwrap();
     }
-    assert_eq!(state.store.lock().list_file_coverage().unwrap().len(), 2);
+    assert_eq!(state.store.list_file_coverage().unwrap().len(), 2);
 }

@@ -78,7 +78,6 @@ async fn prepared(manual: bool) -> (Harness, SubscribeId, LibraryFile) {
     let file = h
         .state
         .store()
-        .lock()
         .file_coverage_by_path(owned.to_str().unwrap())
         .unwrap()
         .unwrap()
@@ -88,9 +87,11 @@ async fn prepared(manual: bool) -> (Harness, SubscribeId, LibraryFile) {
 
 fn change_owned(h: &Harness, file: &LibraryFile, reassign: bool) -> LibraryFile {
     let shared = h.state.store();
-    let store = shared
-        .try_lock_for(Duration::from_millis(200))
-        .expect("identity IO must release Store");
+    shared
+        .writers()
+        .with_writer_timeout(Duration::from_millis(200), store::Db::Library, |_| Ok(()))
+        .expect("identity IO must release the Library writer");
+    let store = shared.as_ref();
     if reassign {
         let mut target = store.get_media(file.media_id).unwrap().unwrap();
         target.id = domain::MediaId::new();
@@ -190,7 +191,7 @@ async fn delayed_deletion(manual: bool, reassign: bool) {
         "{result}"
     );
     let shared = h.state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let current = store
         .file_coverage_by_id(original.file_id)
         .unwrap()

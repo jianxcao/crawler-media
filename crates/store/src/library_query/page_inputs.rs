@@ -59,9 +59,11 @@ impl Store {
         user: UserId,
         references: &[ProtocolItemRef],
     ) -> Result<(ProtocolPageInputs, super::items::QueryWorkStats), StoreError> {
-        let observer = super::items::stats::QueryWorkScope::new(&[&self.app, &self.library]);
-        let inputs = self.protocol_page_inputs(user, references)?;
-        let mut stats = observer.stats(references.len() as u64);
+        let (inputs, mut stats) = self.with_stats(crate::stats::StatsScope::Both, || {
+            self.protocol_page_inputs(user, references)
+        });
+        let inputs = inputs?;
+        stats.rows_returned = references.len() as u64;
         stats.hydrated_rows = inputs.hydrated_rows();
         Ok((inputs, stats))
     }
@@ -77,10 +79,9 @@ impl Store {
             .map(|id| id.parse())
             .collect::<Result<HashSet<_>, _>>()?;
         let is_admin = self.user_role(user)? == "admin";
-        let tx = self.library.unchecked_transaction()?;
-        let inputs = page_inputs_on(&tx, &authorized, user, is_admin, references)?;
-        tx.commit()?;
-        Ok(inputs)
+        self.with_read(crate::Db::Library, |conn| {
+            page_inputs_on(conn, &authorized, user, is_admin, references)
+        })
     }
 }
 

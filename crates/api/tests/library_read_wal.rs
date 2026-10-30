@@ -8,9 +8,9 @@ use tower::ServiceExt;
 #[path = "library_read/support.rs"]
 mod support;
 
-async fn pinned_snapshot(cancel: bool) {
-    let mut fixture = support::Fixture::new(100);
+async fn pinned_snapshot(mut fixture: support::Fixture, cancel: bool) {
     let pool = fixture.state.library_read_pool_weak().upgrade().unwrap();
+    let capacity = warm_readers(&pool);
     wait_for_initial_checkpoint(&fixture.database()).await;
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -76,7 +76,7 @@ async fn pinned_snapshot(cancel: bool) {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             pool.available(),
-            0,
+            capacity - 2,
             "HTTP timeout cannot return a busy connection"
         );
         assert_eq!(
@@ -92,7 +92,7 @@ async fn pinned_snapshot(cancel: bool) {
         let released = Instant::now();
         release_tx.send(()).unwrap();
         release_tx.send(()).unwrap();
-        wait_for_worker(&fixture.state, &pool).await;
+        wait_for_worker(&fixture.state, &pool, capacity).await;
         let recovered = support::checkpoint(&fixture.database(), "TRUNCATE");
         assert_eq!(recovered, (0, 0, 0));
         let s = metrics.snapshot();
@@ -114,7 +114,26 @@ async fn pinned_snapshot(cancel: bool) {
         );
         println!("wal_writer_commit pinned={pinned:?} wal_file_bytes={wal}");
     }
+    assert_readers_returned(&pool, capacity);
     fixture.files.clear();
+}
+
+fn warm_readers(pool: &store::ReaderPool) -> usize {
+    let capacity = 8;
+    assert_readers_returned(pool, capacity);
+    capacity
+}
+
+fn assert_readers_returned(pool: &store::ReaderPool, capacity: usize) {
+    let readers = (0..capacity)
+        .map(|_| pool.try_checkout().unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        pool.try_checkout(),
+        Err(store::LibraryReadError::Busy)
+    ));
+    drop(readers);
+    assert_eq!(pool.available(), capacity);
 }
 
 async fn wait_for_initial_checkpoint(path: &std::path::Path) {
@@ -134,9 +153,9 @@ async fn wait_for_initial_checkpoint(path: &std::path::Path) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
-async fn wait_for_worker(state: &api::ApiState, pool: &store::LibraryReadPool) {
+async fn wait_for_worker(state: &api::ApiState, pool: &store::ReaderPool, capacity: usize) {
     let deadline = Instant::now() + Duration::from_secs(3);
-    while pool.available() != 2 || state.http_work.available_permits() != 8 {
+    while pool.available() != capacity || state.http_work.available_permits() != 8 {
         assert!(
             Instant::now() < deadline,
             "worker must finish rollback before capacity returns"
@@ -144,13 +163,25 @@ async fn wait_for_worker(state: &api::ApiState, pool: &store::LibraryReadPool) {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn active_snapshot_allows_100_file_writer_commit() {
-    pinned_snapshot(false).await;
+// Construct outside Tokio so unrelated background drivers cannot borrow the
+// unified Library pool while this fixture proves ownership of every lease.
+fn snapshot_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_snapshot_returns_only_after_worker_cleanup_then_checkpoint_recovers() {
-    pinned_snapshot(true).await;
+
+#[test]
+fn active_snapshot_allows_100_file_writer_commit() {
+    let fixture = support::Fixture::new(100);
+    snapshot_runtime().block_on(pinned_snapshot(fixture, false));
+}
+#[test]
+fn cancelled_snapshot_returns_only_after_worker_cleanup_then_checkpoint_recovers() {
+    let fixture = support::Fixture::new(100);
+    snapshot_runtime().block_on(pinned_snapshot(fixture, true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -87,7 +87,7 @@ impl TransferRemovalPin {
         })
     }
 
-    fn validate(&self, store: &store::Store) -> Result<(), String> {
+    fn validate(&self, store: &store::LibraryConnection<'_>) -> Result<(), String> {
         let current = store
             .file_coverage_by_id(self.file_id)
             .map_err(|error| error.to_string())?
@@ -189,7 +189,7 @@ pub(crate) fn observe_transfer_removals(
 /// batch before creating any intent; the pending intents then block source writes.
 pub(crate) fn queue_transfer_removals(
     state: &ApiState,
-    store: &store::Store,
+    store: &store::LibraryConnection<'_>,
     removals: &[ObservedTransferRemoval],
 ) -> Result<(), String> {
     state

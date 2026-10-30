@@ -7,12 +7,11 @@ use api::probe_manager::{
 use domain::{
     Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
-use parking_lot::Mutex;
 use store::{FilePresence, LedgerPresenceMode, LedgerPresenceObservation, ScannedLedger, Store};
 
 struct Fixture {
     _temp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     /// The scanned file after presence verification marked its source missing.
     row: FileCoverage,
 }
@@ -91,7 +90,7 @@ fn fixture() -> Fixture {
         .unwrap();
     Fixture {
         _temp: temp,
-        store: Arc::new(Mutex::new(store)),
+        store: Arc::new(store),
         row,
     }
 }
@@ -117,7 +116,7 @@ fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation
     let file_id = row.file.file_id.to_string();
     assert!(
         store
-            .lock()
+            .as_ref()
             .active_probe_unit_for_ledger(&file_id)
             .unwrap()
             .is_none()
@@ -125,7 +124,7 @@ fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation
     assert_eq!(manager.queued_ledger_count(), 0);
     assert!(
         store
-            .lock()
+            .as_ref()
             .clear_ledger_missing(&row.file.path.to_string_lossy())
             .unwrap()
     );
@@ -143,7 +142,7 @@ fn recovery_retires_missing_source_queued_after_presence_snapshot() {
     let store = &fixture.store;
     let file_id = fixture.row.file.file_id.to_string();
     store
-        .lock()
+        .as_ref()
         .create_probe_job(
             "late",
             "media_probe",
@@ -162,13 +161,18 @@ fn recovery_retires_missing_source_queued_after_presence_snapshot() {
         .unwrap();
     let manager = ProbeManager::new(store.clone()).unwrap();
     assert_eq!(
-        store.lock().get_probe_job("late").unwrap().unwrap().status,
+        store
+            .as_ref()
+            .get_probe_job("late")
+            .unwrap()
+            .unwrap()
+            .status,
         "cancelled"
     );
     assert!(!manager.is_queued(&file_id));
     assert!(
         store
-            .lock()
+            .as_ref()
             .file_coverage_by_id(fixture.row.file.file_id)
             .unwrap()
             .is_some()
@@ -200,7 +204,7 @@ fn missing_source_cannot_be_persisted_by_any_admission_path() {
     );
     assert!(
         store
-            .lock()
+            .as_ref()
             .active_probe_unit_for_ledger(&fixture.row.file.file_id.to_string())
             .unwrap()
             .is_none()

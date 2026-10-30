@@ -31,7 +31,7 @@ async fn credential_handler(
     Extension(user_id): Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     if id == "revoke-bearer" {
         store
             .delete_session_tokens(&["bearer-token".into()])
@@ -67,12 +67,12 @@ fn self_auth_passes_selected_bearer_or_cookie_as_opaque_read_credential() {
     .unwrap();
     let user = state
         .store
-        .lock()
+        .as_ref()
         .user_id_by_token("management-secret")
         .unwrap()
         .unwrap();
     for token in ["bearer-token", "cookie-token"] {
-        state.store.lock().set_user_token(user, token).unwrap();
+        state.store.as_ref().set_user_token(user, token).unwrap();
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -100,7 +100,11 @@ fn self_auth_passes_selected_bearer_or_cookie_as_opaque_read_credential() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            state.store.lock().user_id_by_token("cookie-token").unwrap(),
+            state
+                .store
+                .as_ref()
+                .user_id_by_token("cookie-token")
+                .unwrap(),
             Some(user)
         );
         let response = app

@@ -1,7 +1,6 @@
 use api::{DownloaderEnv, DynamicDownloader, Store};
 use domain::{DownloaderId, SiteId, Torrent};
 use downloader::Downloader;
-use parking_lot::Mutex;
 use std::sync::Arc;
 
 fn torrent() -> Torrent {
@@ -43,11 +42,7 @@ fn assert_submission_rejected(kind: Option<&str>, enabled: bool) {
             })
             .unwrap();
     }
-    let downloader = DynamicDownloader::new(
-        Arc::new(Mutex::new(store)),
-        DownloaderEnv::default(),
-        tmp.path(),
-    );
+    let downloader = DynamicDownloader::new(Arc::new(store), DownloaderEnv::default(), tmp.path());
     assert!(
         downloader.add(&torrent()).is_err(),
         "production cannot accept a fake in-memory submission"

@@ -22,7 +22,7 @@ async fn mixed_tv_retry_binds_old_subtitle_to_persisted_custom_destination() {
     assert!(!d2.exists());
     fixture.assert_sources(&[(&e1, &d1)]);
     fixture.assert_pending(1, 0);
-    let original_id = fixture.state.store().lock().list_file_coverage().unwrap()[0]
+    let original_id = fixture.state.store().list_file_coverage().unwrap()[0]
         .file
         .file_id;
     fixture.unblock(&blocker, "tv/The Long Watch/01/01-01.zh.srt");
@@ -38,7 +38,7 @@ async fn mixed_tv_retry_binds_old_subtitle_to_persisted_custom_destination() {
     );
     fixture.assert_sources(&[(&e1, &d1), (&e2, &d2)]);
     fixture.assert_pending(0, 1);
-    let rows = fixture.state.store().lock().list_file_coverage().unwrap();
+    let rows = fixture.state.store().list_file_coverage().unwrap();
     assert_eq!(
         rows.iter()
             .find(|coverage| coverage.file.path.as_path() == d1)
@@ -61,7 +61,7 @@ async fn all_owned_videos_without_subtitles_complete_reactivated_pending() {
     fixture.pending(&torrent);
     assert!(fixture.transfer().await.is_ok());
     fixture.assert_pending(0, 1);
-    let original_id = fixture.state.store().lock().list_file_coverage().unwrap()[0]
+    let original_id = fixture.state.store().list_file_coverage().unwrap()[0]
         .file
         .file_id;
 
@@ -71,7 +71,7 @@ async fn all_owned_videos_without_subtitles_complete_reactivated_pending() {
     fixture.assert_pending(0, 1);
     fixture.assert_sources(&[(&source, &destination)]);
     assert_eq!(
-        fixture.state.store().lock().list_file_coverage().unwrap()[0]
+        fixture.state.store().list_file_coverage().unwrap()[0]
             .file
             .file_id,
         original_id
@@ -144,7 +144,7 @@ async fn unrelated_torrent_with_same_episode_does_not_steal_owned_destination() 
         "Unrelated source must not bind by episode facts: {result:?}"
     );
     assert_eq!(std::fs::read(&destination).unwrap(), b"owned");
-    let rows = fixture.state.store().lock().list_file_coverage().unwrap();
+    let rows = fixture.state.store().list_file_coverage().unwrap();
     let owned_row = rows
         .iter()
         .find(|coverage| coverage.file.path.as_path() == destination)

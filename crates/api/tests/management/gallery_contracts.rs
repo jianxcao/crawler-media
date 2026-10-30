@@ -25,7 +25,6 @@ use store::test_support::{FixtureFile, publish_fixture_file};
 fn movie_root(api_state: &ApiState, lib_id: &str) -> (String, std::path::PathBuf) {
     let root = api_state
         .store()
-        .lock()
         .list_library_roots()
         .unwrap()
         .into_iter()
@@ -55,7 +54,7 @@ fn seed_movie_with_artwork(
         bangumi_id: None,
         anilist_id: None,
     };
-    api_state.store().lock().insert_media(&media).unwrap();
+    api_state.store().insert_media(&media).unwrap();
 
     let item_dir = lib_dir.join(format!("Movie {i}"));
     std::fs::create_dir_all(&item_dir).unwrap();
@@ -113,7 +112,7 @@ fn seed_movie_with_artwork(
         library_id: lib_id.parse().unwrap(),
         config_revision: 0,
     };
-    let observations = api_state.store().lock().nfo_input_observer().observe(
+    let observations = api_state.store().nfo_input_observer().observe(
         &video_file,
         MediaKind::Movie,
         &[UnitKey::WHOLE],
@@ -123,7 +122,6 @@ fn seed_movie_with_artwork(
     );
     api_state
         .store()
-        .lock()
         .publish_files(
             &scope,
             &[StorePublication {
@@ -322,7 +320,6 @@ async fn library_gallery_skips_empty_artwork_groups() {
     let blank_id = MediaId::new();
     api_state
         .store()
-        .lock()
         .insert_media(&Media {
             id: blank_id,
             kind: MediaKind::Movie,
@@ -342,7 +339,7 @@ async fn library_gallery_skips_empty_artwork_groups() {
     let blank_file = blank_dir.join("Blank.mkv");
     std::fs::write(&blank_file, b"content").unwrap();
     publish_fixture_file(
-        &api_state.store().lock(),
+        &api_state.store(),
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: blank_id,
@@ -504,7 +501,6 @@ async fn favorites_view_respects_title_sort_order() {
 
     let media_ids: std::collections::HashSet<_> = api_state
         .store()
-        .lock()
         .list_file_coverage()
         .unwrap()
         .into_iter()

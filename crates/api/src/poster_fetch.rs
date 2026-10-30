@@ -116,7 +116,7 @@ fn check_existing_poster(
 ) -> ExistingPoster {
     let locked = state
         .store
-        .lock()
+        .as_ref()
         .get_setting(&format!("artwork.{}", media.id))
         .ok()
         .flatten()
@@ -154,7 +154,7 @@ fn attach_poster_catalog(
     lease: Option<&crate::library_lifecycle::LibraryWorkLease>,
 ) -> Option<Vec<u8>> {
     let tmdb_id = media.tmdb_id.as_deref()?;
-    let config = state.store.lock().get_scrape_config().ok();
+    let config = state.store.as_ref().get_scrape_config().ok();
     let size = config
         .as_ref()
         .map(|c| c.effective.poster_size.as_str())
@@ -206,7 +206,7 @@ fn attach_poster_with(
     };
     let mirror_images = state
         .store
-        .lock()
+        .as_ref()
         .get_scrape_config()
         .ok()
         .map(|config| config.effective.mirror_images)
@@ -349,7 +349,7 @@ fn write_frame_poster(
 /// The Library that recorded `video`. Ownership is the row's explicit
 /// `library_files.library_id`; the path is only the identity of the row.
 fn recorded_library_id(state: &ApiState, video: &Path) -> Option<domain::LibraryId> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     match store.file_coverage_by_path(&video.to_string_lossy()) {
         Ok(Some(coverage)) => Some(coverage.file.library_id),
         Ok(None) => {
@@ -367,7 +367,7 @@ fn recorded_library_id(state: &ApiState, video: &Path) -> Option<domain::Library
 /// recorded owner, never from which root the path starts with, and a lookup that
 /// fails refuses the work instead of silently allowing it.
 fn thumbnails_allowed(state: &ApiState, library_id: &domain::LibraryId) -> bool {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     match store.get_library(&library_id.to_string()) {
         Ok(Some(library)) => library.generate_thumbnails,
         Ok(None) => {
@@ -453,17 +453,17 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
 /// reference. The version check keeps a late worker from attaching artwork to a file
 /// that was replaced while the download ran.
 pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
-    let captured = crate::http::store_wait::with_bounded_store(state.store(), |store| {
+    let captured = crate::http::store_wait::with_store_read(state, |store| {
         store.file_version_for_path(&video.to_string_lossy())
     });
     let (file_id, version) = match captured {
-        Some(Ok(Some(version))) => version,
-        Some(Ok(None)) => return,
-        Some(Err(error)) => {
+        Ok(Ok(Some(version))) => version,
+        Ok(Ok(None)) => return,
+        Ok(Err(error)) => {
             tracing::error!(%error, video=%video.display(), "failed to capture artwork owner");
             return;
         }
-        None => {
+        Err(_) => {
             tracing::warn!(video=%video.display(), "artwork owner capture is busy");
             return;
         }
@@ -471,7 +471,7 @@ pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
     let discovered = store::files::DiscoveredArtwork::discover_with(video, |path| {
         state.file_stats.is_file(path)
     });
-    let result = crate::http::store_wait::with_bounded_store(state.store(), |store| {
+    let result = crate::http::store_wait::with_foreground_store(state, |store| {
         state
             .require_writable()
             .map_err(|_| store::StoreError::Protected("instance.read_only".into()))?;
@@ -489,11 +489,11 @@ pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
         )
     });
     match result {
-        Some(Ok(_)) => {}
-        Some(Err(error)) => {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
             tracing::warn!(%error, video=%video.display(), "记录文件封面失败：封面不会出现在卡片上")
         }
-        None => tracing::warn!(video=%video.display(), "artwork publication is busy"),
+        Err(_) => tracing::warn!(video=%video.display(), "artwork publication is busy"),
     }
 }
 
@@ -635,7 +635,7 @@ fn attach_backdrop_outcome_opts(
             return ArtworkOutcome::Skipped;
         }
     };
-    let Some(config) = state.store.lock().get_scrape_config().ok() else {
+    let Some(config) = state.store.as_ref().get_scrape_config().ok() else {
         tracing::warn!(media = %media.title, "读取刮削配置失败，跳过背景图");
         return ArtworkOutcome::Failed;
     };

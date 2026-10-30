@@ -394,7 +394,7 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
     let accepted_operation = "op-interrupted-1";
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store.finish_user_removal(uid).unwrap();
         store
             .put_setting(
@@ -451,12 +451,11 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-    let pending_setting_remains_after_success =
-        state.store().lock().get_setting(&key).unwrap().is_some();
+    let pending_setting_remains_after_success = state.store().get_setting(&key).unwrap().is_some();
     assert!(!pending_setting_remains_after_success);
 
     // An unreadable record is a visible recovery failure, not a silent Ok.
-    state.store().lock().put_setting(&key, "{not json").unwrap();
+    state.store().put_setting(&key, "{not json").unwrap();
     let recovery = api::user_removal::UserRemovalService::new(Arc::new(state.clone()))
         .recover_pending_removals();
     let recovery_error = recovery.err();

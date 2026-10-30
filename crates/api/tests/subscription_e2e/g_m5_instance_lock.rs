@@ -93,7 +93,6 @@ async fn crashed_holder_is_taken_over_after_ttl() {
     assert_eq!(
         state
             .store()
-            .lock()
             .try_acquire_instance_lock("crashed", now - 57, 60)
             .unwrap(),
         None
@@ -121,7 +120,6 @@ async fn lease_loss_stops_jobs_and_gates_manual_run() {
     assert_eq!(
         h.state
             .store()
-            .lock()
             .try_acquire_instance_lock("intruder", later, 60)
             .unwrap(),
         None,
@@ -172,7 +170,7 @@ async fn lease_loss_stops_jobs_and_gates_manual_run() {
         "reads stay available"
     );
     assert!(
-        h.state.store().lock().get_subscribe(id).unwrap().is_some(),
+        h.state.store().get_subscribe(id).unwrap().is_some(),
         "not deleted"
     );
     handle.shutdown().await.unwrap();

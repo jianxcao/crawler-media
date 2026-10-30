@@ -27,7 +27,12 @@ pub mod transfer;
 
 pub use artwork::*;
 
-pub use publish::*;
+#[cfg(feature = "test-support")]
+pub use publish::PublishStats;
+pub(crate) use publish::{
+    enqueue_probe, ensure_config_revision, ensure_library_writable, ensure_media_writable,
+    insert_file_row, sync_coverage,
+};
 pub use reassign::*;
 pub(crate) use reduce::*;
 pub use rename_completion::{ObservedRenameCompletion, RenameCompletionPlan};

@@ -5,7 +5,7 @@ use super::*;
 const MAX_FILES: usize = 200;
 
 pub(super) fn read(
-    store: &Store,
+    store: &crate::LibraryConnection<'_>,
     library: LibraryId,
     after: Option<LedgerId>,
     limit: usize,
@@ -53,18 +53,20 @@ mod tests {
         let store = Store::open(dir.path().join("data")).unwrap();
         for has_cursor in [false, true] {
             let sql = page_sql(has_cursor);
-            let mut stmt = store
-                .library
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                .unwrap();
-            let args = (0..stmt.parameter_count()).map(|_| "200");
-            let details = stmt
-                .query_map(rusqlite::params_from_iter(args), |row| {
-                    row.get::<_, String>(3)
+            let details = store
+                .with_read(crate::Db::Library, |conn| {
+                    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                    let args = (0..stmt.parameter_count()).map(|_| "200");
+                    let details = stmt
+                        .query_map(rusqlite::params_from_iter(args), |row| {
+                            row.get::<_, String>(3)
+                        })
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .collect::<Vec<_>>();
+                    Ok(details)
                 })
-                .unwrap()
-                .map(Result::unwrap)
-                .collect::<Vec<_>>();
+                .unwrap();
             for detail in &details {
                 assert!(
                     !detail.starts_with("SCAN library_files")

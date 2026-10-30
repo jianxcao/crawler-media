@@ -126,7 +126,7 @@ pub(crate) fn seed_local_facts(
     let user = domain::UserId::new();
     let media = domain::MediaId::new();
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .insert_media(&domain::Media {
             id: media,
@@ -142,7 +142,7 @@ pub(crate) fn seed_local_facts(
             anilist_id: None,
         })
         .unwrap();
-    support::seed_published_file(&guard, root, media);
+    support::seed_published_file(guard, root, media);
     guard
         .upsert_unit(
             user,
@@ -165,7 +165,6 @@ pub(crate) fn seed_local_facts(
 pub(crate) fn fixture_library_id(state: &ApiState) -> String {
     state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -176,11 +175,7 @@ pub(crate) fn fixture_library_id(state: &ApiState) -> String {
 
 pub(crate) fn library_stats(state: &ApiState) -> store::LibraryRosterStats {
     let library_id = fixture_library_id(state);
-    state
-        .store()
-        .lock()
-        .library_roster_stats(&library_id)
-        .unwrap()
+    state.store().library_roster_stats(&library_id).unwrap()
 }
 
 pub(crate) fn playback_count(
@@ -190,19 +185,13 @@ pub(crate) fn playback_count(
 ) -> usize {
     state
         .store()
-        .lock()
         .playback_units_for_media(user, &[media])
         .unwrap()
         .len()
 }
 
 pub(crate) fn active_operations(state: &ApiState) -> usize {
-    state
-        .store()
-        .lock()
-        .unfinished_media_merges()
-        .unwrap()
-        .len()
+    state.store().unfinished_media_merges().unwrap().len()
 }
 
 /// 公开 API 没有创建 `media_operations` 行的入口（`begin_merge` 是 crate 私有），

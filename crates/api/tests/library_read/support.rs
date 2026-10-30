@@ -107,20 +107,9 @@ pub async fn read(
 }
 
 pub fn write_batch(state: &ApiState, files: &mut [LibraryFile], batch: usize) -> (f64, f64, f64) {
-    let start = Instant::now();
-    let shared = state.store();
-    let store = shared.lock();
-    let wait = start.elapsed().as_secs_f64() * 1000.;
-    let held = Instant::now();
     for file in files.iter_mut() {
         file.size_bytes = Some(batch as u64 + 1);
     }
-    let scope = store::library_write::WriteScope {
-        library_id: files[0].library_id,
-        config_revision: store
-            .library_config_revision(&files[0].library_id.to_string())
-            .unwrap(),
-    };
     let units = [UnitKey::WHOLE];
     let publications: Vec<_> = files
         .iter()
@@ -132,16 +121,22 @@ pub fn write_batch(state: &ApiState, files: &mut [LibraryFile], batch: usize) ->
             probe_required: false,
         })
         .collect();
-    let result = store
-        .publish_files(&scope, &publications, batch as i64)
+    let shared = state.store();
+    let start = Instant::now();
+    let (wait, held) = shared
+        .library_write(|store| {
+            let wait = start.elapsed().as_secs_f64() * 1000.;
+            let held = Instant::now();
+            let scope = store::library_write::WriteScope {
+                library_id: files[0].library_id,
+                config_revision: store.library_config_revision(&files[0].library_id.to_string())?,
+            };
+            let result = store.publish_files(&scope, &publications, batch as i64)?;
+            assert_eq!(result.updated, files.len());
+            Ok((wait, held.elapsed().as_secs_f64() * 1000.))
+        })
         .unwrap();
-    assert_eq!(result.updated, files.len());
-    drop(store);
-    (
-        start.elapsed().as_secs_f64() * 1000.,
-        wait,
-        held.elapsed().as_secs_f64() * 1000.,
-    )
+    (start.elapsed().as_secs_f64() * 1000., wait, held)
 }
 
 pub fn checkpoint(path: &std::path::Path, mode: &str) -> (i64, i64, i64) {

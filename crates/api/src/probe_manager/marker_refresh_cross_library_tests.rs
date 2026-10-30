@@ -5,7 +5,7 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
     let lib_b_dir = harness._tmp.path().join("tv_lib_b");
     std::fs::create_dir_all(&lib_b_dir).unwrap();
     {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -31,7 +31,7 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
     );
     std::fs::write(&row_b.file.path, b"dummy").unwrap();
     let expected_chapters_b = {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         super::super::test_support::publish_into(&store, &mut row_b);
         seed_episode_old_refresh_result(
             &store,
@@ -57,7 +57,7 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
         .collect();
     assert_eq!(harness.manager.enqueue_marker_refresh(units), 2);
     let job_id = {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         store
             .active_probe_unit_for_ledger(&harness.rows[0].file.file_id.to_string())
             .unwrap()
@@ -71,7 +71,7 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
     harness.manager.finish(&second, true);
 
     let (job, chapters_b, chapters_a0, chapters_a1, marker_a0, marker_a1, marker_b, active_job) = {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         (
             store.get_probe_job(&job_id).unwrap().unwrap(),
             store

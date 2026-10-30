@@ -30,7 +30,7 @@ impl Fixture {
         let member = UserId::new();
         {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .insert_user_with_password(
                     &User {

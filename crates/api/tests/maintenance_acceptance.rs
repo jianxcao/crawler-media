@@ -231,7 +231,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
 
     {
         let store_handle = state.store();
-        let store = store_handle.lock();
+        let store = store_handle.as_ref();
         // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
         store
             .insert_media(&domain::Media {
@@ -248,12 +248,12 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
                 anilist_id: None,
             })
             .unwrap();
-        let file_id = seed_published_file(&store, tmp.path(), media);
+        let file_id = seed_published_file(store, tmp.path(), media);
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
             store
                 .upsert_session(&session(
-                    &store,
+                    store,
                     user,
                     media,
                     file_id,
@@ -266,7 +266,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
                 .unwrap();
         }
         // 一条活跃会话 + 进度/收藏：清理不得碰它们。
-        let mut live = session(&store, user, media, file_id, "live-device", now - 30);
+        let mut live = session(store, user, media, file_id, "live-device", now - 30);
         live.position_ms = 12_345;
         store.upsert_session(&live).unwrap();
         store
@@ -288,7 +288,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
     }
     let before = {
         let store_handle = state.store();
-        let store = store_handle.lock();
+        let store = store_handle.as_ref();
         store.unit_state(user, media, -1, -1).unwrap().unwrap()
     };
 
@@ -300,7 +300,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
     .expect("播放历史清理应成功");
 
     let store_handle = state.store();
-    let store = store_handle.lock();
+    let store = store_handle.as_ref();
     let scope = store::PlaybackLogScope {
         before: None,
         before_id: None,

@@ -47,15 +47,13 @@ fn parse_def_id(raw: &str) -> Result<JobDefId, Response> {
     JobDefId::from_str(raw).map_err(|_| err(StatusCode::BAD_REQUEST, "job.invalid", "任务 id 无效"))
 }
 
-fn load_def(state: &ApiState, id: JobDefId) -> Result<jobs::JobDef, Response> {
-    match state.jobs.lock().def(id) {
+async fn load_def(state: &ApiState, id: JobDefId) -> Result<jobs::JobDef, Response> {
+    match crate::jobs_readers::read_async(state.jobs_readers.clone(), move |queue| queue.def(id))
+        .await
+    {
         Ok(Some(def)) => Ok(def),
         Ok(None) => Err(err(StatusCode::NOT_FOUND, "job.missing", "任务不存在")),
-        Err(error) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        )),
+        Err(error) => Err(super::jobs::jobs_read_error(error)),
     }
 }
 
@@ -89,7 +87,7 @@ pub(crate) async fn update_maintenance_config(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let def = match load_def(&state, id) {
+    let def = match load_def(&state, id).await {
         Ok(def) => def,
         Err(response) => return response,
     };
@@ -150,7 +148,7 @@ pub(crate) async fn update_maintenance_config(
     }
 
     // 重新从库中读取实际生效的 schedule，避免在未修改 interval_secs 时返回错误 null
-    let active_def = load_def(&state, id).ok();
+    let active_def = load_def(&state, id).await.ok();
     let schedule = active_def.and_then(|d| d.schedule).map(|s| match s {
         jobs::Schedule::Interval { secs } => json!({ "interval_secs": secs }),
     });
@@ -180,7 +178,7 @@ pub(crate) async fn preview_maintenance(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let def = match load_def(&state, id) {
+    let def = match load_def(&state, id).await {
         Ok(def) => def,
         Err(response) => return response,
     };
@@ -207,11 +205,11 @@ pub(crate) async fn preview_maintenance(
                     // 只是 dry_run 不写游标、不删行。旧实现用 `prune_terminal_jobs`
                     // 的过滤窗口，同一个数据会给出与实跑不同的候选/保护数字。
                     let cursor_key = def.id.to_string();
-                    let window = state_for_blocking
-                        .jobs
-                        .lock()
-                        .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, true)
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", e.to_string()))?;
+                    let window = crate::jobs_readers::read(
+                        &state_for_blocking.jobs_readers,
+                        |queue| queue.preview_terminal_window(&cursor_key, cutoff, BATCH_SIZE),
+                    )
+                        .map_err(super::jobs::jobs_read_error_parts)?;
                     Ok(json!({
                         "kind": def.kind.as_str(),
                         "policy_version": policy.version,
@@ -229,8 +227,7 @@ pub(crate) async fn preview_maintenance(
                     let cutoff = cutoff(now, policy.retention_days)
                         .map_err(|e| (StatusCode::BAD_REQUEST, "job.invalid_config", e))?;
                     let preview = state_for_blocking
-                        .store
-                        .lock()
+                        .store.as_ref()
                         .preview_playback_logs(cutoff, BATCH_SIZE)
                         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", e.to_string()))?;
                     Ok(json!({
@@ -302,7 +299,7 @@ fn preview_data_retention(
         // 预览与下一轮实跑同口径：读取已持久化游标（只读，不写回）。
         let (cutoff, cursor) = crate::maintenance::load_cursor(state, class, requested);
         let batch = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             store
                 .prune_data_history(class, cutoff, cursor.as_ref(), BATCH_SIZE, true)
                 .map_err(|error| error.to_string())?

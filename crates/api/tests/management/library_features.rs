@@ -126,7 +126,7 @@ async fn chapters_generate_with_voiceprint_markers() {
     let m_id = domain::MediaId::from_str(&media_id).unwrap();
     {
         let store_arc = api_state.store();
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store
             .put_media_marker(&api::store::StoredMediaMarker {
                 media_id: m_id,

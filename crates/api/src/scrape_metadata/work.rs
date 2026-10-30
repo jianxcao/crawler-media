@@ -57,7 +57,7 @@ pub(crate) fn fetch_tmdb_metadata(
 ) -> Result<Option<media::ItemMeta>, String> {
     let preferences = state
         .store
-        .lock()
+        .as_ref()
         .get_scrape_config()
         .ok()
         .map(|config| {
@@ -80,7 +80,7 @@ pub(crate) fn fetch_tmdb_metadata(
 pub(crate) fn preferred_language(state: &crate::management::ApiState) -> String {
     state
         .store
-        .lock()
+        .as_ref()
         .get_scrape_config()
         .ok()
         .map(|config| config.effective.primary_language().to_string())
@@ -159,7 +159,7 @@ pub(crate) fn scrape_movie_fanart(
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let scrape_config = state.store.lock().get_scrape_config().ok();
+    let scrape_config = state.store.as_ref().get_scrape_config().ok();
     let (mirror_images, fanart_api_key, fanart_lang) = match scrape_config {
         Some(ref c) => (
             c.effective.mirror_images,
@@ -187,23 +187,14 @@ pub(crate) fn scrape_movie_fanart(
         lease: lease.as_ref(),
     };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
-    match state
-        .fanart_cache()
-        .map(|cache| media::fanart::FanartClient::with_cache(getter, cache, &api_key))
-    {
-        Ok(client) => {
-            let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
-            match client.movie(tmdb_id, &lang_refs) {
-                Ok(set) => {
-                    crate::fanart_artwork::save_fanart_files(&fetch, movie_root, &[], &set);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, %tmdb_id, "请求电影 Fanart.tv 失败");
-                }
-            }
+    let client = media::fanart::FanartClient::with_cache(getter, state.fanart_cache(), &api_key);
+    let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
+    match client.movie(tmdb_id, &lang_refs) {
+        Ok(set) => {
+            crate::fanart_artwork::save_fanart_files(&fetch, movie_root, &[], &set);
         }
         Err(error) => {
-            tracing::warn!(%error, "初始化 FanartClient 失败");
+            tracing::warn!(%error, %tmdb_id, "请求电影 Fanart.tv 失败");
         }
     }
 }
@@ -230,7 +221,7 @@ pub(crate) fn record_scraped_display(
     };
     if let Err(error) = state
         .store
-        .lock()
+        .as_ref()
         .record_scraped_display(media_id, &locale, display)
     {
         tracing::error!(%error, %media_id, "记录刮削展示字段失败");
@@ -241,7 +232,7 @@ pub(crate) fn record_scraped_display(
 pub(crate) fn metadata_locale(state: &crate::management::ApiState) -> String {
     state
         .store
-        .lock()
+        .as_ref()
         .metadata_language()
         .ok()
         .map(|state| state.language)
@@ -273,7 +264,7 @@ pub(crate) fn record_scraped_display_meta(
     };
     if let Err(error) = state
         .store
-        .lock()
+        .as_ref()
         .record_scraped_display(media_id, &locale, display)
     {
         tracing::error!(%error, %media_id, "记录刮削展示字段失败");

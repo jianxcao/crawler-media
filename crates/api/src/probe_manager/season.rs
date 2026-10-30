@@ -153,8 +153,7 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
     for unit in units {
         let active = pipeline
             .mgr
-            .reader()
-            .map_err(|error| error.to_string())?
+            .store
             .fingerprint_source_active(pipeline.job_id, &unit.row.file.file_id.to_string())
             .map_err(|error| format!("source_check_failed: {error}"))?;
         if !active {
@@ -175,7 +174,7 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
 }
 
 fn effective_sampling_mode(mgr: &SeasonAccess) -> Result<String, String> {
-    let store = mgr.reader().map_err(|error| error.to_string())?;
+    let store = mgr.store.as_ref();
     Ok(store
         .get_scrape_config()
         .map_err(|error| error.to_string())?
@@ -196,7 +195,7 @@ fn collect_episode_descriptors(
             )
         })
         .collect::<Vec<_>>();
-    let store = mgr.reader().map_err(|error| error.to_string())?;
+    let store = mgr.store.as_ref();
     Ok(observed
         .into_iter()
         .filter_map(|(unit, source_version)| {
@@ -259,7 +258,7 @@ async fn run_season_unit(
     };
 
     let media_duration_ms = {
-        let reader = pipeline.mgr.reader().map_err(|error| error.to_string())?;
+        let reader = pipeline.mgr.store.as_ref();
         known_media_duration(&reader, &ledger_id)
     };
     let req = EpisodeCaptureRequest {
@@ -362,14 +361,14 @@ fn persist_season_model(
         })
         .collect();
 
-    let store = pipeline.mgr.writer().map_err(|error| error.to_string())?;
+    pipeline.mgr.store.library_write(|store| {
     // Comparison runs without Store. Recheck the durable origin under the same
     // writer guard as model publication; never reacquire Registry from here.
     let origin = match store.get_probe_job(pipeline.job_id) {
         Ok(origin) => origin,
         Err(error) => {
             tracing::error!(%error, job_id=pipeline.job_id, "season model origin lookup failed");
-            return Err(error.to_string());
+            return Err(error);
         }
     };
     if origin.as_ref().is_some_and(|job| !job.is_active()) {
@@ -377,7 +376,7 @@ fn persist_season_model(
             job_id = pipeline.job_id,
             "cancelled season model publication"
         );
-        return Err("file_deleted: season model source cancelled".into());
+        return Err(store::StoreError::Missing("file_deleted: season model source cancelled".into()));
     }
     match store.probe_job_units(pipeline.job_id) {
         Ok(units)
@@ -389,12 +388,12 @@ fn persist_season_model(
                 job_id = pipeline.job_id,
                 "cancelled season model member publication"
             );
-            return Err("file_deleted: season model source cancelled".into());
+            return Err(store::StoreError::Missing("file_deleted: season model source cancelled".into()));
         }
         Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, job_id=pipeline.job_id, "season model member lookup failed");
-            return Err(error.to_string());
+            return Err(error);
         }
     }
     let automatic = origin
@@ -406,7 +405,7 @@ fn persist_season_model(
             .is_none_or(|row| {
                 row.file.media_id != pipeline.media_id
                     || row.file.version.source_version != member.source_version
-                    || crate::fingerprint_job::source::ensure_source_recorded(&store, &row).is_err()
+                    || crate::fingerprint_job::source::ensure_source_recorded_on(store, &row).is_err()
                     || (automatic
                         && !store
                             .get_library(&row.file.library_id.to_string())
@@ -423,7 +422,7 @@ fn persist_season_model(
             model_id = %model.model_id,
             "cancelled Library season model publication"
         );
-        return Err("file_deleted: season model source cancelled".into());
+        return Err(store::StoreError::Missing("file_deleted: season model source cancelled".into()));
     }
     if let Err(error) = store.put_fingerprint_model(&stored_model, &members) {
         if matches!(
@@ -436,9 +435,10 @@ fn persist_season_model(
             tracing::error!(%error, media_id=%pipeline.media_id, model_id=%model.model_id,
                 "failed to persist fingerprint season model");
         }
-        return Err(error.to_string());
+        return Err(error);
     }
     Ok(())
+    }).map_err(|error| error.to_string())
 }
 
 fn reverify_detections(
@@ -518,7 +518,7 @@ fn build_marker_replacement(
         std::collections::BTreeMap::new();
     let mut chapter_updates = Vec::new();
     let updated_at = now_secs();
-    let store = pipeline.mgr.reader().map_err(|error| error.to_string())?;
+    let store = pipeline.mgr.store.as_ref();
 
     for unit in units {
         let ledger_id = unit.row.file.file_id.to_string();

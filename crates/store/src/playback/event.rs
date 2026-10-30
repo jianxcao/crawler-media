@@ -60,86 +60,17 @@ impl Store {
         event: &BoundPlaybackEvent,
         now_ms: i64,
     ) -> Result<EventOutcome, StoreError> {
-        let (media_id, unit) = playback_unit(&event.item);
-        self.ensure_owns_transaction()?;
-        // `&self` only: `Store::library` is not reachable as `&mut` here, so ask rusqlite for
-        // the IMMEDIATE lock directly instead of `Connection::transaction_with_behavior`.
-        let tx = Transaction::new_unchecked(&self.library, TransactionBehavior::Immediate)?;
-        crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
-        let Some(binding) = read_binding(&tx, event)? else {
-            return Ok(EventOutcome::IgnoredStale);
-        };
-        if stale_bound_event(self, &tx, event, &binding, media_id, unit)? {
-            return Ok(EventOutcome::IgnoredStale);
-        }
-        match crate::library_write::publish::ensure_media_identity_writable(&tx, media_id) {
-            Ok(()) => {}
-            Err(StoreError::Protected(_) | StoreError::Missing(_)) => {
-                tracing::debug!(%media_id, session_id = %event.session_id,
-                    "playback event for a frozen or retired identity ignored");
-                return Ok(EventOutcome::IgnoredStale);
-            }
-            Err(error) => return Err(error),
-        }
-        // An admin ended this device's playback: a later event must not resurrect the session
-        // nor write unit facts, it archives the live row instead. `Applied` (not
-        // `IgnoredStale`) because this event *is* handled — it ends the session, which is a
-        // write; `IgnoredStale` stays reserved for events that write nothing.
-        if admin_ended_session(self, event, now_ms)?
-            && event.event_type != PlaybackEventType::Stopped
-        {
-            archive_admin_ended_session(&tx, event, &binding, now_ms)?;
-            tx.commit()?;
-            tracing::debug!(
-                session_id = %event.session_id,
-                "playback event for an admin-ended session closed without unit writes"
-            );
-            return Ok(EventOutcome::Applied);
-        }
-        // Starting or progressing activates exactly this session; a session already closed by
-        // a newer generation on the same device is refused instead of being reused.
-        if event.event_type != PlaybackEventType::Stopped
-            && !self.activate_play_session(event.user_id, &event.device_id, &event.session_id)?
-        {
-            return Ok(EventOutcome::IgnoredStale);
-        }
-
-        let previous = super::event_duration::read_event_resume(&tx, event, media_id, unit)?;
-        let duration = super::event_duration::effective_event_duration(event, previous.as_ref());
-        write_unit_facts(self, &tx, event, media_id, unit, duration, now_ms)?;
-        if event.event_type == PlaybackEventType::Stopped {
-            bump_play_count_for_completed_stop(&tx, event, media_id, unit, duration)?;
-        }
-        advance_session_state(self, &tx, event, &binding, now_ms)?;
-
-        self.refresh_user_library_summary(
-            event.user_id,
-            media_id,
-            SummaryScope::for_unit(unit.season, unit.episode),
-        )?;
-        tx.commit()?;
-        tracing::debug!(
-            session_id = %event.session_id,
-            event = ?event.event_type,
-            position_ms = event.position_ms,
-            "playback event applied"
-        );
-        Ok(EventOutcome::Applied)
-    }
-
-    /// Refuse to commit when the caller already holds a transaction.
-    ///
-    /// Exactly one IMMEDIATE transaction: a nested BEGIN is rejected by SQLite (`cannot start
-    /// a transaction within a transaction`), and the old heartbeat route swallowed that error
-    /// and kept writing through the legacy helpers, so an event committed by nobody.
-    /// Same rule as the reuse guard in `playback.rs` `playback_write`.
-    fn ensure_owns_transaction(&self) -> Result<(), StoreError> {
-        if !self.library.is_autocommit() {
-            return Err(StoreError::Invalid(
-                "commit_playback_event must own its IMMEDIATE transaction".into(),
-            ));
-        }
-        Ok(())
+        let authorized = self.authorized_library_ids(event.user_id)?;
+        self.with_library_write(|db| {
+            let scope = crate::LibraryConnection {
+                library: db.library,
+                data_dir: db.data_dir,
+                root_ledger_scans: db.root_ledger_scans,
+                media_ledger_reads: db.media_ledger_reads,
+                authorization: Some((event.user_id, authorized)),
+            };
+            scope.commit_playback_event(event, now_ms)
+        })
     }
 }
 
@@ -148,8 +79,8 @@ impl Store {
 ///
 /// Returns `true` when the event must be ignored as stale (nothing written).
 fn stale_bound_event(
-    store: &Store,
-    tx: &Transaction<'_>,
+    store: &crate::LibraryConnection<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
     media_id: MediaId,
@@ -176,7 +107,7 @@ fn stale_bound_event(
 
 /// Close the issued session of an admin-ended device without writing any unit fact.
 fn archive_admin_ended_session(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
     now_ms: i64,
@@ -191,7 +122,7 @@ fn archive_admin_ended_session(
 
 /// A completed stop is the only event that counts as one play.
 fn bump_play_count_for_completed_stop(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
@@ -207,7 +138,7 @@ fn bump_play_count_for_completed_stop(
 }
 
 fn read_binding(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
 ) -> Result<Option<IssuedBinding>, StoreError> {
     let row = tx
@@ -256,7 +187,7 @@ fn binding_matches(
 /// The issued physical source must still be the published, present generation that covers the
 /// event's unit. A replacement scan that bumped the revision makes the old event stale.
 fn source_still_current(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
 ) -> Result<bool, StoreError> {
     let file: Option<(String, i64, String, String, String, String)> = tx
@@ -304,8 +235,8 @@ fn source_still_current(
 /// The Library recorded at issuance must still be `ready`, at the same config revision, and
 /// readable by this user.
 fn library_still_readable(
-    tx: &Transaction<'_>,
-    store: &Store,
+    tx: &rusqlite::Connection,
+    store: &crate::LibraryConnection<'_>,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
 ) -> Result<bool, StoreError> {
@@ -337,8 +268,8 @@ fn library_still_readable(
 /// Progress events never bump `play_count`: only a real terminal stop is a play. The clock is
 /// `now_ms`, and a seek (a position jump beyond the elapsed time) never counts as watch time.
 fn write_unit_facts(
-    store: &Store,
-    tx: &Transaction<'_>,
+    store: &crate::LibraryConnection<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
@@ -404,7 +335,7 @@ fn write_unit_facts(
 /// the live row is still flagged; this mirrors the guard the HTTP route ran before calling
 /// the store, now inside the transaction that owns the session state.
 fn admin_ended_session(
-    store: &Store,
+    store: &crate::LibraryConnection<'_>,
     event: &BoundPlaybackEvent,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
@@ -425,8 +356,8 @@ fn admin_ended_session(
 /// archive that row under its *own* binding (one play log) and close its id, so the new
 /// session starts with fresh `started_at`/`watched_ms` instead of inheriting them.
 fn archive_superseded_session(
-    store: &Store,
-    tx: &Transaction<'_>,
+    store: &crate::LibraryConnection<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     now_ms: i64,
 ) -> Result<(), StoreError> {
@@ -483,7 +414,7 @@ fn archive_superseded_session(
 }
 
 fn close_live_session(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
     now_ms: i64,
@@ -571,8 +502,8 @@ fn close_live_session(
 /// A `Stop` closes exactly the session that reported it and drops its live session row; a
 /// repeated `Stop` never reaches here because the binding is already `closed`.
 fn advance_session_state(
-    store: &Store,
-    tx: &Transaction<'_>,
+    store: &crate::LibraryConnection<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
     now_ms: i64,
@@ -624,8 +555,8 @@ fn advance_session_state(
 /// update of one session, not a new one; a seek that jumps ahead of the elapsed time adds no
 /// watch time.
 fn upsert_live_session(
-    store: &Store,
-    tx: &Transaction<'_>,
+    store: &crate::LibraryConnection<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     binding: &IssuedBinding,
     now_ms: i64,
@@ -744,3 +675,6 @@ fn watch_increment(
     }
     elapsed.min((advance as f64 / rate) as i64).max(0)
 }
+
+#[path = "event/connection.rs"]
+mod connection;

@@ -97,13 +97,14 @@ pub(crate) fn is_absent_and_stale_with_hash(
     !hash_seen && is_absent_and_stale(item, snapshots, now)
 }
 
-/// Background reconciliation for one Subscribe. The caller must hold the
-/// Subscribe guard. Returns the pending rows that remain active.
+/// Observe Downloader tasks without a Subscribe guard, then revalidate and
+/// apply the owned observations under a short decision guard.
 pub(crate) fn reconcile_subscribe(
     state: &ApiState,
-    subscribe_id: SubscribeId,
+    expected: &domain::Subscribe,
     pending: Vec<(i32, store::PendingDownload)>,
 ) -> Vec<(i32, store::PendingDownload)> {
+    let subscribe_id = expected.id;
     let mut snapshots: HashMap<Option<DownloaderId>, Option<Vec<downloader::TaskSnapshot>>> =
         HashMap::new();
     for (_, item) in &pending {
@@ -118,14 +119,42 @@ pub(crate) fn reconcile_subscribe(
             }
         });
     }
+    let guard = state.subscribe_guard(subscribe_id);
+    let _guard = guard.lock();
+    if state.subscribe_is_deleting(subscribe_id) {
+        return Vec::new();
+    }
+    let active = {
+        let store = state.store.as_ref();
+        match store.get_subscribe(subscribe_id) {
+            Ok(Some(current)) if current == *expected => {}
+            Ok(_) => return Vec::new(),
+            Err(error) => {
+                tracing::error!(%subscribe_id, %error, "重新验证对账 Subscribe 失败");
+                return Vec::new();
+            }
+        }
+        match store.load_pending(subscribe_id) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%subscribe_id, %error, "重新验证对账 pending 失败");
+                return Vec::new();
+            }
+        }
+    };
     let now = crate::job_loop::unix_now();
     let hashes = state
         .store
-        .lock()
         .load_pending_info_hashes(subscribe_id)
         .unwrap_or_default();
     let mut kept = Vec::with_capacity(pending.len());
     for (score, item) in pending {
+        if !active
+            .iter()
+            .any(|(current_score, current)| *current_score == score && same_pending(current, &item))
+        {
+            continue;
+        }
         let list = snapshots
             .get(&item.downloader_id)
             .and_then(|s| s.as_deref());
@@ -133,7 +162,6 @@ pub(crate) fn reconcile_subscribe(
         if is_absent_and_stale_with_hash(&item, hash, list, now) {
             match state
                 .store
-                .lock()
                 .delete_pending(subscribe_id, &item.torrent.enclosure)
             {
                 Ok(()) => {
@@ -154,13 +182,19 @@ pub(crate) fn reconcile_subscribe(
     kept
 }
 
+pub(crate) fn same_pending(a: &store::PendingDownload, b: &store::PendingDownload) -> bool {
+    a.torrent == b.torrent
+        && a.release_override == b.release_override
+        && a.downloader_id == b.downloader_id
+        && a.submitted_at == b.submitted_at
+}
+
 /// H3 stalled: default days without progress before a pending is released.
 pub(crate) const DEFAULT_STALLED_TIMEOUT_DAYS: i64 = 7;
 
 fn stalled_timeout_secs(state: &ApiState) -> i64 {
     let days = state
         .store
-        .lock()
         .get_setting(crate::settings_keys::SUBSCRIBE_STALLED_TIMEOUT_DAYS)
         .ok()
         .flatten()
@@ -190,27 +224,22 @@ fn is_stalled(
         return false;
     }
     let enclosure = &item.torrent.enclosure;
-    let last = match state.store.lock().touch_pending_progress(
-        subscribe_id,
-        enclosure,
-        snapshot.progress,
-        now,
-    ) {
-        Ok(Some(last)) => last,
-        Ok(None) => return false,
-        Err(error) => {
-            tracing::warn!(%subscribe_id, %error, "记录下载进度失败");
-            return false;
-        }
-    };
+    let last =
+        match state
+            .store
+            .touch_pending_progress(subscribe_id, enclosure, snapshot.progress, now)
+        {
+            Ok(Some(last)) => last,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%subscribe_id, %error, "记录下载进度失败");
+                return false;
+            }
+        };
     if now - last < stalled_timeout_secs(state) {
         return false;
     }
-    match state
-        .store
-        .lock()
-        .mark_pending_stalled(subscribe_id, enclosure)
-    {
+    match state.store.mark_pending_stalled(subscribe_id, enclosure) {
         Ok(()) => {
             tracing::warn!(%subscribe_id, torrent = %item.torrent.title, idle_secs = now - last,
                 "下载长时间无进度：标记 stalled 并释放占位（不删除下载器任务）");

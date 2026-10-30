@@ -13,15 +13,15 @@ async fn late_old_stop_does_not_close_new_session() {
 
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     // 1. Start session A
     let session_id_a = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row_a.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row_a.file_id, 1000)
     };
 
     // Start A with play_session_id_a
@@ -45,8 +45,8 @@ async fn late_old_stop_does_not_close_new_session() {
     // 2. Start session B on same device
     let session_id_b = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row_b.file_id, 2000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row_b.file_id, 2000)
     };
     let (status, _) = fix
         .request_with_body(
@@ -68,7 +68,7 @@ async fn late_old_stop_does_not_close_new_session() {
     // Verify active session is B
     let store_arc = fix.state.store();
     let current = store_arc
-        .lock()
+        .as_ref()
         .get_session(user_id, "dev1")
         .unwrap()
         .unwrap();
@@ -100,7 +100,7 @@ async fn late_old_stop_does_not_close_new_session() {
     assert_eq!(status, StatusCode::OK);
 
     // Session B must NOT be closed!
-    let current_after = store_arc.lock().get_session(user_id, "dev1").unwrap();
+    let current_after = store_arc.as_ref().get_session(user_id, "dev1").unwrap();
     assert!(current_after.is_some(), "Session B must still be active");
     assert_eq!(
         current_after.unwrap().play_session_id.as_deref(),
@@ -114,15 +114,15 @@ async fn late_old_progress_does_not_rewind_position() {
     let (_, row) = fix.insert_media_and_ledger("same_movie.mkv");
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     // Session 1 on same file
     let id_1 = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row.file_id, 1000)
     };
     fix.request_with_body(
         "POST",
@@ -142,8 +142,8 @@ async fn late_old_progress_does_not_rewind_position() {
     // Session 2 on same file (newer generation)
     let id_2 = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row.file_id, 2000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row.file_id, 2000)
     };
     fix.request_with_body(
         "POST",
@@ -179,7 +179,7 @@ async fn late_old_progress_does_not_rewind_position() {
     // Active session position must remain 8000, not rewound to 2000
     let store_arc = fix.state.store();
     let cur = store_arc
-        .lock()
+        .as_ref()
         .get_session(user_id, "dev1")
         .unwrap()
         .unwrap();
@@ -194,15 +194,15 @@ async fn late_other_episode_does_not_close_active_session() {
 
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     // Start session on B (active)
     let session_id_b = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row_b.file_id, 2000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row_b.file_id, 2000)
     };
     fix.request_with_body(
         "POST",
@@ -236,7 +236,7 @@ async fn late_other_episode_does_not_close_active_session() {
 
     // Active session B must not be closed!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let active = guard.get_session(user_id, "dev1").unwrap().unwrap();
     assert_eq!(
         active.play_session_id.as_deref(),
@@ -251,14 +251,14 @@ async fn duplicate_stop_only_records_one_log() {
 
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     let session_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row.file_id, 1000)
     };
 
     fix.request_with_body(
@@ -313,7 +313,7 @@ async fn duplicate_stop_only_records_one_log() {
     assert_eq!(s2, StatusCode::OK);
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let logs = guard
         .list_logs(10, None, None, None, i64::MAX / 2, None)
         .unwrap();
@@ -338,17 +338,17 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
     let (media_id, row) = fix.insert_media_and_ledger("session_states.mkv");
     let store_arc = fix.state.store();
     let user_id = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
     let device = "dev_session_states";
     let sid = {
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, device, row.file_id, 1_000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, device, row.file_id, 1_000)
     };
     let state = |sid: &str| {
         store_arc
-            .lock()
+            .as_ref()
             .play_session_binding(user_id, device, sid)
             .unwrap()
             .map(|binding| binding.state)
@@ -392,7 +392,7 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
     );
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .get_session(user_id, device)
             .unwrap()
             .is_some(),
@@ -409,7 +409,7 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
     );
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .get_session(user_id, device)
             .unwrap()
             .is_none(),
@@ -426,7 +426,7 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
     );
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .get_session(user_id, device)
             .unwrap()
             .is_none(),
@@ -495,13 +495,13 @@ async fn http_event_sequence_regression_is_ignored_and_writes_nothing() {
     let (media_id, row) = fix.insert_media_and_ledger("seq_regression.mkv");
     let store_arc = fix.state.store();
     let user_id = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
     let device = "dev_seq_regression";
     let sid = {
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, device, row.file_id, 1_000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, device, row.file_id, 1_000)
     };
     let post = |event: &str, position_ms: i64, event_sequence: i64| {
         let body = json!({
@@ -531,7 +531,7 @@ async fn http_event_sequence_regression_is_ignored_and_writes_nothing() {
     assert_eq!(status, StatusCode::OK, "start body={body}");
 
     let (unit_before, session_before) = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         (
             guard
                 .unit_state(user_id, media_id, -1, -1)
@@ -550,7 +550,7 @@ async fn http_event_sequence_regression_is_ignored_and_writes_nothing() {
     let (status, body) = post("progress", 300_000, 1).await;
     assert_eq!(status, StatusCode::OK, "regressed body={body}");
 
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert_eq!(
         guard
             .unit_state(user_id, media_id, -1, -1)
@@ -578,13 +578,13 @@ async fn movie_zero_coordinates_are_rejected_without_writes() {
     let (media_id, file) = fix.insert_media_and_ledger("movie_zero.mkv");
     let store_arc = fix.state.store();
     let user_id = store_arc
-        .lock()
+        .as_ref()
         .user_by_token(&fix.admin_token)
         .unwrap()
         .unwrap()
         .id;
     let sid =
-        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+        support::session::issue_session(store_arc.as_ref(), user_id, "dev1", file.file_id, 1000);
     let (status, _) = fix
         .request_with_body(
             "POST",
@@ -606,7 +606,7 @@ async fn movie_zero_coordinates_are_rejected_without_writes() {
         !status.is_success(),
         "movie 0/0 must be refused, got {status}"
     );
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(
         guard
             .unit_state(user_id, media_id, -1, -1)

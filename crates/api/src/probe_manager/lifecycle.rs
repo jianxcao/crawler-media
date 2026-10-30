@@ -12,22 +12,18 @@ impl ProbeManager {
         reason: &str,
     ) -> Result<(), store::StoreError> {
         for ledger_id in ledger_ids {
-            let unit = self
-                .reader()
-                .and_then(|store| store.active_probe_unit_for_ledger(ledger_id))?;
+            let unit = self.store.active_probe_unit_for_ledger(ledger_id)?;
             if let Some(unit) = unit {
-                {
-                    let store = self.writer()?;
+                self.store.library_write(|store| {
                     let job = store.get_probe_job(&unit.job_id)?;
                     if job.as_ref().is_some_and(|job| job.kind == "marker_refresh") {
                         store.cancel_probe_job(&unit.job_id, reason)?;
                     } else {
                         store.cancel_probe_unit(&unit.job_id, ledger_id, reason)?;
                     }
-                }
-                let units = self
-                    .reader()
-                    .and_then(|store| store.probe_job_units(&unit.job_id))?;
+                    Ok(())
+                })?;
+                let units = self.store.probe_job_units(&unit.job_id)?;
                 let mut seen = self.seen.lock();
                 for unit in units {
                     seen.remove(&unit.ledger_id);
@@ -42,9 +38,7 @@ impl ProbeManager {
     /// Uses the shared reader pool. Async callers use their existing off-executor
     /// read seam so reader acquisition cannot park a Tokio worker.
     pub fn is_queued(&self, ledger_id: &str) -> bool {
-        let queued = self
-            .reader()
-            .and_then(|store| store.is_probe_queued(ledger_id));
+        let queued = self.store.is_probe_queued(ledger_id);
         match queued {
             Ok(queued) => queued,
             Err(_) => self.seen.lock().contains(ledger_id),
@@ -61,8 +55,8 @@ impl ProbeManager {
         media_id: MediaId,
         season: u32,
     ) -> Result<Option<crate::store::ProbeJob>, crate::store::StoreError> {
-        self.reader()
-            .and_then(|store| store.latest_marker_refresh_for_season(&media_id.to_string(), season))
+        self.store
+            .latest_marker_refresh_for_season(&media_id.to_string(), season)
     }
 
     #[cfg(test)]
@@ -133,12 +127,7 @@ impl ProbeManager {
         let cancelled = unit
             .job_id
             .as_deref()
-            .and_then(|id| {
-                self.reader()
-                    .and_then(|store| store.get_probe_job(id))
-                    .ok()
-                    .flatten()
-            })
+            .and_then(|id| self.store.get_probe_job(id).ok().flatten())
             .is_some_and(|job| job.status == "cancelled");
         if cancelled {
             self.seen.lock().remove(&ledger_id);
@@ -157,10 +146,7 @@ impl ProbeManager {
         let Some(job_id) = unit.job_id.as_deref() else {
             return;
         };
-        let result = {
-            let Ok(store) = self.writer() else {
-                return;
-            };
+        let result = self.store.library_write(|store| {
             store
                 .cancel_probe_unit(job_id, &ledger_id, reason)
                 .and_then(|(job, _, all_done)| {
@@ -170,15 +156,13 @@ impl ProbeManager {
                     }
                     store.get_probe_job(job_id)
                 })
-        };
+        });
         match result {
             Ok(Some(job)) => {
                 if !job.is_active() {
                     // Enqueue holds seen before Store. Never retain the Store
                     // temporary guard while acquiring seen (including in if let).
-                    let units = self
-                        .reader()
-                        .and_then(|store| store.probe_job_units(job_id));
+                    let units = self.store.probe_job_units(job_id);
                     if let Ok(units) = units {
                         let mut seen = self.seen.lock();
                         for pending in units {
@@ -207,7 +191,7 @@ impl ProbeManager {
             tracing::error!(ledger_id, "探测队列项缺少持久化任务 ID，拒绝写入结果");
             return false;
         };
-        let result = self.writer().and_then(|store| {
+        let result = self.store.library_write(|store| {
             store.finish_probe_unit_with_status(job_id, &ledger_id, status, error_kind, error)
         });
         let (job, accepted, all_done) = match result {
@@ -239,7 +223,7 @@ impl ProbeManager {
             return true;
         }
         if job.failed > 0 {
-            if let Err(error) = self.writer().and_then(|store| {
+            if let Err(error) = self.store.library_write(|store| {
                 store.finish_probe_job(
                     &job.id,
                     false,
@@ -263,7 +247,7 @@ impl ProbeManager {
         } else {
             let final_succeeded = job.status == "succeeded";
             let job_final_status = job.status.clone();
-            match self.writer().and_then(|store| {
+            match self.store.library_write(|store| {
                 store.finish_probe_job(&job.id, final_succeeded, job.error.as_deref())
             }) {
                 Ok(()) => tracing::info!(

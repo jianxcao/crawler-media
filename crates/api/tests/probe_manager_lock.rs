@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 #[path = "probe_manager_lock/support.rs"]
 mod support;
 
@@ -15,7 +21,7 @@ fn probe_round_does_not_stall_runtime_while_writer_is_held() {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = writer.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(writer.clone(), store::Db::Library);
         held_tx.send(()).unwrap();
         // The fallback lets the unfixed handler unblock and report its timer
         // failure instead of deadlocking the single-threaded test runtime.
@@ -63,14 +69,14 @@ fn probe_round_does_not_stall_runtime_while_writer_is_held() {
 fn probe_admission_returns_busy_before_the_writer_is_released_without_a_late_job() {
     let fixture = support::Fixture::new();
     let shared = fixture.state.store();
-    let row = shared.lock().list_file_coverage().unwrap().remove(0);
+    let row = shared.as_ref().list_file_coverage().unwrap().remove(0);
     let file_id = row.file.file_id.to_string();
     let probe = fixture.state.probe.clone();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let writer = shared.clone();
     let holder = std::thread::spawn(move || {
-        let _guard = writer.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(writer.clone(), store::Db::Library);
         held_tx.send(()).unwrap();
         let _ = release_rx.recv_timeout(Duration::from_secs(3));
     });
@@ -86,13 +92,12 @@ fn probe_admission_returns_busy_before_the_writer_is_released_without_a_late_job
     holder.join().unwrap();
     caller.join().unwrap();
     assert!(
-        matches!(outcome, Ok(Err(store::StoreError::Io(ref error)))
-            if error.kind() == std::io::ErrorKind::WouldBlock),
+        matches!(outcome, Ok(Err(store::StoreError::WriteBusy))),
         "admission must return temporary busy within its writer budget: {outcome:?}"
     );
     assert!(
         shared
-            .lock()
+            .as_ref()
             .active_probe_unit_for_ledger(&file_id)
             .unwrap()
             .is_none(),

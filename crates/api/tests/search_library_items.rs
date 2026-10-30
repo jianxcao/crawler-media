@@ -56,7 +56,7 @@ impl Fixture {
         .unwrap();
         let token = "search-token".to_string();
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let user = domain::User {
             id: domain::UserId::new(),
             login: "search-admin".into(),
@@ -90,7 +90,7 @@ impl Fixture {
             let path = library.root_paths[0].join(format!("stress-{index}.mkv"));
             std::fs::write(&path, b"fixture").unwrap();
             store::test_support::publish_fixture_file(
-                &store,
+                store,
                 &store::test_support::FixtureFile {
                     media_id,
                     path: path.display().to_string(),
@@ -120,7 +120,7 @@ impl Fixture {
         let path = library.root_paths[0].join("actor.mkv");
         std::fs::write(&path, b"fixture").unwrap();
         store::test_support::publish_fixture_file(
-            &store,
+            store,
             &store::test_support::FixtureFile {
                 media_id: actor_media,
                 path: path.display().to_string(),
@@ -130,7 +130,6 @@ impl Fixture {
         .unwrap();
         let library_id = library.id.clone();
         let data_dir = store.data_dir().to_path_buf();
-        drop(store);
         let conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
         conn.execute(
             "INSERT INTO library_protocol_people

@@ -1,4 +1,4 @@
-use rusqlite::{Transaction, params};
+use rusqlite::params;
 
 use crate::{Store, StoreError};
 
@@ -10,28 +10,14 @@ impl Store {
         detect_intros: bool,
         enable_fingerprint: bool,
     ) -> Result<(), StoreError> {
-        self.ensure_library_mutable(id)?;
-        let tx = crate::write_tx(&self.library)?;
-        let disabling = tx.query_row(
-            "SELECT (detect_intros=1 AND ?2=0) OR (enable_fingerprint=1 AND ?3=0)
-             FROM libraries WHERE library_id=?1",
-            params![id, detect_intros, enable_fingerprint],
-            |row| row.get::<_, bool>(0),
-        )?;
-        tx.execute(
-            "UPDATE libraries SET detect_intros = ?1, enable_fingerprint = ?2 WHERE library_id = ?3",
-            params![detect_intros, enable_fingerprint, id],
-        )?;
-        if disabling {
-            cancel_optional_library_work(&tx, id)?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| {
+            db.set_library_intro_settings(id, detect_intros, enable_fingerprint)
+        })
     }
 }
 
 pub(super) fn file_accepts_optional_work(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     file_id: &str,
     automatic: bool,
 ) -> Result<bool, StoreError> {
@@ -47,7 +33,7 @@ pub(super) fn file_accepts_optional_work(
     )?)
 }
 
-fn cancel_optional_library_work(tx: &Transaction<'_>, id: &str) -> Result<(), StoreError> {
+fn cancel_optional_library_work(tx: &rusqlite::Connection, id: &str) -> Result<(), StoreError> {
     let jobs = {
         let mut statement = tx.prepare(
             "SELECT DISTINCT j.id FROM probe_jobs j
@@ -84,3 +70,6 @@ fn cancel_optional_library_work(tx: &Transaction<'_>, id: &str) -> Result<(), St
     }
     Ok(())
 }
+
+#[path = "optional/connection.rs"]
+mod connection;

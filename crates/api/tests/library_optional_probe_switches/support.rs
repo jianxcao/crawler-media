@@ -48,7 +48,7 @@ impl Fixture {
         let mut libraries = Vec::new();
         {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             for name in ["target", "sibling"] {
                 let root = dir.path().join(name);
                 std::fs::create_dir_all(&root).unwrap();
@@ -93,7 +93,7 @@ impl Fixture {
                     let path = root.join(format!("S01E{:02}.mkv", episode + 1));
                     std::fs::write(&path, b"finite local probe source").unwrap();
                     let file = store::test_support::publish_fixture_file(
-                        &store,
+                        store,
                         &store::test_support::FixtureFile {
                             media_id: media.id,
                             path: path.display().to_string(),
@@ -104,7 +104,7 @@ impl Fixture {
                     )
                     .unwrap();
                     let id = uuid::Uuid::new_v4().to_string();
-                    create_job(&store, &id, kind, &file);
+                    create_job(store, &id, kind, &file);
                     if status == "running" {
                         assert!(
                             store

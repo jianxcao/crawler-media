@@ -20,7 +20,7 @@ pub(crate) fn since_key(id: SubscribeId) -> String {
 
 /// Store (or clear with `None`) the fallback delay in days.
 pub(crate) fn set_after_days(state: &ApiState, id: SubscribeId, days: Option<u32>) {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let result = match days {
         Some(days) => store.put_setting(&after_key(id), &days.to_string()),
         None => store.delete_setting(&after_key(id)).map(|_| ()),
@@ -44,7 +44,7 @@ pub(crate) fn effective<'a>(state: &ApiState, subscribe: &'a Subscribe) -> Cow<'
     if !subscribe.full_season_pack {
         return Cow::Borrowed(subscribe);
     }
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(days) = store
         .get_setting(&after_key(subscribe.id))
         .ok()

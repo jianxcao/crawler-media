@@ -38,7 +38,7 @@ impl Fixture {
         let library;
         {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .insert_media(&Media {
                     id: media_id,
@@ -56,7 +56,7 @@ impl Fixture {
                 .unwrap();
             library = store.default_library(MediaKind::Tv).unwrap().unwrap().id;
             for episode in 1..=2 {
-                publish_episode(&store, media_id, &root, 1, episode);
+                publish_episode(store, media_id, &root, 1, episode);
             }
         }
         Self {
@@ -160,7 +160,7 @@ impl Fixture {
     /// Drive the Store's own public reader, bypassing the HTTP views.
     fn effective_played(&self, user: UserId, season: i32, episode: i32) -> bool {
         let handle = self.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .effective_unit_state(user, self.media_id, UnitKey::new(season, episode))
             .unwrap()
@@ -169,7 +169,7 @@ impl Fixture {
 
     fn admin(&self) -> UserId {
         let handle = self.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.admin_user_id().unwrap()
     }
 }
@@ -222,9 +222,9 @@ async fn whole_item_mark_reaches_every_season_of_the_item() {
     // A second season proves the assertion is not scoped to one season.
     {
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let root = fixture.tmp.path().join("data/library/tv/Test Work");
-        publish_episode(&store, fixture.media_id, &root, 2, 1);
+        publish_episode(store, fixture.media_id, &root, 2, 1);
     }
     fixture.mark(-1, -1, true).await;
     assert_eq!(fixture.episodes(1).await["episodes"][0]["played"], true);
@@ -286,7 +286,7 @@ async fn equal_change_time_resolves_to_the_episode_scope() {
     let user = fixture.admin();
     {
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         // Both assertions carry the same change time; the more specific scope wins.
         for (season, episode, played) in [(1, -1, true), (1, 1, false)] {
             let change =
@@ -309,7 +309,7 @@ async fn another_user_keeps_their_own_watch_state() {
     let member = UserId::new();
     {
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .insert_user(&domain::User {
                 id: member,

@@ -3,7 +3,7 @@ use store::Store;
 
 #[test]
 fn subscription_with_units_and_retention_alignment() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(tmp.path()).unwrap();
 
     let media_id = MediaId::new();
@@ -20,6 +20,30 @@ fn subscription_with_units_and_retention_alignment() {
             true,
             &[],
         )
+        .unwrap();
+
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: MediaKind::Tv,
+            title: "Anime TV fixture".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    store
+        .insert_filter(&domain::Filter {
+            id: filter_id,
+            name: "TV fixture filter".into(),
+            atoms: vec![],
+            keep_old_versions: false,
+        })
         .unwrap();
 
     // 2. Insert a subscribe record tied to this library

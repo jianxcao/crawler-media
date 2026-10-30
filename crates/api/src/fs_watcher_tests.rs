@@ -53,7 +53,6 @@ fn watcher_retry_scans_other_library_while_one_is_frozen() {
     loop {
         if state
             .store()
-            .lock()
             .file_coverage_by_path(path.to_str().unwrap())
             .unwrap()
             .is_some()
@@ -103,7 +102,6 @@ fn watcher_retry_scans_after_reconfiguration_releases_library() {
     loop {
         if state
             .store()
-            .lock()
             .file_coverage_by_path(path.to_str().unwrap())
             .unwrap()
             .is_some()
@@ -144,15 +142,26 @@ fn watcher_retry_eventually_scans_after_store_contention() {
     .unwrap();
     let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
     let handle = state.store();
-    let held = handle.lock();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        handle
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     crate::fs_watcher::retry_library_scan(&state, &tracker, library.to_string());
     std::thread::sleep(Duration::from_millis(1200));
-    drop(held);
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if state
             .store()
-            .lock()
             .file_coverage_by_path(path.to_str().unwrap())
             .unwrap()
             .is_some()
@@ -242,7 +251,7 @@ fn realtime_library_root_matches_nested_strm_path() {
     assert_eq!(entry_scan_target_dir(&root, &episode), show_dir);
 
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let rows = state.store.lock().list_file_coverage().unwrap();
+    let rows = state.store.as_ref().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].file.path.display().to_string(),
@@ -279,24 +288,24 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     .unwrap();
     let show_dir = root.join("喜剧之王 (2026)");
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let first = state.store.lock().list_file_coverage().unwrap();
+    let first = state.store.as_ref().list_file_coverage().unwrap();
     let first_id = first[0].file.file_id.to_string();
     while state.probe.take_queued_for_test().is_some() {}
     let job_id = state
         .store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&first_id)
         .unwrap()
         .unwrap()
         .job_id;
     state
         .store
-        .lock()
+        .as_ref()
         .finish_probe_unit(&job_id, &first_id, true, None)
         .unwrap();
     state
         .store
-        .lock()
+        .as_ref()
         .finish_probe_job(&job_id, true, None)
         .unwrap();
     assert!(!state.probe.is_queued(&first_id));
@@ -305,7 +314,7 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     std::fs::write(&episode_two, "https://example.test/e02.mkv").unwrap();
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
 
-    let rows = state.store.lock().list_file_coverage().unwrap();
+    let rows = state.store.as_ref().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(!state.probe.is_queued(&first_id), "已有 E01 不能再次入队");
     let second = rows
@@ -552,7 +561,6 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
 
     let ops = state
         .store()
-        .lock()
         .scan_operations_for_library(&library_id)
         .unwrap();
     assert_eq!(ops.len(), 1, "watch 事件必须提交一个扫描 operation");
@@ -564,7 +572,7 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
 
     // 定向扫描真的跑完（走 ScanWalker 的 targets 模式）：剧集入账。
     for _ in 0..200 {
-        let rows = state.store().lock().list_file_coverage().unwrap();
+        let rows = state.store().list_file_coverage().unwrap();
         if let Some(row) = rows.first() {
             assert_eq!(
                 row.file.path.display().to_string(),

@@ -85,12 +85,11 @@ fn recent_sidecar_export_survives_retention_until_its_millisecond_timestamp() {
     .unwrap();
     let baseline_before = state
         .store()
-        .lock()
         .nfo_local_edits_observed(&request, &observation)
         .unwrap();
     assert!(baseline_before.is_some());
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert!(
         store
             .nfo_export_registration(&operation_id)

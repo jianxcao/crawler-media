@@ -121,7 +121,7 @@ impl SearchAdmissionFixture {
         let mut site_ids = Vec::new();
         {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             for index in 0..site_count {
                 let site = Site {
                     id: SiteId::new(),

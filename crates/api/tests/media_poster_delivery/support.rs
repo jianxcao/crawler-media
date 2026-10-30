@@ -30,6 +30,7 @@ pub struct FiniteSource {
     outcome: Mutex<Outcome>,
     pub active: AtomicUsize,
     pub peak: AtomicUsize,
+    pub calls: AtomicUsize,
 }
 impl FiniteSource {
     pub fn new(gated: bool, delay: Duration, outcome: Outcome) -> Arc<Self> {
@@ -39,6 +40,7 @@ impl FiniteSource {
             outcome: Mutex::new(outcome),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
         })
     }
     pub fn release(&self) {
@@ -67,6 +69,7 @@ impl Drop for Active<'_> {
 }
 impl ImageFetcher for FiniteSource {
     fn fetch(&self, _: &str) -> Result<(String, Vec<u8>), PosterError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
         let _active = Active(&self.active);
@@ -114,6 +117,21 @@ struct Offline;
 impl Fetcher for Offline {
     fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
         Err(IndexerError::Fetch("offline fixture".into()))
+    }
+}
+
+/// Only occupies ApiState while the original service is moved and reconfigured.
+struct DetachedPosterSource;
+#[async_trait::async_trait]
+impl api::media_posters::MediaPosterSource for DetachedPosterSource {
+    async fn cached(
+        &self,
+        _: MediaId,
+    ) -> Result<Option<api::media_posters::PosterBytes>, PosterError> {
+        unreachable!("no request during fixture reconfiguration")
+    }
+    async fn get(&self, _: MediaId) -> Result<api::media_posters::PosterBytes, PosterError> {
+        unreachable!("no request during fixture reconfiguration")
     }
 }
 
@@ -165,7 +183,6 @@ impl Fixture {
                 temp.path().join("posters"),
                 source.clone(),
             )
-            .unwrap()
             .with_wait_deadline(wait),
         );
         let state = state.with_media_posters(service.clone());
@@ -176,6 +193,28 @@ impl Fixture {
             ids,
         }
     }
+    /// Move the same drained service, retaining its semaphore, flights and caches.
+    pub fn with_wait_deadline(self, wait: Duration) -> Self {
+        let Self {
+            _temp,
+            state,
+            service,
+            ids,
+        } = self;
+        let state = state.with_media_posters(Arc::new(DetachedPosterSource));
+        let service = match Arc::try_unwrap(service) {
+            Ok(service) => Arc::new(service.with_wait_deadline(wait)),
+            Err(_) => panic!("poster fixture must drain all service owners before reconfiguration"),
+        };
+        let state = state.with_media_posters(service.clone());
+        Self {
+            _temp,
+            state,
+            service,
+            ids,
+        }
+    }
+
     pub fn app(&self) -> axum::Router {
         api::router(self.state.clone())
     }

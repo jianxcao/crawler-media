@@ -132,7 +132,7 @@ pub fn not_started_reason(want: ReconcileWant) -> Option<&'static str> {
 }
 
 fn load_want(state: &ApiState) -> (ReconcileWant, crate::obscura_manager::InstallPolicy) {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     load_want_on(&store)
 }
 

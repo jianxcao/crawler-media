@@ -267,6 +267,7 @@ fn delete_subscribe_clears_all_related_rows() {
         follow_future: false,
         search_interval_secs: 1800,
     };
+    seed_subscribe_media(&store, subscribe.media_id);
     store.insert_subscribe(&subscribe).unwrap();
     let conn = Connection::open(data.join("subscribe.db")).unwrap();
     conn.execute(

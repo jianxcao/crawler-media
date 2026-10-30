@@ -1,0 +1,241 @@
+//! SQL on one explicitly borrowed database connection.
+use super::*;
+
+impl crate::LibraryConnection<'_> {
+    pub fn fingerprint_source_active(
+        &self,
+        job_id: &str,
+        file_id: &str,
+    ) -> Result<bool, StoreError> {
+        fingerprint_source_active(self.library, job_id, file_id)
+    }
+
+    pub fn begin_fingerprint_attempt(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "INSERT INTO fingerprint_attempts (
+                 attempt_id, job_id, file_id, kind, window_start_ms,
+                 window_end_ms, phase, started_at_ms, finished_at_ms,
+                 status, error_kind, metrics_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(attempt_id) DO UPDATE SET
+                 job_id = excluded.job_id,
+                 file_id = excluded.file_id,
+                 kind = excluded.kind,
+                 window_start_ms = excluded.window_start_ms,
+                 window_end_ms = excluded.window_end_ms,
+                 phase = excluded.phase,
+                 started_at_ms = excluded.started_at_ms,
+                 finished_at_ms = excluded.finished_at_ms,
+                 status = excluded.status,
+                 error_kind = excluded.error_kind,
+                 metrics_json = excluded.metrics_json",
+            params![
+                attempt.attempt_id,
+                attempt.job_id,
+                attempt.ledger_id,
+                attempt.kind,
+                attempt.window_start_ms,
+                attempt.window_end_ms,
+                attempt.phase,
+                attempt.started_at_ms,
+                attempt.finished_at_ms,
+                attempt.status,
+                attempt.error_kind,
+                attempt.metrics_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_fingerprint_attempt(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+        sample: Option<&StoredFingerprintSample>,
+    ) -> Result<(), StoreError> {
+        self.complete_fingerprint_attempt_inner(attempt, sample, None)
+            .map(|_| ())
+    }
+
+    pub fn complete_fingerprint_attempt_for_source(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+        sample: &StoredFingerprintSample,
+        expected_path: &str,
+    ) -> Result<bool, StoreError> {
+        self.complete_fingerprint_attempt_inner(attempt, Some(sample), Some(expected_path))
+    }
+
+    pub(super) fn complete_fingerprint_attempt_inner(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+        sample: Option<&StoredFingerprintSample>,
+        expected_path: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.library)?;
+
+        if let Some(path) = expected_path {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM library_files
+                     WHERE file_id = ?1 AND path_key = norm_path_key(?2)
+                       AND presence_state = 'present' AND publication_state = 'published'
+                 )",
+                params![attempt.ledger_id, path],
+                |row| row.get(0),
+            )?;
+            if !exists || !fingerprint_source_active(&tx, &attempt.job_id, &attempt.ledger_id)? {
+                return Ok(false);
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO fingerprint_attempts (
+                 attempt_id, job_id, file_id, kind, window_start_ms,
+                 window_end_ms, phase, started_at_ms, finished_at_ms,
+                 status, error_kind, metrics_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(attempt_id) DO UPDATE SET
+                 job_id = excluded.job_id,
+                 file_id = excluded.file_id,
+                 kind = excluded.kind,
+                 window_start_ms = excluded.window_start_ms,
+                 window_end_ms = excluded.window_end_ms,
+                 phase = excluded.phase,
+                 started_at_ms = excluded.started_at_ms,
+                 finished_at_ms = excluded.finished_at_ms,
+                 status = excluded.status,
+                 error_kind = excluded.error_kind,
+                 metrics_json = excluded.metrics_json",
+            params![
+                attempt.attempt_id,
+                attempt.job_id,
+                attempt.ledger_id,
+                attempt.kind,
+                attempt.window_start_ms,
+                attempt.window_end_ms,
+                attempt.phase,
+                attempt.started_at_ms,
+                attempt.finished_at_ms,
+                attempt.status,
+                attempt.error_kind,
+                attempt.metrics_json,
+            ],
+        )?;
+
+        if let Some(s) = sample {
+            tx.execute(
+                "INSERT INTO fingerprint_samples (
+                     sample_id, file_id, source_version, capture_profile_key,
+                     kind, window_start_ms, window_end_ms, pcm_duration_ms,
+                     fingerprint_json, captured_job_id, captured_at_ms, metrics_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(file_id, source_version, capture_profile_key, kind, window_start_ms, window_end_ms)
+                 DO UPDATE SET
+                     sample_id = excluded.sample_id,
+                     pcm_duration_ms = excluded.pcm_duration_ms,
+                     fingerprint_json = excluded.fingerprint_json,
+                     captured_job_id = excluded.captured_job_id,
+                     captured_at_ms = excluded.captured_at_ms,
+                     metrics_json = excluded.metrics_json",
+                params![
+                    s.sample_id,
+                    s.ledger_id,
+                    s.source_version,
+                    s.capture_profile_key,
+                    s.kind,
+                    s.window_start_ms,
+                    s.window_end_ms,
+                    s.pcm_duration_ms,
+                    serde_json::to_string(&s.fingerprint)?,
+                    s.captured_job_id,
+                    s.captured_at_ms,
+                    s.metrics_json,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn list_fingerprint_attempts_for_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT attempt_id, job_id, file_id, kind, window_start_ms,
+                    window_end_ms, phase, started_at_ms, finished_at_ms,
+                    status, error_kind, metrics_json
+             FROM fingerprint_attempts WHERE job_id = ?1
+             ORDER BY started_at_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![job_id], |row| {
+                Ok(StoredFingerprintAttempt {
+                    attempt_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    ledger_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    window_start_ms: row.get(4)?,
+                    window_end_ms: row.get(5)?,
+                    phase: row.get(6)?,
+                    started_at_ms: row.get(7)?,
+                    finished_at_ms: row.get(8)?,
+                    status: row.get(9)?,
+                    error_kind: row.get(10)?,
+                    metrics_json: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_fingerprint_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<StoredFingerprintAttempt>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT attempt_id, job_id, file_id, kind, window_start_ms,
+                        window_end_ms, phase, started_at_ms, finished_at_ms,
+                        status, error_kind, metrics_json
+                 FROM fingerprint_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                |row| {
+                    Ok(StoredFingerprintAttempt {
+                        attempt_id: row.get(0)?,
+                        job_id: row.get(1)?,
+                        ledger_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        window_start_ms: row.get(4)?,
+                        window_end_ms: row.get(5)?,
+                        phase: row.get(6)?,
+                        started_at_ms: row.get(7)?,
+                        finished_at_ms: row.get(8)?,
+                        status: row.get(9)?,
+                        error_kind: row.get(10)?,
+                        metrics_json: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn recover_interrupted_fingerprint_attempts(
+        &self,
+        job_id: &str,
+    ) -> Result<usize, StoreError> {
+        let changed = self.library.execute(
+            "UPDATE fingerprint_attempts
+             SET status = 'interrupted',
+                 metrics_json = json_set(metrics_json, '$.measurement_complete', json('false'))
+             WHERE job_id = ?1 AND status = 'running'",
+            params![job_id],
+        )?;
+        Ok(changed)
+    }
+}

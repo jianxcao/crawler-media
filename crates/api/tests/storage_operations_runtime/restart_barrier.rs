@@ -13,7 +13,7 @@ fn freeze_a_library_then_exit(temp: &tempfile::TempDir) -> Seeded {
     let seeded = seed_library(&state, temp);
     let target = new_root(temp);
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let revision = store.library_config_revision(&seeded.library_id).unwrap();
     let status = store
         .begin_library_reconfiguration(
@@ -41,7 +41,7 @@ fn restarted_frozen_facts(
         "nothing is frozen in memory, only in the Store"
     );
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert_eq!(
         store.library_lifecycle_state(library_id).unwrap(),
         "reindexing",
@@ -97,7 +97,7 @@ fn assert_resumed_success_releases_the_freeze(
     seeded: &Seeded,
 ) {
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert_eq!(
         store.library_lifecycle_state(&seeded.library_id).unwrap(),
         "ready",
@@ -114,7 +114,7 @@ fn assert_resumed_success_releases_the_freeze(
         .unwrap();
     assert_eq!(
         page.files[0].root_id,
-        root_id_of(&store, &seeded.library_id, &target),
+        root_id_of(store, &seeded.library_id, &target),
         "resumed recovery must finish the migration"
     );
 }

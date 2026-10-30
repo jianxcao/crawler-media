@@ -109,7 +109,7 @@ fn make_state(root: &Path, gate: Arc<Gate>) -> ApiState {
 /// 默认 movie 库下写一个真实视频 + NFO + ledger 行；返回 admin 用户。
 fn seed(state: &ApiState, root: &Path) -> domain::UserId {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard
         .list_libraries()
         .unwrap()
@@ -146,7 +146,7 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
     };
     guard.insert_media(&media).unwrap();
     publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
@@ -171,7 +171,7 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(tmp.path(), gate.clone());
     let user_id = seed(&state, tmp.path());
@@ -191,7 +191,10 @@ async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "metadata file IO must not run while the Store lock is held"
         );
     }
@@ -209,7 +212,7 @@ async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jellyfin_metadata_gate_does_not_block_async_worker() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(tmp.path(), gate.clone());
     let user_id = seed(&state, tmp.path());

@@ -12,7 +12,7 @@ async fn patch_is_refused_while_a_removal_owns_the_library() {
     let seeded = seed_library(&state, &temp);
     let revision_before = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         // A removal needs a second Library of the same kind to exist first.
         store
             .create_library(MediaKind::Movie, "Second", &["/s/t"], "everyone", true, &[])
@@ -42,7 +42,7 @@ async fn patch_is_refused_while_a_removal_owns_the_library() {
     assert_eq!(body["error"]["code"], "library.protected", "{body}");
 
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     assert!(
         store.unfinished_library_operations().unwrap().is_empty(),
         "the refusal must not leave a resumable reconfiguration behind"

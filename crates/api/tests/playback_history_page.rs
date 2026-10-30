@@ -224,23 +224,23 @@ fn log_play(
 
 #[tokio::test]
 async fn entries_skip_hidden_rows_and_hidden_count_covers_scope() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library_root = seed_visible_library(&store.lock(), tmp.path());
-    let (member, token) = seed_member(&store.lock(), "alice");
+    let library_root = seed_visible_library(store.as_ref(), tmp.path());
+    let (member, token) = seed_member(store.as_ref(), "alice");
     let (visible, visible_file, hidden, hidden_file) = {
-        let guard = store.lock();
-        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "Visible");
-        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "Hidden");
+        let guard = store.as_ref();
+        let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "Visible");
+        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "Hidden");
         (visible, visible_file, hidden, hidden_file)
     };
     {
-        let guard = store.lock();
-        log_play(&guard, member, visible, visible_file, 3000, "dev-visible");
-        log_play(&guard, member, hidden, hidden_file, 2000, "dev-hidden");
-        log_play(&guard, member, visible, visible_file, 1000, "dev-visible-2");
+        let guard = store.as_ref();
+        log_play(guard, member, visible, visible_file, 3000, "dev-visible");
+        log_play(guard, member, hidden, hidden_file, 2000, "dev-hidden");
+        log_play(guard, member, visible, visible_file, 1000, "dev-visible-2");
     }
 
     let data = history(&app, &token, "").await;
@@ -254,21 +254,21 @@ async fn entries_skip_hidden_rows_and_hidden_count_covers_scope() {
 
 #[tokio::test]
 async fn same_second_rows_page_without_gaps_or_duplicates() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library_root = seed_visible_library(&store.lock(), tmp.path());
-    let (member, token) = seed_member(&store.lock(), "bob");
+    let library_root = seed_visible_library(store.as_ref(), tmp.path());
+    let (member, token) = seed_member(store.as_ref(), "bob");
     let (visible, visible_file) = {
-        let guard = store.lock();
-        seed_media_with_ledger(&guard, &library_root, "SameSecond")
+        let guard = store.as_ref();
+        seed_media_with_ledger(guard, &library_root, "SameSecond")
     };
     let same_second = 5_000_000;
     {
-        let guard = store.lock();
+        let guard = store.as_ref();
         for device in ["dev-a", "dev-b", "dev-c"] {
-            log_play(&guard, member, visible, visible_file, same_second, device);
+            log_play(guard, member, visible, visible_file, same_second, device);
         }
     }
 
@@ -305,23 +305,23 @@ async fn same_second_rows_page_without_gaps_or_duplicates() {
 
 #[tokio::test]
 async fn days_filter_applies_to_page_and_hidden_count() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library_root = seed_visible_library(&store.lock(), tmp.path());
-    let (member, token) = seed_member(&store.lock(), "carol");
+    let library_root = seed_visible_library(store.as_ref(), tmp.path());
+    let (member, token) = seed_member(store.as_ref(), "carol");
     let (visible, visible_file, hidden, hidden_file) = {
-        let guard = store.lock();
-        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "Recent");
-        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "HiddenRecent");
+        let guard = store.as_ref();
+        let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "Recent");
+        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "HiddenRecent");
         (visible, visible_file, hidden, hidden_file)
     };
     let now = now_secs();
     {
-        let guard = store.lock();
+        let guard = store.as_ref();
         log_play(
-            &guard,
+            guard,
             member,
             visible,
             visible_file,
@@ -329,7 +329,7 @@ async fn days_filter_applies_to_page_and_hidden_count() {
             "dev-recent",
         );
         log_play(
-            &guard,
+            guard,
             member,
             hidden,
             hidden_file,
@@ -337,7 +337,7 @@ async fn days_filter_applies_to_page_and_hidden_count() {
             "dev-hidden-recent",
         );
         log_play(
-            &guard,
+            guard,
             member,
             visible,
             visible_file,
@@ -345,7 +345,7 @@ async fn days_filter_applies_to_page_and_hidden_count() {
             "dev-old",
         );
         log_play(
-            &guard,
+            guard,
             member,
             hidden,
             hidden_file,
@@ -366,22 +366,22 @@ async fn days_filter_applies_to_page_and_hidden_count() {
 
 #[tokio::test]
 async fn admin_scope_all_ignores_visibility() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library_root = seed_visible_library(&store.lock(), tmp.path());
-    let (member, _token) = seed_member(&store.lock(), "dave");
+    let library_root = seed_visible_library(store.as_ref(), tmp.path());
+    let (member, _token) = seed_member(store.as_ref(), "dave");
     let (visible, visible_file, hidden, hidden_file) = {
-        let guard = store.lock();
-        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "AdminVisible");
-        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "AdminHidden");
+        let guard = store.as_ref();
+        let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "AdminVisible");
+        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "AdminHidden");
         (visible, visible_file, hidden, hidden_file)
     };
     {
-        let guard = store.lock();
-        log_play(&guard, member, visible, visible_file, 2000, "dev-visible");
-        log_play(&guard, member, hidden, hidden_file, 1000, "dev-hidden");
+        let guard = store.as_ref();
+        log_play(guard, member, visible, visible_file, 2000, "dev-visible");
+        log_play(guard, member, hidden, hidden_file, 1000, "dev-hidden");
     }
 
     let data = history(&app, "management-secret", "scope=all").await;
@@ -392,14 +392,14 @@ async fn admin_scope_all_ignores_visibility() {
 
 #[tokio::test]
 async fn member_without_visible_library_gets_empty_page() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let (member, token) = seed_member(&store.lock(), "erin");
-    let (hidden, hidden_file) = seed_hidden_playable_media(&store.lock(), tmp.path(), "NoLibrary");
+    let (member, token) = seed_member(store.as_ref(), "erin");
+    let (hidden, hidden_file) = seed_hidden_playable_media(store.as_ref(), tmp.path(), "NoLibrary");
     log_play(
-        &store.lock(),
+        store.as_ref(),
         member,
         hidden,
         hidden_file,
@@ -424,17 +424,17 @@ async fn member_without_visible_library_gets_empty_page() {
 async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
     const VISIBLE_ROWS: i64 = 200_000;
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library_root = seed_visible_library(&store.lock(), tmp.path());
-    let (member, token) = seed_member(&store.lock(), "frank");
+    let library_root = seed_visible_library(store.as_ref(), tmp.path());
+    let (member, token) = seed_member(store.as_ref(), "frank");
     let (visible, hidden) = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         (
-            seed_media_with_ledger(&guard, &library_root, "CapVisible").0,
-            seed_hidden_media(&guard, "CapHidden"),
+            seed_media_with_ledger(guard, &library_root, "CapVisible").0,
+            seed_hidden_media(guard, "CapHidden"),
         )
     };
 

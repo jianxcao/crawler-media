@@ -20,14 +20,14 @@ pub(crate) use refresh::{probe_status, refresh_item_chapters};
 /// 供整库刷新与入库链路调用；失败静默（不影响主流程）。
 pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     let enabled = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         chapter_images_enabled(&store, path)
     };
     if !enabled {
         tracing::debug!(path = %path.display(), "媒体库已关闭章节场景图提取，跳过自动抓帧");
         return;
     }
-    let kind = owning_library(&state.store.lock(), path).map(|owner| owner.kind);
+    let kind = owning_library(&state.store.as_ref(), path).map(|owner| owner.kind);
     let lease = match kind
         .map(|kind| state.acquire_path_work(path, kind))
         .transpose()

@@ -149,11 +149,8 @@ pub(super) async fn probe_fingerprint_detailed(
         };
     }
     let sampling_mode = {
-        let store = match mgr.reader() {
-            Ok(store) => store,
-            Err(_) => return super::stages::FingerprintRunOutcome::Retry,
-        };
-        crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
+        let store = mgr.store.as_ref();
+        crate::scrape_store::ScrapeStoreExt::get_scrape_config(store)
             .ok()
             .map(|c| c.effective.fingerprint_sampling_mode)
             .unwrap_or_else(|| "full_window".to_string())
@@ -271,10 +268,7 @@ async fn probe_adaptive_season(
 
     let season = super::require_episode_coordinates(&unit.row).ok()?.0;
     let season_units: Vec<ProbeUnit> = {
-        let store = match mgr.reader() {
-            Ok(store) => store,
-            Err(_) => return Some(super::stages::FingerprintRunOutcome::Retry),
-        };
+        let store = mgr.store.as_ref();
         let rows = store
             .file_coverage_for_media(unit.row.file.media_id)
             .unwrap_or_default();
@@ -319,10 +313,11 @@ async fn probe_adaptive_season(
                     .collect::<Vec<_>>();
                 let members = super::markers::source_observations(&rows);
                 let publication = members.and_then(|members| {
-                    let store = mgr.writer()?;
-                    super::markers::validate_active_unit(&store, unit)?;
-                    super::markers::validate_season_rows(&store, &rows).and_then(|()| {
-                        store.replace_marker_results_batch_checked(&[replacement], &members)
+                    mgr.store.library_write(|store| {
+                        super::markers::validate_active_unit(store, unit)?;
+                        super::markers::validate_season_rows(store, &rows).and_then(|()| {
+                            store.replace_marker_results_batch_checked(&[replacement], &members)
+                        })
                     })
                 });
                 if let Err(e) = publication {
@@ -379,7 +374,7 @@ pub(super) fn fingerprint_duration(
     kind: MediaKind,
     explicit_refresh: bool,
 ) -> Option<u32> {
-    let store = mgr.reader().ok()?;
+    let store = mgr.store.as_ref();
     fingerprint_duration_for_store(&store, library_id, kind, explicit_refresh)
 }
 
@@ -420,10 +415,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
 ) -> super::stages::FingerprintRunOutcome {
     let ledger_id = unit.row.file.file_id.to_string();
     let started = Instant::now();
-    let cached = match mgr
-        .reader()
-        .and_then(|reader| reader.get_fingerprint_cache(&ledger_id))
-    {
+    let cached = match mgr.store.get_fingerprint_cache(&ledger_id) {
         Ok(cache) => cache,
         Err(error) if super::store_access::is_busy(&error) => {
             return super::stages::FingerprintRunOutcome::Retry;
@@ -468,16 +460,17 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     };
     let publication =
         super::markers::observe_rows(std::slice::from_ref(&unit.row)).and_then(|()| {
-            let store = mgr.writer()?;
-            super::markers::validate_active_unit(&store, unit)?;
-            super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
-                .and_then(|()| {
-                    store.put_fingerprint_cache_checked(
-                        &ledger_id,
-                        Some(&unit.row.file.version),
-                        &outcome.cache,
-                    )
-                })
+            mgr.store.library_write(|store| {
+                super::markers::validate_active_unit(store, unit)?;
+                super::markers::validate_publication_rows(store, std::slice::from_ref(&unit.row))
+                    .and_then(|()| {
+                        store.put_fingerprint_cache_checked(
+                            &ledger_id,
+                            Some(&unit.row.file.version),
+                            &outcome.cache,
+                        )
+                    })
+            })
         });
     if let Err(error) = publication {
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
@@ -529,7 +522,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
 
 /// Publish stream facts pinned to the queued version. `Ok(false)`: a rescan replaced it.
 pub(super) fn publish_probe_tracks(
-    store: &crate::Store,
+    store: &store::LibraryConnection<'_>,
     unit: &ProbeUnit,
     source_version: &str,
     tracks: &library::Tracks,

@@ -3,9 +3,7 @@ use std::collections::{HashMap, HashSet};
 use domain::{MediaId, MediaKind, ProtocolItemPage, TypedItemId};
 use rusqlite::Connection;
 
-use super::{
-    LibraryReadContext, LibraryReadError, LibraryReadLease, LibraryReadRequest, QueryBudget,
-};
+use super::{LibraryReadContext, LibraryReadError, LibraryReadRequest, QueryBudget, ReaderLease};
 use crate::library_query::{
     facets::library_facets_on,
     items::{
@@ -33,7 +31,7 @@ pub enum LibraryReadResult {
     },
 }
 
-impl LibraryReadLease {
+impl ReaderLease {
     /// Diagnostic-only complete leased SQL scope: initial layout, BEGIN, roster,
     /// selection/hydration, ROLLBACK and final layout. Normal execute has no tracer.
     /// `rows_returned` and `hydrated_rows` are unfilled; their default zero is not
@@ -53,6 +51,7 @@ impl LibraryReadLease {
                 budget,
                 |conn| Ok(execute_on(conn, context)),
                 Some(&mut stats),
+                true,
             )
             .and_then(|owned| owned);
         (result, stats)
@@ -66,7 +65,7 @@ impl LibraryReadLease {
         // The B1 callback is StoreError-only. Nest the typed query outcome inside its
         // successful owned value; context and authorization never travel as SQL text.
         let result = self
-            .with_connection(budget, |conn| Ok(execute_on(conn, context)))
+            .with_connection_instrumented(budget, |conn| Ok(execute_on(conn, context)), None, true)
             .and_then(|owned| owned);
         if let Err(error) = &result {
             super::context::log_rejection(

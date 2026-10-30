@@ -16,7 +16,6 @@ use domain::{
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::{CatalogGet, Tmdb, TmdbError};
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -58,10 +57,14 @@ fn season_payload(date: &str) -> String {
 }
 
 /// 模拟 `TmdbHttp`：必须拿到同一个 Store 才能读取配置。
-fn store_api_key(store: &Mutex<Store>) -> Result<(), TmdbError> {
+fn store_api_key(store: &Store) -> Result<(), TmdbError> {
     for _ in 0..50 {
-        if let Some(guard) = store.try_lock() {
-            let key = guard
+        if store
+            .writers()
+            .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+            .is_ok()
+        {
+            let key = store
                 .get_setting("tmdb.api_key")
                 .map_err(|error| TmdbError::Http(error.to_string()))?;
             if key.is_none() {
@@ -78,7 +81,7 @@ fn store_api_key(store: &Mutex<Store>) -> Result<(), TmdbError> {
 
 /// 冷缓存路径：返回 body 前必须成功借用 Store。
 struct LockAwareGet {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     body: String,
 }
 
@@ -127,7 +130,7 @@ fn seed_tmdb_cache(path: &Path, body: &str, now: i64) {
 
 /// 按路径选择性成功：用于验证部分源失败不影响其余 items。
 struct SelectiveGet {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     ok_path_marker: &'static str,
     ok_body: String,
 }
@@ -145,7 +148,7 @@ impl CatalogGet for SelectiveGet {
 
 /// 统计 catalog 调用次数：同一请求内同 (tmdb_id, season) 只应查询一次。
 struct CountingGet {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     body: String,
     calls: Arc<AtomicUsize>,
 }
@@ -160,7 +163,7 @@ impl CatalogGet for CountingGet {
 
 /// 让 catalog 调用阻塞，便于观察阻塞期间 Store 锁是否空闲。
 struct GatedGet {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     gate: Arc<Gate>,
     body: String,
 }
@@ -297,19 +300,19 @@ fn seed_admin_tv_with_media(
     tmdb_id: &str,
 ) -> (SubscribeId, MediaId) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
     guard
         .put_setting("tmdb.api_key", "offline-never-sent")
         .unwrap();
-    let media_id = insert_tv_media(&guard, title, tmdb_id);
-    let subscribe_id = insert_tv_subscribe_for_media(&guard, user_id, media_id);
+    let media_id = insert_tv_media(guard, title, tmdb_id);
+    let subscribe_id = insert_tv_subscribe_for_media(guard, user_id, media_id);
     (subscribe_id, media_id)
 }
 
 fn seed_member_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let user_id = UserId::new();
     guard
         .insert_user_with_password(
@@ -323,7 +326,7 @@ fn seed_member_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
         )
         .unwrap();
     guard.set_user_token(user_id, MEMBER_TOKEN).unwrap();
-    insert_tv_subscribe(&guard, user_id, title, tmdb_id)
+    insert_tv_subscribe(guard, user_id, title, tmdb_id)
 }
 
 fn arrivals_request(token: &str) -> Request<Body> {
@@ -483,9 +486,9 @@ async fn arrivals_query_each_season_once_per_request() {
     let (first, media_id) = seed_admin_tv_with_media(&state, "Show A", "100");
     let second = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
-        insert_tv_subscribe_for_media(&guard, user_id, media_id)
+        insert_tv_subscribe_for_media(guard, user_id, media_id)
     };
     let calls = Arc::new(AtomicUsize::new(0));
     let get = CountingGet {
@@ -535,8 +538,11 @@ async fn blocked_catalog_call_does_not_hold_store_lock() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
-            "arrivals must not hold the Store lock while the catalog call blocks"
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()),)
+                .is_ok(),
+            "arrivals must not hold the Library writer while the catalog call blocks"
         );
     }
     gate.release();

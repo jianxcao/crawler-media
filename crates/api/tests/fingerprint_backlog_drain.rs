@@ -7,7 +7,6 @@ use domain::{
     Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
 use store::ScannedLedger;
 
 struct FixtureFingerprint;
@@ -30,7 +29,7 @@ impl FingerprintEngine for FixtureFingerprint {
 
 struct Fixture {
     _temp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     manager: Arc<ProbeManager>,
     rows: Vec<FileCoverage>,
     jobs: Vec<String>,
@@ -91,7 +90,7 @@ fn insert_episode(
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+        let store = Arc::new(Store::open(temp.path()).unwrap());
         let media_id = MediaId::new();
         let media = Media {
             id: media_id,
@@ -106,19 +105,19 @@ impl Fixture {
             bangumi_id: None,
             anilist_id: None,
         };
-        store.lock().insert_media(&media).unwrap();
+        store.as_ref().insert_media(&media).unwrap();
         let root = temp.path().to_str().unwrap();
         let library = store
-            .lock()
+            .as_ref()
             .create_library(MediaKind::Tv, "TV", &[root], "everyone", true, &[])
             .unwrap();
         store
-            .lock()
+            .as_ref()
             .set_library_intro_settings(&library.id, true, true)
             .unwrap();
-        let mut setting = store.lock().get_scrape_config().unwrap().setting;
+        let mut setting = store.as_ref().get_scrape_config().unwrap().setting;
         setting.fingerprint_duration_secs = Some(90);
-        store.lock().save_scrape_config(&setting).unwrap();
+        store.as_ref().save_scrape_config(&setting).unwrap();
         let manager = Arc::new(
             ProbeManager::with_fingerprint_engine(store.clone(), Arc::new(FixtureFingerprint))
                 .unwrap(),
@@ -127,7 +126,7 @@ impl Fixture {
         let mut jobs = Vec::new();
         for episode in 1..=33 {
             let path = temp.path().join(format!("episode-{episode}.mkv"));
-            let row = insert_episode(&store.lock(), media_id, &path, episode);
+            let row = insert_episode(store.as_ref(), media_id, &path, episode);
             let job = manager
                 .enqueue_direct_fingerprint(
                     ProbeUnit {
@@ -165,7 +164,7 @@ impl Fixture {
                 if self.jobs.iter().all(|id| {
                     !self
                         .store
-                        .lock()
+                        .as_ref()
                         .get_probe_job(id)
                         .unwrap()
                         .unwrap()
@@ -184,14 +183,19 @@ impl Fixture {
         );
         for id in &self.jobs[cancelled..] {
             assert_eq!(
-                self.store.lock().get_probe_job(id).unwrap().unwrap().status,
+                self.store
+                    .as_ref()
+                    .get_probe_job(id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 "succeeded"
             );
         }
         for row in &self.rows[cancelled..] {
             let cache = self
                 .store
-                .lock()
+                .as_ref()
                 .get_fingerprint_cache(&row.file.file_id.to_string())
                 .unwrap()
                 .unwrap();
@@ -224,7 +228,7 @@ async fn fingerprint_overflow_refills_after_every_initial_source_is_deleted() {
         assert_eq!(
             fixture
                 .store
-                .lock()
+                .as_ref()
                 .get_probe_job(id)
                 .unwrap()
                 .unwrap()

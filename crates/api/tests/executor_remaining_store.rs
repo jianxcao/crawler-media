@@ -1,4 +1,10 @@
 //! Library roster and every Collection route keep synchronous work off Tokio.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,7 +69,7 @@ impl Fixture {
         let media = MediaId::new();
         let collection = {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .insert_user_with_password(&user, "admin-pass")
                 .unwrap();
@@ -89,7 +95,7 @@ impl Fixture {
             std::fs::write(&path, b"fixture").unwrap();
             std::fs::write(library.root_paths[0].join("poster.jpg"), b"poster").unwrap();
             store::test_support::publish_fixture_file(
-                &store,
+                store,
                 &store::test_support::FixtureFile {
                     media_id: media,
                     path: path.display().to_string(),
@@ -144,11 +150,11 @@ async fn json_response(response: axum::response::Response) -> Value {
     .unwrap()
 }
 
-fn hold_store(state: &ApiState, duration: Duration) -> std::thread::JoinHandle<()> {
+fn hold_store(state: &ApiState, db: store::Db, duration: Duration) -> std::thread::JoinHandle<()> {
     let store = state.store();
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), db);
         tx.send(()).unwrap();
         std::thread::sleep(duration);
     });
@@ -177,7 +183,7 @@ fn remaining_roster_and_collection_routes_keep_executor_responsive() {
             _ => ("DELETE", f.uri(""), Value::Null),
         };
         let app = router(f.state.clone());
-        let holder = hold_store(&f.state, Duration::from_millis(500));
+        let holder = hold_store(&f.state, store::Db::Library, Duration::from_millis(500));
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, &uri, &f.token, body)), async {

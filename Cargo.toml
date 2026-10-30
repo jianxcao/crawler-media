@@ -53,6 +53,7 @@ parking_lot = "0.12"
 # 数据库维护的 VACUUM 磁盘准入需要可用空间；std 没有跨平台 API（已在依赖树中）。
 libc = "0.2"
 base64 = "0.22"
+tokio = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 notify-debouncer-mini = "0.5"
 notify = "7.0"

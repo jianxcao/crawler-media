@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::{ProbeManager, ProbeUnit, single_episode, single_season};
-use crate::http::store_wait::STORE_WRITE_WAIT;
 
 /// Stream facts reader; tests inject a deterministic source replacement here.
 pub trait TracksProbe: Send + Sync {
@@ -130,36 +129,32 @@ pub(super) async fn probe_tracks_and_store(
         match tokio::task::spawn_blocking(move || {
             crate::fingerprint_job::source::observe_source(&unit_for_write.row)
                 .map_err(|_| TrackProbeError::Failed)?;
-            let Some(store) = store.try_lock_for(STORE_WRITE_WAIT) else {
-                return Ok(None);
-            };
-            if !super::worker::unit_is_active(&store, &unit_for_write)
-                || crate::fingerprint_job::source::ensure_source_recorded(
-                    &store,
-                    &unit_for_write.row,
+            let published = store.library_write(|store| {
+                if !super::worker::unit_is_active(store, &unit_for_write)
+                    || crate::fingerprint_job::source::ensure_source_recorded_on(
+                        store,
+                        &unit_for_write.row,
+                    )
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                super::probe::publish_probe_tracks(
+                    store,
+                    &unit_for_write,
+                    &version,
+                    &tracks_for_write,
+                    duration_ms,
                 )
-                .is_err()
-            {
-                return Ok(Some(None));
-            }
-            Ok(Some(Some(super::probe::publish_probe_tracks(
-                &store,
-                &unit_for_write,
-                &version,
-                &tracks_for_write,
-                duration_ms,
-            ))))
+                .map(Some)
+            });
+            Ok(published)
         })
         .await
         {
-            Ok(Ok(Some(Some(published)))) => published,
-            // The lock stayed contended for the write budget: keep the durable row
-            // and let the job's retry re-run the stage rather than publishing half.
-            Ok(Ok(Some(None))) => return Err(TrackProbeError::Retry),
-            Ok(Ok(None)) => {
-                tracing::warn!(ledger_id, "流信息发布未拿到 Store 锁，稍后重试");
-                return Err(TrackProbeError::Retry);
-            }
+            Ok(Ok(Ok(Some(published)))) => Ok(published),
+            Ok(Ok(Ok(None))) => return Err(TrackProbeError::Retry),
+            Ok(Ok(Err(error))) => Err(error),
             Ok(Err(error)) => return Err(error),
             Err(error) => {
                 tracing::warn!(

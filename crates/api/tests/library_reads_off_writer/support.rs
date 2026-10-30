@@ -95,13 +95,7 @@ impl Fixture {
     }
 
     pub fn user(&self) -> UserId {
-        self.state
-            .store()
-            .lock()
-            .user_by_token(TOKEN)
-            .unwrap()
-            .unwrap()
-            .id
+        self.state.store().user_by_token(TOKEN).unwrap().unwrap().id
     }
 
     pub fn items_uri(&self) -> String {
@@ -126,7 +120,8 @@ impl HeldWriter {
         let (acquired_tx, acquired_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let _guard = writer.lock();
+            let _guard =
+                crate::writer_hold::WriterHold::acquire(writer.clone(), store::Db::Library);
             acquired_tx.send(()).unwrap();
             let _ = release_rx.recv_timeout(Duration::from_secs(3));
         });

@@ -126,7 +126,9 @@ impl Store {
             if user.id != credential.user_id || request.user().is_some_and(|id| id != user.id) {
                 return Err(LibraryReadError::Unauthorized);
             }
-            let roster = read_roster(&self.library, user.id, user.role)?;
+            let roster = self.with_read(crate::Db::Library, |conn| {
+                read_roster(conn, user.id, user.role)
+            })?;
             Ok(LibraryReadContext {
                 credential: credential.clone(),
                 request: request.clone(),
@@ -161,7 +163,9 @@ impl Store {
             if user.role != context.role || user.enabled != context.enabled {
                 return Err(LibraryReadError::ContextChanged);
             }
-            let roster = read_roster(&self.library, user.id, user.role)?;
+            let roster = self.with_read(crate::Db::Library, |conn| {
+                read_roster(conn, user.id, user.role)
+            })?;
             if let Some(id) = context.request.explicit_library()
                 && context.has_library(id)
                 && !roster.iter().any(|entry| entry.id == id)

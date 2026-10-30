@@ -9,7 +9,7 @@
 //! Keep the hosts' clocks synced; the TTL (60 s) is the tolerance window.
 //!
 //! The heartbeat refreshes the lease through the shared app writer
-//! ([`Store::open_app_heartbeat`]) and never takes `state.store.lock()`. A batch
+//! ([`Store::open_app_heartbeat`]) and never takes `state.store.as_ref()`. A batch
 //! holding that lock for longer than the TTL must not let a second instance take
 //! the directory over. Two consecutive heartbeat errors degrade this instance to
 //! read-only instead of letting it write on an unverified lease.
@@ -17,8 +17,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-
-use parking_lot::Mutex;
 
 use crate::store::{AppHeartbeat, Store};
 
@@ -106,14 +104,14 @@ fn multi_instance_allowed(store: &Store) -> bool {
 }
 
 /// Acquire the data-directory lease; `Err` when another live instance holds it.
-pub(crate) fn acquire(store: &Arc<Mutex<Store>>) -> std::io::Result<Option<Arc<InstanceLease>>> {
+pub(crate) fn acquire(store: &Arc<Store>) -> std::io::Result<Option<Arc<InstanceLease>>> {
     let owner = format!(
         "pid{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     );
     let heartbeat = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         if multi_instance_allowed(&guard) {
             tracing::warn!("已允许多实例共用数据目录：订阅选种/入库可能重复执行");
             return Ok(None);

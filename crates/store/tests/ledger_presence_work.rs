@@ -73,9 +73,13 @@ fn presence_page_limits_files_without_cutting_coverage_and_settles_media_once() 
     }
     assert_eq!(all.len(), 4);
     let db = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
-    db.execute_batch("CREATE TABLE presence_settlements(n INTEGER); INSERT INTO presence_settlements VALUES(0);
-        CREATE TRIGGER count_presence_settle AFTER UPDATE OF query_projection_revision ON library_items
-        BEGIN UPDATE presence_settlements SET n=n+1; END;").unwrap();
+    let before_revision: i64 = db
+        .query_row(
+            "SELECT item_revision FROM library_items WHERE library_id=?1 AND media_id=?2",
+            rusqlite::params![library.id, id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
     for obs in &mut all {
         obs.presence = FilePresence::Missing;
     }
@@ -84,10 +88,19 @@ fn presence_page_limits_files_without_cutting_coverage_and_settles_media_once() 
         .unwrap();
     assert_eq!(result.missing, 4);
     assert_eq!(result.applied.len(), 4);
-    let count: i64 = db
-        .query_row("SELECT n FROM presence_settlements", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 1, "one projection settlement per affected Media");
+    let (revision, projection): (i64, i64) = db.query_row(
+        "SELECT item_revision,query_projection_revision FROM library_items WHERE library_id=?1 AND media_id=?2",
+        rusqlite::params![library.id, id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!(
+        revision,
+        before_revision + 1,
+        "one card settlement per affected Media"
+    );
+    assert_eq!(
+        projection, revision,
+        "the settled query projection is current"
+    );
     let item = store.get_library_item(library_id, id).unwrap().unwrap();
     assert_eq!(
         (

@@ -156,18 +156,23 @@ fn changed_snapshot_identity_rejects_cleanup_before_any_row_is_removed() {
     // Simulate a stale writer bypassing the Store freeze barrier. It moves the
     // coverage row and the summary that points at it, so the deferred composite
     // foreign keys stay satisfied and only the snapshot identity goes stale.
-    let tx = store.library.unchecked_transaction().unwrap();
-    tx.execute(
-        "UPDATE library_file_units SET episode=2 WHERE file_id=?1",
-        [row.file_id.expect("fixture file id").to_string()],
-    )
-    .unwrap();
-    tx.execute(
-        "UPDATE library_units SET episode=2 WHERE library_id=?1 AND media_id=?2",
-        params![&library.id, row.media_id.to_string()],
-    )
-    .unwrap();
-    tx.commit().unwrap();
+    store
+        .with_writer(crate::Db::Library, |conn| {
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "UPDATE library_file_units SET episode=2 WHERE file_id=?1",
+                [row.file_id.expect("fixture file id").to_string()],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE library_units SET episode=2 WHERE library_id=?1 AND media_id=?2",
+                params![&library.id, row.media_id.to_string()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            Ok(())
+        })
+        .unwrap();
     assert!(matches!(
         store.clean_library_removal(&removal.operation_id),
         Err(StoreError::Protected(_))
@@ -247,12 +252,14 @@ fn removal_reduces_preferred_file_summaries_and_purges_orphan_media() {
 fn summary_rows(store: &Store, library_id: &str, media_id: MediaId) -> (i64, i64) {
     let count = |table: &str| {
         store
-            .library
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {table} WHERE library_id=?1 AND media_id=?2"),
-                params![library_id, media_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
+            .with_read(crate::Db::Library, |conn| {
+                conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE library_id=?1 AND media_id=?2"),
+                    params![library_id, media_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            })
             .unwrap()
     };
     (count("library_items"), count("library_units"))
@@ -287,12 +294,14 @@ fn large_removal_commits_bounded_batches_and_resumes() {
     INTERRUPT_AFTER_BATCHES.with(|slot| slot.set(Some(1)));
     assert!(store.clean_library_removal(&removal.operation_id).is_err());
     let remaining: i64 = store
-        .library
-        .query_row(
-            "SELECT COUNT(*) FROM library_files WHERE library_id=?1",
-            [&library.id],
-            |row| row.get(0),
-        )
+        .with_read(crate::Db::Library, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM library_files WHERE library_id=?1",
+                [&library.id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
     assert_eq!(
         remaining, 150,
@@ -313,39 +322,43 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
     let media = row.media_id.to_string();
     // Seed the owned rows the e2e residual scan still finds after a whole-library delete.
     store
-        .library
-        .execute(
-            "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+        .with_writer(crate::Db::Library, |conn| {
+            conn.execute(
+                "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
              VALUES ('tmdb', 'tv', 'alias-1', ?1, 0)",
-            [&media],
-        )
+                [&media],
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
     store
-        .library
-        .execute(
-            "INSERT INTO media_episodes (media_id, season, episode, locale, revision)
+        .with_writer(crate::Db::Library, |conn| {
+            conn.execute(
+                "INSERT INTO media_episodes (media_id, season, episode, locale, revision)
              VALUES (?1, 1, 1, 'zh-CN', 1)",
-            [&media],
-        )
+                [&media],
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
     store
-        .library
-        .execute(
-            "INSERT INTO media_metadata_sources (
+        .with_writer(crate::Db::Library, |conn| {
+            conn.execute(
+                "INSERT INTO media_metadata_sources (
                 media_id, entity_scope, source, locale, provider_entity_id, provider_work_id,
                 normalized_json, present_fields_json, preferences_json, selection_origins_json,
                 fetched_at, source_revision)
              VALUES (?1, 'work', 'tmdb', 'zh-CN', '1', '1', '{}', '[]', '{}', '{}', 1, 0)",
-            [&media],
-        )
+                [&media],
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
-    store
-        .library
-        .execute(
+    store.with_writer(crate::Db::Library, |conn| conn.execute(
             "INSERT INTO probe_jobs (id, kind, media_id, scope_key, status, total, created_at_ms, finished_at_ms)
              VALUES ('job-1', 'media_probe', ?1, ?1 || '-scope', 'succeeded', 1, 1, 2)",
             [&media],
-        )
+        ).map_err(Into::into))
         .unwrap();
 
     let removal = store.begin_library_removal(&library.id).unwrap();
@@ -378,8 +391,10 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
         ),
     ] {
         let count: i64 = store
-            .library
-            .query_row(sql, [&media], |r| r.get(0))
+            .with_read(crate::Db::Library, |conn| {
+                conn.query_row(sql, [&media], |r| r.get(0))
+                    .map_err(Into::into)
+            })
             .unwrap();
         assert_eq!(count, 0, "{table} still has rows for purged media {media}");
     }

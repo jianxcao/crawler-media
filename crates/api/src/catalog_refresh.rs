@@ -6,7 +6,7 @@ use crate::management::ApiState;
 
 pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     let media_id = payload_media_id(payload)?;
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let stored = store
         .get_media(media_id)
         .map_err(|e| e.to_string())?
@@ -28,7 +28,6 @@ pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
         .media_revision(media_id)
         .map_err(|e| e.to_string())?
         .unwrap_or(0);
-    drop(store);
     tracing::debug!(media = %stored.title, tmdb_id = %tmdb_id, "刷新目录元数据");
     let Some(fresh) = state
         .catalog
@@ -45,7 +44,7 @@ pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     tracing::info!(media = %updated.title, "已从目录更新媒体元数据");
     state
         .store
-        .lock()
+        .as_ref()
         .update_media_identity(rev, &updated)
         .map_err(|e| e.to_string())?;
 

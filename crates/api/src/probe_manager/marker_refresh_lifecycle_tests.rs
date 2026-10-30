@@ -40,7 +40,7 @@ fn seed_episode_old_refresh_result(
 }
 struct RefreshHarness {
     _tmp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     registry: Arc<crate::library_lifecycle::LibraryWorkRegistry>,
     manager: Arc<ProbeManager>,
     media_id: MediaId,
@@ -55,10 +55,9 @@ impl RefreshHarness {
         let tmp = tempfile::tempdir().unwrap();
         let lib_dir = tmp.path().join("tv_lib");
         std::fs::create_dir_all(&lib_dir).unwrap();
-        let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+        let store = Arc::new(Store::open(tmp.path()).unwrap());
         let media_id = MediaId::new();
-        let library = store
-            .lock()
+        let library = store.as_ref()
             .create_library(
                 MediaKind::Tv,
                 "TV",
@@ -68,12 +67,10 @@ impl RefreshHarness {
                 &[],
             )
             .unwrap();
-        store
-            .lock()
+        store.as_ref()
             .set_library_intro_settings(&library.id, true, true)
             .unwrap();
-        store
-            .lock()
+        store.as_ref()
             .insert_media(&domain::Media {
                 id: media_id,
                 kind: MediaKind::Tv,
@@ -102,10 +99,10 @@ impl RefreshHarness {
         let mut rows = vec![make_row(1), make_row(2)];
         for row in rows.iter_mut() {
             std::fs::write(&row.file.path, b"dummy").unwrap();
-            super::super::test_support::publish_into(&store.lock(), row);
+            super::super::test_support::publish_into(&store.as_ref(), row);
         }
         let expected_chapters = {
-            let store = store.lock();
+            let store = store.as_ref();
             vec![
                 seed_episode_old_refresh_result(
                     &store,
@@ -157,7 +154,7 @@ impl RefreshHarness {
     }
 
     fn assert_old_markers_intact(&self) {
-        let store = self.store.lock();
+        let store = self.store.as_ref();
         for (idx, row) in self.rows.iter().enumerate() {
             let marker = store
                 .get_media_marker(
@@ -262,7 +259,7 @@ async fn check_restored_presence() {
         unit.reuse_media_info_cache = false;
     }
     {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         assert!(
             store
                 .create_probe_job(
@@ -333,8 +330,7 @@ async fn check_restored_presence() {
     );
     assert_eq!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .file_coverage_by_id(units[0].row.file.file_id)
             .unwrap()
             .unwrap()
@@ -353,8 +349,7 @@ async fn check_restored_presence() {
     );
     assert_eq!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .file_coverage_by_id(units[1].row.file.file_id)
             .unwrap()
             .unwrap()
@@ -380,8 +375,7 @@ async fn check_restored_presence() {
     ));
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .get_fingerprint_cache(&ids[0])
             .unwrap()
             .is_none()
@@ -402,8 +396,7 @@ fn window1_queued_stage_cancellation_releases_scope() {
     );
 
     let active_job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap();
@@ -414,16 +407,14 @@ fn window1_queued_stage_cancellation_releases_scope() {
         .unwrap();
 
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&active_job.id)
         .unwrap()
         .unwrap();
     assert_eq!(job.status, "cancelled");
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -452,8 +443,7 @@ fn window3_pre_publication_freeze_prevents_late_result() {
         2
     );
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
@@ -465,8 +455,7 @@ fn window3_pre_publication_freeze_prevents_late_result() {
     harness.manager.finish(&first, true);
     assert_eq!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .get_probe_job(&job_id)
             .unwrap()
             .unwrap()
@@ -475,8 +464,7 @@ fn window3_pre_publication_freeze_prevents_late_result() {
     );
 
     harness
-        .store
-        .lock()
+        .store.as_ref()
         .begin_library_removal(&harness.library_id)
         .unwrap();
     harness.registry.cancel(&harness.library_id);
@@ -484,8 +472,7 @@ fn window3_pre_publication_freeze_prevents_late_result() {
     harness.manager.finish(&second, true);
 
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -495,8 +482,7 @@ fn window3_pre_publication_freeze_prevents_late_result() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -515,8 +501,7 @@ fn window3_pre_publication_file_deleted_prevents_late_result() {
         2
     );
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
@@ -532,8 +517,7 @@ fn window3_pre_publication_file_deleted_prevents_late_result() {
     harness.manager.finish(&second, true);
 
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -543,8 +527,7 @@ fn window3_pre_publication_file_deleted_prevents_late_result() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -562,16 +545,14 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
         2
     );
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
         .id;
 
     harness
-        .store
-        .lock()
+        .store.as_ref()
         .begin_library_removal(&harness.library_id)
         .unwrap();
 
@@ -579,8 +560,7 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
     restarted.recover_pending_jobs();
 
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -589,8 +569,7 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
     assert!(!restarted.is_queued(&harness.rows[0].file.file_id.to_string()));
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -600,8 +579,7 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
     restarted.recover_pending_jobs();
     assert_eq!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .get_probe_job(&job_id)
             .unwrap()
             .unwrap()
@@ -620,16 +598,14 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
         2
     );
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
         .id;
 
     harness
-        .store
-        .lock()
+        .store.as_ref()
         .finish_probe_unit_with_status(
             &job_id,
             &harness.rows[0].file.file_id.to_string(),
@@ -639,8 +615,7 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
         )
         .unwrap();
     harness
-        .store
-        .lock()
+        .store.as_ref()
         .finish_probe_unit_with_status(
             &job_id,
             &harness.rows[1].file.file_id.to_string(),
@@ -656,8 +631,7 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
     restarted.recover_pending_jobs();
 
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -665,8 +639,7 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
     assert_eq!(job.error.as_deref(), Some("file_deleted"));
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()

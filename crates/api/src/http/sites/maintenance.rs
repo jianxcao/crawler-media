@@ -1,7 +1,7 @@
 //! Site connectivity maintenance: verify / login / check-in.
 
 use super::*;
-use crate::http::store_wait::{STORE_READ_WAIT, busy_response, store_read};
+use crate::http::store_wait::store_read;
 
 mod credentials;
 use credentials::AdmittedCredentials;
@@ -84,10 +84,7 @@ async fn maintain_site(state: ApiState, id: String, action: Action) -> Response 
             worker.require_writable()?;
             worker.require_write_admitted()?;
             let site = {
-                let store = worker
-                    .store_readers
-                    .checkout(STORE_READ_WAIT)
-                    .ok_or_else(busy_response)?;
+                let store = worker.store.clone();
                 store
                     .get_site(id)
                     .ok()

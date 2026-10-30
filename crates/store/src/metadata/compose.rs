@@ -347,15 +347,7 @@ impl Store {
         scope: EntityScope,
         locale: &str,
     ) -> Result<ComposedMetadata, StoreError> {
-        let actual_locale = self
-            .resolved_metadata_locale(library, media, locale)?
-            .unwrap_or_else(|| locale.to_string());
-        let (fields, field_origins) = compose_entity(&self.library, media, scope, &actual_locale)?;
-        Ok(ComposedMetadata {
-            fields,
-            actual_locale,
-            field_origins,
-        })
+        self.with_library_read(|db| db.effective_metadata_fields(library, media, scope, locale))
     }
 }
 
@@ -377,3 +369,6 @@ pub(crate) fn missing_fill(
     for_each_field!(fill_field);
     any.then_some(fill)
 }
+
+#[path = "compose/connection.rs"]
+mod connection;

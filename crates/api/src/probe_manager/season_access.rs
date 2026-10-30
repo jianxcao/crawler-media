@@ -4,16 +4,15 @@ use std::sync::Arc;
 use domain::MediaId;
 use marker::FingerprintEngine;
 use marker::fingerprint::capture_types::FingerprintCaptureEngine;
-use parking_lot::{Mutex, MutexGuard};
-use store::{MarkerResultReplacement, Store, StoreError};
+use parking_lot::Mutex;
+use store::{MarkerResultReplacement, Store};
 
 use crate::probe_manager::progress::MetadataPriorityGate;
 use crate::probe_manager::timings::ProbeTimingLedger;
 use crate::probe_manager::{ProbeManager, ProbeStoreAccess, ProbeUnit};
-use crate::store_readers::StoreReader;
 
 pub(super) struct SeasonAccess {
-    store: ProbeStoreAccess,
+    pub(super) store: Arc<Store>,
     pub(super) fingerprint_engine: Arc<dyn FingerprintEngine>,
     pub(super) capture_engine: Arc<dyn FingerprintCaptureEngine>,
     pub(super) gate: MetadataPriorityGate,
@@ -24,7 +23,7 @@ pub(super) struct SeasonAccess {
 impl SeasonAccess {
     pub(super) fn from_manager(manager: &ProbeManager) -> Self {
         Self {
-            store: manager.store_access(),
+            store: manager.store.clone(),
             fingerprint_engine: manager.fingerprint_engine.clone(),
             capture_engine: manager.capture_engine.clone(),
             gate: MetadataPriorityGate::from_manager(manager),
@@ -34,15 +33,7 @@ impl SeasonAccess {
     }
 
     pub(super) fn store_access(&self) -> ProbeStoreAccess {
-        self.store.clone()
-    }
-
-    pub(super) fn reader(&self) -> Result<StoreReader, StoreError> {
-        self.store.reader()
-    }
-
-    pub(super) fn writer(&self) -> Result<MutexGuard<'_, Store>, StoreError> {
-        self.store.write()
+        ProbeStoreAccess::new(self.store.clone())
     }
 
     pub(super) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
@@ -51,7 +42,7 @@ impl SeasonAccess {
         let Some(job_id) = unit.job_id.as_deref() else {
             return;
         };
-        let result = self.writer().and_then(|store| {
+        let result = self.store.library_write(|store| {
             let (job, _, all_done) = store.cancel_probe_unit(job_id, &ledger_id, reason)?;
             if job.kind == "marker_refresh" || all_done {
                 store.cancel_probe_job(job_id, reason)?;
@@ -61,16 +52,13 @@ impl SeasonAccess {
         match result {
             Ok(Some(job)) => {
                 if !job.is_active() {
-                    if let Ok(units) = self
-                        .reader()
-                        .and_then(|store| store.probe_job_units(job_id))
-                    {
+                    if let Ok(units) = self.store.probe_job_units(job_id) {
                         self.cancelled_dispatches
                             .lock()
                             .extend(units.into_iter().map(|unit| unit.ledger_id));
                     }
                     crate::probe_manager::timings::log_terminal_job(
-                        &self.store,
+                        &self.store_access(),
                         &self.timings,
                         &job,
                     );

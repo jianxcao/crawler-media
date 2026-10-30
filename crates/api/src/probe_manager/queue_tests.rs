@@ -34,7 +34,7 @@ fn seed_probe_library(store: &Store, tmp: &tempfile::TempDir, media_id: MediaId,
 #[test]
 fn force_probe_during_existing_probe_is_rejected_until_terminal() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = ProbeManager::new(store).unwrap();
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "movie.mkv", None, None),
@@ -82,7 +82,7 @@ fn force_probe_during_existing_probe_is_rejected_until_terminal() {
 #[test]
 fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
@@ -100,12 +100,12 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
         job_id: None,
     };
     seed_probe_library(
-        &store.lock(),
+        &store.as_ref(),
         &tmp,
         unit.row.file.media_id,
         MediaKind::Movie,
     );
-    super::super::test_support::publish_into(&store.lock(), &mut unit.row);
+    super::super::test_support::publish_into(&store.as_ref(), &mut unit.row);
 
     assert!(manager.enqueue(unit.clone()));
     let stale = manager.take_queued_for_test().unwrap();
@@ -117,14 +117,12 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
     assert_ne!(stale_job, retry_job);
 
     assert!(
-        !store
-            .lock()
+        !store.as_ref()
             .start_probe_unit(&stale_job, &unit.row.file.file_id.to_string())
             .unwrap()
     );
     manager.finish(&stale, true);
-    let active = store
-        .lock()
+    let active = store.as_ref()
         .active_probe_unit_for_ledger(&unit.row.file.file_id.to_string())
         .unwrap()
         .unwrap();
@@ -135,7 +133,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
 #[test]
 fn queued_probe_is_recovered_after_manager_restart() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
             MediaId::new(),
@@ -152,20 +150,18 @@ fn queued_probe_is_recovered_after_manager_restart() {
         job_id: None,
     };
     let ledger_id = unit.row.file.file_id.to_string();
-    seed_probe_library(&store.lock(), &tmp, unit.row.file.media_id, MediaKind::Tv);
-    super::super::test_support::publish_into(&store.lock(), &mut unit.row);
+    seed_probe_library(&store.as_ref(), &tmp, unit.row.file.media_id, MediaKind::Tv);
+    super::super::test_support::publish_into(&store.as_ref(), &mut unit.row);
     let manager = ProbeManager::new(store.clone()).unwrap();
 
     assert!(manager.enqueue(unit.clone()));
     assert!(manager.is_queued(&ledger_id));
-    let persisted = store
-        .lock()
+    let persisted = store.as_ref()
         .active_probe_unit_for_ledger(&ledger_id)
         .unwrap()
         .unwrap();
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .start_probe_unit(&persisted.job_id, &ledger_id)
             .unwrap()
     );
@@ -188,7 +184,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
 #[test]
 fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = ProbeManager::new(store).unwrap();
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "episode.mkv", Some(1), Some(1)),
@@ -210,7 +206,7 @@ fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
 #[tokio::test]
 async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store).unwrap());
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "episode.mkv", Some(1), Some(1)),
@@ -242,7 +238,7 @@ async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
 #[test]
 fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
@@ -259,16 +255,15 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         marker_refresh_id: None,
         job_id: None,
     };
-    seed_probe_library(&store.lock(), &tmp, unit.row.file.media_id, MediaKind::Tv);
-    super::super::test_support::publish_into(&store.lock(), &mut unit.row);
+    seed_probe_library(&store.as_ref(), &tmp, unit.row.file.media_id, MediaKind::Tv);
+    super::super::test_support::publish_into(&store.as_ref(), &mut unit.row);
 
     assert!(manager.enqueue(unit));
     let metadata_unit = manager.take_queued_for_test().unwrap();
     let metadata_job_id = metadata_unit.job_id.clone().unwrap();
     let ledger_id = metadata_unit.row.file.file_id.to_string();
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .start_probe_unit(&metadata_job_id, &ledger_id)
             .unwrap()
     );
@@ -283,21 +278,18 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         })
     );
 
-    let metadata_job = store
-        .lock()
+    let metadata_job = store.as_ref()
         .get_probe_job(&metadata_job_id)
         .unwrap()
         .unwrap();
     assert_eq!(metadata_job.kind, "media_probe");
     assert_eq!(metadata_job.status, "succeeded");
-    let active_voiceprint = store
-        .lock()
+    let active_voiceprint = store.as_ref()
         .active_probe_unit_for_ledger(&ledger_id)
         .unwrap();
     let active_voiceprint = active_voiceprint.unwrap();
     assert_eq!(active_voiceprint.status, "queued");
-    let voiceprint_job = store
-        .lock()
+    let voiceprint_job = store.as_ref()
         .get_probe_job(&active_voiceprint.job_id)
         .unwrap()
         .unwrap();
@@ -316,8 +308,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
     assert!(restarted.take_queued_for_test().is_none());
     restarted.finish(&recovered, false);
     assert_eq!(
-        store
-            .lock()
+        store.as_ref()
             .get_probe_job(&metadata_job_id)
             .unwrap()
             .unwrap()
@@ -326,8 +317,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         "a failed optional voiceprint must not undo completed media information"
     );
     assert_eq!(
-        store
-            .lock()
+        store.as_ref()
             .get_probe_job(&voiceprint_job_id)
             .unwrap()
             .unwrap()
@@ -340,7 +330,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
 fn interrupted_refresh_cancellation_is_completed_during_recovery() {
     for has_pending_unit in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+        let store = Arc::new(Store::open(tmp.path()).unwrap());
         let media_id = MediaId::new();
         let mut row = super::super::test_support::coverage(
             media_id,
@@ -352,8 +342,8 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
             Some(1),
         );
         std::fs::write(&row.file.path, b"dummy").unwrap();
-        seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
-        super::super::test_support::publish_into(&store.lock(), &mut row);
+        seed_probe_library(&store.as_ref(), &tmp, media_id, MediaKind::Tv);
+        super::super::test_support::publish_into(&store.as_ref(), &mut row);
         let ledger_id = row.file.file_id.to_string();
         let pending_id = if has_pending_unit {
             let mut pending = super::super::test_support::coverage(
@@ -363,7 +353,7 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
                 Some(2),
             );
             std::fs::write(&pending.file.path, b"finite pending source").unwrap();
-            super::super::test_support::publish_into(&store.lock(), &mut pending);
+            super::super::test_support::publish_into(&store.as_ref(), &mut pending);
             Some(pending.file.file_id.to_string())
         } else {
             None
@@ -386,8 +376,7 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
                 reuse_media_info_cache: true,
             });
         }
-        store
-            .lock()
+        store.as_ref()
             .create_probe_job(
                 "interrupted-cancel",
                 "marker_refresh",
@@ -397,15 +386,13 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
                 &specs,
             )
             .unwrap();
-        store
-            .lock()
+        store.as_ref()
             .cancel_probe_unit("interrupted-cancel", &ledger_id, "file_deleted")
             .unwrap();
 
         let manager = ProbeManager::new(store.clone()).unwrap();
 
-        let job = store
-            .lock()
+        let job = store.as_ref()
             .get_probe_job("interrupted-cancel")
             .unwrap()
             .unwrap();
@@ -414,15 +401,13 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
         assert_eq!(job.failed, 0);
         assert!(!manager.is_queued(&ledger_id));
         assert!(
-            store
-                .lock()
+            store.as_ref()
                 .active_probe_job_for_scope("interrupted-cancel-scope")
                 .unwrap()
                 .is_none()
         );
         assert!(
-            store
-                .lock()
+            store.as_ref()
                 .probe_job_units(&job.id)
                 .unwrap()
                 .iter()
@@ -434,9 +419,9 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
 #[test]
 fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
-    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
+    seed_probe_library(&store.as_ref(), &tmp, media_id, MediaKind::Tv);
     let mut row = super::super::test_support::coverage(
         media_id,
         &tmp.path().join("removed.mkv").to_string_lossy(),
@@ -444,7 +429,7 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
         Some(1),
     );
     std::fs::write(&row.file.path, b"finite source before deletion").unwrap();
-    super::super::test_support::publish_into(&store.lock(), &mut row);
+    super::super::test_support::publish_into(&store.as_ref(), &mut row);
     let ledger_id = row.file.file_id.to_string();
     let job_id = "completed-marker-refresh";
     let units = [crate::store::ProbeJobUnitSpec {
@@ -455,8 +440,7 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
         overwrite_markers: true,
         reuse_media_info_cache: true,
     }];
-    store
-        .lock()
+    store.as_ref()
         .create_probe_job(
             job_id,
             "marker_refresh",
@@ -466,20 +450,18 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
             &units,
         )
         .unwrap();
-    store.lock().start_probe_unit(job_id, &ledger_id).unwrap();
-    store
-        .lock()
+    store.as_ref().start_probe_unit(job_id, &ledger_id).unwrap();
+    store.as_ref()
         .finish_probe_unit(job_id, &ledger_id, true, None)
         .unwrap();
     assert_eq!(
-        store.lock().get_probe_job(job_id).unwrap().unwrap().status,
+        store.as_ref().get_probe_job(job_id).unwrap().unwrap().status,
         "running"
     );
 
     // Simulate cleanup interrupted before job reconciliation. Remove dependent
     // projections with foreign keys enabled, retaining the completion receipt.
-    let database = store
-        .lock()
+    let database = store.as_ref()
         .db_paths()
         .into_iter()
         .find(|path| path.ends_with("library.db"))
@@ -503,21 +485,19 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
         .unwrap();
     cleanup.commit().unwrap();
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .file_coverage_by_id(row.file.file_id)
             .unwrap()
             .is_none()
     );
     let _restarted = ProbeManager::new(store.clone()).unwrap();
-    let recovered = store.lock().get_probe_job(job_id).unwrap().unwrap();
+    let recovered = store.as_ref().get_probe_job(job_id).unwrap().unwrap();
     assert_eq!(recovered.status, "cancelled");
     assert_eq!(recovered.error.as_deref(), Some("file_deleted"));
     assert_eq!(recovered.completed, recovered.total);
     assert!(recovered.error.is_some());
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .active_probe_job_for_scope("marker-refresh:recovery-test")
             .unwrap()
             .is_none()
@@ -527,7 +507,7 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
 #[test]
 fn failed_probe_is_persisted_and_can_be_retried() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
@@ -545,8 +525,8 @@ fn failed_probe_is_persisted_and_can_be_retried() {
         job_id: None,
     };
     let ledger_id = unit.row.file.file_id.to_string();
-    seed_probe_library(&store.lock(), &tmp, unit.row.file.media_id, MediaKind::Tv);
-    super::super::test_support::publish_into(&store.lock(), &mut unit.row);
+    seed_probe_library(&store.as_ref(), &tmp, unit.row.file.media_id, MediaKind::Tv);
+    super::super::test_support::publish_into(&store.as_ref(), &mut unit.row);
 
     assert!(manager.enqueue(unit.clone()));
     let queued = manager.take_queued_for_test().unwrap();
@@ -554,8 +534,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
     manager.finish(&queued, false);
     assert!(!manager.is_queued(&ledger_id));
     let scope = format!("ledger:{ledger_id}");
-    let failed = store
-        .lock()
+    let failed = store.as_ref()
         .latest_probe_job_for_scope(&scope)
         .unwrap()
         .unwrap();
@@ -563,8 +542,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
     assert_eq!(failed.failed, 1);
 
     assert!(manager.enqueue_force(unit));
-    let active = store
-        .lock()
+    let active = store.as_ref()
         .active_probe_job_for_scope(&scope)
         .unwrap()
         .unwrap();
@@ -574,7 +552,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
 #[test]
 fn active_season_marker_refresh_rejects_a_duplicate_batch() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     let mut rows = [1, 2].map(|episode| {
         super::super::test_support::coverage(
@@ -587,9 +565,9 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
             Some(episode),
         )
     });
-    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
+    seed_probe_library(&store.as_ref(), &tmp, media_id, MediaKind::Tv);
     for row in rows.iter_mut() {
-        super::super::test_support::publish_into(&store.lock(), row);
+        super::super::test_support::publish_into(&store.as_ref(), row);
     }
     let units = || {
         rows.iter()
@@ -610,16 +588,14 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
 
     assert_eq!(first.enqueue_marker_refresh(units()), 2);
     let scope = super::super::marker_refresh_scope(media_id, 1);
-    let active = store
-        .lock()
+    let active = store.as_ref()
         .active_probe_job_for_scope(&scope)
         .unwrap()
         .unwrap();
     assert_eq!(active.total, 2);
     assert_eq!(active.completed, 0);
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .probe_job_units(&active.id)
             .unwrap()
             .iter()
@@ -635,7 +611,7 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
 #[test]
 fn forced_item_refresh_reserves_all_episodes_or_none() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     let mut rows = [1, 2].map(|episode| {
         super::super::test_support::coverage(
@@ -648,9 +624,9 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
             Some(episode),
         )
     });
-    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
+    seed_probe_library(&store.as_ref(), &tmp, media_id, MediaKind::Tv);
     for row in rows.iter_mut() {
-        super::super::test_support::publish_into(&store.lock(), row);
+        super::super::test_support::publish_into(&store.as_ref(), row);
     }
     let manager = ProbeManager::new(store.clone()).unwrap();
     let active_unit = ProbeUnit {
@@ -683,8 +659,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
         Err(super::ProbeEnqueueError::AlreadyRunning)
     ));
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .active_probe_job_for_scope(&format!("marker-refresh:{media_id}:all"))
             .unwrap()
             .is_none()
@@ -699,9 +674,8 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
 #[test]
 fn explicit_tv_refresh_works_with_switches_off_but_automatic_force_does_not() {
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let library = store
-        .lock()
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
+    let library = store.as_ref()
         .create_library(
             MediaKind::Tv,
             "Manual",

@@ -10,10 +10,8 @@ use std::future::Future;
 use store::{LibraryReadError, QueryBudget};
 use store::{LibraryReadRequest, LibraryReadResult, ReadCredential};
 
-mod gate;
 mod metrics;
 mod mutation;
-pub(crate) use gate::LibraryReadGate;
 use media_server::query_metrics::QueryMetrics;
 use metrics::{StageMetrics, WorkerMetrics};
 pub(crate) use mutation::run_store_write_stage_named;
@@ -44,27 +42,29 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
-    let lock_started = Instant::now();
-    let reader = state
-        .store_readers
+    let store = state.store();
+    let wait_started = Instant::now();
+    let admitted = store
+        .reader_pool(store::Db::Library)
         .checkout_async(deadline.saturating_duration_since(Instant::now()))
         .await;
-    let reader_wait = lock_started.elapsed();
+    let reader_wait = wait_started.elapsed();
     state.record_query_phase("lock_wait", reader_wait);
     if let Some(metrics) = QueryMetrics::current() {
-        metrics.duration(
-            match stage {
-                "auth" => "auth_wait",
-                "validate" => "validate_wait",
-                "credential_binding" => "binding_wait",
-                _ => "prepare_wait",
-            },
-            reader_wait,
-        );
+        let wait_phase = match stage {
+            "validate" => "validate_wait",
+            "credential_binding" => "binding_wait",
+            _ => "prepare_wait",
+        };
+        metrics.duration(wait_phase, reader_wait);
     }
-    let reader = reader.ok_or_else(|| {
-        phase.timeout();
-        LibraryReadError::Deadline
+    let lease = admitted.inspect_err(|error| {
+        if matches!(error, LibraryReadError::Busy) {
+            phase.rejected();
+        }
+        if Instant::now() >= deadline {
+            phase.timeout();
+        }
     })?;
     let reservation = state.http_work.try_reserve().map_err(|_| {
         phase.rejected();
@@ -89,9 +89,18 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
             }
             worker.acquired();
             budget.check()?;
-            let result = reader.with_query_budget(&budget, work);
-            drop(reader);
-            result
+            store.with_query_budget(&budget, |store| {
+                store
+                    .with_reader_lease(store::Db::Library, lease, |store| {
+                        store
+                            .with_read_scope(
+                                deadline.saturating_duration_since(Instant::now()),
+                                || work(store),
+                            )
+                            .map_err(LibraryReadError::Store)?
+                    })
+                    .map_err(LibraryReadError::Store)?
+            })
         })
         .await;
     drop(cancel_on_drop);
@@ -115,34 +124,54 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
     }
 }
 
-/// Identity reads borrow the shared read-only Store pool within the request deadline.
+/// Identity reads use the shared App pool independently of external IO capacity.
 pub(crate) async fn run_app_read_stage_named<T: Send + 'static>(
     state: &ApiState,
     deadline: Instant,
     stage: &'static str,
-    work: impl FnOnce(&store::Store) -> Result<T, store::StoreError> + Send + 'static,
+    work: impl FnOnce(&store::App<'_>) -> Result<T, store::StoreError> + Send + 'static,
 ) -> Result<T, LibraryReadError> {
     let phase = StageMetrics::start(stage);
     if Instant::now() >= deadline {
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let Some(reader) = state.store_readers.checkout_async(remaining).await else {
-        phase.timeout();
-        return Err(LibraryReadError::Deadline);
-    };
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let task = tokio::task::spawn_blocking(move || work(&reader));
-    match tokio::time::timeout(remaining, task).await {
-        Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(error))) => {
-            if store_error_is_unavailable(&error) {
+    // Wait asynchronously before occupying a blocking worker. The unified App
+    // pool itself bounds identity work; external IO must not deny authentication.
+    let mut lease = state
+        .store()
+        .reader_pool(store::Db::App)
+        .checkout_async(deadline.saturating_duration_since(Instant::now()))
+        .await
+        .inspect_err(|_| phase.timeout())?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_on_drop = CancelOnDrop(cancelled.clone());
+    let stage_barrier = state.library_read_stage_barrier.clone();
+    let worker = WorkerMetrics::queued(QueryMetrics::current(), stage, deadline);
+    let task = tokio::task::spawn_blocking(move || {
+        let mut worker = worker.start();
+        let budget = QueryBudget {
+            deadline,
+            cancelled,
+        };
+        budget.check()?;
+        if let Some(barrier) = stage_barrier {
+            barrier(stage);
+        }
+        worker.acquired();
+        lease.with_connection(&budget, |connection| {
+            work(&store::App::from_connection(connection))
+        })
+    });
+    let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task).await;
+    drop(cancel_on_drop);
+    match result {
+        Ok(Ok(value)) => {
+            if value.as_ref().is_err_and(error_is_unavailable) {
                 phase.timeout();
             }
-            Err(LibraryReadError::Store(error))
+            value
         }
-        // worker panic：与 Store 阶段同一种映射（上层翻成 500，而不是"繁忙"）
         Ok(Err(error)) => Err(LibraryReadError::Store(store::StoreError::Protected(
             error.to_string(),
         ))),
@@ -163,49 +192,29 @@ pub(crate) async fn run_lease_stage(
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
-    // T4: wait for a free reader on the async side, bounded and deadline-aware,
-    // before taking a blocking worker; the permit travels into the worker and is
-    // released only when that worker exits.
-    let reader_permit =
-        state
-            .library_read_gate
-            .acquire(deadline)
-            .await
-            .map_err(|error| match error {
-                gate::GateError::Saturated => {
-                    phase.rejected();
-                    LibraryReadError::Busy
-                }
-                gate::GateError::Deadline => {
-                    phase.timeout();
-                    LibraryReadError::Deadline
-                }
-            })?;
+    let mut lease = state
+        .library_reads
+        .checkout_async(deadline.saturating_duration_since(Instant::now()))
+        .await
+        .inspect_err(|_| phase.timeout())?;
     let reservation = state.http_work.try_reserve().map_err(|_| {
         phase.rejected();
         LibraryReadError::Busy
     })?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_on_drop = CancelOnDrop(cancelled.clone());
-    let pool = state.library_reads.clone();
     let metrics = state.clone();
     let remaining = deadline.saturating_duration_since(Instant::now());
     let request_metrics = QueryMetrics::current();
     let worker = WorkerMetrics::queued(request_metrics.clone(), "lease", deadline);
     let result = reservation
         .run(remaining, move || {
-            let _reader_permit = reader_permit;
             let worker = worker.start();
             let budget = QueryBudget {
                 deadline,
                 cancelled,
             };
             budget.check()?;
-            let mut lease = pool.try_checkout().inspect_err(|_| {
-                if let Some(m) = &request_metrics {
-                    m.update(|s| s.pool_rejections += 1);
-                }
-            })?;
             let selection_started = Instant::now();
             let result = if request_metrics
                 .as_ref()
@@ -458,7 +467,12 @@ pub(crate) fn stage_response(error: LibraryReadError) -> axum::response::Respons
 /// SQLite can report contention before a submillisecond absolute budget expires.
 pub(crate) fn store_error_is_unavailable(error: &store::StoreError) -> bool {
     match error {
-        store::StoreError::QueryUnavailable { .. } => true,
+        store::StoreError::QueryUnavailable { .. }
+        | store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled
+        | store::StoreError::WriteBusy => true,
         store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => matches!(
             code.code,
             rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked

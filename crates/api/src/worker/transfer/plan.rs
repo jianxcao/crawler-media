@@ -1,11 +1,13 @@
 use domain::{Media, Subscribe};
 
 use crate::management::ApiState;
-use crate::scrape_store::ScrapeStoreExt;
+use crate::scrape_config::{ScrapeConfigSetting, compose_config};
 
 pub(crate) struct TransferPlan {
     pub(crate) library_id: String,
     library: store::Library,
+    transfer_settings: store::TransferSettings,
+    scrape_setting: Option<String>,
     pub(crate) fingerprint: store::ReadFingerprint,
     pub(crate) root: std::path::PathBuf,
     /// Root of `library_id` that owns `root`: the destination identity every
@@ -29,7 +31,7 @@ pub(crate) struct TransferPlan {
 /// roots contain, is an error: publishing a file under a root the Library does
 /// not declare would record a file row nobody owns.
 fn destination_root_id(
-    store: &crate::Store,
+    store: &store::LibraryConnection<'_>,
     library_id: &str,
     destination: &std::path::Path,
 ) -> Result<String, String> {
@@ -81,36 +83,58 @@ pub(crate) fn resolve_transfer_plan(
     media: &Media,
     subscribe: &Subscribe,
 ) -> Result<TransferPlan, String> {
-    let store = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        .ok_or_else(|| "runtime.busy".to_string())?;
+    let store = state.store.as_ref();
     let library = match subscribe.library_id {
         Some(id) => store.get_library(&id.to_string()),
         None => store.default_library(media.kind),
     }
     .map_err(|e| e.to_string())?
     .ok_or("目标 Library 不存在")?;
-    let (root, mode, scrape) =
-        crate::directory::transfer_plan_for_library(&store, media.kind, Some(&library.id))
-            .map_err(|e| e.to_string())?;
-    let root_id = destination_root_id(&store, &library.id, &root)?;
+    if !store
+        .library_accepts_work(&library.id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("目标 Library 正在删除".into());
+    }
+    let root = library
+        .root_paths
+        .first()
+        .cloned()
+        .ok_or("目标 Library 没有根目录")?;
+    let root_id = store
+        .library_read_snapshot(|db| destination_root_id(db, &library.id, &root))
+        .map_err(|error| error.to_string())??;
     let config_revision = store
         .library_config_revision(&library.id)
-        .map_err(|error| {
-            tracing::error!(library_id = %library.id, %error, "读取 Library 配置版本失败");
-            error.to_string()
-        })?;
-    let naming = store
-        .naming_pattern(media.kind)
-        .map_err(|e| e.to_string())?;
-    let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let transfer_settings = store
+        .transfer_settings()
+        .map_err(|error| error.to_string())?;
+    let mode = crate::directory::parse_transfer_mode(&transfer_settings.transfer_mode);
+    let scrape = transfer_settings.scrape;
+    let scrape_setting = store
+        .get_setting(crate::scrape_config::KEY)
+        .map_err(|error| error.to_string())?;
+    let setting = match scrape_setting.as_deref() {
+        Some(raw) => serde_json::from_str::<ScrapeConfigSetting>(raw).unwrap_or_else(|error| {
+            tracing::error!(%error, "Transfer scrape configuration is corrupt; using defaults");
+            ScrapeConfigSetting::default()
+        }),
+        None => ScrapeConfigSetting::default(),
+    };
+    let cfg = compose_config(setting);
+    let naming = match media.kind {
+        domain::MediaKind::Tv => cfg.effective.compose_tv_pattern(),
+        _ => cfg.effective.compose_movie_pattern(),
+    };
     let fingerprint = store
         .read_fingerprint(&library.id, media.id)
         .map_err(|e| e.to_string())?;
     Ok(TransferPlan {
         library_id: library.id.clone(),
         library,
+        transfer_settings,
+        scrape_setting,
         fingerprint,
         root,
         root_id,
@@ -193,60 +217,104 @@ pub(super) fn validate_transfer_plan_at(
     ignored_files: &std::collections::HashSet<String>,
     plan: &TransferPlan,
 ) -> Result<(), String> {
+    validate_app_plan(store, plan)?;
+    if store
+        .get_subscribe(subscribe.id)
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        != Some(subscribe)
+    {
+        return Err("Transfer Subscribe changed".into());
+    }
+    store
+        .library_read_snapshot(|db| {
+            validate_library_plan(db, lease, fingerprint, ignored_files, plan)
+        })
+        .map_err(|error| error.to_string())?
+}
+
+fn validate_app_plan(store: &store::Store, plan: &TransferPlan) -> Result<(), String> {
+    if store
+        .transfer_settings()
+        .map_err(|error| error.to_string())?
+        != plan.transfer_settings
+        || store
+            .get_setting(crate::scrape_config::KEY)
+            .map_err(|error| error.to_string())?
+            != plan.scrape_setting
+    {
+        return Err("Transfer configuration changed".into());
+    }
+    Ok(())
+}
+
+/// App configuration cannot change between admission and the Library write.
+/// Both writers are held only for SQL and acquired in App → Library order.
+pub(crate) fn with_plan_write<T>(
+    store: &store::Store,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+    fingerprint: Option<&store::ReadFingerprint>,
+    ignored_files: &std::collections::HashSet<String>,
+    plan: &TransferPlan,
+    work: impl FnOnce(&store::LibraryConnection<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    store
+        .writers()
+        .with_app(|app| {
+            if app.transfer_settings()? != plan.transfer_settings
+                || app.get_setting(crate::scrape_config::KEY)? != plan.scrape_setting
+            {
+                return Err(store::StoreError::Protected(
+                    "Transfer configuration changed".into(),
+                ));
+            }
+            store.library_write_with_error(std::convert::identity, |db| {
+                validate_library_plan(db, lease, fingerprint, ignored_files, plan)
+                    .map_err(store::StoreError::Protected)?;
+                work(db).map_err(store::StoreError::Protected)
+            })
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn validate_library_plan(
+    store: &store::LibraryConnection<'_>,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+    fingerprint: Option<&store::ReadFingerprint>,
+    ignored_files: &std::collections::HashSet<String>,
+    plan: &TransferPlan,
+) -> Result<(), String> {
     lease.control().check().map_err(|e| e.to_string())?;
     if !store
         .library_accepts_work(lease.library_id())
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
     {
         return Err("目标 Library 正在删除或已不存在".into());
     }
     let fingerprint_changed = match fingerprint {
         Some(fingerprint) => {
-            let current_fingerprint = store
+            let current = store
                 .read_fingerprint(&plan.library_id, plan.fingerprint.media_id)
-                .map_err(|e| e.to_string())?;
-            !fingerprint_matches(&current_fingerprint, fingerprint, ignored_files)
-                || !fingerprint_matches(&current_fingerprint, &plan.fingerprint, ignored_files)
+                .map_err(|error| error.to_string())?;
+            !fingerprint_matches(&current, fingerprint, ignored_files)
+                || !fingerprint_matches(&current, &plan.fingerprint, ignored_files)
         }
         None => false,
     };
     let library = store
         .get_library(&plan.library_id)
-        .map_err(|e| e.to_string())?;
-    let (root, mode, scrape) = crate::directory::transfer_plan_for_library(
-        store,
-        plan.library.kind,
-        Some(&plan.library_id),
-    )
-    .map_err(|e| e.to_string())?;
-    let root_id = destination_root_id(store, &plan.library_id, &root)?;
+        .map_err(|error| error.to_string())?;
+    let root_id = destination_root_id(store, &plan.library_id, &plan.root)?;
     let config_revision = store
         .library_config_revision(&plan.library_id)
-        .map_err(|e| e.to_string())?;
-    let naming = store
-        .naming_pattern(plan.library.kind)
-        .map_err(|e| e.to_string())?;
-    let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
-    // Roots and global settings are not all covered by the scoped fingerprint.
-    // Compare the actual plan as well, including changes before the facts snapshot.
+        .map_err(|error| error.to_string())?;
     if fingerprint_changed
         || lease.library_id() != plan.library_id
         || library.as_ref() != Some(&plan.library)
-        || root != plan.root
         || root_id != plan.root_id
         || config_revision != plan.config_revision
-        || mode != plan.mode
-        || scrape != plan.scrape
-        || naming != plan.naming
-        || (scrape && cfg.effective.mirror_nfo) != plan.nfo
-        || store
-            .get_subscribe(subscribe.id)
-            .map_err(|e| e.to_string())?
-            .as_ref()
-            != Some(subscribe)
     {
-        tracing::warn!(subscribe_id = %subscribe.id, library_id = %plan.library_id,
-            "Transfer source or Library configuration changed");
+        tracing::warn!(library_id = %plan.library_id, "Transfer source or Library configuration changed");
         return Err("Transfer source or Library configuration changed".into());
     }
     Ok(())

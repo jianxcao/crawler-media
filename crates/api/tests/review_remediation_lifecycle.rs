@@ -110,7 +110,7 @@ fn watcher_preserves_media_still_targeted_by_subscribe() {
     };
     {
         let handle = state.store();
-        let s = handle.lock();
+        let s = handle.as_ref();
         s.create_library(
             MediaKind::Tv,
             "TV",
@@ -121,13 +121,13 @@ fn watcher_preserves_media_still_targeted_by_subscribe() {
         )
         .unwrap();
         s.insert_media(&media).unwrap();
-        publish_fixture_file(&s, &row).unwrap();
+        publish_fixture_file(s, &row).unwrap();
         s.insert_subscribe(&sub).unwrap();
     }
     std::fs::remove_file(&row.path).unwrap();
     deleted(&state, &row.path);
     let handle = state.store();
-    let s = handle.lock();
+    let s = handle.as_ref();
     assert!(s.get_subscribe(sub.id).unwrap().is_some());
     assert!(
         s.get_media(media.id).unwrap().is_some(),
@@ -161,7 +161,7 @@ fn deleting_one_version_preserves_locked_marker_for_other_version() {
     let b = row(&media, &tmp, "version-b.mkv", 1);
     let b_file = {
         let handle = state.store();
-        let s = handle.lock();
+        let s = handle.as_ref();
         s.insert_media(&media).unwrap();
         s.create_library(
             MediaKind::Tv,
@@ -172,15 +172,15 @@ fn deleting_one_version_preserves_locked_marker_for_other_version() {
             &[],
         )
         .unwrap();
-        publish_fixture_file(&s, &a).unwrap();
-        let b_file = publish_fixture_file(&s, &b).unwrap();
+        publish_fixture_file(s, &a).unwrap();
+        let b_file = publish_fixture_file(s, &b).unwrap();
         s.put_media_marker(&marker(&media, 1, true)).unwrap();
         b_file
     };
     std::fs::remove_file(&a.path).unwrap();
     deleted(&state, &a.path);
     let handle = state.store();
-    let s = handle.lock();
+    let s = handle.as_ref();
     assert!(s.file_coverage_by_id(b_file.file_id).unwrap().is_some());
     assert!(
         s.get_media_marker(media.id, Some(1), Some(1))
@@ -199,7 +199,7 @@ fn repeated_empty_chapter_read_does_not_borrow_neighbor_intro() {
     let special = row(&media, &tmp, "e2.strm", 2);
     let special_coverage = {
         let handle = state.store();
-        let s = handle.lock();
+        let s = handle.as_ref();
         s.insert_media(&media).unwrap();
         s.create_library(
             MediaKind::Tv,
@@ -210,8 +210,8 @@ fn repeated_empty_chapter_read_does_not_borrow_neighbor_intro() {
             &[],
         )
         .unwrap();
-        publish_fixture_file(&s, &neighbor).unwrap();
-        publish_fixture_file(&s, &special).unwrap();
+        publish_fixture_file(s, &neighbor).unwrap();
+        publish_fixture_file(s, &special).unwrap();
         s.put_media_marker(&marker(&media, 1, false)).unwrap();
         s.file_coverage_by_path(&special.path).unwrap().unwrap()
     };
@@ -247,7 +247,7 @@ fn realtime_video_library_uses_video_ingestion() {
     std::fs::write(&file, b"fixture").unwrap();
     {
         let handle = state.store();
-        let s = handle.lock();
+        let s = handle.as_ref();
         let lib = s
             .create_library(
                 MediaKind::Video,
@@ -274,7 +274,7 @@ fn realtime_video_library_uses_video_ingestion() {
             loop {
                 let kind = {
                     let handle = state.store();
-                    let s = handle.lock();
+                    let s = handle.as_ref();
                     s.file_coverage_by_path(file.to_str().unwrap())
                         .unwrap()
                         .and_then(|c| s.get_media(c.file.media_id).unwrap())

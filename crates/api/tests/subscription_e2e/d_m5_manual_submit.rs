@@ -18,7 +18,6 @@ async fn manual_submit_does_not_deliver_when_library_facts_cannot_be_read() {
     let library_db = h
         .state
         .store()
-        .lock()
         .db_paths()
         .into_iter()
         .find(|path| path.ends_with("library.db"))

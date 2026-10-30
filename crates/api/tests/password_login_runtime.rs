@@ -3,6 +3,12 @@
 //! 注入阻塞 verify：闭包进入后主测试线程必须能立刻拿到 Store 锁；阻塞期间
 //! 改密 / 禁用 / 删除用户，release 后登录必须 401 且不泄露任何会话凭据。
 //! 另测并发上限触发 503，且 permit 直到 CAS 结束才释放。
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
@@ -147,7 +153,7 @@ fn login_request(protocol: Protocol, username: &str, password: &str) -> Request<
         .unwrap()
 }
 
-fn apply_mutation(store: &mut Store, user_id: UserId, mutation: Mutation) {
+fn apply_mutation(store: &Store, user_id: UserId, mutation: Mutation) {
     match mutation {
         Mutation::ChangePassword => store.set_password(user_id, "changed-secret").unwrap(),
         Mutation::Disable => {
@@ -177,10 +183,15 @@ async fn assert_blocked_login_rejected(protocol: Protocol, mutation: Mutation) {
     gate.wait_entered();
     {
         let store = state.store();
-        let mut guard = store
-            .try_lock()
-            .expect("Store lock must stay free while the Argon2 verify blocks");
-        apply_mutation(&mut guard, member, mutation);
+        store
+            .writers()
+            .with_writer_timeout(
+                std::time::Duration::from_millis(100),
+                store::Db::App,
+                |_| Ok(()),
+            )
+            .expect("App writer must stay free while the Argon2 verify blocks");
+        apply_mutation(&store, member, mutation);
     }
     gate.release();
 
@@ -207,7 +218,6 @@ async fn assert_blocked_login_rejected(protocol: Protocol, mutation: Mutation) {
     assert!(
         state
             .store()
-            .lock()
             .latest_token_for_user(member)
             .unwrap()
             .is_none(),
@@ -343,7 +353,7 @@ fn both_password_protocols_keep_executor_responsive_while_waiting_for_store() {
         let app = router(state);
         let (tx, rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::App);
             tx.send(()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(500));
         });
@@ -401,7 +411,6 @@ async fn both_password_protocols_recheck_write_admission_after_verification() {
             assert!(
                 state
                     .store()
-                    .lock()
                     .latest_token_for_user(member)
                     .unwrap()
                     .is_none()

@@ -88,20 +88,29 @@ async fn start_subscription_deletion(
     delete_torrents: bool,
     delete_library_files: bool,
 ) -> Result<SubscriptionDeleteSnapshot, Response> {
-    let state = state.clone();
-    match tokio::task::spawn_blocking(move || {
-        begin_subscription_deletion(&state, id, user_id, delete_torrents, delete_library_files)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::error!(subscribe_id = %id, %error, "开始删除订阅失败");
-            Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "subscription.delete_failed",
-                &error.to_string(),
-            ))
+    loop {
+        // Register before checking the active marker: a round may finish while
+        // the blocking decision is queued, and its wakeup must not be lost.
+        let finished = state.subscribe_round_finished.notified();
+        tokio::pin!(finished);
+        finished.as_mut().enable();
+        let worker = state.clone();
+        match tokio::task::spawn_blocking(move || {
+            begin_subscription_deletion(&worker, id, user_id, delete_torrents, delete_library_files)
+        })
+        .await
+        {
+            Ok(Ok(Some(snapshot))) => return Ok(snapshot),
+            Ok(Ok(None)) => finished.await,
+            Ok(Err(response)) => return Err(response),
+            Err(error) => {
+                tracing::error!(subscribe_id = %id, %error, "开始删除订阅失败");
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subscription.delete_failed",
+                    &error.to_string(),
+                ));
+            }
         }
     }
 }
@@ -224,7 +233,7 @@ fn begin_subscription_deletion(
     user_id: UserId,
     delete_torrents: bool,
     delete_library_files: bool,
-) -> Result<SubscriptionDeleteSnapshot, Response> {
+) -> Result<Option<SubscriptionDeleteSnapshot>, Response> {
     let guard = state.subscribe_guard(id);
     let _guard = guard.lock();
     if state.subscribe_is_deleting(id) {
@@ -234,7 +243,7 @@ fn begin_subscription_deletion(
             "订阅正在删除",
         ));
     }
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(subscribe) = store.get_subscribe(id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -248,27 +257,34 @@ fn begin_subscription_deletion(
         user_id,
         delete_torrents || delete_library_files,
     )?;
+    // The admitted round records every successful add and publication before
+    // clearing its marker. Wait without retaining this decision guard, then
+    // capture cleanup facts and fence new rounds in the same guarded section.
+    if (delete_torrents || delete_library_files) && state.active_transfers.lock().contains(&id) {
+        return Ok(None);
+    }
     let pending = if delete_torrents {
         exclusively_owned_pending(&store, id)?
     } else {
         Vec::new()
     };
+    state.mark_subscribe_deleting(id);
+    drop(_guard);
+    let reservation = crate::management::SubscribeDeletionReservation::new(state.clone(), id);
+    // The deletion fence keeps new rounds out while strict root/path checks
+    // inspect the filesystem. An error drops the reservation and clears the fence.
     let rows = if delete_library_files {
         deletable_library_rows(&store, &subscribe)?
     } else {
         Vec::new()
     };
-    state.mark_subscribe_deleting(id);
-    drop(store);
-    drop(_guard);
-    let reservation = crate::management::SubscribeDeletionReservation::new(state.clone(), id);
-    Ok(SubscriptionDeleteSnapshot {
+    Ok(Some(SubscriptionDeleteSnapshot {
         subscribe,
         pending,
         rows,
         delete_torrents,
         _reservation: reservation,
-    })
+    }))
 }
 
 fn deletable_library_rows(
@@ -387,7 +403,7 @@ fn finish_subscription_deletion(
 ) -> Result<(), Response> {
     let guard = state.subscribe_guard(id);
     let _guard = guard.lock();
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let current = store.get_subscribe(id).ok().flatten();
     if current.as_ref().map(|row| row.user_id) != Some(user_id) {
         return Err(err(

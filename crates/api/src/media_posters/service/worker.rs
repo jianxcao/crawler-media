@@ -16,7 +16,7 @@ impl Drop for ActiveWorker {
 
 impl MediaPosterService {
     pub(super) fn spawn_worker(&self, media_id: MediaId, entry: Arc<PosterInflight>) {
-        let readers = self.readers.clone();
+        let store = self.store.clone();
         let catalog = self.catalog.clone();
         let fetcher = self.fetcher.clone();
         let cache = self.cache.clone();
@@ -47,7 +47,7 @@ impl MediaPosterService {
             let _ = tokio::task::spawn_blocking(move || {
                 let _active = ActiveWorker::start(active_workers);
                 let outcome =
-                    fetch_poster(&readers, &*catalog, &*fetcher, &cache, media_id, deadline);
+                    fetch_poster(&store, &*catalog, &*fetcher, &cache, media_id, deadline);
                 if let Err(error) = &outcome {
                     Self::record_negative_cache(&negative_cache, media_id, error);
                 }
@@ -59,7 +59,7 @@ impl MediaPosterService {
 }
 
 fn fetch_poster(
-    readers: &Arc<crate::store_readers::StoreReaders>,
+    store: &Arc<Store>,
     catalog: &dyn Catalog,
     fetcher: &dyn ImageFetcher,
     cache: &DiskPosterCache,
@@ -72,10 +72,10 @@ fn fetch_poster(
     }
     let (kind, tmdb_id) = {
         let wait = deadline.saturating_duration_since(Instant::now());
-        let store = readers.checkout(wait).ok_or(PosterError::Timeout)?;
         check_deadline(deadline)?;
         let media = store
-            .get_media(media_id)
+            .with_read_scope(wait, || store.get_media(media_id))
+            .map_err(|error| PosterError::Io(error.to_string()))?
             .map_err(|error| PosterError::Io(error.to_string()))?
             .ok_or(PosterError::NotFound)?;
         (media.kind, media.tmdb_id.ok_or(PosterError::NotFound)?)

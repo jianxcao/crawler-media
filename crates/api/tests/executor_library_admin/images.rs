@@ -11,7 +11,7 @@ fn artwork(f: &Fixture) -> Vec<String> {
     )
     .unwrap();
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let library = store
         .get_library(&f.file.library_id.to_string())
         .unwrap()
@@ -44,7 +44,8 @@ fn native_artwork_routes_remain_public_and_keep_executor_responsive() {
         let handle = f.state.store();
         let (tx, rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _guard = handle.lock();
+            let _guard =
+                crate::writer_hold::WriterHold::acquire(handle.clone(), store::Db::Library);
             tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
         });

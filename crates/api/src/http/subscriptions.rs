@@ -296,7 +296,7 @@ fn persist_removed_pending(
 ) -> bool {
     if let Err(error) = state
         .store
-        .lock()
+        .as_ref()
         .delete_pending(subscribe_id, &torrent.enclosure)
     {
         tracing::error!(
@@ -326,10 +326,7 @@ pub(crate) fn resolve_subscribe(
             ));
         }
     };
-    let store = state
-        .store_readers
-        .checkout(super::store_wait::STORE_READ_WAIT)
-        .ok_or_else(super::store_wait::busy_response)?;
+    let store = state.store.clone();
     resolve_subscribe_on(&store, raw, user_id)
 }
 
@@ -462,7 +459,8 @@ pub(crate) async fn guarded_blocking(
             {
                 return response;
             }
-            super::store_wait::with_app_admission(&worker, work).unwrap_or_else(|response| response)
+            super::store_wait::with_write_admission(&worker, work)
+                .unwrap_or_else(|response| response)
         })
         .await
     {

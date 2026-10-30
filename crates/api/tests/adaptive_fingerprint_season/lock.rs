@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 struct ContendedModelPublication {
-    writer: Arc<Mutex<Store>>,
+    writer: Arc<Store>,
     entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: Mutex<Option<mpsc::Receiver<()>>>,
     holder: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -32,7 +32,8 @@ impl marker::FingerprintEngine for ContendedModelPublication {
             let release = self.release.lock().take().unwrap();
             let (held, ready) = mpsc::channel();
             *self.holder.lock() = Some(std::thread::spawn(move || {
-                let _guard = writer.lock();
+                let _guard =
+                    crate::writer_hold::WriterHold::acquire(writer.clone(), store::Db::Library);
                 held.send(()).unwrap();
                 let _ = entered.send(());
                 let _ = release.recv_timeout(Duration::from_secs(3));
@@ -55,12 +56,7 @@ impl marker::FingerprintEngine for ContendedModelPublication {
     }
 }
 
-fn season_fixture() -> (
-    tempfile::TempDir,
-    Arc<Mutex<Store>>,
-    MediaId,
-    Vec<ProbeUnit>,
-) {
+fn season_fixture() -> (tempfile::TempDir, Arc<Store>, MediaId, Vec<ProbeUnit>) {
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(directory.path().join("data")).unwrap();
     let media_id = MediaId::new();
@@ -98,7 +94,7 @@ fn season_fixture() -> (
             }
         })
         .collect();
-    (directory, Arc::new(Mutex::new(store)), media_id, units)
+    (directory, Arc::new(store), media_id, units)
 }
 
 #[test]

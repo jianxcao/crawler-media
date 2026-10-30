@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
+fn fixture() -> (tempfile::TempDir, Arc<crate::Store>, ProbeUnit) {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::Store::open(directory.path().join("data")).unwrap();
     let root = directory.path().join("shows");
@@ -54,11 +54,11 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<crate::Store>>, ProbeUnit) {
         marker_refresh_id: None,
         job_id: None,
     };
-    (directory, Arc::new(Mutex::new(store)), unit)
+    (directory, Arc::new(store), unit)
 }
 
 struct ContendedPublication {
-    store: Arc<Mutex<crate::Store>>,
+    store: Arc<crate::Store>,
     entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     holder: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -75,10 +75,14 @@ impl marker::FingerprintEngine for ContendedPublication {
         let entered = self.entered.lock().take().unwrap();
         let (held, ready) = mpsc::channel();
         *self.holder.lock() = Some(std::thread::spawn(move || {
-            let _guard = store.lock();
-            held.send(()).unwrap();
-            let _ = entered.send(());
-            std::thread::sleep(Duration::from_millis(500));
+            store
+                .with_writer(store::Db::Library, |_| {
+                    held.send(()).unwrap();
+                    let _ = entered.send(());
+                    std::thread::sleep(Duration::from_millis(500));
+                    Ok(())
+                })
+                .unwrap();
         }));
         ready.recv_timeout(Duration::from_secs(2)).unwrap();
         Ok(vec![1, 2, 3])
@@ -131,7 +135,7 @@ async fn fingerprint_publication_contention_does_not_park_the_executor() {
     engine.holder.lock().take().unwrap().join().unwrap();
     assert!(
         store
-            .lock()
+            .as_ref()
             .get_fingerprint_cache(&file_id.to_string())
             .unwrap()
             .is_some()
@@ -150,9 +154,7 @@ async fn fingerprint_publication_contention_does_not_park_the_executor() {
 #[tokio::test]
 async fn recovered_refresh_waits_for_busy_read_pool_before_acquiring_leases() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Arc::new(parking_lot::Mutex::new(
-        store::Store::open(directory.path()).unwrap(),
-    ));
+    let store = Arc::new(store::Store::open(directory.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     *manager.library_work.lock() = Some(Arc::new(
         crate::library_lifecycle::LibraryWorkRegistry::default(),
@@ -172,8 +174,14 @@ async fn recovered_refresh_waits_for_busy_read_pool_before_acquiring_leases() {
         marker_refresh_id: Some(1),
         job_id: Some("job".into()),
     };
-    let readers: Vec<_> = (0..crate::store_readers::STORE_READERS)
-        .map(|_| manager.readers.checkout(std::time::Duration::ZERO).unwrap())
+    let readers: Vec<_> = (0..8)
+        .map(|_| {
+            manager
+                .store
+                .reader_pool(store::Db::Library)
+                .checkout(std::time::Duration::ZERO)
+                .unwrap()
+        })
         .collect();
     let task = tokio::spawn(async move { acquire_recovered_refresh_leases(&manager, &unit).await });
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;

@@ -81,12 +81,38 @@ pub fn prune_data_history(
     // 服务端固定预算：调用方传更大值也不会扩大单批窗口。
     let limit = limit.min(500);
     match class {
-        RetentionClass::Qoe => prune_qoe(store, cutoff_ms, cursor, limit, dry_run),
+        RetentionClass::Qoe => {
+            if dry_run {
+                store.with_read(crate::Db::Library, |conn| {
+                    prune_qoe(conn, cutoff_ms, cursor, limit, true)
+                })
+            } else {
+                store.with_writer(crate::Db::Library, |conn| {
+                    prune_qoe(conn, cutoff_ms, cursor, limit, false)
+                })
+            }
+        }
         RetentionClass::TransientCatalog => {
-            prune_transient_catalog(store, cutoff_ms, cursor, limit, dry_run)
+            if dry_run {
+                store.with_read(crate::Db::Cache, |conn| {
+                    prune_transient_catalog(conn, cutoff_ms, cursor, limit, true)
+                })
+            } else {
+                store.with_writer(crate::Db::Cache, |conn| {
+                    prune_transient_catalog(conn, cutoff_ms, cursor, limit, false)
+                })
+            }
         }
         RetentionClass::ProbeHistory => {
-            prune_probe_history(store, cutoff_ms, cursor, limit, dry_run)
+            if dry_run {
+                store.with_read(crate::Db::Library, |conn| {
+                    prune_probe_history(conn, cutoff_ms, cursor, limit, true)
+                })
+            } else {
+                store.with_writer(crate::Db::Library, |conn| {
+                    prune_probe_history(conn, cutoff_ms, cursor, limit, false)
+                })
+            }
         }
         RetentionClass::Operations => prune_operations(store, cutoff_ms, limit, dry_run),
     }
@@ -162,7 +188,7 @@ fn chunk_delete_rowids(
 // ---------------------------------------------------------------------------
 
 fn prune_qoe(
-    store: &Store,
+    conn: &Connection,
     cutoff_ms: i64,
     cursor: Option<&DataRetentionCursor>,
     limit: usize,
@@ -173,7 +199,11 @@ fn prune_qoe(
     let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
     let cursor_id = cursor.map(|cursor| cursor.id.as_str());
 
-    let tx = crate::write_tx(&store.library)?;
+    let tx = if dry_run {
+        crate::read_tx(conn)?
+    } else {
+        crate::write_tx(conn)?
+    };
     let mut rows = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(
@@ -244,7 +274,7 @@ pub(crate) fn is_transient_catalog_key(cache_key: &str) -> bool {
 }
 
 fn prune_transient_catalog(
-    store: &Store,
+    conn: &Connection,
     cutoff_ms: i64,
     cursor: Option<&DataRetentionCursor>,
     limit: usize,
@@ -300,7 +330,11 @@ fn prune_transient_catalog(
          LIMIT ?6"
     );
 
-    let tx = crate::write_tx(&store.cache)?;
+    let tx = if dry_run {
+        crate::read_tx(conn)?
+    } else {
+        crate::write_tx(conn)?
+    };
     let mut rows: Vec<(String, i64, String, i64)> = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(&sql)?;
@@ -380,7 +414,7 @@ fn prune_transient_catalog(
 const PROBE_TERMINAL_STATUSES: &str = "('succeeded', 'failed', 'cancelled')";
 
 fn prune_probe_history(
-    store: &Store,
+    conn: &Connection,
     cutoff_ms: i64,
     cursor: Option<&DataRetentionCursor>,
     limit: usize,
@@ -389,7 +423,11 @@ fn prune_probe_history(
     let cursor_at = cursor.map(|cursor| cursor.at_ms);
     let cursor_id = cursor.map(|cursor| cursor.id.as_str());
 
-    let tx = crate::write_tx(&store.library)?;
+    let tx = if dry_run {
+        crate::read_tx(conn)?
+    } else {
+        crate::write_tx(conn)?
+    };
     let mut rows = Vec::with_capacity(limit.saturating_add(1));
     {
         let sql = format!(
@@ -476,7 +514,7 @@ fn prune_probe_history(
 /// 2. 仍有 queued/running unit（终态 job 但单位没收口，保守保护）；
 /// 3. 属于该 scope 最新 3 条终态之一；边界 `finished_at_ms` 并列的全部保护。
 fn probe_job_protected(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     job_id: &str,
     scope_key: &str,
     finished_at_ms: i64,

@@ -21,9 +21,9 @@ impl ProbeManager {
         let mut scanned = 0usize;
         let budget = limit.saturating_mul(SCAN_BUDGET_FACTOR);
         while queued < limit && scanned < budget {
-            let batch = self
-                .writer()
-                .and_then(|store| store.claim_due_probe_stages(now_ms, DISPATCH_LEASE_MS, limit))?;
+            let batch = self.store.library_write(|store| {
+                store.claim_due_probe_stages(now_ms, DISPATCH_LEASE_MS, limit)
+            })?;
             if batch.is_empty() {
                 break;
             }
@@ -46,8 +46,8 @@ impl ProbeManager {
     ) -> bool {
         let key = &stage.key;
         let retire = |reason: &str| match self
-            .writer()
-            .and_then(|store| store.retire_probe_stage(key))
+            .store
+            .library_write(|store| store.retire_probe_stage(key))
         {
             Ok(_) => tracing::info!(
                 ledger_id = %key.ledger_id,
@@ -70,10 +70,7 @@ impl ProbeManager {
         };
         // Owned lookup first: the Store guard must be gone before any arm can
         // retire (which locks the same non-reentrant mutex again).
-        let loaded = {
-            self.reader()
-                .and_then(|store| store.file_coverage_by_id(file_id))
-        };
+        let loaded = { self.store.file_coverage_by_id(file_id) };
         let row = match loaded {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -87,9 +84,7 @@ impl ProbeManager {
         };
         let source_version = crate::fingerprint_job::current_source_version(&row.file.path);
         let need = {
-            let Ok(store) = self.reader() else {
-                return false;
-            };
+            let store = self.store.as_ref();
             super::policy::assess_probe_need(
                 &store,
                 &row.file,

@@ -32,7 +32,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
     std::fs::create_dir_all(&nested).unwrap();
     let shared = state.store();
     let source = shared
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Movie,
             "Parent",
@@ -55,11 +55,11 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
         bangumi_id: None,
         anilist_id: None,
     };
-    shared.lock().insert_media(&media).unwrap();
+    shared.as_ref().insert_media(&media).unwrap();
     let path = nested.join("One.mkv");
     std::fs::write(&path, b"video").unwrap();
     let file = publish_fixture_file(
-        &shared.lock(),
+        shared.as_ref(),
         &FixtureFile {
             media_id: media.id,
             path: path.to_string_lossy().into_owned(),
@@ -77,7 +77,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
     )
     .unwrap();
     let target = shared
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Movie,
             "Nested",
@@ -88,7 +88,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
         )
         .unwrap();
     let started = shared
-        .lock()
+        .as_ref()
         .root_reassignments_for_library(&target.id)
         .unwrap();
     assert_eq!(started.len(), 1);
@@ -97,7 +97,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let row = shared
-                .lock()
+                .as_ref()
                 .file_coverage_by_id(file.file_id)
                 .unwrap()
                 .unwrap();
@@ -110,7 +110,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
     .await
     .expect("root work must resume when the source is ready");
     let finished = shared
-        .lock()
+        .as_ref()
         .root_reassignments_for_library(&target.id)
         .unwrap();
     assert_eq!(finished[0].operation_id, operation_id);
@@ -131,11 +131,14 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
     )
     .unwrap();
     let shared = state.store();
-    let (blocked, file_a, dir_a) = source(&shared.lock(), temp.path(), "A");
-    let (_, file_b, dir_b) = source(&shared.lock(), temp.path(), "B");
-    let revision = shared.lock().library_config_revision(&blocked.id).unwrap();
+    let (blocked, file_a, dir_a) = source(shared.as_ref(), temp.path(), "A");
+    let (_, file_b, dir_b) = source(shared.as_ref(), temp.path(), "B");
+    let revision = shared
+        .as_ref()
+        .library_config_revision(&blocked.id)
+        .unwrap();
     shared
-        .lock()
+        .as_ref()
         .begin_library_reconfiguration(
             &store::LibraryReconfiguration {
                 operation_id: "hold-a".into(),
@@ -148,7 +151,7 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
         )
         .unwrap();
     let a = shared
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Movie,
             "Nested A",
@@ -159,7 +162,7 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
         )
         .unwrap();
     let b = shared
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Movie,
             "Nested B",
@@ -172,7 +175,7 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if shared
-                .lock()
+                .as_ref()
                 .file_coverage_by_id(file_b.file_id)
                 .unwrap()
                 .unwrap()
@@ -190,7 +193,7 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
     .unwrap();
     assert_eq!(
         shared
-            .lock()
+            .as_ref()
             .file_coverage_by_id(file_a.file_id)
             .unwrap()
             .unwrap()
@@ -200,7 +203,11 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
         blocked.id
     );
     assert_eq!(
-        shared.lock().root_reassignments_for_library(&a.id).unwrap()[0].state,
+        shared
+            .as_ref()
+            .root_reassignments_for_library(&a.id)
+            .unwrap()[0]
+            .state,
         "blocked"
     );
 }
@@ -288,11 +295,11 @@ async fn formal_root_addition_queues_cross_library_ownership_until_ready() {
     )
     .unwrap();
     let shared = state.store();
-    let (_, file, nested) = source(&shared.lock(), temp.path(), "Source");
+    let (_, file, nested) = source(shared.as_ref(), temp.path(), "Source");
     let root = temp.path().join("Target");
     std::fs::create_dir_all(&root).unwrap();
     let target = shared
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Movie,
             "Target",
@@ -317,7 +324,7 @@ async fn formal_root_addition_queues_cross_library_ownership_until_ready() {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if shared
-                .lock()
+                .as_ref()
                 .file_coverage_by_id(file.file_id)
                 .unwrap()
                 .unwrap()
@@ -335,7 +342,7 @@ async fn formal_root_addition_queues_cross_library_ownership_until_ready() {
     .expect("new roots from the formal operation must drive cross-Library ownership");
     assert!(
         shared
-            .lock()
+            .as_ref()
             .root_reassignments_for_library(&target.id)
             .unwrap()
             .iter()

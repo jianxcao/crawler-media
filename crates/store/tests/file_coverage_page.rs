@@ -189,7 +189,13 @@ fn file_coverage_page_sql_work_stays_bounded_by_the_requested_files() {
     assert_eq!(page[0].units.len(), 8);
     // This is actual executed work. A small materialized page may itself be
     // scanned, so do not demand FULLSCAN_STEP=0 for every CTE in the query.
-    assert!(stats.sql_rows <= 10, "bounded hydration: {stats:?}");
+    let (_, lease) = fix.store.with_stats(StatsScope::Library, || {
+        fix.store.with_read(store::Db::Library, |_| Ok(())).unwrap()
+    });
+    assert!(
+        stats.sql_rows - lease.sql_rows <= 10,
+        "bounded hydration: {stats:?}"
+    );
     assert!(
         stats.fullscan_steps <= 10,
         "one packed file must not scan the Library: {stats:?}"

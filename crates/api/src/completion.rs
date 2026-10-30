@@ -48,34 +48,55 @@ pub(crate) fn units_on_disk(state: &ApiState, subscribe: &Subscribe) -> bool {
         })
 }
 
-fn set_state(state: &ApiState, subscribe: &Subscribe, value: &str) {
-    let store = state.store.lock();
-    let Ok(Some(mut current)) = store.get_subscribe(subscribe.id) else {
-        return;
-    };
-    current.tracking_state = value.to_string();
-    if let Err(error) = store.update_subscribe(&current) {
-        tracing::warn!(subscribe_id = %subscribe.id, %error, "更新订阅追踪状态失败");
-    }
+/// Caller holds this Subscribe's guard; no observation or notification runs here.
+pub(crate) fn current_is_unchanged(
+    state: &ApiState,
+    expected: &Subscribe,
+) -> Result<bool, store::StoreError> {
+    Ok(expected.tracking_state != "paused"
+        && !state.subscribe_is_deleting(expected.id)
+        && state.store.get_subscribe(expected.id)?.as_ref() == Some(expected))
 }
 
-/// After Transfer / search: an active subscription that is fully in the
-/// library becomes completed.
-pub(crate) fn mark_if_complete(state: &ApiState, subscribe: &Subscribe) {
-    let active = state
-        .store
-        .lock()
-        .get_subscribe(subscribe.id)
-        .ok()
-        .flatten()
-        .is_some_and(|s| s.tracking_state == "active");
-    if active && library_complete(state, subscribe) {
+/// After Transfer / search, publish completion only for the Subscribe observed.
+/// The returned value includes this call's own accepted state transition.
+pub(crate) fn mark_if_complete(state: &ApiState, subscribe: &Subscribe) -> Option<Subscribe> {
+    if subscribe.tracking_state == "paused" {
+        return None;
+    }
+    let complete = library_complete(state, subscribe);
+    let accepted = {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        match accept_completion(state, subscribe, complete) {
+            Ok(accepted) => accepted?,
+            Err(error) => {
+                tracing::warn!(subscribe_id = %subscribe.id, %error, "更新订阅追踪状态失败");
+                return None;
+            }
+        }
+    };
+    if complete {
+        create_next_season(state, &accepted);
+    }
+    Some(accepted)
+}
+
+fn accept_completion(
+    state: &ApiState,
+    subscribe: &Subscribe,
+    complete: bool,
+) -> Result<Option<Subscribe>, store::StoreError> {
+    if !current_is_unchanged(state, subscribe)? {
+        return Ok(None);
+    }
+    let mut accepted = subscribe.clone();
+    if complete && accepted.tracking_state == "active" {
+        accepted.tracking_state = COMPLETED.into();
+        state.store.update_subscribe(&accepted)?;
         tracing::info!(subscribe_id = %subscribe.id, "订阅已全部入库，标记 completed，后续搜索跳过索引站");
-        set_state(state, subscribe, COMPLETED);
     }
-    if library_complete(state, subscribe) {
-        create_next_season(state, subscribe);
-    }
+    Ok(Some(accepted))
 }
 
 fn auto_next_key(id: domain::SubscribeId) -> String {
@@ -88,7 +109,7 @@ fn next_created_key(id: domain::SubscribeId) -> String {
 
 /// G-M3: opt-in per subscription (stored as a setting, default off).
 pub(crate) fn set_auto_next_season(state: &ApiState, id: domain::SubscribeId, on: bool) {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let result = if on {
         store.put_setting(&auto_next_key(id), "1")
     } else {
@@ -106,33 +127,78 @@ fn create_next_season(state: &ApiState, subscribe: &Subscribe) {
     let Coverage::Tv { season, .. } = subscribe.coverage else {
         return;
     };
-    let media = {
-        let store = state.store.lock();
-        let enabled = store
-            .get_setting(&auto_next_key(subscribe.id))
-            .ok()
-            .flatten()
-            .is_some();
-        let done = store
-            .get_setting(&next_created_key(subscribe.id))
-            .ok()
-            .flatten()
-            .is_some();
-        if !enabled || done {
-            return;
+    let store = state.store.as_ref();
+    let media = match next_season_enabled(store, subscribe.id).and_then(|enabled| {
+        if enabled {
+            store.get_media(subscribe.media_id)
+        } else {
+            Ok(None)
         }
-        match store.get_media(subscribe.media_id) {
-            Ok(Some(media)) => media,
-            _ => return,
+    }) {
+        Ok(Some(media)) => media,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(subscribe_id = %subscribe.id, %error, "读取下一季自动订阅配置失败");
+            return;
         }
     };
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let next = season + 1;
+    let Some(next) = season.checked_add(1) else {
+        tracing::warn!(subscribe_id = %subscribe.id, season, "无法创建超出季编号范围的订阅");
+        return;
+    };
     match state.catalog.season_episodes(tmdb_id, next) {
         Ok(episodes) if !episodes.is_empty() => {}
-        _ => return,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(subscribe_id = %subscribe.id, season = next, %error, "读取下一季目录失败");
+            return;
+        }
+    }
+    let published = {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        publish_next_season(state, subscribe, &media, next)
+    };
+    match published {
+        Ok(Some(created)) => {
+            tracing::info!(subscribe_id = %subscribe.id, next_subscribe = %created, season = next, "已自动创建下一季订阅");
+            crate::worker::notify(
+                state,
+                "已自动订阅下一季",
+                &format!("「{}」第 {next} 季已创建订阅", media.title),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(subscribe_id = %subscribe.id, %error, "自动创建下一季订阅失败");
+        }
+    }
+}
+
+fn next_season_enabled(
+    store: &store::Store,
+    id: domain::SubscribeId,
+) -> Result<bool, store::StoreError> {
+    Ok(store.get_setting(&auto_next_key(id))?.is_some()
+        && store.get_setting(&next_created_key(id))?.is_none())
+}
+
+/// Only database work runs under the original Subscribe's decision guard.
+fn publish_next_season(
+    state: &ApiState,
+    subscribe: &Subscribe,
+    media: &domain::Media,
+    next: u32,
+) -> Result<Option<domain::SubscribeId>, crate::subscribe_create::CreateError> {
+    let store = state.store.as_ref();
+    if !current_is_unchanged(state, subscribe)?
+        || !next_season_enabled(store, subscribe.id)?
+        || store.get_media(subscribe.media_id)?.as_ref() != Some(media)
+    {
+        return Ok(None);
     }
     let mut follow = subscribe.clone();
     follow.id = domain::SubscribeId::new();
@@ -143,28 +209,16 @@ fn create_next_season(state: &ApiState, subscribe: &Subscribe) {
     };
     follow.tracking_state = "active".into();
     match crate::subscribe_create::create(state, media.clone(), follow, None) {
-        Ok((media, created)) => {
-            let store = state.store.lock();
-            let _ = store.put_setting(&next_created_key(subscribe.id), &created.id.to_string());
-            let _ = store.put_setting(&auto_next_key(created.id), "1");
-            drop(store);
-            tracing::info!(subscribe_id = %subscribe.id, next_subscribe = %created.id, season = next, "已自动创建下一季订阅");
-            crate::worker::notify(
-                state,
-                "已自动订阅下一季",
-                &format!("「{}」第 {next} 季已创建订阅", media.title),
-            );
+        Ok((_, created)) => {
+            store.put_setting(&next_created_key(subscribe.id), &created.id.to_string())?;
+            store.put_setting(&auto_next_key(created.id), "1")?;
+            Ok(Some(created.id))
         }
         Err(crate::subscribe_create::CreateError::Overlap(other)) => {
-            // A subscription for that season already exists: nothing to do.
-            let _ = state
-                .store
-                .lock()
-                .put_setting(&next_created_key(subscribe.id), &other.to_string());
+            store.put_setting(&next_created_key(subscribe.id), &other.to_string())?;
+            Ok(None)
         }
-        Err(error) => {
-            tracing::warn!(subscribe_id = %subscribe.id, %error, "自动创建下一季订阅失败");
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -176,13 +230,30 @@ pub(crate) fn skip_search(state: &ApiState, subscribe: &mut Subscribe) -> bool {
     if library_complete(state, subscribe) {
         return true;
     }
-    tracing::info!(subscribe_id = %subscribe.id, "已完成订阅缺失文件或范围变化，恢复 active 并重新搜索");
-    set_state(state, subscribe, "active");
+    let guard = state.subscribe_guard(subscribe.id);
+    let _guard = guard.lock();
+    match current_is_unchanged(state, subscribe) {
+        Ok(true) => {}
+        Ok(false) => return true,
+        Err(error) => {
+            tracing::warn!(subscribe_id = %subscribe.id, %error, "检查订阅恢复条件失败");
+            return true;
+        }
+    }
+    let mut active = subscribe.clone();
+    active.tracking_state = "active".into();
+    if let Err(error) = state.store.update_subscribe(&active) {
+        tracing::warn!(subscribe_id = %subscribe.id, %error, "恢复订阅追踪状态失败");
+        return true;
+    }
     // L4: the completion notice may fire again after the next completion.
-    let _ = state
+    if let Err(error) = state
         .store
-        .lock()
-        .delete_setting(&format!("subscribe.completed:{}", subscribe.id));
-    subscribe.tracking_state = "active".into();
+        .delete_setting(&format!("subscribe.completed:{}", subscribe.id))
+    {
+        tracing::warn!(subscribe_id = %subscribe.id, %error, "清除订阅完成通知标记失败");
+    }
+    tracing::info!(subscribe_id = %subscribe.id, "已完成订阅缺失文件或范围变化，恢复 active 并重新搜索");
+    *subscribe = active;
     false
 }

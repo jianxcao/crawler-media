@@ -105,7 +105,7 @@ pub(crate) fn scan_library_leased_resumable(
     op_id: Option<&str>,
 ) -> Result<(library::ScanReport, Value), ScanRunError> {
     let (kind, roots, scrape) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let Some(library) = library_by_id(&store, id) else {
             return Err(failed_response(missing_library(), "library.missing"));
         };
@@ -202,7 +202,7 @@ pub(crate) fn scan_library_leased_resumable(
         // 这里**不再**调用 `library_cover_path`（P2-2）：它只做 `Path::is_file`，
         // 返回值本来就被丢弃，但在 Store 锁内做文件系统 IO 违反 B3 §1.3（慢挂载
         // 会拖住所有 Store 使用者）。封面路径解析/生成由封面服务在锁外负责。
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         if let Some(lib) = library_by_id(&store, id) {
             clear_library_cover_checked(&store, &lib.id);
         }

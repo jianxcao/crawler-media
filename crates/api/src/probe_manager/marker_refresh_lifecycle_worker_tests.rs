@@ -1,8 +1,8 @@
 // Worker-driven windows: shares the fixture in marker_refresh_lifecycle_tests.rs (same `include!`d module).
-async fn wait_for_terminal(store: &Arc<Mutex<Store>>, job_id: &str) -> crate::store::ProbeJob {
+async fn wait_for_terminal(store: &Arc<Store>, job_id: &str) -> crate::store::ProbeJob {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            let job = store.lock().get_probe_job(job_id).unwrap().unwrap();
+            let job = store.as_ref().get_probe_job(job_id).unwrap().unwrap();
             if !job.is_active() {
                 return job;
             }
@@ -52,8 +52,7 @@ async fn window1_queued_stage_freeze_aborts_cleanly_and_releases_scope() {
     );
 
     let active_job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .expect("刷新任务应当已入库持有 scope");
@@ -70,8 +69,7 @@ async fn window1_queued_stage_freeze_aborts_cleanly_and_releases_scope() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -90,8 +88,7 @@ async fn window2_execution_handover_freeze_prevents_publication() {
         2
     );
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
@@ -121,8 +118,7 @@ async fn window2_execution_handover_freeze_prevents_publication() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -164,8 +160,7 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
     );
 
     let job_id = harness
-        .store
-        .lock()
+        .store.as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .expect("刷新任务应当已入库持有 scope")
@@ -187,8 +182,7 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
     assert!(!harness.registry.has_active_work());
     assert!(
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()

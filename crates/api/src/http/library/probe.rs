@@ -84,13 +84,7 @@ fn committed_coverage(
 /// than the writer's in-memory copy.
 pub(crate) fn enqueue_probes_for_files(state: &ApiState, files: &[domain::LibraryFile]) -> usize {
     let rows: Vec<_> = {
-        let Some(store) = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        else {
-            tracing::warn!("探测入队读取池暂不可用");
-            return 0;
-        };
+        let store = state.store.clone();
         files
             .iter()
             .filter_map(|file| committed_coverage(&store, &file.path, Some(file.media_id)))
@@ -104,13 +98,7 @@ pub(crate) fn enqueue_probes_for_paths(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> usize {
     let rows: Vec<_> = {
-        let Some(store) = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        else {
-            tracing::warn!("探测入队读取池暂不可用");
-            return 0;
-        };
+        let store = state.store.clone();
         paths
             .into_iter()
             .filter_map(|path| committed_coverage(&store, &path, None))
@@ -143,12 +131,7 @@ fn probe_item_blocking(
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
     let (rows, media_kind) = {
-        let Some(store) = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        else {
-            return crate::http::store_wait::busy_response();
-        };
+        let store = state.store.clone();
         if let Err(response) = state
             .require_writable()
             .and_then(|_| state.require_write_admitted())
@@ -261,7 +244,7 @@ mod tests {
         std::fs::write(&dest, b"matrix").unwrap();
         let file = {
             let store = state.store();
-            let guard = store.lock();
+            let guard = &store;
             guard.insert_media(&media).unwrap();
             guard
                 .create_library(
@@ -273,7 +256,6 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-            drop(guard);
             crate::claim::publish_claimed_file(
                 &store,
                 &media,
@@ -294,7 +276,7 @@ mod tests {
 
         assert_eq!(queued, 1);
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         assert!(guard.is_probe_queued(&file.file_id.to_string()).unwrap());
     }
 
@@ -308,7 +290,7 @@ mod tests {
 
         assert_eq!(queued, 0);
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         assert!(!guard.is_probe_queued(&absent.file_id.to_string()).unwrap());
     }
 }

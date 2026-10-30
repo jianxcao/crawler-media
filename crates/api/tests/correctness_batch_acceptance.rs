@@ -46,7 +46,7 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     let row = scan_published_movie(&fix).await;
     let store_arc = fix.state.store();
     let job = store_arc
-        .lock()
+        .as_ref()
         .latest_probe_job_for_scope(&format!("ledger:{}", row.file.file_id))
         .unwrap()
         .expect("scan admission must persist probe work");
@@ -54,13 +54,13 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     wait_for_probe(&fix, &job.id, "succeeded").await;
 
     let user_id = store_arc
-        .lock()
+        .as_ref()
         .user_by_token(&fix.admin_token)
         .unwrap()
         .unwrap()
         .id;
     let session_id_1 = support::session::issue_session(
-        &store_arc.lock(),
+        store_arc.as_ref(),
         user_id,
         "device_acc",
         row.file.file_id,
@@ -70,7 +70,7 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     heartbeat(&fix, &row, &session_id_1, "progress", 5000).await;
 
     let session_id_2 = support::session::issue_session(
-        &store_arc.lock(),
+        store_arc.as_ref(),
         user_id,
         "device_acc",
         row.file.file_id,
@@ -80,7 +80,7 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     heartbeat(&fix, &row, &session_id_1, "stop", 5000).await;
 
     let cur = store_arc
-        .lock()
+        .as_ref()
         .get_session(user_id, "device_acc")
         .unwrap()
         .unwrap();
@@ -96,13 +96,13 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     );
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .scan_probe_obligations(10)
             .unwrap()
             .is_empty()
     );
     let latest = store_arc
-        .lock()
+        .as_ref()
         .latest_probe_job_for_scope(&format!("ledger:{}", row.file.file_id))
         .unwrap()
         .unwrap();
@@ -120,7 +120,7 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
     let store_arc = fix.state.store();
     let scope = format!("ledger:{}", row.file.file_id);
     let failed = store_arc
-        .lock()
+        .as_ref()
         .latest_probe_job_for_scope(&scope)
         .unwrap()
         .unwrap();
@@ -133,12 +133,12 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
             .unwrap(),
         0
     );
-    let obligations = store_arc.lock().scan_probe_obligations(10).unwrap();
+    let obligations = store_arc.as_ref().scan_probe_obligations(10).unwrap();
     assert_eq!(obligations.len(), 1, "failed work must remain retryable");
     assert_eq!(obligations[0].ledger_id, row.file.file_id);
     assert_eq!(
         store_arc
-            .lock()
+            .as_ref()
             .latest_probe_job_for_scope(&scope)
             .unwrap()
             .unwrap()
@@ -162,13 +162,13 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
     );
     assert!(
         store_arc
-            .lock()
+            .as_ref()
             .scan_probe_obligations(10)
             .unwrap()
             .is_empty()
     );
     let retry = store_arc
-        .lock()
+        .as_ref()
         .latest_probe_job_for_scope(&scope)
         .unwrap()
         .unwrap();
@@ -177,7 +177,7 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
     wait_for_probe(&fix, &retry.id, "succeeded").await;
     assert_eq!(
         store_arc
-            .lock()
+            .as_ref()
             .get_probe_job(&failed.id)
             .unwrap()
             .unwrap()
@@ -190,16 +190,10 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
 async fn wait_for_probe(fix: &PresenceFixture, job_id: &str, expected: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let job = fix
-                .state
-                .store()
-                .lock()
-                .get_probe_job(job_id)
-                .unwrap()
-                .unwrap();
+            let job = fix.state.store().get_probe_job(job_id).unwrap().unwrap();
             if !job.is_active() {
                 assert_eq!(job.status, expected, "{job:?}");
-                let units = fix.state.store().lock().probe_job_units(job_id).unwrap();
+                let units = fix.state.store().probe_job_units(job_id).unwrap();
                 assert_eq!(units.len(), 1);
                 assert_eq!(units[0].status, expected);
                 return;
@@ -246,13 +240,13 @@ async fn scan_published_movie(fix: &PresenceFixture) -> domain::FileCoverage {
 
     let store_arc = fix.state.store();
     let row = store_arc
-        .lock()
+        .as_ref()
         .file_coverage_by_path(&movie_file.display().to_string())
         .unwrap()
         .unwrap();
     // Movie scans register file facts; publish WHOLE coverage for session issuance.
     publish_fixture_file(
-        &store_arc.lock(),
+        store_arc.as_ref(),
         &FixtureFile {
             media_id: row.file.media_id,
             path: row.file.path.display().to_string(),

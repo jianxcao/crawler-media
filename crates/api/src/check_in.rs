@@ -1,6 +1,5 @@
 use domain::{Site, SiteId};
 use hooks::{Bus, HttpPost, NexusPhpPolicy, PluginError, SiteCredentials};
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::Store;
@@ -9,7 +8,6 @@ use crate::management::ApiState;
 pub fn run(state: &ApiState) -> Result<(), String> {
     let sites = state
         .store
-        .lock()
         .list_enabled_sites()
         .map_err(|e| e.to_string())?;
     tracing::info!(
@@ -58,7 +56,6 @@ pub fn run(state: &ApiState) -> Result<(), String> {
 fn boost_check(state: &ApiState) -> Result<(), String> {
     let category = state
         .store
-        .lock()
         .default_downloader()
         .ok()
         .flatten()
@@ -68,7 +65,7 @@ fn boost_check(state: &ApiState) -> Result<(), String> {
         .downloader
         .uploaded_by_category(&category)
         .unwrap_or(0);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let sites = store.list_enabled_sites().map_err(|e| e.to_string())?;
     for site in sites {
         let key = format!("boost.{}", site.id);
@@ -198,12 +195,11 @@ fn attendance_request(
     Ok(format!("{}{text}", cookies.concat()))
 }
 
-pub(crate) struct StoreSites<'a>(&'a Mutex<Store>);
+pub(crate) struct StoreSites<'a>(&'a Store);
 
 impl SiteCredentials for StoreSites<'_> {
     fn load(&self, id: SiteId) -> Result<Site, PluginError> {
         self.0
-            .lock()
             .get_site(id)
             .map_err(|e| PluginError::Fetch(e.to_string()))?
             .ok_or(PluginError::NotFound)
@@ -212,7 +208,6 @@ impl SiteCredentials for StoreSites<'_> {
     fn save(&self, site: &Site) -> Result<(), PluginError> {
         if self
             .0
-            .lock()
             .save_site(site)
             .map_err(|e| PluginError::Fetch(e.to_string()))?
         {

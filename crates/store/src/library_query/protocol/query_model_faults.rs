@@ -10,6 +10,9 @@ fn classification_queries_do_not_read_cold_metadata_but_search_does() {
     for kind in [MediaKind::Movie, MediaKind::Tv] {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("data")).unwrap();
+        store
+            .configure_reader_pool_size(crate::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
         let root = tmp.path().join("movies");
         std::fs::create_dir_all(&root).unwrap();
         let lib = store
@@ -80,14 +83,17 @@ fn classification_queries_do_not_read_cold_metadata_but_search_does() {
             limit: 10,
         };
         store
-            .library
-            .authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-                AuthAction::Read {
-                    table_name: "media_metadata" | "library_metadata_inputs" | "media_episodes",
-                    ..
-                } => Authorization::Deny,
-                _ => Authorization::Allow,
-            }));
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+                    AuthAction::Read {
+                        table_name: "media_metadata" | "library_metadata_inputs" | "media_episodes",
+                        ..
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }));
+                Ok(())
+            })
+            .unwrap();
         request.genres = vec!["Drama".into()];
         assert_eq!(store.protocol_item_page(&request).unwrap().total, 1);
         request.genres.clear();
@@ -99,7 +105,10 @@ fn classification_queries_do_not_read_cold_metadata_but_search_does() {
         request.search_term = Some("Film".into());
         assert!(store.protocol_item_page(&request).is_err());
         store
-            .library
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                Ok(())
+            })
+            .unwrap();
     }
 }

@@ -290,7 +290,7 @@ async fn owner_round(
             // 播放会话心跳超时回收：停止上报的会话落成播放记录。
             let _ = state_clone
                 .store
-                .lock()
+                .as_ref()
                 .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
             // Media 合并的持久阶段同样按轮推进（本人持有租约，别处不会驱动）；
             // 单条失败只告警，不停整轮后台工作。
@@ -336,12 +336,22 @@ pub(crate) fn run_pending_jobs_with_clock(
     let mut finished = Vec::with_capacity(claimed.len());
     let active_guards = claimed
         .iter()
-        .map(|job| ActiveAttemptGuard::new(Arc::clone(&state.active_job_attempts), job.clone()))
+        .map(|job| {
+            ActiveAttemptGuard::new(
+                Arc::clone(&state.active_job_attempts),
+                Arc::clone(&state.job_attempt_coordinator),
+                job.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     for (job, mut active_guard) in claimed.into_iter().zip(active_guards) {
         let job_name = job
             .def_id
-            .and_then(|def_id| state.jobs.lock().def_name(def_id).ok().flatten())
+            .and_then(|def_id| {
+                crate::jobs_readers::read(&state.jobs_readers, |queue| queue.def_name(def_id))
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or_else(|| job.kind.as_str().to_owned());
         tracing::info!(job_id = %job.id, job_name = %job_name, kind = ?job.kind, "后台任务开始执行");
         let result = runner.run(&job);
@@ -364,9 +374,9 @@ fn claim_pending_jobs(
     now: i64,
     source: TickSource,
 ) -> Result<(Vec<Job>, Vec<String>), JobError> {
-    let mut active = state.active_job_attempts.lock();
+    let _coordinator = state.job_attempt_coordinator.lock();
+    let active_attempts: Vec<_> = state.active_job_attempts.lock().values().cloned().collect();
     let queue = state.jobs.lock();
-    let active_attempts: Vec<_> = active.values().cloned().collect();
     queue.recover_except(now, &active_attempts)?;
     let skipped_maintenance = schedule_due(&queue, now, source)?;
     let claimed = if source == TickSource::DevHttp {
@@ -375,6 +385,8 @@ fn claim_pending_jobs(
     } else {
         queue.claim(now, 2)?
     };
+    drop(queue);
+    let mut active = state.active_job_attempts.lock();
     for job in &claimed {
         active.insert(job.id, job.clone());
     }
@@ -438,19 +450,20 @@ fn persist_job_result(
     finished_at: i64,
     active_guard: &mut ActiveAttemptGuard,
 ) -> Result<Option<Job>, JobError> {
-    // Keep the marker through the DB write; claiming uses the same lock order.
-    let mut active = state.active_job_attempts.lock();
-    let queue = state.jobs.lock();
+    // Serialize claim/recovery with finish/removal without nesting Queue and
+    // active-attempt locks. Runners execute outside this short coordinator.
+    let _coordinator = state.job_attempt_coordinator.lock();
     let persisted = match result {
         Ok(()) => {
             tracing::info!(job_id = %job.id, kind = ?job.kind, "后台任务执行成功");
-            queue.succeed_claimed(job, finished_at)?
+            state.jobs.lock().succeed_claimed(job, finished_at)?
         }
         Err(error) => {
             tracing::error!(job_id = %job.id, kind = ?job.kind, error = %error, "后台任务执行失败");
-            queue.fail_claimed(job, finished_at, &error)?
+            state.jobs.lock().fail_claimed(job, finished_at, &error)?
         }
     };
+    let mut active = state.active_job_attempts.lock();
     if active
         .get(&job.id)
         .is_some_and(|attempt| same_attempt(attempt, job))
@@ -465,14 +478,16 @@ type ActiveJobMap = HashMap<domain::JobId, Job>;
 
 struct ActiveAttemptGuard {
     active: Arc<Mutex<ActiveJobMap>>,
+    coordinator: Arc<Mutex<()>>,
     job: Job,
     armed: bool,
 }
 
 impl ActiveAttemptGuard {
-    fn new(active: Arc<Mutex<ActiveJobMap>>, job: Job) -> Self {
+    fn new(active: Arc<Mutex<ActiveJobMap>>, coordinator: Arc<Mutex<()>>, job: Job) -> Self {
         Self {
             active,
+            coordinator,
             job,
             armed: true,
         }
@@ -488,6 +503,7 @@ impl Drop for ActiveAttemptGuard {
         if !self.armed {
             return;
         }
+        let _coordinator = self.coordinator.lock();
         let mut active = self.active.lock();
         if active
             .get(&self.job.id)

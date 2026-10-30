@@ -2,6 +2,12 @@
 //!
 //! 渲染结果先落成新的不可变版本文件，DB 指针最后 CAS 发布；晚到的自动渲染
 //! 不得覆盖更新的手动封面或 `none` 标记。
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -135,7 +141,7 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
     std::fs::write(&file, b"video").unwrap();
     std::fs::write(library_root.join("poster.jpg"), b"poster").unwrap();
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard
         .create_library(
             MediaKind::Movie,
@@ -161,7 +167,7 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
     };
     guard.insert_media(&media).unwrap();
     publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
@@ -183,7 +189,7 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
 
 fn cover_path(state: &ApiState, library_id: &str) -> Option<String> {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard.get_library(library_id).unwrap().unwrap().cover_path
 }
 
@@ -195,7 +201,7 @@ fn referenced_bytes(state: &ApiState, library_id: &str) -> Option<Vec<u8>> {
 fn cover_dir_files(state: &ApiState) -> Vec<PathBuf> {
     let dir = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard.library_covers_dir()
     };
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -342,7 +348,7 @@ async fn db_failure_keeps_previous_cover_and_drops_new_version() {
     // trigger 必须建在同一个连接能看到的库里才会生效。
     let db_path = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard.data_dir().join("library.db")
     };
     let connection = rusqlite::Connection::open(&db_path).unwrap();
@@ -381,7 +387,7 @@ async fn preview_only_does_not_write_files_or_db() {
     let before = cover_dir_files(&state);
     let revision_before = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard.library_cover_revision(&library_id).unwrap()
     };
 
@@ -396,7 +402,7 @@ async fn preview_only_does_not_write_files_or_db() {
     assert_eq!(cover_path(&state, &library_id), None);
     let revision_after = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard.library_cover_revision(&library_id).unwrap()
     };
     assert_eq!(revision_before, revision_after);
@@ -438,7 +444,7 @@ async fn cover_get_serves_cached_bytes_while_writer_is_busy() {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = handle.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(handle.clone(), store::Db::Library);
         entered_tx.send(()).unwrap();
         release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     });

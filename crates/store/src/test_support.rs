@@ -11,12 +11,6 @@ use std::path::Path;
 use super::{Store, StoreError};
 use crate::library_write::{FilePublication as PublicationRequest, WriteScope};
 
-/// Leave a read snapshot open to exercise reader-pool cleanup.
-pub fn begin_library_snapshot(store: &Store) -> Result<(), StoreError> {
-    store.library.execute_batch("BEGIN")?;
-    Ok(())
-}
-
 /// Specification of a file to be published in tests: the ledger facts a fixture
 /// needs, expressed with the same shapes the production read model uses.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,16 +145,18 @@ fn place_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, 
             StoreError::Invalid(format!("path is outside every Library root: {}", spec.path))
         })?;
     let root_id = root_for_path(store, &library.id, &spec.path)?;
-    let existing: Option<(String, i64, String)> = store
-        .library
-        .query_row(
-            "SELECT file_id, file_revision, source_version FROM library_files
+    let existing: Option<(String, i64, String)> =
+        store.with_read(crate::Db::Library, |library| {
+            Ok(library
+                .query_row(
+                    "SELECT file_id, file_revision, source_version FROM library_files
              WHERE path_key = norm_path_key(?1)
              LIMIT 1",
-            [&spec.path],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
+                    [&spec.path],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?)
+        })?;
 
     let (file_id, revision, source_version) = match existing {
         Some((file_id, revision, source_version)) => {
@@ -244,10 +240,13 @@ pub fn set_media_identity_state(
     media_id: MediaId,
     state: &str,
 ) -> Result<(), StoreError> {
-    store.library.execute(
-        "UPDATE media SET identity_state = ?2 WHERE media_id = ?1",
-        rusqlite::params![media_id.to_string(), state],
-    )?;
+    store.with_writer(crate::Db::Library, |library| {
+        library.execute(
+            "UPDATE media SET identity_state = ?2 WHERE media_id = ?1",
+            rusqlite::params![media_id.to_string(), state],
+        )?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -255,11 +254,13 @@ pub fn set_media_identity_state(
 /// legacy/corrupt row in tests. Production renames use
 /// [`Store::rename_file_within_root`].
 pub fn force_file_path(store: &Store, from: &str, to: &str) -> Result<bool, StoreError> {
-    let n = store.library.execute(
-        "UPDATE library_files SET path_key = ?2, display_path = ?2
+    let n = store.with_writer(crate::Db::Library, |library| {
+        Ok(library.execute(
+            "UPDATE library_files SET path_key = ?2, display_path = ?2
          WHERE path_key = norm_path_key(?1)",
-        rusqlite::params![from, to],
-    )?;
+            rusqlite::params![from, to],
+        )?)
+    })?;
     Ok(n > 0)
 }
 
@@ -270,10 +271,13 @@ pub fn force_file_states(
     presence: FilePresence,
     publication: FilePublication,
 ) -> Result<(), StoreError> {
-    store.library.execute(
+    store.with_writer(crate::Db::Library, |library| {
+        library.execute(
         "UPDATE library_files SET presence_state = ?2, publication_state = ?3 WHERE file_id = ?1",
         rusqlite::params![file_id.to_string(), presence.as_str(), publication.as_str()],
     )?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -285,26 +289,28 @@ pub fn set_root_reassign_batch_budget(budget: Option<usize>) {
 
 /// Pending root reassignment cursors, as `(kind, root_key, cursor_key)`.
 pub fn pending_root_reassignments(store: &Store) -> Vec<(String, String, String)> {
-    let mut stmt = store
-        .library
-        .prepare("SELECT kind, root_key, cursor_key FROM pending_root_reassignments")
-        .unwrap();
-    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+    store
+        .with_read(crate::Db::Library, |library| {
+            let mut stmt = library
+                .prepare("SELECT kind, root_key, cursor_key FROM pending_root_reassignments")?;
+            Ok(stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
         .unwrap()
 }
 
 /// Number of ledger files owned by `library_id`.
 pub fn library_file_count(store: &Store, library_id: &str) -> usize {
     store
-        .library
-        .query_row(
-            "SELECT COUNT(*) FROM library_files WHERE library_id = ?1",
-            [library_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap() as usize
+        .with_read(crate::Db::Library, |library| {
+            Ok(library.query_row(
+                "SELECT COUNT(*) FROM library_files WHERE library_id = ?1",
+                [library_id],
+                |r| r.get::<_, i64>(0),
+            )? as usize)
+        })
+        .unwrap()
 }
 
 /// Test setup through the same durable reconfiguration operation as the API.
@@ -359,7 +365,7 @@ impl Store {
 
     /// Removes every ledger row of one media, through the normal file-deletion path.
     pub fn delete_ledger_for_media(&self, media_id: domain::MediaId) -> Result<usize, StoreError> {
-        let owned = self.file_ids_of_media(media_id)?;
+        let owned = self.with_library_read(|db| db.file_ids_of_media(media_id))?;
         let mut removed = 0;
         for (library_id, file_ids) in owned {
             removed += self.delete_files(library_id, &file_ids)?;
@@ -371,7 +377,7 @@ impl Store {
     pub fn delete_playback_for_media(&self, media_id: domain::MediaId) -> Result<(), StoreError> {
         self.playback_write(|store| {
             crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                &store.library,
+                store.library,
                 media_id,
             )?;
             let id_str = media_id.to_string();
@@ -392,4 +398,15 @@ impl Store {
             Ok(())
         })
     }
+}
+
+/// Resize this Store's existing pool before the fixture takes any leases.
+pub fn reader_pool_for_fixture(
+    store: &Store,
+    size: std::num::NonZeroUsize,
+) -> std::sync::Arc<crate::ReaderPool> {
+    store
+        .configure_reader_pool_size(crate::Db::Library, size)
+        .unwrap();
+    store.reader_pool(crate::Db::Library)
 }

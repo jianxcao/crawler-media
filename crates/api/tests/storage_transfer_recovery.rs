@@ -13,7 +13,7 @@ use support::library_presence::PresenceFixture;
 async fn recovered_pending_a_does_not_block_b() {
     let fix = PresenceFixture::new();
     let store_arc = fix.state.store();
-    let (scope, candidate_a) = seed_pending_transfer(&store_arc.lock());
+    let (scope, candidate_a) = seed_pending_transfer(store_arc.as_ref());
     let reserved_a_id = candidate_a.file.file_id;
     let lib_id = scope.library_id;
     let media_id = candidate_a.file.media_id;
@@ -21,7 +21,7 @@ async fn recovered_pending_a_does_not_block_b() {
 
     // Step 1: reserve A in pending state
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let _ = store
             .reserve_transfer(
                 &scope,
@@ -35,7 +35,7 @@ async fn recovered_pending_a_does_not_block_b() {
 
     // Step 2: simulate restart and recover pending A
     let recovered_a = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store
             .reserve_transfer(
                 &scope,
@@ -49,7 +49,7 @@ async fn recovered_pending_a_does_not_block_b() {
 
     assert_eq!(recovered_a.file.file_id, reserved_a_id);
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         assert_eq!(
             store.get_file_units(recovered_a.file.file_id).unwrap(),
             vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
@@ -97,7 +97,7 @@ async fn recovered_pending_a_does_not_block_b() {
     };
 
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let reserved_b = store
             .reserve_transfer(
                 &scope,

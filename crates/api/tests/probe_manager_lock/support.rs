@@ -41,7 +41,7 @@ impl Fixture {
         std::fs::write(&path, b"finite local fixture").unwrap();
         let (file, session) = {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .create_library(
                     MediaKind::Movie,
@@ -67,7 +67,7 @@ impl Fixture {
             };
             store.insert_media(&media).unwrap();
             let file = store::test_support::publish_fixture_file(
-                &store,
+                store,
                 &store::test_support::FixtureFile {
                     media_id: media.id,
                     path: path.display().to_string(),

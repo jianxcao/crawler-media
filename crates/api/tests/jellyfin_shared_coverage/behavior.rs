@@ -6,7 +6,7 @@ use store::test_support::{FixtureFile, publish_fixture_file_units};
 
 fn add_variant(fixture: &Fixture) -> LedgerId {
     let handle = fixture.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let current = store
         .file_coverage_by_id(fixture.source.file_id)
         .unwrap()
@@ -15,7 +15,7 @@ fn add_variant(fixture: &Fixture) -> LedgerId {
     std::fs::write(&path, b"second version").unwrap();
     let file_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
     publish_fixture_file_units(
-        &store,
+        store,
         &FixtureFile {
             media_id: fixture.media,
             path: path.display().to_string(),
@@ -32,7 +32,6 @@ fn mark(fixture: &Fixture, season: i32, episode: i32, played: bool, clock: i64) 
     fixture
         .state
         .store()
-        .lock()
         .mutate_playback(
             fixture.media,
             &PlaybackMutation::marks(fixture.user, season, episode, Some(played), None),
@@ -95,7 +94,7 @@ fn resume_position(store: &store::Store, user: UserId, media: MediaId, source: P
 
 fn member_with_hidden_resume(fixture: &Fixture) -> UserId {
     let handle = fixture.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let user = UserId::new();
     store
         .insert_user(&User {
@@ -105,7 +104,7 @@ fn member_with_hidden_resume(fixture: &Fixture) -> UserId {
             role: UserRole::Member,
         })
         .unwrap();
-    resume_position(&store, user, fixture.media, fixture.source.clone());
+    resume_position(store, user, fixture.media, fixture.source.clone());
     let root = fixture._dir.path().join("hidden");
     std::fs::create_dir_all(&root).unwrap();
     store
@@ -125,7 +124,7 @@ fn member_with_hidden_resume(fixture: &Fixture) -> UserId {
     let path = root.join("hidden.mkv");
     std::fs::write(&path, b"hidden").unwrap();
     let file = publish_fixture_file_units(
-        &store,
+        store,
         &FixtureFile {
             media_id: media.id,
             path: path.display().to_string(),
@@ -135,7 +134,7 @@ fn member_with_hidden_resume(fixture: &Fixture) -> UserId {
     )
     .unwrap();
     resume_position(
-        &store,
+        store,
         user,
         media.id,
         PhysicalSourceId {

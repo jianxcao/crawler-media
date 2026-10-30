@@ -32,6 +32,11 @@ pub(crate) type RootAliases = Arc<RwLock<Vec<(String, String)>>>;
 /// Fixed alias snapshot for one observation plan. IO stays outside the Store lock;
 /// every sidecar key in that plan uses this snapshot, not a later reload.
 pub(crate) fn alias_snapshot(conn: &Connection) -> RootAliases {
+    if scoped_alias_dirty(conn).is_some_and(|dirty| dirty.get())
+        && let Ok(rows) = read_root_aliases(conn)
+    {
+        return Arc::new(RwLock::new(rows));
+    }
     let aliases = table_for(conn)
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -127,12 +132,13 @@ pub(crate) fn canonical_recorded_key(conn: &Connection, raw: &str) -> String {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    if aliases.is_empty()
+    if (aliases.is_empty() || scoped_alias_dirty(conn).is_some_and(|dirty| dirty.get()))
         && let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots")
         && let Ok(rows) = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
     {
+        aliases.clear();
         for row in rows.flatten() {
             let display = normalize_path_key(&row.0);
             if display != row.1 {
@@ -189,8 +195,11 @@ pub fn canonical_root_key(display: &str) -> Result<String, StoreError> {
 }
 
 pub(crate) fn register(conn: &Connection) -> Result<(), StoreError> {
+    register_alias_function(conn, fresh_table(conn))
+}
+
+fn register_alias_function(conn: &Connection, aliases: RootAliases) -> Result<(), StoreError> {
     use rusqlite::functions::FunctionFlags;
-    let aliases = fresh_table(conn);
     conn.create_scalar_function(
         "norm_path_key",
         1,
@@ -209,23 +218,94 @@ pub(crate) fn register(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Rebuild the alias table from committed `library_roots` (small table). Writers call it
-/// only after their transaction committed, so a rolled-back root is never published.
+/// A borrowed SQL scope owns any connection-local alias overlay until its actual
+/// commit or rollback. Other connections continue to use the committed table.
+pub(crate) struct AliasScope<'a> {
+    conn: &'a Connection,
+    dirty: std::rc::Rc<std::cell::Cell<bool>>,
+}
+thread_local! {
+    static ALIAS_SCOPES: std::cell::RefCell<Vec<(usize, std::rc::Rc<std::cell::Cell<bool>>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn connection_id(conn: &Connection) -> usize {
+    // SAFETY: this identity never outlives its borrowed connection or dereferences it.
+    unsafe { conn.handle() as usize }
+}
+impl<'a> AliasScope<'a> {
+    pub(crate) fn new(conn: &'a Connection) -> Self {
+        let dirty = std::rc::Rc::new(std::cell::Cell::new(false));
+        ALIAS_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .push((connection_id(conn), dirty.clone()))
+        });
+        Self { conn, dirty }
+    }
+    pub(crate) fn publish(&self) -> Result<(), StoreError> {
+        if self.dirty.get() {
+            reload_root_aliases(self.conn)?;
+        }
+        Ok(())
+    }
+}
+impl Drop for AliasScope<'_> {
+    fn drop(&mut self) {
+        if self.dirty.get()
+            && let Err(error) = register_alias_function(self.conn, table_for(self.conn))
+        {
+            tracing::error!(%error, "failed to restore committed root aliases after SQL scope");
+        }
+        ALIAS_SCOPES.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
+    }
+}
+fn scoped_alias_dirty(conn: &Connection) -> Option<std::rc::Rc<std::cell::Cell<bool>>> {
+    ALIAS_SCOPES.with(|scopes| {
+        scopes
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == connection_id(conn))
+            .map(|(_, dirty)| dirty.clone())
+    })
+}
+
+/// Publish only committed roots globally. A borrowed transaction gets its own SQL
+/// function snapshot so reads of its new roots never leak to pooled readers.
 pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
-    let aliases = table_for(conn);
+    let rows = read_root_aliases(conn)?;
+    let dirty = scoped_alias_dirty(conn);
+    if !conn.is_autocommit() {
+        let dirty = dirty.ok_or_else(|| {
+            StoreError::Protected(
+                "uncommitted root aliases require an owned Library SQL scope".into(),
+            )
+        })?;
+        register_alias_function(conn, Arc::new(RwLock::new(rows)))?;
+        dirty.set(true);
+    } else {
+        let aliases = table_for(conn);
+        *aliases.write().unwrap_or_else(|e| e.into_inner()) = rows;
+        if let Some(dirty) = dirty.filter(|dirty| dirty.get()) {
+            register_alias_function(conn, aliases)?;
+            dirty.set(false);
+        }
+    }
+    Ok(())
+}
+fn read_root_aliases(conn: &Connection) -> Result<Vec<(String, String)>, StoreError> {
     let mut stmt = conn.prepare("SELECT display_path, path_key FROM library_roots")?;
     let mut rows: Vec<(String, String)> = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        // Registration already resolved each key. Reloading facts must not
-        // reinterpret a later symlink, or observe slow mounts under Store.
+        // Registration already resolved each key. Reloading facts performs no IO.
         .map(|(display, key)| (normalize_path_key(&display), key))
         .filter(|(alias, key)| alias != key)
         .collect();
     rows.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
-    *aliases.write().unwrap_or_else(|e| e.into_inner()) = rows;
-    Ok(())
+    Ok(rows)
 }
 
 /// 前缀范围查询的上界：所有以 `prefix` 开头的键都 `< 返回值`。

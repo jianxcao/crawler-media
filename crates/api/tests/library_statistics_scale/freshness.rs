@@ -8,9 +8,9 @@ async fn library_scope_change_does_not_reuse_old_statistics() {
     let old_root;
     {
         let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let (id, root) = new_library(
-            &guard,
+            guard,
             seeded.fixture.dir.path(),
             "TV Other",
             MediaKind::Tv,
@@ -18,8 +18,8 @@ async fn library_scope_change_does_not_reuse_old_statistics() {
             true,
         );
         tv_other = id;
-        let library = library_of(&guard, &tv_other);
-        seed_rows(&guard, &library, &root, "T", MediaKind::Tv, 2, 1, 0);
+        let library = library_of(guard, &tv_other);
+        seed_rows(guard, &library, &root, "T", MediaKind::Tv, 2, 1, 0);
         old_root = root;
     }
     let before = seeded.list().await;
@@ -39,7 +39,6 @@ async fn library_scope_change_does_not_reuse_old_statistics() {
         .fixture
         .state
         .store()
-        .lock()
         .update_library_full(
             &tv_other,
             None,
@@ -81,14 +80,14 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
     let library_id = seeded.fixture.library_id.clone();
     let store_arc = seeded.fixture.state.store();
     let (root_id, media_id, file_id, from, to) = {
-        let guard = store_arc.lock();
-        let library = library_of(&guard, &library_id);
-        let root_id = root_id_of(&guard, &library_id);
-        let media_id = insert_media(&guard, MediaKind::Movie, "A-00000");
+        let guard = store_arc.as_ref();
+        let library = library_of(guard, &library_id);
+        let root_id = root_id_of(guard, &library_id);
+        let media_id = insert_media(guard, MediaKind::Movie, "A-00000");
         let file_id = LedgerId::new();
         let from = seeded.fixture.root.join("A-00000.0.mkv");
         publish_file(
-            &guard,
+            guard,
             &library,
             &root_id,
             media_id,
@@ -111,10 +110,10 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
     assert_eq!(old["stale"], false, "库表聚合必须是最新值");
 
     {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         assert!(
             store::test_support::force_file_path(
-                &guard,
+                guard,
                 &from.display().to_string(),
                 &to.display().to_string()
             )
@@ -125,9 +124,9 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
             .get_file_version(file_id)
             .unwrap()
             .expect("file version");
-        let library = library_of(&guard, &library_id);
+        let library = library_of(guard, &library_id);
         publish_file(
-            &guard, &library, &root_id, media_id, file_id, version, &to, 0,
+            guard, &library, &root_id, media_id, file_id, version, &to, 0,
         );
     }
 

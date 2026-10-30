@@ -22,15 +22,9 @@ impl super::super::Store {
         library_id: LibraryId,
         file_ids: &[LedgerId],
     ) -> Result<usize, StoreError> {
-        if file_ids.is_empty() {
-            return Ok(0);
-        }
-        let tx = crate::write_tx(&self.library)?;
-        let (removed, affected) = delete_files_in_tx(&tx, library_id, file_ids)?;
-        let subscribed = self.subscribed_media(&affected)?;
-        super::orphan_media::purge_orphan_media_in_tx(&tx, &affected, &subscribed)?;
-        tx.commit()?;
-        Ok(removed)
+        self.with_reference_write(|library, subscribe| {
+            library.delete_files_with_references(subscribe, library_id, file_ids)
+        })
     }
 }
 
@@ -76,3 +70,6 @@ pub(crate) fn delete_files_in_tx(
     }
     Ok((removed, affected))
 }
+
+#[path = "delete/connection.rs"]
+mod connection;

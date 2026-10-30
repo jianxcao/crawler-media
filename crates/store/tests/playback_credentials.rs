@@ -40,7 +40,7 @@ fn revoke_only_observed_credentials_and_persist_bindings() {
 
 #[test]
 fn shared_token_is_revoked_for_every_device_using_it() {
-    let (_, store, user) = fixture();
+    let (_tmp, store, user) = fixture();
     store.set_user_token(user, "shared").unwrap();
     for device in ["bedroom", "living"] {
         store
@@ -54,7 +54,7 @@ fn shared_token_is_revoked_for_every_device_using_it() {
 
 #[test]
 fn unbound_and_cli_only_devices_cannot_be_revoked() {
-    let (_, store, user) = fixture();
+    let (_tmp, store, user) = fixture();
     store.set_user_token(user, "cli").unwrap();
     store.put_setting("auth.cli_token.current", "cli").unwrap();
     store

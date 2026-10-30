@@ -225,7 +225,7 @@ fn make_state(
 
 fn configure_notify(state: &ApiState) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .put_setting("notify_url", "http://127.0.0.1:9/hook/system_alerts")
         .unwrap();
@@ -324,7 +324,6 @@ async fn limits_keep_unavailable_and_available_downloader_statuses_independent()
     let id = domain::DownloaderId::new();
     state
         .store()
-        .lock()
         .insert_downloader(&api::store::DownloaderRow {
             id,
             name: "unconfigured-qb".into(),

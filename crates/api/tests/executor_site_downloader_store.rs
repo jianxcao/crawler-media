@@ -1,4 +1,10 @@
 //! Site/Downloader configuration and maintenance never park a Tokio worker on Store.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 #[path = "executor_site_downloader_store/fixture.rs"]
 mod fixture;
 #[path = "executor_site_downloader_store/verification.rs"]
@@ -31,7 +37,7 @@ fn holder(f: &Fixture, readonly: bool) -> std::thread::JoinHandle<()> {
     let state = f.state.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::App);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         if readonly {
@@ -87,7 +93,7 @@ fn site_downloader_mutations_recheck_admission_after_lock_wait() {
         held.join().unwrap();
         assert_eq!(response.status().as_u16(), 409, "{method} {uri}");
         let store = f.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         assert_eq!(guard.list_sites().unwrap().len(), 1);
         assert_eq!(
             guard.get_site(f.site).unwrap().unwrap().name,

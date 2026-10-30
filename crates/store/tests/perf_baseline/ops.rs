@@ -2,7 +2,7 @@
 //!
 //! The set is chosen from the plan's Task 17 list plus the production read path that the
 //! HTTP layer actually runs: browse (page 1, deep offset, deep cursor, and the same page
-//! through a `LibraryReadPool` lease), item detail, every facet dimension, playback source
+//! through a `ReaderPool` lease), item detail, every facet dimension, playback source
 //! selection, scan publication (fresh insert and idempotent republish) and an integrity
 //! status lookup. A deliberately expensive read is measured last as a control: it proves
 //! the full-scan counter is live and that the gate rejects it.
@@ -208,10 +208,8 @@ fn deep_cursor_anchor(fx: &Fixture) -> String {
 /// The same page through the read pool, which is what a member request runs: checkout,
 /// layout validation, `BEGIN`, roster verification, selection, hydration, `ROLLBACK`.
 fn browse_read_lease(fx: &Fixture) -> Report {
-    let pool = fx
-        .store
-        .open_library_read_pool(NonZeroUsize::new(2).unwrap())
-        .unwrap();
+    let pool =
+        store::test_support::reader_pool_for_fixture(&fx.store, NonZeroUsize::new(2).unwrap());
     let credential = ReadCredential::new(fx.user, fx.token.clone());
     let request = LibraryReadRequest::Browse(library_query(
         fx,
@@ -225,7 +223,8 @@ fn browse_read_lease(fx: &Fixture) -> Report {
         .store
         .prepare_library_read(&credential, &request)
         .unwrap();
-    let report = measure(&fx.store, BROWSE_READ_LEASE, 1, 10, || {
+
+    measure(&fx.store, BROWSE_READ_LEASE, 1, 10, || {
         let budget = QueryBudget {
             deadline: Instant::now() + Duration::from_secs(30),
             cancelled: Default::default(),
@@ -234,9 +233,7 @@ fn browse_read_lease(fx: &Fixture) -> Report {
         let (result, stats) = lease.execute_observed(&context, &budget);
         assert!(result.is_ok(), "leased browse failed: {:?}", result.err());
         Work::from_stats(&stats)
-    });
-    pool.close();
-    report
+    })
 }
 
 fn item_detail(fx: &Fixture) -> Report {

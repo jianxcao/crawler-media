@@ -28,9 +28,7 @@ fn expect_from_worker<T>(rx: &std::sync::mpsc::Receiver<T>, what: &str) -> T {
 fn reader_refuses_main_temp_and_schema_writes() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     for sql in [
         "UPDATE libraries SET name = name",
@@ -61,9 +59,7 @@ fn reader_refuses_main_temp_and_schema_writes() {
 fn expired_lease_does_not_interrupt_the_next_request() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let first = budget();
     let late_cancel = Arc::clone(&first.cancelled);
     let mut lease = pool.try_checkout().unwrap();
@@ -129,9 +125,7 @@ fn paused_sql(
 fn active_sql_deadline_and_close_cancel_then_drain() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let (entered, worker_entered) = TimedGate::new("deadline sql entered");
     let (release, worker_release) = TimedGate::new("deadline sql released");
     let mut lease = pool.try_checkout().unwrap();
@@ -185,9 +179,7 @@ fn active_sql_deadline_and_close_cancel_then_drain() {
 fn validation_and_dirty_retirement_keep_capacity_reserved() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     lease.inject_cleanup_failure();
     let _ = lease.with_connection(&budget(), |conn| {
@@ -213,11 +205,10 @@ fn checkout_busy_is_immediate_while_real_layout_validation_is_paused() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = Arc::new(
-        store
-            .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-            .unwrap(),
-    );
+    let pool = Arc::new(crate::test_support::reader_pool_for_fixture(
+        &store,
+        NonZeroUsize::new(1).unwrap(),
+    ));
     let lease = pool.try_checkout().unwrap();
     let (hook_entered, entered) = TimedGate::new("validation paused");
     let (hook_release, release) = TimedGate::new("validation released");
@@ -273,9 +264,7 @@ fn checkout_busy_is_immediate_while_real_layout_validation_is_paused() {
 fn panic_and_sql_error_leave_no_transaction_or_callback() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     assert!(
         lease
@@ -312,9 +301,8 @@ fn same_inode_layout_change_after_checkout_is_rejected() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let pool = store
-            .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-            .unwrap();
+        let pool =
+            crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
         let mut lease = pool.try_checkout().unwrap();
         let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
         writer.execute_batch(&change).unwrap();
@@ -334,9 +322,7 @@ fn same_inode_layout_change_after_checkout_is_rejected() {
 fn layout_change_during_read_is_rejected_before_publication() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     let result = lease.with_connection(&budget(), |conn| {
@@ -356,9 +342,7 @@ fn layout_change_during_read_is_rejected_before_publication() {
 fn cleanup_failure_cannot_publish_success() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     lease.inject_cleanup_failure();
     let result = lease.with_connection(&budget(), |conn| {
@@ -378,9 +362,7 @@ fn confirmed_layout_mismatch_closes_pool_after_cancellation() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let lease = pool.try_checkout().unwrap();
     let writer = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     writer
@@ -438,9 +420,7 @@ fn confirmed_layout_mismatch_closes_pool_after_cancellation() {
 fn post_work_validation_reduces_actual_sqlite_busy_timeout() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     let (lease_entered, entered) = TimedGate::new("postcheck entered");
     let (lease_release, release) = TimedGate::new("postcheck released");
@@ -483,9 +463,7 @@ fn diagnostic_scope_counts_rollback_and_restores_after_error_cancel_and_panic() 
     use crate::library_query::items::QueryWorkStats;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     for failure in ["error", "cancel", "panic"] {
         let budget = budget();
@@ -510,9 +488,19 @@ fn diagnostic_scope_counts_rollback_and_restores_after_error_cancel_and_panic() 
                     }
                 },
                 Some(&mut stats),
+                false,
             )
         }));
         assert!(outcome.is_err() || outcome.unwrap().is_err());
+        let idle = lease.conn.as_ref().unwrap();
+        assert!(idle.is_autocommit(), "{failure} left a read snapshot open");
+        let timeout: u64 = idle
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            timeout, 5000,
+            "{failure} left its short busy policy installed"
+        );
         assert!(
             stats.statements > 2 && stats.vm_steps > 0,
             "layout/BEGIN/read/rollback: {stats:?}"

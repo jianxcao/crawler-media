@@ -40,9 +40,7 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let all_rows = mgr
-        .reader()
-        .and_then(|store| store.file_coverage_for_media(media_id));
+    let all_rows = mgr.store.file_coverage_for_media(media_id);
     let all_rows = match all_rows {
         Ok(rows) => rows,
         Err(error) if super::store_access::is_busy(&error) => {
@@ -83,12 +81,13 @@ pub(super) fn apply_marker_refresh(
         .collect::<Vec<_>>();
     let members = markers::source_observations(&rows);
     let publication = members.and_then(|members| {
-        let store = mgr.writer()?;
-        markers::validate_season_rows(&store, &rows).and_then(|()| {
-            // Validate every original job member under this same lock, not just the
-            // anchor or the expanded lease that ended during result preparation.
-            validate_refresh_units(&store, &job.id)?;
-            store.complete_marker_refresh_checked(&job.id, &replacements, &members)
+        mgr.store.library_write(|store| {
+            markers::validate_season_rows(store, &rows).and_then(|()| {
+                // Validate every original job member under this same lock, not just the
+                // anchor or the expanded lease that ended during result preparation.
+                validate_refresh_units(store, &job.id)?;
+                store.complete_marker_refresh_checked(&job.id, &replacements, &members)
+            })
         })
     });
     if let Err(error) = publication {
@@ -117,11 +116,11 @@ pub(super) fn apply_marker_refresh(
 }
 
 fn validate_refresh_units(
-    store: &crate::Store,
+    store: &store::LibraryConnection<'_>,
     job_id: &str,
 ) -> Result<(), crate::store::StoreError> {
     for unit in store.probe_job_units(job_id)? {
-        let row = super::coverage_for_ledger_id(store, &unit.ledger_id)?;
+        let row = super::projection::coverage_for_ledger_id_on(store, &unit.ledger_id)?;
         markers::validate_publication_rows(store, &[row])?;
     }
     Ok(())
@@ -145,7 +144,7 @@ fn marker_refresh_seasons(
 ) -> Result<Vec<u32>, crate::store::StoreError> {
     let mut rows = Vec::new();
     {
-        let store = mgr.reader()?;
+        let store = mgr.store.as_ref();
         for unit in store.probe_job_units(&job.id)? {
             let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
             crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
@@ -170,8 +169,8 @@ fn prepare_season_replacements(
     all_rows: &[domain::FileCoverage],
 ) -> Result<Vec<crate::store::MarkerResultReplacement>, (u32, crate::store::StoreError)> {
     let sampling_mode = {
-        let store = mgr.reader().map_err(|error| (0, error))?;
-        crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
+        let store = mgr.store.as_ref();
+        crate::scrape_store::ScrapeStoreExt::get_scrape_config(store)
             .ok()
             .map(|c| c.effective.fingerprint_sampling_mode)
             .unwrap_or_else(|| "full_window".to_string())
@@ -222,7 +221,7 @@ fn prepare_season_replacements(
                     })
                     .map_err(|error| {
                         let error = if super::store_access::is_busy_message(&error) {
-                            super::store_access::busy_error()
+                            crate::store::StoreError::WriteBusy
                         } else {
                             crate::store::StoreError::Missing(error)
                         };
@@ -260,7 +259,7 @@ fn scope_replacement_to_job(
     job: &crate::store::ProbeJob,
     replacement: &mut crate::store::MarkerResultReplacement,
 ) -> Result<(), crate::store::StoreError> {
-    let units = mgr.reader()?.probe_job_units(&job.id)?;
+    let units = mgr.store.probe_job_units(&job.id)?;
     let members: std::collections::HashSet<String> =
         units.into_iter().map(|unit| unit.ledger_id).collect();
     let before = replacement.chapter_updates.len();
@@ -291,8 +290,8 @@ pub(super) fn defer_refresh(mgr: &ProbeManager, job: &crate::store::ProbeJob, un
 
 fn fail_job(mgr: &ProbeManager, job: &crate::store::ProbeJob, message: &str) {
     if let Err(error) = mgr
-        .writer()
-        .and_then(|store| store.finish_probe_job(&job.id, false, Some(message)))
+        .store
+        .library_write(|store| store.finish_probe_job(&job.id, false, Some(message)))
     {
         tracing::error!(%error, job_id = %job.id, %message, "持久化声纹任务失败状态失败");
     }

@@ -76,7 +76,7 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
     std::fs::write(library_root.join("poster.jpg"), poster).unwrap();
 
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .create_library(
             MediaKind::Movie,
@@ -103,7 +103,7 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
     guard.insert_media(&media).unwrap();
     let ledger_id = LedgerId::new();
     publish_fixture_file(
-        &guard,
+        guard,
         &FixtureFile {
             file_id: Some(ledger_id),
             media_id: media.id,
@@ -125,14 +125,14 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
 
 #[tokio::test]
 async fn conditional_get_requires_authorization_before_validator() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let first_bytes = b"\xff\xd8\xffPOSTER-ONE".to_vec();
     let ledger_id = seed_poster(tmp.path(), &state, &first_bytes);
     let member = {
         let store = state.store();
-        seed_member(&store.lock(), "alice")
+        seed_member(store.as_ref(), "alice")
     };
     let uri = format!("/api/v1/posters/{ledger_id}");
 
@@ -285,7 +285,7 @@ impl Drop for ReleaseOnDrop {
 async fn metadata_file_io_runs_off_the_store_lock() {
     use media_server::provider::MediaServerProvider;
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state =
         make_state(tmp.path()).with_file_stat_read(Arc::new(BlockingBrowse { gate: gate.clone() }));
@@ -295,7 +295,7 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         let file = library_root.join("Movie.mkv");
         std::fs::write(&file, b"video").unwrap();
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .create_library(
                 MediaKind::Movie,
@@ -322,7 +322,7 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         guard.insert_media(&media).unwrap();
         let ledger_id = LedgerId::new();
         publish_fixture_file(
-            &guard,
+            guard,
             &FixtureFile {
                 file_id: Some(ledger_id),
                 media_id: media.id,
@@ -364,7 +364,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "NFO/stat/subtitle IO must not run while the Store lock is held"
         );
     }

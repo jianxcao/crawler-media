@@ -182,7 +182,10 @@ fn path_aliases_share_one_deletion_owner_and_lookup_stays_bounded() {
             .unwrap()
     });
     assert_eq!(after, before);
-    assert_eq!(large.statements, 1);
+    let (_, lease) = store.with_stats(store::stats::StatsScope::Library, || {
+        store.with_read(store::Db::Library, |_| Ok(())).unwrap()
+    });
+    assert_eq!(large.statements - lease.statements, 1);
     assert_eq!(large.vm_steps, small.vm_steps);
     assert!(
         store

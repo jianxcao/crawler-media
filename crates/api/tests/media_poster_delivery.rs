@@ -147,8 +147,39 @@ fn media_poster_stalled_source_releases_waiters_at_deadline() {
         assert_eq!(cache_control.unwrap(), "no-store");
         assert!(elapsed < Duration::from_millis(400));
         assert_eq!(source.active.load(Ordering::SeqCst), 0);
+        let resources = fixture.service.resource_counts();
+        // The 70ms observer deadline was checked above. Recovery tests that the
+        // same real window is usable again, including a durable disk cache write.
+        let fixture = fixture.with_wait_deadline(Duration::from_secs(1));
+        assert_eq!(fixture.service.resource_counts(), resources);
         source.succeed();
-        image(get(fixture.app(), fixture.ids[1]).await).await;
+        let previous_calls = source.calls.load(Ordering::SeqCst);
+        let recovery_started = Instant::now();
+        let recovery = get(fixture.app(), fixture.ids[1]).await;
+        let recovery_elapsed = recovery_started.elapsed();
+        if recovery.status() != StatusCode::OK {
+            let status = recovery.status();
+            let counts = fixture.service.resource_counts();
+            let calls_at_response = source.calls.load(Ordering::SeqCst);
+            let active_at_response = source.active.load(Ordering::SeqCst);
+            let cache_at_response = fixture.cache_path(1).is_file();
+            let body = to_bytes(recovery.into_body(), 1024).await.unwrap();
+            fixture.drained().await;
+            panic!(
+                "poster recovery expected 200, got {status}; elapsed={recovery_elapsed:?}; \
+                 source_calls_before={previous_calls}, at_response={calls_at_response}, after_drain={}; \
+                 active_at_response={active_at_response}, peak={}; \
+                 workers_at_response={}, registry_at_response={}; \
+                 cache_at_response={cache_at_response}, cache_after_drain={}; body={}",
+                source.calls.load(Ordering::SeqCst),
+                source.peak.load(Ordering::SeqCst),
+                counts.active_workers,
+                counts.registry_entries,
+                fixture.cache_path(1).is_file(),
+                String::from_utf8_lossy(&body),
+            );
+        }
+        image(recovery).await;
         fixture.drained().await;
     });
 }

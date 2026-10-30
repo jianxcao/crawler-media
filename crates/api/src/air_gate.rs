@@ -131,7 +131,7 @@ fn wanted_units(
     subscribe: &Subscribe,
     media: &Media,
 ) -> Option<Vec<(Option<u32>, Option<u32>)>> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     if let Ok(Some(value)) = store.get_setting(crate::settings_keys::SUBSCRIBE_AIR_DATE_GATE)
         && matches!(value.trim(), "0" | "false" | "off")
     {
@@ -139,7 +139,6 @@ fn wanted_units(
     }
     let pending = store.load_pending(subscribe.id).ok()?;
     let history = store.load_wanted_history(subscribe.id).ok()?;
-    drop(store);
     let facts =
         crate::subscribe_library_read::read_subscribe_library_facts(state, subscribe, media.kind)
             .ok()?;

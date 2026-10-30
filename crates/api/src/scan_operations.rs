@@ -114,7 +114,7 @@ impl ScanCoordinator {
                 dispatch.wake = false;
                 dispatch.running.iter().cloned().collect::<Vec<_>>()
             };
-            let op_opt = match state.store.lock().claim_next_queued_scan(&excluding) {
+            let op_opt = match state.store.as_ref().claim_next_queued_scan(&excluding) {
                 Ok(op) => op,
                 Err(e) => {
                     tracing::error!(%e, "Failed to claim next queued scan operation");
@@ -161,25 +161,29 @@ impl ScanCoordinator {
         library_id: &str,
         targets: Vec<PathBuf>,
     ) -> Result<ScanOperation, ScanEnqueueError> {
-        let signature = {
-            let store = state
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or(ScanEnqueueError::Busy)?;
-            let lib = store
-                .get_library(library_id)
-                .map_err(|e| ScanEnqueueError::Internal(e.to_string()))?
-                .ok_or_else(|| ScanEnqueueError::NotFound("Library 不存在".to_string()))?;
-            if !store
-                .library_accepts_work(library_id)
-                .map_err(|e| ScanEnqueueError::Internal(e.to_string()))?
-            {
-                return Err(ScanEnqueueError::Conflict(
-                    "Library 正在删除或已冻结".to_string(),
-                ));
-            }
-            scan_scope_signature(&lib)
-        };
+        state
+            .store
+            .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+                if state
+                    .store
+                    .get_library(library_id)
+                    .map_err(scan_store_error)?
+                    .is_none()
+                {
+                    return Err(ScanEnqueueError::NotFound("Library 不存在".into()));
+                }
+                if !state
+                    .store
+                    .library_accepts_work(library_id)
+                    .map_err(scan_store_error)?
+                {
+                    return Err(ScanEnqueueError::Conflict(
+                        "Library 正在删除或已冻结".into(),
+                    ));
+                }
+                Ok(())
+            })
+            .map_err(scan_store_error)??;
 
         let lease = state
             .library_work
@@ -195,15 +199,43 @@ impl ScanCoordinator {
         drop(lease);
 
         let now_ms = crate::job_loop::unix_now() * 1000;
-        let op = {
-            let store = state
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or(ScanEnqueueError::Busy)?;
-            store
-                .enqueue_scan(library_id, &signature, &targets, now_ms)
-                .map_err(|e| ScanEnqueueError::Internal(e.to_string()))?
-        };
+        let op = crate::http::store_wait::with_foreground_store(state, |store| {
+            store.library_write_with_error(scan_store_error, |db| {
+                let library = db
+                    .get_library(library_id)
+                    .map_err(scan_store_error)?
+                    .ok_or_else(|| ScanEnqueueError::NotFound("Library 不存在".into()))?;
+                if db
+                    .library_lifecycle_state(library_id)
+                    .map_err(scan_store_error)?
+                    != "ready"
+                {
+                    return Err(ScanEnqueueError::Reconfiguring);
+                }
+                if !db
+                    .library_accepts_work(library_id)
+                    .map_err(scan_store_error)?
+                {
+                    return Err(ScanEnqueueError::Conflict(
+                        "Library 正在删除或已冻结".into(),
+                    ));
+                }
+                db.enqueue_scan(
+                    library_id,
+                    &scan_scope_signature(&library),
+                    &targets,
+                    now_ms,
+                )
+                .map_err(scan_store_error)
+            })
+        })
+        .map_err(|response| match response.status() {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE => ScanEnqueueError::Busy,
+            axum::http::StatusCode::CONFLICT => {
+                ScanEnqueueError::Conflict("instance is read-only or under maintenance".into())
+            }
+            status => ScanEnqueueError::Internal(format!("scan write admission failed: {status}")),
+        })??;
 
         // If operation is already running or being executed by a worker, return it
         {
@@ -216,6 +248,18 @@ impl ScanCoordinator {
         self.trigger_next(state);
 
         Ok(op)
+    }
+}
+
+fn scan_store_error(error: store::StoreError) -> ScanEnqueueError {
+    match error {
+        store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled
+        | store::StoreError::WriteBusy => ScanEnqueueError::Busy,
+        store::StoreError::Protected(message) => ScanEnqueueError::Conflict(message),
+        error => ScanEnqueueError::Internal(error.to_string()),
     }
 }
 
@@ -331,12 +375,12 @@ fn cancel_stale_operation(store: &crate::Store, op_id: &str, reason: &str) {
 }
 
 fn run_operation(state: &ApiState, op: &ScanOperation) {
-    let Some(admission) = scan_admission(&state.store.lock(), &op.id, &op.library_id) else {
+    let Some(admission) = scan_admission(state.store.as_ref(), &op.id, &op.library_id) else {
         return;
     };
     if let Some(reason) = admission.stale_reason {
         tracing::warn!(op_id = %op.id, library_id = %op.library_id, %reason, "扫描 scope 已变化，取消过期 operation");
-        cancel_stale_operation(&state.store.lock(), &op.id, &reason);
+        cancel_stale_operation(state.store.as_ref(), &op.id, &reason);
         return;
     }
     let lease = match state.acquire_library_work(&op.library_id) {
@@ -351,7 +395,7 @@ fn run_operation(state: &ApiState, op: &ScanOperation) {
         .register_control(&op.id, lease.control().clone());
     match state
         .store
-        .lock()
+        .as_ref()
         .set_scan_operation_status(&op.id, ScanOperationStatus::Running)
     {
         Ok(true) => {}
@@ -373,7 +417,7 @@ fn run_operation(state: &ApiState, op: &ScanOperation) {
         refresh_scan_statistics(state, op, &lease);
     }
     let outcome = scan_outcome(&admission.base_report, result);
-    record_scan_outcome(&state.store.lock(), &op.id, op.dirty_rev, outcome);
+    record_scan_outcome(&state.store.as_ref(), &op.id, op.dirty_rev, outcome);
 }
 
 /// Maintenance follows the whole round's cleanup, before its completion receipt.
@@ -403,7 +447,7 @@ fn refresh_scan_statistics(
 }
 
 fn finish_scan_failure(state: &ApiState, op: &ScanOperation, reason: &str) {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let base = match store.scan_operation(&op.id) {
         Ok(Some(current)) => current.report,
         Ok(None) => return,

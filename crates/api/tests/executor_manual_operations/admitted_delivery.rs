@@ -2,7 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct CloseAfterAdmission {
-    store: OnceLock<Arc<parking_lot::Mutex<Store>>>,
+    store: OnceLock<Arc<Store>>,
     gate: OnceLock<Arc<api::write_gate::WriteGate>>,
     finish: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     intent_seen: AtomicBool,
@@ -12,9 +12,11 @@ struct CloseAfterAdmission {
 impl downloader::Downloader for CloseAfterAdmission {
     fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
         let handle = self.store.get().unwrap();
-        let store = handle
-            .try_lock_for(Duration::from_millis(100))
-            .expect("add must run outside Store");
+        handle
+            .writers()
+            .with_writer_timeout(Duration::from_millis(100), store::Db::Subscribe, |_| Ok(()))
+            .expect("add must run outside the Subscribe writer");
+        let store = handle.as_ref();
         self.intent_seen.store(
             store
                 .list_all_pending_routed()
@@ -25,7 +27,6 @@ impl downloader::Downloader for CloseAfterAdmission {
                 }),
             Ordering::SeqCst,
         );
-        drop(store);
         let gate = self.gate.get().unwrap().clone();
         let hold_confirmation = self.hold_confirmation;
         let shared = self.store.get().unwrap().clone();
@@ -33,7 +34,9 @@ impl downloader::Downloader for CloseAfterAdmission {
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         *self.finish.lock() = Some(finish_tx);
         std::thread::spawn(move || {
-            let _held = hold_confirmation.then(|| shared.lock());
+            let _held = hold_confirmation.then(|| {
+                crate::writer_hold::WriterHold::acquire(shared.clone(), store::Db::Subscribe)
+            });
             let _closed = gate.close();
             ready_tx.send(()).unwrap();
             let _ = finish_rx.recv_timeout(Duration::from_secs(5));
@@ -82,7 +85,6 @@ fn admitted_add_is_tracked_and_confirmed_even_when_maintenance_starts_during_add
     let pending = f
         .state
         .store()
-        .lock()
         .load_pending(f.subscribe.parse().unwrap())
         .unwrap();
     assert_eq!(pending.len(), 1);
@@ -106,11 +108,16 @@ fn confirmation_busy_retains_the_routed_unconfirmed_intent_after_successful_add(
         .block_on(f.app.clone().oneshot(f.request(0)))
         .unwrap();
     client.finish.lock().take().unwrap().send(()).unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let status = response.status();
+    let retry_after = response.headers().get("retry-after").cloned();
+    let body = runtime().block_on(common::json_body(response));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "runtime.busy");
+    assert_eq!(retry_after.unwrap(), "1");
     assert!(client.added.load(Ordering::SeqCst));
     assert!(client.intent_seen.load(Ordering::SeqCst));
     let handle = f.state.store();
-    let store = handle.try_lock_for(Duration::from_secs(2)).unwrap();
+    let store = handle.as_ref();
     let pending = store.load_pending(f.subscribe.parse().unwrap()).unwrap();
     assert_eq!(pending.len(), 1);
     assert!(
@@ -165,8 +172,6 @@ fn cancelled_admit_keeps_worker_capacity_until_remote_result_is_confirmed() {
         let pending = f
             .state
             .store()
-            .try_lock_for(Duration::from_millis(100))
-            .unwrap()
             .load_pending(f.subscribe.parse().unwrap())
             .unwrap();
         assert_eq!(pending.len(), 1);
@@ -186,7 +191,6 @@ fn cancelled_admit_keeps_worker_capacity_until_remote_result_is_confirmed() {
     let pending = f
         .state
         .store()
-        .lock()
         .load_pending(f.subscribe.parse().unwrap())
         .unwrap();
     assert_eq!(pending.len(), 1);

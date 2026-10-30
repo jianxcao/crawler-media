@@ -19,7 +19,7 @@ async fn directory_aggregate_and_root_routes_are_removed() {
         }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     );
-    let before = state.store().lock().list_library_roots().unwrap();
+    let before = state.store().list_library_roots().unwrap();
     let app = router(state.clone());
     for (method, path) in [
         ("GET", "/api/v1/directory"),
@@ -39,7 +39,7 @@ async fn directory_aggregate_and_root_routes_are_removed() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
     }
-    assert_eq!(state.store().lock().list_library_roots().unwrap(), before);
+    assert_eq!(state.store().list_library_roots().unwrap(), before);
     let response = app
         .oneshot(request(
             "GET",

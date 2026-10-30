@@ -18,7 +18,7 @@ pub(super) fn scan_media_for(
     state: &ApiState,
     files: &[library::TransferredFile],
 ) -> HashMap<domain::MediaId, (domain::Media, domain::FileCoverage)> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let _hold = super::hold::trace_lock_section("scan_media_for");
     let mut map = HashMap::new();
     for file in files {
@@ -74,7 +74,7 @@ pub(super) fn resolve_scan_metadata(
             let _ = crate::poster_fetch::attach_backdrop(state, &resolved, path);
             // Reread after alias convergence; stale coverage still carries the provisional ID.
             let (coverage, coverages) = {
-                let store = state.store.lock();
+                let store = state.store.as_ref();
                 let _hold = super::hold::trace_lock_section("metadata_reread");
                 let key = coverage.file.path.to_string_lossy().into_owned();
                 let coverage = coverage_by_path(&store, &key).unwrap_or(coverage);

@@ -1,4 +1,10 @@
 //! Public Router regressions for the pre-auth query deadline.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -30,6 +36,35 @@ fn state(dir: &tempfile::TempDir) -> ApiState {
     .unwrap()
 }
 
+/// Inject a real query failure while preserving the validated database layout.
+fn deny_reader_table(state: &ApiState, db: store::Db, table: &'static str, capacity: usize) {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let pool = state.store().reader_pool(db);
+    let mut leases = (0..capacity)
+        .map(|_| pool.try_checkout().unwrap())
+        .collect::<Vec<_>>();
+    for lease in &mut leases {
+        lease
+            .with_connection(
+                &store::QueryBudget {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+                |conn| {
+                    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+                        AuthAction::Read { table_name, .. } if table_name == table => {
+                            Authorization::Deny
+                        }
+                        _ => Authorization::Allow,
+                    }));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+}
+
 #[test]
 fn writer_lock_before_auth_does_not_block_reader_routes() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -46,7 +81,7 @@ fn writer_lock_before_auth_does_not_block_reader_routes() {
         let released = Arc::new(AtomicBool::new(false));
         let released_worker = released.clone();
         let writer = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
             ready_tx.send(()).unwrap();
             // This timeout only prevents a hung test from retaining the lock forever.
             let _ = release_rx.recv_timeout(Duration::from_secs(3));
@@ -209,8 +244,7 @@ fn self_covered_routes_distinguish_invalid_credentials_from_store_failure() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
-        let conn = rusqlite::Connection::open(dir.path().join("data/app.db")).unwrap();
-        conn.execute_batch("DROP TABLE user_tokens").unwrap();
+        deny_reader_table(&state, store::Db::App, "user_tokens", 4);
         for path in paths {
             let response = app
                 .clone()
@@ -257,7 +291,6 @@ async fn self_reads_keep_missing_and_hidden_library_404_for_get_and_head() {
     let state = state(&dir);
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .unwrap()
@@ -266,7 +299,7 @@ async fn self_reads_keep_missing_and_hidden_library_404_for_get_and_head() {
     let member = domain::UserId::new();
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .insert_user(&domain::User {
                 id: member,
@@ -316,7 +349,6 @@ async fn self_reads_revalidate_original_token_before_visibility_preflight() {
             let state = state(&dir);
             let library = state
                 .store()
-                .lock()
                 .default_library(domain::MediaKind::Movie)
                 .unwrap()
                 .unwrap()
@@ -355,26 +387,25 @@ async fn self_read_visibility_preflight_preserves_sql_failures_and_freeze_status
     for failure in ["sql", "freeze"] {
         for endpoint in ["items", "gallery", "facets"] {
             for method in ["GET", "HEAD"] {
-                // A structural query failure closes the pool, so each first-failure
-                // status oracle needs its own instance rather than the closed pool.
+                // A query failure must remain 500 for every endpoint without
+                // corrupting the schema or turning later attempts into pool 503s.
                 let dir = tempfile::tempdir().unwrap();
                 let state = state(&dir);
                 let library = state
                     .store()
-                    .lock()
                     .default_library(domain::MediaKind::Movie)
                     .unwrap()
                     .unwrap()
                     .id
                     .to_string();
-                let conn = rusqlite::Connection::open(dir.path().join("data/library.db")).unwrap();
                 let expected = if failure == "sql" {
-                    conn.execute_batch("DROP TABLE library_items").unwrap();
+                    // Visibility preflight reads libraries for every endpoint;
+                    // facets need not read the item projection at all.
+                    deny_reader_table(&state, store::Db::Library, "libraries", 8);
                     StatusCode::INTERNAL_SERVER_ERROR
                 } else {
                     state
                         .store()
-                        .lock()
                         .begin_library_integrity(library.parse().unwrap(), true, "freeze", 0)
                         .unwrap();
                     StatusCode::SERVICE_UNAVAILABLE
@@ -417,7 +448,7 @@ async fn self_reads_preserve_reindexing_started_after_visibility_preflight() {
             let state = state(&dir);
             let shared = state.store();
             let library = shared
-                .lock()
+                .as_ref()
                 .default_library(domain::MediaKind::Movie)
                 .unwrap()
                 .unwrap()
@@ -428,7 +459,7 @@ async fn self_reads_preserve_reindexing_started_after_visibility_preflight() {
             let state = state.with_library_read_stage_barrier(Arc::new(move |stage| {
                 if stage == "prepare" && !observed.swap(true, Ordering::SeqCst) {
                     shared
-                        .lock()
+                        .as_ref()
                         .begin_library_integrity(library_id, true, "freeze", 0)
                         .unwrap();
                 }

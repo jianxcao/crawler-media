@@ -23,9 +23,13 @@ pub(crate) async fn episodes(
     // Review L2: episode snapshots are a ledger read; take the lock off-executor.
     let id_for_read = id.clone();
     let (media, visible_cloned, unit_states) = match store_read(&state, move |store| {
+        let is_admin = match user_id {
+            Some(user) => store.user_role(user).map_err(episode_store_error)? == "admin",
+            None => false,
+        };
         store
             .library_read_snapshot(|store| {
-                load_episode_snapshot(store, &id_for_read, user_id, season_number)
+                load_episode_snapshot(store, &id_for_read, user_id, season_number, is_admin)
             })
             .map_err(episode_store_error)?
     })
@@ -95,10 +99,11 @@ fn episode_store_error(error: store::StoreError) -> Response {
 }
 
 fn load_episode_snapshot(
-    store: &crate::Store,
+    store: &store::LibraryConnection<'_>,
     id: &str,
     user_id: Option<domain::UserId>,
     season: Option<u32>,
+    is_admin: bool,
 ) -> Result<EpisodeSnapshot, Response> {
     let missing = || err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     let media_id = resolve_media_id(id).ok_or_else(missing)?;
@@ -106,7 +111,7 @@ fn load_episode_snapshot(
         .get_media(media_id)
         .map_err(episode_store_error)?
         .ok_or_else(missing)?;
-    let visible = crate::visible_scope::VisibleLibraries::load(store, user_id)
+    let visible = crate::visible_scope::VisibleLibraries::load_on(store, user_id, is_admin)
         .map_err(episode_store_error)?;
     let mut coverage = Vec::new();
     let mut has_file = false;

@@ -212,12 +212,9 @@ async fn prepare(state: &ApiState, id: &str) -> Result<(CoverLease, Arc<CoverSna
         .run_to_completion(move || {
             let lease = worker
                 .library_work()
-                .acquire_from_readers(&worker.store_readers, &id)
+                .acquire_bounded(&worker.store, &id)
                 .map_err(|error| format!("cover.unavailable: {error}"))?;
-            let store = worker
-                .store_readers
-                .checkout(crate::http::store_wait::STORE_READ_WAIT)
-                .ok_or_else(|| "runtime.busy".to_string())?;
+            let store = worker.store.clone();
             Ok((Arc::new(lease), Arc::new(snapshot_from_store(&store, &id)?)))
         })
         .await
@@ -244,10 +241,7 @@ async fn existing_off_executor(
 
 /// 锁内只取 owned DB 事实。
 pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
-    let store = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        .ok_or_else(|| "runtime.busy".to_string())?;
+    let store = state.store.clone();
     snapshot_from_store(&store, id)
 }
 
@@ -294,7 +288,7 @@ fn cas_publish(
     lease: &crate::library_lifecycle::LibraryWorkLease,
 ) -> Result<bool, String> {
     lease.publish(|| {
-        crate::http::store_wait::with_bounded_store(state.store(), |store| {
+        crate::http::store_wait::with_foreground_store(state, |store| {
             state
                 .require_writable()
                 .map_err(|_| "instance.read_only".to_string())?;
@@ -305,7 +299,7 @@ fn cas_publish(
                 .compare_set_library_cover(&snapshot.library.id, snapshot.revision, target, marker)
                 .map_err(|error| error.to_string())
         })
-        .unwrap_or_else(|| Err("runtime.busy".into()))
+        .map_err(|response| format!("cover write rejected ({})", response.status()))?
     })
 }
 
@@ -431,13 +425,7 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
 /// bytes behind forever; every startup retries, so the cleanup is idempotent.
 pub fn purge_removed_library_covers(state: &ApiState) {
     let (covers_dir, removals) = {
-        let Some(store) = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        else {
-            tracing::warn!("Store read pool busy, skipping removed Library cover reconciliation");
-            return;
-        };
+        let store = state.store.clone();
         (
             store.library_covers_dir(),
             store.succeeded_library_removals(),

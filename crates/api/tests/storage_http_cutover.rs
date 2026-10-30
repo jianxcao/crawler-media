@@ -35,13 +35,13 @@ fn fixture(root: &std::path::Path) -> (api::ApiState, axum::Router, MediaId, Str
     };
     let library_id = {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.insert_media(&media).unwrap();
         let path = root.join("data/library/movies/canonical.mkv");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"movie").unwrap();
         let file = publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 media_id: media.id,
                 path: path.display().to_string(),
@@ -145,7 +145,7 @@ async fn tv_zero_season_zero_episode_remains_playable() {
     };
     {
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.insert_media(&media).unwrap();
         let root = temp.path().join("tv-zero");
         std::fs::create_dir_all(&root).unwrap();
@@ -162,7 +162,7 @@ async fn tv_zero_season_zero_episode_remains_playable() {
         let path = root.join("special.S00E00.mkv");
         std::fs::write(&path, b"episode").unwrap();
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 media_id: media.id,
                 path: path.display().to_string(),

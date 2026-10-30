@@ -69,7 +69,7 @@ impl Drop for LeaseTimers {
 async fn heartbeat_uses_the_shared_app_writer_and_remains_independent_of_outer_store() {
     let _timers = LeaseTimers::fast();
     let fixture = Fixture::new();
-    let path: PathBuf = fixture.state.store().lock().app_db_path().to_owned();
+    let path: PathBuf = fixture.state.store().app_db_path().to_owned();
     let loop_handle = api::job_loop::spawn_job_loop(fixture.state.clone());
     assert!(!loop_handle.is_read_only());
     let previous = beat(&path);

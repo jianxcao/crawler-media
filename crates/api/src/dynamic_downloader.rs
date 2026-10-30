@@ -20,14 +20,14 @@ use crate::runtime_downloader::{ChosenDownloader, DownloaderEnv, choose_download
 type CachedClient = Option<(ChosenDownloader, Arc<dyn Downloader>)>;
 
 pub struct DynamicDownloader {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     env: DownloaderEnv,
     memory: Arc<MemoryDownloader>,
     cached: Mutex<CachedClient>,
 }
 
 impl DynamicDownloader {
-    pub fn new(store: Arc<Mutex<Store>>, env: DownloaderEnv, data_dir: &Path) -> Self {
+    pub fn new(store: Arc<Store>, env: DownloaderEnv, data_dir: &Path) -> Self {
         Self {
             store,
             env,
@@ -37,7 +37,7 @@ impl DynamicDownloader {
     }
 
     fn client(&self) -> Result<Arc<dyn Downloader>, DownloaderError> {
-        let chosen = choose_downloader(&self.store.lock(), &self.env)
+        let chosen = choose_downloader(&self.store.as_ref(), &self.env)
             .map_err(|error| DownloaderError::Message(error.to_string()))?;
         if let Some((cached_config, client)) = self.cached.lock().as_ref()
             && cached_config == &chosen
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn dynamic_downloader_delegates_add_with_options_with_save_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
+        let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
         let dynamic = DynamicDownloader::new(store, DownloaderEnv::default(), tmp.path());
 
         let t = Torrent {

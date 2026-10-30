@@ -15,7 +15,7 @@ async fn prune_purges_orphan_media_with_its_last_file() {
     let user_id = domain::UserId::new();
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .set_playback_state(user_id, media_id, 3000, Some(true), Some(true), None, None)
             .unwrap();
@@ -45,7 +45,7 @@ async fn prune_purges_orphan_media_with_its_last_file() {
 
     // Verify ledger row is deleted
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_none());
 
     // The Media lost its last file: it and its per-user state are purged
@@ -62,7 +62,7 @@ async fn frozen_or_deleted_library_rejects_presence_operations() {
     // Freeze library
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.begin_library_removal(&fix.library_id).unwrap();
     }
 
@@ -99,7 +99,7 @@ where
         if fired.swap(true, Ordering::SeqCst) {
             return;
         }
-        action(&store.lock(), &library_id);
+        action(store.as_ref(), &library_id);
     }));
 }
 
@@ -116,7 +116,7 @@ async fn scope_change_race_is_classified_as_scope_changed() {
     std::fs::create_dir_all(&other_root).unwrap();
     let other_id = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .create_library(
                 MediaKind::Movie,
@@ -145,7 +145,7 @@ async fn scope_change_race_is_classified_as_scope_changed() {
 
     // 竞争发生时屏障整体回滚：不写任何 presence 观察，也不动账本行。
     let guard = fix.state.store();
-    let guard = guard.lock();
+    let guard = guard.as_ref();
     assert!(guard.missing_at_by_path().unwrap().is_empty());
     assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
 }
@@ -191,7 +191,7 @@ async fn prune_with_permission_denied_on_recheck_skips_and_preserves_ledger() {
 
     // 4. Ledger row is safely preserved!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
 }
 
@@ -216,7 +216,7 @@ async fn stale_presence_generation_request(prune: bool) {
         .insert(file.path.clone(), Ok(false));
     if prune {
         let store = fix.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
         store
             .apply_ledger_presence(
@@ -242,15 +242,22 @@ async fn stale_presence_generation_request(prune: bool) {
         }
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "filesystem observations release Store"
         );
-        let row = store.lock().file_coverage_by_id(file_id).unwrap().unwrap();
+        let row = store
+            .as_ref()
+            .file_coverage_by_id(file_id)
+            .unwrap()
+            .unwrap();
         let mut replacement = row.file.clone();
         replacement.version.source_version = "replacement-v2".into();
         replacement.presence = domain::FilePresence::Present;
         store
-            .lock()
+            .as_ref()
             .publish_files(
                 &WriteScope {
                     library_id: replacement.library_id,
@@ -266,7 +273,11 @@ async fn stale_presence_generation_request(prune: bool) {
                 2000,
             )
             .unwrap();
-        let replacement = store.lock().file_coverage_by_id(file_id).unwrap().unwrap();
+        let replacement = store
+            .as_ref()
+            .file_coverage_by_id(file_id)
+            .unwrap()
+            .unwrap();
         let ProbeRequestResult::Queued { job_id } = state
             .probe
             .request_probe(&replacement, ProbeRequestOrigin::Filesystem)
@@ -294,7 +305,7 @@ async fn stale_presence_generation_request(prune: bool) {
     );
     assert_eq!(response["data"]["skipped"], 1);
     let store = fix.state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     let row = store.file_coverage_by_id(file_id).unwrap().unwrap();
     assert_eq!(row.file.version.source_version, "replacement-v2");
     assert_eq!(row.file.presence, domain::FilePresence::Present);
@@ -314,7 +325,6 @@ async fn empty_presence_window_still_revalidates_captured_scope() {
     let other_id = fix
         .state
         .store()
-        .lock()
         .create_library(
             MediaKind::Movie,
             "Other",

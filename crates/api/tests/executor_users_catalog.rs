@@ -1,4 +1,10 @@
 //! Admin User and catalog cache operations keep Store waits off Tokio.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 #[path = "executor_users_catalog/fixture.rs"]
 mod fixture;
 #[path = "executor_users_catalog/views.rs"]
@@ -68,12 +74,12 @@ fn route(f: &Fixture, index: usize) -> (&'static str, String, Value, u16) {
         ),
     }
 }
-fn hold_store(f: &Fixture, readonly: bool) -> std::thread::JoinHandle<()> {
+fn hold_store(f: &Fixture, readonly: bool, db: store::Db) -> std::thread::JoinHandle<()> {
     let store = f.state.store();
     let state = f.state.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let held = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), db);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         if readonly {
@@ -90,7 +96,15 @@ fn user_and_cache_routes_keep_executor_responsive() {
         let f = Fixture::new();
         let (method, uri, body, expected) = route(&f, index);
         let app = router(f.state.clone());
-        let held = hold_store(&f, false);
+        let held = hold_store(
+            &f,
+            false,
+            if index >= 6 {
+                store::Db::Cache
+            } else {
+                store::Db::App
+            },
+        );
         let (response, elapsed) = runtime().block_on(async {
             let started = Instant::now();
             tokio::join!(app.oneshot(request(method, &uri, body)), async {
@@ -116,14 +130,22 @@ fn user_and_cache_mutations_recheck_admission_after_wait() {
         let f = Fixture::new();
         let (method, uri, body, _) = route(&f, index);
         let app = router(f.state.clone());
-        let held = hold_store(&f, true);
+        let held = hold_store(
+            &f,
+            true,
+            if index >= 6 {
+                store::Db::Cache
+            } else {
+                store::Db::App
+            },
+        );
         let response = runtime()
             .block_on(app.oneshot(request(method, &uri, body)))
             .unwrap();
         held.join().unwrap();
         assert_eq!(response.status().as_u16(), 409, "{method} {uri}");
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert_eq!(store.get_user(f.member).unwrap().unwrap().login, "member");
         let credential = store.login_credential("member").unwrap().unwrap();
         assert!(store::password::verify_password(

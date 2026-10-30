@@ -12,7 +12,6 @@ async fn wait_for_recorded_probe(fixture: &Fixture, expected: bool) {
         let recorded = fixture
             .state
             .store()
-            .lock()
             .probe_unit_recorded_for_ledger(&ledger)
             .unwrap();
         if recorded == expected && (expected || started.elapsed() >= Duration::from_millis(150)) {

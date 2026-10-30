@@ -1,4 +1,3 @@
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -159,10 +158,10 @@ fn default_profile() -> FingerprintCaptureProfile {
 #[tokio::test]
 async fn reuse_valid_does_not_read_media() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+    let store = Arc::new(Store::open(temp.path()).unwrap());
     let engine = Arc::new(MockEngine::new(0));
     let ctx = AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
@@ -173,7 +172,7 @@ async fn reuse_valid_does_not_read_media() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row(&store.lock(), "l-1", 1);
+    let row = dummy_row(store.as_ref(), "l-1", 1);
     let req = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -199,10 +198,10 @@ async fn reuse_valid_does_not_read_media() {
 #[tokio::test]
 async fn recapture_requires_new_job_evidence() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+    let store = Arc::new(Store::open(temp.path()).unwrap());
     let engine = Arc::new(MockEngine::new(0));
     let ctx = AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
@@ -213,7 +212,7 @@ async fn recapture_requires_new_job_evidence() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row(&store.lock(), "l-1", 1);
+    let row = dummy_row(store.as_ref(), "l-1", 1);
     let req1 = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -243,11 +242,11 @@ async fn recapture_requires_new_job_evidence() {
 #[tokio::test]
 async fn retries_and_fallback_share_four_attempt_budget() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+    let store = Arc::new(Store::open(temp.path()).unwrap());
     // Fails 5 times -> should exhaust 4 attempts budget and fail
     let engine = Arc::new(MockEngine::new(5));
     let ctx = AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
@@ -258,7 +257,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row(&store.lock(), "l-exhaust", 1);
+    let row = dummy_row(store.as_ref(), "l-exhaust", 1);
     let req = EpisodeCaptureRequest {
         job_id: "job-exhaust".into(),
         row,
@@ -275,7 +274,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let res = capture_episode_adaptive(&ctx, &req).await;
     assert!(res.is_err());
 
-    let store_guard = store.lock();
+    let store_guard = store.as_ref();
     let attempts = store_guard
         .list_fingerprint_attempts_for_job("job-exhaust")
         .unwrap_or_default();

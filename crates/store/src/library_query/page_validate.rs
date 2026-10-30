@@ -68,10 +68,7 @@ impl Store {
         &self,
         snapshot: &PageSnapshot,
     ) -> Result<PageValidation, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        let result = validate_on(&tx, snapshot)?;
-        tx.commit()?;
-        Ok(result)
+        self.with_library_read(|db| db.validate_page_snapshot(snapshot))
     }
 
     /// Credentials retain their typed failure semantics. Selected sources and coverage
@@ -114,42 +111,44 @@ impl Store {
                 selected.files.push(file);
             }
         }
-        let tx = self
-            .library
-            .unchecked_transaction()
-            .map_err(StoreError::from)?;
-        let result = validate_on(&tx, &selected)?;
-        let mut gone = match result {
-            PageValidation::Fresh => Vec::new(),
-            PageValidation::Stale { gone } => gone,
-        };
-        let encoded = serde_json::to_string(&coverage).map_err(StoreError::from)?;
-        let mut stmt = tx.prepare(COVERAGE_SQL).map_err(StoreError::from)?;
-        for row in stmt
-            .query_map([encoded], |r| r.get::<_, String>(0))
-            .map_err(StoreError::from)?
-        {
-            let id = row
+        let validated = self.with_read(crate::Db::Library, |conn| {
+            let result = validate_on(conn, &selected)?;
+            let mut gone = match result {
+                PageValidation::Fresh => Vec::new(),
+                PageValidation::Stale { gone } => gone,
+            };
+            let encoded = serde_json::to_string(&coverage).map_err(StoreError::from)?;
+            let mut stmt = conn.prepare(COVERAGE_SQL).map_err(StoreError::from)?;
+            for row in stmt
+                .query_map([encoded], |r| r.get::<_, String>(0))
                 .map_err(StoreError::from)?
-                .parse::<LedgerId>()
-                .map_err(StoreError::from)?;
-            if !gone.contains(&id) {
-                gone.push(id);
+            {
+                let id = row
+                    .map_err(StoreError::from)?
+                    .parse::<LedgerId>()
+                    .map_err(StoreError::from)?;
+                if !gone.contains(&id) {
+                    gone.push(id);
+                }
             }
-        }
-        drop(stmt);
+            drop(stmt);
+            let fresh = gone.is_empty() && config_revision(conn)? == snapshot.config_revision;
+
+            Ok(if fresh {
+                PageValidation::Fresh
+            } else {
+                PageValidation::Stale { gone }
+            })
+        })?;
         for context in contexts {
             self.validate_library_read(context)?;
         }
-        let fresh = gone.is_empty() && config_revision(&tx)? == snapshot.config_revision;
-        tx.commit().map_err(StoreError::from)?;
-        Ok(if fresh {
-            PageValidation::Fresh
-        } else {
-            PageValidation::Stale { gone }
-        })
+        Ok(validated)
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const VALIDATION_PLANS: &[&str] = &[FILES_SQL, COVERAGE_SQL];
+
+#[path = "page_validate/connection.rs"]
+mod connection;

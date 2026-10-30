@@ -1,4 +1,4 @@
-use crate::http::store_wait::{busy_response, store_read, with_bounded_store};
+use crate::http::store_wait::{busy_response, store_read, with_foreground_store, with_store_read};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -29,7 +29,12 @@ fn prune_orphan_pending(
                     tracing::debug!(%subscribe_id, "Protected task read skips orphan cleanup");
                     continue;
                 }
-                if let Err(error) = store.delete_pending(subscribe_id, &item.torrent.enclosure) {
+                if let Err(error) = with_foreground_store(state, |store| {
+                    store.delete_pending(subscribe_id, &item.torrent.enclosure)
+                })
+                .map_err(|response| format!("pending cleanup rejected ({})", response.status()))
+                .and_then(|result| result.map_err(|error| error.to_string()))
+                {
                     tracing::error!(%subscribe_id, %error, "清理孤儿 pending 失败");
                 } else {
                     tracing::info!(%subscribe_id, torrent = %item.torrent.title, "清理孤儿 pending：订阅已删除");
@@ -96,12 +101,11 @@ fn prune_absent_pending(
         // Review M-1: same rule as the background reconcile, including the
         // persisted info hash (D-M3).
         if let std::collections::hash_map::Entry::Vacant(entry) = hashes.entry(subscribe_id) {
-            let rows = with_bounded_store(state.store(), |store| {
+            let rows = with_store_read(state, |store| {
                 store
                     .load_pending_info_hashes(subscribe_id)
                     .unwrap_or_default()
-            })
-            .ok_or_else(busy_response)?;
+            })?;
             entry.insert(rows);
         }
         let sub_hashes = &hashes[&subscribe_id];
@@ -141,33 +145,33 @@ fn delete_absent_pending(
         tracing::debug!(%subscribe_id, "订阅正在搜索/转存，本轮跳过缺失任务清理");
         return Ok(false);
     };
-    with_bounded_store(state.store(), |store| {
-    if state.require_writable().is_err() || state.require_write_admitted().is_err() {
-        tracing::debug!(%subscribe_id, "Protected task read skips absent pending cleanup");
-        return false;
-    }
-    // Re-check under the guard: Transfer may have imported it meanwhile.
-    let still_active = store
-        .load_pending(subscribe_id)
-        .map(|rows| {
-            rows.iter()
-                .any(|(_, p)| p.torrent.enclosure == item.torrent.enclosure)
-        })
-        .unwrap_or(false);
-    if !still_active {
-        return true;
-    }
-    match store.delete_pending(subscribe_id, &item.torrent.enclosure) {
-        Ok(()) => {
-            tracing::info!(%subscribe_id, torrent = %item.torrent.title, "自动清理：种子已不在下载器且超过宽限期");
-            true
+    with_foreground_store(state, |store| {
+        if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+            tracing::debug!(%subscribe_id, "Protected task read skips absent pending cleanup");
+            return false;
         }
-        Err(error) => {
-            tracing::error!(%subscribe_id, %error, "自动清理缺失任务失败");
-            false
+        // Re-check under the guard: Transfer may have imported it meanwhile.
+        let still_active = store
+            .load_pending(subscribe_id)
+            .map(|rows| {
+                rows.iter()
+                    .any(|(_, p)| p.torrent.enclosure == item.torrent.enclosure)
+            })
+            .unwrap_or(false);
+        if !still_active {
+            return true;
         }
-    }
-    }).ok_or_else(busy_response)
+        match store.delete_pending(subscribe_id, &item.torrent.enclosure) {
+            Ok(()) => {
+                tracing::info!(%subscribe_id, torrent = %item.torrent.title, "自动清理：种子已不在下载器且超过宽限期");
+                true
+            }
+            Err(error) => {
+                tracing::error!(%subscribe_id, %error, "自动清理缺失任务失败");
+                false
+            }
+        }
+    })
 }
 
 fn subscribe_media_index(
@@ -278,14 +282,15 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
     let (pending, targets) = match state
         .http_work
         .run_to_completion(move || {
-            with_bounded_store(initial_state.store(), |store| {
+            with_store_read(&initial_state, |store| {
                 prune_orphan_pending(store, &initial_state)
             })
         })
         .await
     {
-        Ok(Some(inputs)) => inputs,
-        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => return busy_response(),
+        Ok(Ok(inputs)) => inputs,
+        Ok(Err(response)) => return response,
+        Err(crate::blocking_budget::BlockingError::Busy) => return busy_response(),
         Err(error) => {
             tracing::error!(%error, "Downloader pending capture worker failed");
             return crate::http::err(

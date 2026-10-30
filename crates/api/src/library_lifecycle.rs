@@ -10,7 +10,7 @@ impl ApiState {
     ) -> Result<Option<LibraryWorkLease>, String> {
         let resolved = store::LibraryPathScope::resolve_path(path).map_err(|e| e.to_string())?;
         let owner = {
-            let store = self.store.lock();
+            let store = self.store.as_ref();
             let owner = store
                 .library_owning_key(&resolved, kind)
                 .map_err(|e| e.to_string())?;
@@ -60,10 +60,7 @@ pub(crate) fn launch_library_removal(
 ) -> Result<store::LibraryRemoval, String> {
     let mut response = operation.clone();
     if operation.state == "succeeded" {
-        let store = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| "runtime.busy".to_string())?;
+        let store = state.store.clone();
         response = store
             .library_removal_status(&operation.operation_id)
             .map_err(|error| error.to_string())?
@@ -78,11 +75,9 @@ pub(crate) fn launch_library_removal(
         return Ok(response);
     }
     if operation.state == "failed" {
-        if let Err(error) =
-            state
-                .store
-                .lock()
-                .set_removal_state(&operation.operation_id, "draining", None)
+        if let Err(error) = state
+            .store
+            .set_removal_state(&operation.operation_id, "draining", None)
         {
             state
                 .library_work
@@ -165,10 +160,7 @@ async fn drain_with_retry(state: &ApiState, operation_id: &str) -> Result<(), St
 
 pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
     let operations = {
-        let store = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| "runtime.busy".to_string())?;
+        let store = state.store.clone();
         let mut operations = store
             .pending_library_removals()
             .map_err(|e| e.to_string())?;
@@ -286,7 +278,7 @@ pub(crate) enum BoundedLeaseError {
 impl LibraryWorkRegistry {
     pub fn acquire(
         self: &Arc<Self>,
-        store: &Mutex<store::Store>,
+        store: &store::Store,
         library_id: &str,
     ) -> Result<LibraryWorkLease, String> {
         let mut entries = self.entries.lock();
@@ -296,7 +288,6 @@ impl LibraryWorkRegistry {
         }
         if entry.cancelled
             || !store
-                .lock()
                 .library_accepts_work(library_id)
                 .map_err(|e| e.to_string())?
         {
@@ -317,55 +308,45 @@ impl LibraryWorkRegistry {
     }
     pub(crate) fn acquire_bounded(
         self: &Arc<Self>,
-        store: &Mutex<store::Store>,
+        store: &store::Store,
         library_id: &str,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         self.acquire_bounded_kind(store, library_id, LibraryWorkKind::Ordinary)
     }
 
-    pub(crate) fn acquire_from_readers(
+    pub(crate) fn acquire_optional(
         self: &Arc<Self>,
-        readers: &Arc<crate::store_readers::StoreReaders>,
-        library_id: &str,
-    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
-        self.acquire_bounded_with(library_id, LibraryWorkKind::Ordinary, || {
-            readers
-                .checkout(crate::http::store_wait::STORE_READ_WAIT)
-                .ok_or(BoundedLeaseError::StoreBusy)
-        })
-    }
-
-    pub(crate) fn acquire_optional_from_readers(
-        self: &Arc<Self>,
-        readers: &Arc<crate::store_readers::StoreReaders>,
+        store: &store::Store,
         library_id: &str,
         kind: LibraryWorkKind,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
-        self.acquire_bounded_with(library_id, kind, || {
-            readers
-                .checkout(crate::http::store_wait::STORE_READ_WAIT)
-                .ok_or(BoundedLeaseError::StoreBusy)
-        })
+        self.acquire_bounded_kind(store, library_id, kind)
     }
 
     fn acquire_bounded_kind(
         self: &Arc<Self>,
-        store: &Mutex<store::Store>,
+        store: &store::Store,
         library_id: &str,
         kind: LibraryWorkKind,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
-        self.acquire_bounded_with(library_id, kind, || {
-            store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or(BoundedLeaseError::StoreBusy)
-        })
+        store
+            .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+                self.acquire_bounded_with(store, library_id, kind)
+            })
+            .map_err(|error| match error {
+                store::StoreError::ReadBusy
+                | store::StoreError::ReadClosed
+                | store::StoreError::ReadDeadline
+                | store::StoreError::ReadCancelled => BoundedLeaseError::StoreBusy,
+                error => BoundedLeaseError::Store(error.to_string()),
+            })?
     }
 
-    fn acquire_bounded_with<R: std::ops::Deref<Target = store::Store>>(
+    fn acquire_bounded_with(
         self: &Arc<Self>,
+        store: &store::Store,
         library_id: &str,
         kind: LibraryWorkKind,
-        acquire: impl FnOnce() -> Result<R, BoundedLeaseError>,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         let mut entries = self
             .entries
@@ -375,7 +356,6 @@ impl LibraryWorkRegistry {
         if entry.blocked_by.is_some() {
             return Err(BoundedLeaseError::Reconfiguring);
         }
-        let store = acquire()?;
         if entry.cancelled
             || !store
                 .library_accepts_work(library_id)
@@ -419,24 +399,23 @@ impl LibraryWorkRegistry {
                 .entries
                 .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
                 .ok_or_else(crate::http::store_wait::busy_response)?;
-            let store = state
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or_else(crate::http::store_wait::busy_response)?;
-            state.require_writable()?;
-            state.require_write_admitted()?;
-            let current = match store.get_library(library_id) {
-                Ok(Some(current)) => current,
-                Ok(None) => return Ok(Err(store::StoreError::Missing(library_id.into()))),
+            let disabling = crate::http::store_wait::with_foreground_store(state, |store| {
+                store.library_write(|store| {
+                    let current = store
+                        .get_library(library_id)?
+                        .ok_or_else(|| store::StoreError::Missing(library_id.into()))?;
+                    let detect = detect.unwrap_or(current.detect_intros);
+                    let fingerprint = fingerprint.unwrap_or(current.enable_fingerprint);
+                    let disabling = (current.detect_intros && !detect)
+                        || (current.enable_fingerprint && !fingerprint);
+                    store.set_library_intro_settings(library_id, detect, fingerprint)?;
+                    Ok(disabling)
+                })
+            })?;
+            let disabling = match disabling {
+                Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             };
-            let detect = detect.unwrap_or(current.detect_intros);
-            let fingerprint = fingerprint.unwrap_or(current.enable_fingerprint);
-            let disabling =
-                (current.detect_intros && !detect) || (current.enable_fingerprint && !fingerprint);
-            if let Err(error) = store.set_library_intro_settings(library_id, detect, fingerprint) {
-                return Ok(Err(error));
-            }
             if disabling {
                 entries
                     .entry(library_id.into())
@@ -457,12 +436,12 @@ impl LibraryWorkRegistry {
     }
     pub fn freeze(
         &self,
-        store: &Mutex<store::Store>,
+        store: &store::Store,
         library_id: &str,
     ) -> Result<store::LibraryRemoval, store::StoreError> {
         let controls = {
             let mut entries = self.entries.lock();
-            let operation = store.lock().begin_library_removal(library_id)?;
+            let operation = store.begin_library_removal(library_id)?;
             let entry = entries.entry(library_id.into()).or_default();
             entry.cancelled = true;
             let controls: Vec<_> = entry
@@ -489,7 +468,7 @@ impl LibraryWorkRegistry {
     /// mid-operation still wins, because `cancelled` refuses this lease too.
     pub(crate) fn acquire_for_reconfiguration(
         self: &Arc<Self>,
-        store: &Mutex<store::Store>,
+        store: &store::Store,
         library_id: &str,
         operation_id: &str,
     ) -> Result<LibraryWorkLease, String> {
@@ -505,8 +484,6 @@ impl LibraryWorkRegistry {
             return Err(format!("Library 未被重配置操作 {operation_id} 冻结"));
         }
         if !store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or_else(|| "Store busy while acquiring reconfiguration work".to_string())?
             .library_accepts_work(library_id)
             .map_err(|e| e.to_string())?
         {

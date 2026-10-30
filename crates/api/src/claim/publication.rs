@@ -3,8 +3,6 @@
 use std::path::Path;
 
 use domain::{FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId, Media};
-#[cfg(test)]
-use parking_lot::Mutex;
 use store::library_write::{FilePublication as PublicationRequest, WriteScope};
 use store::metadata::nfo_input::NfoInputObserver;
 use store::{Store, StoreError};
@@ -24,7 +22,7 @@ struct PreparedClaim {
 /// Test fixture publication shares the production context/CAS writer.
 #[cfg(test)]
 pub(crate) fn publish_claimed_file(
-    shared: &Mutex<Store>,
+    shared: &Store,
     media: &Media,
     dest: &Path,
     facts: &ClaimedFacts,

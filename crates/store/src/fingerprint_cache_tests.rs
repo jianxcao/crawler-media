@@ -56,7 +56,11 @@ fn competing_source_writer_prevents_old_fingerprint_publication() {
         "UPDATE library_files SET file_revision = file_revision + 1, source_version = 'replacement' WHERE file_id = ?1",
         [file.file_id.to_string()],
     ).unwrap();
-    store.library.busy_handler(Some(busy)).unwrap();
+    store
+        .with_writer(crate::Db::Library, |conn| {
+            conn.busy_handler(Some(busy)).map_err(Into::into)
+        })
+        .unwrap();
     WAITING_FOR_WRITER.store(false, Ordering::SeqCst);
     let writer = std::thread::spawn(move || {
         let result = store.put_fingerprint_cache_checked(

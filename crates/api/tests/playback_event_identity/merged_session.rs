@@ -19,7 +19,7 @@ struct MergedE02Fixture {
 fn merged_e02_fixture(fix: &PresenceFixture) -> MergedE02Fixture {
     let tv_lib = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let tv_root = fix.root.join("tv");
         std::fs::create_dir_all(&tv_root).unwrap();
         guard
@@ -52,7 +52,7 @@ fn merged_e02_fixture(fix: &PresenceFixture) -> MergedE02Fixture {
     let file_id = domain::LedgerId::new();
     let root_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let roots = guard.list_library_roots().unwrap();
         roots
             .into_iter()
@@ -102,7 +102,7 @@ fn merged_e02_fixture(fix: &PresenceFixture) -> MergedE02Fixture {
 
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.insert_media(&show).unwrap();
         guard
             .publish_files(
@@ -121,7 +121,7 @@ fn merged_e02_fixture(fix: &PresenceFixture) -> MergedE02Fixture {
 
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
     MergedE02Fixture {
@@ -145,7 +145,7 @@ async fn merged_e02_open_episode_sessions(
     // Issue session for E02
     let session_id_e02 = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .issue_play_session(
                 user_id,
@@ -178,7 +178,7 @@ async fn merged_e02_open_episode_sessions(
     // Set initial E01 state (e.g. at 2000ms)
     let session_id_e01 = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .issue_play_session(
                 user_id,
@@ -193,7 +193,7 @@ async fn merged_e02_open_episode_sessions(
     };
     {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .commit_playback_event(
                 &store::playback::BoundPlaybackEvent {
@@ -241,7 +241,7 @@ async fn merged_e02_progress_touches_only_e02(
     let file_id = merged.file_id;
     let e01_before = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.unit_state(user_id, media_id, 1, 1).unwrap().unwrap()
     };
 
@@ -269,14 +269,14 @@ async fn merged_e02_progress_touches_only_e02(
 
     let e01_after = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.unit_state(user_id, media_id, 1, 1).unwrap().unwrap()
     };
     assert_eq!(e01_after, e01_before);
 
     let e02_after = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.unit_state(user_id, media_id, 1, 2).unwrap().unwrap()
     };
     assert_eq!(e02_after.position_ms, 5000);
@@ -291,7 +291,7 @@ async fn merged_no_id_other_unit_is_ignored() {
     merged_e02_open_episode_sessions(&fix, &merged).await;
     let read = |season, episode| {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .unit_state(merged.user_id, merged.media_id, season, episode)
             .unwrap()

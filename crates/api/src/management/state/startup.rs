@@ -28,7 +28,7 @@ impl ApiState {
             self.chapter_frames.start();
             crate::scan_probe_dispatch::start_dispatcher(self.clone());
             // T11: Old browse projection periodic refresh is obsolete with library_items single table
-            match self.store.lock().recover_orphaned_scans() {
+            match self.store.as_ref().recover_orphaned_scans() {
                 Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的扫描操作"),
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),

@@ -93,7 +93,7 @@ fn publish_event_observations(
 
         let sub_res = publish_presence(&lease, || {
             let store_arc = state.store();
-            let guard = store_arc.lock();
+            let guard = &store_arc;
             let current_snapshot = guard.library_ownership()?;
             if !current_snapshot.accepts_work(&lib_id) {
                 return Err(PresencePublishError::LibraryDeleting);
@@ -142,7 +142,7 @@ pub(crate) fn observe_event(
 ) -> Result<LedgerPresenceResult, PresenceError> {
     let snapshot = {
         let store_arc = state.store();
-        let guard = store_arc.lock();
+        let guard = &store_arc;
         guard.library_ownership()?
     };
 
@@ -152,7 +152,7 @@ pub(crate) fn observe_event(
     loop {
         let candidates = {
             let store = state.store();
-            let guard = store.lock();
+            let guard = &store;
             guard.watcher_presence_page(&path.to_string_lossy(), cursor.as_deref(), 100)?
         };
         let Some(last) = candidates.last() else {

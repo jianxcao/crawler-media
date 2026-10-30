@@ -67,14 +67,7 @@ async fn strict_language_contract_and_legacy_credentials_are_atomic() {
         .await
         .unwrap();
     assert_eq!(old.status(), StatusCode::BAD_REQUEST);
-    assert!(
-        state
-            .store()
-            .lock()
-            .get_setting("tmdb.api_key")
-            .unwrap()
-            .is_none()
-    );
+    assert!(state.store().get_setting("tmdb.api_key").unwrap().is_none());
     for body in [
         serde_json::json!({}),
         serde_json::json!({"language":null,"expected_revision":0}),
@@ -127,7 +120,6 @@ async fn retry_validates_library_owner_and_failed_state() {
     let state = stage(&temp);
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .unwrap();
@@ -137,7 +129,6 @@ async fn retry_validates_library_owner_and_failed_state() {
     let library_id = library.id.parse::<domain::LibraryId>().unwrap();
     let changed = state
         .store()
-        .lock()
         .change_metadata_language(0, "ja", "change", 0)
         .unwrap();
     let operation = changed
@@ -197,7 +188,6 @@ async fn retry_validates_library_owner_and_failed_state() {
     assert_eq!(
         state
             .store()
-            .lock()
             .get_library(&library.id)
             .unwrap()
             .unwrap()
@@ -226,7 +216,6 @@ async fn retry_validates_library_owner_and_failed_state() {
     assert_eq!(
         state
             .store()
-            .lock()
             .get_library(&library.id)
             .unwrap()
             .unwrap()
@@ -257,7 +246,6 @@ async fn language_freeze_is_unavailable_for_library_and_root_reads() {
     let state = stage(&temp);
     let changed = state
         .store()
-        .lock()
         .change_metadata_language(0, "ja", "change", 0)
         .unwrap();
     let app = router(state.clone());
@@ -336,7 +324,7 @@ async fn completed_language_operations_obey_thirty_day_retention() {
         clock.0.store(NOW, std::sync::atomic::Ordering::SeqCst);
     }
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     store
         .prune_terminal_operations(NOW - WINDOW, 100, false)
         .unwrap();

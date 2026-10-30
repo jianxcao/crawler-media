@@ -312,7 +312,7 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
     seed_backlog_fixture(&temp, media_id, ledger_id);
 
     let original = (METADATA_PENDING + FINGERPRINT_PENDING) as i64;
-    let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+    let store = Arc::new(Store::open(temp.path()).unwrap());
     let gate = Gate::new();
     gate.release();
     let capture = Arc::new(GatedCapture::new(gate.clone()));
@@ -321,12 +321,12 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
     );
 
     let metadata_pending = store
-        .lock()
+        .as_ref()
         .pending_probe_dispatch_ids(store::ProbeDispatchStage::Metadata, 64)
         .unwrap()
         .len();
     let fingerprint_pending = store
-        .lock()
+        .as_ref()
         .pending_probe_dispatch_ids(store::ProbeDispatchStage::Fingerprint, 16)
         .unwrap()
         .len();
@@ -359,7 +359,7 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
     );
     let drained = Instant::now();
     loop {
-        let (pending, terminal) = durable_counts(&store.lock());
+        let (pending, terminal) = durable_counts(store.as_ref());
         if pending + terminal == original && capture.max_active() <= 1 {
             break;
         }
@@ -370,7 +370,7 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
     }
 
     manager.shutdown_workers().await.unwrap();
-    let (pending, terminal) = durable_counts(&store.lock());
+    let (pending, terminal) = durable_counts(store.as_ref());
     assert_eq!(
         pending + terminal,
         original,

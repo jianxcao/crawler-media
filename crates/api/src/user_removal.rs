@@ -88,7 +88,7 @@ impl UserRemovalService {
 
     /// Drive an accepted removal to its end (or to a recorded failure).
     pub fn continue_removal(&self, user_id: UserId) -> Result<String, String> {
-        let record = read_record(&self.state.store.lock(), user_id)?
+        let record = read_record(&self.state.store.as_ref(), user_id)?
             .ok_or_else(|| format!("no pending removal for user {user_id}"))?;
         self.drive(user_id, record)
     }
@@ -126,7 +126,7 @@ impl UserRemovalService {
 
     fn drive(&self, user_id: UserId, mut record: UserRemovalRecord) -> Result<String, String> {
         let operation_id = record.operation_id.clone();
-        let store = self.state.store.lock();
+        let store = self.state.store.as_ref();
         loop {
             let step = run_phase(&store, user_id, &record.phase);
             match step {
@@ -178,11 +178,11 @@ impl UserRemovalService {
         let keys = self
             .state
             .store
-            .lock()
+            .as_ref()
             .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
             .map_err(|e| e.to_string())?;
         let mut failures = Vec::new();
-        prune_results(&self.state.store.lock(), crate::job_loop::unix_now());
+        prune_results(&self.state.store.as_ref(), crate::job_loop::unix_now());
         for key in keys {
             if key.starts_with(USER_REMOVAL_RESULT_PREFIX)
                 || key.starts_with(USER_REMOVAL_DONE_PREFIX)
@@ -194,7 +194,7 @@ impl UserRemovalService {
                 failures.push(format!("{key}: invalid user id"));
                 continue;
             };
-            let record = match read_record(&self.state.store.lock(), uid) {
+            let record = match read_record(&self.state.store.as_ref(), uid) {
                 Ok(Some(record)) => record,
                 Ok(None) => continue,
                 Err(error) => {

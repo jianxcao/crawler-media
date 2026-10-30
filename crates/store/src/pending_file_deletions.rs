@@ -66,28 +66,11 @@ impl Store {
         path: &str,
         now: i64,
     ) -> Result<Option<QueuedFileDeletion>, StoreError> {
-        Ok(self.library.query_row(
-            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
-             WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1))
-               AND next_retry_at<=?2 AND attempts<?3",
-            params![path,now,MAX_FILE_DELETION_ATTEMPTS],
-            |row| Ok(QueuedFileDeletion {
-                path:row.get(0)?, file_id:row.get(1)?,
-                file_size:row.get::<_,Option<i64>>(2)?.map(|v| v as u64),
-                file_inode:row.get::<_,Option<i64>>(3)?.map(|v| v as u64),
-                path_key:row.get(4)?,
-                deletion_id:row.get(5)?,
-            }),
-        ).optional()?)
+        self.with_library_read(|db| db.due_file_deletion(path, now))
     }
 
     pub fn file_deletion_pending(&self, path: &str) -> Result<bool, StoreError> {
-        Ok(self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pending_file_deletions
-                WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1)))",
-            [path],
-            |row| row.get(0),
-        )?)
+        self.with_library_read(|db| db.file_deletion_pending(path))
     }
 
     /// Publish an identity captured without the process-wide Store lock. Callers
@@ -99,54 +82,7 @@ impl Store {
         reason: &str,
         identity: Option<(u64, Option<u64>)>,
     ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let file_id: Option<String> = tx
-            .query_row(
-                "SELECT file_id FROM library_files
-                 WHERE path_key = norm_path_key(?1)
-                 LIMIT 1",
-                [path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(file_id) = &file_id {
-            let placing: bool = tx.query_row(
-                "SELECT publication_state='pending' FROM library_files WHERE file_id=?1",
-                [file_id],
-                |row| row.get(0),
-            )?;
-            let renaming: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pending_file_renames WHERE file_id=?1)",
-                [file_id],
-                |row| row.get(0),
-            )?;
-            if renaming || placing {
-                tracing::warn!(
-                    file_id,
-                    renaming,
-                    placing,
-                    "拒绝删除仍有文件发布所有者的路径"
-                );
-                return Err(StoreError::Protected(format!(
-                    "file {file_id} has a rename or placement owner"
-                )));
-            }
-        }
-        tx.execute(
-            "INSERT INTO pending_file_deletions (path, path_key, reason, file_id, file_size, file_inode, deletion_id)
-             VALUES (?1, norm_path_key(?1), ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT DO NOTHING",
-            params![
-                path,
-                reason,
-                file_id,
-                identity.map(|(size, _)| size as i64),
-                identity.and_then(|(_, ino)| ino).map(|ino| ino as i64),
-                uuid::Uuid::new_v4().to_string(),
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| db.enqueue_file_deletion_observed(path, reason, identity))
     }
 
     /// Review M-3: deletions whose backoff has expired (`next_retry_at <= now`).
@@ -157,21 +93,7 @@ impl Store {
     /// a sort it can get for free from a scan) and turn the window into a full
     /// scan of the queue; `tests/library_query_plans.rs` pins the plan.
     pub fn list_due_file_deletions(&self, now: i64) -> Result<Vec<QueuedFileDeletion>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT path, file_id, file_size, file_inode, path_key, deletion_id FROM pending_file_deletions
-             WHERE next_retry_at <= ?1 AND attempts < ?2 ORDER BY next_retry_at",
-        )?;
-        let rows = stmt.query_map(params![now, MAX_FILE_DELETION_ATTEMPTS], |row| {
-            Ok(QueuedFileDeletion {
-                path: row.get(0)?,
-                path_key: row.get(4)?,
-                deletion_id: row.get(5)?,
-                file_id: row.get(1)?,
-                file_size: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-                file_inode: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.with_library_read(|db| db.list_due_file_deletions(now))
     }
 
     /// Reload the exact durable generation without resolving a retired root alias.
@@ -180,93 +102,46 @@ impl Store {
         entry: &QueuedFileDeletion,
         now: i64,
     ) -> Result<Option<QueuedFileDeletion>, StoreError> {
-        Ok(self.library.query_row(
-            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
-             WHERE path_key=?1 AND deletion_id=?2 AND next_retry_at<=?3 AND attempts<?4",
-            params![entry.path_key,entry.deletion_id,now,MAX_FILE_DELETION_ATTEMPTS],
-            |row| Ok(QueuedFileDeletion {
-                path:row.get(0)?, file_id:row.get(1)?,
-                file_size:row.get::<_,Option<i64>>(2)?.map(|v|v as u64),
-                file_inode:row.get::<_,Option<i64>>(3)?.map(|v|v as u64),
-                path_key:row.get(4)?, deletion_id:row.get(5)?,
-            }),
-        ).optional()?)
+        self.with_library_read(|db| db.due_file_deletion_intent(entry, now))
     }
 
     pub fn file_deletion_intent_pending(
         &self,
         entry: &QueuedFileDeletion,
     ) -> Result<bool, StoreError> {
-        Ok(self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2)",
-            params![entry.path_key,entry.deletion_id], |row| row.get(0),
-        )?)
+        self.with_library_read(|db| db.file_deletion_intent_pending(entry))
     }
 
     pub fn file_id_at_deletion_path(
         &self,
         entry: &QueuedFileDeletion,
     ) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .library
-            .query_row(
-                "SELECT file_id FROM library_files WHERE path_key=?1",
-                [&entry.path_key],
-                |row| row.get(0),
-            )
-            .optional()?)
+        self.with_library_read(|db| db.file_id_at_deletion_path(entry))
     }
 
     /// Drop only this stale generation; a replacement intent and file stay intact.
     pub fn abandon_file_deletion(&self, entry: &QueuedFileDeletion) -> Result<(), StoreError> {
-        self.library.execute(
-            "DELETE FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
-            params![entry.path_key, entry.deletion_id],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.abandon_file_deletion(entry))
     }
 
     /// Review L-10: deletions that exhausted their retries, with last error.
     pub fn list_stuck_file_deletions(&self) -> Result<Vec<(String, Option<String>)>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT path, last_error FROM pending_file_deletions
-             WHERE attempts >= ?1 ORDER BY rowid",
-        )?;
-        let rows = stmt.query_map([MAX_FILE_DELETION_ATTEMPTS], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.with_library_read(|db| db.list_stuck_file_deletions())
     }
 
     /// Make a queued deletion due now (manual "retry now").
     pub fn reset_file_deletion_backoff(&self, path: &str) -> Result<(), StoreError> {
-        self.library.execute(
-            "UPDATE pending_file_deletions SET next_retry_at = 0, attempts = 0
-             WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1))",
-            [path],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.reset_file_deletion_backoff(path))
     }
 
     /// Current file id at `path`, if any.
     pub fn file_id_at_path(&self, path: &str) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .library
-            .query_row(
-                "SELECT file_id FROM library_files WHERE path_key = norm_path_key(?1) LIMIT 1",
-                [path],
-                |row| row.get(0),
-            )
-            .optional()?)
+        self.with_library_read(|db| db.file_id_at_path(path))
     }
 
     /// Paths still waiting to be deleted, oldest first.
     pub fn list_pending_file_deletions(&self) -> Result<Vec<String>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT path FROM pending_file_deletions ORDER BY rowid")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.with_library_read(|db| db.list_pending_file_deletions())
     }
 
     /// Record a failed attempt with exponential backoff (capped at one day).
@@ -276,58 +151,17 @@ impl Store {
         now: i64,
         error: &str,
     ) -> Result<(), StoreError> {
-        self.library.execute(
-            "UPDATE pending_file_deletions
-             SET attempts = attempts + 1,
-                 next_retry_at = ?3 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
-                 last_error = ?4
-             WHERE path_key = ?1 AND deletion_id = ?2",
-            params![entry.path_key, entry.deletion_id, now, error],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.record_file_deletion_failure(entry, now, error))
     }
 
     /// Complete only this generation, atomically removing its file facts and intent.
     /// The persisted key keeps recovery independent of the current root registry.
     pub fn complete_file_deletion(&self, entry: &QueuedFileDeletion) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let queued_file_id: Option<Option<String>> = tx
-            .query_row(
-                "SELECT file_id FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
-                params![entry.path_key, entry.deletion_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(queued_file_id) = queued_file_id else {
-            return Ok(());
-        };
-        let current: Option<(String, String)> = tx
-            .query_row(
-                "SELECT file_id,library_id FROM library_files WHERE path_key=?1",
-                [&entry.path_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((file_id, library_id)) = current
-            && Some(file_id.as_str()) == queued_file_id.as_deref()
-        {
-            let (_, affected) = crate::library_write::delete::delete_files_in_tx(
-                &tx,
-                library_id.parse()?,
-                &[file_id.parse()?],
-            )?;
-            let subscribed = self.subscribed_media(&affected)?;
-            crate::library_write::orphan_media::purge_orphan_media_in_tx(
-                &tx,
-                &affected,
-                &subscribed,
-            )?;
-        }
-        tx.execute(
-            "DELETE FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",
-            params![entry.path_key, entry.deletion_id],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.with_reference_write(|library, subscribe| {
+            library.complete_file_deletion_with_references(subscribe, entry)
+        })
     }
 }
+
+#[path = "pending_file_deletions/connection.rs"]
+mod connection;

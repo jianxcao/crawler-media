@@ -22,7 +22,7 @@ mod delivery;
 mod worker;
 
 pub struct MediaPosterService {
-    readers: Arc<crate::store_readers::StoreReaders>,
+    store: Arc<Store>,
     catalog: Arc<dyn Catalog>,
     cache: DiskPosterCache,
     fetcher: Arc<dyn ImageFetcher>,
@@ -35,12 +35,9 @@ pub struct MediaPosterService {
 }
 
 impl MediaPosterService {
-    pub(crate) fn new(
-        readers: Arc<crate::store_readers::StoreReaders>,
-        catalog: Arc<dyn Catalog>,
-    ) -> Self {
+    pub(crate) fn new(store: Arc<Store>, catalog: Arc<dyn Catalog>) -> Self {
         Self::configured(
-            readers,
+            store,
             catalog,
             DiskPosterCache::default_dir(),
             Arc::new(RestricedImageFetcher),
@@ -48,24 +45,23 @@ impl MediaPosterService {
     }
 
     pub fn with_custom_fetcher(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         catalog: Arc<dyn Catalog>,
         cache_dir: std::path::PathBuf,
         fetcher: Arc<dyn ImageFetcher>,
-    ) -> Result<Self, store::StoreError> {
-        let readers = Arc::new(crate::store_readers::StoreReaders::open(&store.lock(), 4)?);
-        Ok(Self::configured(readers, catalog, cache_dir, fetcher))
+    ) -> Self {
+        Self::configured(store, catalog, cache_dir, fetcher)
     }
 
     fn configured(
-        readers: Arc<crate::store_readers::StoreReaders>,
+        store: Arc<Store>,
         catalog: Arc<dyn Catalog>,
         cache_dir: std::path::PathBuf,
         fetcher: Arc<dyn ImageFetcher>,
     ) -> Self {
         let clock = Arc::new(SystemPosterClock::new());
         Self {
-            readers,
+            store,
             catalog,
             cache: DiskPosterCache::new(cache_dir),
             fetcher,

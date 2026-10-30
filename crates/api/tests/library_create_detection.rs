@@ -38,7 +38,6 @@ async fn library_creation_honors_explicit_detection_switches() {
         assert_eq!(data["enable_fingerprint"], enabled);
         let library = state
             .store()
-            .lock()
             .get_library(data["id"].as_str().unwrap())
             .unwrap()
             .unwrap();
@@ -74,7 +73,7 @@ async fn omitted_detection_switches_are_disabled_and_invalid_input_is_atomic() {
     let data = common::json_data(response).await;
     assert_eq!(data["detect_intros"], false);
     assert_eq!(data["enable_fingerprint"], false);
-    let count = state.store().lock().list_libraries().unwrap().len();
+    let count = state.store().list_libraries().unwrap().len();
     for extra in [
         json!({"detect_intros":"false"}),
         json!({"enable_fingerprint":null}),
@@ -96,6 +95,6 @@ async fn omitted_detection_switches_are_disabled_and_invalid_input_is_atomic() {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(state.store().lock().list_libraries().unwrap().len(), count);
+        assert_eq!(state.store().list_libraries().unwrap().len(), count);
     }
 }

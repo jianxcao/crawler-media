@@ -96,6 +96,57 @@ struct Fixture {
     roots: Vec<PathBuf>,
 }
 
+/// Fail subsequent heavy reads on the actual pool without changing its schema.
+/// The current request must keep rendering the facts captured before file IO.
+fn fail_file_details_reads_on_first_io(fixture: &Fixture) -> Arc<AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    let failing = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let pool = fixture.state.store().reader_pool(store::Db::Library);
+    let mut leases = (0..8)
+        .map(|_| pool.try_checkout().unwrap())
+        .collect::<Vec<_>>();
+    for lease in &mut leases {
+        let failing = failing.clone();
+        let rejected = rejected.clone();
+        lease
+            .with_connection(
+                &store::QueryBudget {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+                |conn| {
+                    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                        if failing.load(Ordering::SeqCst)
+                            && matches!(
+                                ctx.action,
+                                AuthAction::Read {
+                                    table_name: "file_details",
+                                    ..
+                                }
+                            )
+                        {
+                            rejected.fetch_add(1, Ordering::SeqCst);
+                            Authorization::Deny
+                        } else {
+                            Authorization::Allow
+                        }
+                    }));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    drop(leases);
+    fixture.files.fail_store_on_first_io(Box::new(move || {
+        failing.store(true, Ordering::SeqCst);
+    }));
+    rejected
+}
+
 fn new_state(dir: &Path, files: Arc<CountingFiles>) -> ApiState {
     let store = Store::open(dir.join("data")).unwrap();
     ApiState::new(
@@ -168,7 +219,7 @@ fn tv_fixture_seeded(shows: usize, episodes: usize, seed: impl Fn(&Path)) -> Fix
     std::fs::create_dir_all(&root).unwrap();
     let library_id = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .create_library(
                 MediaKind::Tv,
@@ -183,14 +234,14 @@ fn tv_fixture_seeded(shows: usize, episodes: usize, seed: impl Fn(&Path)) -> Fix
     };
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         for show in 0..shows {
-            let media_id = new_media(&store, &format!("Show{show:03}"));
+            let media_id = new_media(store, &format!("Show{show:03}"));
             let show_dir = root.join(format!("Show{show:03}"));
             std::fs::create_dir_all(&show_dir).unwrap();
             seed(&show_dir);
             for episode in 1..=episodes {
-                insert_episode(&store, &show_dir, media_id, 1, episode as u32);
+                insert_episode(store, &show_dir, media_id, 1, episode as u32);
             }
         }
     }
@@ -206,7 +257,7 @@ fn tv_fixture_seeded(shows: usize, episodes: usize, seed: impl Fn(&Path)) -> Fix
 /// 按标题找 Media（测试 fixture 里标题唯一）。
 fn media_for_title(state: &ApiState, title: &str) -> MediaId {
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     for row in store.list_file_coverage().unwrap() {
         let Some(media) = store.get_media(row.file.media_id).unwrap() else {
             continue;
@@ -315,7 +366,7 @@ fn adopt_page_metadata(state: &ApiState, media: MediaId) {
         },
     };
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     store
         .adopt_metadata(&adoption(domain::EntityScope::Work), 1)
         .unwrap();

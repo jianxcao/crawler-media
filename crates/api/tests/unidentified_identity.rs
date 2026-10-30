@@ -114,7 +114,7 @@ async fn identify_and_transfer_may_change_parked_movie_owner_to_explicit_tv_targ
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let file = store
         .file_coverage_by_path(body["data"]["path"].as_str().unwrap())
         .unwrap()

@@ -2,13 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use domain::{Media, MediaId, MediaKind};
-use parking_lot::Mutex;
 
 use super::*;
 
 struct Fixture {
     _dir: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     file: domain::LibraryFile,
 }
 
@@ -71,7 +70,7 @@ impl Fixture {
         .unwrap();
         Self {
             _dir: dir,
-            store: Arc::new(Mutex::new(store)),
+            store: Arc::new(store),
             file,
         }
     }
@@ -79,7 +78,7 @@ impl Fixture {
     fn queue(&self) -> store::QueuedFileDeletion {
         let path = self.file.path.to_string_lossy();
         let identity = store::file_identity(&path);
-        let store = self.store.lock();
+        let store = self.store.as_ref();
         store
             .enqueue_file_deletion_observed(&path, "test", identity)
             .unwrap();
@@ -102,7 +101,7 @@ fn queued_same_inode_equal_size_replacement_is_preserved() {
     );
     retry_queued_deletions(&f.store).unwrap();
     assert_eq!(std::fs::read(&f.file.path).unwrap(), b"replaced");
-    let store = f.store.lock();
+    let store = &f.store;
     assert!(store.file_coverage_by_id(f.file.file_id).unwrap().is_some());
     assert!(store.list_pending_file_deletions().unwrap().is_empty());
 }
@@ -110,29 +109,22 @@ fn queued_same_inode_equal_size_replacement_is_preserved() {
 #[test]
 fn path_appearing_after_an_absent_observation_is_preserved_without_a_file_row() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Mutex::new(Store::open(dir.path().join("data")).unwrap());
+    let store = Store::open(dir.path().join("data")).unwrap();
     let path = dir.path().join("appeared.mkv");
     store
-        .lock()
         .enqueue_file_deletion_observed(path.to_str().unwrap(), "test", None)
         .unwrap();
     std::fs::write(&path, b"new bytes").unwrap();
     retry_queued_deletions(&store).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), b"new bytes");
-    assert!(
-        store
-            .lock()
-            .list_pending_file_deletions()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.list_pending_file_deletions().unwrap().is_empty());
 }
 
 #[test]
 fn committed_deletion_intent_survives_a_fact_cleanup_failure() {
     let f = Fixture::new();
     f.queue();
-    let db = rusqlite::Connection::open(f.store.lock().data_dir().join("library.db")).unwrap();
+    let db = rusqlite::Connection::open(f.store.data_dir().join("library.db")).unwrap();
     db.execute_batch(
         "CREATE TRIGGER fail_cleanup BEFORE DELETE ON library_files
         BEGIN SELECT RAISE(ABORT,'cleanup unavailable'); END;",
@@ -142,31 +134,20 @@ fn committed_deletion_intent_survives_a_fact_cleanup_failure() {
     assert!(!f.file.path.exists());
     assert!(
         f.store
-            .lock()
             .file_coverage_by_id(f.file.file_id)
             .unwrap()
             .is_some()
     );
-    assert_eq!(
-        f.store.lock().list_pending_file_deletions().unwrap().len(),
-        1
-    );
+    assert_eq!(f.store.list_pending_file_deletions().unwrap().len(), 1);
     db.execute_batch("DROP TRIGGER fail_cleanup").unwrap();
     retry_queued_deletions(&f.store).unwrap();
     assert!(
         f.store
-            .lock()
             .file_coverage_by_id(f.file.file_id)
             .unwrap()
             .is_none()
     );
-    assert!(
-        f.store
-            .lock()
-            .list_pending_file_deletions()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(f.store.list_pending_file_deletions().unwrap().is_empty());
 }
 
 #[test]
@@ -187,7 +168,7 @@ fn same_path_worker_rechecks_intent_after_the_previous_claim_finishes() {
     let premature = done.recv_timeout(Duration::from_millis(100));
     // Model a previous owner completing and a new source appearing before the
     // waiting worker can claim the path. It must reload the durable intent.
-    f.store.lock().abandon_file_deletion(&entry).unwrap();
+    f.store.abandon_file_deletion(&entry).unwrap();
     std::fs::write(&f.file.path, b"new source").unwrap();
     drop(held);
     let completion = done.recv_timeout(Duration::from_secs(3));
@@ -200,7 +181,6 @@ fn same_path_worker_rechecks_intent_after_the_previous_claim_finishes() {
     assert_eq!(std::fs::read(&f.file.path).unwrap(), b"new source");
     assert!(
         f.store
-            .lock()
             .file_coverage_by_id(f.file.file_id)
             .unwrap()
             .is_some()
@@ -211,7 +191,7 @@ fn same_path_worker_rechecks_intent_after_the_previous_claim_finishes() {
 fn stale_worker_cannot_drain_a_recreated_intent_with_the_same_file_identity() {
     let f = Fixture::new();
     let old = f.queue();
-    f.store.lock().abandon_file_deletion(&old).unwrap();
+    f.store.abandon_file_deletion(&old).unwrap();
     let current = f.queue();
     assert_eq!(
         (old.file_id.as_ref(), old.file_size, old.file_inode),
@@ -224,7 +204,7 @@ fn stale_worker_cannot_drain_a_recreated_intent_with_the_same_file_identity() {
     assert_ne!(old.deletion_id, current.deletion_id);
     process_queued_deletion(&f.store, &old, crate::job_loop::unix_now()).unwrap();
     assert_eq!(std::fs::read(&f.file.path).unwrap(), b"original");
-    let store = f.store.lock();
+    let store = &f.store;
     assert!(store.file_coverage_by_id(f.file.file_id).unwrap().is_some());
     assert_eq!(
         store
@@ -240,7 +220,7 @@ fn durable_deletion_survives_retirement_of_its_library_root_alias() {
     let f = Fixture::with_alias(true);
     let entry = f.queue();
     {
-        let store = f.store.lock();
+        let store = &f.store;
         let operation = store
             .begin_library_removal(&f.file.library_id.to_string())
             .unwrap();
@@ -264,11 +244,5 @@ fn durable_deletion_survives_retirement_of_its_library_root_alias() {
         !f.file.path.exists(),
         "retired root alias hid the durable deletion"
     );
-    assert!(
-        f.store
-            .lock()
-            .list_pending_file_deletions()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(f.store.list_pending_file_deletions().unwrap().is_empty());
 }

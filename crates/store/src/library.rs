@@ -13,18 +13,23 @@ pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
 
 use super::{Store, StoreError};
 
+/// Owned facts for verification's read/observe/write boundary.
+struct VerificationFile {
+    file_id: String,
+    path: String,
+    library_id: String,
+    root_id: String,
+    media_id: String,
+    revision: i64,
+    source_version: String,
+    missing_at: Option<i64>,
+    publication: String,
+}
+
 impl Store {
     /// Primary root of the kind's default library — where new content lands.
     pub fn library_root(&self, kind: MediaKind) -> Result<PathBuf, StoreError> {
-        let path: String = self.library.query_row(
-            "SELECT r.display_path FROM library_roots r
-             JOIN libraries l ON l.library_id = r.library_id
-             WHERE l.kind = ?1 AND l.is_default = 1
-             ORDER BY r.sort_order, r.display_path LIMIT 1",
-            params![kind.as_str()],
-            |row| row.get(0),
-        )?;
-        Ok(PathBuf::from(path))
+        self.with_library_read(|db| db.library_root(kind))
     }
 
     /// 读取文件的流信息缓存（探测任务写入）。
@@ -32,43 +37,7 @@ impl Store {
     /// 缓存按源版本有效：文件内容被重扫替换后，旧流的行内事实不再描述磁盘上的文件，
     /// 因此这里返回 None 让调用方重新探测，而不是把上一代的流信息当成现状。
     pub fn get_file_meta(&self, ledger_id: &str) -> Result<Option<library::Tracks>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT d.audio_json, d.subtitle_json, d.video_json, d.tracks_version
-                 FROM file_details d
-                 JOIN library_files f ON f.file_id = d.file_id
-                 WHERE d.file_id = ?1 AND d.source_version = f.source_version",
-                params![ledger_id],
-                |row| {
-                    let video_raw: Option<String> = row.get(2).ok().flatten();
-                    let tracks_version: i64 = row.get(3)?;
-                    if tracks_version < CURRENT_TRACKS_VERSION {
-                        return Ok(None);
-                    }
-                    // 旧版缓存行没有 video_json（NULL）：视为「未完成探测」，
-                    // 返回 None 让调用方重新探测并补写完整流信息。
-                    if video_raw.is_none() {
-                        return Ok(None);
-                    }
-                    let audio =
-                        serde_json::from_str::<Vec<library::AudioTrack>>(&row.get::<_, String>(0)?)
-                            .unwrap_or_default();
-                    let subtitles = serde_json::from_str::<Vec<library::SubtitleTrack>>(
-                        &row.get::<_, String>(1)?,
-                    )
-                    .unwrap_or_default();
-                    let video = video_raw
-                        .and_then(|s| serde_json::from_str::<library::VideoTrack>(&s).ok());
-                    Ok(Some(library::Tracks {
-                        video,
-                        audio,
-                        subtitles,
-                    }))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
+        self.with_library_read(|db| db.get_file_meta(ledger_id))
     }
 
     pub fn put_file_meta(
@@ -76,7 +45,7 @@ impl Store {
         ledger_id: &str,
         tracks: &library::Tracks,
     ) -> Result<(), StoreError> {
-        self.put_file_meta_versioned(ledger_id, tracks, None, None)
+        self.with_library_write(|db| db.put_file_meta(ledger_id, tracks))
     }
 
     /// 写入流信息缓存。
@@ -90,73 +59,16 @@ impl Store {
         source_version: Option<&str>,
         format_duration_ms: Option<i64>,
     ) -> Result<(), StoreError> {
-        let tx = self
-            .library
-            .is_autocommit()
-            .then(|| crate::write_tx(&self.library))
-            .transpose()?;
-        ensure_file_integrity_writable(&self.library, ledger_id)?;
-        let changed = self.library.execute(
-            "INSERT INTO file_details (
-                 file_id, source_revision, source_version, tracks_version,
-                 audio_json, subtitle_json, video_json, format_duration_ms
-             )
-             SELECT f.file_id, f.file_revision, f.source_version, ?5, ?2, ?3, ?4, ?7
-             FROM library_files f
-             WHERE f.file_id = ?1 AND (?6 IS NULL OR f.source_version = ?6)
-             ON CONFLICT(file_id) DO UPDATE SET
-               source_revision = excluded.source_revision,
-               source_version = excluded.source_version,
-               audio_json = excluded.audio_json,
-               subtitle_json = excluded.subtitle_json,
-               video_json = excluded.video_json,
-               tracks_version = excluded.tracks_version,
-               format_duration_ms = excluded.format_duration_ms",
-            params![
-                ledger_id,
-                serde_json::to_string(&tracks.audio)?,
-                serde_json::to_string(&tracks.subtitles)?,
-                tracks
-                    .video
-                    .as_ref()
-                    .map(|v| serde_json::to_string(v).unwrap_or_default()),
-                CURRENT_TRACKS_VERSION,
-                source_version,
-                format_duration_ms,
-            ],
-        )?;
-        if changed == 0 {
-            tracing::warn!(
-                ledger_id,
-                source_version,
-                "流信息缓存写入被忽略：文件行不存在或源版本已变化"
-            );
-        }
-        if let Some(tx) = tx {
-            tx.commit()?;
-        }
-        Ok(())
+        self.with_library_write(|db| {
+            db.put_file_meta_versioned(ledger_id, tracks, source_version, format_duration_ms)
+        })
     }
 
     pub fn get_cached_chapters(
         &self,
         ledger_id: &str,
     ) -> Result<Option<Vec<library::ChapterMarker>>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT d.chapters_json
-                 FROM file_details d
-                 JOIN library_files f ON f.file_id = d.file_id
-                 WHERE d.file_id = ?1 AND d.source_version = f.source_version",
-                params![ledger_id],
-                |row| {
-                    let json_str: Option<String> = row.get(0)?;
-                    Ok(json_str.and_then(|s| serde_json::from_str(&s).ok()))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
+        self.with_library_read(|db| db.get_cached_chapters(ledger_id))
     }
 
     /// 写入章节缓存（标记检测与探测共用同一写入口）。
@@ -165,45 +77,15 @@ impl Store {
         ledger_id: &str,
         chapters: &[library::ChapterMarker],
     ) -> Result<(), StoreError> {
-        let tx = self
-            .library
-            .is_autocommit()
-            .then(|| crate::write_tx(&self.library))
-            .transpose()?;
-        ensure_file_integrity_writable(&self.library, ledger_id)?;
-        let json_str = serde_json::to_string(chapters)?;
-        if !upsert_chapter_cache_tx(&self.library, ledger_id, &json_str)? {
-            tracing::warn!(ledger_id, "章节缓存写入被忽略：文件行不存在或源版本已变化");
-        }
-        if let Some(tx) = tx {
-            tx.commit()?;
-        }
-        Ok(())
+        self.with_library_write(|db| db.put_cached_chapters(ledger_id, chapters))
     }
 
     pub fn clear_cached_chapters(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = self
-            .library
-            .is_autocommit()
-            .then(|| crate::write_tx(&self.library))
-            .transpose()?;
-        ensure_file_integrity_writable(&self.library, ledger_id)?;
-        self.library.execute(
-            "UPDATE file_details SET chapters_json = NULL WHERE file_id = ?1",
-            params![ledger_id],
-        )?;
-        if let Some(tx) = tx {
-            tx.commit()?;
-        }
-        Ok(())
+        self.with_library_write(|db| db.clear_cached_chapters(ledger_id))
     }
 
     pub fn delete_file_meta_by_ledger_id(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        ensure_file_integrity_writable(&tx, ledger_id)?;
-        delete_file_meta_for_ledger(&tx, ledger_id)?;
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| db.delete_file_meta_by_ledger_id(ledger_id))
     }
 }
 
@@ -214,114 +96,46 @@ impl Store {
         roots: &[std::path::PathBuf],
         now: i64,
     ) -> Result<(i64, i64), StoreError> {
-        let mut missing = 0;
-        let mut restored = 0;
-        let observed = self
-            .file_paths()?
+        self.verify_library_files_with(roots, now, std::path::Path::exists)
+    }
+
+    /// Verify recorded paths with an injected filesystem observer.
+    pub fn verify_library_files_with(
+        &self,
+        roots: &[std::path::PathBuf],
+        now: i64,
+        mut exists: impl FnMut(&std::path::Path) -> bool,
+    ) -> Result<(i64, i64), StoreError> {
+        let files = self.with_library_read(|db| db.file_paths())?;
+        let observed = files
             .into_iter()
-            .filter(|(_, path)| {
+            .filter(|file| {
                 roots
                     .iter()
-                    .any(|root| std::path::Path::new(path).starts_with(root))
+                    .any(|root| std::path::Path::new(&file.path).starts_with(root))
             })
-            .map(|(id, path)| (id, path.clone(), std::path::Path::new(&path).exists()))
+            .map(|file| {
+                let present = exists(std::path::Path::new(&file.path));
+                (file, present)
+            })
             .collect::<Vec<_>>();
-        let tx = crate::write_tx(&self.library)?;
-        for (id, _, _) in &observed {
-            ensure_file_integrity_writable(&tx, id)?;
-        }
-        for (file_id, path, exists) in observed {
-            if !roots
-                .iter()
-                .any(|root| std::path::Path::new(&path).starts_with(root))
-            {
-                continue;
-            }
-            if exists {
-                let n = tx.execute(
-                    "UPDATE library_files SET missing_at = NULL WHERE file_id = ?1 AND missing_at IS NOT NULL",
-                    params![file_id],
-                )?;
-                if n > 0 {
-                    restored += 1;
-                }
-            } else {
-                let n = tx.execute(
-                    "UPDATE library_files SET missing_at = ?1 WHERE file_id = ?2 AND missing_at IS NULL",
-                    params![now, file_id],
-                )?;
-                if n > 0 {
-                    missing += 1;
-                }
-            }
-        }
-        tx.commit()?;
-        Ok((missing, restored))
+        self.with_library_write(|db| db.apply_file_verification(&observed, now))
     }
 
     /// path → missing_at 映射（接口打「文件缺失」标用）。
     pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT path_key, missing_at FROM library_files WHERE missing_at IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.with_library_read(|db| db.missing_at_by_path())
     }
 
     /// 文件重新入库后清除缺失标记（摘要随事实在同一事务里重算）。
     pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let mut owners = Vec::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT library_id, media_id FROM library_files
-                 WHERE display_path = ?1 AND (missing_at IS NOT NULL OR presence_state <> 'present')",
-            )?;
-            let rows = stmt.query_map(params![path], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            for row in rows {
-                let (library_id, media_id) = row?;
-                owners.push((
-                    library_id.parse::<domain::LibraryId>()?,
-                    media_id.parse::<domain::MediaId>()?,
-                ));
-            }
-        }
-        for (_, media) in &owners {
-            crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                &tx, *media,
-            )?;
-        }
-        let changed = tx.execute(
-            "UPDATE library_files SET missing_at = NULL, presence_state = 'present'
-             WHERE display_path = ?1 AND (missing_at IS NOT NULL OR presence_state <> 'present')",
-            params![path],
-        )?;
-        for (library_id, media_id) in owners {
-            crate::library_write::reduce::reduce_library_media(&tx, library_id, media_id)?;
-        }
-        tx.commit()?;
-        Ok(changed > 0)
-    }
-
-    /// Every file row as `(file_id, display_path)`.
-    fn file_paths(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT file_id, display_path FROM library_files")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.with_library_write(|db| db.clear_ledger_missing(path))
     }
 }
 
 /// Remove all caches in the same transaction as ledger deletion when applicable.
 pub(crate) fn delete_file_meta_for_ledger(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     ledger_id: &str,
 ) -> Result<(), StoreError> {
     tx.execute("DELETE FROM file_details WHERE file_id = ?1", [ledger_id])?;
@@ -331,7 +145,7 @@ pub(crate) fn delete_file_meta_for_ledger(
 /// Drop context-keyed derived state (fingerprints, attempts, probe stages,
 /// samples) of one file; cold details are left to the caller.
 pub(crate) fn delete_derived_contexts_for_ledger(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     ledger_id: &str,
 ) -> Result<(), StoreError> {
     tx.execute(
@@ -387,3 +201,6 @@ fn ensure_file_integrity_writable(tx: &rusqlite::Connection, file: &str) -> Resu
     }
     Ok(())
 }
+
+#[path = "library/connection.rs"]
+mod connection;

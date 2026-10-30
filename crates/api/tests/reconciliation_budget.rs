@@ -35,7 +35,7 @@ fn seed_reconciliation_tree(
     tmp: &std::path::Path,
 ) -> (String, std::path::PathBuf) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library_root = tmp.join("library_root");
     std::fs::create_dir_all(&library_root).unwrap();
 
@@ -85,7 +85,7 @@ fn seed_reconciliation_tree(
         filter_score: None,
         ..Default::default()
     };
-    publish_fixture_file(&guard, &spec1).unwrap();
+    publish_fixture_file(guard, &spec1).unwrap();
 
     let media_id2 = MediaId::new();
     let media2 = Media {
@@ -121,7 +121,7 @@ fn seed_reconciliation_tree(
         filter_score: None,
         ..Default::default()
     };
-    publish_fixture_file(&guard, &spec2).unwrap();
+    publish_fixture_file(guard, &spec2).unwrap();
 
     // Put the files into a new shared directory (NewDir/test_movie1.mkv and NewDir/test_movie2.mkv)
     let new_dir = library_root.join("NewDir");
@@ -296,7 +296,6 @@ async fn housekeeping_uses_bounded_blocking_admission() {
     assert!(
         state
             .store()
-            .lock()
             .file_coverage_by_path(root.join("OldDir/test_movie1.mkv").to_str().unwrap())
             .unwrap()
             .is_some(),
@@ -305,7 +304,7 @@ async fn housekeeping_uses_bounded_blocking_admission() {
 }
 
 struct ReconciliationFileRead {
-    store: Arc<parking_lot::Mutex<Store>>,
+    store: Arc<Store>,
     library_id: String,
     change: &'static str,
     entered: std::sync::atomic::AtomicBool,
@@ -324,11 +323,15 @@ impl api::file_stat_read::FileStatRead for ReconciliationFileRead {
     fn is_file(&self, path: &std::path::Path) -> bool {
         use std::sync::atomic::Ordering;
         self.entered.store(true, Ordering::SeqCst);
-        // Background workers (probe-obligation dispatcher etc.) legitimately take
-        // the Store lock for short DB reads; a bare `try_lock` races them. Wait a
-        // bounded time instead: if the handler itself held the lock across this
-        // FS call, the wait still times out and `unlocked` stays false.
-        if let Some(store) = self.store.try_lock_for(Duration::from_secs(5)) {
+        // Probe the actual writer, then release it before re-entrant Store
+        // mutations below; filesystem callbacks must never inherit that guard.
+        if self
+            .store
+            .writers()
+            .with_writer_timeout(Duration::ZERO, store::Db::Library, |_| Ok(()))
+            .is_ok()
+        {
+            let store = self.store.as_ref();
             self.unlocked.store(true, Ordering::SeqCst);
             let library = store.get_library(&self.library_id).unwrap().unwrap();
             match self.change {
@@ -380,7 +383,7 @@ impl api::file_stat_read::FileStatRead for ReconciliationFileRead {
                         filter_score: cov.file.filter_score,
                         ..Default::default()
                     };
-                    publish_fixture_file(&store, &spec).unwrap();
+                    publish_fixture_file(store, &spec).unwrap();
                 }
                 "unchanged" => {}
                 _ => panic!("unexpected fixture change"),
@@ -448,7 +451,7 @@ async fn reconciliation_revalidates_off_lock_scope_freeze_and_source() {
             usize::from(!applied)
         );
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         assert_eq!(
             store
                 .file_coverage_by_path(from.to_str().unwrap())

@@ -66,7 +66,7 @@ fn fixture() -> (tempfile::TempDir, ApiState, Media, Subscribe) {
         search_interval_secs: 1800,
     };
     {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.insert_media(&media).unwrap();
         store.insert_filter(&filter).unwrap();
         store.insert_subscribe(&subscribe).unwrap();
@@ -129,7 +129,7 @@ fn recorder<'a>(
     plan: &'a TransferPlan,
 ) -> PlannedPublicationRecorder<'a> {
     let (fingerprint, snapshot) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             store
                 .read_fingerprint(&plan.library_id, subscribe.media_id)
@@ -157,14 +157,13 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
     let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
     let lease = state.acquire_library_work(&plan.library_id).unwrap();
     store::test_support::reconfigure_default_root(
-        &state.store.lock(),
+        &state.store,
         media.kind,
         &tmp.path().join("new-root"),
     )
     .unwrap();
     let fingerprint = state
         .store
-        .lock()
         .read_fingerprint(&plan.library_id, media.id)
         .unwrap();
     assert_eq!(
@@ -184,7 +183,6 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
             fingerprint,
             snapshot: state
                 .store
-                .lock()
                 .subscribe_library_snapshot(&subscribe, media.kind)
                 .unwrap(),
         },
@@ -202,7 +200,7 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
         result.is_err(),
         "obsolete root must not be reserved: {result:?}"
     );
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+    assert!(state.store.list_file_coverage().unwrap().is_empty());
     assert!(!candidate_cov.file.path.exists());
 }
 
@@ -227,7 +225,6 @@ fn reservation_and_publication_keep_the_destination_identity() {
     assert!(
         state
             .store
-            .lock()
             .transfer_pending(&destination.display().to_string())
             .unwrap(),
         "the reservation is a pending row at the destination"
@@ -240,7 +237,6 @@ fn reservation_and_publication_keep_the_destination_identity() {
 
     let library_path = state
         .store
-        .lock()
         .db_paths()
         .into_iter()
         .find(|path| path.ends_with("library.db"))
@@ -325,7 +321,7 @@ fn restarted_pending_reservation_reuses_file_identity_and_version() {
     let mut published = recovered.clone();
     published.file.publication = domain::FilePublication::Published;
     subscribe::TransferRecorder::published(&restarted, &published).unwrap();
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     assert_eq!(
         store
             .file_coverage_by_path(&recovered.file.path.display().to_string())
@@ -371,7 +367,6 @@ fn reserve(
 ) -> domain::FileCoverage {
     state
         .store
-        .lock()
         .reserve_transfer(
             &write_scope(plan),
             coverage,
@@ -445,15 +440,19 @@ fn publication_writes_confirmed_facts_mode_source_and_artwork() {
     let outcome = outcome_of(confirmed, &source);
 
     let observation = publication_observation(&outcome, "hardlink");
-    let published = publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap();
+    let published = state
+        .store
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
+        .unwrap();
 
     assert_eq!(published.file_id, reserved.file.file_id);
     assert_eq!(published.transfer_mode.as_deref(), Some("hardlink"));
@@ -461,7 +460,7 @@ fn publication_writes_confirmed_facts_mode_source_and_artwork() {
         published.version == reserved.file.version,
         "the reservation's version is kept"
     );
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let files = store
         .library_file_page(plan.library_id.parse().unwrap(), media.id, None, 100)
         .unwrap()
@@ -508,7 +507,6 @@ fn publication_refuses_a_reservation_whose_version_moved() {
     };
     state
         .store
-        .lock()
         .publish_files(
             &write_scope(&plan),
             &[store::library_write::FilePublication {
@@ -524,7 +522,6 @@ fn publication_refuses_a_reservation_whose_version_moved() {
     assert_eq!(
         state
             .store
-            .lock()
             .get_file_version(reserved.file.file_id)
             .unwrap()
             .unwrap()
@@ -534,15 +531,19 @@ fn publication_refuses_a_reservation_whose_version_moved() {
 
     let outcome = outcome_of(confirmed, &source);
     let observation = publication_observation(&outcome, "hardlink");
-    let error = publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap_err();
+    let error = state
+        .store
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
+        .unwrap_err();
     assert_reservation_changed(error);
 }
 
@@ -559,17 +560,21 @@ fn publication_refuses_a_destination_without_a_reservation() {
     let outcome = outcome_of(coverage, &source);
 
     let observation = publication_observation(&outcome, "copy");
-    let error = publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap_err();
+    let error = state
+        .store
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
+        .unwrap_err();
     assert_reservation_changed(error);
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+    assert!(state.store.list_file_coverage().unwrap().is_empty());
 }
 
 /// The collected coverage widens a span the reservation recorded as one unit:
@@ -583,7 +588,6 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
     // A reservation without units (the shape an old reservation could leave behind).
     state
         .store
-        .lock()
         .publish_files(
             &write_scope(&plan),
             &[store::library_write::FilePublication {
@@ -599,7 +603,6 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
     assert!(
         state
             .store
-            .lock()
             .get_file_units(reserved.file.file_id)
             .unwrap()
             .is_empty()
@@ -609,21 +612,21 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
     widened.units = vec![domain::UnitKey::new(2, 3), domain::UnitKey::new(2, 4)];
     let outcome = outcome_of(widened, &source);
     let observation = publication_observation(&outcome, "copy");
-    publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap();
+    state
+        .store
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
+        .unwrap();
     assert_eq!(
-        state
-            .store
-            .lock()
-            .get_file_units(reserved.file.file_id)
-            .unwrap(),
+        state.store.get_file_units(reserved.file.file_id).unwrap(),
         vec![domain::UnitKey::new(2, 3), domain::UnitKey::new(2, 4)]
     );
 }
@@ -638,7 +641,6 @@ fn publication_keeps_unknown_coverage_unknown() {
     let source = tmp.path().join("downloads/The Matrix.mkv");
     state
         .store
-        .lock()
         .publish_files(
             &write_scope(&plan),
             &[store::library_write::FilePublication {
@@ -654,20 +656,20 @@ fn publication_keeps_unknown_coverage_unknown() {
     confirmed.units = Vec::new();
     let outcome = outcome_of(confirmed, &source);
     let observation = publication_observation(&outcome, "copy");
-    publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap();
-    let units = state
+    state
         .store
-        .lock()
-        .get_file_units(reserved.file.file_id)
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
         .unwrap();
+    let units = state.store.get_file_units(reserved.file.file_id).unwrap();
     assert!(units.is_empty(), "unknown coverage became {units:?}");
 }
 
@@ -683,21 +685,21 @@ fn publication_prefers_reserved_units_over_carried_ones() {
     let outcome = outcome_of(confirmed, &source);
 
     let observation = publication_observation(&outcome, "copy");
-    publish_transfer_file(
-        &state.store.lock(),
-        &plan.library_id,
-        plan.config_revision,
-        &outcome.files[0],
-        Some(&source),
-        &observation,
-    )
-    .unwrap();
+    state
+        .store
+        .library_write(|db| {
+            publish_transfer_file(
+                db,
+                &plan.library_id,
+                plan.config_revision,
+                &outcome.files[0],
+                Some(&source),
+                &observation,
+            )
+        })
+        .unwrap();
     assert_eq!(
-        state
-            .store
-            .lock()
-            .get_file_units(reserved.file.file_id)
-            .unwrap(),
+        state.store.get_file_units(reserved.file.file_id).unwrap(),
         vec![domain::UnitKey::new(1, 1)]
     );
 }

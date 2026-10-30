@@ -83,14 +83,14 @@ fn refresh(state: &ApiState, id: &str) -> Response {
         Ok(lease) => lease,
         Err(error) => return lease_error(error),
     };
-    let captured = match store_wait::with_bounded_store(state.store(), |store| {
+    let captured = match store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         capture(store, id)
     }) {
-        Some(Ok(captured)) => captured,
-        Some(Err(response)) => return response,
-        None => return store_wait::busy_response(),
+        Ok(Ok(captured)) => captured,
+        Ok(Err(response)) => return response,
+        Err(response) => return response,
     };
     tracing::info!(
         library_id = id,
@@ -134,7 +134,7 @@ fn refresh(state: &ApiState, id: &str) -> Response {
 }
 
 fn check_work(state: &ApiState, id: &str, lease: &LibraryWorkLease) -> Result<(), Response> {
-    store_wait::with_bounded_store(state.store(), |store| {
+    store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         if lease.control().is_cancelled() || !store.library_accepts_work(id).map_err(store_error)? {
@@ -145,6 +145,5 @@ fn check_work(state: &ApiState, id: &str, lease: &LibraryWorkLease) -> Result<()
             ));
         }
         Ok(())
-    })
-    .unwrap_or_else(|| Err(store_wait::busy_response()))
+    })?
 }

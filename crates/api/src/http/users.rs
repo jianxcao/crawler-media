@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
-use crate::http::store_wait::{busy_response, store_read, store_write, with_bounded_store};
+use crate::http::store_wait::{busy_response, store_read, store_write, with_foreground_store};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
@@ -180,12 +180,11 @@ pub(crate) async fn delete_user(
     let outcome = state
         .http_work
         .run_to_completion(move || {
-            let completed = with_bounded_store(worker.store(), |store| {
+            let completed = with_foreground_store(&worker, |store| {
                 worker.require_writable()?;
                 worker.require_write_admitted()?;
                 removal_preflight(store, id)
-            })
-            .ok_or_else(busy_response)??;
+            })??;
             if let Some(completed) = completed {
                 return Ok((completed, None));
             }

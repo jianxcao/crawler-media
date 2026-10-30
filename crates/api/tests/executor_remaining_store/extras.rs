@@ -5,7 +5,7 @@ fn extras_failure_rolls_back_parked_identity_and_published_file_together() {
     let f = Fixture::new();
     let (file, path) = {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let row = store
             .file_coverage_for_media(f.media)
             .unwrap()
@@ -31,7 +31,7 @@ fn extras_failure_rolls_back_parked_identity_and_published_file_together() {
     let body = runtime().block_on(json_response(response));
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert!(store.file_coverage_by_id(file).unwrap().is_some());
     assert!(
         store

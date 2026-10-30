@@ -62,7 +62,7 @@ pub(crate) fn checkpoint_fresh(
     }
     let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
     let (checkpoints_res, source_versions_res) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let _hold = super::hold::trace_lock_section("checkpoints");
         // 两个读都在同一把 Store 锁内：断点与 durable 版本必须是同一时刻的一致视图。
         (
@@ -200,7 +200,7 @@ pub(super) fn invalidate_changed_facts(
         })
         .collect();
     let now_ms = crate::job_loop::unix_now() * 1000;
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let _hold = super::hold::trace_lock_section("invalidate");
     let mut affected = Vec::new();
     let mut failed_paths = std::collections::HashSet::new();
@@ -244,7 +244,7 @@ struct ChangedTarget {
 }
 
 fn changed_targets(state: &ApiState, changed: &[PathBuf]) -> Result<Vec<ChangedTarget>, String> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let _hold = super::hold::trace_lock_section("invalidate_targets");
     let mut targets = Vec::new();
     for path in changed {

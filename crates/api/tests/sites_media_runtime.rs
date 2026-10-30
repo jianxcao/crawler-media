@@ -321,7 +321,7 @@ async fn organize_side_effect_really_renames_on_disk() {
     std::fs::create_dir_all(&root).unwrap();
     let library = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .create_library(
                 MediaKind::Movie,
@@ -351,9 +351,9 @@ async fn organize_side_effect_really_renames_on_disk() {
     std::fs::write(&old, b"payload").unwrap();
     {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store.insert_media(&media).unwrap();
-        publish_fixture_file(&store, &fixture_file(media.id, &old)).unwrap();
+        publish_fixture_file(store, &fixture_file(media.id, &old)).unwrap();
     }
 
     let app = router(state.clone());
@@ -376,7 +376,7 @@ async fn organize_side_effect_really_renames_on_disk() {
     );
     assert!(!old.exists(), "source file must be gone after organize");
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     assert!(
         store
             .file_coverage_by_path(&new.display().to_string())

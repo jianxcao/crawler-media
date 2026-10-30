@@ -15,7 +15,7 @@ async fn scan_seen_checkpoints_and_avoids_reprocessing() {
 
     let store_arc = fix.state.store();
     let op = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .enqueue_scan(&fix.library_id, "sig", &[], 1000)
             .unwrap()
@@ -23,7 +23,7 @@ async fn scan_seen_checkpoints_and_avoids_reprocessing() {
 
     // Checkpoint f1 as seen
     {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .record_scan_seen(&op.id, std::slice::from_ref(&f1))
             .unwrap();
@@ -41,7 +41,7 @@ async fn scan_seen_checkpoints_and_avoids_reprocessing() {
 
     // Clear seen
     {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.clear_scan_seen(&op.id).unwrap();
         assert!(
             !guard
@@ -54,7 +54,7 @@ async fn scan_seen_checkpoints_and_avoids_reprocessing() {
 /// 轮询 store 直到 operation 进入终态，返回落库的 report。
 async fn wait_scan_terminal(fix: &PresenceFixture, op_id: &str) -> Value {
     for _ in 0..200 {
-        let op = fix.state.store().lock().scan_operation(op_id).unwrap();
+        let op = fix.state.store().scan_operation(op_id).unwrap();
         if let Some(op) = op
             && !op.status.is_active()
         {
@@ -77,7 +77,7 @@ async fn resumed_scan_skips_checkpointed_files() {
     // 第一轮：真实扫完 f1（入账 + 探测入队）。
     let op_id = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -85,7 +85,7 @@ async fn resumed_scan_skips_checkpointed_files() {
     };
     fix.state.scan_coordinator.trigger_next(&fix.state);
     wait_scan_terminal(&fix, &op_id).await;
-    let first = fix.state.store().lock().list_file_coverage().unwrap();
+    let first = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(first.len(), 1, "第一轮应入账 f1");
     let f1_row = first[0].file.file_id.to_string();
     // 让 f1 的探测结束，这样“断点生效”不会被“本来就没再探测”混淆。真实探测
@@ -94,19 +94,22 @@ async fn resumed_scan_skips_checkpointed_files() {
         let store = fix.state.store();
         assert!(
             store
-                .lock()
+                .as_ref()
                 .probe_unit_recorded_for_ledger(&f1_row)
                 .unwrap(),
             "f1 应已产生探测单元"
         );
-        let active = store.lock().active_probe_unit_for_ledger(&f1_row).unwrap();
+        let active = store
+            .as_ref()
+            .active_probe_unit_for_ledger(&f1_row)
+            .unwrap();
         if let Some(unit) = active {
             store
-                .lock()
+                .as_ref()
                 .finish_probe_unit(&unit.job_id, &f1_row, true, None)
                 .unwrap();
             store
-                .lock()
+                .as_ref()
                 .finish_probe_job(&unit.job_id, true, None)
                 .unwrap();
         }
@@ -115,7 +118,6 @@ async fn resumed_scan_skips_checkpointed_files() {
     let f1_job = fix
         .state
         .store()
-        .lock()
         .latest_probe_job_for_ledger(&f1_row)
         .unwrap();
 
@@ -125,7 +127,7 @@ async fn resumed_scan_skips_checkpointed_files() {
     std::fs::write(&f2, b"2").unwrap();
     let op2_id = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 2000)
             .unwrap();
@@ -153,7 +155,7 @@ async fn resumed_scan_skips_checkpointed_files() {
         "断点命中的 f1 不得被重复处理: {report}"
     );
     assert_eq!(report["inserted"], 1, "只有新增的 f2 入账: {report}");
-    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     let f2_row = rows
         .iter()
@@ -171,13 +173,13 @@ async fn resumed_scan_skips_checkpointed_files() {
     let store = fix.state.store();
     assert!(
         store
-            .lock()
+            .as_ref()
             .probe_unit_recorded_for_ledger(&f2_row)
             .unwrap(),
         "新增文件必须进入探测队列"
     );
     assert_eq!(
-        store.lock().latest_probe_job_for_ledger(&f1_row).unwrap(),
+        store.as_ref().latest_probe_job_for_ledger(&f1_row).unwrap(),
         f1_job,
         "断点命中的 f1 不得被重新探测"
     );
@@ -193,7 +195,7 @@ async fn restored_file_is_reprocessed_and_missing_cleared() {
     fix.insert_media_and_ledger(rel);
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let (missing, _restored) = guard
             .verify_library_files(std::slice::from_ref(&fix.root), 1)
             .unwrap();
@@ -213,7 +215,7 @@ async fn restored_file_is_reprocessed_and_missing_cleared() {
     let sig = fix.scope_signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
@@ -238,7 +240,7 @@ async fn restored_file_is_reprocessed_and_missing_cleared() {
     );
 
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard.missing_at_by_path().unwrap().is_empty(),
         "恢复后 missing 标记必须清掉"
@@ -257,7 +259,7 @@ async fn changed_file_is_reprocessed_despite_checkpoint() {
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
@@ -298,7 +300,7 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         // 预置派生探测事实：内容变化后必须失效。
         let tracks = library::Tracks {
             video: Some(library::VideoTrack {
@@ -356,7 +358,7 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
     );
 
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard.get_file_meta(&ledger_id).unwrap().is_none(),
         "变化文件的派生探测事实必须失效"
@@ -385,7 +387,7 @@ async fn stale_scope_signature_cancels_operation_without_ledgering() {
 
     let op_id = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, "definitely-old-scope", &[], 1000)
             .unwrap()
@@ -408,12 +410,7 @@ async fn stale_scope_signature_cancels_operation_without_ledgering() {
         done.report
     );
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }

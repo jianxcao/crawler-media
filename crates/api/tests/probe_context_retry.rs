@@ -9,7 +9,7 @@ use store::{ProbeStage, ProbeStageCompletion, ProbeStageKey};
 use support::ProbeScenario;
 
 fn raw(s: &ProbeScenario) -> rusqlite::Connection {
-    rusqlite::Connection::open(s.store.lock().data_dir().join("library.db")).unwrap()
+    rusqlite::Connection::open(s.store.as_ref().data_dir().join("library.db")).unwrap()
 }
 
 /// `n` failed outro rows of superseded contexts on `file_id`, due before `due_ms`.
@@ -118,7 +118,7 @@ async fn late_worker_and_restart_cannot_revive_a_retired_context() {
         context_key: "superseded-0000".into(),
         stage: ProbeStage::Outro,
     };
-    let late = s.store.lock().finish_probe_stage(
+    let late = s.store.as_ref().finish_probe_stage(
         &key,
         "late-job",
         &ProbeStageCompletion::Failed {

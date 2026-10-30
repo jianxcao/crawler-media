@@ -36,7 +36,7 @@ mod api_fixture {
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
         };
-        state.store().lock().insert_site(&site).unwrap();
+        state.store().insert_site(&site).unwrap();
         (tmp, state, site)
     }
 }
@@ -62,13 +62,7 @@ fn credential_save_rechecks_readonly_and_maintenance_after_load() {
             if maintenance { 503 } else { 409 }
         );
         assert_eq!(
-            state
-                .store()
-                .lock()
-                .get_site(site.id)
-                .unwrap()
-                .unwrap()
-                .cookie,
+            state.store().get_site(site.id).unwrap().unwrap().cookie,
             site.cookie
         );
         drop(closed);
@@ -83,9 +77,9 @@ fn credential_save_does_not_overwrite_a_concurrent_site_update() {
     renewed.cookie = Some("renewed".into());
     let mut changed = site.clone();
     changed.url = "https://changed.invalid".into();
-    state.store().lock().save_site(&changed).unwrap();
+    state.store().save_site(&changed).unwrap();
     assert!(creds.save(&renewed).is_err());
-    assert!(state.store().lock().get_site(site.id).unwrap().unwrap() == changed);
+    assert!(state.store().get_site(site.id).unwrap().unwrap() == changed);
 }
 
 #[test]
@@ -96,7 +90,7 @@ fn credential_save_publishes_current_cookie() {
     renewed.cookie = Some("renewed".into());
     creds.save(&renewed).unwrap();
     assert!(creds.take_rejection().is_none());
-    assert!(state.store().lock().get_site(site.id).unwrap().unwrap() == renewed);
+    assert!(state.store().get_site(site.id).unwrap().unwrap() == renewed);
 }
 
 fn queued_credential_save(maintenance: bool) {
@@ -105,7 +99,7 @@ fn queued_credential_save(maintenance: bool) {
 
     let (_tmp, state, site) = fixture();
     let gate = state.write_gate();
-    let writers = state.store().lock().writers();
+    let writers = state.store().writers();
     let renewed = Site {
         cookie: Some("renewed".into()),
         ..site.clone()
@@ -147,13 +141,13 @@ fn queued_credential_save(maintenance: bool) {
         "queued Site credentials must not publish after admission closes"
     );
     assert_eq!(status, Some(if maintenance { 503 } else { 409 }));
-    assert!(state.store().lock().get_site(site.id).unwrap().unwrap() == site);
+    assert!(state.store().get_site(site.id).unwrap().unwrap() == site);
     drop(closed);
     let _ = state.clone().with_instance_writable(true);
     let creds = AdmittedCredentials::new(&state, site);
     creds.save(&renewed).unwrap();
     assert!(creds.take_rejection().is_none());
-    assert!(state.store().lock().get_site(renewed.id).unwrap().unwrap() == renewed);
+    assert!(state.store().get_site(renewed.id).unwrap().unwrap() == renewed);
 }
 
 #[test]

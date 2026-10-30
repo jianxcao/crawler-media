@@ -12,14 +12,14 @@ async fn visible_scope_loads_strictly_owned_media_ids() {
 
     let admin_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     let scope = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        api::visible_scope::VisibleScope::load(&guard, admin_id).unwrap()
+        let guard = store_arc.as_ref();
+        api::visible_scope::VisibleScope::load(guard, admin_id).unwrap()
     };
 
     assert!(scope.media_ids().contains(&m1));

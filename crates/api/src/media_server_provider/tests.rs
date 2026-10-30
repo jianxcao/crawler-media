@@ -32,15 +32,10 @@ fn readonly_page_keeps_original_token_and_skips_incidental_device_binding() {
     .unwrap();
     let user_id = state
         .store
-        .lock()
         .user_id_by_token("management-secret")
         .unwrap()
         .unwrap();
-    state
-        .store
-        .lock()
-        .set_user_token(user_id, "device-token")
-        .unwrap();
+    state.store.set_user_token(user_id, "device-token").unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -63,24 +58,12 @@ fn readonly_page_keeps_original_token_and_skips_incidental_device_binding() {
         state.instance_writable.store(false, Ordering::SeqCst);
         let response = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            !state
-                .store
-                .lock()
-                .device_is_revocable(user_id, "bedroom")
-                .unwrap()
-        );
+        assert!(!state.store.device_is_revocable(user_id, "bedroom").unwrap());
         state.instance_writable.store(true, Ordering::SeqCst);
         for _ in 0..2 {
             let response = app.clone().oneshot(request()).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
-        assert!(
-            state
-                .store
-                .lock()
-                .device_is_revocable(user_id, "bedroom")
-                .unwrap()
-        );
+        assert!(state.store.device_is_revocable(user_id, "bedroom").unwrap());
     });
 }

@@ -129,7 +129,7 @@ fn optional_capture_state(
     manager.set_library_registry(state.library_work.clone());
     state.probe = manager;
     {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         store
             .set_library_intro_settings(&harness.library_id, true, true)
             .unwrap();
@@ -222,8 +222,7 @@ fn optional_switch_stops_running_capture(field: &str, sampling_mode: &str) {
         harness.assert_old_markers_intact();
         assert!(
             harness
-                .store
-                .lock()
+                .store.as_ref()
                 .get_fingerprint_cache(&unit.row.file.file_id.to_string())
                 .unwrap()
                 .is_none()
@@ -264,7 +263,7 @@ fn mixed_owner_optional_cancellation(target_completed: bool) {
     );
     std::fs::write(&sibling_row.file.path, b"finite sibling source").unwrap();
     let sibling_id = {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -303,8 +302,7 @@ fn mixed_owner_optional_cancellation(target_completed: bool) {
     if target_completed {
         let target = harness.rows[0].file.file_id.to_string();
         harness
-            .store
-            .lock()
+            .store.as_ref()
             .finish_probe_unit(&job_id, &target, true, None)
             .unwrap();
     }
@@ -321,8 +319,7 @@ fn mixed_owner_optional_cancellation(target_completed: bool) {
     assert_eq!(
         state
             .probe
-            .store
-            .lock()
+            .store.as_ref()
             .get_probe_job(&job_id)
             .unwrap()
             .unwrap()
@@ -334,15 +331,14 @@ fn mixed_owner_optional_cancellation(target_completed: bool) {
         },
         "the sibling's accepted work remains pending"
     );
-    let pending = harness.store.lock().probe_job_units(&job_id).unwrap();
+    let pending = harness.store.as_ref().probe_job_units(&job_id).unwrap();
     assert!(pending.iter().any(|unit| {
         unit.ledger_id == sibling.row.file.file_id.to_string() && unit.status == "queued"
     }));
     state.probe.finish(&sibling, true);
     let job = state
         .probe
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -378,7 +374,7 @@ fn disabling_detection_cancels_completed_refresh_waiting_for_atomic_publication(
     // The worker has finished all capture units; atomic marker publication has
     // not started. Persist the real completion receipts without calling publish.
     let completed = {
-        let store = harness.store.lock();
+        let store = harness.store.as_ref();
         store
             .finish_probe_unit(&job_id, &first.row.file.file_id.to_string(), true, None)
             .unwrap();
@@ -402,8 +398,7 @@ fn disabling_detection_cancels_completed_refresh_waiting_for_atomic_publication(
     // Resume the already prepared worker after PATCH, using its prior receipt.
     super::super::marker_jobs::apply_marker_refresh(&state.probe, &completed, &second);
     let job = harness
-        .store
-        .lock()
+        .store.as_ref()
         .get_probe_job(&job_id)
         .unwrap()
         .unwrap();
@@ -529,8 +524,7 @@ fn disabling_detection_during_comparison_prevents_season_model_publication() {
         "cancelled season run must not succeed"
     );
     let models = harness
-        .store
-        .lock()
+        .store.as_ref()
         .list_fingerprint_models(&harness.media_id.to_string(), 1)
         .unwrap();
     assert!(

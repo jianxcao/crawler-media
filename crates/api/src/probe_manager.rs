@@ -16,7 +16,6 @@ use marker::fingerprint::capture_types::FingerprintCaptureEngine;
 use marker::{ChromaprintEngine, FingerprintEngine};
 
 use crate::Store;
-use crate::store_readers::StoreReaders;
 
 pub(crate) use projection::{
     coverage_for_ledger_id, covers_season, ledger_id, require_episode_coordinates,
@@ -81,8 +80,7 @@ pub(crate) enum ProbeEnqueueError {
 }
 
 pub struct ProbeManager {
-    store: Arc<Mutex<Store>>,
-    readers: Arc<StoreReaders>,
+    store: Arc<Store>,
     store_key: std::path::PathBuf,
     store_lease: Mutex<Option<store_lease::Lease>>,
     recovery_deferred: AtomicBool,
@@ -121,7 +119,7 @@ pub struct ProbeManager {
 }
 
 impl ProbeManager {
-    pub fn new(store: Arc<Mutex<Store>>) -> Result<Self, store::StoreError> {
+    pub fn new(store: Arc<Store>) -> Result<Self, store::StoreError> {
         Self::with_engines(
             store,
             Arc::new(ChromaprintEngine),
@@ -130,54 +128,23 @@ impl ProbeManager {
     }
 
     pub fn with_fingerprint_engine(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
     ) -> Result<Self, store::StoreError> {
         Self::with_engines(store, fingerprint_engine, Arc::new(ChromaprintEngine))
     }
 
     pub fn with_engines(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Result<Self, store::StoreError> {
-        let readers = Arc::new(StoreReaders::open(
-            &store.lock(),
-            crate::store_readers::STORE_READERS,
-        )?);
-        Ok(Self::with_engines_and_readers(
-            store,
-            readers,
-            fingerprint_engine,
-            capture_engine,
-        ))
-    }
-
-    pub(crate) fn with_shared_readers(
-        store: Arc<Mutex<Store>>,
-        readers: Arc<StoreReaders>,
-    ) -> Self {
-        Self::with_engines_and_readers(
-            store,
-            readers,
-            Arc::new(ChromaprintEngine),
-            Arc::new(ChromaprintEngine),
-        )
-    }
-
-    fn with_engines_and_readers(
-        store: Arc<Mutex<Store>>,
-        readers: Arc<StoreReaders>,
-        fingerprint_engine: Arc<dyn FingerprintEngine>,
-        capture_engine: Arc<dyn FingerprintCaptureEngine>,
-    ) -> Self {
         let channels = dispatch::channels();
         let (shutdown_signal, _) = tokio::sync::watch::channel(false);
-        let data_dir = store.lock().data_dir().to_path_buf();
+        let data_dir = store.data_dir().to_path_buf();
         let store_key = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
         let manager = Self {
             store,
-            readers,
             store_key,
             store_lease: Mutex::new(None),
             recovery_deferred: AtomicBool::new(false),
@@ -214,7 +181,7 @@ impl ProbeManager {
         if !store_lease::recover_if_idle(&manager) {
             manager.recovery_deferred.store(true, Ordering::SeqCst);
         }
-        manager
+        Ok(manager)
     }
 
     /// Replace stream IO while retaining the same queue and publication pipeline.

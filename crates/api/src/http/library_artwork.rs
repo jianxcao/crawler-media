@@ -58,8 +58,7 @@ pub(crate) async fn artwork_candidates(
     let result = state
         .http_work
         .run(std::time::Duration::from_secs(10), move || {
-            let store = state_for_blocking.store_readers.checkout(store_wait::STORE_READ_WAIT)
-                .ok_or_else(store_wait::busy_response)?;
+            let store = state_for_blocking.store.clone();
             let library = match require_visible_library(&store, &id, user_id) {
                 Ok(library) => library,
                 Err(response) => return Err(response),

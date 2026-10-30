@@ -1,9 +1,8 @@
 #[test]
 fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let library = store
-        .lock()
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
+    let library = store.as_ref()
         .create_library(
             MediaKind::Tv,
             "Fixture",
@@ -13,13 +12,11 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             &[],
         )
         .unwrap();
-    store
-        .lock()
+    store.as_ref()
         .set_library_intro_settings(&library.id, true, true)
         .unwrap();
     let media_id = MediaId::new();
-    store
-        .lock()
+    store.as_ref()
         .insert_media(&domain::Media {
             id: media_id,
             kind: MediaKind::Tv,
@@ -48,10 +45,10 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let mut rows = [make_row(1), make_row(2)];
     for row in rows.iter_mut() {
         std::fs::write(&row.file.path, b"dummy").unwrap();
-        super::super::test_support::publish_into(&store.lock(), row);
+        super::super::test_support::publish_into(&store.as_ref(), row);
     }
     let cached =
-        seed_old_refresh_result(&store.lock(), media_id, &rows[0].file.file_id.to_string());
+        seed_old_refresh_result(&store.as_ref(), media_id, &rows[0].file.file_id.to_string());
 
     let manager = ProbeManager::new(store.clone()).unwrap();
     let units = rows
@@ -72,15 +69,13 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let second = manager.take_queued_for_test().unwrap();
     manager.finish(&first, true);
 
-    let current = store
-        .lock()
+    let current = store.as_ref()
         .get_media_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     assert_eq!(current.source, "old-result");
     assert_eq!(
-        store
-            .lock()
+        store.as_ref()
             .get_cached_chapters(&rows[0].file.file_id.to_string())
             .unwrap()
             .unwrap(),
@@ -89,21 +84,18 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
 
     manager.finish(&second, true);
     assert!(
-        store
-            .lock()
+        store.as_ref()
             .get_media_marker(media_id, Some(1), Some(1))
             .unwrap()
             .is_none()
     );
-    let chapters = store
-        .lock()
+    let chapters = store.as_ref()
         .get_cached_chapters(&rows[0].file.file_id.to_string())
         .unwrap()
         .unwrap();
     assert_eq!(chapters, cached);
     assert_eq!(
-        store
-            .lock()
+        store.as_ref()
             .latest_marker_refresh_for_season(&media_id.to_string(), 1)
             .unwrap()
             .unwrap()

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, mpsc};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use api::Store;
@@ -28,41 +28,6 @@ use support::{
 #[path = "support/mod.rs"]
 mod api_support;
 
-/// 第一次进入 `execute` 后阻塞，直到测试放行；用来证明维护不在 Store/Queue 锁内执行。
-struct BlockingExecutor {
-    entered: mpsc::Sender<()>,
-    release: StdMutex<mpsc::Receiver<()>>,
-    blocked: std::sync::atomic::AtomicBool,
-}
-
-impl DatabaseExecutor for BlockingExecutor {
-    fn execute(
-        &self,
-        target: &DatabaseTarget,
-        _vacuum_enabled: bool,
-        _context: &MaintenanceContext<'_>,
-    ) -> Result<DatabaseReport, String> {
-        if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            self.entered.send(()).unwrap();
-            self.release
-                .lock()
-                .unwrap()
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .expect("test must release the blocked maintenance executor");
-        }
-        Ok(DatabaseReport {
-            name: target.name.as_str().to_string(),
-            outcome: DatabaseOutcome::Optimized,
-            free_pages: 0,
-            page_size: 4096,
-            size_before: 0,
-            size_after: 0,
-            skip_reason: None,
-            elapsed_ms: 1,
-        })
-    }
-}
-
 /// 只让 app 库打不开的假执行器：验证"其余库跑完再汇总失败"。
 struct AppOpenFailure {
     attempted: Mutex<Vec<DatabaseName>>,
@@ -71,6 +36,7 @@ struct AppOpenFailure {
 impl DatabaseExecutor for AppOpenFailure {
     fn execute(
         &self,
+        _conn: &rusqlite::Connection,
         target: &DatabaseTarget,
         _vacuum_enabled: bool,
         _context: &MaintenanceContext<'_>,
@@ -114,37 +80,6 @@ fn one_failed_database_fails_the_job_after_running_the_rest() {
 }
 
 #[test]
-fn maintenance_runs_outside_store_and_queue_locks() {
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let (tmp, state) = temp_state(Arc::new(BlockingExecutor {
-        entered: entered_tx,
-        release: StdMutex::new(release_rx),
-        blocked: std::sync::atomic::AtomicBool::new(false),
-    }));
-    assert!(tmp.path().exists());
-    let job = enqueue_claim(&state, JobKind::DatabaseMaintenance, DB_LIGHT, unix_now());
-
-    let run_state = state.clone();
-    let handle = std::thread::spawn(move || run(&run_state, &job));
-    entered_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("执行器必须被调用");
-
-    assert!(
-        state.store().try_lock().is_some(),
-        "维护执行期间不得持有 Store 锁"
-    );
-    assert!(
-        state.jobs().try_lock().is_some(),
-        "维护执行期间不得持有 Queue 锁"
-    );
-
-    release_tx.send(()).unwrap();
-    handle.join().unwrap().unwrap();
-}
-
-#[test]
 fn active_library_work_downgrades_vacuum_but_still_optimizes() {
     let recorder = Arc::new(Recorder::default());
     let (tmp, state) = temp_state(recorder.clone());
@@ -152,7 +87,6 @@ fn active_library_work_downgrades_vacuum_but_still_optimizes() {
     std::fs::create_dir_all(&root).unwrap();
     let library = state
         .store()
-        .lock()
         .create_library(
             MediaKind::Tv,
             "Extra",
@@ -398,7 +332,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     let cutoff = now - DAY;
     let store = state.store();
     {
-        let guard = store.lock();
+        let guard = store.as_ref();
         // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
         guard
             .insert_media(&domain::Media {
@@ -415,7 +349,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
                 anilist_id: None,
             })
             .unwrap();
-        let file_id = seed_published_file(&guard, tmp.path(), media);
+        let file_id = seed_published_file(guard, tmp.path(), media);
         guard
             .upsert_unit(
                 user,
@@ -435,7 +369,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
         for index in 0..2 {
             let device = format!("old{index}");
             let play_session_id = api_support::session::issue_session(
-                &guard,
+                guard,
                 user,
                 &device,
                 file_id,
@@ -474,7 +408,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
                 .unwrap();
         }
     }
-    let progress_before = store.lock().unit_state(user, media, -1, -1).unwrap();
+    let progress_before = store.as_ref().unit_state(user, media, -1, -1).unwrap();
 
     let preview = enqueue_claim(&state, JobKind::PlaybackHistoryRetention, PREVIEW, now);
     run(&state, &preview).unwrap();
@@ -482,7 +416,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     assert_eq!(report["deleted"], 0, "dry_run 必须零删除: {report}");
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .list_logs(100, None, None, None, 0, Some(user))
             .unwrap()
             .len(),
@@ -495,14 +429,14 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     assert_eq!(report["deleted"], 2);
     assert!(
         store
-            .lock()
+            .as_ref()
             .list_logs(100, None, None, None, 0, Some(user))
             .unwrap()
             .is_empty(),
         "只清理保留期外的播放历史"
     );
     assert_eq!(
-        store.lock().unit_state(user, media, -1, -1).unwrap(),
+        store.as_ref().unit_state(user, media, -1, -1).unwrap(),
         progress_before,
         "播放进度不得被清理"
     );
@@ -618,7 +552,7 @@ async fn jobs_tick_http_never_executes_maintenance_and_says_so() {
     let store = state.store();
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .get_setting("maintenance.vacuum_last_success.app")
             .unwrap(),
         None
@@ -681,14 +615,17 @@ fn vacuum_limits() -> SqliteLimits {
     }
 }
 
-/// ~32MiB 负载并删掉一半：VACUUM 需要真实的重写时间，才有可观测的持锁窗口。
+/// ~32MiB 合法 settings 负载并删掉一半，不改变严格 schema。
+/// VACUUM 需要真实的重写时间，才有可观测的持锁窗口。
 fn seed_free_pages(path: &Path) {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE gauge_payload (id INTEGER PRIMARY KEY, body TEXT);
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 8000)
+         INSERT INTO settings (key, value)
+         SELECT 'vacuum-gauge-' || x, hex(zeroblob(2000)) FROM c;
          WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 8000)
-         INSERT INTO gauge_payload (id, body) SELECT x, hex(zeroblob(2000)) FROM c;
-         DELETE FROM gauge_payload WHERE id % 2 = 0;",
+         DELETE FROM settings WHERE key IN
+             (SELECT 'vacuum-gauge-' || x FROM c WHERE x % 2 = 0);",
     )
     .unwrap();
 }

@@ -2,7 +2,7 @@ use api::ApiState;
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Hold the real app connection without holding the outer Store mutex.
+/// Hold the real App writer on a dedicated thread.
 pub struct HeldAppWriter {
     release: Option<mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -10,7 +10,7 @@ pub struct HeldAppWriter {
 
 impl HeldAppWriter {
     pub fn acquire(state: &ApiState) -> Self {
-        let writers = state.store().lock().writers();
+        let writers = state.store().writers();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {

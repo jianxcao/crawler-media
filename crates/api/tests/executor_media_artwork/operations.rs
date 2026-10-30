@@ -4,7 +4,7 @@ fn insert_merge_pair(state: &ApiState) -> Value {
     let survivor = MediaId::new();
     let loser = MediaId::new();
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     for id in [survivor, loser] {
         store
             .insert_media(&Media {
@@ -105,7 +105,7 @@ fn merge_write_bounds_store_wait_without_queuing_a_late_write() {
     let store = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
     });

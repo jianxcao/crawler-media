@@ -166,7 +166,6 @@ fn published_movie(
     std::fs::create_dir_all(&directory).unwrap();
     let library = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Movie,
             "Movies",
@@ -182,7 +181,7 @@ fn published_movie(
     // Thumbnail policy needs a recorded Library, so publish the fixture file.
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         guard.insert_media(&media).unwrap();
         store::test_support::publish_fixture_file(
             &guard,
@@ -277,7 +276,7 @@ fn frame_uses_recorded_library_policy_when_the_path_matches_another_library() {
     std::fs::rename(&video, &moved).unwrap();
     {
         let store = state.store();
-        let guard = store.lock();
+        let guard = &store;
         let other = guard
             .create_library(
                 domain::MediaKind::Movie,
@@ -329,7 +328,6 @@ fn library_lease_publish_after_cancelled_control_returns_err() {
     let state = test_state(tmp.path());
     let _ = state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Movie,
             "Movies",

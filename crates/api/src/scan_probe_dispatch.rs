@@ -16,11 +16,11 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
 }
 
 fn dispatch_obligations(
-    shared: &parking_lot::Mutex<store::Store>,
+    shared: &store::Store,
     probe: &crate::probe_manager::ProbeManager,
 ) -> Result<usize, String> {
     let obligations = {
-        let store = shared.lock();
+        let store = shared;
         store
             .scan_probe_obligations(100)
             .map_err(|e| e.to_string())?
@@ -33,7 +33,7 @@ fn dispatch_obligations(
     let mut acked = 0;
     for ob in obligations {
         let row_opt = {
-            let store = shared.lock();
+            let store = shared;
             store
                 .file_coverage_by_id(ob.ledger_id)
                 .map_err(|e| e.to_string())?
@@ -41,7 +41,7 @@ fn dispatch_obligations(
 
         let Some(row) = row_opt else {
             // Ledger row no longer exists (pruned/deleted), ack obligation immediately
-            let store = shared.lock();
+            let store = shared;
             match store.ack_scan_probe_obligation(ob.ledger_id) {
                 Ok(()) => acked += 1,
                 Err(error) => {
@@ -60,7 +60,7 @@ fn dispatch_obligations(
         // the 100-row dispatch window with files that will never run. Restoring the source
         // re-arms the obligation (`crates/api/src/library_presence.rs`).
         {
-            let store = shared.lock();
+            let store = shared;
             if store
                 .ledger_is_missing(&row.file.file_id.to_string())
                 .map_err(|error| error.to_string())?
@@ -79,7 +79,7 @@ fn dispatch_obligations(
         );
         // Keep acceptance and ACK under one Store lock so presence cannot cancel
         // accepted work and restore a new obligation between these two writes.
-        let store = shared.lock();
+        let store = shared;
         let acknowledged = match result {
             Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { job_id }) => store
                 .ack_scan_probe_obligation_for_work(&ob, Some(&job_id))

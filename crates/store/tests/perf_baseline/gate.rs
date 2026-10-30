@@ -106,7 +106,7 @@ fn role_limit(label: &str, statements: Option<u64>, fullscan: (u64, u64)) -> Lim
     }
 }
 
-fn limits() -> Vec<Limit> {
+fn limits(store: &store::Store) -> Vec<Limit> {
     let mut limits = vec![
         Limit {
             // The fixed 60-card page measures 1,938 VM steps at both 424 and
@@ -169,7 +169,40 @@ fn limits() -> Vec<Limit> {
             vm,
         ));
     }
+    add_reader_overhead(store, &mut limits);
     limits
+}
+
+/// Old budgets observed business SQL on a writer connection; full read leases now
+/// also include layout checks and snapshot boundaries. Measure their fixed cost
+/// separately, retain it in reports, and keep the old query-work allowances.
+fn add_reader_overhead(store: &store::Store, limits: &mut [Limit]) {
+    let (_, empty) = store.with_stats(store::stats::StatsScope::Both, || {
+        store.with_read(store::Db::Library, |_| Ok(())).unwrap();
+    });
+    for limit in limits {
+        let (leases, previous_snapshot) = match limit.label.as_str() {
+            ops::BROWSE_PAGE_1 | ops::BROWSE_DEEP_OFFSET | ops::BROWSE_DEEP_CURSOR => (1, 2),
+            ops::ITEM_DETAIL | ops::ITEM_DETAIL_TV | ops::PLAYBACK_UNSCOPED => (1, 0),
+            ops::PLAYBACK_ROSTER => (2, 0),
+            ops::PLAYBACK_SOURCES => (3, 0),
+            // Library stats deliberately exclude the App role lookup.
+            ops::PLAYBACK_PROGRESS_WRITE => (1, 0),
+            ops::INTEGRITY_STATUS => (3, 0),
+            label if label.starts_with("facets:") => (1, 2),
+            // The explicit read-lease budget already included the entire lease.
+            _ => (0, 0),
+        };
+        if let Some((base, _)) = &mut limit.statements {
+            *base += leases * empty.statements - previous_snapshot;
+        }
+        if let Some((base, _)) = &mut limit.vm {
+            *base += leases * empty.vm_steps;
+        }
+        if let Some(rows) = &mut limit.sql_rows {
+            *rows += leases * empty.sql_rows;
+        }
+    }
 }
 
 fn fullscan_budget(limit: &Limit, files: usize) -> u64 {
@@ -251,8 +284,8 @@ fn is_control(label: &str) -> bool {
 }
 
 /// Every operation must be covered by a budget, and every budget must be respected.
-fn assert_gate(reports: &[Report], files: usize) {
-    let limits = limits();
+fn assert_gate(reports: &[Report], files: usize, store: &store::Store) {
+    let limits = limits(store);
     let mut violations = Vec::new();
     for report in reports {
         if is_control(&report.label) {
@@ -283,7 +316,7 @@ fn run_gate(scale: Scale) {
     print_context(&fixture.store, &scale.label());
     let reports = ops::all(&fixture);
     print_table(&scale.label(), &reports);
-    assert_gate(&reports, scale.files());
+    assert_gate(&reports, scale.files(), &fixture.store);
 }
 
 /// The default-target variant: same fixture shape and the same budgets, 1/144 of the rows.
@@ -377,20 +410,28 @@ fn gate_rejects_a_duplicated_query() {
     println!("negative control (duplicated query) rejected as designed: {violations:?}");
 }
 
-/// A lost index must not degrade silently.
-///
-/// The control used to drop `library_item_terms`' indexes: the facet aggregate pinned
-/// `terms_media` with `INDEXED BY`, so a missing index made the request *fail* with
-/// "no query solution". The v4 round deleted that index — the terms primary key
-/// `(library_id, media_id, ...)` now makes the per-card join a key prefix, so the pin
-/// (and the b-tree behind it) is gone — and with it the hard error.
-///
-/// The property that must survive is the one the gate exists for: **a hot read that
-/// loses the index it runs on must be rejected, not served more slowly**. `items_title`
-/// is the index `browse page 1` (offset 0, `BrowseOrder::Title`) walks. Without it,
-/// SQLite may choose a table scan or another index plus a sort, depending on its
-/// statistics. The same shipped VM/sort budget must reject either plan even when
-/// fullscan is zero. Schema index presence has separate layout tests.
+/// A supported query can still do excessive row work without changing schema.
+/// Keep proving the VM budget rejects it independently of layout validation.
+#[test]
+fn gate_rejects_excessive_indexed_page_work() {
+    let fixture = Fixture::build(Scale::TINY);
+    let budget = limits(&fixture.store)
+        .into_iter()
+        .find(|limit| limit.label == ops::BROWSE_PAGE_1)
+        .unwrap();
+    let report = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, fixture.scale.movies);
+    let violations = check(&report, &budget, fixture.scale.files());
+    assert!(
+        violations
+            .iter()
+            .any(|message| message.contains("vm steps")),
+        "the VM budget accepted excessive indexed row work: {:?}, {violations:?}",
+        report.work
+    );
+}
+
+/// Unified readers validate schema changes before serving another lease. A
+/// missing required index must reject the layout, before a slower query can run.
 #[test]
 fn a_lost_index_fails_loudly_instead_of_scanning() {
     let fixture = Fixture::build(Scale::TINY);
@@ -411,7 +452,7 @@ fn lost_index_is_rejected_with_fresh_and_analyzed_statistics() {
 }
 
 fn assert_lost_index_rejected(fixture: Fixture) {
-    let budget = limits()
+    let budget = limits(&fixture.store)
         .into_iter()
         .find(|limit| limit.label == ops::BROWSE_PAGE_1)
         .unwrap();
@@ -423,28 +464,18 @@ fn assert_lost_index_rejected(fixture: Fixture) {
     );
 
     drop_index(&fixture, "items_title");
-    let degraded = ops::browse_report(&fixture, ops::BROWSE_PAGE_1, 60);
-    let violations = check(&degraded, &budget, fixture.scale.files());
-    println!(
-        "negative control (lost index): {:?} -> {:?}, violations: {violations:?}",
-        healthy.work, degraded.work
-    );
+    let error = fixture
+        .store
+        .library_item_page(&ops::page_query(&fixture))
+        .unwrap_err();
     assert!(
-        !violations.is_empty(),
-        "a lost index passed the gate silently: {:?} against budget {:?}",
-        degraded.work,
-        fullscan_budget(&budget, fixture.scale.files())
-    );
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.contains("vm steps") || v.contains("sort operations")),
-        "the lost index must expose query work regardless of scan strategy: {violations:?}"
+        error.is_layout_refusal(),
+        "a missing required index must reject the changed layout: {error}"
     );
 }
 
 /// Drops one named index from the fixture's own `library.db`, exactly as a missing
-/// `CREATE INDEX` would leave it. The store is already open, so no layout guard re-runs.
+/// `CREATE INDEX` would leave it. The next lease must revalidate the schema cookie.
 fn drop_index(fixture: &Fixture, name: &str) {
     let db = rusqlite::Connection::open(fixture.store.data_dir().join("library.db")).unwrap();
     db.execute_batch(&format!("DROP INDEX \"{name}\"")).unwrap();

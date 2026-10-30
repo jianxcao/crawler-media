@@ -107,10 +107,10 @@ fn seed_test_env(
     let rows = seed_library_files(&library_dir, media_id);
 
     let store = api_state.store();
-    let s = store.lock();
+    let s = store.as_ref();
     s.insert_media(&media).unwrap();
     for spec in &rows {
-        publish_fixture_file(&s, spec).unwrap();
+        publish_fixture_file(s, spec).unwrap();
     }
     s.upsert_unit(
         user_a_id,
@@ -237,7 +237,6 @@ async fn library_episodes_reject_invalid_season_parameters() {
     seed_test_env(&api_state, user_id, media_id, tmp.path());
     let library_id = api_state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -286,7 +285,7 @@ async fn library_episodes_accept_season_zero_for_specials() {
     seed_test_env(&api_state, user_id, media_id, tmp.path());
     let library_id = {
         let store = api_state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let special = store
             .file_coverage_for_media(media_id)
             .unwrap()
@@ -294,7 +293,7 @@ async fn library_episodes_accept_season_zero_for_specials() {
             .find(|coverage| coverage.units == vec![domain::UnitKey::new(2, 1)])
             .expect("seeded season 2 file");
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 file_id: Some(special.file.file_id),
                 media_id: special.file.media_id,

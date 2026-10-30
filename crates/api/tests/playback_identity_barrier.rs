@@ -37,7 +37,7 @@ impl Fixture {
         let loser = MediaId::new();
         {
             let shared = state.store();
-            let store = shared.lock();
+            let store = shared.as_ref();
             store
                 .insert_user_with_password(
                     &User {
@@ -67,7 +67,7 @@ impl Fixture {
                     })
                     .unwrap();
                 publish_fixture_file(
-                    &store,
+                    store,
                     &FixtureFile {
                         media_id: id,
                         path: tmp
@@ -95,7 +95,6 @@ impl Fixture {
     fn begin(&self) -> String {
         self.state
             .store()
-            .lock()
             .begin_media_merge(
                 &MediaMergeRequest {
                     request_id: "00000000-0000-0000-0001-0000000000a1".into(),
@@ -120,7 +119,7 @@ impl Fixture {
 
     fn assert_no_facts(&self) {
         let shared = self.state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         assert!(
             store
                 .unit_rows(self.user, self.survivor)
@@ -166,7 +165,6 @@ fn self_marks_report_frozen_and_retired_conflicts_without_redirecting_the_write(
         assert_eq!(
             f.state
                 .store()
-                .lock()
                 .advance_media_merge(&operation, 1_200)
                 .unwrap()
                 .state,
@@ -196,7 +194,6 @@ fn self_marks_report_frozen_and_retired_conflicts_without_redirecting_the_write(
         let unit = f
             .state
             .store()
-            .lock()
             .unit_state(f.user, f.survivor, -1, -1)
             .unwrap()
             .unwrap();
@@ -224,7 +221,6 @@ fn jellyfin_marks_refuse_frozen_identity_and_retired_item_without_new_facts() {
         assert_eq!(
             f.state
                 .store()
-                .lock()
                 .advance_media_merge(&operation, 1_200)
                 .unwrap()
                 .state,
@@ -248,7 +244,6 @@ fn jellyfin_marks_refuse_frozen_identity_and_retired_item_without_new_facts() {
         assert!(
             f.state
                 .store()
-                .lock()
                 .unit_state(f.user, f.survivor, -1, -1)
                 .unwrap()
                 .unwrap()

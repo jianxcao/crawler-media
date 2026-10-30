@@ -167,12 +167,13 @@ impl Fixture {
 /// Item row, unit rows and terms of one card, in a stable order. `item_revision` and
 /// `unit_revision` are counters that both paths bump, so they are not compared.
 fn snapshot(store: &Store, lib: &str, media: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    {
-        let mut stmt = store
-            .library
-            .prepare(
-                "SELECT kind, title, title_sort, year, identity_state,
+    store
+        .with_read(crate::Db::Library, |conn| {
+            let mut out = Vec::new();
+            {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT kind, title, title_sort, year, identity_state,
                         metadata_revision, release_date_sort, rating_sort, runtime_sort,
                         language, added_at_sort, size_bytes, size_sort,
                         resolution_rank, hdr, scraped, missing, stable_shuffle_key,
@@ -180,50 +181,50 @@ fn snapshot(store: &Store, lib: &str, media: &str) -> Vec<String> {
                         unknown_file_count, distinct_episode_count, distinct_season_count,
                         preferred_file_id, has_still, poster_ref, backdrop_ref
                  FROM library_items WHERE library_id = ?1 AND media_id = ?2",
-            )
-            .unwrap();
-        let mut rows = stmt.query(params![lib, media]).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            for index in 0..28 {
-                out.push(format!("item[{index}]={:?}", row.get_ref(index).unwrap()));
+                    )
+                    .unwrap();
+                let mut rows = stmt.query(params![lib, media]).unwrap();
+                while let Some(row) = rows.next().unwrap() {
+                    for index in 0..28 {
+                        out.push(format!("item[{index}]={:?}", row.get_ref(index).unwrap()));
+                    }
+                }
             }
-        }
-    }
-    {
-        let mut stmt = store
-            .library
-            .prepare(
-                "SELECT season, episode, file_count, available_file_count,
+            {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT season, episode, file_count, available_file_count,
                         preferred_file_id
                  FROM library_units WHERE library_id = ?1 AND media_id = ?2
                  ORDER BY season, episode",
-            )
-            .unwrap();
-        let mut rows = stmt.query(params![lib, media]).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            for index in 0..5 {
-                out.push(format!("unit[{index}]={:?}", row.get_ref(index).unwrap()));
+                    )
+                    .unwrap();
+                let mut rows = stmt.query(params![lib, media]).unwrap();
+                while let Some(row) = rows.next().unwrap() {
+                    for index in 0..5 {
+                        out.push(format!("unit[{index}]={:?}", row.get_ref(index).unwrap()));
+                    }
+                }
             }
-        }
-    }
-    {
-        let mut stmt = store
-            .library
-            .prepare(
-                "SELECT term_kind, term_value FROM library_item_terms
+            {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT term_kind, term_value FROM library_item_terms
                  WHERE library_id = ?1 AND media_id = ?2 ORDER BY term_kind, term_value",
-            )
-            .unwrap();
-        let mut rows = stmt.query(params![lib, media]).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            out.push(format!(
-                "term={:?}/{:?}",
-                row.get_ref(0).unwrap(),
-                row.get_ref(1).unwrap()
-            ));
-        }
-    }
-    out
+                    )
+                    .unwrap();
+                let mut rows = stmt.query(params![lib, media]).unwrap();
+                while let Some(row) = rows.next().unwrap() {
+                    out.push(format!(
+                        "term={:?}/{:?}",
+                        row.get_ref(0).unwrap(),
+                        row.get_ref(1).unwrap()
+                    ));
+                }
+            }
+            Ok(out)
+        })
+        .unwrap()
 }
 
 /// Insert two scanned files and update their presence, size, artwork and quality.

@@ -8,12 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use domain::{FileCoverage, FileVersion, MediaKind};
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
 use store::Store;
 use support::ProbeScenario;
 
 struct ReplaceSource {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     row: FileCoverage,
     during_capture: bool,
     publish_replacement: bool,
@@ -39,7 +38,7 @@ impl ReplaceSource {
             revision: file.version.revision + 1,
             source_version: library::observe_source(&file.path).unwrap().source_version,
         };
-        let store = self.store.lock();
+        let store = self.store.as_ref();
         store
             .publish_files(
                 &store::library_write::WriteScope {
@@ -135,7 +134,7 @@ async fn refresh_rows(scenario: &ProbeScenario, rows: &[FileCoverage]) -> store:
         loop {
             let job = scenario
                 .store
-                .lock()
+                .as_ref()
                 .latest_marker_refresh_for_season(&scenario.media_id.to_string(), 1)
                 .unwrap()
                 .unwrap();
@@ -156,7 +155,7 @@ async fn disk_change_during_comparison_cannot_publish_old_markers() {
     let (scenario, engine) = scenario(false, false).await;
     let job = refresh(&scenario).await;
     assert!(engine.replaced.load(Ordering::SeqCst));
-    let store = scenario.store.lock();
+    let store = scenario.store.as_ref();
     assert!(
         store
             .get_media_marker(scenario.media_id, Some(1), Some(1))
@@ -178,7 +177,7 @@ async fn ledger_change_during_comparison_cannot_publish_old_markers() {
     let (scenario, engine) = scenario(false, true).await;
     let job = refresh(&scenario).await;
     assert!(engine.replaced.load(Ordering::SeqCst));
-    let store = scenario.store.lock();
+    let store = scenario.store.as_ref();
     assert!(
         store
             .get_media_marker(scenario.media_id, Some(1), Some(1))
@@ -199,7 +198,7 @@ async fn partial_refresh_checks_comparison_inputs_outside_its_lease() {
     let (scenario, engine) = scenario(false, false).await;
     let job = refresh_rows(&scenario, &scenario.ledgers[1..3]).await;
     assert!(engine.replaced.load(Ordering::SeqCst));
-    let store = scenario.store.lock();
+    let store = scenario.store.as_ref();
     for episode in [2, 3] {
         assert!(
             store
@@ -218,7 +217,7 @@ async fn disk_change_during_capture_cannot_overwrite_fingerprint_cache() {
     let file_id = engine.row.file.file_id.to_string();
     let before = scenario
         .store
-        .lock()
+        .as_ref()
         .get_fingerprint_cache(&file_id)
         .unwrap()
         .unwrap();
@@ -226,7 +225,7 @@ async fn disk_change_during_capture_cannot_overwrite_fingerprint_cache() {
     assert!(engine.replaced.load(Ordering::SeqCst));
     let after = scenario
         .store
-        .lock()
+        .as_ref()
         .get_fingerprint_cache(&file_id)
         .unwrap()
         .unwrap();
@@ -290,7 +289,7 @@ async fn disk_change_during_tracks_cannot_publish_details_or_nfo() {
         loop {
             let job = scenario
                 .store
-                .lock()
+                .as_ref()
                 .latest_probe_job_for_scope(&format!("ledger:{file_id}"))
                 .unwrap()
                 .unwrap();
@@ -305,7 +304,7 @@ async fn disk_change_during_tracks_cannot_publish_details_or_nfo() {
     scenario.manager.shutdown_workers().await.unwrap();
     let details = scenario
         .store
-        .lock()
+        .as_ref()
         .get_file_meta(&file_id)
         .unwrap()
         .unwrap();
@@ -333,7 +332,7 @@ async fn probe_once(scenario: &ProbeScenario, row: FileCoverage) {
         loop {
             let terminal = scenario
                 .store
-                .lock()
+                .as_ref()
                 .latest_probe_job_for_scope(&format!("ledger:{id}"))
                 .unwrap()
                 .is_some_and(|job| !job.is_active());
@@ -354,14 +353,14 @@ async fn replacement_with_the_same_sample_lengths_must_recompare() {
     assert!(
         scenario
             .store
-            .lock()
+            .as_ref()
             .get_media_marker(scenario.media_id, Some(1), Some(1))
             .unwrap()
             .is_some()
     );
     let mut before = scenario
         .store
-        .lock()
+        .as_ref()
         .get_fingerprint_cache(&engine.row.file.file_id.to_string())
         .unwrap()
         .unwrap();
@@ -379,7 +378,7 @@ async fn replacement_with_the_same_sample_lengths_must_recompare() {
         .source_version;
     scenario
         .store
-        .lock()
+        .as_ref()
         .put_file_meta_versioned(
             &engine.row.file.file_id.to_string(),
             &library::Tracks {
@@ -396,7 +395,7 @@ async fn replacement_with_the_same_sample_lengths_must_recompare() {
     before.outro = Some(vec![24, 25, 26]);
     scenario
         .store
-        .lock()
+        .as_ref()
         .put_fingerprint_cache(&engine.row.file.file_id.to_string(), &before)
         .unwrap();
     engine.start_secs.store(30, Ordering::SeqCst);
@@ -405,7 +404,7 @@ async fn replacement_with_the_same_sample_lengths_must_recompare() {
     assert_eq!(
         scenario
             .store
-            .lock()
+            .as_ref()
             .get_media_marker(scenario.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()

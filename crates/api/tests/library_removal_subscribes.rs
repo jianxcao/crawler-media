@@ -43,7 +43,7 @@ fn subscribe_bound_to_deleted_library_falls_back_to_default() {
             assert!(lease.publish(|| Ok(())).is_err());
             let store = fixture.state.store();
             assert_eq!(
-                store.lock().default_library(kind).unwrap().unwrap().id,
+                store.as_ref().default_library(kind).unwrap().unwrap().id,
                 fixture.default.id
             );
             let state = fixture.state.clone();
@@ -55,7 +55,10 @@ fn subscribe_bound_to_deleted_library_falls_back_to_default() {
                 result.is_ok(),
                 "Transfer must resolve the same-kind default: {result:?}"
             );
-            let rows = store.lock().file_coverage_for_media(fixture.media).unwrap();
+            let rows = store
+                .as_ref()
+                .file_coverage_for_media(fixture.media)
+                .unwrap();
             assert_eq!(
                 rows.len(),
                 1,
@@ -74,14 +77,14 @@ fn subscribe_bound_to_deleted_library_falls_back_to_default() {
             );
             assert!(
                 store
-                    .lock()
+                    .as_ref()
                     .load_pending(fixture.subscribe)
                     .unwrap()
                     .is_empty()
             );
             assert_eq!(
                 store
-                    .lock()
+                    .as_ref()
                     .load_pending_state(fixture.subscribe, "imported")
                     .unwrap()
                     .len(),
@@ -102,7 +105,7 @@ fn startup_recovery_detaches_bindings_after_a_succeeded_library_commit() {
         let store = fixture.state.store();
         assert_eq!(
             store
-                .lock()
+                .as_ref()
                 .library_removal(&receipt.operation_id)
                 .unwrap()
                 .unwrap(),

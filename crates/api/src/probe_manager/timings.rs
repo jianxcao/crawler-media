@@ -94,8 +94,8 @@ pub(super) fn log_terminal_job(
     fallback: &ProbeJob,
 ) {
     let job = store
-        .reader()
-        .and_then(|store| store.get_probe_job(&fallback.id))
+        .store
+        .get_probe_job(&fallback.id)
         .ok()
         .flatten()
         .unwrap_or_else(|| fallback.clone());
@@ -154,8 +154,8 @@ fn terminal_timing_summary(
 ) -> ProbeTimingSummary {
     let mut summary = timings.take(job_id);
     let attempts = store
-        .reader()
-        .and_then(|store| store.list_fingerprint_attempts_for_job(job_id))
+        .store
+        .list_fingerprint_attempts_for_job(job_id)
         .unwrap_or_default();
     for attempt in &attempts {
         let elapsed_ms = attempt
@@ -183,7 +183,6 @@ mod terminal_timing_tests {
     use super::{ProbeTimingLedger, terminal_timing_summary};
     use crate::Store;
     use crate::store::StoredFingerprintAttempt;
-    use parking_lot::Mutex;
     use std::sync::Arc;
 
     fn finished_attempt(
@@ -212,14 +211,14 @@ mod terminal_timing_tests {
     #[test]
     fn fallback_full_window_reads_are_added_to_adaptive_attempt_counts() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+        let store = Arc::new(Store::open(temp.path()).unwrap());
         let timings = ProbeTimingLedger::default();
         let job_id = "adaptive-fallback-job";
 
         // Adaptive sampling burned four intro attempts, all failing on IO.
         for index in 0..4 {
             store
-                .lock()
+                .as_ref()
                 .begin_fingerprint_attempt(&finished_attempt(
                     &format!("att-{index}"),
                     job_id,
@@ -234,7 +233,7 @@ mod terminal_timing_tests {
         timings.record_fingerprint(Some(job_id), false, false, 25, 24);
 
         let summary = terminal_timing_summary(
-            &super::super::ProbeStoreAccess::new(store.clone()).unwrap(),
+            &super::super::ProbeStoreAccess::new(store.clone()),
             &timings,
             job_id,
         );

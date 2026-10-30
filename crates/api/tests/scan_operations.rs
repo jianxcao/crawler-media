@@ -13,7 +13,6 @@ fn claimed_scan_finishes_after_runtime_stops_before_task_is_polled() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -27,7 +26,6 @@ fn claimed_scan_finishes_after_runtime_stops_before_task_is_polled() {
             let status = fix
                 .state
                 .store()
-                .lock()
                 .scan_operation(&op.id)
                 .unwrap()
                 .unwrap()
@@ -45,7 +43,6 @@ fn claimed_scan_finishes_after_runtime_stops_before_task_is_polled() {
         let status = fix
             .state
             .store()
-            .lock()
             .scan_operation(&op.id)
             .unwrap()
             .unwrap()
@@ -56,10 +53,7 @@ fn claimed_scan_finishes_after_runtime_stops_before_task_is_polled() {
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(status, store::ScanOperationStatus::Completed);
-    assert_eq!(
-        fix.state.store().lock().list_file_coverage().unwrap().len(),
-        1
-    );
+    assert_eq!(fix.state.store().list_file_coverage().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -189,7 +183,7 @@ async fn cross_operation_change_invalidates_derived_facts() {
     // operation A：真实扫描，登记台账并记录 durable 源版本；终态后 scan_seen 被清空。
     let op_a = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -206,10 +200,10 @@ async fn cross_operation_change_invalidates_derived_facts() {
     // 变化前的基线：探测义务已了结、派生探测事实存在。
     let (mkv_id, strm_id) = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let rows = guard.list_file_coverage().unwrap();
         assert_eq!(rows.len(), 2, "operation A 必须登记两个文件");
-        seed_probe_baseline(&guard, &rows)
+        seed_probe_baseline(guard, &rows)
     };
 
     // 文件变化：mkv 内容变长；strm 换成同长度 URL 并把 mtime 恢复成原值。
@@ -232,7 +226,7 @@ async fn cross_operation_change_invalidates_derived_facts() {
     // operation B：全新 operation，没有任何该路径的 scan_seen 断点。
     let op_b = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 2000)
             .unwrap()
@@ -253,7 +247,7 @@ async fn cross_operation_change_invalidates_derived_facts() {
     );
 
     let store = fix.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let rows = guard.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2, "变化文件必须复用既有台账行，不得重新入库");
     for id in [mkv_id, strm_id] {
@@ -335,7 +329,7 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let full = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
@@ -357,7 +351,7 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
         done.report
     );
 
-    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     let paths: Vec<String> = rows
         .iter()
         .map(|row| row.file.path.to_string_lossy().to_string())
@@ -388,7 +382,7 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
@@ -423,7 +417,7 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
     );
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
 
-    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     let paths: Vec<String> = rows
         .iter()
         .map(|row| row.file.path.to_string_lossy().to_string())
@@ -450,7 +444,7 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     }
     std::fs::write(sub.join("Movie_sub (2024).mkv"), b"x").unwrap();
     {
-        let db_path = fix.state.store().lock().data_dir().join("library.db");
+        let db_path = fix.state.store().data_dir().join("library.db");
         let conn = rusqlite::Connection::open(db_path).unwrap();
         conn.execute(
             "CREATE TRIGGER fail_sub_publish BEFORE INSERT ON library_files
@@ -463,7 +457,7 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     let sig = fix.scope_signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -490,7 +484,7 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
         "失败终态必须写错误摘要: {}",
         done.report
     );
-    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 100, "只有已提交的 chunk 前缀入账");
 }
 
@@ -504,7 +498,7 @@ async fn old_signature_is_cancelled_without_upgrading_or_publishing() {
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &legacy, &[], 1000)
             .unwrap()
@@ -520,14 +514,7 @@ async fn old_signature_is_cancelled_without_upgrading_or_publishing() {
     );
     assert_eq!(done.scope_signature, legacy);
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(fix.state.store().list_file_coverage().unwrap().is_empty());
 }
 
 /// P2-A：v1 编码不是单射——两组不同的根数组可以编码出同一串字节，逐字节相等不能
@@ -550,7 +537,7 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
     std::fs::write(format!("{plain_root}/Movie Plain (2024).mkv"), b"2").unwrap();
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .update_library(
                 &fix.library_id,
@@ -577,7 +564,7 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
 
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &legacy, &[], 1000)
             .unwrap()
@@ -597,12 +584,7 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         "取消时不得把持久化签名改写成当前 scope"
     );
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得把当前 scope 的文件登记进台账"
     );
 }
@@ -617,7 +599,7 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
     std::fs::create_dir_all(&comma_root).unwrap();
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .update_library(
                 &fix.library_id,
@@ -639,7 +621,7 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
     );
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &legacy, &[], 1000)
             .unwrap()
@@ -656,12 +638,7 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
     assert_eq!(done.report["error"], "library.scope_changed");
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
@@ -685,7 +662,7 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     // 1. 旧配置：唯一根路径里含逗号 → 旧编码 `movie:1:<old_root>` 有歧义。
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .update_library(
                 &fix.library_id,
@@ -709,7 +686,7 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     // 2. operation 入队前配置已经改成另一个根。
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .update_library(
                 &fix.library_id,
@@ -723,7 +700,7 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     // 3. 遗留 operation 仍带着旧签名。
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &legacy, &[], 1000)
             .unwrap()
@@ -740,12 +717,7 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     assert_eq!(done.report["error"], "library.scope_changed");
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件（尤其不能扫新根）"
     );
 }

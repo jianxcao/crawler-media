@@ -1,11 +1,13 @@
 //! L2: blocking `Store` work must never run on a tokio worker thread.
 //!
-//! Every `/api/v1` request goes through `auth::authenticate`, and the job
-//! handlers take the process-wide `Store` lock. When either of those blocks on
-//! that lock the whole runtime stalls: nothing else scheduled on the same
-//! executor runs, including timers and `/health`. A long batch (scan,
-//! integrity) holds the lock for minutes, so the wait has to happen on the
-//! blocking pool with a deadline that turns into 503 + retry.
+//! Authentication and Jobs reads use their own read connections. Holding a Library
+//! writer must leave both requests and unrelated executor timers responsive.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,8 +40,7 @@ fn request(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
 ///
 /// Built **outside** any Tokio runtime on purpose: `ApiState::new` only starts
 /// its background drivers (probe workers, chapter frames, root reassignment,
-/// …) when a runtime already exists, and those drivers take the `Store` lock on
-/// their first poll. Leaving them out keeps the measurement about the request
+/// …) when a runtime already exists. Leaving them out keeps the measurement about the request
 /// path itself.
 fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let state = ApiState::new(
@@ -53,7 +54,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     .unwrap();
     let token = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let user = domain::User {
             id: domain::UserId::new(),
             login: "jobs-admin".into(),
@@ -70,7 +71,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     (state, token)
 }
 
-/// `GET /api/v1/jobs` while another thread holds the `Store` lock for 2 s.
+/// `GET /api/v1/jobs` while another thread holds the Library writer for 2 s.
 #[test]
 fn heartbeat_route_responds_while_store_locked() {
     let tmp = tempfile::tempdir().unwrap();
@@ -83,8 +84,9 @@ fn heartbeat_route_responds_while_store_locked() {
 
     let locked_store = state.store();
     let holder = std::thread::spawn(move || {
-        // A batch that holds the process-wide Store lock: scan / integrity work.
-        let _guard = locked_store.lock();
+        // A scan or integrity batch holds the Library writer.
+        let _guard =
+            crate::writer_hold::WriterHold::acquire(locked_store.clone(), store::Db::Library);
         std::thread::sleep(Duration::from_millis(2000));
     });
     std::thread::sleep(Duration::from_millis(50));
@@ -97,7 +99,7 @@ fn heartbeat_route_responds_while_store_locked() {
                 .await
         });
 
-        // The executor must stay free while the request waits for the lock.
+        // The executor must stay free while the Library writer is held.
         let started = Instant::now();
         tokio::time::sleep(Duration::from_millis(10)).await;
         let slept = started.elapsed();
@@ -106,12 +108,15 @@ fn heartbeat_route_responds_while_store_locked() {
             "executor starved by a blocking Store lock: sleep(10ms) took {slept:?}"
         );
 
-        // The wait itself is bounded: 503 (retry) instead of hanging on the lock.
-        let response = pending.await.unwrap().unwrap();
+        let response = tokio::time::timeout(Duration::from_millis(500), pending)
+            .await
+            .expect("Jobs reader must finish while the Library writer is still held")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "a Store lookup that cannot get the lock in time must answer 503, not hang"
+            StatusCode::OK,
+            "Jobs reads must remain available while the Library writer is held"
         );
     });
     holder.join().unwrap();
@@ -128,7 +133,7 @@ fn scan_wakeup_does_not_park_executor_on_store() {
     let store = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -158,7 +163,7 @@ fn up_next_does_not_park_executor_on_store() {
     let store = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -188,7 +193,6 @@ fn episode_routes_do_not_park_executor_on_store() {
     let (state, token) = state_with_admin(tmp.path());
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Tv)
         .unwrap()
         .unwrap()
@@ -211,7 +215,6 @@ fn scan_write_routes_do_not_park_executor_on_store() {
     let (state, token) = state_with_admin(tmp.path());
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Tv)
         .unwrap()
         .unwrap()
@@ -247,7 +250,7 @@ fn assert_request_timer_responsive(
     let store = state.store();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });

@@ -463,14 +463,37 @@ fn a_failed_batch_rolls_back_keeps_the_freeze_and_stays_recoverable() {
         "reindexing"
     );
 
-    // Fault injection: a batch that has to write the root table cannot finish once the
-    // table is gone, so this is a batch that really does return `Err`.
-    {
-        let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE library_roots;")
-            .unwrap();
-    }
+    // Deny the real writer's root mutation without corrupting the sole layout.
+    store
+        .with_writer(store::Db::Library, |conn| {
+            conn.authorizer(Some(|ctx: rusqlite::hooks::AuthContext<'_>| {
+                use rusqlite::hooks::{AuthAction, Authorization};
+                match ctx.action {
+                    AuthAction::Insert {
+                        table_name: "library_roots",
+                    }
+                    | AuthAction::Update {
+                        table_name: "library_roots",
+                        ..
+                    }
+                    | AuthAction::Delete {
+                        table_name: "library_roots",
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }
+            }));
+            Ok(())
+        })
+        .unwrap();
     let failed = store.advance_library_operation(&operation_id, 3_100, 1);
+    store
+        .with_writer(store::Db::Library, |conn| {
+            conn.authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            );
+            Ok(())
+        })
+        .unwrap();
     assert!(failed.is_err(), "a batch that cannot write must fail");
 
     // R19: the failed batch commits nothing, the freeze stays, and the operation is

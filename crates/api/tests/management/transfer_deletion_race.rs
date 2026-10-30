@@ -140,7 +140,7 @@ async fn transfer_started_first_is_finished_before_delete_snapshot() {
     {
         let store = api_state.store();
         store
-            .lock()
+            .as_ref()
             .record_pending_submission(sub_id, 100, &pending_item)
             .unwrap();
     }
@@ -196,7 +196,7 @@ async fn transfer_started_first_is_finished_before_delete_snapshot() {
 
     // Verify deletion cleaned up everything (no orphan facts, ledger, or subscribe)
     let store_arc = api_state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     assert!(store.get_subscribe(sub_id).unwrap().is_none());
     assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
     assert!(
@@ -270,7 +270,7 @@ async fn delete_reserved_first_prevents_transfer_mutation() {
     // Should NOT have called completed_files or mutated store
     assert!(!downloader.completed_called.load(Ordering::SeqCst));
     let store_arc = api_state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
 }
 
@@ -314,13 +314,11 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
     let id = sub["id"].as_str().unwrap().parse().unwrap();
     let library = api_state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .unwrap();
     api_state
         .store()
-        .lock()
         .record_pending_submission(
             id,
             100,
@@ -341,7 +339,6 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
     let other_root = tmp.path().join("other-library");
     api_state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Movie,
             "other",
@@ -356,14 +353,7 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
     resume_tx.send(()).unwrap();
     assert!(transfer.await.unwrap().is_err());
     assert_eq!(std::fs::read(src_file).unwrap(), b"video content");
-    assert!(
-        api_state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(api_state.store().list_file_coverage().unwrap().is_empty());
     for root in library.root_paths {
         if root.exists() {
             assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);

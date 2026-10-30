@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use api::{ApiState, Store};
 use axum::Router;
 use domain::{LibraryFile, LibraryId, MediaId, UnitKey};
-use parking_lot::Mutex;
 use tower::ServiceExt;
 
 use crate::fixtures::{TOKEN, episode_file, heartbeat_body, publish};
@@ -295,7 +294,7 @@ impl DbWatch {
 /// 现有的公开读计数器：**粗粒度**读数指标，明确**不是** `read_scope`。
 pub(crate) fn read_counters(state: &ApiState) -> (usize, usize, usize) {
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     (
         store.root_ledger_scans(),
         store.media_ledger_reads(),
@@ -363,7 +362,7 @@ pub(crate) struct ScanReport {
 }
 
 /// 扫描侧：拿真实 `publish_files`（每批 ≤100 文件 ⇒ 一个短事务）连续写一整个 Media。
-pub(crate) fn run_scan(store: Arc<Mutex<Store>>, plan: ScanPlan) -> ScanReport {
+pub(crate) fn run_scan(store: Arc<Store>, plan: ScanPlan) -> ScanReport {
     let mut report = ScanReport {
         inserted: 0,
         updated: 0,
@@ -380,16 +379,13 @@ pub(crate) fn run_scan(store: Arc<Mutex<Store>>, plan: ScanPlan) -> ScanReport {
             keys.push(UnitKey::new(1, episode));
         }
         let started = Instant::now();
-        let outcome = {
-            let guard = store.lock();
-            publish(
-                &guard,
-                &plan.library_id,
-                &files,
-                &keys,
-                2_000 + batch as i64,
-            )
-        };
+        let outcome = publish(
+            &store,
+            &plan.library_id,
+            &files,
+            &keys,
+            2_000 + batch as i64,
+        );
         report.batch_ms.push(started.elapsed().as_millis());
         match outcome {
             Ok(counts) => {

@@ -13,7 +13,7 @@ use tower::ServiceExt;
 use super::common::*;
 
 struct StoreLockingCatalog {
-    store: Arc<parking_lot::Mutex<Store>>,
+    store: Arc<Store>,
 }
 
 impl Catalog for StoreLockingCatalog {
@@ -36,12 +36,13 @@ impl Catalog for StoreLockingCatalog {
         if tmdb_id != "603" {
             return Ok(None);
         }
-        // 生产路径会在已持有 Store 锁时再读 scrape 配置。try_lock 失败即证明嵌套锁。
-        let guard = self
-            .store
-            .try_lock()
-            .ok_or_else(|| "nested store.lock while fetching metadata".to_string())?;
-        let _config = guard.get_scrape_config().ok();
+        // Catalog IO cannot inherit the Library writer. Probe the actual writer
+        // and release it before reading configuration through the read pool.
+        self.store
+            .writers()
+            .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+            .map_err(|error| format!("Library writer held while fetching metadata: {error}"))?;
+        let _config = self.store.get_scrape_config().ok();
         Ok(Some(media::ItemMeta {
             genre_ids: vec![16],
             origin_countries: vec!["JP".into()],
@@ -51,9 +52,7 @@ impl Catalog for StoreLockingCatalog {
 }
 
 fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let catalog = Arc::new(StoreLockingCatalog {
         store: store.clone(),
     });

@@ -35,23 +35,29 @@ impl QueryBudget {
     }
 }
 
-pub struct LibraryReadLease {
+pub struct ReaderLease {
     conn: Option<Connection>,
     pool: Arc<Inner>,
     clean: bool,
+    epoch: u64,
     #[cfg(test)]
     fail_cleanup: bool,
 }
 
-impl LibraryReadLease {
-    pub(super) fn new(conn: Connection, pool: Arc<Inner>) -> Self {
+impl ReaderLease {
+    pub(super) fn new(conn: Connection, pool: Arc<Inner>, epoch: u64) -> Self {
         Self {
             conn: Some(conn),
             pool,
             clean: true,
+            epoch,
             #[cfg(test)]
             fail_cleanup: false,
         }
+    }
+
+    pub(super) fn shares_pool(&self, pool: &Arc<Inner>) -> bool {
+        Arc::ptr_eq(&self.pool, pool)
     }
 
     #[cfg(test)]
@@ -59,12 +65,12 @@ impl LibraryReadLease {
         self.fail_cleanup = true;
     }
 
-    pub(super) fn with_connection<T>(
+    pub fn with_connection<T>(
         &mut self,
         budget: &QueryBudget,
         work: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<T, LibraryReadError> {
-        self.with_connection_instrumented(budget, work, None)
+        self.with_connection_instrumented(budget, work, None, false)
     }
 
     /// Fixture boundary: one lease plus the SQL work it performed.
@@ -79,7 +85,7 @@ impl LibraryReadLease {
         work: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<(T, crate::library_query::items::stats::QueryWorkStats), LibraryReadError> {
         let mut stats = crate::library_query::items::stats::QueryWorkStats::default();
-        let value = self.with_connection_instrumented(budget, work, Some(&mut stats))?;
+        let value = self.with_connection_instrumented(budget, work, Some(&mut stats), false)?;
         Ok((value, stats))
     }
 
@@ -88,27 +94,18 @@ impl LibraryReadLease {
         budget: &QueryBudget,
         work: impl FnOnce(&Connection) -> Result<T, StoreError>,
         stats: Option<&mut crate::library_query::items::stats::QueryWorkStats>,
+        library_query: bool,
     ) -> Result<T, LibraryReadError> {
         let conn = self.conn.as_ref().ok_or(LibraryReadError::Closed)?;
+        let _scoped_capture = crate::stats::LeaseStats::for_database(self.pool.database, conn);
         let _capture =
             stats.map(|out| crate::library_query::items::stats::QueryWorkCapture::new(conn, out));
         Self::prepare(conn, &self.pool, &mut self.clean, budget)?;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             conn.execute_batch("BEGIN")?;
-            install_progress(conn, budget, &self.pool, true);
-            let observer = self
-                .pool
-                .snapshot_observer
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            if let Some(observer) = observer {
-                // Deferred BEGIN alone does not pin WAL. Complete a real Library read
-                // before exposing this diagnostic-only active snapshot boundary.
-                conn.query_row("SELECT count(*) FROM libraries", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-                observer();
+            install_progress(conn, budget, &self.pool, true, library_query);
+            if library_query {
+                observe_snapshot(conn, &self.pool)?;
             }
             work(conn)
         }));
@@ -139,7 +136,7 @@ impl LibraryReadLease {
                         .unwrap();
                     observed.store(configured, Ordering::Release);
                 }
-                install_progress(conn, budget, &self.pool, false);
+                install_progress(conn, budget, &self.pool, false, false);
                 let result = self.pool.check_layout(conn);
                 conn.progress_handler(0, None::<fn() -> bool>);
                 Some(result)
@@ -216,7 +213,7 @@ impl LibraryReadLease {
         budget.check()?;
         conn.busy_timeout(budget.busy_wait()?)
             .map_err(StoreError::from)?;
-        install_progress(conn, budget, pool, false);
+        install_progress(conn, budget, pool, false, false);
         if let Err(error) = pool.check_layout(conn) {
             conn.progress_handler(0, None::<fn() -> bool>);
             let reset = conn.busy_timeout(Duration::from_millis(5000));
@@ -235,6 +232,22 @@ impl LibraryReadLease {
     }
 }
 
+fn observe_snapshot(conn: &Connection, pool: &Inner) -> Result<(), StoreError> {
+    let observer = pool
+        .snapshot_observer
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(observer) = observer {
+        // Deferred BEGIN alone does not pin WAL. Read before exposing the snapshot.
+        conn.query_row("SELECT count(*) FROM libraries", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        observer();
+    }
+    Ok(())
+}
+
 fn remaining_wait(budget: &QueryBudget) -> Duration {
     budget
         .deadline
@@ -242,11 +255,11 @@ fn remaining_wait(budget: &QueryBudget) -> Duration {
         .min(Duration::from_millis(5000))
 }
 
-impl Drop for LibraryReadLease {
+impl Drop for ReaderLease {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             if self.clean {
-                self.pool.put_back(conn);
+                self.pool.put_back(conn, self.epoch);
             } else {
                 drop(conn); // Physical close precedes release of the capacity slot.
                 #[cfg(test)]
@@ -282,11 +295,12 @@ fn install_progress(
     budget: &QueryBudget,
     pool: &Arc<Inner>,
     query_active: bool,
+    library_query: bool,
 ) {
     let cancelled = Arc::clone(&budget.cancelled);
     let stopped = Arc::clone(pool);
     let deadline = budget.deadline;
-    let observer = if query_active {
+    let observer = if query_active && (pool.database != "library" || library_query) {
         pool.query_progress_observer
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -294,16 +308,24 @@ fn install_progress(
     } else {
         None
     };
+    let diagnostic = (query_active && pool.database == "library")
+        .then(crate::progress::active)
+        .flatten();
     let observed = AtomicBool::new(false);
     conn.progress_handler(
-        if observer.is_some() { 1 } else { 1000 },
+        if observer.is_some() {
+            1
+        } else {
+            diagnostic.as_ref().map_or(1000, |p| p.interval)
+        },
         Some(move || {
             if let Some(observer) = &observer
                 && !observed.swap(true, Ordering::AcqRel)
             {
                 observer();
             }
-            cancelled.load(Ordering::Acquire)
+            diagnostic.as_ref().is_some_and(|p| p.run())
+                || cancelled.load(Ordering::Acquire)
                 || stopped.stopped.load(Ordering::Acquire)
                 || Instant::now() >= deadline
         }),

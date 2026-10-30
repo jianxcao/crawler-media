@@ -11,17 +11,9 @@ use crate::{Store, StoreError};
 impl Store {
     /// 目录路径 → `library_roots.root_id`（同一路径多库时取最靠前的 root）。
     pub fn protocol_folder_root_id(&self, root_path: &str) -> Result<Option<String>, StoreError> {
-        let root_id = self
-            .library
-            .query_row(
-                "SELECT r.root_id FROM library_roots r
-                 WHERE r.display_path = ?1 AND r.enabled = 1
-                 ORDER BY r.sort_order, r.library_id
-                 LIMIT 1",
-                [root_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(root_id)
+        self.with_library_read(|db| db.protocol_folder_root_id(root_path))
     }
 }
+
+#[path = "folder/connection.rs"]
+mod connection;

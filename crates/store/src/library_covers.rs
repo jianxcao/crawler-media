@@ -30,17 +30,23 @@ impl Store {
         path: Option<&str>,
         marker: &str,
     ) -> Result<bool, StoreError> {
-        self.ensure_library_mutable(id)?;
-        let tx = crate::write_tx(&self.library)?;
-        let changed = tx.execute(
-            "UPDATE libraries SET cover_path = ?1, cover_revision = cover_revision + 1
+        let changed = self.with_library_write(|library| {
+            library.ensure_library_mutable(id)?;
+            let tx = crate::write_tx(library.library)?;
+            let changed = tx.execute(
+                "UPDATE libraries SET cover_path = ?1, cover_revision = cover_revision + 1
              WHERE library_id = ?2 AND cover_revision = ?3",
-            params![path, id, expected_revision],
-        )?;
-        if changed == 0 {
+                params![path, id, expected_revision],
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            tx.commit()?;
+            Ok(true)
+        })?;
+        if !changed {
             return Ok(false);
         }
-        tx.commit()?;
         if let Err(error) = self.put_setting(&marker_key(id), marker) {
             tracing::warn!(
                 library_id = id,
@@ -53,13 +59,9 @@ impl Store {
 
     /// 当前封面指针 revision；Library 不存在时返回 `None`。
     pub fn library_cover_revision(&self, id: &str) -> Result<Option<i64>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT COALESCE(cover_revision, 0) FROM libraries WHERE library_id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        self.with_library_read(|db| db.library_cover_revision(id))
     }
 }
+
+#[path = "library_covers/connection.rs"]
+mod connection;

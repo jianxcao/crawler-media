@@ -66,9 +66,9 @@ impl JobUpdates {
     /// 订阅任务计数。返回的 receiver 立即持有**真实当前计数**。
     pub async fn subscribe(
         &self,
-        queue: Arc<Mutex<jobs::Queue>>,
+        readers: Arc<store::ReaderPool>,
     ) -> Result<watch::Receiver<JobCount>, String> {
-        let count = self.current_count(&queue)?;
+        let count = self.current_count(readers.clone()).await?;
         let mut guard = self.inner.lock();
         let sender = match guard.sender.clone() {
             Some(sender) => sender,
@@ -95,7 +95,7 @@ impl JobUpdates {
             tokio::spawn(poll_loop(
                 self.inner.clone(),
                 self.polls.clone(),
-                queue,
+                readers,
                 generation,
             ));
         }
@@ -103,8 +103,8 @@ impl JobUpdates {
     }
 
     /// 订阅时立刻查一次真实计数：失败且没有上一次好值时返回 `Err`。
-    fn current_count(&self, queue: &Arc<Mutex<jobs::Queue>>) -> Result<JobCount, String> {
-        match queue.lock().change_state() {
+    async fn current_count(&self, readers: Arc<store::ReaderPool>) -> Result<JobCount, String> {
+        match crate::jobs_readers::read_async(readers, |queue| queue.change_state()).await {
             Ok(state) => Ok(JobCount {
                 count: state.finished_count,
                 revision: state.revision,
@@ -131,7 +131,7 @@ impl JobUpdates {
 async fn poll_loop(
     inner: Arc<Mutex<Inner>>,
     polls: Arc<AtomicUsize>,
-    queue: Arc<Mutex<jobs::Queue>>,
+    readers: Arc<store::ReaderPool>,
     generation: u64,
 ) {
     loop {
@@ -152,7 +152,7 @@ async fn poll_loop(
             }
         };
         polls.fetch_add(1, Ordering::SeqCst);
-        match queue.lock().change_state() {
+        match crate::jobs_readers::read_async(readers.clone(), |queue| queue.change_state()).await {
             Ok(state) => {
                 let next = JobCount {
                     count: state.finished_count,

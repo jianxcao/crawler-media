@@ -11,6 +11,7 @@ test-support = []
 
 [dependencies]
 parking_lot.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true
@@ -30,6 +31,7 @@ tracing.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 jobs.workspace = true
 tempfile.workspace = true
 # Integration tests are separate crates and cannot see `#[cfg(test)]` items, so the

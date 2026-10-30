@@ -65,16 +65,9 @@ impl Store {
         &self,
         rename_id: &str,
     ) -> Result<RenameCompletionPlan, StoreError> {
-        let request = self.load_file_rename(rename_id)?;
-        if !matches!(
-            request.phase.as_str(),
-            "disk_applied" | "library_published" | "references_applied"
-        ) {
-            return Err(StoreError::Protected(format!(
-                "rename {rename_id} phase {} cannot complete; apply disk first",
-                request.phase
-            )));
-        }
-        Ok(RenameCompletionPlan { request })
+        self.with_library_read(|db| db.plan_file_rename_completion(rename_id))
     }
 }
+
+#[path = "rename_completion/connection.rs"]
+mod connection;

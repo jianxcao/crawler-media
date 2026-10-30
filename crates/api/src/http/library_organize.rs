@@ -74,7 +74,7 @@ pub(crate) async fn preview_organize(
 }
 
 fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -177,7 +177,7 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
     };
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -199,7 +199,6 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
             "条目没有在位文件",
         );
     };
-    drop(store);
     let path = row.file.path.clone();
     // 剧集级目录：模板整理后是 `<show>/Season N/file`，show 根 = 文件父目录的上一级；
     // 平铺时 = 文件所在目录。poster/fanart/tvshow.nfo 落在 show 根。
@@ -296,7 +295,7 @@ pub(crate) async fn relax_filter(
 }
 
 fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -399,7 +398,7 @@ fn similar_inner(
     item_id: &str,
     user_id: Option<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let library = match require_visible_library(&store, id, user_id) {
         Ok(library) => library,
         Err(response) => return response,
@@ -430,7 +429,6 @@ fn similar_inner(
     let Some(tmdb_id) = media.tmdb_id.clone() else {
         return ok_list(Vec::new()).into_response();
     };
-    drop(store);
     let hits = state
         .catalog
         .similar(media.kind, &tmdb_id)

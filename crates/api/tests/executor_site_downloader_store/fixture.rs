@@ -34,7 +34,7 @@ impl Fixture {
         let downloader = DownloaderId::new();
         {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .insert_site(&Site {
                     id: site,

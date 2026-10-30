@@ -98,29 +98,36 @@ fn delete_duplicate_blocking(
     if let Err(response) = prove_redundant(&plan, &observed) {
         return *response;
     }
-    let queued = super::store_wait::with_bounded_store(state.store(), |store| {
-        state.require_writable()?;
-        state.require_write_admitted()?;
-        match capture_plan_locked(store, library_id, file_id) {
-            Ok(again) if again.versions() == plan.versions() => {}
-            Ok(_) => return Err(not_duplicate("文件在检查期间已变化，拒绝删除")),
-            Err(response) => return Err(*response),
-        }
-        store
-            .enqueue_file_deletion_observed(&path, "duplicate", identity)
-            .map_err(|error| {
-                tracing::error!(%error, %path, "登记重复文件删除意图失败");
+    let queued = super::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(
+            |error| {
                 err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "file.delete",
                     &error.to_string(),
                 )
-            })
+            },
+            |store| {
+                match capture_plan_on(store, library_id, file_id) {
+                    Ok(again) if again.versions() == plan.versions() => {}
+                    Ok(_) => return Err(not_duplicate("文件在检查期间已变化，拒绝删除")),
+                    Err(response) => return Err(*response),
+                }
+                store
+                    .enqueue_file_deletion_observed(&path, "duplicate", identity)
+                    .map_err(|error| {
+                        err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "file.delete",
+                            &error.to_string(),
+                        )
+                    })
+            },
+        )
     });
     match queued {
-        Some(Ok(())) => {}
-        Some(Err(response)) => return response,
-        None => return super::store_wait::busy_response(),
+        Ok(Ok(())) => {}
+        Ok(Err(response)) | Err(response) => return response,
     }
     if let Err(error) = crate::http::file_delete::retry_queued_deletions_for(&state.store, &path) {
         tracing::error!(%error, path = %path, "删除重复文件失败，保留删除意图稍后重试");
@@ -156,14 +163,40 @@ fn capture_plan(
     library_id: &str,
     file_id: domain::LedgerId,
 ) -> Result<DeletePlan, Box<Response>> {
-    super::store_wait::with_bounded_store(state.store(), |store| {
+    super::store_wait::with_store_read(state, |store| {
         capture_plan_locked(store, library_id, file_id)
     })
-    .unwrap_or_else(|| Err(Box::new(super::store_wait::busy_response())))
+    .map_err(Box::new)?
 }
 
 fn capture_plan_locked(
     store: &crate::Store,
+    library_id: &str,
+    file_id: domain::LedgerId,
+) -> Result<DeletePlan, Box<Response>> {
+    let plan = store
+        .library_read_snapshot(|store| capture_plan_on(store, library_id, file_id))
+        .map_err(|error| {
+            Box::new(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ))
+        })??;
+    let target = &plan.files[0];
+    let media = store
+        .get_media(target.file.media_id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| Box::new(not_duplicate("Media 已不存在")))?;
+    if super::library::library_for_file_strict(store, &target.file, &media).is_none() {
+        return Err(Box::new(not_duplicate("文件不属于该媒体库")));
+    }
+    Ok(plan)
+}
+
+fn capture_plan_on(
+    store: &store::LibraryConnection<'_>,
     library_id: &str,
     file_id: domain::LedgerId,
 ) -> Result<DeletePlan, Box<Response>> {
@@ -181,7 +214,7 @@ fn capture_plan_locked(
         .ok()
         .flatten()
         .ok_or_else(missing)?;
-    if crate::http::library::library_for_file_strict(store, &target.file, &media)
+    if crate::http::library::library_for_recorded_file(store, &target, &media)
         .is_none_or(|owner| owner.id != library.id)
     {
         return Err(Box::new(err(

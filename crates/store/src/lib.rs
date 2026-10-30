@@ -17,7 +17,13 @@ mod file_reads;
 mod instance_lock;
 pub use instance_lock::AppHeartbeat;
 mod app_auth;
+mod connections;
+mod progress;
+mod read_scope;
+mod writer_rank;
 mod writers;
+pub use connections::{LibraryConnection, SubscribeConnection};
+pub use writer_rank::{WriterRank, WriterRankGuard};
 pub use writers::{App, Db, Writers};
 mod pending_file_deletions;
 mod pending_progress;
@@ -52,8 +58,8 @@ pub mod files;
 mod library;
 mod library_read;
 pub use library_read::{
-    LibraryReadContext, LibraryReadError, LibraryReadLease, LibraryReadPool, LibraryReadRequest,
-    LibraryReadResult, QueryBudget, ReadCredential,
+    LibraryReadContext, LibraryReadError, LibraryReadRequest, LibraryReadResult, QueryBudget,
+    ReadCredential, ReaderLease, ReaderPool,
 };
 mod unidentified;
 pub use unidentified::UnidentifiedRow;
@@ -115,7 +121,7 @@ mod subscribes;
 mod users;
 pub mod work_counters;
 mod write_tx;
-pub(crate) use write_tx::write_tx;
+pub(crate) use write_tx::{read_tx, write_tx};
 
 pub mod password;
 pub mod probe_state;
@@ -162,8 +168,6 @@ pub use subscribe_wanted::WantedHistory;
 pub use subscribes::PendingDownload;
 
 use std::path::PathBuf;
-
-use rusqlite::Connection;
 
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -224,7 +228,19 @@ pub fn rfc3339_from_secs(secs: i64) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("app writer is temporarily busy")]
+    #[error("reader pool is temporarily busy")]
+    ReadBusy,
+    #[error("reader pool is closed")]
+    ReadClosed,
+    #[error("reader deadline expired")]
+    ReadDeadline,
+    #[error("reader operation cancelled")]
+    ReadCancelled,
+    #[error("reader lease belongs to another database or Store")]
+    ReadLeaseMismatch,
+    #[error("reader operation reentered its active database connection")]
+    ReadReentrant,
+    #[error("database writer is temporarily busy")]
     WriteBusy,
     #[error("library {library_id} query projection is temporarily unavailable")]
     QueryUnavailable { library_id: domain::LibraryId },
@@ -255,6 +271,8 @@ pub enum StoreError {
     CredentialConflict(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("subscription coverage overlaps {subscribe_id}")]
+    SubscribeOverlap { subscribe_id: domain::SubscribeId },
     #[error("password hashing error: {0}")]
     PasswordHash(String),
 }
@@ -285,12 +303,9 @@ pub struct Store {
     /// Per-store role lookup diagnostic for bounded roster work.
     pub(crate) role_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     app_path: PathBuf,
-    pub(crate) app: Connection,
     writers: std::sync::Arc<Writers>,
-    read_only: bool,
-    pub(crate) cache: Connection,
-    pub(crate) library: Connection,
-    pub(crate) subscribe: Connection,
+    readers: connections::Readers,
+    aliases: path_key::RootAliases,
 }
 
 impl std::fmt::Debug for Store {
@@ -335,7 +350,12 @@ impl Store {
     /// Freeze committed root aliases; the returned observer performs IO without Store.
     pub fn nfo_input_observer(&self) -> crate::metadata::nfo_input::NfoInputObserver {
         crate::metadata::nfo_input::NfoInputObserver {
-            aliases: crate::path_key::alias_snapshot(&self.library),
+            aliases: std::sync::Arc::new(std::sync::RwLock::new(
+                self.aliases
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
         }
     }
 }

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use marker::adaptive::TemplateReference;
-use parking_lot::Mutex;
 use store::playback::MediaMergeRequest;
 
 use super::*;
@@ -71,9 +70,9 @@ fn publish(manager: &ProbeManager, media_id: MediaId, model: &TemplateModel) {
 #[test]
 fn pipeline_publication_drops_transferred_media_without_redirecting() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(store::Store::open(dir.path()).unwrap()));
+    let store = Arc::new(store::Store::open(dir.path()).unwrap());
     let manager = ProbeManager::new(store.clone()).unwrap();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let loser = media(&guard);
     let survivor = media(&guard);
     let library = guard
@@ -115,9 +114,8 @@ fn pipeline_publication_drops_transferred_media_without_redirecting() {
         current.file.version.source_version,
         file.version.source_version
     );
-    drop(guard);
     publish(&manager, loser, &captured_model);
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert!(
         guard
             .list_fingerprint_models(&loser.to_string(), 1)
@@ -130,12 +128,11 @@ fn pipeline_publication_drops_transferred_media_without_redirecting() {
             .unwrap()
             .is_empty()
     );
-    drop(guard);
     // A newly computed pipeline for the current identity remains publishable.
     publish(&manager, survivor, &captured_model);
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .list_fingerprint_models(&survivor.to_string(), 1)
             .unwrap()
             .len(),

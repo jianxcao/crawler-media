@@ -175,7 +175,7 @@ fn recording_ffmpeg(dir: &std::path::Path) -> (std::path::PathBuf, std::path::Pa
 const WORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn chapter_service(
-    store: &std::sync::Arc<parking_lot::Mutex<Store>>,
+    store: &std::sync::Arc<Store>,
     registry: &std::sync::Arc<crate::library_lifecycle::LibraryWorkRegistry>,
     ffmpeg: &std::path::Path,
 ) -> std::sync::Arc<crate::chapter_frame_service::ChapterFrameService> {
@@ -208,7 +208,7 @@ async fn fingerprint_marker_extracts_scene_frames_when_library_enables_them() {
         false,
     )
     .unwrap();
-    let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
+    let store = std::sync::Arc::new(store);
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
     service.start();
@@ -217,7 +217,7 @@ async fn fingerprint_marker_extracts_scene_frames_when_library_enables_them() {
     // 只等"文件出现"或 lease 归还会读到还没写入内容的空文件（DB16）。
     tokio::time::timeout(WORK_TIMEOUT, async {
         loop {
-            let terminal = store.lock().chapter_frame_task_counts().unwrap().terminal();
+            let terminal = store.as_ref().chapter_frame_task_counts().unwrap().terminal();
             if terminal > 0 {
                 break;
             }
@@ -250,7 +250,7 @@ fn fingerprint_marker_skips_scene_frames_when_library_disables_them() {
         false,
     )
     .unwrap();
-    let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
+    let store = std::sync::Arc::new(store);
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
     crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(&updates, &service);
@@ -258,8 +258,7 @@ fn fingerprint_marker_skips_scene_frames_when_library_disables_them() {
         !args.is_file(),
         "关闭生成章节后，声纹写入片头片尾不得抓场景图"
     );
-    let marker = store
-        .lock()
+    let marker = store.as_ref()
         .get_media_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -296,7 +295,7 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
         false,
     )
     .unwrap();
-    let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
+    let store = std::sync::Arc::new(store);
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
     service.start();

@@ -60,8 +60,9 @@ fn patch_blocking(
     if let Some(auto) = auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, auto);
     }
+    drop(_guard);
     let snapshot = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
         super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
     };
@@ -85,7 +86,7 @@ fn load_and_patch(
     user_id: UserId,
     body: PatchSubscriptionInput,
 ) -> Result<(Subscribe, Subscribe, Media), Response> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(mut subscribe) = store.get_subscribe(id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -111,19 +112,18 @@ fn persist_subscription(
     previous: &Subscribe,
     subscribe: &Subscribe,
 ) -> Result<(), Response> {
-    // G-M1: a coverage / library change must not overlap a sibling subscription.
-    if previous.coverage != subscribe.coverage || previous.library_id != subscribe.library_id {
-        let overlap =
-            crate::subscribe_create::overlapping_subscription(&state.store.lock(), subscribe);
-        if let Ok(Some(other)) = overlap {
+    if let Err(error) = state
+        .store
+        .as_ref()
+        .update_nonoverlapping_subscribe(subscribe)
+    {
+        if let crate::store::StoreError::SubscribeOverlap { subscribe_id } = error {
             return Err(err(
                 StatusCode::CONFLICT,
                 "subscription.overlap",
-                &format!("同一媒体库中已有覆盖重叠的订阅（{other}），请合并或调整集数范围"),
+                &format!("同一媒体库中已有覆盖重叠的订阅（{subscribe_id}），请合并或调整集数范围"),
             ));
         }
-    }
-    if let Err(error) = state.store.lock().update_subscribe(subscribe) {
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",
@@ -149,7 +149,7 @@ fn persist_subscription(
 }
 
 fn rollback_subscription(state: &ApiState, id: &str, previous: &Subscribe) {
-    if let Err(error) = state.store.lock().update_subscribe(previous) {
+    if let Err(error) = state.store.as_ref().update_subscribe(previous) {
         tracing::error!(subscribe_id = id, error = %error, "队列同步失败后回滚订阅状态失败");
     }
     super::patch_jobs::rollback_jobs(state, id, previous);

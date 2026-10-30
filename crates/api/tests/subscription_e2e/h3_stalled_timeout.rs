@@ -65,7 +65,6 @@ async fn threshold_is_configurable() {
     let h = Harness::new();
     h.state
         .store()
-        .lock()
         .put_setting(api::settings_keys::SUBSCRIBE_STALLED_TIMEOUT_DAYS, "1")
         .unwrap();
     h.create_site().await;

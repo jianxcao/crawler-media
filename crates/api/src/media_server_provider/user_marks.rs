@@ -6,6 +6,11 @@ pub(super) fn mark_error(
     media_id: domain::MediaId,
 ) -> UserMarksError {
     match error {
+        crate::store::StoreError::WriteBusy
+        | crate::store::StoreError::ReadBusy
+        | crate::store::StoreError::ReadClosed
+        | crate::store::StoreError::ReadDeadline
+        | crate::store::StoreError::ReadCancelled => UserMarksError::Unavailable,
         crate::store::StoreError::Protected(message) => {
             tracing::warn!(%message, %user_id, %media_id, "Jellyfin user mark rejected by write barrier");
             UserMarksError::Conflict(message)

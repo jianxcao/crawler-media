@@ -294,7 +294,7 @@ async fn changing_default_does_not_move_an_existing_pending_task() {
     let tmp = tempfile::tempdir().unwrap();
     let (first_url, first_calls, _first_url_server) = transmission_fixture();
     let (second_url, second_calls, _second_url_server) = transmission_fixture();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let first_id = domain::DownloaderId::new();
     let second_id = domain::DownloaderId::new();
     for (id, name, url, is_default) in [
@@ -302,7 +302,7 @@ async fn changing_default_does_not_move_an_existing_pending_task() {
         (second_id, "second", second_url, false),
     ] {
         store
-            .lock()
+            .as_ref()
             .insert_downloader(&api::store::DownloaderRow {
                 id,
                 name: name.into(),
@@ -352,12 +352,12 @@ async fn changing_default_does_not_move_an_existing_pending_task() {
         .unwrap();
     assert_eq!(submitted.status(), StatusCode::OK);
     assert_eq!(
-        store.lock().list_all_pending_routed().unwrap()[0]
+        store.as_ref().list_all_pending_routed().unwrap()[0]
             .2
             .downloader_id,
         Some(first_id)
     );
-    store.lock().set_default_downloader(second_id).unwrap();
+    store.as_ref().set_default_downloader(second_id).unwrap();
     let task_id = format!("{}:{stable_url}", subscribe["id"].as_str().unwrap());
     let removed = app
         .oneshot(request(

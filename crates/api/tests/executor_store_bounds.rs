@@ -1,12 +1,13 @@
-//! Task 22 slice 1: playback and search reads must not wait for the `Store` lock
-//! on a tokio worker.
+//! Playback and search reads stay responsive while a Library writer is busy.
 //!
-//! A long batch (scan, integrity) holds the process-wide `Store` mutex for
-//! seconds. If a request parks its tokio worker on that mutex, every other task
-//! scheduled on the runtime is delayed — including `/health` and requests that
-//! never touch the store. The lock is waited for on the blocking pool with a
-//! bounded deadline (`http::store_wait`), and a lock that stays contended answers
-//! 503 + `Retry-After` instead of hanging.
+//! Requests use read-only connections, so a scan or integrity write transaction
+//! must leave read responses, `/health`, and unrelated executor timers responsive.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,7 +38,7 @@ fn request(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
 
 /// State with one admin whose bearer token is usable over HTTP, built **outside**
 /// any Tokio runtime so the background drivers `ApiState::new` starts (probe
-/// workers, chapter frames, root reassignment) do not take the lock themselves.
+/// workers, chapter frames, root reassignment) do not interfere with the measurement.
 fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
@@ -50,7 +51,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     .unwrap();
     let token = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let user = domain::User {
             id: domain::UserId::new(),
             login: "slice-admin".into(),
@@ -73,7 +74,7 @@ fn busy_code(body: &[u8]) -> Option<String> {
 }
 
 /// L1 read/write split: request reads run on read-only connections and never wait
-/// for the writer `Store` lock, however long a batch holds it (and even while a
+/// for the Library writer, however long a batch holds it (and even while a
 /// write transaction is open on library.db). The detail page is the acceptance
 /// endpoint: a missing item answers 404 at idle speed, never 503.
 #[test]
@@ -82,7 +83,6 @@ fn reads_do_not_wait_for_the_writer_lock() {
     let (state, token) = state_with_admin(tmp.path());
     let library = state
         .store()
-        .lock()
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .expect("default movie library")
@@ -99,7 +99,8 @@ fn reads_do_not_wait_for_the_writer_lock() {
     let (release, released) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
         // A long scan / scrape / probe batch: writer lock + open write transaction.
-        let _guard = held_store.lock();
+        let _guard =
+            crate::writer_hold::WriterHold::acquire(held_store.clone(), store::Db::Library);
         let writer = rusqlite::Connection::open(library_db).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         locked.send(()).unwrap();
@@ -174,7 +175,7 @@ fn metadata_language_requests_leave_the_executor_responsive() {
         let (locked, acquired) = std::sync::mpsc::channel();
         let held = state.store();
         let holder = std::thread::spawn(move || {
-            let _guard = held.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
             locked.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(800));
         });
@@ -224,7 +225,7 @@ fn series_detail_and_files_answer_while_the_writer_is_busy() {
     let (state, token) = state_with_admin(tmp.path());
     let (library_id, media_id) = {
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let library = guard
             .default_library(domain::MediaKind::Tv)
             .unwrap()
@@ -249,7 +250,7 @@ fn series_detail_and_files_answer_while_the_writer_is_busy() {
         let path = library.root_paths[0].join("S01E01.mkv");
         std::fs::write(&path, b"fixture").unwrap();
         store::test_support::publish_fixture_file(
-            &guard,
+            guard,
             &store::test_support::FixtureFile {
                 media_id,
                 path: path.display().to_string(),
@@ -269,7 +270,8 @@ fn series_detail_and_files_answer_while_the_writer_is_busy() {
     let (locked, acquired) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
-        let _guard = held_store.lock();
+        let _guard =
+            crate::writer_hold::WriterHold::acquire(held_store.clone(), store::Db::Library);
         let writer = rusqlite::Connection::open(library_db).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         locked.send(()).unwrap();

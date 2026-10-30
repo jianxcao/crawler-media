@@ -57,6 +57,18 @@ pub(crate) fn unit_marker(
     unit: UnitKey,
     unit_count: usize,
 ) -> Option<StoredMediaMarker> {
+    store
+        .library_read_snapshot(|store| unit_marker_on(store, media, unit, unit_count))
+        .ok()
+        .flatten()
+}
+
+fn unit_marker_on(
+    store: &store::LibraryConnection<'_>,
+    media: &Media,
+    unit: UnitKey,
+    unit_count: usize,
+) -> Option<StoredMediaMarker> {
     let (season, episode) = marker_coordinates(media.kind, unit, unit_count)?;
     store
         .get_media_marker(media.id, Some(season), Some(episode))
@@ -113,46 +125,43 @@ fn clear_for_refresh(
 ) -> Result<(), ChapterRefreshError> {
     let lease = state
         .library_work
-        .acquire_from_readers(&state.store_readers, &row.file.library_id.to_string())
+        .acquire_bounded(&state.store, &row.file.library_id.to_string())
         .map_err(|error| {
             tracing::warn!(%error, file_id=%row.file.file_id, "chapter refresh lease was rejected");
             ChapterRefreshError::Unavailable(axum::http::StatusCode::CONFLICT)
         })?;
     lease
         .publish(|| {
-            Ok(crate::http::store_wait::with_bounded_store(
-                state.store(),
-                |store| {
-                    state
-                        .require_writable()
-                        .map_err(|response| ChapterRefreshError::Unavailable(response.status()))?;
-                    state
-                        .require_write_admitted()
-                        .map_err(|response| ChapterRefreshError::Unavailable(response.status()))?;
-                    crate::fingerprint_job::source::ensure_source_recorded(store, row)
-                        .map_err(ChapterRefreshError::SourceChanged)?;
-                    store
-                        .clear_cached_chapters(&row.file.file_id.to_string())
-                        .map_err(|error| ChapterRefreshError::Storage(error.to_string()))?;
-                    if let Some((season, episode)) =
-                        marker_coordinates(media.kind, unit, row.units.len())
-                    {
-                        let locked = unit_marker(store, media, unit, row.units.len())
-                            .is_some_and(|marker| marker.locked);
-                        if !locked {
+            Ok(
+                crate::http::store_wait::with_foreground_store(state, |store| {
+                    store.library_write_with_error(
+                        |error| ChapterRefreshError::Storage(error.to_string()),
+                        |store| {
+                            crate::fingerprint_job::source::ensure_source_recorded_on(store, row)
+                                .map_err(ChapterRefreshError::SourceChanged)?;
                             store
-                                .delete_media_marker(media.id, Some(season), Some(episode))
+                                .clear_cached_chapters(&row.file.file_id.to_string())
                                 .map_err(|error| ChapterRefreshError::Storage(error.to_string()))?;
-                        }
-                    }
-                    Ok(())
-                },
-            ))
+                            if let Some((season, episode)) =
+                                marker_coordinates(media.kind, unit, row.units.len())
+                                && !unit_marker_on(store, media, unit, row.units.len())
+                                    .is_some_and(|marker| marker.locked)
+                            {
+                                store
+                                    .delete_media_marker(media.id, Some(season), Some(episode))
+                                    .map_err(|error| {
+                                        ChapterRefreshError::Storage(error.to_string())
+                                    })?;
+                            }
+                            Ok(())
+                        },
+                    )
+                })
+                .map_err(|response| ChapterRefreshError::Unavailable(response.status()))
+                .and_then(std::convert::identity),
+            )
         })
         .map_err(ChapterRefreshError::SourceChanged)?
-        .ok_or(ChapterRefreshError::Unavailable(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        ))?
 }
 
 /// Return persisted markers when source detection is disabled, but do not run
@@ -202,7 +211,7 @@ fn resolve_item_chapters_blocking(
 ) -> Vec<ChapterMarker> {
     let _lease = match state
         .library_work()
-        .acquire_from_readers(&state.store_readers, &row.file.library_id.to_string())
+        .acquire_bounded(&state.store, &row.file.library_id.to_string())
     {
         Ok(lease) => lease,
         Err(_) => return Vec::new(),
@@ -228,41 +237,45 @@ fn resolve_item_chapters_blocking(
     if crate::fingerprint_job::source::observe_source(row).is_err() {
         return Vec::new();
     }
-    {
-        let handle = state.store();
-        let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
-            tracing::warn!(file_id=%row.file.file_id, "chapter publication Store busy");
-            return Vec::new();
-        };
-        if crate::fingerprint_job::source::ensure_source_recorded(&store, row).is_err() {
-            return Vec::new();
-        }
-        if state.require_writable().is_ok() && state.require_write_admitted().is_ok() {
-            let mut published = true;
-            for marker in &output.markers {
-                if let Err(error) = store.put_media_marker(marker) {
-                    tracing::error!(%error, file_id=%row.file.file_id, "chapter marker publication failed");
-                    published = false;
-                    break;
+    let publication = crate::http::store_wait::with_foreground_store(state, |store| {
+        store.library_write_with_error(
+            |error| error.to_string(),
+            |store| {
+                crate::fingerprint_job::source::ensure_source_recorded_on(store, row)?;
+                for marker in &output.markers {
+                    store
+                        .put_media_marker(marker)
+                        .map_err(|error| error.to_string())?;
                 }
-            }
-            if published
-                && output.cacheable
-                && let Err(error) = store.put_cached_chapters(&cache_key, &chapters)
-            {
-                tracing::error!(%error, file_id=%row.file.file_id, "chapter cache publication failed");
-            }
+                if output.cacheable {
+                    store
+                        .put_cached_chapters(&cache_key, &chapters)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            },
+        )
+    });
+    match publication {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, file_id=%row.file.file_id, "chapter publication rejected");
+            return Vec::new();
         }
-        if let Some(latest) = unit_marker(&store, media, unit, row.units.len()) {
-            let duration_ms = store
-                .file_coverage_by_id(row.file.file_id)
-                .ok()
-                .flatten()
-                .filter(|current| current.file.version == row.file.version)
-                .and_then(|current| current.file.duration_ms);
-            append_marker_chapters(&mut chapters, Some(&latest), duration_ms);
-            chapters.sort_by_key(|chapter| chapter.start_ms);
+        Err(response) => {
+            tracing::warn!(status=%response.status(), file_id=%row.file.file_id, "chapter publication not admitted");
         }
+    }
+    if let Some(latest) = unit_marker(&state.store, media, unit, row.units.len()) {
+        let duration_ms = state
+            .store
+            .file_coverage_by_id(row.file.file_id)
+            .ok()
+            .flatten()
+            .filter(|current| current.file.version == row.file.version)
+            .and_then(|current| current.file.duration_ms);
+        append_marker_chapters(&mut chapters, Some(&latest), duration_ms);
+        chapters.sort_by_key(|chapter| chapter.start_ms);
     }
     chapters
 }
@@ -274,13 +287,7 @@ fn snapshot(
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Option<ResolveSnapshot> {
-    let Some(store) = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-    else {
-        tracing::warn!(file_id=%row.file.file_id, "chapter snapshot Store busy");
-        return None;
-    };
+    let store = state.store.clone();
     if let Err(error) = crate::fingerprint_job::source::ensure_source_recorded(&store, row) {
         tracing::warn!(%error, file_id=%row.file.file_id, "discarded stale chapter snapshot before cache lookup");
         return None;

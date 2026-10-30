@@ -5,7 +5,6 @@ use marker::fingerprint::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -98,7 +97,7 @@ impl FingerprintCaptureEngine for FixtureEngine {
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     manager: ProbeManager,
     media_id: MediaId,
     units: Vec<ProbeUnit>,
@@ -107,7 +106,7 @@ struct Fixture {
 
 fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     let engine = Arc::new(FixtureEngine {
         case,
@@ -115,7 +114,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
     });
     let manager =
         ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone()).unwrap();
-    let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
+    let tv_root = store.as_ref().library_root(MediaKind::Tv).unwrap();
     let rows: Vec<_> = episodes
         .iter()
         .enumerate()
@@ -191,12 +190,12 @@ fn control_uniform_season_publishes_all_markers() {
         4
     );
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     assert_eq!(
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -219,7 +218,7 @@ fn duplicate_episode_versions_publish_without_unique_key_failure() {
     );
     let result = f
         .store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement]);
     println!("publication: {result:?}");
     assert!(
@@ -260,12 +259,12 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .filter(|marker| marker.intro_start_ms.is_some())
         .count();
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -275,7 +274,7 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         f.engine.reads.load(Ordering::Relaxed),
         after.intro_start_ms,
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -298,7 +297,7 @@ fn unlocked_timeline_uses_the_known_media_duration() {
     let f = setup("no-outro", &[1, 2, 3]);
     let replacement = run(&f);
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let chapters =
@@ -328,7 +327,7 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     let f = setup("uniform", &[1, 2, 3]);
     let first = &f.units[0].row;
     {
-        let st = f.store.lock();
+        let st = f.store.as_ref();
         let version = st
             .get_file_version(first.file.file_id)
             .unwrap()
@@ -356,13 +355,13 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     assert!(try_run(&f).is_err());
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     let status = f
         .store
-        .lock()
+        .as_ref()
         .get_probe_job("review9-job")
         .unwrap()
         .unwrap()
@@ -412,12 +411,12 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .map(|marker| marker.episode)
         .collect();
     f.store
-        .lock()
+        .as_ref()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
     let after = f
         .store
-        .lock()
+        .as_ref()
         .get_media_marker(f.media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -427,7 +426,7 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         f.engine.reads.load(Ordering::Relaxed),
         after.intro_start_ms,
         f.store
-            .lock()
+            .as_ref()
             .get_probe_job("review9-job")
             .unwrap()
             .unwrap()
@@ -492,11 +491,11 @@ fn seed_probe(store: &Store, row: &domain::FileCoverage, duration_ms: Option<i64
 }
 
 fn seed_store(
-    store: &Arc<Mutex<Store>>,
+    store: &Arc<Store>,
     media_id: MediaId,
     rows: &[FixtureFile],
 ) -> Vec<domain::FileCoverage> {
-    let st = store.lock();
+    let st = store.as_ref();
     let mut config = st.get_scrape_config().unwrap().setting;
     config.fingerprint_sampling_mode = Some("adaptive".into());
     st.save_scrape_config(&config).unwrap();
@@ -517,7 +516,7 @@ fn seed_store(
     let mut coverages = Vec::new();
     for row in rows {
         std::fs::write(&row.path, b"dummy").unwrap();
-        let file = publish_fixture_file(&st, row).unwrap();
+        let file = publish_fixture_file(st, row).unwrap();
         let coverage = domain::FileCoverage {
             path_key: String::new(),
             file,
@@ -526,7 +525,7 @@ fn seed_store(
                 _ => vec![domain::UnitKey::WHOLE],
             },
         };
-        seed_probe(&st, &coverage, Some(1_000_000));
+        seed_probe(st, &coverage, Some(1_000_000));
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,

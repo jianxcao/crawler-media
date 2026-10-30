@@ -8,14 +8,14 @@ async fn issued_session_cannot_write_replacement_source() {
 
     let user_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     let session_id_a = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, "dev1", row_a.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, "dev1", row_a.file_id, 1000)
     };
 
     // Client sends heartbeat for media_b with session_id_a (issued for row_a / media_a)
@@ -39,7 +39,7 @@ async fn issued_session_cannot_write_replacement_source() {
     assert_eq!(status, StatusCode::OK);
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let unit_b = guard.unit_state(user_id, media_b, -1, -1).unwrap();
     assert!(unit_b.is_none() || unit_b.unwrap().position_ms != 10000);
 }
@@ -50,13 +50,13 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
     let (media_id, row) = fix.insert_media_and_ledger("stale_source.mkv");
     let store_arc = fix.state.store();
     let user_id = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
     let device = "dev_stale_src";
     let sid = {
-        let guard = store_arc.lock();
-        support::session::issue_session(&guard, user_id, device, row.file_id, 1000)
+        let guard = store_arc.as_ref();
+        support::session::issue_session(guard, user_id, device, row.file_id, 1000)
     };
 
     let (status, body) = fix
@@ -78,7 +78,7 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
     assert_eq!(status, StatusCode::OK, "start body={body}");
 
     let unit_before = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .unit_state(user_id, media_id, -1, -1)
             .unwrap()
@@ -86,7 +86,7 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
     };
     assert_eq!(unit_before.position_ms, 1000);
     let session_before = {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.get_session(user_id, device).unwrap().unwrap()
     };
 
@@ -122,7 +122,7 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
         assert_eq!(status, StatusCode::OK, "event={event} body={body}");
 
         let unit_after = {
-            let guard = store_arc.lock();
+            let guard = store_arc.as_ref();
             guard
                 .unit_state(user_id, media_id, -1, -1)
                 .unwrap()
@@ -135,7 +135,7 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
         );
 
         let session_after = {
-            let guard = store_arc.lock();
+            let guard = store_arc.as_ref();
             guard.get_session(user_id, device).unwrap()
         };
         let session_after = session_after.expect("源换版不得删除会话行(IgnoredStale 零写入)");
@@ -159,7 +159,7 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
     let (media_id, file) = fix.insert_media_and_ledger("movie_resume.mkv");
     let store_arc = fix.state.store();
     let user_id = store_arc
-        .lock()
+        .as_ref()
         .user_by_token(&fix.admin_token)
         .unwrap()
         .unwrap()
@@ -178,7 +178,7 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
         body
     };
     let s1 =
-        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+        support::session::issue_session(store_arc.as_ref(), user_id, "dev1", file.file_id, 1000);
     for (event, pos) in [("start", Some(0)), ("stop", Some(600_000))] {
         let (status, _) = fix
             .request_with_body(
@@ -197,13 +197,13 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
             .unwrap()
     };
     assert_eq!(
-        unit(&store_arc.lock()).position_ms,
+        unit(store_arc.as_ref()).position_ms,
         600_000,
         "positive control"
     );
 
     {
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let scope = store::library_write::WriteScope {
             library_id: file.library_id,
             config_revision: guard
@@ -222,7 +222,7 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
             .unwrap();
     }
     let s2 =
-        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 6000);
+        support::session::issue_session(store_arc.as_ref(), user_id, "dev1", file.file_id, 6000);
     let (status, _) = fix
         .request_with_body(
             "POST",
@@ -233,7 +233,7 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        unit(&store_arc.lock()).position_ms,
+        unit(store_arc.as_ref()).position_ms,
         0,
         "old-source resume must not be rebound"
     );

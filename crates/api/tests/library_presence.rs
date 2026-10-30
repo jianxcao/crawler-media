@@ -38,7 +38,7 @@ async fn restored_missing_row_is_not_pruned() {
 
     // Ledger row still exists and unchanged
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);
     assert_eq!(loaded.file.media_id, media_id);
@@ -54,7 +54,7 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
     std::fs::create_dir_all(&nested_root).unwrap();
     let _nested_lib = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .create_library(
                 MediaKind::Movie,
@@ -71,7 +71,7 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
     let nested_file = nested_root.join("child.mkv");
     let (_nested_media_id, nested_row) = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         let mid = domain::MediaId::new();
         let m = domain::Media {
             id: mid,
@@ -102,7 +102,7 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
             ..Default::default()
         };
         guard.insert_media(&m).unwrap();
-        let published = publish_fixture_file(&guard, &spec).unwrap();
+        let published = publish_fixture_file(guard, &spec).unwrap();
         (mid, published)
     };
 
@@ -131,7 +131,7 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
 
     // Parent row is deleted, but nested child row remains!
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(
         guard
             .file_coverage_by_id(parent_row.file_id)
@@ -168,7 +168,7 @@ async fn root_failure_rejects_whole_request_without_writes() {
     assert_eq!(res["error"]["code"], "library.root_unavailable");
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(guard.missing_at_by_path().unwrap().is_empty());
 }
 
@@ -181,7 +181,7 @@ async fn symlink_alias_of_owned_root_cannot_create_ambiguous_scope() {
     let alias = fix.dir.path().join("movies-alias");
     std::os::unix::fs::symlink(&fix.root, &alias).unwrap();
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     let err = guard
         .create_library(
             MediaKind::Movie,
@@ -218,7 +218,7 @@ async fn file_permission_error_is_skipped_not_missing() {
     assert_eq!(res["data"]["skipped"], 1);
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(guard.missing_at_by_path().unwrap().is_empty());
 }
 
@@ -279,10 +279,10 @@ async fn orphaned_row_presence_is_attributed_to_its_recorded_library() {
     let outside = fix.dir.path().join("moved-away").join("orphan.mkv");
     {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         assert!(
             store::test_support::force_file_path(
-                &guard,
+                guard,
                 row.path.to_str().unwrap(),
                 outside.to_str().unwrap(),
             )
@@ -309,7 +309,7 @@ async fn orphaned_row_presence_is_attributed_to_its_recorded_library() {
     // Recording presence never rewrites ownership.
     let recorded = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
         let default_id = guard.default_library(MediaKind::Movie).unwrap().unwrap().id;
         (loaded.file.library_id.to_string(), default_id)

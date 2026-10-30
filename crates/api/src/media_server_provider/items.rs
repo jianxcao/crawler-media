@@ -103,13 +103,8 @@ pub(super) fn entry_snapshot(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<MediaItemSnapshot>, String> {
-    let entry = {
-        let store = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| "Store read pool busy".to_string())?;
-        resolve_entry(&store, Some(user_id), id)?
-    };
+    let entry =
+        super::sync_operations::read_store(state, |store| resolve_entry(store, Some(user_id), id))?;
     entry
         .map(|entry| {
             snapshot_from_entry(
@@ -132,66 +127,64 @@ pub(super) fn snapshot_from_entry(
     media: domain::Media,
     is_series: bool,
 ) -> Result<MediaItemSnapshot, String> {
-    // 锁内只取 owned DB 事实。
-    let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) = {
-        let store = state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| "Store read pool busy".to_string())?;
-        let (season, episode) = unit_columns(unit);
-        let marker = store
-            .get_media_marker(file.media_id, season, episode)
-            .ok()
-            .flatten();
-        let chapters = store
-            .get_cached_chapters(&file.file_id.to_string())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let ticks = playback_ticks(&store, user_id, &file, unit, &media);
-        let is_episode = media.kind == MediaKind::Tv && !is_whole_unit(unit);
-        let parent_id = if is_episode {
-            domain::TypedItemId::Work(media.id).to_wire_string()
-        } else {
-            crate::http::playback::library_id_for(&store, &media, &[&file])
-                .unwrap_or_else(|| domain::TypedItemId::Work(media.id).to_wire_string())
-        };
-        let (played, play_count, series_counts) = if is_series {
-            let (played, unplayed, child_counts) = direct_series_rollup(&store, user_id, media.id);
-            (played, 0, Some((unplayed, child_counts)))
-        } else {
-            let played = item_is_played(&store, user_id, &file, unit);
-            let play_count = unit_play_count(&store, user_id, file.media_id, unit.0, unit.1);
-            (played, play_count, None)
-        };
-        let (own_unit, whole_unit) =
-            item_metadata::row_units(&store, user_id, &file, unit, is_series);
-        let facts = item_metadata::item_db_facts(
-            &store,
-            &file,
-            unit,
-            is_series,
-            own_unit.as_ref(),
-            whole_unit.as_ref(),
-        );
-        let fields = item_metadata::page_fields(&store, &file, unit, &media, is_series)
+    // 读 scope 内只取 owned DB 事实，每个 SQL 使用对应数据库的 reader。
+    let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) =
+        super::sync_operations::read_store(state, |store| {
+            let (season, episode) = unit_columns(unit);
+            let marker = store
+                .get_media_marker(file.media_id, season, episode)
+                .ok()
+                .flatten();
+            let chapters = store
+                .get_cached_chapters(&file.file_id.to_string())
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let ticks = playback_ticks(store, user_id, &file, unit, &media);
+            let is_episode = media.kind == MediaKind::Tv && !is_whole_unit(unit);
+            let parent_id = if is_episode {
+                domain::TypedItemId::Work(media.id).to_wire_string()
+            } else {
+                crate::http::playback::library_id_for(store, &media, &[&file])
+                    .unwrap_or_else(|| domain::TypedItemId::Work(media.id).to_wire_string())
+            };
+            let (played, play_count, series_counts) = if is_series {
+                let (played, unplayed, child_counts) =
+                    direct_series_rollup(store, user_id, media.id);
+                (played, 0, Some((unplayed, child_counts)))
+            } else {
+                let played = item_is_played(store, user_id, &file, unit);
+                let play_count = unit_play_count(store, user_id, file.media_id, unit.0, unit.1);
+                (played, play_count, None)
+            };
+            let (own_unit, whole_unit) =
+                item_metadata::row_units(store, user_id, &file, unit, is_series);
+            let facts = item_metadata::item_db_facts(
+                store,
+                &file,
+                unit,
+                is_series,
+                own_unit.as_ref(),
+                whole_unit.as_ref(),
+            );
+            let fields = item_metadata::page_fields(store, &file, unit, &media, is_series)
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, media_id = %file.media_id, "page metadata 读取失败，按空字段渲染");
                 domain::MetadataFields::default()
             });
-        (
-            marker,
-            chapters,
-            ticks,
-            played,
-            play_count,
-            parent_id,
-            facts,
-            fields,
-            series_counts,
-        )
-    };
-    // 锁外：stat / 外部字幕 IO。
+            Ok((
+                marker,
+                chapters,
+                ticks,
+                played,
+                play_count,
+                parent_id,
+                facts,
+                fields,
+                series_counts,
+            ))
+        })?;
+    // reader 已释放：stat / 外部字幕 IO。
     let metadata = with_date_created(
         item_metadata(
             facts,
@@ -320,12 +313,9 @@ fn list_visible_items_blocking(
     parent_id: Option<&str>,
     library_scope: Option<&str>,
 ) -> Result<Vec<MediaItemSnapshot>, String> {
-    let store_guard = state
-        .store_readers
-        .checkout(crate::http::store_wait::STORE_READ_WAIT)
-        .ok_or_else(|| "Store read pool busy".to_string())?;
-    let snapshot = collect_pending(&store_guard, user_id, parent_id, library_scope)?;
-    drop(store_guard);
+    let snapshot = super::sync_operations::read_store(state, |store| {
+        collect_pending(store, user_id, parent_id, library_scope)
+    })?;
     let (pending, ingest_paths) = snapshot;
     let browse = state.file_stats.as_ref();
     let latest_ingest = latest_ingest_by_media(browse, &ingest_paths);

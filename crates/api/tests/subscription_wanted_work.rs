@@ -18,7 +18,7 @@ static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
 
 fn seed(f: &Fixture, episodes: u32, pending_count: u32) -> SubscribeId {
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let id = SubscribeId::new();
     store
         .insert_subscribe(&Subscribe {
@@ -181,7 +181,7 @@ fn overlapping_ranges_keep_first_pending_precedence(runtime: &tokio::runtime::Ru
     let id = seed(&f, 3, 0);
     {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .merge_pending(
                 id,
@@ -221,7 +221,7 @@ fn overlapping_ranges_keep_first_pending_precedence(runtime: &tokio::runtime::Ru
     );
     {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store.delete_pending(id, "fixture:range").unwrap();
         store.delete_pending(id, "fixture:single").unwrap();
         store

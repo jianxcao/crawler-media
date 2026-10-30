@@ -3,6 +3,12 @@
 //! Fixture construction and writer holding run outside the executor. The request
 //! future is polled until it has dispatched its write, so no sleep guesses when
 //! ingress admission happened.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 #[path = "management/common.rs"]
 mod common;
@@ -76,7 +82,7 @@ impl Fixture {
         let media = MediaId::new();
         let (root, user) = {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             let library = store.default_library(MediaKind::Movie).unwrap().unwrap();
             (
                 library.root_paths[0].clone(),
@@ -90,7 +96,7 @@ impl Fixture {
         let history_value = json!([{"id": HISTORY_ID, "query": "original"}]).to_string();
         {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             store
                 .insert_media(&Media {
                     id: media,
@@ -107,7 +113,7 @@ impl Fixture {
                 })
                 .unwrap();
             store::test_support::publish_fixture_file(
-                &store,
+                store,
                 &store::test_support::FixtureFile {
                     media_id: media,
                     path: path.display().to_string(),
@@ -134,7 +140,6 @@ impl Fixture {
     fn session(&self) -> store::SessionRow {
         self.state
             .store()
-            .lock()
             .get_session(self.user, DEVICE)
             .unwrap()
             .unwrap()
@@ -156,11 +161,11 @@ struct HeldWriter {
 }
 
 impl HeldWriter {
-    fn new(store: Arc<Mutex<Store>>) -> Self {
+    fn new(store: Arc<Store>, db: store::Db) -> Self {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), db);
             entered_tx.send(()).unwrap();
             // Disconnect also releases the writer during assertion unwinding.
             let _ = release_rx.recv();
@@ -259,7 +264,7 @@ async fn assert_queued_heartbeat_refused(fixture: &Fixture, maintenance: bool) {
     let session = start_playback(fixture, &app).await;
     let before = fixture.session();
     let calls = fixture.clock.calls.load(Ordering::SeqCst);
-    let held = HeldWriter::new(fixture.state.store());
+    let held = HeldWriter::new(fixture.state.store(), store::Db::Library);
     let body = fixture.heartbeat(&session, "progress", 1, 90_000);
     let mut request = Box::pin(app.clone().oneshot(common::request(
         "POST",
@@ -333,7 +338,7 @@ async fn assert_queued_history_delete_refused(fixture: &Fixture, maintenance: bo
         .header("authorization", format!("Bearer {TOKEN}"))
         .body(Body::from_stream(ExtractionSignal(extracted.clone())))
         .unwrap();
-    let held = HeldWriter::new(fixture.state.store());
+    let held = HeldWriter::new(fixture.state.store(), store::Db::App);
     let mut request = Box::pin(app.clone().oneshot(input));
     poll_until_write_dispatched(request.as_mut(), || extracted.load(Ordering::SeqCst)).await;
     let gate = fixture.state.write_gate();
@@ -347,7 +352,7 @@ async fn assert_queued_history_delete_refused(fixture: &Fixture, maintenance: bo
     assert_refusal(request.await.unwrap(), maintenance).await;
     {
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert_eq!(
             store.get_setting(&fixture.history_key).unwrap().as_deref(),
             Some(fixture.history_value.as_str())
@@ -370,7 +375,6 @@ async fn assert_queued_history_delete_refused(fixture: &Fixture, maintenance: bo
         fixture
             .state
             .store()
-            .lock()
             .get_search_snapshot(HISTORY_ID)
             .unwrap()
             .is_none()

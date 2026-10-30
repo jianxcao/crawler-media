@@ -10,7 +10,7 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
     std::fs::create_dir_all(&other_root).unwrap();
     let (other_library, other_show) = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -21,8 +21,8 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
                 &[],
             )
             .unwrap();
-        let media_id = new_media(&store, "Other show");
-        insert_episode(&store, &other_root, media_id, 1, 1);
+        let media_id = new_media(store, "Other show");
+        insert_episode(store, &other_root, media_id, 1, 1);
         (library.id, media_id)
     };
     let app = router(fixture.state.clone());
@@ -82,7 +82,7 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
     std::fs::create_dir_all(&root_b).unwrap();
     let (library_id, show_media) = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -93,9 +93,9 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
                 &[],
             )
             .unwrap();
-        let media_id = new_media(&store, "Split show");
-        insert_episode(&store, &root_a, media_id, 1, 1);
-        insert_episode(&store, &root_b, media_id, 1, 2);
+        let media_id = new_media(store, "Split show");
+        insert_episode(store, &root_a, media_id, 1, 1);
+        insert_episode(store, &root_b, media_id, 1, 2);
         (library.id, media_id)
     };
     let app = router(state);
@@ -179,7 +179,7 @@ async fn series_scoped_selection_reads_only_that_series_candidates() {
 
     let show = series_wire_id_for_title(&fixture.state, "Show000");
     fixture.files.reset();
-    fixture.state.store().lock().reset_root_ledger_scans();
+    fixture.state.store().reset_root_ledger_scans();
     let scoped = get_json(
         &app,
         &format!(
@@ -188,7 +188,7 @@ async fn series_scoped_selection_reads_only_that_series_candidates() {
         ),
     )
     .await;
-    let scans = fixture.state.store().lock().root_ledger_scans();
+    let scans = fixture.state.store().root_ledger_scans();
     assert_eq!(scoped["TotalRecordCount"], 10, "只列这部剧的分集：{scoped}");
     assert_eq!(scans, 0, "剧作用域不得扫无 WHERE 的根账本，实际 {scans}");
     assert_eq!(fixture.files.subtitles(), 1);
@@ -199,12 +199,7 @@ async fn series_scoped_selection_reads_only_that_series_candidates() {
 async fn read_failure_never_becomes_a_silently_empty_page() {
     let fixture = tv_fixture(1, 2);
     let app = router(fixture.state.clone());
-    let db = fixture.dir.path().join("data/library.db");
-    fixture.files.fail_store_on_first_io(Box::new(move || {
-        let conn = rusqlite::Connection::open(&db).expect("open library db");
-        conn.execute_batch("DROP TABLE file_details")
-            .expect("drop file_details");
-    }));
+    let rejected = fail_file_details_reads_on_first_io(&fixture);
     let (status, listing) = get(
         &app,
         &format!(
@@ -219,12 +214,22 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
         "候选读先于文件 IO：请求进行中的存储故障不得吞掉这一页：{listing}"
     );
     assert_eq!(items(&listing).len(), 1);
+    let (failed_status, failed) = get(
+        &app,
+        &format!(
+            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&Limit=1",
+            fixture.library_id
+        ),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    assert!(rejected.load(Ordering::SeqCst) > 0);
 
     let heavy_fixture = tv_fixture(1, 2);
     let heavy_app = router(heavy_fixture.state.clone());
     let failing = {
         let store = heavy_fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .list_file_coverage()
             .unwrap()
@@ -283,7 +288,7 @@ async fn jellyfin_selection_records_candidate_and_heavy_counts() {
 
     let show = series_wire_id_for_title(&fixture.state, "Show000");
     let before = candidates.load(Ordering::SeqCst);
-    fixture.state.store().lock().reset_root_ledger_scans();
+    fixture.state.store().reset_root_ledger_scans();
     let scoped = get_json(
         &app,
         &format!(
@@ -292,7 +297,7 @@ async fn jellyfin_selection_records_candidate_and_heavy_counts() {
         ),
     )
     .await;
-    let scans = fixture.state.store().lock().root_ledger_scans();
+    let scans = fixture.state.store().root_ledger_scans();
     assert_eq!(scoped["TotalRecordCount"], 10);
     assert_eq!(
         scans, 0,
@@ -313,7 +318,7 @@ async fn failed_playback_unit_read_still_counts_loaded_ledger_rows() {
     let show = media_id_for_title(&fixture.state, "Show000");
     let user_id = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .list_users()
             .unwrap()
@@ -325,7 +330,7 @@ async fn failed_playback_unit_read_still_counts_loaded_ledger_rows() {
     let stored_media = uuid::Uuid::parse_str(&show).unwrap().to_string();
     let resume_file = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .list_file_coverage()
             .unwrap()
@@ -370,7 +375,7 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
     std::fs::create_dir_all(&hidden_root).unwrap();
     let show = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .create_library(
                 domain::MediaKind::Tv,
@@ -381,17 +386,17 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
                 &[],
             )
             .unwrap();
-        let media_id = new_media(&store, "HiddenShow");
+        let media_id = new_media(store, "HiddenShow");
         let show_dir = hidden_root.join("HiddenShow");
         std::fs::create_dir_all(&show_dir).unwrap();
         for episode in 1..=2 {
-            insert_episode(&store, &show_dir, media_id, 1, episode);
+            insert_episode(store, &show_dir, media_id, 1, episode);
         }
         media_id.to_string().replace('-', "")
     };
 
     let candidates = fixture.state.jellyfin_candidates();
-    fixture.state.store().lock().reset_media_ledger_reads();
+    fixture.state.store().reset_media_ledger_reads();
     let app = router(fixture.state.clone());
     let (status, body) = get(
         &app,
@@ -403,7 +408,7 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
         body["TotalRecordCount"], 0,
         "admin_visible=false 的剧不得列出：{body}"
     );
-    let reads = fixture.state.store().lock().media_ledger_reads();
+    let reads = fixture.state.store().media_ledger_reads();
     assert_eq!(reads, 0, "不可见的 Media 分类不应读取其台账，实际 {reads}");
     assert_eq!(
         candidates.load(Ordering::SeqCst),

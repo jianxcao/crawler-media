@@ -60,9 +60,9 @@ async fn media_merge_is_idempotent_and_rejects_a_different_plan() {
     let (survivor, loser) = sample_media_ids();
     {
         let handle = state.store();
-        let store = handle.lock();
-        media(&store, survivor);
-        media(&store, loser);
+        let store = handle.as_ref();
+        media(store, survivor);
+        media(store, loser);
     }
     let app = router(state.clone());
     let body = merge_body(MERGE_REQUEST_ID, survivor, loser);
@@ -123,9 +123,9 @@ async fn media_merge_driver_retires_the_loser() {
     let (survivor, loser) = sample_media_ids();
     {
         let handle = state.store();
-        let store = handle.lock();
-        media(&store, survivor);
-        media(&store, loser);
+        let store = handle.as_ref();
+        media(store, survivor);
+        media(store, loser);
     }
     let app = router(state.clone());
     let data_dir = temp.path().join("data");
@@ -173,7 +173,7 @@ async fn media_merge_driver_retires_the_loser() {
         "the survivor must be released back to the identity it was frozen with"
     );
     assert_eq!(
-        state.store().lock().unfinished_media_merges().unwrap(),
+        state.store().unfinished_media_merges().unwrap(),
         Vec::<String>::new(),
         "a succeeded merge must not stay in the recovery set"
     );
@@ -217,9 +217,9 @@ async fn media_merge_converges_queued_job_references_once() {
     let (survivor, loser) = sample_media_ids();
     {
         let handle = state.store();
-        let store = handle.lock();
-        media(&store, survivor);
-        media(&store, loser);
+        let store = handle.as_ref();
+        media(store, survivor);
+        media(store, loser);
     }
     let def_id = seed_catalog_refresh_def(&state, loser);
     assert_eq!(

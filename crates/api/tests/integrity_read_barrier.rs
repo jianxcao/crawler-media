@@ -20,7 +20,7 @@ async fn frozen_library_and_root_return_503_without_leaking_to_unauthorized_user
     let (_, token) = common::create_member(&app, "reader").await;
     let (library, other) = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         let library = store
             .create_library(
                 domain::MediaKind::Movie,
@@ -77,7 +77,7 @@ async fn frozen_library_and_root_return_503_without_leaking_to_unauthorized_user
     assert_eq!(response.status(), StatusCode::OK);
     {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store.advance_library_operation("freeze", 1, 100).unwrap();
     }
     let response = app
@@ -97,7 +97,7 @@ async fn frozen_library_and_root_return_503_without_leaking_to_unauthorized_user
 async fn assert_hidden_library(app: axum::Router, state: &api::ApiState, token: &str) {
     let hidden = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         let hidden = store
             .create_library(
                 domain::MediaKind::Movie,
@@ -150,7 +150,7 @@ async fn http_integrity_start_drives_check_and_repair_without_restart() {
     let app = api::router(state.clone());
     let library = {
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         store
             .create_library(
                 domain::MediaKind::Movie,
@@ -181,7 +181,7 @@ async fn http_integrity_start_drives_check_and_repair_without_restart() {
             loop {
                 let finished = {
                     let shared = state.store();
-                    let store = shared.lock();
+                    let store = shared.as_ref();
                     store
                         .library_operation_view(operation)
                         .unwrap()

@@ -66,11 +66,10 @@ async fn source_quality_survives_persistence_for_wash_cut() {
     let app = router(state.clone());
     let created = create_subscribe(&app, "search").await;
     let id: SubscribeId = created["id"].as_str().unwrap().parse().unwrap();
-    let mut sub = state.store().lock().get_subscribe(id).unwrap().unwrap();
+    let mut sub = state.store().get_subscribe(id).unwrap().unwrap();
     sub.wash_cut = true;
     let root = state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap()
@@ -132,8 +131,8 @@ async fn source_quality_survives_persistence_for_wash_cut() {
     );
     {
         let handle = state.store();
-        let store = handle.lock();
-        publish_fixture_file(&store, &row).unwrap();
+        let store = handle.as_ref();
+        publish_fixture_file(store, &row).unwrap();
         store.save_subscribe_facts(id, &facts).unwrap();
     }
     // Reopen a separate connection to prove the quality is durable, not an in-memory fallback.
@@ -170,7 +169,7 @@ async fn legacy_second_run_does_not_turn_pending_into_owned_fact() {
     }
     assert!(!dl.added().is_empty());
     let handle = state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     assert!(store.list_file_coverage().unwrap().is_empty());
     assert!(!store.load_pending(id).unwrap().is_empty());
     assert!(
@@ -189,7 +188,6 @@ async fn existing_library_prevents_redundant_download_for_new_subscribe() {
     let media_id: MediaId = original["media"]["id"].as_str().unwrap().parse().unwrap();
     let root = state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap()
@@ -198,11 +196,11 @@ async fn existing_library_prevents_redundant_download_for_new_subscribe() {
     let owned = root.join("The Matrix").join("The Matrix - 2160p.mkv");
     std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
     std::fs::write(&owned, b"owned").unwrap();
-    publish_fixture_file(&state.store().lock(), &owned_row(media_id, &owned)).unwrap();
+    publish_fixture_file(&state.store(), &owned_row(media_id, &owned)).unwrap();
     // G-M1: one subscription per media/library/coverage — the first one is
     // gone before the new one is created; the library file still counts.
     let original_id: SubscribeId = original["id"].as_str().unwrap().parse().unwrap();
-    state.store().lock().delete_subscribe(original_id).unwrap();
+    state.store().delete_subscribe(original_id).unwrap();
     let created = create_alias_subscribe(&app).await;
     assert_eq!(created["media"]["id"], original["media"]["id"]);
     let id = created["id"].as_str().unwrap();
@@ -245,7 +243,6 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
     let media_id: MediaId = created["media"]["id"].as_str().unwrap().parse().unwrap();
     let root = state
         .store()
-        .lock()
         .default_library(MediaKind::Movie)
         .unwrap()
         .unwrap()

@@ -93,7 +93,7 @@ pub(crate) fn attach_video_artwork(
 
 /// 路径 → 已入账的 Media（登记阶段刚写过台账行，正常都应命中）。
 fn media_for_path(state: &ApiState, path: &Path) -> Option<domain::Media> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let coverage = store
         .file_coverage_by_path(&path.display().to_string())
         .ok()

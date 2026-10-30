@@ -16,7 +16,7 @@ pub struct MetadataService {
 pub(crate) fn metadata_preferences(state: &ApiState) -> MetadataPreferences {
     state
         .store
-        .lock()
+        .as_ref()
         .get_scrape_config()
         .ok()
         .map(|config| MetadataPreferences {
@@ -37,7 +37,7 @@ pub(crate) fn capture_metadata_revision(
 ) -> Result<i64, String> {
     state
         .store
-        .lock()
+        .as_ref()
         .media_revision(media)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("media {media} not found"))
@@ -77,7 +77,7 @@ pub(crate) fn adopt_catalog_metadata(
     };
     state
         .store
-        .lock()
+        .as_ref()
         .adopt_metadata(&adoption, fetched_at)
         .map_err(|e| e.to_string())?;
     Ok(true)
@@ -93,7 +93,7 @@ impl MetadataService {
         let target = self
             .state
             .store
-            .lock()
+            .as_ref()
             .media_refresh_alias(media.id, "tmdb")
             .map_err(|e| e.to_string())?;
         let Some(tmdb_id) = target

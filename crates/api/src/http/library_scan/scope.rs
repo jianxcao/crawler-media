@@ -49,7 +49,7 @@ impl ScanScope {
     pub fn capture(state: &ApiState, library_id: &str) -> Result<Self, PresenceError> {
         let (snapshot, kind, signature) = {
             let store_arc = state.store();
-            let guard = store_arc.lock();
+            let guard = &store_arc;
             let snapshot = guard.library_ownership()?;
             let library = snapshot.library(library_id).ok_or(PresenceError::Missing)?;
             let kind = library.kind;

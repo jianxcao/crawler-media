@@ -45,7 +45,7 @@ pub(crate) fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Respon
             "缺少 renames 列表",
         );
     };
-    let Some(library) = state.store.lock().get_library(id).ok().flatten() else {
+    let Some(library) = state.store.as_ref().get_library(id).ok().flatten() else {
         return missing_library();
     };
     let entries: Vec<PreparedOrganizeEntry> = renames
@@ -136,7 +136,7 @@ fn apply_entry(
         }
         state
             .store
-            .lock()
+            .as_ref()
             .begin_observed_file_rename(observed, now)
             .map_err(|e| e.to_string())
     }) {
@@ -154,7 +154,7 @@ fn apply_entry(
         if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
             return Err("目标媒体库正在删除".into());
         }
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store
             .complete_observed_file_rename(observed, now)
             .map_err(|e| e.to_string())?;
@@ -189,7 +189,7 @@ fn apply_disk_and_observe(
         if let Err(record) =
             state
                 .store
-                .lock()
+                .as_ref()
                 .record_rename_refusal(&request.rename_id, now, error)
         {
             tracing::error!(%record, rename_id = %request.rename_id, "记录重命名拒绝失败");
@@ -198,7 +198,7 @@ fn apply_disk_and_observe(
     crate::rename_work::record_disk(&state.store, &receipt, now)?;
     let plan = state
         .store
-        .lock()
+        .as_ref()
         .plan_file_rename_completion(&request.rename_id)?;
     plan.observe()
 }
@@ -232,7 +232,7 @@ fn prepare_rename(
     if to_path.exists() {
         return Prepared::Skipped(format!("目标已存在 {to}"));
     }
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let owner = |path: &FsPath| store.library_owning_key(path, library.kind).ok().flatten();
     if owner(from_path).as_deref() != Some(library.id.as_str()) {
         return Prepared::Failed(format!("{from}: 源文件不属于当前媒体库"));

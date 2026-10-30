@@ -81,13 +81,11 @@ impl Fixture {
         .with_instance_writable(false);
         let user = state
             .store()
-            .lock()
             .user_id_by_token("coverage-secret")
             .unwrap()
             .unwrap();
         state
             .store()
-            .lock()
             .upsert_unit_for_source(
                 user,
                 media.id,

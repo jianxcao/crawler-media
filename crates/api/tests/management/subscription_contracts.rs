@@ -79,7 +79,7 @@ async fn patch_subscription_filter_id_updates_store_and_rejects_invalid() {
 
     let store_binding = api_state.store();
     let current_sub = store_binding
-        .lock()
+        .as_ref()
         .get_subscribe(sub_id.parse().unwrap())
         .unwrap()
         .unwrap();

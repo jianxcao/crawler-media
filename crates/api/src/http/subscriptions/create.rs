@@ -195,7 +195,7 @@ fn persist_subscription(
         crate::completion::set_auto_next_season(&state, subscribe.id, true);
     }
     let snapshot = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
         super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
     };
@@ -211,7 +211,7 @@ fn subscribe_from_input(
     coverage: Coverage,
     body: &CreateSubscriptionInput,
 ) -> Result<Subscribe, Response> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let filter_id = resolve_filter_id(&store, body)?;
     let filter_keep_old = store
         .get_filter(filter_id)

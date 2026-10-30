@@ -117,8 +117,12 @@ fn seed_file(store: &Store, fixture: &Fixture, name: &str, season: i32, episode:
         backdrop_path: None,
         still_path: None,
     };
-    insert_file_row(&store.library, &file).unwrap();
-    sync_coverage(&store.library, &file, &[UnitKey::new(season, episode)]).unwrap();
+    store
+        .with_writer(crate::Db::Library, |conn| {
+            insert_file_row(conn, &file)?;
+            sync_coverage(conn, &file, &[UnitKey::new(season, episode)])
+        })
+        .unwrap();
     file_id
 }
 

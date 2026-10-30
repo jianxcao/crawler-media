@@ -13,7 +13,42 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
     if operation.state != "cleaning" {
         return Err(StoreError::Protected("Library 工作尚未排空".into()));
     }
-    let tx = crate::write_tx(&store.library)?;
+    let ready = store.with_reference_write(|library, subscribe| {
+        clean_window(library, subscribe, id, &operation)
+    })?;
+    if !ready {
+        return store
+            .library_removal(id)?
+            .ok_or_else(|| StoreError::Missing(id.into()));
+    }
+    store.app_write(|app| {
+        for prefix in super::LIBRARY_SETTING_KEY_PREFIXES {
+            app.delete_setting(&format!("{prefix}{}", operation.library_id))?;
+        }
+        Ok(())
+    })?;
+    store.with_writer(crate::Db::Library, |library| {
+        let tx = crate::write_tx(library)?;
+        validate_revision(&tx, id, &operation.library_id)?;
+        finalize(&tx, id, &operation.library_id)?;
+        tx.commit()?;
+        crate::path_key::reload_root_aliases(library)?;
+        Ok(())
+    })?;
+    store.detach_subscribes_from_library(operation.library_id.parse()?)?;
+    tracing::info!(operation_id=id,library_id=%operation.library_id,"Library 索引删除完成，磁盘文件保留");
+    store
+        .library_removal(id)?
+        .ok_or_else(|| StoreError::Missing(id.into()))
+}
+
+fn clean_window(
+    library: &crate::LibraryConnection<'_>,
+    subscribe: &crate::SubscribeConnection<'_>,
+    id: &str,
+    operation: &LibraryRemoval,
+) -> Result<bool, StoreError> {
+    let tx = crate::write_tx(library.library)?;
     validate_revision(&tx, id, &operation.library_id)?;
     let ready: bool = tx.query_row(
         "SELECT snapshot_done FROM library_removals WHERE operation_id=?1",
@@ -37,7 +72,7 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
         )?;
         // Same orphan purge as single-file delete: Media that lost its last file
         // (and is not kept by a collection/subscription) must leave with the Library.
-        let subscribed = store.subscribed_media(&affected)?;
+        let subscribed = subscribe.subscribed_media(&affected)?;
         crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &affected, &subscribed)?;
         clean_unit_facts(&tx, rows.iter())?;
         for row in &rows {
@@ -54,9 +89,7 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
         );
         #[cfg(test)]
         super::removal_batch_failpoint()?;
-        return store
-            .library_removal(id)?
-            .ok_or_else(|| StoreError::Missing(id.into()));
+        return Ok(false);
     }
     let unidentified = tx.execute(
         "DELETE FROM unidentified WHERE rowid IN
@@ -70,33 +103,14 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
             unidentified,
             "Library removal Unidentified window committed"
         );
-        return store
-            .library_removal(id)?
-            .ok_or_else(|| StoreError::Missing(id.into()));
+        return Ok(false);
     }
     #[cfg(test)]
     super::removal_cleanup_failpoint()?;
     // The app transaction must finish before this durable intent can succeed.
     // Release library.db first: two databases never hold write locks together.
     tx.commit()?;
-    store.app_write(|store| {
-        for prefix in super::LIBRARY_SETTING_KEY_PREFIXES {
-            store.delete_setting(&format!("{prefix}{}", operation.library_id))?;
-        }
-        Ok(())
-    })?;
-    let tx = crate::write_tx(&store.library)?;
-    validate_revision(&tx, id, &operation.library_id)?;
-    finalize(&tx, id, &operation.library_id)?;
-    tx.commit()?;
-    // Finalization is durable before subscribe.db takes its own write lock.
-    // A failed detach leaves the succeeded receipt available for recovery.
-    crate::path_key::reload_root_aliases(&store.library)?;
-    store.detach_subscribes_from_library(operation.library_id.parse()?)?;
-    tracing::info!(operation_id=id,library_id=%operation.library_id,"Library 索引删除完成，磁盘文件保留");
-    store
-        .library_removal(id)?
-        .ok_or_else(|| StoreError::Missing(id.into()))
+    Ok(true)
 }
 
 fn validate_revision(tx: &rusqlite::Connection, id: &str, library: &str) -> Result<(), StoreError> {

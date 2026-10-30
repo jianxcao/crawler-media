@@ -107,9 +107,13 @@ fn fixed_file_page_does_not_read_other_files_coverage() {
     assert_eq!(after.len(), 50);
     assert!(after.iter().all(|(_, units)| units.len() == 1));
     println!("file page coverage 100={small:?}; 10000={large:?}");
-    assert_eq!(small.sql_rows, 50);
+    let (_, lease) = fx.store.with_stats(StatsScope::Library, || {
+        fx.store.file_units(fx.library, fx.media, &[]).unwrap()
+    });
+    assert_eq!(small.sql_rows - lease.sql_rows, 50);
     assert_eq!(
-        large.sql_rows, 50,
+        large.sql_rows - lease.sql_rows,
+        50,
         "decoded coverage outside the requested page"
     );
     assert!(
@@ -173,7 +177,13 @@ fn file_coverage_preserves_order_units_scope_and_empty_pages() {
         fx.store.file_units(fx.library, fx.media, &[]).unwrap()
     });
     assert!(empty.is_empty());
-    assert_eq!(work.statements, 0, "empty pages must not query coverage");
+    let (_, lease) = fx.store.with_stats(StatsScope::Library, || {
+        fx.store.with_read(store::Db::Library, |_| Ok(())).unwrap()
+    });
+    assert_eq!(
+        work.statements, lease.statements,
+        "empty pages must only validate their read lease"
+    );
 }
 
 #[test]
@@ -201,9 +211,12 @@ fn coverage_batches_preserve_every_requested_file() {
         assert_eq!(file.file_id, *id);
         assert_eq!(units.len(), 1);
     }
-    assert_eq!(work.sql_rows, 501);
+    let (_, lease) = fx.store.with_stats(StatsScope::Library, || {
+        fx.store.file_units(fx.library, fx.media, &[]).unwrap()
+    });
+    assert_eq!(work.sql_rows - lease.sql_rows, 501);
     assert!(
-        work.statements <= 4,
+        work.statements <= lease.statements + 4,
         "one query per bounded file window in one snapshot: {work:?}"
     );
 }

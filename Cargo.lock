@@ -2155,6 +2155,7 @@ dependencies = [
  "subscribe",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "unicode-normalization",
  "uuid",

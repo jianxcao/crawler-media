@@ -8,8 +8,7 @@
 //! 采纳只补观测缺失的字段。季/集作用域在此之上再叠一层 work 作用域兜底，对应 NFO 里
 //! 用 `tvshow.nfo` 补分集字段的回退语义。
 
-use crate::library_query::details::metadata::instance_default_locale;
-use crate::library_query::details::{fill_from_adopted, library_display_locale};
+use crate::library_query::details::fill_from_adopted;
 use crate::{Store, StoreError};
 use domain::{EntityScope, LibraryId, MediaId, MetadataFields};
 use rusqlite::{OptionalExtension, params};
@@ -23,134 +22,7 @@ impl Store {
         scope: EntityScope,
         locale: Option<&str>,
     ) -> Result<MetadataFields, StoreError> {
-        let mut fields = self.scoped_page_fields(library_id, media_id, scope, locale)?;
-        if !matches!(scope, EntityScope::Work) {
-            let work = self.scoped_page_fields(library_id, media_id, EntityScope::Work, locale)?;
-            overlay_missing(&mut fields, &work);
-        }
-        Ok(fields)
-    }
-
-    /// Observed inputs of one scope, then adopted sources of the same scope filling gaps.
-    fn scoped_page_fields(
-        &self,
-        library_id: LibraryId,
-        media_id: MediaId,
-        scope: EntityScope,
-        locale: Option<&str>,
-    ) -> Result<MetadataFields, StoreError> {
-        let mut fields = self.page_observed_fields(library_id, media_id, scope, locale)?;
-        let Some(resolved) =
-            self.resolved_metadata_locale(library_id, media_id, locale.unwrap_or(""))?
-        else {
-            return Ok(fields);
-        };
-        if matches!(scope, EntityScope::Work)
-            && let Some(adopted) = self.get_effective_metadata(media_id, &resolved)?
-        {
-            overlay_adopted_details(&mut fields, &adopted.details_json, media_id);
-            fill_from_adopted(&mut fields, &adopted);
-        }
-        let composed = self.effective_metadata_fields(library_id, media_id, scope, &resolved)?;
-        overlay_missing(&mut fields, &composed.fields);
-        Ok(fields)
-    }
-
-    /// Scrape inputs already stored for this entity scope.
-    fn page_observed_fields(
-        &self,
-        library_id: LibraryId,
-        media_id: MediaId,
-        scope: EntityScope,
-        locale: Option<&str>,
-    ) -> Result<MetadataFields, StoreError> {
-        if matches!(scope, EntityScope::Work) {
-            // work 作用域复用 Web 浏览同一条读路径，避免两套 locale 语义。
-            return self.metadata_input_fields(library_id, media_id, locale);
-        }
-        let Some(chosen) = self.scoped_input_locale(library_id, media_id, scope, locale)? else {
-            return Ok(MetadataFields::default());
-        };
-        let (season, episode) = scope.season_episode();
-        let fields_json: Option<String> = self
-            .library
-            .query_row(
-                "SELECT fields_json FROM library_metadata_inputs
-                 WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = ?3
-                   AND season = ?4 AND episode = ?5
-                   AND parse_state = 'valid' AND locale = ?6
-                 ORDER BY input_key
-                 LIMIT 1",
-                params![
-                    library_id.to_string(),
-                    media_id.to_string(),
-                    scope.as_str(),
-                    season,
-                    episode,
-                    chosen
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match fields_json {
-            Some(fields_json) => Ok(serde_json::from_str(&fields_json)?),
-            None => Ok(MetadataFields::default()),
-        }
-    }
-
-    /// Locale of one season/episode scope's inputs: the same request → Library → instance
-    /// chain the work-scope reader uses, plus the unbound `''` bucket as last resort.
-    fn scoped_input_locale(
-        &self,
-        library_id: LibraryId,
-        media_id: MediaId,
-        scope: EntityScope,
-        requested: Option<&str>,
-    ) -> Result<Option<String>, StoreError> {
-        let (season, episode) = scope.season_episode();
-        let mut statement = self.library.prepare(
-            "SELECT DISTINCT locale FROM library_metadata_inputs
-             WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = ?3
-               AND season = ?4 AND episode = ?5 AND parse_state = 'valid'
-             ORDER BY locale",
-        )?;
-        let locales = statement
-            .query_map(
-                params![
-                    library_id.to_string(),
-                    media_id.to_string(),
-                    scope.as_str(),
-                    season,
-                    episode
-                ],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        if locales.is_empty() {
-            return Ok(None);
-        }
-        let chain = [
-            requested.map(str::to_string),
-            library_display_locale(self, library_id)?,
-            instance_default_locale(self)?,
-        ];
-        for candidate in chain.into_iter().flatten() {
-            let candidate = candidate.trim();
-            if candidate.is_empty() {
-                continue;
-            }
-            if let Some(exact) = locales.iter().find(|stored| stored.as_str() == candidate) {
-                return Ok(Some(exact.clone()));
-            }
-            let prefix = candidate.split(['-', '_']).next().unwrap_or(candidate);
-            if let Some(prefix_match) = locales
-                .iter()
-                .find(|stored| stored.split(['-', '_']).next().unwrap_or(stored) == prefix)
-            {
-                return Ok(Some(prefix_match.clone()));
-            }
-        }
-        Ok(locales.into_iter().find(|stored| stored.is_empty()))
+        self.with_library_read(|db| db.protocol_page_metadata(library_id, media_id, scope, locale))
     }
 }
 
@@ -209,3 +81,6 @@ fn is_missing(value: Option<&serde_json::Value>) -> bool {
         value.get("state").and_then(serde_json::Value::as_str) == Some("missing")
     })
 }
+
+#[path = "metadata/connection.rs"]
+mod connection;

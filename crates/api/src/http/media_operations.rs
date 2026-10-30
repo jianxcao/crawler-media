@@ -130,18 +130,19 @@ pub(crate) async fn post_merge(State(state): State<ApiState>, Json(body): Json<V
     let now_ms = state.playback_clock.now_ms();
     let survivor = request.survivor;
     let loser = request.loser;
-    let store = state.store();
+    let worker = state.clone();
     let started = match state
         .http_work
         .run_to_completion(move || {
-            super::store_wait::with_bounded_store(store, |store| {
+            super::store_wait::with_foreground_store(&worker, |store| {
                 store.begin_media_merge(&request, now_ms)
             })
         })
         .await
     {
-        Ok(Some(result)) => result,
-        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => {
+        Ok(Ok(result)) => result,
+        Ok(Err(response)) => return response,
+        Err(crate::blocking_budget::BlockingError::Busy) => {
             return super::store_wait::busy_response();
         }
         Err(error) => {

@@ -319,7 +319,7 @@ fn reconciliation_plan(
     scope: Option<&store::LibraryPathScope>,
     row: &Reconciliation,
 ) -> Result<store::library_write::RenameIntentPlan, store::StoreError> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let current = store.library_ownership()?;
     if !scope.is_some_and(|scope| {
         scope.matches(&current)
@@ -366,7 +366,7 @@ fn apply_reconciliation(
             .publish(|| {
                 state
                     .store
-                    .lock()
+                    .as_ref()
                     .begin_observed_file_rename(observed, now)
                     .map_err(|e| e.to_string())
             })
@@ -375,21 +375,21 @@ fn apply_reconciliation(
         // still run outside the Store and publication gate, as for a physical move.
         let receipt = store::library_write::execute_rename_disk(&request)
             .inspect_err(|error| {
-                if let Err(record) = state.store.lock().record_rename_refusal(&request.rename_id, now, error) {
+                if let Err(record) = state.store.as_ref().record_rename_refusal(&request.rename_id, now, error) {
                     tracing::error!(%record, rename_id = %request.rename_id, "Recording reconciliation refusal failed");
                 }
             })?;
         crate::rename_work::record_disk(&state.store, &receipt, now)?;
         let completion = state
             .store
-            .lock()
+            .as_ref()
             .plan_file_rename_completion(&request.rename_id)?;
         let observed = completion.observe()?;
         lease
             .publish(|| {
                 state
                     .store
-                    .lock()
+                    .as_ref()
                     .complete_observed_file_rename(observed, now)
                     .map_err(|e| e.to_string())
             })

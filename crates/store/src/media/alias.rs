@@ -19,64 +19,7 @@ impl Store {
     /// Add an alias to a media. First alias for (source, kind) becomes the refresh target.
     /// Subsequent aliases do not silently switch the refresh target.
     pub fn add_media_alias(&self, media_id: MediaId, alias: &MediaAlias) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
-
-        crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
-        let id_str = media_id.to_string();
-        // Check if this external_id is already registered to another media
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT media_id FROM media_aliases WHERE source = ?1 AND kind = ?2 AND external_id = ?3",
-                params![alias.source, alias.kind.as_str(), alias.external_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(other_id) = existing {
-            if other_id != id_str {
-                return Err(StoreError::Protected(format!(
-                    "Alias {}:{} already registered to media {other_id}",
-                    alias.source, alias.external_id
-                )));
-            }
-            // Already registered to this media, nothing to add
-            return Ok(());
-        }
-
-        // Check if there is already a refresh target for this (media_id, source, kind)
-        let has_target: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM media_aliases WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND is_refresh_target = 1)",
-            params![id_str, alias.source, alias.kind.as_str()],
-            |r| r.get(0),
-        )?;
-
-        let is_target = if has_target { 0 } else { 1 };
-        tx.execute(
-            "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                alias.source,
-                alias.kind.as_str(),
-                alias.external_id,
-                id_str,
-                is_target
-            ],
-        )?;
-
-        // If media was provisional, it's now confirmed
-        tx.execute(
-            "UPDATE media SET identity_state = 'confirmed' WHERE media_id = ?1 AND identity_state = 'provisional'",
-            params![id_str],
-        )?;
-        tx.execute(
-            "UPDATE library_items SET identity_state = 'confirmed' WHERE media_id = ?1 AND identity_state = 'provisional'",
-            params![id_str],
-        )?;
-
-        // Rebuild cards everywhere for affected media
-        crate::library_write::reduce::reduce_media_everywhere(&tx, media_id)?;
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| db.add_media_alias(media_id, alias))
     }
 
     /// Read the current refresh target alias for a given source, restricted to the
@@ -91,26 +34,7 @@ impl Store {
         media: MediaId,
         source: &str,
     ) -> Result<Option<MediaAlias>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT a.source, a.kind, a.external_id FROM media_aliases a
-             JOIN media m ON m.media_id = a.media_id AND m.kind = a.kind
-             WHERE a.media_id = ?1 AND a.source = ?2 AND a.is_refresh_target = 1
-             ORDER BY a.external_id ASC LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![media.to_string(), source])?;
-        if let Some(row) = rows.next()? {
-            let source: String = row.get(0)?;
-            let kind_str: String = row.get(1)?;
-            let kind = kind_str.parse().map_err(StoreError::MediaKind)?;
-            let external_id: String = row.get(2)?;
-            Ok(Some(MediaAlias {
-                source,
-                kind,
-                external_id,
-            }))
-        } else {
-            Ok(None)
-        }
+        self.with_library_read(|db| db.media_refresh_alias(media, source))
     }
 
     /// Transactional update of media scalar identity with revision CAS and writable checks.
@@ -120,60 +44,14 @@ impl Store {
         expected_revision: i64,
         media: &Media,
     ) -> Result<i64, StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        let id_str = media.id.to_string();
-
-        let current_state_and_rev: Option<(String, i64)> = tx
-            .query_row(
-                "SELECT identity_state, metadata_revision FROM media WHERE media_id = ?1",
-                params![id_str],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-
-        let Some((state, cur_rev)) = current_state_and_rev else {
-            return Err(StoreError::Missing(format!("media {}", media.id)));
-        };
-
-        if state == "merging" || state == "retired" {
-            return Err(StoreError::Protected(format!(
-                "media {} identity is frozen ({state})",
-                media.id
-            )));
-        }
-
-        if cur_rev != expected_revision {
-            return Err(StoreError::Protected(format!(
-                "media {} metadata_revision mismatch: expected {}, got {}",
-                media.id, expected_revision, cur_rev
-            )));
-        }
-
-        let next_rev = cur_rev + 1;
-        tx.execute(
-            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5, metadata_revision = ?6 WHERE media_id = ?1",
-            params![
-                id_str,
-                media.title,
-                media.year.map(i64::from),
-                media.original_title,
-                aliases_json(&media.aliases),
-                next_rev,
-            ],
-        )?;
-
-        // Rebuild cards everywhere
-        crate::library_write::reduce::reduce_media_everywhere(&tx, media.id)?;
-        tx.commit()?;
-        Ok(next_rev)
+        self.with_library_write(|db| db.update_media_identity(expected_revision, media))
     }
 
     /// Read the current metadata_revision of a media.
     pub fn media_revision(&self, media_id: MediaId) -> Result<Option<i64>, StoreError> {
-        let sql = "SELECT metadata_revision FROM media WHERE media_id = ?1";
-        self.library
-            .query_row(sql, params![media_id.to_string()], |r| r.get(0))
-            .optional()
-            .map_err(Into::into)
+        self.with_library_read(|db| db.media_revision(media_id))
     }
 }
+
+#[path = "alias/connection.rs"]
+mod connection;

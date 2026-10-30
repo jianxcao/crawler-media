@@ -56,7 +56,7 @@ impl HeldWriter {
         let marker = held.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let guard = writer.lock();
+            let guard = crate::writer_hold::WriterHold::acquire(writer.clone(), store::Db::Library);
             marker.store(true, Ordering::SeqCst);
             ready_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_secs(3));

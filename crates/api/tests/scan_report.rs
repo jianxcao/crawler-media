@@ -16,7 +16,7 @@ async fn multi_root_partial_scan_report() {
 
     let lib2 = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .create_library(
                 MediaKind::Movie,
@@ -51,7 +51,7 @@ async fn video_library_supports_mts_and_vob_and_iso() {
 
     let v_lib = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard
             .create_library(
                 MediaKind::Video,
@@ -79,7 +79,7 @@ async fn video_library_supports_mts_and_vob_and_iso() {
     assert_eq!(res["inserted"], 3);
 
     let store_arc = fix.state.store();
-    let guard = store_arc.lock();
+    let guard = store_arc.as_ref();
     assert!(
         guard
             .file_coverage_by_path(&f1.display().to_string())

@@ -13,7 +13,6 @@ use crate::ApiState;
 pub(crate) fn enabled(state: &ApiState) -> bool {
     state
         .store
-        .lock()
         .get_setting(crate::settings_keys::SUBSCRIBE_SELECTIVE_FILES)
         .ok()
         .flatten()
@@ -147,10 +146,11 @@ pub(crate) fn apply<D: Downloader + ?Sized>(
 /// A row is cleared once the client reports its file list.
 pub(crate) fn retry_deferred(
     state: &ApiState,
-    subscribe_id: domain::SubscribeId,
+    expected: &domain::Subscribe,
     pending: &[(i32, crate::store::PendingDownload)],
 ) {
-    let deferred = match state.store.lock().load_pending_selective(subscribe_id) {
+    let subscribe_id = expected.id;
+    let deferred = match state.store.load_pending_selective(subscribe_id) {
         Ok(map) if !map.is_empty() => map,
         _ => return,
     };
@@ -159,11 +159,10 @@ pub(crate) fn retry_deferred(
     }
     let hashes = state
         .store
-        .lock()
         .load_pending_info_hashes(subscribe_id)
         .unwrap_or_default();
     let media = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store
             .get_subscribe(subscribe_id)
             .ok()
@@ -171,6 +170,9 @@ pub(crate) fn retry_deferred(
             .and_then(|sub| store.get_media(sub.media_id).ok().flatten())
     };
     for (_, item) in pending {
+        if !selection_is_current(state, expected, item) {
+            return;
+        }
         let Some(raw) = deferred.get(&item.torrent.enclosure) else {
             continue;
         };
@@ -193,17 +195,59 @@ pub(crate) fn retry_deferred(
             Ok(None) => {}
             Ok(Some(skipped)) => {
                 tracing::info!(torrent = %item.torrent.title, skipped, "选择性下载：元数据到达后已跳过已有集的文件");
-                if let Err(error) = state.store.lock().set_pending_selective(
-                    subscribe_id,
-                    &item.torrent.enclosure,
-                    None,
-                ) {
+                let guard = state.subscribe_guard(subscribe_id);
+                let _guard = guard.lock();
+                if !selection_is_current_on(state, expected, item) {
+                    return;
+                }
+                if let Err(error) =
+                    state
+                        .store
+                        .set_pending_selective(subscribe_id, &item.torrent.enclosure, None)
+                {
                     tracing::warn!(%error, "清除待选择文件标记失败");
                 }
             }
             Err(error) => {
                 tracing::warn!(torrent = %item.torrent.title, %error, "选择性下载重试失败")
             }
+        }
+    }
+}
+
+fn selection_is_current(
+    state: &ApiState,
+    expected: &domain::Subscribe,
+    item: &store::PendingDownload,
+) -> bool {
+    let guard = state.subscribe_guard(expected.id);
+    let _guard = guard.lock();
+    selection_is_current_on(state, expected, item)
+}
+
+fn selection_is_current_on(
+    state: &ApiState,
+    expected: &domain::Subscribe,
+    item: &store::PendingDownload,
+) -> bool {
+    if state.subscribe_is_deleting(expected.id) {
+        return false;
+    }
+    let store = state.store.as_ref();
+    let current = store.get_subscribe(expected.id).and_then(|current| {
+        if current.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        store.load_pending(expected.id).map(|rows| {
+            rows.iter()
+                .any(|(_, row)| crate::pending_reconcile::same_pending(row, item))
+        })
+    });
+    match current {
+        Ok(current) => current,
+        Err(error) => {
+            tracing::error!(subscribe_id=%expected.id, %error, "重新验证待选择文件任务失败");
+            false
         }
     }
 }

@@ -52,10 +52,7 @@ impl ProbeManager {
                 reuse_media_info_cache: true,
             })
             .collect::<Vec<_>>();
-        let Ok(store) = self.writer() else {
-            return 0;
-        };
-        let created = store.create_probe_job(
+        let created = self.store.create_probe_job(
             &job_id,
             "marker_refresh",
             &media_id.to_string(),
@@ -63,7 +60,6 @@ impl ProbeManager {
             &scope,
             &specs,
         );
-        drop(store);
         match created {
             Ok(true) => {}
             Ok(false) => {
@@ -119,7 +115,7 @@ impl ProbeManager {
         })
     }
 
-    /// Persist the whole item after admission is rechecked under the Store lock.
+    /// Recheck admission and persist the whole item in one Library transaction.
     fn enqueue_forced_item_refresh_checked(
         &self,
         mut units: Vec<ProbeUnit>,
@@ -221,42 +217,46 @@ impl ProbeManager {
         specs: &[crate::store::ProbeJobUnitSpec<'_>],
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
-        let Some(store) = self
-            .store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-        else {
-            return Err(ProbeEnqueueError::Admission(
-                crate::http::store_wait::busy_response(),
-            ));
-        };
-        admitted()?;
-        match store.create_probe_job(
-            job_id,
-            job_kind,
-            &media_id.to_string(),
-            season,
-            scope,
-            specs,
-        ) {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                let conflict = specs.iter().any(|spec| {
-                    store
-                        .active_probe_unit_for_ledger(spec.ledger_id)
-                        .ok()
-                        .flatten()
-                        .is_some()
-                });
-                Err(if conflict {
-                    ProbeEnqueueError::AlreadyRunning
+        self.store.library_write_with_error(
+            |error| {
+                if super::store_access::is_busy(&error) {
+                    ProbeEnqueueError::Admission(crate::http::store_wait::busy_response())
                 } else {
+                    tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
                     ProbeEnqueueError::Persistence
-                })
-            }
-            Err(error) => {
-                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                Err(ProbeEnqueueError::Persistence)
-            }
-        }
+                }
+            },
+            |store| {
+                admitted()?;
+                match store.create_probe_job(
+                    job_id,
+                    job_kind,
+                    &media_id.to_string(),
+                    season,
+                    scope,
+                    specs,
+                ) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        let conflict = specs.iter().any(|spec| {
+                            store
+                                .active_probe_unit_for_ledger(spec.ledger_id)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        });
+                        Err(if conflict {
+                            ProbeEnqueueError::AlreadyRunning
+                        } else {
+                            ProbeEnqueueError::Persistence
+                        })
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
+                        Err(ProbeEnqueueError::Persistence)
+                    }
+                }
+            },
+        )
     }
 }

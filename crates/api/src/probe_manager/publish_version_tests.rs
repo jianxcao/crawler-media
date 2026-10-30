@@ -51,14 +51,17 @@ fn queued_version_rejects_a_result_probed_after_replacement() {
         marker_refresh_id: None,
         job_id: None,
     };
-    let published = super::probe::publish_probe_tracks(
-        &store,
-        &unit,
-        &queued.source_version,
-        &Tracks::default(),
-        Some(1_000),
-    )
-    .unwrap();
+    let published = store
+        .library_write(|db| {
+            super::probe::publish_probe_tracks(
+                db,
+                &unit,
+                &queued.source_version,
+                &Tracks::default(),
+                Some(1_000),
+            )
+        })
+        .unwrap();
     assert!(
         !published,
         "a result for the queued version must not land on the replacement"

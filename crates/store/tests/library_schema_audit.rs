@@ -177,7 +177,55 @@ fn facet_dimensions_keep_their_work_after_the_terms_pk_reorder() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let lib = support::seed(&store, MediaKind::Movie, 400);
-    let cases: Vec<(&str, BrowseFilter)> = vec![
+    let cases = facet_dimension_cases();
+    // Pre-reorder baseline, measured on this fixture before the key changed.
+    // `statements` / `sort_operations` / `fullscan_steps` are deterministic; the
+    // budget is an upper bound so a future improvement does not have to edit it.
+    let budget: [(&str, u64, u64, u64); 11] = [
+        ("none", 5, 0, 0),
+        ("genre", 6, 0, 797),
+        ("country", 6, 1, 399),
+        ("decade", 6, 0, 0),
+        ("runtime", 6, 1, 399),
+        ("language", 6, 1, 399),
+        ("resolution", 6, 1, 399),
+        ("hdr", 6, 0, 0),
+        ("rating", 5, 1, 399),
+        ("stock", 6, 1, 399),
+        ("watch", 5, 1, 1995),
+    ];
+    let (_, lease) = store.with_stats(store::stats::StatsScope::Library, || {
+        store.with_read(store::Db::Library, |_| Ok(())).unwrap()
+    });
+    // The historical budgets already included BEGIN/ROLLBACK. Add only the
+    // newly measured validation overhead, keeping their query budgets intact.
+    let validation_statements = lease.statements - 2;
+    for ((name, filter), (want, statements, sorts, fullscan)) in cases.into_iter().zip(budget) {
+        let statements = statements + validation_statements;
+        assert_eq!(name, want);
+        let request = FacetRequest {
+            library_id: lib,
+            user_id: None,
+            filter,
+            tier: FacetTier::All,
+        };
+        let (_, work) = store.library_facets_with_stats(&request).unwrap();
+        println!(
+            "{name:11} statements={:3} sort={:3} fullscan={:6} vm={:8}",
+            work.statements, work.sort_operations, work.fullscan_steps, work.vm_steps
+        );
+        assert!(
+            work.statements <= statements
+                && work.sort_operations <= sorts
+                && work.fullscan_steps <= fullscan,
+            "{name}: the terms-key reorder must not cost work: got {work:?}, \
+             budget statements<={statements} sort<={sorts} fullscan<={fullscan}"
+        );
+    }
+}
+
+fn facet_dimension_cases() -> Vec<(&'static str, BrowseFilter)> {
+    vec![
         ("none", BrowseFilter::default()),
         (
             "genre",
@@ -249,42 +297,5 @@ fn facet_dimensions_keep_their_work_after_the_terms_pk_reorder() {
                 ..Default::default()
             },
         ),
-    ];
-    // Pre-reorder baseline, measured on this fixture before the key changed.
-    // `statements` / `sort_operations` / `fullscan_steps` are deterministic; the
-    // budget is an upper bound so a future improvement does not have to edit it.
-    let budget: [(&str, u64, u64, u64); 11] = [
-        ("none", 5, 0, 0),
-        ("genre", 6, 0, 797),
-        ("country", 6, 1, 399),
-        ("decade", 6, 0, 0),
-        ("runtime", 6, 1, 399),
-        ("language", 6, 1, 399),
-        ("resolution", 6, 1, 399),
-        ("hdr", 6, 0, 0),
-        ("rating", 5, 1, 399),
-        ("stock", 6, 1, 399),
-        ("watch", 5, 1, 1995),
-    ];
-    for ((name, filter), (want, statements, sorts, fullscan)) in cases.into_iter().zip(budget) {
-        assert_eq!(name, want);
-        let request = FacetRequest {
-            library_id: lib,
-            user_id: None,
-            filter,
-            tier: FacetTier::All,
-        };
-        let (_, work) = store.library_facets_with_stats(&request).unwrap();
-        println!(
-            "{name:11} statements={:3} sort={:3} fullscan={:6} vm={:8}",
-            work.statements, work.sort_operations, work.fullscan_steps, work.vm_steps
-        );
-        assert!(
-            work.statements <= statements
-                && work.sort_operations <= sorts
-                && work.fullscan_steps <= fullscan,
-            "{name}: the terms-key reorder must not cost work: got {work:?}, \
-             budget statements<={statements} sort<={sorts} fullscan<={fullscan}"
-        );
-    }
+    ]
 }

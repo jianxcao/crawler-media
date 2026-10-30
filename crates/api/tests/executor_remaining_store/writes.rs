@@ -4,7 +4,7 @@ use super::*;
 fn collection_write_times_out_without_late_mutation() {
     let f = Fixture::new();
     let app = router(f.state.clone());
-    let holder = hold_store(&f.state, Duration::from_millis(1500));
+    let holder = hold_store(&f.state, store::Db::Library, Duration::from_millis(1500));
     let response = runtime()
         .block_on(app.oneshot(request(
             "PATCH",
@@ -17,7 +17,7 @@ fn collection_write_times_out_without_late_mutation() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()["retry-after"], "1");
     let store = f.state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     assert_eq!(guard.list_collections(f.user).unwrap()[0].name, "Original");
 }
 
@@ -29,7 +29,7 @@ fn collection_write_rechecks_readonly_after_waiting_for_store() {
     let state = f.state.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = store.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(250));
         let _ = state.with_instance_writable(false);
@@ -46,7 +46,7 @@ fn collection_write_rechecks_readonly_after_waiting_for_store() {
     holder.join().unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(
-        f.state.store().lock().list_collections(f.user).unwrap()[0].name,
+        f.state.store().list_collections(f.user).unwrap()[0].name,
         "Original"
     );
 }
@@ -60,7 +60,7 @@ fn collection_write_rechecks_maintenance_after_waiting_for_store() {
     let (tx, rx) = std::sync::mpsc::channel();
     let (closed_tx, closed_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let guard = store.lock();
+        let guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(250));
         let _closed = gate.close();
@@ -80,7 +80,7 @@ fn collection_write_rechecks_maintenance_after_waiting_for_store() {
     holder.join().unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        f.state.store().lock().list_collections(f.user).unwrap()[0].name,
+        f.state.store().list_collections(f.user).unwrap()[0].name,
         "Original"
     );
 }
@@ -96,7 +96,7 @@ fn collection_ownership_and_current_response_remain_intact() {
     };
     {
         let store = f.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .insert_user_with_password(&other, "other-pass")
             .unwrap();
@@ -132,7 +132,7 @@ fn collection_ownership_and_current_response_remain_intact() {
         );
     });
     assert_eq!(
-        f.state.store().lock().list_collections(f.user).unwrap()[0].name,
+        f.state.store().list_collections(f.user).unwrap()[0].name,
         "Original"
     );
 }

@@ -40,7 +40,6 @@ fn search_fixture() -> Fixture {
     let media = fixture
         .state
         .store()
-        .lock()
         .get_media(fixture.media_id)
         .unwrap()
         .unwrap();
@@ -114,7 +113,6 @@ fn assert_protected_search(readonly: bool) {
         let history = fixture
             .state
             .store()
-            .lock()
             .get_setting(&fixture.history_key)
             .unwrap()
             .unwrap();

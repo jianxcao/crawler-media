@@ -68,11 +68,11 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
     let state = startup_state.clone().with_catalog(catalog);
 
     // 预存旧的 canonical Media
-    state.store().lock().insert_media(&old_canonical).unwrap();
+    state.store().insert_media(&old_canonical).unwrap();
 
     let (root, lib_id) = {
         let store_arc = state.store();
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let lib = store
             .list_libraries()
             .unwrap()
@@ -90,7 +90,7 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
     scan_and_wait(&app, &lib_id).await;
 
     let store_arc = state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     let coverage = store
         .file_coverage_by_path(&video.display().to_string())
         .unwrap()

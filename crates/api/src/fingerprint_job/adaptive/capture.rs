@@ -216,7 +216,8 @@ async fn finish_capture(
     let persisted = ctx
         .store
         .write_async(move |store| {
-            ensure_source_recorded(store, &row).map_err(store::StoreError::Missing)?;
+            crate::fingerprint_job::source::ensure_source_recorded_on(store, &row)
+                .map_err(store::StoreError::Missing)?;
             let accepted = store.complete_fingerprint_attempt_for_source(
                 &stored_attempt,
                 &stored_sample,

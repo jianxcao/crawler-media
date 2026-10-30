@@ -47,15 +47,14 @@ pub(crate) async fn patch(
     let result = state
         .http_work
         .run_to_completion(move || {
-            let result = super::store_wait::with_bounded_store(work_state.store(), |store| {
+            let result = super::store_wait::with_foreground_store(&work_state, |store| {
                 store.change_metadata_language(
                     expected_revision,
                     &body.language,
                     &uuid::Uuid::new_v4().to_string(),
                     work_state.playback_clock.now_ms(),
                 )
-            })
-            .ok_or(())?;
+            })?;
             if let Ok(value) = &result {
                 for operation in &value.operations {
                     let library = operation.library_id.to_string();
@@ -69,12 +68,12 @@ pub(crate) async fn patch(
                     );
                 }
             }
-            Ok::<_, ()>(result)
+            Ok::<_, Response>(result)
         })
         .await;
     let result = match result {
         Ok(Ok(result)) => result,
-        Ok(Err(())) => return super::store_wait::busy_response(),
+        Ok(Err(response)) => return response,
         Err(error) => return super::library::browse_work_error(error),
     };
     match result {

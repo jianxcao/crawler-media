@@ -64,7 +64,7 @@ pub struct AppliedLedgerPresence {
 impl crate::Store {
     /// Canonical identity of a path that may no longer exist. No filesystem IO.
     pub fn recorded_path_key(&self, path: &str) -> String {
-        crate::path_key::canonical_recorded_key(&self.library, path)
+        crate::path_key::canonical_key(path, &self.aliases)
     }
 
     /// Apply presence observations and probe lifecycle within one Immediate transaction.
@@ -97,37 +97,9 @@ impl crate::Store {
         mode: LedgerPresenceMode,
         now: i64,
     ) -> Result<LedgerPresenceResult, StoreError> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.library,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-
-        let mut result = LedgerPresenceResult::default();
-        let mut batch = crate::library_write::presence::PresenceBatch::default();
-        let mut seen = HashSet::new();
-        for obs in observations {
-            if !seen.insert(obs.file.file.file_id) {
-                result.skipped += 1;
-                continue;
-            }
-            apply_observation(&tx, obs, mode, now, &mut result, &mut batch)?;
-        }
-        batch.settle(&tx)?;
-        if result.deleted > 0 {
-            let candidates: HashSet<domain::MediaId> = observations
-                .iter()
-                .map(|obs| obs.file.file.media_id)
-                .collect();
-            let subscribed = self.subscribed_media(&candidates)?;
-            crate::library_write::orphan_media::purge_orphan_media_in_tx(
-                &tx,
-                &candidates,
-                &subscribed,
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(result)
+        self.with_reference_write(|library, subscribe| {
+            library.apply_ledger_presence_with_references(subscribe, observations, mode, now)
+        })
     }
 }
 
@@ -230,3 +202,6 @@ fn apply_observation(
 
     Ok(())
 }
+
+#[path = "ledger_presence/connection.rs"]
+mod connection;

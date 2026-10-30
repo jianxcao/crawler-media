@@ -1,4 +1,10 @@
 //! Task 3 RED draft: writer-independent reads and safe selected-source races.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 #[path = "library_reads_off_writer/probe_admission.rs"]
 mod probe_admission;
 #[path = "library_reads_off_writer/support.rs"]
@@ -59,7 +65,7 @@ async fn items_page_drops_file_deleted_between_prepare_and_validate() {
             let source = selected.preferred_source.as_ref().unwrap();
             assert_eq!(
                 writer
-                    .lock()
+                    .as_ref()
                     .delete_files(selected.library_id, &[source.file_id])
                     .unwrap(),
                 1
@@ -102,7 +108,7 @@ async fn two_consecutive_source_changes_return_safe_200_without_third_prepare() 
             let source = selected.preferred_source.as_ref().unwrap();
             assert_eq!(
                 writer
-                    .lock()
+                    .as_ref()
                     .delete_files(selected.library_id, &[source.file_id])
                     .unwrap(),
                 1
@@ -139,12 +145,7 @@ async fn observed_session_device_remains_revocable_and_bound_reads_skip_writer()
     let user = fixture.user();
     let uri = fixture.items_uri();
     let token = "task3-ordinary-session";
-    fixture
-        .state
-        .store()
-        .lock()
-        .set_user_token(user, token)
-        .unwrap();
+    fixture.state.store().set_user_token(user, token).unwrap();
     let provider = api::media_server_provider::ApiServerProvider::new(fixture.state.clone());
     provider
         .bind_playback_credential(user, "task3-reader", token, None)
@@ -154,7 +155,6 @@ async fn observed_session_device_remains_revocable_and_bound_reads_skip_writer()
         fixture
             .state
             .store()
-            .lock()
             .device_is_revocable(user, "task3-reader")
             .unwrap()
     );
@@ -170,7 +170,6 @@ async fn observed_session_device_remains_revocable_and_bound_reads_skip_writer()
     fixture
         .state
         .store()
-        .lock()
         .revoke_device(user, "task3-reader")
         .unwrap();
     assert!(

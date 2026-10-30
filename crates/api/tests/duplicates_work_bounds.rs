@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -45,7 +51,7 @@ impl Fixture {
         .unwrap();
         let library = {
             let handle = state.store();
-            let store = handle.lock();
+            let store = handle.as_ref();
             let user = User {
                 id: UserId::new(),
                 login: "duplicates".into(),
@@ -67,7 +73,7 @@ impl Fixture {
 
     fn seed(&self, count: usize) {
         let handle = self.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let media = Media {
             id: MediaId::new(),
             kind: MediaKind::Tv,
@@ -128,7 +134,7 @@ fn duplicates_do_not_park_the_executor_waiting_for_store() {
     let held = fixture.state.store();
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = held.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(held.clone(), store::Db::Library);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -232,7 +238,7 @@ impl api::file_stat_read::FileStatRead for SlowFiles {
 fn duplicate_delete_observes_files_without_holding_store() {
     let fixture = Fixture::new();
     fixture.seed(2);
-    let file_id = fixture.state.store().lock().list_file_coverage().unwrap()[0]
+    let file_id = fixture.state.store().list_file_coverage().unwrap()[0]
         .file
         .file_id;
     let uri = format!("{}/{file_id}", fixture.uri);
@@ -254,7 +260,10 @@ fn duplicate_delete_observes_files_without_holding_store() {
     });
     let observed = received.recv_timeout(Duration::from_secs(2)).is_ok();
     let handle = fixture.state.store();
-    let available = handle.try_lock_for(Duration::from_millis(100)).is_some();
+    let available = handle
+        .writers()
+        .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+        .is_ok();
     let status = worker.join().unwrap();
     assert!(
         observed,

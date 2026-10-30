@@ -8,7 +8,6 @@ use domain::{
     Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
     LibraryId, MediaId, MediaKind, QualitySource, UnitKey,
 };
-use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +57,7 @@ fn coverage() -> FileCoverage {
 #[tokio::test]
 async fn new_metadata_waits_only_for_current_sample() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let mgr = Arc::new(ProbeManager::new(store.clone()).unwrap());
 
     let gate = MetadataPriorityGate::new(mgr.clone());
@@ -256,7 +255,7 @@ mod real_catalog {
         };
         let library_id = {
             let store = state.store();
-            let store = store.lock();
+            let store = store.as_ref();
             let library = store
                 .create_library(
                     MediaKind::Movie,
@@ -271,7 +270,7 @@ mod real_catalog {
             let path = root.join("Real.Movie.2020.mkv");
             std::fs::write(&path, b"bytes").unwrap();
             publish_fixture_file(
-                &store,
+                store,
                 &FixtureFile {
                     media_id: media.id,
                     path: path.display().to_string(),

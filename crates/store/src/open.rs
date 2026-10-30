@@ -6,207 +6,121 @@ use super::{Store, StoreError, schema};
 use std::num::NonZeroUsize;
 
 impl Store {
-    /// Reset snapshots accidentally left open before a reader is reused.
-    /// Returns whether rollback was attempted on any connection.
-    /// A connection that cannot be reset must not be returned to a pool.
-    pub fn reset_if_in_transaction(&self) -> bool {
-        let mut reset = false;
-        for (db, connection) in [
-            ("app", &self.app),
-            ("library", &self.library),
-            ("subscribe", &self.subscribe),
-            ("cache", &self.cache),
-        ] {
-            if !connection.is_autocommit() {
-                reset = true;
-                match connection.execute_batch("ROLLBACK") {
-                    Ok(()) => {
-                        tracing::error!(db, "reader returned inside a transaction; rolled back")
-                    }
-                    Err(error) => {
-                        tracing::error!(db, %error, "reader transaction rollback failed");
-                    }
-                }
-            }
-        }
-        reset
-    }
-
-    #[doc(hidden)]
-    pub fn has_open_transaction(&self) -> bool {
-        [&self.app, &self.library, &self.subscribe, &self.cache]
-            .iter()
-            .any(|connection| !connection.is_autocommit())
-    }
-
-    #[doc(hidden)]
-    pub fn library_in_transaction(&self) -> bool {
-        !self.library.is_autocommit()
-    }
-
-    pub fn open_library_read_pool(
-        &self,
-        size: NonZeroUsize,
-    ) -> Result<crate::LibraryReadPool, StoreError> {
-        crate::library_read::LibraryReadPool::open(self.data_dir.join("library.db"), size)
-    }
-
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let data_dir = data_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir)?;
-        Self::open_files(&data_dir, data_dir.join("app.db"))
+        Self::open_files(data_dir.as_ref(), data_dir.as_ref().join("app.db"))
     }
-
     pub fn open_at(
         data_dir: impl AsRef<Path>,
         sqlite_path: impl AsRef<Path>,
     ) -> Result<Self, StoreError> {
-        Self::open_files(data_dir, sqlite_path)
+        Self::open_files(data_dir.as_ref(), sqlite_path)
     }
-
-    fn open_files(
-        data_dir: impl AsRef<Path>,
-        app_path: impl AsRef<Path>,
-    ) -> Result<Self, StoreError> {
-        let data_dir = data_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir)?;
+    fn open_files(data_dir: &Path, app_path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let data_dir = data_dir.to_path_buf();
         let app_path = app_path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&data_dir)?;
         if let Some(parent) = app_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let cache_path = data_dir.join("cache.db");
-        let library_path = data_dir.join("library.db");
-        let subscribe_path = data_dir.join("subscribe.db");
-
-        // Read-only preflight check
-        schema::layout::preflight_check_existing_file(
-            "app",
-            &app_path,
-            schema::layout::APP_APPLICATION_ID,
-            schema::layout::V1_USER_VERSION,
-        )?;
-        schema::layout::preflight_check_existing_file(
-            "cache",
-            &cache_path,
-            schema::layout::CACHE_APPLICATION_ID,
-            schema::layout::CACHE_USER_VERSION_I64,
-        )?;
-        schema::layout::preflight_check_existing_file(
-            "library",
-            &library_path,
-            schema::layout::LIBRARY_APPLICATION_ID,
-            schema::layout::LIBRARY_USER_VERSION,
-        )?;
-        schema::layout::preflight_check_existing_file(
-            "subscribe",
-            &subscribe_path,
-            schema::layout::SUBSCRIBE_APPLICATION_ID,
-            schema::layout::SUBSCRIBE_USER_VERSION,
-        )?;
-
-        let app = Connection::open(&app_path)?;
-        let cache = Connection::open(&cache_path)?;
-        let library = Connection::open(&library_path)?;
-        let subscribe = Connection::open(&subscribe_path)?;
-
-        // Create path only: `auto_vacuum` lives in the database header and SQLite
-        // only rewrites it while the file still has no tables *and* is not in WAL
-        // mode. Both hold exactly here, before `apply_connection_policy` turns on
-        // WAL and before `initialize_layout()` runs any DDL, so a later `VACUUM` never has to
-        // pay for the change. Existing files are validated without applying DDL.
-        for conn in [&app, &cache, &library, &subscribe] {
+        let paths = [
+            app_path.clone(),
+            data_dir.join("subscribe.db"),
+            data_dir.join("library.db"),
+            data_dir.join("cache.db"),
+        ];
+        let layouts = [
+            (
+                "app",
+                schema::layout::APP_APPLICATION_ID,
+                schema::layout::V1_USER_VERSION,
+                schema::layout::APP_DDL,
+            ),
+            (
+                "subscribe",
+                schema::layout::SUBSCRIBE_APPLICATION_ID,
+                schema::layout::SUBSCRIBE_USER_VERSION,
+                schema::layout::SUBSCRIBE_DDL,
+            ),
+            (
+                "library",
+                schema::layout::LIBRARY_APPLICATION_ID,
+                schema::layout::LIBRARY_USER_VERSION,
+                schema::layout::LIBRARY_DDL,
+            ),
+            (
+                "cache",
+                schema::layout::CACHE_APPLICATION_ID,
+                schema::layout::CACHE_USER_VERSION_I64,
+                schema::layout::CACHE_DDL,
+            ),
+        ];
+        for (path, (name, id, version, _)) in paths.iter().zip(layouts.iter()) {
+            schema::layout::preflight_check_existing_file(name, path, *id, *version)?;
+        }
+        let [app, subscribe, library, cache] = [
+            Connection::open(&paths[0])?,
+            Connection::open(&paths[1])?,
+            Connection::open(&paths[2])?,
+            Connection::open(&paths[3])?,
+        ];
+        for conn in [&app, &subscribe, &library, &cache] {
             apply_auto_vacuum_on_create(conn)?;
         }
         for (conn, kind) in [
             (&app, DbKind::Authoritative),
-            (&cache, DbKind::Cache),
-            (&library, DbKind::Authoritative),
             (&subscribe, DbKind::Authoritative),
+            (&library, DbKind::Authoritative),
+            (&cache, DbKind::Cache),
         ] {
             apply_connection_policy(conn, kind)?;
         }
-
-        let app_writer = Connection::open(&app_path)?;
-        apply_connection_policy(&app_writer, DbKind::Authoritative)?;
-        let store = Self {
+        for (conn, (name, id, version, ddl)) in [&app, &subscribe, &library, &cache]
+            .into_iter()
+            .zip(layouts.iter())
+        {
+            schema::layout::initialize_or_validate(name, conn, ddl, *id, *version)?;
+        }
+        schema::seed_defaults(&app, &library, &data_dir)?;
+        crate::path_key::reload_root_aliases(&library)?;
+        let aliases = crate::path_key::table_for(&library);
+        let writers = std::sync::Arc::new(crate::Writers::new(app, subscribe, library, cache));
+        let pool = |index: usize,
+                    size: usize,
+                    validate: fn(&Connection) -> Result<(), StoreError>| {
+            let size = NonZeroUsize::new(size)
+                .ok_or_else(|| StoreError::Invalid("reader pool size must be positive".into()))?;
+            crate::ReaderPool::open(paths[index].clone(), size, layouts[index].0, validate)
+                .map(std::sync::Arc::new)
+        };
+        let readers = crate::connections::Readers {
+            app: pool(0, 4, validate_app_reader)?,
+            subscribe: pool(1, 2, validate_subscribe_reader)?,
+            library: pool(2, 8, validate_library_reader)?,
+            cache: pool(3, 2, validate_cache_reader)?,
+        };
+        Ok(Self {
             data_dir,
+            app_path,
+            writers,
+            readers,
+            aliases,
             root_ledger_scans: Default::default(),
             media_ledger_reads: Default::default(),
             role_lookups: Default::default(),
-            app_path: app_path.clone(),
-            app,
-            writers: std::sync::Arc::new(crate::Writers::new(app_writer)),
-            read_only: false,
-            cache,
-            library,
-            subscribe,
-        };
-        store.initialize_layout()?;
-        store.app.pragma_update(None, "query_only", true)?;
-        Ok(store)
-    }
-
-    /// A read-only facade over the same four files (L1 read/write split).
-    ///
-    /// Request reads run here instead of behind the process-wide writer `Store`
-    /// lock: SQLite WAL lets them read the last committed snapshot while a scan,
-    /// probe or scrape batch holds the write lock. Every connection is opened
-    /// `SQLITE_OPEN_READ_ONLY` (TEMP tables stay usable), so a read path that
-    /// accidentally writes a database file fails loudly instead of racing the writer. Root aliases are shared per
-    /// database file ([`crate::path_key`]), so `norm_path_key` agrees with the writer.
-    pub fn open_reader(&self) -> Result<Self, StoreError> {
-        let open = |path: &Path| -> Result<Connection, StoreError> {
-            let conn = Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            )?;
-            // No `query_only`: it would also forbid the TEMP tables some reads build
-            // (watch aggregates). SQLITE_OPEN_READ_ONLY already rejects every write
-            // to the database files themselves.
-            conn.pragma_update(None, "foreign_keys", "ON")?;
-            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-            apply_reader_pragma_tuning(&conn)?;
-            register_casefold(&conn)?;
-            crate::path_key::register(&conn)?;
-            Ok(conn)
-        };
-        Ok(Self {
-            data_dir: self.data_dir.clone(),
-            // Diagnostics count the logical store, whichever connection served it.
-            root_ledger_scans: self.root_ledger_scans.clone(),
-            media_ledger_reads: self.media_ledger_reads.clone(),
-            role_lookups: self.role_lookups.clone(),
-            app_path: self.app_path.clone(),
-            app: open(&self.app_path)?,
-            writers: self.writers(),
-            read_only: true,
-            cache: open(&self.data_dir.join("cache.db"))?,
-            library: open(&self.data_dir.join("library.db"))?,
-            subscribe: open(&self.data_dir.join("subscribe.db"))?,
         })
     }
-
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
-
-    /// 媒体库专属数据目录（data/library/covers 等）
     pub fn library_covers_dir(&self) -> PathBuf {
         self.data_dir.join("library").join("covers")
     }
-
     pub fn sqlite_path(&self) -> &Path {
         &self.app_path
     }
-
-    /// app 库的**真实**路径。`open_at` 允许自定义，因此维护任务不能假定
-    /// `data_dir/app.db`（DB8 第 5.2 节的 allowlist 由内部事实产生）。
     pub fn app_db_path(&self) -> &Path {
         &self.app_path
     }
-
     pub fn db_paths(&self) -> Vec<PathBuf> {
         vec![
             self.app_path.clone(),
@@ -215,56 +129,55 @@ impl Store {
             self.data_dir.join("subscribe.db"),
         ]
     }
-
-    /// Schema versions for each database file (app, catalog, library, subscribe).
     pub fn schema_versions(&self) -> Vec<(&'static str, i64)> {
         [
-            ("app", &self.app),
-            ("cache", &self.cache),
-            ("library", &self.library),
-            ("subscribe", &self.subscribe),
+            ("app", crate::Db::App),
+            ("cache", crate::Db::Cache),
+            ("library", crate::Db::Library),
+            ("subscribe", crate::Db::Subscribe),
         ]
         .into_iter()
-        .map(|(name, conn)| {
-            let version = schema::layout::read_user_version(conn).unwrap_or(0);
-            (name, version)
+        .map(|(name, db)| {
+            (
+                name,
+                self.with_read(db, schema::layout::read_user_version)
+                    .unwrap_or(0),
+            )
         })
         .collect()
     }
-
-    fn initialize_layout(&self) -> Result<(), StoreError> {
-        schema::layout::initialize_or_validate(
-            "app",
-            &self.app,
-            schema::layout::APP_DDL,
-            schema::layout::APP_APPLICATION_ID,
-            schema::layout::V1_USER_VERSION,
-        )?;
-        schema::layout::initialize_or_validate(
-            "cache",
-            &self.cache,
-            schema::layout::CACHE_DDL,
-            schema::layout::CACHE_APPLICATION_ID,
-            schema::layout::CACHE_USER_VERSION_I64,
-        )?;
-        schema::layout::initialize_or_validate(
-            "library",
-            &self.library,
-            schema::layout::LIBRARY_DDL,
-            schema::layout::LIBRARY_APPLICATION_ID,
-            schema::layout::LIBRARY_USER_VERSION,
-        )?;
-        schema::layout::initialize_or_validate(
-            "subscribe",
-            &self.subscribe,
-            schema::layout::SUBSCRIBE_DDL,
-            schema::layout::SUBSCRIBE_APPLICATION_ID,
-            schema::layout::SUBSCRIBE_USER_VERSION,
-        )?;
-        schema::seed_defaults(&self.app, &self.library, &self.data_dir)?;
-        crate::path_key::reload_root_aliases(&self.library)?;
-        Ok(())
-    }
+}
+fn validate_app_reader(conn: &Connection) -> Result<(), StoreError> {
+    schema::layout::validate_database_layout(
+        "app",
+        conn,
+        schema::layout::APP_APPLICATION_ID,
+        schema::layout::V1_USER_VERSION,
+    )
+}
+fn validate_subscribe_reader(conn: &Connection) -> Result<(), StoreError> {
+    schema::layout::validate_database_layout(
+        "subscribe",
+        conn,
+        schema::layout::SUBSCRIBE_APPLICATION_ID,
+        schema::layout::SUBSCRIBE_USER_VERSION,
+    )
+}
+fn validate_library_reader(conn: &Connection) -> Result<(), StoreError> {
+    schema::layout::validate_database_layout(
+        "library",
+        conn,
+        schema::layout::LIBRARY_APPLICATION_ID,
+        schema::layout::LIBRARY_USER_VERSION,
+    )
+}
+fn validate_cache_reader(conn: &Connection) -> Result<(), StoreError> {
+    schema::layout::validate_database_layout(
+        "cache",
+        conn,
+        schema::layout::CACHE_APPLICATION_ID,
+        schema::layout::CACHE_USER_VERSION_I64,
+    )
 }
 
 /// 建库路径上的 `auto_vacuum`：只在**未初始化**的文件上执行，且必须早于
@@ -402,45 +315,21 @@ fn pragma_i64(conn: &Connection, name: &str) -> Result<i64, StoreError> {
 }
 
 impl Store {
-    /// 四个库的**连接级** pragma 快照（诊断与测试用；值不持久）。
+    /// Diagnostic snapshots of the actual unique writer policies.
     pub fn connection_pragmas(&self) -> Vec<(&'static str, ConnectionPragmas)> {
-        let mut snapshots: Vec<_> = [
-            ("cache", &self.cache),
-            ("library", &self.library),
-            ("subscribe", &self.subscribe),
+        [
+            ("app", crate::Db::App),
+            ("cache", crate::Db::Cache),
+            ("library", crate::Db::Library),
+            ("subscribe", crate::Db::Subscribe),
         ]
         .into_iter()
-        .filter_map(|(name, conn)| ConnectionPragmas::read(conn).ok().map(|p| (name, p)))
-        .collect();
-        let app = if self.read_only {
-            ConnectionPragmas::read(&self.app)
-        } else {
-            self.writers
-                .with_writer(crate::Db::App, ConnectionPragmas::read)
-        };
-        if let Ok(pragmas) = app {
-            snapshots.insert(0, ("app", pragmas));
-        }
-        snapshots
-    }
-}
-
-/// 关闭连接前跑一次 `PRAGMA optimize`（SQLite 推荐的「关闭时」用法）：
-/// 用连接生命周期内的查询统计决定要不要刷新 `sqlite_stat1`。
-impl Drop for Store {
-    fn drop(&mut self) {
-        if self.read_only {
-            return;
-        }
-        for (name, conn) in [
-            ("cache", &self.cache),
-            ("library", &self.library),
-            ("subscribe", &self.subscribe),
-        ] {
-            if let Err(error) = conn.execute_batch("PRAGMA optimize;") {
-                tracing::warn!(database = name, %error, "关闭连接前的 PRAGMA optimize 失败");
-            }
-        }
+        .filter_map(|(name, db)| {
+            self.with_writer(db, ConnectionPragmas::read)
+                .ok()
+                .map(|p| (name, p))
+        })
+        .collect()
     }
 }
 

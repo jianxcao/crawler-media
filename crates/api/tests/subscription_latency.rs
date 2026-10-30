@@ -78,7 +78,9 @@ fn authed_get(uri: &str) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-fn fixture(catalog: Arc<ForbiddenPosterCatalog>) -> (axum::Router, MediaId, SubscribeId) {
+fn fixture(
+    catalog: Arc<ForbiddenPosterCatalog>,
+) -> (tempfile::TempDir, axum::Router, MediaId, SubscribeId) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
@@ -95,7 +97,7 @@ fn fixture(catalog: Arc<ForbiddenPosterCatalog>) -> (axum::Router, MediaId, Subs
     .with_catalog(catalog);
 
     let store_arc = state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     let user_id = store
         .list_users()
         .unwrap()
@@ -142,18 +144,15 @@ fn fixture(catalog: Arc<ForbiddenPosterCatalog>) -> (axum::Router, MediaId, Subs
         search_interval_secs: 1800,
     };
     store.insert_subscribe(&subscribe).unwrap();
-    drop(store);
-
-    std::mem::forget(tmp);
 
     let app = api::router(state);
-    (app, media_id, subscribe_id)
+    (tmp, app, media_id, subscribe_id)
 }
 
 #[tokio::test]
 async fn subscriptions_list_does_not_call_remote_catalog_and_returns_stable_poster_route() {
     let catalog = Arc::new(ForbiddenPosterCatalog::new());
-    let (app, media_id, _) = fixture(catalog.clone());
+    let (_tmp, app, media_id, _) = fixture(catalog.clone());
 
     let req = authed_get("/api/v1/subscriptions");
     let res = app.oneshot(req).await.unwrap();
@@ -185,7 +184,7 @@ async fn subscriptions_list_does_not_call_remote_catalog_and_returns_stable_post
 #[tokio::test]
 async fn slow_poster_fetch_does_not_hold_store_lock_or_block_jobs_and_auth() {
     let catalog = Arc::new(ForbiddenPosterCatalog::new());
-    let (app, _media_id, _) = fixture(catalog.clone());
+    let (_tmp, app, _media_id, _) = fixture(catalog.clone());
 
     // 并发请求 /api/v1/subscriptions, /api/v1/jobs, /api/v1/auth/me
     let concurrent = tokio::time::timeout(std::time::Duration::from_secs(2), async {

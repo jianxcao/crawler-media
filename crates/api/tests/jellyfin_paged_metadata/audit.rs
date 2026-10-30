@@ -55,7 +55,7 @@ impl api::catalog::Catalog for SelectiveCatalog {
 
 fn set_tmdb(state: &ApiState, title_contains: &str, tmdb_id: &str) {
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     for row in store.list_file_coverage().unwrap() {
         let Some(mut media) = store.get_media(row.file.media_id).unwrap() else {
             continue;
@@ -96,7 +96,7 @@ async fn series_parent_does_not_scan_the_root_ledger() {
         let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
         let foreign = {
             let store = fixture.state.store();
-            let store = store.lock();
+            let store = store.as_ref();
             store
                 .list_file_coverage()
                 .unwrap()
@@ -112,13 +112,13 @@ async fn series_parent_does_not_scan_the_root_ledger() {
         )
         .unwrap();
     }
-    fixture.state.store().lock().reset_root_ledger_scans();
+    fixture.state.store().reset_root_ledger_scans();
     let listing = get_json(
         &app,
         &format!("/Items?ParentId={show}&Recursive=true&Limit=1&SortBy=SortName"),
     )
     .await;
-    let scans = fixture.state.store().lock().root_ledger_scans();
+    let scans = fixture.state.store().root_ledger_scans();
     assert_eq!(
         listing["TotalRecordCount"], 2,
         "坏掉的无关行不得让这部剧失败：{listing}"
@@ -138,7 +138,7 @@ async fn person_filter_is_local_and_survives_catalog_failure() {
     set_tmdb(&fixture.state, "Show000", "200");
     {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .list_file_coverage()
             .unwrap()
@@ -178,10 +178,10 @@ async fn person_filter_is_local_and_survives_catalog_failure() {
 async fn favorite_filter_uses_the_same_observation_as_the_response() {
     let fixture = tv_fixture(1, 1);
     let app = router(fixture.state.clone());
-    let user = fixture.state.store().lock().admin_user_id().unwrap();
+    let user = fixture.state.store().admin_user_id().unwrap();
     let media = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .list_file_coverage()
             .unwrap()
@@ -210,7 +210,7 @@ async fn favorite_filter_uses_the_same_observation_as_the_response() {
         let state = fixture.state.clone();
         move || {
             let store = state.store();
-            let store = store.lock();
+            let store = store.as_ref();
             store
                 .upsert_unit(
                     user,
@@ -250,25 +250,7 @@ async fn page_uses_captured_heavy_facts_before_a_later_database_failure() {
     let fixture = tv_fixture(2, 1);
     let heavy = fixture.state.jellyfin_heavy_items();
     let app = router(fixture.state.clone());
-    let _failing = {
-        let store = fixture.state.store();
-        let store = store.lock();
-        store
-            .list_file_coverage()
-            .unwrap()
-            .into_iter()
-            .find(|row| row.file.path.to_string_lossy().contains("Show001"))
-            .expect("Show001")
-            .file
-            .file_id
-    };
-    fixture.files.fail_store_on_first_io(Box::new({
-        let db = fixture.dir.path().join("data/library.db");
-        move || {
-            let conn = rusqlite::Connection::open(&db).unwrap();
-            conn.execute_batch("DROP TABLE file_details").unwrap();
-        }
-    }));
+    let rejected = fail_file_details_reads_on_first_io(&fixture);
     let (status, _) = get(
         &app,
         &format!(
@@ -294,8 +276,9 @@ async fn page_uses_captured_heavy_facts_before_a_later_database_failure() {
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
-        "a later request must report the missing selected facts table"
+        "a later request must report the selected facts read failure"
     );
+    assert!(rejected.load(Ordering::SeqCst) > 0);
 }
 
 #[tokio::test]
@@ -305,7 +288,7 @@ async fn person_filter_does_not_assess_probes_for_unselected_rows() {
     let app = router(fixture.state.clone());
     {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .list_file_coverage()
             .unwrap()
@@ -344,7 +327,7 @@ async fn off_page_blob_chapters_fail_only_when_that_row_is_selected() {
     let app = router(fixture.state.clone());
     let failing = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .list_file_coverage()
             .unwrap()

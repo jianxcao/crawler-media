@@ -345,7 +345,7 @@ fn episode_artwork(thumb: &str, observed: bool) -> EpisodeArtwork {
     }
     let media_id = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let root = library_root.display().to_string();
         store
             .create_library(MediaKind::Tv, "TV", &[root.as_str()], "everyone", true, &[])
@@ -364,7 +364,7 @@ fn episode_artwork(thumb: &str, observed: bool) -> EpisodeArtwork {
             anilist_id: None,
         };
         store.insert_media(&show).unwrap();
-        publish_fixture_file(&store, &episode_file(show.id, &video, 1)).unwrap();
+        publish_fixture_file(store, &episode_file(show.id, &video, 1)).unwrap();
         show.id
     };
     if !observed {

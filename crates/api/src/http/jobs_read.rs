@@ -14,8 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
-use super::jobs::{JOBS_READ_DEADLINE, jobs_budget_response, with_bounded_store};
-use crate::blocking_budget::BlockingError;
+use super::jobs::{JOBS_READ_DEADLINE, jobs_budget_response, jobs_read_error, with_bounded_store};
 use crate::http::{err, ok, ok_list};
 use crate::maintenance::MaintenancePolicy;
 use crate::management::ApiState;
@@ -261,41 +260,38 @@ pub(crate) async fn list_jobs(
 }
 
 fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) -> Response {
-    // 1) Queue 快照：defs（单独加锁，不与 Store 嵌套）。
-    let defs = match state.jobs.lock().list_defs() {
+    // 1) Jobs 只读快照：先取 defs，再释放 reader。
+    let defs = match crate::jobs_readers::read(&state.jobs_readers, |queue| queue.list_defs()) {
         Ok(defs) => defs,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
+        Err(error) => return jobs_read_error(error),
     };
     // 2) Store 快照：可见性与 scope 过滤（都在 limit 之前）。
     let visible_defs =
         match with_bounded_store(state, |store| visible_defs(store, defs, user_id, query)) {
-            Some(visible_defs) => visible_defs,
-            None => return jobs_budget_response(BlockingError::Busy),
+            Ok(visible_defs) => visible_defs,
+            Err(error) => return jobs_budget_response(error),
         };
-    // 3) Queue 快照：一次批量取所有 live/last child（不再逐 def 查询）。
+    // 3) Jobs 只读快照：一次批量取所有 live/last child。
     let children = {
-        let queue = state.jobs.lock();
         let ids: Vec<JobDefId> = visible_defs.iter().map(|def| def.id).collect();
-        queue.children_for_defs(&ids).unwrap_or_default()
+        match crate::jobs_readers::read(&state.jobs_readers, |queue| queue.children_for_defs(&ids))
+        {
+            Ok(children) => children,
+            Err(error) => return jobs_read_error(error),
+        }
     };
     let selected = select_rows(visible_defs, children, query);
-    // 4) Store 快照：只取渲染所需的 media title，锁内不渲染 JSON。
+    // 4) Store 只读 scope：只取渲染所需的 media title。
     let titles = match with_bounded_store(state, |store| {
         selected
             .iter()
             .map(|(def, _, _)| def_media_title(def, store))
             .collect::<Vec<Option<String>>>()
     }) {
-        Some(titles) => titles,
-        None => return jobs_budget_response(BlockingError::Busy),
+        Ok(titles) => titles,
+        Err(error) => return jobs_budget_response(error),
     };
-    // 5) 锁外渲染。
+    // 5) 释放 reader 后渲染。
     let listed: Vec<Value> = selected
         .into_iter()
         .zip(titles)
@@ -306,7 +302,7 @@ fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) 
     ok_list(listed).into_response()
 }
 
-/// 可见性 + scope 过滤：锁内只读事实，不渲染。
+/// 可见性 + scope 过滤：只读事实，不渲染。
 fn visible_defs(
     store: &crate::Store,
     defs: Vec<jobs::JobDef>,
@@ -407,25 +403,18 @@ pub(crate) async fn get_job(
 }
 
 fn get_job_blocking(state: &ApiState, user_id: UserId, id: JobDefId) -> Response {
-    // Queue 快照：取完即放锁，不与 Store 锁嵌套（Store 锁是有界等待）。
-    let (def, live, last) = {
-        let queue = state.jobs.lock();
-        let defs = match queue.list_defs() {
-            Ok(defs) => defs,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
+    let snapshot = crate::jobs_readers::read(&state.jobs_readers, |queue| {
+        let Some(def) = queue.def(id)? else {
+            return Ok(None);
         };
-        let Some(def) = defs.into_iter().find(|d| d.id == id) else {
-            return err(StatusCode::NOT_FOUND, "job.missing", "任务不存在");
-        };
-        let live = queue.get_live_child(def.id).ok().flatten();
-        let last = queue.get_last_child(def.id).ok().flatten();
-        (def, live, last)
+        let live = queue.get_live_child(id)?;
+        let last = queue.get_last_child(id)?;
+        Ok(Some((def, live, last)))
+    });
+    let (def, live, last) = match snapshot {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "job.missing", "任务不存在"),
+        Err(error) => return jobs_read_error(error),
     };
     let rendered = with_bounded_store(state, |store| {
         let admin = store
@@ -443,8 +432,8 @@ fn get_job_blocking(state: &ApiState, user_id: UserId, id: JobDefId) -> Response
         ))
     });
     match rendered {
-        Some(Some(rendered)) => ok(rendered).into_response(),
-        Some(None) => err(StatusCode::NOT_FOUND, "job.missing", "任务不存在"),
-        None => jobs_budget_response(BlockingError::Busy),
+        Ok(Some(rendered)) => ok(rendered).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "job.missing", "任务不存在"),
+        Err(error) => jobs_budget_response(error),
     }
 }

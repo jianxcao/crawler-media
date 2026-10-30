@@ -34,7 +34,7 @@ async fn rename_grace_all_missing_does_not_recreate_directory() {
         "live root must not be recreated if all files missing"
     );
     let store_guard = f.state.store();
-    let store = store_guard.lock();
+    let store = store_guard.as_ref();
     assert_eq!(
         store.file_coverage_for_media(f.media.id).unwrap().len(),
         4,
@@ -51,9 +51,9 @@ async fn rename_grace_stale_preferred_row_does_not_poison_target() {
     let old_e99 = f.old_root.join("Spirit.Rangers.S01E99.strm");
     {
         let store_guard = f.state.store();
-        let store = store_guard.lock();
+        let store = store_guard.as_ref();
         publish_fixture_file(
-            &store,
+            store,
             &FixtureFile {
                 file_id: Some(domain::LedgerId::new()),
                 media_id: f.media.id,
@@ -89,7 +89,7 @@ async fn rename_grace_stale_preferred_row_does_not_poison_target() {
         "old root must not be recreated even with stale preferred row"
     );
     let store_guard = f.state.store();
-    let store = store_guard.lock();
+    let store = store_guard.as_ref();
     assert_eq!(store.file_coverage_for_media(f.media.id).unwrap().len(), 5);
 }
 
@@ -126,12 +126,12 @@ async fn rename_grace_keeps_two_live_copies_separate() {
     std::fs::create_dir_all(&copy).unwrap();
     {
         let store_guard = f.state.store();
-        let store = store_guard.lock();
+        let store = store_guard.as_ref();
         for episode in 1..=2 {
             let path = copy.join(format!("Spirit.Rangers.S01E{episode:02}.strm"));
             std::fs::write(&path, b"https://example.com/copy").unwrap();
             publish_fixture_file(
-                &store,
+                store,
                 &FixtureFile {
                     file_id: Some(domain::LedgerId::new()),
                     media_id: f.media.id,

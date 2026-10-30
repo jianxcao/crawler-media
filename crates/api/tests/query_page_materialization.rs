@@ -28,7 +28,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let state = ApiState::new(
             Store::open(dir.path().join("data")).unwrap(),
             "management-secret".into(),
@@ -40,8 +40,7 @@ impl Fixture {
         .unwrap();
         let root = dir.path().join("tv");
         std::fs::create_dir_all(&root).unwrap();
-        let binding = state.store();
-        let store = binding.lock();
+        let store = state.store();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -91,7 +90,6 @@ impl Fixture {
             .find(|user| store.user_role(user.id).unwrap() == "admin")
             .unwrap()
             .id;
-        drop(store);
         Self {
             dir,
             state,
@@ -129,8 +127,7 @@ impl Fixture {
 #[test]
 fn zero_limit_returns_exact_total_without_materializing_references() {
     let fx = Fixture::new();
-    let binding = fx.state.store();
-    let store = binding.lock();
+    let store = fx.state.store();
     let query = fx.query(0);
     let page = store.protocol_item_page(&query).unwrap();
     assert_eq!(page.total, 1);
@@ -152,8 +149,7 @@ fn zero_limit_returns_exact_total_without_materializing_references() {
 #[test]
 fn instrumented_capture_counts_sql_and_series_date_ignores_uncovered_file() {
     let fx = Fixture::new();
-    let binding = fx.state.store();
-    let store = binding.lock();
+    let store = fx.state.store();
     let selected = store.protocol_item_page(&fx.query(1)).unwrap();
     let (facts, stats) = store
         .protocol_page_inputs_with_stats(fx.user, &selected.items)

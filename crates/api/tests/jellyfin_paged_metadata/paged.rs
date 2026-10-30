@@ -106,7 +106,6 @@ async fn selected_source_recorded_library_change_is_rejected() {
     let other = fixture
         .state
         .store()
-        .lock()
         .default_library(MediaKind::Tv)
         .unwrap()
         .unwrap()
@@ -195,7 +194,7 @@ async fn hydrated_rows_include_selected_playback_assertions() {
     let media = media_for_title(&fixture.state, "Show000").to_string();
     let user = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .list_users()
             .unwrap()
@@ -308,7 +307,7 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
     let app = router(fixture.state.clone());
     let out_of_page = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let rows: Vec<_> = store
             .list_file_coverage()
             .unwrap()
@@ -436,7 +435,7 @@ async fn episode_expansion_stays_inside_the_folder() {
     std::fs::create_dir_all(&root_b).unwrap();
     let show_media = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .create_library(
                 MediaKind::Tv,
@@ -447,9 +446,9 @@ async fn episode_expansion_stays_inside_the_folder() {
                 &[],
             )
             .unwrap();
-        let media_id = new_media(&store, "Folder show");
-        insert_episode(&store, &root_a, media_id, 1, 1);
-        insert_episode(&store, &root_b, media_id, 1, 2);
+        let media_id = new_media(store, "Folder show");
+        insert_episode(store, &root_a, media_id, 1, 1);
+        insert_episode(store, &root_b, media_id, 1, 2);
         media_id
     };
     let app = router(state);
@@ -515,12 +514,12 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
     let app = router(fixture.state.clone());
     let user = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store.admin_user_id().unwrap()
     };
     let first_show = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .list_file_coverage()
             .unwrap()
@@ -575,7 +574,7 @@ async fn person_filter_selects_before_paging() {
     let fixture = tv_fixture(4, 1);
     let (person_id, matched) = {
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let row = store
             .list_file_coverage()
             .unwrap()
@@ -620,7 +619,7 @@ async fn name_ties_keep_a_stable_order() {
     std::fs::create_dir_all(&root).unwrap();
     let library_id = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -662,7 +661,7 @@ async fn name_ties_keep_a_stable_order() {
             let path = show_dir.join("01x01.mkv");
             std::fs::write(&path, b"episode").unwrap();
             store::test_support::publish_fixture_file(
-                &store,
+                store,
                 &store::test_support::FixtureFile {
                     media_id,
                     path: path.display().to_string(),
@@ -739,7 +738,7 @@ fn adopt_show_metadata(state: &ApiState, media: MediaId) {
         },
     };
     let store = state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     store.adopt_metadata(&adoption, 1).unwrap();
 }
 

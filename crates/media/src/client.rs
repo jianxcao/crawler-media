@@ -23,6 +23,8 @@ pub enum TmdbError {
     Http(String),
     #[error("parse: {0}")]
     Parse(String),
+    #[error("cache backend: {0}")]
+    CacheBackend(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -49,6 +51,14 @@ impl<H: CatalogGet> Tmdb<H> {
     pub fn new(http: H, catalog_db: &Path) -> Result<Self, TmdbError> {
         // now = 0 → CatalogCache 走实时时钟（生产路径缓存正常过期）。
         Self::new_at(http, catalog_db, 0)
+    }
+
+    pub fn with_cache(http: H, cache: CatalogCache) -> Self {
+        Self {
+            http,
+            cache,
+            language: "zh-CN".to_string(),
+        }
     }
 
     pub fn with_language(mut self, language: &str) -> Self {

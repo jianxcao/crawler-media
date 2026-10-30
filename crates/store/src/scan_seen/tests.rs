@@ -14,13 +14,13 @@ fn checkpoint_window_has_a_bounded_database_work_budget() {
     let count = steps.clone();
     // A one-file resume window must not read/materialize 5,000 prior checkpoints.
     // Abort runaway DB work, instead of asserting timing or a particular SQL shape.
-    store.library.progress_handler(
-        1_000,
-        Some(move || count.fetch_add(1, Ordering::Relaxed) >= 20),
-    );
     let requested = vec![stamps[2_500].0.clone()];
     let checkpoints = store
-        .scan_seen_checkpoints("operation", &requested)
+        .with_library_progress(
+            1_000,
+            move || count.fetch_add(1, Ordering::Relaxed) >= 20,
+            || store.scan_seen_checkpoints("operation", &requested),
+        )
         .unwrap();
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[&requested[0]], (10, 5, None, false));

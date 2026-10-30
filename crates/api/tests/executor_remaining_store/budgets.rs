@@ -154,7 +154,7 @@ fn saturated_collection_write_leaves_no_mutation() {
     drop(reservation);
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        f.state.store().lock().list_collections(f.user).unwrap()[0].name,
+        f.state.store().list_collections(f.user).unwrap()[0].name,
         "Original"
     );
 }

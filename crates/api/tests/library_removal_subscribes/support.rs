@@ -161,7 +161,6 @@ impl Fixture {
     pub fn binding(&self) -> Option<domain::LibraryId> {
         self.state
             .store()
-            .lock()
             .get_subscribe(self.subscribe)
             .unwrap()
             .unwrap()
@@ -201,7 +200,6 @@ impl Fixture {
         };
         self.state
             .store()
-            .lock()
             .record_pending_submission(
                 self.subscribe,
                 100,
@@ -216,7 +214,7 @@ impl Fixture {
     }
     pub fn succeeded_with_binding_gap(&self) -> store::LibraryRemoval {
         let handle = self.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let operation = store.begin_library_removal(&self.removed.id).unwrap();
         store
             .set_removal_state(&operation.operation_id, "cleaning", None)

@@ -13,7 +13,7 @@ async fn next_up_aggregates_one_media_across_libraries() {
     std::fs::create_dir_all(&root_two).unwrap();
     let media_id = {
         let store = state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
             .create_library(
                 MediaKind::Tv,
@@ -34,9 +34,9 @@ async fn next_up_aggregates_one_media_across_libraries() {
                 &[],
             )
             .unwrap();
-        let media_id = new_media(&store, "Cross library show");
-        insert_episode(&store, &root_one, media_id, 1, 1);
-        insert_episode(&store, &root_two, media_id, 1, 2);
+        let media_id = new_media(store, "Cross library show");
+        insert_episode(store, &root_one, media_id, 1, 1);
+        insert_episode(store, &root_two, media_id, 1, 2);
         media_id
     };
     let app = router(state);

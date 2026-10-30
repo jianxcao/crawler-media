@@ -1,14 +1,17 @@
+mod decision;
 mod plan;
 mod publication;
 mod recorder;
 mod removals;
 mod run;
+mod snapshot;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use plan::{
     TransferPlan, resolve_transfer_plan, validate_committed_transfer_plan, validate_transfer_plan,
+    with_plan_write,
 };
 #[cfg(test)]
 pub(crate) use publication::TransferFileObservation;

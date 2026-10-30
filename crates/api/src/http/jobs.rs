@@ -39,15 +39,49 @@ pub(super) fn jobs_budget_response(error: BlockingError) -> Response {
     }
 }
 
+pub(super) fn jobs_read_error(error: store::LibraryReadError) -> Response {
+    let (status, code, message) = jobs_read_error_parts(error);
+    err(status, code, &message)
+}
+
+pub(super) fn jobs_read_error_parts(
+    error: store::LibraryReadError,
+) -> (StatusCode, &'static str, String) {
+    match error {
+        store::LibraryReadError::Busy
+        | store::LibraryReadError::Deadline
+        | store::LibraryReadError::Cancelled
+        | store::LibraryReadError::Closed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "任务信息繁忙，请稍后重试".to_owned(),
+        ),
+        error => {
+            tracing::error!(%error, "Jobs 只读快照失败");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                error.to_string(),
+            )
+        }
+    }
+}
+
 /// Bounded snapshot read from the shared read-only Store pool.
 pub(super) fn with_bounded_store<T>(
     state: &ApiState,
     work: impl FnOnce(&crate::Store) -> T,
-) -> Option<T> {
-    let guard = state
-        .store_readers
-        .checkout(super::store_wait::STORE_READ_WAIT)?;
-    Some(work(&guard))
+) -> Result<T, BlockingError> {
+    state
+        .store
+        .with_read_scope(JOBS_READ_DEADLINE, || work(&state.store))
+        .map_err(|error| match error {
+            store::StoreError::ReadBusy | store::StoreError::ReadClosed => BlockingError::Busy,
+            store::StoreError::ReadDeadline | store::StoreError::ReadCancelled => {
+                BlockingError::Timeout
+            }
+            error => BlockingError::Worker(error.to_string()),
+        })
 }
 
 pub(crate) async fn run_job(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
@@ -368,7 +402,11 @@ pub(crate) async fn tick_jobs(
 /// 所有连接共用 `JobUpdates` 的单个 2 秒 poller；客户端断开即结束本连接任务。
 pub(crate) async fn job_stream(State(state): State<ApiState>) -> Response {
     use tokio_stream::wrappers::ReceiverStream;
-    let mut updates = match state.job_updates.subscribe(state.jobs.clone()).await {
+    let mut updates = match state
+        .job_updates
+        .subscribe(state.jobs_readers.clone())
+        .await
+    {
         Ok(receiver) => receiver,
         Err(error) => {
             tracing::error!(%error, "任务计数订阅失败");

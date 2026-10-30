@@ -10,14 +10,14 @@ async fn collection_gallery_reports_real_favorite_state() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library = seed_library(&store.lock(), tmp.path(), "collections");
-    let (member, token) = seed_member(&store.lock(), "alice");
+    let library = seed_library(store.as_ref(), tmp.path(), "collections");
+    let (member, token) = seed_member(store.as_ref(), "alice");
     let (favorited, plain, collection) = {
-        let guard = store.lock();
-        let favorited = seed_media(&guard, "Favorited", Some(2020));
-        let plain = seed_media(&guard, "Plain", Some(2021));
-        add_ledger(&guard, favorited, &library, "Favorited");
-        add_ledger(&guard, plain, &library, "Plain");
+        let guard = store.as_ref();
+        let favorited = seed_media(guard, "Favorited", Some(2020));
+        let plain = seed_media(guard, "Plain", Some(2021));
+        add_ledger(guard, favorited, &library, "Favorited");
+        add_ledger(guard, plain, &library, "Plain");
         let collection = guard.create_collection(member, "混装").unwrap();
         guard
             .add_collection_item(&collection, &favorited.to_string())
@@ -27,7 +27,7 @@ async fn collection_gallery_reports_real_favorite_state() {
             .unwrap();
         (favorited, plain, collection)
     };
-    favorite(&store.lock(), member, favorited, true);
+    favorite(store.as_ref(), member, favorited, true);
 
     let data = get(
         &app,
@@ -62,22 +62,22 @@ async fn favorites_sort_matches_existing_keys() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library = seed_library(&store.lock(), tmp.path(), "favorites");
-    let (member, token) = seed_member(&store.lock(), "bob");
+    let library = seed_library(store.as_ref(), tmp.path(), "favorites");
+    let (member, token) = seed_member(store.as_ref(), "bob");
     let (alpha_old, alpha_new, beta, gamma) = {
-        let guard = store.lock();
-        let alpha_old = seed_media(&guard, "Alpha", Some(2019));
-        let alpha_new = seed_media(&guard, "Alpha", Some(2024));
-        let beta = seed_media(&guard, "Beta", Some(2021));
-        let gamma = seed_media(&guard, "Gamma", Some(2022));
+        let guard = store.as_ref();
+        let alpha_old = seed_media(guard, "Alpha", Some(2019));
+        let alpha_new = seed_media(guard, "Alpha", Some(2024));
+        let beta = seed_media(guard, "Beta", Some(2021));
+        let gamma = seed_media(guard, "Gamma", Some(2022));
         for (id, name) in [
             (alpha_old, "alpha-old"),
             (alpha_new, "alpha-new"),
             (beta, "beta"),
             (gamma, "gamma"),
         ] {
-            add_ledger(&guard, id, &library, name);
-            favorite(&guard, member, id, true);
+            add_ledger(guard, id, &library, name);
+            favorite(guard, member, id, true);
         }
         (alpha_old, alpha_new, beta, gamma)
     };
@@ -137,14 +137,14 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library = seed_library(&store.lock(), tmp.path(), "recent-favorites");
-    let (member, token) = seed_member(&store.lock(), "dana");
+    let library = seed_library(store.as_ref(), tmp.path(), "recent-favorites");
+    let (member, token) = seed_member(store.as_ref(), "dana");
     let (older, newer) = {
-        let guard = store.lock();
-        let older = seed_media(&guard, "Older favorite", Some(2020));
-        let newer = seed_media(&guard, "Newer favorite", Some(2021));
-        add_ledger(&guard, older, &library, "older");
-        add_ledger(&guard, newer, &library, "newer");
+        let guard = store.as_ref();
+        let older = seed_media(guard, "Older favorite", Some(2020));
+        let newer = seed_media(guard, "Newer favorite", Some(2021));
+        add_ledger(guard, older, &library, "older");
+        add_ledger(guard, newer, &library, "newer");
         guard
             .upsert_unit(
                 member,
@@ -201,7 +201,7 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
     );
     let gallery = get(&app, "/api/v1/playback/favorites/gallery?limit=10", &token).await;
     assert_eq!(gallery[0]["media_item_id"], newer.to_string(), "{gallery}");
-    let played = store.lock().user_active_media_ids(member).unwrap();
+    let played = store.as_ref().user_active_media_ids(member).unwrap();
     assert_eq!(played[0].0, newer);
     assert_eq!(
         played[0].1, 50,
@@ -216,14 +216,14 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library = seed_library(&store.lock(), tmp.path(), "stable-favorites");
-    let (member, token) = seed_member(&store.lock(), "erin");
+    let library = seed_library(store.as_ref(), tmp.path(), "stable-favorites");
+    let (member, token) = seed_member(store.as_ref(), "erin");
     let (historical, recent) = {
-        let guard = store.lock();
-        let historical = seed_media(&guard, "Historical favorite", Some(2018));
-        let recent = seed_media(&guard, "Recent favorite", Some(2024));
-        add_ledger(&guard, historical, &library, "historical");
-        add_ledger(&guard, recent, &library, "recent");
+        let guard = store.as_ref();
+        let historical = seed_media(guard, "Historical favorite", Some(2018));
+        let recent = seed_media(guard, "Recent favorite", Some(2024));
+        add_ledger(guard, historical, &library, "historical");
+        add_ledger(guard, recent, &library, "recent");
         guard
             .upsert_unit(
                 member,
@@ -250,7 +250,7 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
         (historical, recent)
     };
     {
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .upsert_unit(
                 member, historical, -1, -1, 90_000, None, None, None, None, None, false, 200,
@@ -307,17 +307,17 @@ async fn favorite_coverage_spans_every_visible_library_holding_the_media() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let first = seed_library(&store.lock(), tmp.path(), "first");
-    let second = seed_library(&store.lock(), tmp.path(), "second");
-    let (member, token) = seed_member(&store.lock(), "carol");
+    let first = seed_library(store.as_ref(), tmp.path(), "first");
+    let second = seed_library(store.as_ref(), tmp.path(), "second");
+    let (member, token) = seed_member(store.as_ref(), "carol");
     let media = {
-        let guard = store.lock();
-        let media = seed_media(&guard, "Twice", Some(2020));
-        add_ledger(&guard, media, &first, "twice-a");
-        add_ledger(&guard, media, &second, "twice-b");
+        let guard = store.as_ref();
+        let media = seed_media(guard, "Twice", Some(2020));
+        add_ledger(guard, media, &first, "twice-a");
+        add_ledger(guard, media, &second, "twice-b");
         media
     };
-    favorite(&store.lock(), member, media, true);
+    favorite(store.as_ref(), member, media, true);
     let data = get(&app, "/api/v1/playback/favorites", &token).await;
     assert_eq!(data["total"], 1, "{data}");
     assert_eq!(data["items"][0]["file_count"], 2, "{data}");

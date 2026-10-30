@@ -1,10 +1,13 @@
-//! L1: the instance-lease heartbeat must not queue behind the process-wide
-//! `Arc<parking_lot::Mutex<Store>>` lock.
+//! The instance-lease heartbeat stays responsive while the Library writer is held.
 //!
-//! A long batch (integrity / scan) holds that lock for minutes. When the
-//! heartbeat shares it, the lease stops being refreshed, its TTL expires and a
-//! second instance takes the data directory over — two writers on one
-//! directory. The heartbeat therefore runs on its own app.db connection.
+//! The heartbeat uses the shared App writer independently of Library batches, so
+//! a stalled Library write cannot let another instance take over the data directory.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::path::Path;
 use std::sync::Arc;
@@ -59,7 +62,7 @@ fn heartbeat_at(root: &Path) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn heartbeat_survives_long_store_lock() {
+async fn heartbeat_survives_long_library_write() {
     fast_lease();
     let tmp = tempfile::tempdir().unwrap();
     let first_state = open(tmp.path());
@@ -68,9 +71,10 @@ async fn heartbeat_survives_long_store_lock() {
     assert!(!first.is_read_only(), "first instance must own the lease");
     let beat_on_acquire = heartbeat_at(tmp.path());
 
-    // A batch that holds the process-wide Store lock for 1 s: >3x the TTL.
+    // Hold the Library writer for 1 s: >3x the TTL.
     let holder = std::thread::spawn(move || {
-        let _guard = locked_store.lock();
+        let _guard =
+            crate::writer_hold::WriterHold::acquire(locked_store.clone(), store::Db::Library);
         std::thread::sleep(Duration::from_millis(1000));
     });
     std::thread::sleep(Duration::from_millis(600));
@@ -78,7 +82,7 @@ async fn heartbeat_survives_long_store_lock() {
     let beat_under_lock = heartbeat_at(tmp.path());
     assert!(
         beat_under_lock > beat_on_acquire,
-        "heartbeat must keep refreshing the lease while a batch holds the Store lock \
+        "heartbeat must keep refreshing the lease while a batch holds the Library writer \
          (acquired at {beat_on_acquire}, still {beat_under_lock} after 600 ms)"
     );
 

@@ -39,7 +39,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     let media = seed_movie_strm(&state, &strm_file);
 
     // 校验入账成功
-    let rows = state.store().lock().list_file_coverage().unwrap();
+    let rows = state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].file.path.to_string_lossy().into_owned(),
@@ -62,7 +62,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     api::fs_watcher::handle_fs_events(&state, &tracker, Vec::new());
 
     // 4. 验证 ledger 中的该文件记录被标记缺失，而不是自动物理删除
-    let remaining_rows = state.store().lock().list_file_coverage().unwrap();
+    let remaining_rows = state.store().list_file_coverage().unwrap();
     assert_eq!(
         remaining_rows.len(),
         1,
@@ -71,7 +71,6 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     assert!(
         state
             .store()
-            .lock()
             .missing_at_by_path()
             .unwrap()
             .keys()
@@ -80,7 +79,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     );
 
     // 5. 验证 media 记录以及用户事实被保留
-    let remaining_media = state.store().lock().get_media(media.id).unwrap();
+    let remaining_media = state.store().get_media(media.id).unwrap();
     assert!(remaining_media.is_some(), "文件缺失不应删除 Media 用户事实");
     // 6. 模拟从回收站还原该目录（重新创建目录与 strm 文件）
     std::fs::create_dir_all(&movie_dir).unwrap();
@@ -97,7 +96,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // 7. 验证还原后重新入账
-    let restored_rows = state.store().lock().list_file_coverage().unwrap();
+    let restored_rows = state.store().list_file_coverage().unwrap();
     assert_eq!(
         restored_rows.len(),
         1,
@@ -123,10 +122,10 @@ fn seed_movie_strm(state: &api::management::ApiState, path: &std::path::Path) ->
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
 
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &FixtureFile {
             file_id: Some(domain::LedgerId::new()),
             media_id: media.id,
@@ -204,10 +203,10 @@ async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
     let ledger_id = domain::LedgerId::new();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(ledger_id, media.id, &episode, 1),
     )
     .unwrap();
@@ -223,7 +222,6 @@ async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
     assert!(
         state
             .store()
-            .lock()
             .latest_probe_job_for_scope(&format!("ledger:{ledger_id}"))
             .unwrap()
             .is_none(),
@@ -276,10 +274,10 @@ async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
     let ledger_id = domain::LedgerId::new();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(ledger_id, media.id, &episode, 1),
     )
     .unwrap();
@@ -291,7 +289,6 @@ async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
     assert!(
         state
             .store()
-            .lock()
             .latest_probe_job_for_scope(&format!("ledger:{ledger_id}"))
             .unwrap()
             .is_none(),
@@ -350,15 +347,15 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
     let first_id = domain::LedgerId::new();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(first_id, media.id, &episode_one, 1),
     )
     .unwrap();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(domain::LedgerId::new(), media.id, &episode_two, 2),
     )
     .unwrap();
@@ -383,7 +380,7 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         let _ = std::fs::remove_dir_all(&parked_season);
     }
 
-    let rows = state.store().lock().list_file_coverage().unwrap();
+    let rows = state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2, "文件缺失后台账保留并被标记缺失: {rows:?}");
     assert_eq!(
         rows[0].file.file_id, first_id,
@@ -396,7 +393,6 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
     assert!(
         state
             .store()
-            .lock()
             .missing_at_by_path()
             .unwrap()
             .keys()
@@ -405,13 +401,12 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
     assert!(
         !state
             .store()
-            .lock()
             .missing_at_by_path()
             .unwrap()
             .keys()
             .any(|key| key.ends_with(episode_one.file_name().unwrap().to_str().unwrap()))
     );
-    assert!(state.store().lock().get_media(media.id).unwrap().is_some());
+    assert!(state.store().get_media(media.id).unwrap().is_some());
 }
 
 #[tokio::test]
@@ -427,7 +422,7 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
     );
 
     let store = fixture.state.store();
-    let during_grace = store.lock();
+    let during_grace = store.as_ref();
     let coverage = during_grace
         .file_coverage_by_path(&fixture.episode.display().to_string())
         .unwrap()
@@ -452,7 +447,6 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
             .unwrap()
             .is_some()
     );
-    drop(during_grace);
 
     std::fs::write(&fixture.episode, "https://example.com/e02.mkv").unwrap();
     api::fs_watcher::handle_fs_events(
@@ -462,7 +456,7 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
     );
 
     let store = fixture.state.store();
-    let after_restore = store.lock();
+    let after_restore = store.as_ref();
     let restored = after_restore
         .file_coverage_by_path(&fixture.episode.display().to_string())
         .unwrap()
@@ -491,7 +485,7 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
     api::fs_watcher::handle_fs_events(&fixture.state, &tracker, Vec::new());
 
     let store = fixture.state.store();
-    let after_expiry = store.lock();
+    let after_expiry = store.as_ref();
     assert!(
         after_expiry
             .missing_at_by_path()
@@ -515,7 +509,6 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
         "播放进度是用户数据，删集时保留"
     );
     assert!(after_expiry.get_media(fixture.media_id).unwrap().is_some());
-    drop(after_expiry);
 
     std::fs::write(&fixture.episode, "https://example.com/e02.mkv").unwrap();
     api::fs_watcher::handle_fs_events(
@@ -532,7 +525,6 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
     let missing_cleared = !fixture
         .state
         .store()
-        .lock()
         .missing_at_by_path()
         .unwrap()
         .keys()
@@ -545,7 +537,6 @@ fn wait_for_restored_ledger(fixture: &EpisodeFixture) -> domain::FileCoverage {
         if let Ok(Some(coverage)) = fixture
             .state
             .store()
-            .lock()
             .file_coverage_by_path(&fixture.episode.display().to_string())
         {
             return coverage;
@@ -595,7 +586,6 @@ fn episode_fixture() -> EpisodeFixture {
     let media_id = domain::MediaId::new();
     state
         .store()
-        .lock()
         .insert_media(&domain::Media {
             id: media_id,
             kind: domain::MediaKind::Tv,
@@ -612,7 +602,7 @@ fn episode_fixture() -> EpisodeFixture {
         .unwrap();
     let ledger_id = domain::LedgerId::new();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &FixtureFile {
             file_id: Some(ledger_id),
             media_id,
@@ -630,7 +620,7 @@ fn episode_fixture() -> EpisodeFixture {
     )
     .unwrap();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &FixtureFile {
             file_id: Some(domain::LedgerId::new()),
             media_id,
@@ -651,7 +641,6 @@ fn episode_fixture() -> EpisodeFixture {
     let user_id = domain::UserId::new();
     state
         .store()
-        .lock()
         .upsert_unit(
             user_id, media_id, 1, 2, 12_000, None, None, None, None, None, false, 1,
         )
@@ -683,12 +672,10 @@ fn seed_episode_probe_facts(
     };
     state
         .store()
-        .lock()
         .put_file_meta(&ledger_id.to_string(), &tracks)
         .unwrap();
     state
         .store()
-        .lock()
         .put_fingerprint_cache(
             &ledger_id.to_string(),
             &store::FingerprintCacheEntry {
@@ -703,7 +690,6 @@ fn seed_episode_probe_facts(
         .unwrap();
     state
         .store()
-        .lock()
         .put_media_marker(&store::StoredMediaMarker {
             media_id,
             season: 1,
@@ -764,14 +750,14 @@ async fn deleting_the_show_directory_removes_every_episode_ledger_row() {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(domain::LedgerId::new(), media.id, &episode_one, 1),
     )
     .unwrap();
     publish_fixture_file(
-        &state.store().lock(),
+        &state.store(),
         &episode_spec(domain::LedgerId::new(), media.id, &episode_two, 2),
     )
     .unwrap();
@@ -783,9 +769,9 @@ async fn deleting_the_show_directory_removes_every_episode_ledger_row() {
     api::fs_watcher::handle_fs_events(&state, &tracker, Vec::new());
 
     assert_eq!(
-        state.store().lock().missing_at_by_path().unwrap().len(),
+        state.store().missing_at_by_path().unwrap().len(),
         2,
         "整目录删除后两集台账都应被标记缺失"
     );
-    assert!(state.store().lock().get_media(media.id).unwrap().is_some());
+    assert!(state.store().get_media(media.id).unwrap().is_some());
 }

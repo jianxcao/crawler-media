@@ -46,7 +46,7 @@ impl Fixture {
         .unwrap();
         let (a, b, a_item, b_item) = {
             let store = state.store();
-            let store = store.lock();
+            let store = store.as_ref();
             let root_a = dir.path().join("a");
             let root_b = dir.path().join("b");
             std::fs::create_dir_all(&root_a).unwrap();
@@ -73,8 +73,8 @@ impl Fixture {
                 )
                 .unwrap()
                 .id;
-            let a_media = insert_movie(&store, root_a.join("a.mkv"), "A", populate);
-            let b_media = insert_movie(&store, root_b.join("b.mkv"), "B", populate);
+            let a_media = insert_movie(store, root_a.join("a.mkv"), "A", populate);
+            let b_media = insert_movie(store, root_b.join("b.mkv"), "B", populate);
             let user = store.user_by_token(TOKEN).unwrap().unwrap().id;
             if populate {
                 store
@@ -255,7 +255,7 @@ async fn latest_second_segment_token_revocation_rejects_entire_response() {
 #[tokio::test]
 async fn latest_two_changes_reject_without_third_complete_attempt() {
     let mut fixture = Fixture::new(true);
-    let db = fixture.library_db();
+    let store = fixture.state.store();
     let (a, b) = (fixture.a.clone(), fixture.b.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
@@ -263,20 +263,36 @@ async fn latest_two_changes_reject_without_third_complete_attempt() {
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
             let call = observed.fetch_add(1, Ordering::SeqCst);
-            let conn = rusqlite::Connection::open(&db).unwrap();
-            if call == 1 {
-                hide(&conn, &a);
-            }
-            if call == 3 {
-                conn.execute(
-                    "UPDATE libraries SET display_locale='en-US' WHERE library_id=?1",
-                    [&b],
-                )
+            store
+                .with_writer(store::Db::Library, |conn| {
+                    assert!(
+                        conn.is_autocommit(),
+                        "Library writer must not retain a transaction"
+                    );
+                    if call == 1 {
+                        hide(conn, &a);
+                    }
+                    if call == 3 {
+                        let changed = conn.execute(
+                            "UPDATE libraries SET display_locale='en-US' WHERE library_id=?1",
+                            [&b],
+                        )?;
+                        assert_eq!(
+                            changed, 1,
+                            "locale mutation must update the selected Library"
+                        );
+                    }
+                    Ok(())
+                })
                 .unwrap();
-            }
         }));
     let (status, _) = get(fixture.state, "/Users/me/Items/Latest?Limit=2", None).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "selection barrier calls: {}",
+        calls.load(Ordering::SeqCst)
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 
@@ -344,7 +360,7 @@ async fn root_selected_acl_change_retries_current_roster_with_exact_total() {
 #[tokio::test]
 async fn root_second_context_change_returns_503_without_third_attempt() {
     let mut fixture = Fixture::new(true);
-    let db = fixture.library_db();
+    let store = fixture.state.store();
     let (a, b) = (fixture.a.clone(), fixture.b.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
@@ -352,20 +368,36 @@ async fn root_second_context_change_returns_503_without_third_attempt() {
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
             let call = observed.fetch_add(1, Ordering::SeqCst);
-            let conn = rusqlite::Connection::open(&db).unwrap();
-            if call == 0 {
-                hide(&conn, &a);
-            }
-            if call == 1 {
-                conn.execute(
-                    "UPDATE libraries SET display_locale='en-US' WHERE library_id=?1",
-                    [&b],
-                )
+            store
+                .with_writer(store::Db::Library, |conn| {
+                    assert!(
+                        conn.is_autocommit(),
+                        "Library writer must not retain a transaction"
+                    );
+                    if call == 0 {
+                        hide(conn, &a);
+                    }
+                    if call == 1 {
+                        let changed = conn.execute(
+                            "UPDATE libraries SET display_locale='en-US' WHERE library_id=?1",
+                            [&b],
+                        )?;
+                        assert_eq!(
+                            changed, 1,
+                            "locale mutation must update the selected Library"
+                        );
+                    }
+                    Ok(())
+                })
                 .unwrap();
-            }
         }));
     let (status, _) = get(fixture.state, "/Items?Limit=2", None).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "selection barrier calls: {}",
+        calls.load(Ordering::SeqCst)
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 

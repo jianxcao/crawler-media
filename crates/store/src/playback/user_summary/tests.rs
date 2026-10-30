@@ -72,7 +72,11 @@ fn summary_row(
     library_id: &str,
     media: MediaId,
 ) -> Option<(i64, Summary)> {
-    Store::existing_summary(&store.library, user, library_id, media).unwrap()
+    store
+        .with_read(crate::Db::Library, |conn| {
+            Store::existing_summary(conn, user, library_id, media)
+        })
+        .unwrap()
 }
 
 fn favorite_page(store: &Store, library_id: &str, user: UserId) -> usize {
@@ -170,12 +174,14 @@ fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
         )
         .unwrap();
     store
-        .library
-        .execute(
-            "UPDATE user_library_items SET last_played_at = 7_777, summary_revision = 9
+        .with_writer(crate::Db::Library, |conn| {
+            conn.execute(
+                "UPDATE user_library_items SET last_played_at = 7_777, summary_revision = 9
                  WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3",
-            params![user.to_string(), &season_two, media.to_string()],
-        )
+                params![user.to_string(), &season_two, media.to_string()],
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
 
     store
@@ -291,12 +297,14 @@ fn a_library_that_does_not_own_the_media_gets_no_summary() {
     assert!(summary_row(&store, user, &owning, media).is_some());
     assert!(summary_row(&store, user, &other, media).is_none());
     let count: i64 = store
-        .library
-        .query_row(
-            "SELECT COUNT(*) FROM user_library_items WHERE library_id = ?1",
-            params![&other],
-            |row| row.get(0),
-        )
+        .with_read(crate::Db::Library, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM user_library_items WHERE library_id = ?1",
+                params![&other],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
         .unwrap();
     assert_eq!(count, 0);
 }

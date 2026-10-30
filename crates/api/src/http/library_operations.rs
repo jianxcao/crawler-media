@@ -46,6 +46,7 @@ async fn begin_integrity(state: ApiState, library_id: String, repair: bool) -> R
         )
             .into_response(),
         Err(storage_operations::StorageOperationError::Busy) => super::store_wait::busy_response(),
+        Err(storage_operations::StorageOperationError::Admission(response)) => response,
         Err(storage_operations::StorageOperationError::MissingLibrary) => {
             err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
         }
@@ -204,13 +205,7 @@ pub(crate) async fn retry_operation(
 }
 
 fn retry_blocking(state: ApiState, library: String, operation: String) -> Response {
-    let view = {
-        let Some(store) = state
-            .store
-            .try_lock_for(super::store_wait::STORE_WRITE_WAIT)
-        else {
-            return super::store_wait::busy_response();
-        };
+    let view = super::store_wait::with_store_read(&state, |store| {
         match store.library_operation_view(&operation) {
             Ok(Some(view)) if view.library_id == library => {
                 if view.state != "failed"
@@ -219,11 +214,11 @@ fn retry_blocking(state: ApiState, library: String, operation: String) -> Respon
                         "roots" | "locale" | "default_locale" | "integrity"
                     )
                 {
-                    return err(
+                    return Err(err(
                         StatusCode::CONFLICT,
                         "library.operation_not_retryable",
                         "operation is not a failed rebuild",
-                    );
+                    ));
                 }
                 if store
                     .active_library_operation(&library)
@@ -232,30 +227,36 @@ fn retry_blocking(state: ApiState, library: String, operation: String) -> Respon
                     .as_deref()
                     != Some(operation.as_str())
                 {
-                    return err(
+                    return Err(err(
                         StatusCode::CONFLICT,
                         "library.operation_not_owner",
                         "operation does not own this Library",
-                    );
+                    ));
                 }
-                view
+                Ok(view)
             }
-            Ok(_) => {
-                return err(
-                    StatusCode::NOT_FOUND,
-                    "library.operation_not_found",
-                    "operation not found",
-                );
-            }
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
+            Ok(_) => Err(err(
+                StatusCode::NOT_FOUND,
+                "library.operation_not_found",
+                "operation not found",
+            )),
+            Err(error) => Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            )),
         }
+    });
+    let view = match view {
+        Ok(Ok(view)) => view,
+        Ok(Err(response)) | Err(response) => return response,
     };
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|()| state.require_write_admitted())
+    {
+        return response;
+    }
     state.library_work.block(&library, &operation);
     storage_operations::spawn_driver(&state, &operation, &library);
     (

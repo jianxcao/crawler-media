@@ -30,7 +30,7 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
     )
     .with_catalog(Arc::new(super::catalog::PosterCatalog))
     .with_poster_fetch(Arc::new(super::unidentified::StaticPoster));
-    api_state.store().lock().set_scrape_enabled(true).unwrap();
+    api_state.store().set_scrape_enabled(true).unwrap();
     let app = router(api_state.clone());
     let response = app
         .clone()
@@ -102,7 +102,6 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
     };
     api_state
         .store()
-        .lock()
         .record_pending_submission(
             id,
             100,
@@ -119,7 +118,7 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
         .await
         .unwrap()
         .unwrap();
-    let rows = api_state.store().lock().list_file_coverage().unwrap();
+    let rows = api_state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
     let video = rows[0].file.path.as_path();
     assert!(!video.with_extension("nfo").exists());
@@ -180,7 +179,6 @@ async fn transfer_retry_completes_pending_after_subtitle_failure_is_resolved() {
         fixture
             .state
             .store()
-            .lock()
             .file_coverage_for_media(fixture.media_id)
             .unwrap()
             .len(),
@@ -201,7 +199,6 @@ async fn transfer_retry_completes_pending_after_subtitle_failure_is_resolved() {
         fixture
             .state
             .store()
-            .lock()
             .file_coverage_for_media(fixture.media_id)
             .unwrap()
             .len(),

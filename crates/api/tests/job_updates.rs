@@ -91,8 +91,8 @@ async fn two_subscribers_share_one_poller_and_propagate_changes() {
     let state = make_state(tmp.path()).with_job_updates(updates.clone());
     let queue = state.jobs();
 
-    let first = updates.subscribe(queue.clone()).await.unwrap();
-    let second = updates.subscribe(queue.clone()).await.unwrap();
+    let first = updates.subscribe(state.jobs_readers()).await.unwrap();
+    let second = updates.subscribe(state.jobs_readers()).await.unwrap();
     assert_eq!(updates.subscriber_count(), 2);
     let initial = first.borrow().count;
     assert_eq!(second.borrow().count, initial, "订阅即拿到真实当前计数");
@@ -141,7 +141,7 @@ async fn two_subscribers_share_one_poller_and_propagate_changes() {
     );
 
     // 再次订阅可重启。
-    let _restarted = updates.subscribe(queue.clone()).await.unwrap();
+    let _restarted = updates.subscribe(state.jobs_readers()).await.unwrap();
     wait_for(
         || updates.poll_count() > stopped_at,
         Duration::from_secs(4),

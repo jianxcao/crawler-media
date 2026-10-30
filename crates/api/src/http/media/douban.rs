@@ -24,9 +24,8 @@ pub(crate) async fn douban_detail(
 fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
     // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
     // 有映射走完整 TMDB 详情。
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let local_media = store.get_media_by_alias("douban", id).ok().flatten();
-    drop(store);
     if let Some(media) = local_media
         && let Some(tmdb_id) = media.tmdb_id
     {

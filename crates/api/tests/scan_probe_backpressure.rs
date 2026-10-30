@@ -39,7 +39,7 @@ fn insert_scanned(fix: &PresenceFixture, index: usize) -> FileCoverage {
     // and publishes only while the recorded version still matches.
     let source_version = api::fingerprint_job::current_source_version(&path);
     let store_arc = fix.state.store();
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     store.insert_media(&media).unwrap();
     store
         .insert_scanned_files(
@@ -93,14 +93,20 @@ async fn scan_backlog_survives_full_window_and_restart_then_drains() {
         .iter()
         .map(|row| {
             store
-                .lock()
+                .as_ref()
                 .active_probe_unit_for_ledger(&ledger_id(row))
                 .unwrap()
                 .expect("every scanned file must have durable probe work")
                 .job_id
         })
         .collect();
-    assert!(store.lock().scan_probe_obligations(100).unwrap().is_empty());
+    assert!(
+        store
+            .as_ref()
+            .scan_probe_obligations(100)
+            .unwrap()
+            .is_empty()
+    );
     assert!(fix.state.probe.queued_ledger_count() <= 64);
     assert_eq!(
         api::scan_probe_dispatch::dispatch_once(fix.state.clone())
@@ -114,7 +120,7 @@ async fn scan_backlog_survives_full_window_and_restart_then_drains() {
     for row in &rows {
         let version = api::fingerprint_job::current_source_version(&row.file.path);
         store
-            .lock()
+            .as_ref()
             .put_file_meta_versioned(
                 &ledger_id(row),
                 &library::Tracks {
@@ -133,7 +139,7 @@ async fn scan_backlog_survives_full_window_and_restart_then_drains() {
         loop {
             if jobs
                 .iter()
-                .all(|id| store.lock().get_probe_job(id).unwrap().unwrap().status == "succeeded")
+                .all(|id| store.as_ref().get_probe_job(id).unwrap().unwrap().status == "succeeded")
             {
                 break;
             }
@@ -164,7 +170,7 @@ async fn rejected_persistence_does_not_ack_scan_obligation() {
         0
     );
     assert_eq!(
-        fix.state.store().lock().scan_probe_obligations(10).unwrap()[0].ledger_id,
+        fix.state.store().scan_probe_obligations(10).unwrap()[0].ledger_id,
         row.file.file_id
     );
     connection
@@ -179,7 +185,6 @@ async fn rejected_persistence_does_not_ack_scan_obligation() {
     assert!(
         fix.state
             .store()
-            .lock()
             .active_probe_unit_for_ledger(&ledger_id(&row))
             .unwrap()
             .is_some()
@@ -200,7 +205,6 @@ async fn durable_overflow_can_ack_without_an_in_memory_dispatch_id() {
     assert!(
         fix.state
             .store()
-            .lock()
             .active_probe_unit_for_ledger(&ledger_id(&rows[64]))
             .unwrap()
             .is_some()

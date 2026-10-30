@@ -148,14 +148,14 @@ impl Fixture {
         std::fs::create_dir_all(&other_root).unwrap();
         let (filename, bytes) = sidecars(&root, kind, incoming_alias);
         let shared = state.store();
-        let store = shared.lock();
-        let (library_id, other_library_id) = create_libraries(&store, kind, &root, &other_root);
+        let store = shared.as_ref();
+        let (library_id, other_library_id) = create_libraries(store, kind, &root, &other_root);
         let media = canonical_media(kind);
         store.insert_media(&media).unwrap();
         let old_spec = row(media.id, &root.join(filename), kind);
         let other_spec = row(media.id, &other_root.join(filename), kind);
         std::fs::write(&other_spec.path, b"independent file").unwrap();
-        let (old, other) = seed_caches(&store, [&old_spec, &other_spec]);
+        let (old, other) = seed_caches(store, [&old_spec, &other_spec]);
         let stage = ProbeStageKey {
             ledger_id: old.file_id.to_string(),
             context_key: "old-context".into(),
@@ -163,8 +163,7 @@ impl Fixture {
         };
         assert!(store.claim_probe_stage(&stage, "old-probe", 100).unwrap());
         let users = [UserId::new(), UserId::new()];
-        seed_progress(&store, users, &media);
-        drop(store);
+        seed_progress(store, users, &media);
         Self {
             _temp: temp,
             state,
@@ -340,7 +339,7 @@ impl Fixture {
             );
         }
         let shared = self.state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         assert!(store.get_library(&self.other_library_id).unwrap().is_some());
         assert_eq!(
             store
@@ -435,7 +434,7 @@ async fn remove(f: &Fixture, app: &Router) {
     .await
     .expect("removal did not reach a terminal state");
     let shared = f.state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     assert!(store.get_library(&f.library_id).unwrap().is_none());
     assert!(
         store
@@ -457,7 +456,6 @@ async fn remove(f: &Fixture, app: &Router) {
             .is_none()
     );
     assert!(store.get_probe_stage(&f.stage).unwrap().is_none());
-    drop(store);
     f.assert_preserved();
 }
 async fn scan_library_op(app: &Router, library_id: &str) {
@@ -508,7 +506,7 @@ async fn reimport(f: &Fixture, app: &Router) -> LibraryFile {
     assert_ne!(id, f.library_id);
     scan_library_op(app, id).await;
     let shared = f.state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let library = store.get_library(id).unwrap().unwrap();
     assert!(!library.detect_intros);
     assert!(!library.enable_fingerprint);
@@ -550,16 +548,11 @@ fn run_reimport(kind: MediaKind, incoming_alias: &str, same_identity: bool) {
             } else {
                 vec![domain::UnitKey::WHOLE]
             };
-            let new_units = fixture
-                .state
-                .store()
-                .lock()
-                .get_file_units(new.file_id)
-                .unwrap();
+            let new_units = fixture.state.store().get_file_units(new.file_id).unwrap();
             assert_eq!(new_units, old_units);
             if !same_identity {
                 let shared = fixture.state.store();
-                let store = shared.lock();
+                let store = shared.as_ref();
                 for user in fixture.users {
                     assert!(
                         store
@@ -652,7 +645,7 @@ fn online_identity_rebind_succeeds_when_reimported_library_reuses_removed_root()
                 "必须真正走到在线搜索"
             );
             let shared = fixture.state.store();
-            let store = shared.lock();
+            let store = shared.as_ref();
             let cov = store
                 .file_coverage_by_path(&fixture.old.path.display().to_string())
                 .unwrap()

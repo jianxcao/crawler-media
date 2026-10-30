@@ -69,6 +69,13 @@ pub(crate) fn coverage_for_ledger_id(
     store: &crate::Store,
     raw: &str,
 ) -> Result<domain::FileCoverage, crate::store::StoreError> {
+    store.library_read_snapshot(|db| coverage_for_ledger_id_on(db, raw))?
+}
+
+pub(crate) fn coverage_for_ledger_id_on(
+    store: &store::LibraryConnection<'_>,
+    raw: &str,
+) -> Result<domain::FileCoverage, store::StoreError> {
     let Some(file_id) = ledger_id(raw) else {
         return Err(crate::store::StoreError::Missing(format!(
             "file_deleted: ledger {}",

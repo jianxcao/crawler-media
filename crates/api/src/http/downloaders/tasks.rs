@@ -367,7 +367,7 @@ pub(crate) async fn remove_task(
         pending.downloader_id,
         move |client| client.remove_owned(&torrent_for_remove, delete_files),
         move || {
-            crate::http::store_wait::with_bounded_store(state_for_finalize.store(), |store| {
+            crate::http::store_wait::with_foreground_store(&state_for_finalize, |store| {
                 state_for_finalize
                     .require_writable()
                     .and_then(|_| state_for_finalize.require_write_admitted())
@@ -381,7 +381,7 @@ pub(crate) async fn remove_task(
                     .delete_pending(subscribe_id, &enclosure)
                     .map_err(|error| error.to_string())
             })
-            .ok_or_else(|| "pending finalization Store busy".to_string())?
+            .map_err(|response| format!("pending finalization rejected ({})", response.status()))?
         },
     )
     .await

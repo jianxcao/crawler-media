@@ -102,13 +102,11 @@ async fn setup() -> Setup {
     };
     state
         .store()
-        .lock()
         .record_pending_submission(sub_id, 100, &pending)
         .unwrap();
     // Hold every Library busy so Transfer has to wait for idle.
     let ids: Vec<String> = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -211,6 +209,6 @@ async fn deleted_while_waiting_is_revalidated() {
     assert_eq!(deleted.status(), StatusCode::OK);
     drop(leases);
     transfer.await.unwrap().unwrap();
-    let deleted_subscribe_after = state.store().lock().get_subscribe(sub_id).unwrap();
+    let deleted_subscribe_after = state.store().get_subscribe(sub_id).unwrap();
     assert!(deleted_subscribe_after.is_none());
 }

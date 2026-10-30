@@ -110,8 +110,9 @@ pub(crate) use query::{
 };
 pub(crate) use visibility::{
     artwork_url, backdrop_path_with, clear_library_cover_checked, file_visible_to_user,
-    library_cover_path, library_for_file, library_for_file_strict, library_visible,
-    library_visible_with_role, missing_library, require_visible_library,
+    library_cover_path, library_for_file, library_for_file_strict, library_for_recorded_file,
+    library_visible, library_visible_on, library_visible_with_role, missing_library,
+    require_visible_library, require_visible_library_on,
 };
 
 /// GET /libraries?kind= — one entry per Library entity, defaults first;
@@ -615,9 +616,13 @@ pub(crate) async fn item_episodes(
     };
     let read_id = id.clone();
     let read = super::store_wait::store_read(&state, move |store| {
+        let is_admin = match user_id {
+            Some(user) => store.user_role(user).map_err(browse_store_error)? == "admin",
+            None => false,
+        };
         store
             .library_read_snapshot(|store| {
-                require_visible_library(store, &read_id, user_id)?;
+                require_visible_library_on(store, &read_id, user_id, is_admin)?;
                 match store.get_library_item(lib_id, media_id) {
                     Ok(Some(_)) => {}
                     Ok(None) => {

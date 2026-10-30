@@ -5,23 +5,17 @@ fn cached_marker_resolver_waits_for_store_off_executor() {
     let f = Fixture::new();
     let coverage = {
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         store
             .put_cached_chapters(&f.file.file_id.to_string(), &[])
             .unwrap();
         store.file_coverage_by_id(f.file.file_id).unwrap().unwrap()
     };
-    let media = f
-        .state
-        .store()
-        .lock()
-        .get_media(f.file.media_id)
-        .unwrap()
-        .unwrap();
+    let media = f.state.store().get_media(f.file.media_id).unwrap().unwrap();
     let handle = f.state.store();
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = handle.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(handle.clone(), store::Db::Library);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -51,7 +45,7 @@ fn cached_marker_resolver_waits_for_store_off_executor() {
 }
 
 struct ContendedCoverRenderer {
-    store: Arc<parking_lot::Mutex<Store>>,
+    store: Arc<Store>,
     entered: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<Instant>>>,
     holders: Arc<parking_lot::Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
@@ -67,7 +61,7 @@ impl api::library_cover_service::CoverRenderer for ContendedCoverRenderer {
         let entered = self.entered.lock().take().unwrap();
         let (locked, acquired) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
             locked.send(()).unwrap();
             let _ = entered.send(Instant::now());
             std::thread::sleep(Duration::from_millis(500));
@@ -177,7 +171,7 @@ fn late_empty_auto_render_does_not_change_a_newer_manual_cover_marker() {
         let manual = manual.unwrap();
         assert!(auto.await.unwrap().unwrap().is_none());
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert_eq!(
             store.get_library(&id).unwrap().unwrap().cover_path,
             Some(manual.display().to_string())
@@ -198,14 +192,13 @@ fn marker_resolver_does_not_return_a_new_sources_cache_for_a_stale_file_snapshot
     let stale = f
         .state
         .store()
-        .lock()
         .file_coverage_by_id(f.file.file_id)
         .unwrap()
         .unwrap();
     std::fs::write(&f.file.path, b"new source bytes").unwrap();
     let observed = library::observe_source(&f.file.path).unwrap();
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let library = f.file.library_id.to_string();
     store
         .replace_file_source(
@@ -232,7 +225,6 @@ fn marker_resolver_does_not_return_a_new_sources_cache_for_a_stale_file_snapshot
         )
         .unwrap();
     let media = store.get_media(f.file.media_id).unwrap().unwrap();
-    drop(store);
     let chapters = runtime().block_on(api::marker_resolver::resolve_item_chapters(
         &f.state,
         &stale,
@@ -256,7 +248,7 @@ fn marker_resolver_does_not_return_a_new_sources_cache_for_a_stale_file_snapshot
         Err(api::marker_resolver::ChapterRefreshError::SourceChanged(_))
     ));
     let handle = f.state.store();
-    let store = handle.lock();
+    let store = handle.as_ref();
     let retained = store
         .get_cached_chapters(&f.file.file_id.to_string())
         .unwrap()

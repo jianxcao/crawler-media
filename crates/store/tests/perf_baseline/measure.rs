@@ -22,7 +22,7 @@ use store::library_query::items::QueryWorkStats;
 /// one of three entry points: `Store::with_stats` (the uniform seam — it wraps the production
 /// call in a closure, see `crates/store/src/stats.rs`), the older `*_with_stats` one-offs
 /// (`library_item_page_with_stats`, `library_facets_with_stats`) and
-/// `LibraryReadLease::execute_observed`. `Work::unobserved` is left for operations genuinely
+/// `ReaderLease::execute_observed`. `Work::unobserved` is left for operations genuinely
 /// without a counter (today: none of the measured ones — §7 of the audit doc lists what is
 /// still unmeasured and why).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

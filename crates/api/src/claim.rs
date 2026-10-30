@@ -281,7 +281,7 @@ fn remove_moved_source(state: &ApiState, plan: &ClaimPlan, src: &Path) {
     if check_claim_source(plan, src).is_err() {
         if let Err(error) = state
             .store
-            .lock()
+            .as_ref()
             .insert_unidentified(src.display().to_string(), Confidence::Low)
         {
             tracing::error!(path=%src.display(),%error,"Changed Claim input retained but could not be parked");
@@ -398,7 +398,6 @@ fn claim_blocking(state: State<ApiState>, body: ClaimBody) -> axum::response::Re
 mod tests {
     use super::*;
     use domain::{FilePresence, FilePublication, LibraryId};
-    use parking_lot::Mutex;
 
     fn media() -> Media {
         Media {
@@ -417,7 +416,7 @@ mod tests {
     }
 
     /// A store with one claimed media and a Library registered over `roots`.
-    fn fixture(tmp: &Path, roots: &[&Path]) -> (Mutex<store::Store>, Media, store::Library) {
+    fn fixture(tmp: &Path, roots: &[&Path]) -> (store::Store, Media, store::Library) {
         let store = store::Store::open(tmp).unwrap();
         let media = media();
         store.insert_media(&media).unwrap();
@@ -428,7 +427,7 @@ mod tests {
         let library = store
             .create_library(MediaKind::Movie, "Movies", &paths, "everyone", true, &[])
             .unwrap();
-        (Mutex::new(store), media, library)
+        (store, media, library)
     }
 
     /// Roots nest: the deepest root of the owning Library owns the claimed path.
@@ -439,7 +438,6 @@ mod tests {
         let inner = outer.join("Anime");
         let (store, media, library) = fixture(tmp.path(), &[&outer, &inner]);
         let inner_root = store
-            .lock()
             .list_library_roots()
             .unwrap()
             .into_iter()
@@ -486,7 +484,6 @@ mod tests {
         let file = publish_claimed_file(&store, &media, &dest, &facts).unwrap();
         let library_id: LibraryId = library.id.parse().unwrap();
         let files = store
-            .lock()
             .library_file_page(library_id, media.id, None, 100)
             .unwrap()
             .files;
@@ -503,14 +500,13 @@ mod tests {
         assert_eq!(published.presence, FilePresence::Present);
         assert_eq!(published.publication, FilePublication::Published);
         assert_eq!(
-            store.lock().get_file_units(file.file_id).unwrap(),
+            store.get_file_units(file.file_id).unwrap(),
             vec![UnitKey::new(1, 2)]
         );
-        let locale = store::library_query::library_display_locale(&store.lock(), library_id)
+        let locale = store::library_query::library_display_locale(&store, library_id)
             .unwrap()
             .unwrap_or_default();
         let detail = store
-            .lock()
             .library_item_detail(library_id, media.id, &locale)
             .unwrap()
             .unwrap();
@@ -533,7 +529,6 @@ mod tests {
         std::fs::write(&dest, b"matrix").unwrap();
         assert!(
             store
-                .lock()
                 .library_for_path_strict(&dest, MediaKind::Movie)
                 .unwrap()
                 .is_some(),
@@ -569,7 +564,6 @@ mod tests {
         assert_eq!(first.file_id, second.file_id);
         assert_eq!(
             store
-                .lock()
                 .file_coverage_by_path(dest.to_str().unwrap())
                 .unwrap()
                 .unwrap()
@@ -601,7 +595,6 @@ mod tests {
         );
         assert!(
             store
-                .lock()
                 .file_coverage_by_path(dest.to_str().unwrap())
                 .unwrap()
                 .is_none()
@@ -642,7 +635,7 @@ mod tests {
         let dest = root.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
         {
-            let store = store.lock();
+            let store = &store;
             store
                 .begin_library_reconfiguration(
                     &store::library_operations::LibraryReconfiguration {
@@ -676,7 +669,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            store.lock().get_file_units(file.file_id).unwrap(),
+            store.get_file_units(file.file_id).unwrap(),
             vec![UnitKey::WHOLE]
         );
     }
@@ -686,12 +679,11 @@ fn admitted_store<T>(
     state: &ApiState,
     work: impl FnOnce(&store::Store) -> Result<T, axum::response::Response>,
 ) -> Result<T, axum::response::Response> {
-    crate::http::store_wait::with_bounded_store(state.store(), |store| {
+    crate::http::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         work(store)
-    })
-    .ok_or_else(crate::http::store_wait::busy_response)?
+    })?
 }
 
 fn store_response(error: store::StoreError) -> axum::response::Response {

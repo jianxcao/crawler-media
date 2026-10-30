@@ -31,7 +31,7 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
 
     let lib_id: LibraryId = fix.library_id.parse().unwrap();
     let root_id = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store.insert_media(&media).unwrap();
         let roots = store.list_library_roots().unwrap();
         roots
@@ -99,7 +99,7 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
     };
 
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let report = store
             .publish_files(&scope, &[store_pub], 1000)
             .expect("atomic publish");
@@ -125,7 +125,7 @@ async fn claim_multi_episode_preserves_all_units() {
     let fix = PresenceFixture::new();
     let store_arc = fix.state.store();
     let (tv_lib, root_id) = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let lib = store
             .create_library(
                 MediaKind::Tv,
@@ -168,7 +168,7 @@ async fn claim_multi_episode_preserves_all_units() {
     };
 
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store.insert_media(&media).unwrap();
     }
 
@@ -212,7 +212,7 @@ async fn claim_multi_episode_preserves_all_units() {
     };
 
     {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let reserved = store
             .reserve_transfer(
                 &scope,
@@ -255,7 +255,7 @@ async fn replacement_scan_advances_version_and_rejects_old_probe() {
     };
 
     let (after, old_probe_published, stored_details) = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let after = store
             .replace_file_source(&scope, file_id, &before, &observation, 2000)
             .expect("source replaced");
@@ -323,7 +323,7 @@ async fn unknown_root_does_not_publish_missing() {
     let store_arc = fix.state.store();
     // Non-existent file/root should not prune on unknown/IO failure
     let report = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         store
             .apply_ledger_presence(&[], store::LedgerPresenceMode::Prune, 1000)
             .unwrap()
@@ -345,7 +345,7 @@ async fn actual_rescan_replaces_physical_source() {
     fix.scan_and_wait_completed(&fix.library_id).await;
     let store_arc = fix.state.store();
     let (file_id, before) = {
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let file = store
             .file_coverage_by_path(&strm.display().to_string())
             .unwrap()
@@ -366,7 +366,7 @@ async fn actual_rescan_replaces_physical_source() {
         .unwrap();
     fix.scan_and_wait_completed(&fix.library_id).await;
 
-    let store = store_arc.lock();
+    let store = store_arc.as_ref();
     let after = store.get_file_version(file_id).unwrap().unwrap();
     assert_eq!(after.revision, before.revision + 1);
     assert_ne!(after.source_version, before.source_version);
@@ -388,7 +388,7 @@ async fn actual_rescan_replaces_physical_source() {
 
 fn seed_replaceable_movie(fix: &PresenceFixture) -> (WriteScope, LibraryFile) {
     let shared = fix.state.store();
-    let store = shared.lock();
+    let store = shared.as_ref();
     let media_id = MediaId::new();
     let media = Media {
         id: media_id,

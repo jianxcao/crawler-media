@@ -31,39 +31,7 @@ pub struct LibraryRoot {
 
 impl Store {
     pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT r.root_id, l.kind, r.display_path,
-                    (l.is_default = 1 AND r.sort_order = 0) AS primary_root,
-                    r.library_id, r.sort_order, r.enabled
-             FROM library_roots r
-             JOIN libraries l ON r.library_id = l.library_id
-             ORDER BY l.is_default DESC, r.sort_order, r.display_path",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? != 0,
-                row.get::<_, String>(4)?,
-                row.get::<_, i32>(5)?,
-                row.get::<_, i64>(6)? != 0,
-            ))
-        })?;
-        let mut roots = Vec::new();
-        for row in rows {
-            let (id, kind, path, is_default, library_id, sort_order, enabled) = row?;
-            roots.push(LibraryRoot {
-                id,
-                kind: MediaKind::from_str(&kind).map_err(StoreError::MediaKind)?,
-                path: PathBuf::from(path),
-                is_default,
-                library_id,
-                sort_order,
-                enabled,
-            });
-        }
-        Ok(roots)
+        self.with_library_read(|db| db.list_library_roots())
     }
 
     /// Insert a root attached to the kind's default library (extra roots added
@@ -73,62 +41,16 @@ impl Store {
         kind: MediaKind,
         path: &str,
     ) -> Result<LibraryRoot, StoreError> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let library = self
-            .default_library(kind)?
-            .ok_or_else(|| StoreError::Missing(format!("default {} library", kind.as_str())))?;
-        self.ensure_library_mutable(&library.id)?;
         let key = crate::path_key::canonical_root_key(path)?;
-        self.ensure_removal_keys_available([key.as_str()])?;
-        let sort_order = self.roots_of(&library.id)?.len() as i32;
-        let tx = crate::write_tx(&self.library)?;
-        tx.execute(
-            "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-             VALUES (?1, ?2, ?5, ?3, 1, ?4)",
-            params![
-                id,
-                library.id,
-                path,
-                sort_order,
-                key
-            ],
-        )?;
-        Self::reassign_files_under_root(&tx, &library.id, kind, &key)?;
-        tx.commit()?;
-        crate::path_key::reload_root_aliases(&self.library)?;
-        let _ = self.drain_one_root_batch()?;
-        Ok(LibraryRoot {
-            id,
-            kind,
-            path: PathBuf::from(path),
-            is_default: false,
-            library_id: library.id,
-            sort_order,
-            enabled: true,
-        })
+        self.with_library_write(|library| library.insert_library_root_prepared(kind, path, &key))
     }
 
     pub fn get_library_root(&self, id: &str) -> Result<Option<LibraryRoot>, StoreError> {
-        Ok(self
-            .list_library_roots()?
-            .into_iter()
-            .find(|root| root.id == id))
+        self.with_library_read(|db| db.get_library_root(id))
     }
 
     pub fn delete_extra_library_root(&self, id: &str) -> Result<bool, StoreError> {
-        let root = match self.get_library_root(id)? {
-            Some(r) => r,
-            None => return Ok(false),
-        };
-        if root.is_default {
-            return Ok(false);
-        }
-        self.ensure_library_mutable(&root.library_id)?;
-        let n = self
-            .library
-            .execute("DELETE FROM library_roots WHERE root_id = ?1", params![id])?;
-        crate::path_key::reload_root_aliases(&self.library)?;
-        Ok(n > 0)
+        self.with_library_write(|db| db.delete_extra_library_root(id))
     }
 }
 
@@ -166,82 +88,13 @@ impl Store {
     /// Drain every pending root reassignment. Each batch is its own transaction;
     /// callers that hold the Store lock across this call keep it for the whole drain.
     pub fn drain_root_reassignments(&self) -> Result<usize, StoreError> {
-        let mut batches = 0;
-        loop {
-            if !pending_root_work(self)? {
-                break;
-            }
-            match self.drain_one_root_batch()? {
-                Some(true) => batches += 1,
-                _ => break,
-            }
-        }
-        Ok(batches)
+        self.with_library_write(|db| db.drain_root_reassignments())
     }
 
     /// One file window. Paused roots rotate behind other work, and only a finite
     /// dispatch window is inspected while the caller holds the Store.
     pub fn drain_one_root_batch(&self) -> Result<Option<bool>, StoreError> {
-        let pending: Vec<(String, String)> = {
-            let mut statement = self.library.prepare(
-                "SELECT kind,root_key FROM pending_root_reassignments
-                 ORDER BY dispatch_order,kind,root_key LIMIT 1",
-            )?;
-            statement
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<_, _>>()?
-        };
-        if pending.is_empty() {
-            return Ok(Some(false));
-        }
-        for (kind, root_key) in pending {
-            if !take_batch_budget() {
-                return Ok(None);
-            }
-            let parsed: MediaKind = kind
-                .parse()
-                .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
-            let started = std::time::Instant::now();
-            let tx = crate::write_tx(&self.library)?;
-            let done = match reassign_root_batch(&tx, parsed, &root_key) {
-                Ok(done) => done,
-                Err(error) => {
-                    tx.rollback()?;
-                    let tx = crate::write_tx(&self.library)?;
-                    status::update(&tx, parsed, &root_key, "failed", Some(&error.to_string()))?;
-                    rotate_root(&tx, &kind, &root_key)?;
-                    tx.commit()?;
-                    tracing::error!(kind,root_key,%error,"Root reassignment window rejected; retained for retry");
-                    return Err(error);
-                }
-            };
-            let state = if done == Some(true) {
-                "succeeded"
-            } else if done.is_some() {
-                "running"
-            } else {
-                "blocked"
-            };
-            status::update(&tx, parsed, &root_key, state, None)?;
-            rotate_root(&tx, &kind, &root_key)?;
-            tx.commit()?;
-            if done.is_some() {
-                tracing::debug!(
-                    kind,
-                    root_key,
-                    elapsed_ms = started.elapsed().as_millis(),
-                    state,
-                    "Root reassignment window committed"
-                );
-                return Ok(Some(true));
-            }
-            tracing::debug!(
-                kind,
-                root_key,
-                "Root reassignment paused; rotating other roots"
-            );
-        }
-        Ok(None)
+        self.with_library_write(|db| db.drain_one_root_batch())
     }
 }
 
@@ -263,11 +116,12 @@ thread_local! {
 }
 
 /// Test seam: allow only `budget` more batches on this thread (simulates a crash).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_batch_budget(budget: Option<usize>) {
     BATCH_BUDGET.with(|b| b.set(budget));
 }
 
-fn pending_root_work(store: &Store) -> Result<bool, StoreError> {
+fn pending_root_work(store: &crate::LibraryConnection<'_>) -> Result<bool, StoreError> {
     Ok(store.library.query_row(
         "SELECT EXISTS(SELECT 1 FROM pending_root_reassignments)",
         [],
@@ -722,3 +576,6 @@ fn component_range(root_key: &str) -> (String, String) {
     let base = root_key.trim_end_matches('/');
     (format!("{base}/"), format!("{base}0"))
 }
+
+#[path = "roots/connection.rs"]
+mod connection;

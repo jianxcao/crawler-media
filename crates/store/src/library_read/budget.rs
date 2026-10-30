@@ -52,12 +52,9 @@ fn writer_budget_error(error: LibraryReadError) -> StoreError {
     }
 }
 
-struct ShortPolicy<'a> {
-    app: &'a Connection,
-    library: &'a Connection,
-}
+struct ShortPolicy;
 
-impl ShortPolicy<'_> {
+impl ShortPolicy {
     fn install(
         conn: &Connection,
         budget: &QueryBudget,
@@ -85,10 +82,9 @@ impl ShortPolicy<'_> {
     }
 }
 
-impl Drop for ShortPolicy<'_> {
+struct BudgetScope;
+impl Drop for BudgetScope {
     fn drop(&mut self) {
-        Self::reset(self.app);
-        Self::reset(self.library);
         ACTIVE_BUDGET.with(|active| *active.borrow_mut() = None);
     }
 }
@@ -113,15 +109,8 @@ impl Store {
         if !entered {
             return Err(LibraryReadError::NestedBudget);
         }
-        let guard = ShortPolicy {
-            app: &self.app,
-            library: &self.library,
-        };
-        ShortPolicy::install(guard.app, budget, 1000)?;
-        if let Err(error) = ShortPolicy::install(guard.library, budget, 1000) {
-            drop(guard);
-            return Err(error);
-        }
+        let guard = BudgetScope;
+        budget.check()?;
         let result = work(self);
         drop(guard);
         budget.check()?;

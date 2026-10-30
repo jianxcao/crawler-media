@@ -19,10 +19,8 @@ pub(super) fn resolve_target(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
-    let entry = {
-        let store = provider.bounded_reader()?;
-        super::items::resolve_entry(&store, Some(user_id), id)?
-    };
+    let entry =
+        provider.bounded_reader(|store| super::items::resolve_entry(store, Some(user_id), id))?;
     let Some(entry) = entry else {
         return Ok(None);
     };
@@ -44,10 +42,11 @@ pub(super) fn resolve_target(
                 file_id: entry.file.file_id,
                 revision: entry.file.version.revision,
             };
-            let store = provider.bounded_reader()?;
-            let resolved = store
-                .resolve_playback(user_id, &item, Some(&source), None)
-                .map_err(|error| error.to_string())?;
+            let resolved = provider.bounded_reader(|store| {
+                store
+                    .resolve_playback(user_id, &item, Some(&source), None)
+                    .map_err(|error| error.to_string())
+            })?;
             (resolved.target.file.file_id == source.file_id
                 && resolved.target.file.version.revision == source.revision)
                 .then_some(resolved.duration_ms)
@@ -77,10 +76,7 @@ pub(super) fn report_event(
     let target = resolve_target(provider, user_id, id)?
         .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
     let now_ms = provider.state.playback_clock.now_ms();
-    let store = provider.bounded_store()?;
-    if !provider.state.instance_writable() {
-        return Err("instance is read-only or under maintenance".into());
-    }
+    provider.bounded_store(|store| {
     if store
         .is_device_revoked(user_id, &client.device_id)
         .map_err(|error| error.to_string())?
@@ -95,7 +91,7 @@ pub(super) fn report_event(
         identity: &identity,
         now: now_ms / 1000,
     };
-    let Some((sid, binding)) = request.bound_session(&store)? else {
+    let Some((sid, binding)) = request.bound_session(store)? else {
         return Ok(());
     };
     let Some(bound) = request.bound_event(sid, binding, position_ms, paused) else {
@@ -114,6 +110,7 @@ pub(super) fn report_event(
         }
     }
     Ok(())
+    })
 }
 
 struct ProtocolEvent<'a> {

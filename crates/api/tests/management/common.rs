@@ -355,3 +355,22 @@ pub fn next_playback_sequence() -> i64 {
     static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
+
+/// Seed the Media referenced by a directly inserted movie Subscribe.
+pub(crate) fn seed_subscribe_media(store: &Store, media_id: domain::MediaId) {
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Movie,
+            title: "Pending movie fixture".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+}

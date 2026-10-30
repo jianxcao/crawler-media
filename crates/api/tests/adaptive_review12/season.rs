@@ -2,14 +2,14 @@ use super::*;
 
 struct ChangedCapture {
     inner: Arc<FixtureEngine>,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     target: String,
     mode: &'static str,
 }
 
 struct RestoreCancelledCapture {
     inner: Arc<FixtureEngine>,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     anchor: domain::LedgerId,
     triggered: std::sync::atomic::AtomicBool,
 }
@@ -21,7 +21,7 @@ impl FingerprintCaptureEngine for RestoreCancelledCapture {
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let result = self.inner.capture_window(request)?;
         if !self.triggered.swap(true, Ordering::SeqCst) {
-            let store = self.store.lock();
+            let store = self.store.as_ref();
             for (presence, missing_at, at) in [
                 (domain::FilePresence::Missing, None, 1_000),
                 (domain::FilePresence::Present, Some(1_000), 1_001),
@@ -69,7 +69,7 @@ fn run_restored_anchor_capture_test() {
     });
     f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture).unwrap();
     {
-        let store = f.store.lock();
+        let store = f.store.as_ref();
         let specs: Vec<_> = ids
             .iter()
             .map(|id| store::ProbeJobUnitSpec {
@@ -110,7 +110,7 @@ fn run_restored_anchor_capture_test() {
             &f.units,
         ),
     );
-    let store = f.store.lock();
+    let store = f.store.as_ref();
     let attempts = store
         .list_fingerprint_attempts_for_job("adaptive-cancel")
         .unwrap();
@@ -156,7 +156,10 @@ impl FingerprintCaptureEngine for ChangedCapture {
         if r.path.to_str() == Some(&self.target) {
             if self.mode == "delete-outro" && r.window.start_ms > 0 {
                 std::fs::remove_file(&r.path).unwrap();
-                self.store.lock().delete_ledger_path(&self.target).unwrap();
+                self.store
+                    .as_ref()
+                    .delete_ledger_path(&self.target)
+                    .unwrap();
             } else if self.mode == "silent-intro" && r.window.start_ms == 0 {
                 result.words = vec![0; 200];
             }
@@ -179,7 +182,7 @@ fn final_outro_deletion_must_not_publish_deleted_episode() {
     println!(
         "after final outro deleted ledger={:?}; replacement={result:?}",
         f.store
-            .lock()
+            .as_ref()
             .file_coverage_by_id(row.file.file_id)
             .unwrap()
     );
@@ -204,13 +207,13 @@ fn inconclusive_silent_fingerprint_must_not_be_refreshed_as_success() {
     let result = raw_season(&f);
     if let Ok(rep) = &result {
         f.store
-            .lock()
+            .as_ref()
             .complete_marker_refresh("review9-job", std::slice::from_ref(rep))
             .unwrap();
         println!(
             "silent E1 source={:?}; job={:?}",
             rep.markers.iter().find(|m| m.episode == 1),
-            f.store.lock().get_probe_job("review9-job").unwrap()
+            f.store.as_ref().get_probe_job("review9-job").unwrap()
         );
     }
     assert!(
@@ -228,7 +231,7 @@ fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
         .map(|u| u.row.file.file_id.to_string())
         .collect();
     {
-        let st = f.store.lock();
+        let st = f.store.as_ref();
         let specs: Vec<_> = keys
             .iter()
             .map(|k| api::store::ProbeJobUnitSpec {
@@ -263,7 +266,7 @@ fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
     let deleted = &f.units[2].row;
     std::fs::remove_file(&deleted.file.path).unwrap();
     f.store
-        .lock()
+        .as_ref()
         .delete_ledger_path(deleted.file.path.to_str().unwrap())
         .unwrap();
     let result = tokio::runtime::Runtime::new().unwrap().block_on(
@@ -275,7 +278,7 @@ fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
             &f.units,
         ),
     );
-    let st = f.store.lock();
+    let st = f.store.as_ref();
     let job = st.get_probe_job("cancel-last").unwrap().unwrap();
     println!(
         "aborted refresh result={result:?}; job={job:?}; units={:?}",
@@ -300,14 +303,14 @@ fn deletion_between_analysis_and_publication_keeps_old_results() {
     let row = &f.units[2].row;
     std::fs::remove_file(&row.file.path).unwrap();
     f.store
-        .lock()
+        .as_ref()
         .delete_ledger_path(row.file.path.to_str().unwrap())
         .unwrap();
-    let store = f.store.lock();
+    let store = f.store.as_ref();
     let result = store.complete_marker_refresh_checked(
         "review9-job",
         std::slice::from_ref(&replacement),
-        &observed(&store, std::slice::from_ref(&replacement)),
+        &observed(store, std::slice::from_ref(&replacement)),
     );
     assert!(result.is_err());
     let previous = store
@@ -336,14 +339,14 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
     let first_id = units[0].row.file.file_id.to_string();
     let job_id = f
         .store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&first_id)
         .unwrap()
         .unwrap()
         .job_id;
     std::fs::remove_file(&units[0].row.file.path).unwrap();
     f.store
-        .lock()
+        .as_ref()
         .delete_ledger_path(units[0].row.file.path.to_str().unwrap())
         .unwrap();
     assert!(manager.try_start_workers());
@@ -355,7 +358,7 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
     assert_eq!(manager.enqueue_marker_refresh(units[1..].to_vec()), 2);
     let retry_id = f
         .store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&units[1].row.file.file_id.to_string())
         .unwrap()
         .unwrap()
@@ -367,10 +370,10 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
     );
 }
 
-async fn wait_for_terminal(store: &Arc<Mutex<Store>>, job_id: &str) -> api::store::ProbeJob {
+async fn wait_for_terminal(store: &Arc<Store>, job_id: &str) -> api::store::ProbeJob {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            let job = store.lock().get_probe_job(job_id).unwrap().unwrap();
+            let job = store.as_ref().get_probe_job(job_id).unwrap().unwrap();
             if !job.is_active() {
                 return job;
             }
@@ -400,7 +403,7 @@ async fn restarted_refresh_still_rejects_unresolved_results() {
     );
     assert_eq!(
         f.store
-            .lock()
+            .as_ref()
             .get_media_marker(f.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()

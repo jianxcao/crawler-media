@@ -8,7 +8,7 @@ impl ApiState {
     pub fn with_catalog(mut self, catalog: Arc<dyn Catalog>) -> Self {
         self.catalog = catalog.clone();
         self.media_posters = Arc::new(crate::media_posters::service::MediaPosterService::new(
-            self.store_readers.clone(),
+            self.store.clone(),
             catalog,
         ));
         *self.scan_catalog.lock() = (self.catalog.clone(), self.media_posters.clone());

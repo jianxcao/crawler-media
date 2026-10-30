@@ -8,8 +8,6 @@ use super::{PlayLogRow, Store, StoreError, media_id_from, user_id_from};
 
 /// 单页上限（与 API 层一致）：越界报错，不静默 clamp。
 const MAX_PAGE_LIMIT: usize = 200;
-/// 可见集合一次 INSERT 的批量大小。
-const VISIBLE_CHUNK: usize = 500;
 
 const LOG_COLS: &str = "l.id, l.user_id, l.media_id, l.season, l.episode, l.client,
        l.device_name, l.play_method, l.started_at, l.ended_at, l.watched_ms,
@@ -44,99 +42,7 @@ impl Store {
         scope: &PlaybackLogScope,
         limit: usize,
     ) -> Result<PlaybackLogPage, StoreError> {
-        if limit == 0 || limit > MAX_PAGE_LIMIT {
-            return Err(StoreError::Invalid(format!(
-                "playback log limit must be 1..={MAX_PAGE_LIMIT}, got {limit}"
-            )));
-        }
-        if scope.before_id.is_some() && scope.before.is_none() {
-            return Err(StoreError::Invalid(
-                "playback log cursor requires before when before_id is set".into(),
-            ));
-        }
-        let visible = scope.visible_media.as_deref();
-        // 先清空（SAVEPOINT 之外）：任何失败路径都不会把上一次调用的 scope 行
-        // 留给下一次；SAVEPOINT 只包住本次填充与查询，回滚后表保持空。
-        self.reset_visible_media()?;
-        self.library.execute_batch("SAVEPOINT playback_log_scope")?;
-        let result = self.scoped_log_page(scope, visible, limit);
-        match result {
-            Ok(page) => {
-                self.library.execute_batch("RELEASE playback_log_scope")?;
-                Ok(page)
-            }
-            Err(error) => {
-                let _ = self
-                    .library
-                    .execute_batch("ROLLBACK TO playback_log_scope; RELEASE playback_log_scope");
-                let _ = self.reset_visible_media();
-                Err(error)
-            }
-        }
-    }
-
-    fn scoped_log_page(
-        &self,
-        scope: &PlaybackLogScope,
-        visible: Option<&[MediaId]>,
-        limit: usize,
-    ) -> Result<PlaybackLogPage, StoreError> {
-        if let Some(ids) = visible {
-            self.fill_visible_media(ids)?;
-        }
-        let (filter, args) = scope_filter(scope);
-        let mut page_args = args.clone();
-        page_args.push(rusqlite::types::Value::Integer((limit + 1) as i64));
-        let page_sql = format!(
-            "SELECT {LOG_COLS}{filter}{} ORDER BY l.started_at DESC, l.id DESC LIMIT ?",
-            visible_clause(visible)
-        );
-        let mut stmt = self.library.prepare(&page_sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(page_args), map_log)?;
-        let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
-        let has_more = entries.len() > limit;
-        entries.truncate(limit);
-        let hidden_count = match visible {
-            None => 0,
-            Some(_) => {
-                let count_sql = format!(
-                    "SELECT COUNT(*){filter}{}",
-                    " AND NOT EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)"
-                );
-                let mut stmt = self.library.prepare(&count_sql)?;
-                let count: i64 =
-                    stmt.query_row(rusqlite::params_from_iter(args), |row| row.get(0))?;
-                count.max(0) as usize
-            }
-        };
-        Ok(PlaybackLogPage {
-            entries,
-            has_more,
-            hidden_count,
-        })
-    }
-
-    /// TEMP 可见集合：清空 + 建表（TEMP 表随连接存在，故每次调用都要清）。
-    fn reset_visible_media(&self) -> Result<(), StoreError> {
-        self.library.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS request_visible_media (id TEXT PRIMARY KEY);
-             DELETE FROM request_visible_media;",
-        )?;
-        Ok(())
-    }
-
-    /// 批量填充可见集合：只有 `?` 占位符，用户数据不进 SQL 文本。
-    fn fill_visible_media(&self, ids: &[MediaId]) -> Result<(), StoreError> {
-        for chunk in ids.chunks(VISIBLE_CHUNK) {
-            let placeholders = vec!["(?)"; chunk.len()].join(",");
-            let sql =
-                format!("INSERT OR IGNORE INTO request_visible_media (id) VALUES {placeholders}");
-            self.library.execute(
-                &sql,
-                rusqlite::params_from_iter(chunk.iter().map(MediaId::to_string)),
-            )?;
-        }
-        Ok(())
+        self.with_library_read(|db| db.playback_log_page(scope, limit))
     }
 }
 
@@ -194,3 +100,6 @@ fn map_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlayLogRow> {
         device_id: row.get(15)?,
     })
 }
+
+#[path = "log_scope/connection.rs"]
+mod connection;

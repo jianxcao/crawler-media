@@ -171,7 +171,7 @@ fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileC
 
 pub struct ProbeScenario {
     pub tmp: tempfile::TempDir,
-    pub store: Arc<Mutex<Store>>,
+    pub store: Arc<Store>,
     pub manager: Arc<ProbeManager>,
     pub engine: Arc<FakeFingerprintEngine>,
     pub clock: Arc<api::probe_manager::clock::FakeClock>,
@@ -182,7 +182,7 @@ pub struct ProbeScenario {
 impl ProbeScenario {
     pub fn cached_season() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+        let store = Arc::new(Store::open(tmp.path()).unwrap());
         let engine = Arc::new(FakeFingerprintEngine::new());
         let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000_000));
         let manager =
@@ -197,7 +197,7 @@ impl ProbeScenario {
         std::fs::create_dir_all(&root).unwrap();
 
         let library = store
-            .lock()
+            .as_ref()
             .create_library(
                 MediaKind::Tv,
                 "TV Show Library",
@@ -208,7 +208,7 @@ impl ProbeScenario {
             )
             .unwrap();
         store
-            .lock()
+            .as_ref()
             .set_library_intro_settings(&library.id, true, true)
             .unwrap();
 
@@ -225,7 +225,7 @@ impl ProbeScenario {
             bangumi_id: None,
             anilist_id: None,
         };
-        store.lock().insert_media(&media).unwrap();
+        store.as_ref().insert_media(&media).unwrap();
 
         let mut ledgers = Vec::new();
         for ep in 1..=8 {
@@ -248,7 +248,7 @@ impl ProbeScenario {
             };
             let source_version =
                 api::fingerprint_job::current_source_version(Path::new(&spec.path));
-            let coverage = publish_row(&store.lock(), &spec, &source_version);
+            let coverage = publish_row(store.as_ref(), &spec, &source_version);
             let tracks = library::Tracks {
                 video: Some(library::VideoTrack {
                     codec: Some("h264".into()),
@@ -260,7 +260,7 @@ impl ProbeScenario {
                 ..library::Tracks::default()
             };
             store
-                .lock()
+                .as_ref()
                 .put_file_meta_versioned(
                     &file_id.to_string(),
                     &tracks,
@@ -273,7 +273,7 @@ impl ProbeScenario {
             let cache_key =
                 api::fingerprint_job::fingerprint_cache_key(&source_version, 180, Some(2_400_000));
             store
-                .lock()
+                .as_ref()
                 .put_fingerprint_cache(
                     &file_id.to_string(),
                     &FingerprintCacheEntry {
@@ -342,13 +342,13 @@ impl ProbeScenario {
         let file_id = row.file.file_id.to_string();
         let mut cache = self
             .store
-            .lock()
+            .as_ref()
             .get_fingerprint_cache(&file_id)
             .unwrap()
             .unwrap();
         cache.outro = None;
         self.store
-            .lock()
+            .as_ref()
             .put_fingerprint_cache(&file_id, &cache)
             .unwrap();
     }
@@ -365,7 +365,7 @@ impl ProbeScenario {
     pub async fn drain(&self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            let active = self.store.lock().recover_probe_jobs().unwrap();
+            let active = self.store.as_ref().recover_probe_jobs().unwrap();
             if active.is_empty() {
                 break;
             }
@@ -406,7 +406,7 @@ impl ProbeScenario {
 
     pub fn set_intro_settings(&self, detect_intros: bool, enable_fingerprint: bool) {
         let row = &self.ledgers[0];
-        let store = self.store.lock();
+        let store = self.store.as_ref();
         store
             .set_library_intro_settings(
                 &row.file.library_id.to_string(),
@@ -424,7 +424,7 @@ impl ProbeScenario {
 
     pub fn fingerprint_job_status(&self, episode: u32) -> String {
         let row = self.ledger_for_episode(episode);
-        let store = self.store.lock();
+        let store = self.store.as_ref();
         store
             .latest_probe_job_for_scope(&format!("ledger:{}", row.file.file_id))
             .unwrap()

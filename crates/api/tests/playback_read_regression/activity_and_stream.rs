@@ -15,15 +15,15 @@ async fn activity_media_target_fields_unchanged() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let library = seed_library(&store.lock(), tmp.path(), "activity");
-    let (member, token) = seed_member(&store.lock(), "carol");
+    let library = seed_library(store.as_ref(), tmp.path(), "activity");
+    let (member, token) = seed_member(store.as_ref(), "carol");
     let media = {
-        let guard = store.lock();
-        let media = seed_media(&guard, "Watching", Some(2023));
-        let file = add_ledger(&guard, media, &library, "Watching");
+        let guard = store.as_ref();
+        let media = seed_media(guard, "Watching", Some(2023));
+        let file = add_ledger(guard, media, &library, "Watching");
         let started = now_secs();
         let play_session_id =
-            super::support::session::issue_session(&guard, member, "dev-1", file, started);
+            super::support::session::issue_session(guard, member, "dev-1", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-1".into(),
@@ -90,7 +90,7 @@ async fn episode_media_target_keeps_numeric_coordinates() {
     let library = tmp.path().join("library-episodes");
     std::fs::create_dir_all(&library).unwrap();
     store
-        .lock()
+        .as_ref()
         .create_library(
             MediaKind::Tv,
             "episodes",
@@ -100,9 +100,9 @@ async fn episode_media_target_keeps_numeric_coordinates() {
             &[],
         )
         .unwrap();
-    let (member, token) = seed_member(&store.lock(), "erin");
+    let (member, token) = seed_member(store.as_ref(), "erin");
     let media = {
-        let guard = store.lock();
+        let guard = store.as_ref();
         let media = Media {
             id: domain::MediaId::new(),
             kind: MediaKind::Tv,
@@ -121,7 +121,7 @@ async fn episode_media_target_keeps_numeric_coordinates() {
         std::fs::write(&path, b"x").unwrap();
         let file = LedgerId::new();
         store::test_support::publish_fixture_file(
-            &guard,
+            guard,
             &store::test_support::FixtureFile {
                 file_id: Some(file),
                 media_id: media.id,
@@ -140,7 +140,7 @@ async fn episode_media_target_keeps_numeric_coordinates() {
         .unwrap();
         let started = now_secs();
         let play_session_id =
-            super::support::session::issue_session(&guard, member, "dev-2", file, started);
+            super::support::session::issue_session(guard, member, "dev-2", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-2".into(),
@@ -187,17 +187,17 @@ async fn media_in_two_libraries_reports_null_library_id() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let first = seed_library(&store.lock(), tmp.path(), "first");
-    let second = seed_library(&store.lock(), tmp.path(), "second");
-    let (member, token) = seed_member(&store.lock(), "dave");
+    let first = seed_library(store.as_ref(), tmp.path(), "first");
+    let second = seed_library(store.as_ref(), tmp.path(), "second");
+    let (member, token) = seed_member(store.as_ref(), "dave");
     let media = {
-        let guard = store.lock();
-        let media = seed_media(&guard, "Shared", Some(2020));
-        let file = add_ledger(&guard, media, &first, "Shared-A");
-        add_ledger(&guard, media, &second, "Shared-B");
+        let guard = store.as_ref();
+        let media = seed_media(guard, "Shared", Some(2020));
+        let file = add_ledger(guard, media, &first, "Shared-A");
+        add_ledger(guard, media, &second, "Shared-B");
         let started = now_secs();
         let play_session_id =
-            super::support::session::issue_session(&guard, member, "dev-2", file, started);
+            super::support::session::issue_session(guard, member, "dev-2", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-2".into(),
@@ -247,15 +247,15 @@ async fn session_stream_serves_valid_video_bytes_with_range_support() {
     let state = make_state(tmp.path());
     let app = router(state.clone());
     let store = state.store();
-    let lib_root = seed_library(&store.lock(), tmp.path(), "stream-test");
-    let (_member, token) = seed_member(&store.lock(), "stream-user");
+    let lib_root = seed_library(store.as_ref(), tmp.path(), "stream-test");
+    let (_member, token) = seed_member(store.as_ref(), "stream-user");
     let media = {
-        let guard = store.lock();
-        let media = seed_media(&guard, "Stream Video", Some(2025));
+        let guard = store.as_ref();
+        let media = seed_media(guard, "Stream Video", Some(2025));
         let video_path = lib_root.join("sample.mp4");
         std::fs::write(&video_path, b"abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
         store::test_support::publish_fixture_file(
-            &guard,
+            guard,
             &store::test_support::FixtureFile {
                 file_id: None,
                 media_id: media,
@@ -341,16 +341,16 @@ async fn web_movie_playback_omits_coords_and_explicit_zero_is_rejected() {
     let state = make_state(tmp.path());
     let store = state.store();
     let app = router(state.clone());
-    let lib_root = seed_library(&store.lock(), tmp.path(), "coord-test");
-    let (_member, token) = seed_member(&store.lock(), "coord-user");
+    let lib_root = seed_library(store.as_ref(), tmp.path(), "coord-test");
+    let (_member, token) = seed_member(store.as_ref(), "coord-user");
 
     let media = {
-        let guard = store.lock();
-        let media = seed_media(&guard, "Coord Movie", Some(2025));
+        let guard = store.as_ref();
+        let media = seed_media(guard, "Coord Movie", Some(2025));
         let video_path = lib_root.join("movie.mp4");
         std::fs::write(&video_path, b"movie-content-1234").unwrap();
         store::test_support::publish_fixture_file(
-            &guard,
+            guard,
             &store::test_support::FixtureFile {
                 file_id: None,
                 media_id: media,

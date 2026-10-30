@@ -21,7 +21,7 @@ fn detach(state: &ApiState, body: Value) -> Response {
             "缺少有效 file_ids",
         );
     }
-    let captured = super::super::store_wait::with_bounded_store(state.store(), |store| {
+    let captured = super::super::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         ids.iter()
@@ -44,9 +44,9 @@ fn detach(state: &ApiState, body: Value) -> Response {
             .collect::<Result<Vec<_>, Response>>()
     });
     let files = match captured {
-        Some(Ok(files)) => files,
-        Some(Err(response)) => return response,
-        None => return super::super::store_wait::busy_response(),
+        Ok(Ok(files)) => files,
+        Ok(Err(response)) => return response,
+        Err(response) => return response,
     };
     // Never hold Store while acquiring Registry -> Store leases.
     let ids: Vec<_> = files.iter().map(|request| request.file.file_id).collect();
@@ -54,16 +54,16 @@ fn detach(state: &ApiState, body: Value) -> Response {
         Ok(leases) => leases,
         Err(response) => return response,
     };
-    match super::super::store_wait::with_bounded_store(state.store(), |store| {
+    match super::super::store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         store
             .demote_files_to_unidentified(&files)
             .map_err(store_error)
     }) {
-        Some(Ok(detached)) => ok(json!({"detached":detached})).into_response(),
-        Some(Err(response)) => response,
-        None => super::super::store_wait::busy_response(),
+        Ok(Ok(detached)) => ok(json!({"detached":detached})).into_response(),
+        Ok(Err(response)) => response,
+        Err(response) => response,
     }
 }
 

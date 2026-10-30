@@ -15,48 +15,6 @@ pub(crate) enum CreateError {
     Overlap(domain::SubscribeId),
 }
 
-/// G-M1: whether two coverages share at least one unit.
-pub(crate) fn coverages_overlap(a: &domain::Coverage, b: &domain::Coverage) -> bool {
-    use domain::Coverage;
-    match (a, b) {
-        (Coverage::Movie, Coverage::Movie) => true,
-        (
-            Coverage::Tv {
-                season: sa,
-                episode_from: fa,
-                episode_to: ta,
-            },
-            Coverage::Tv {
-                season: sb,
-                episode_from: fb,
-                episode_to: tb,
-            },
-        ) => {
-            let end = |to: &Option<u32>| to.unwrap_or(u32::MAX);
-            sa == sb && *fa <= end(tb) && *fb <= end(ta)
-        }
-        _ => false,
-    }
-}
-
-/// G-M1: an existing subscription of `media` in the same library whose
-/// coverage overlaps `subscribe` (excluding `subscribe` itself).
-pub(crate) fn overlapping_subscription(
-    store: &crate::Store,
-    subscribe: &Subscribe,
-) -> Result<Option<domain::SubscribeId>, StoreError> {
-    Ok(store
-        .list_all_subscribes()?
-        .into_iter()
-        .find(|other| {
-            other.id != subscribe.id
-                && other.media_id == subscribe.media_id
-                && other.library_id == subscribe.library_id
-                && coverages_overlap(&other.coverage, &subscribe.coverage)
-        })
-        .map(|other| other.id))
-}
-
 /// Persist a Subscribe and its scheduled Jobs as one logical operation.
 /// The stores live in separate SQLite files, so failures need compensation.
 pub(crate) fn create(
@@ -66,29 +24,21 @@ pub(crate) fn create(
     filter: Option<&Filter>,
 ) -> Result<(Media, Subscribe), CreateError> {
     let (media, previous) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let (media, previous) = store.ensure_media_with_previous(incoming)?;
         subscribe.media_id = media.id;
-        match overlapping_subscription(&store, &subscribe) {
-            Ok(Some(other)) => {
-                rollback_store(&store, &media, previous.as_ref(), &subscribe, None);
-                return Err(CreateError::Overlap(other));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                rollback_store(&store, &media, previous.as_ref(), &subscribe, None);
-                return Err(error.into());
-            }
-        }
         let inserted = (|| -> Result<(), StoreError> {
             if let Some(filter) = filter {
                 store.insert_filter(filter)?;
             }
-            store.insert_subscribe(&subscribe)
+            store.insert_nonoverlapping_subscribe(&subscribe)
         })();
         if let Err(error) = inserted {
             rollback_store(&store, &media, previous.as_ref(), &subscribe, filter);
-            return Err(error.into());
+            return Err(match error {
+                StoreError::SubscribeOverlap { subscribe_id } => CreateError::Overlap(subscribe_id),
+                error => error.into(),
+            });
         }
         (media, previous)
     };
@@ -96,7 +46,7 @@ pub(crate) fn create(
     if let Err(error) = seed_jobs(state, &media, &subscribe) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "创建订阅任务失败");
         rollback_store(
-            &state.store.lock(),
+            &state.store.as_ref(),
             &media,
             previous.as_ref(),
             &subscribe,
@@ -165,23 +115,5 @@ fn rollback_store(
         Err(error) => {
             tracing::error!(media_id = %media.id, error = %error, "回滚 Media 失败");
         }
-    }
-}
-
-#[cfg(test)]
-mod overlap_tests {
-    use domain::Coverage;
-
-    #[test]
-    fn ranges_overlap() {
-        let tv = |from, to| Coverage::Tv {
-            season: 1,
-            episode_from: from,
-            episode_to: to,
-        };
-        assert!(super::coverages_overlap(&tv(1, Some(5)), &tv(5, Some(8))));
-        assert!(!super::coverages_overlap(&tv(1, Some(5)), &tv(6, Some(8))));
-        assert!(super::coverages_overlap(&tv(1, None), &tv(9, Some(9))));
-        assert!(super::coverages_overlap(&Coverage::Movie, &Coverage::Movie));
     }
 }

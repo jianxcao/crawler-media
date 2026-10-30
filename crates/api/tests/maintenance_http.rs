@@ -176,7 +176,7 @@ fn seed_member(state: &ApiState) -> String {
     let store = state.store();
     let id = UserId::new();
     store
-        .lock()
+        .as_ref()
         .insert_user_with_password(
             &User {
                 id,
@@ -188,7 +188,7 @@ fn seed_member(state: &ApiState) -> String {
         )
         .unwrap();
     let token = "member-session".to_string();
-    store.lock().set_user_token(id, &token).unwrap();
+    store.as_ref().set_user_token(id, &token).unwrap();
     token
 }
 
@@ -722,7 +722,7 @@ async fn watcher_still_emits_when_terminal_count_drops() {
         seed_orphan_terminal(tmp.path(), 1_000 + i);
     }
 
-    let receiver = updates.subscribe(queue.clone()).await.unwrap();
+    let receiver = updates.subscribe(state.jobs_readers()).await.unwrap();
     let before = receiver.borrow().count;
     assert_eq!(before, 5, "订阅即拿到真实当前计数");
 

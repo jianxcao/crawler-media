@@ -23,6 +23,11 @@ impl crate::Store {
         &self,
         library_id: domain::LibraryId,
     ) -> Result<(), crate::StoreError> {
-        items::page::ensure_library_query_ready_on(&self.library, library_id)
+        self.with_library_read(|db| db.ensure_library_query_ready(library_id))
     }
 }
+
+#[path = "connection.rs"]
+mod connection;
+
+pub(crate) use details::metadata::{instance_default_locale_on, library_display_locale_on};

@@ -5,7 +5,6 @@ use marker::fingerprint::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -181,7 +180,7 @@ impl FingerprintCaptureEngine for FixtureEngine {
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     manager: ProbeManager,
     media_id: MediaId,
     units: Vec<ProbeUnit>,
@@ -190,7 +189,7 @@ struct Fixture {
 
 fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     let engine = Arc::new(FixtureEngine {
         case,
@@ -198,7 +197,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
     });
     let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone()).unwrap();
     {
-        let st = store.lock();
+        let st = store.as_ref();
         let mut config = st.get_scrape_config().unwrap().setting;
         config.fingerprint_sampling_mode = Some("adaptive".into());
         st.save_scrape_config(&config).unwrap();
@@ -217,7 +216,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
         })
         .unwrap();
     }
-    let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
+    let tv_root = store.as_ref().library_root(MediaKind::Tv).unwrap();
     let mut rows: Vec<FileCoverage> = episodes
         .iter()
         .enumerate()
@@ -239,13 +238,13 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
                 source_path: None,
                 file_id: None,
             };
-            let published = publish_fixture_file(&store.lock(), &fixture).unwrap();
+            let published = publish_fixture_file(store.as_ref(), &fixture).unwrap();
             let coverage = FileCoverage {
                 path_key: String::new(),
                 file: published,
                 units: vec![domain::UnitKey::new(1, episode as i32)],
             };
-            seed_probe(&store.lock(), &coverage, Some(1_000_000));
+            seed_probe(store.as_ref(), &coverage, Some(1_000_000));
             coverage
         })
         .collect();
@@ -303,7 +302,7 @@ fn final_intro_outcome(f: &Fixture, episode: u32) -> marker::adaptive::Verificat
     let profile = api::fingerprint_job::capture_profile_key(
         &api::fingerprint_job::FingerprintCaptureProfile::default(),
     );
-    let st = f.store.lock();
+    let st = f.store.as_ref();
     let models: Vec<TemplateModel> = st
         .list_fingerprint_models(&f.media_id.to_string(), 1)
         .unwrap()
@@ -409,8 +408,8 @@ fn seed_probe(store: &Store, row: &FileCoverage, duration_ms: Option<i64>) {
     );
 }
 
-fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FileCoverage]) {
-    let st = store.lock();
+fn seed_store(store: &Arc<Store>, media_id: MediaId, rows: &[FileCoverage]) {
+    let st = store.as_ref();
     for row in rows {
         let episode = row
             .units

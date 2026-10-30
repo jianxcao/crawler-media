@@ -36,6 +36,24 @@ pub(crate) fn library_for_file_strict(
     (by_path.id == owner.id).then_some(owner)
 }
 
+/// Revalidate recorded ownership within an existing SQL scope, without disk IO.
+pub(crate) fn library_for_recorded_file(
+    store: &store::LibraryConnection<'_>,
+    coverage: &domain::FileCoverage,
+    media: &domain::Media,
+) -> Option<Library> {
+    let file = &coverage.file;
+    let owner = store
+        .get_library(&file.library_id.to_string())
+        .ok()
+        .flatten()?;
+    let (library, root) = store
+        .library_root_owning_key(std::path::Path::new(&coverage.path_key), media.kind)
+        .ok()
+        .flatten()?;
+    (library == owner.id && root == file.root_id).then_some(owner)
+}
+
 pub(crate) fn file_visible_to_user(
     store: &crate::Store,
     file: &domain::LibraryFile,
@@ -112,6 +130,34 @@ pub(crate) fn require_visible_library(
         return Err(missing_library());
     }
     Ok(library)
+}
+
+pub(crate) fn library_visible_on(
+    store: &store::LibraryConnection<'_>,
+    library: &Library,
+    user_id: Option<domain::UserId>,
+    is_admin: bool,
+) -> bool {
+    store.library_accepts_work(&library.id).unwrap_or(false)
+        && match user_id {
+            None => true,
+            Some(_) if is_admin => library.admin_visible,
+            Some(user) => library.access_mode == "everyone" || library.member_ids.contains(&user),
+        }
+}
+
+pub(crate) fn require_visible_library_on(
+    store: &store::LibraryConnection<'_>,
+    id: &str,
+    user_id: Option<domain::UserId>,
+    is_admin: bool,
+) -> Result<Library, Response> {
+    store
+        .get_library(id)
+        .ok()
+        .flatten()
+        .filter(|library| library_visible_on(store, library, user_id, is_admin))
+        .ok_or_else(missing_library)
 }
 
 /// 与 [`backdrop_path_with`] 同一套布局，存在性判断走注入的浏览文件 seam。

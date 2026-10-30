@@ -1,7 +1,6 @@
 use crate::{ApiState, http::err};
 use axum::http::StatusCode;
 use axum::response::Response;
-use parking_lot::Mutex;
 use store::{Store, StoreError};
 
 pub(super) enum Error {
@@ -41,7 +40,7 @@ impl Error {
 }
 
 pub(super) struct Access<'a> {
-    pub shared: &'a Mutex<Store>,
+    pub shared: &'a Store,
     pub state: Option<&'a ApiState>,
 }
 impl Access<'_> {
@@ -49,18 +48,12 @@ impl Access<'_> {
         &self,
         work: impl FnOnce(&Store) -> Result<T, StoreError>,
     ) -> Result<T, Error> {
-        let Some(store) = self
-            .shared
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-        else {
-            return Err(Error::Admission(crate::http::store_wait::busy_response()));
-        };
         if let Some(state) = self.state {
-            state
-                .require_writable()
-                .and_then(|_| state.require_write_admitted())
-                .map_err(Error::Admission)?;
+            crate::http::store_wait::with_foreground_store(state, work)
+                .map_err(Error::Admission)?
+                .map_err(Error::Store)
+        } else {
+            work(self.shared).map_err(Error::Store)
         }
-        work(&store).map_err(Error::Store)
     }
 }

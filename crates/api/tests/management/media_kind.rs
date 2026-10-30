@@ -86,6 +86,7 @@ fn merge_pending_keeps_existing_downloads_across_search_rounds() {
         search_interval_secs: 1800,
         keep_old_versions: false,
     };
+    super::common::seed_subscribe_media(&store, subscribe.media_id);
     store.insert_subscribe(&subscribe).unwrap();
     let torrent = |title: &str, enclosure: &str| Torrent {
         id: None,

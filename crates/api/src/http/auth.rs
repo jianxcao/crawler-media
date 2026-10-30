@@ -174,7 +174,7 @@ fn cookie_token(request: &Request) -> Option<String> {
 /// 身份 / 角色查询的绝对预算。
 ///
 /// 生产上这是一次 app.db 单行读（几十微秒），走的是**专用读连接**
-/// （共享 StoreReaders 池）：长写事务期间读者读的是 WAL 的最后提交快照，
+/// （各数据库共享只读连接池）：长写事务期间读者读的是 WAL 的最后提交快照，
 /// 不必排在进程级 `Store` 锁后面。因此 1 s 现在只兜底两种情况——读连接拿不到
 /// 一致快照（WAL checkpoint / `busy_timeout` 用尽），或 blocking worker 卡住；
 /// 两者都给 503 `runtime.busy` + `Retry-After`，让客户端重试，而不是重建会话。
@@ -223,7 +223,7 @@ fn auth_stage_response(error: &store::LibraryReadError) -> Response {
 /// 的单行。预算内的失败一律交给 [`auth_stage_response`] 分类（繁忙→503，真错→500）。
 async fn auth_app_read<T, F>(state: &ApiState, work: F) -> Result<T, Response>
 where
-    F: FnOnce(&crate::Store) -> Result<T, store::StoreError> + Send + 'static,
+    F: FnOnce(&store::App<'_>) -> Result<T, store::StoreError> + Send + 'static,
     T: Send + 'static,
 {
     let deadline = std::time::Instant::now() + AUTH_READ_DEADLINE;
@@ -248,7 +248,7 @@ where
 
 /// Resolve the acting user from the bearer token (or session cookie).
 ///
-/// Review L2: 身份查询不在执行器线程上拿 `store.lock()`。库浏览端点自带请求预算
+/// Review L2: 身份查询不在执行器线程上拿 `(&store)`。库浏览端点自带请求预算
 /// （`QueryTiming`），其余端点用 [`AUTH_STORE_DEADLINE`]；两条路径共用同一段
 /// off-executor 查询，避免再分叉出另一条「直接拿锁」的捷径。
 pub(crate) async fn authenticate(
@@ -306,7 +306,7 @@ pub(crate) async fn authenticate(
 /// 管理员授权层：必须挂在 `authenticate` 之后（内层），读取其注入的身份。
 /// Self API 管理路由使用 authenticate 注入的 UserId。
 ///
-/// Review L2: 角色查询同样不在执行器线程上拿 `store.lock()`；读不到角色时
+/// Review L2: 角色查询同样不在执行器线程上拿 `(&store)`；读不到角色时
 /// 区分「稍后重试」（503）与真正的内部错误（500），不再把繁忙误报成 403。
 pub(crate) async fn require_admin(
     State(state): State<ApiState>,

@@ -47,7 +47,7 @@ impl Fixture {
         )
         .with_catalog(Arc::new(api::catalog::EmptyCatalog));
         let store = state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let library = guard
             .default_library(domain::MediaKind::Movie)
             .unwrap()
@@ -72,7 +72,7 @@ impl Fixture {
         let path = library.root_paths[0].join("Gate.fixture.mkv");
         std::fs::write(&path, b"published video").unwrap();
         let file = store::test_support::publish_fixture_file(
-            &guard,
+            guard,
             &store::test_support::FixtureFile {
                 media_id,
                 path: path.display().to_string(),
@@ -109,7 +109,6 @@ impl Fixture {
                 1,
             )
             .unwrap();
-        drop(guard);
         Self {
             tmp,
             state,
@@ -124,7 +123,7 @@ impl Fixture {
 
     fn assert_unchanged(&self) {
         let store = self.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let file = guard.file_coverage_by_id(self.file_id).unwrap().unwrap();
         assert_eq!(file.file.media_id, self.media_id);
         assert_eq!(file.file.path, self.path);
@@ -300,7 +299,6 @@ fn admitted_ledger_delete_removes_facts_and_bytes() {
         fixture
             .state
             .store()
-            .lock()
             .file_coverage_by_id(fixture.file_id)
             .unwrap()
             .is_none()
@@ -466,7 +464,7 @@ fn protocol_mutations_obey_the_same_write_admission() {
         });
         fixture.assert_unchanged();
         let store = fixture.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let user = store.list_users().unwrap().into_iter().next().unwrap();
         assert!(
             store

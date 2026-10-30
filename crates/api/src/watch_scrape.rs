@@ -8,7 +8,7 @@ use crate::scrape_store::ScrapeStoreExt;
 
 pub fn run(state: &ApiState) -> Result<(), String> {
     let (dirs, nfo) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let mut dirs = Vec::new();
         if let Some(path) = store.watch_inplace().map_err(|e| e.to_string())? {
             dirs.push(PathBuf::from(path));
@@ -39,7 +39,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     }
     let snapshot = state
         .store
-        .lock()
+        .as_ref()
         .library_ownership()
         .map_err(|e| e.to_string())?;
     let scope = store::LibraryPathScope::resolve(snapshot).map_err(|e| e.to_string())?;
@@ -48,7 +48,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     if owner.is_none()
         && state
             .store
-            .lock()
+            .as_ref()
             .path_key_in_removal_scope(&resolved)
             .map_err(|e| e.to_string())?
     {
@@ -108,7 +108,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     while pending.peek().is_some() {
         let batch: Vec<_> = pending.by_ref().take(SCRAPE_BATCH).collect();
         let batch_files = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             validate_scope(&store, &scope)?;
             if !accepts(&store, lease.as_ref())? {
                 return Ok(());
@@ -130,7 +130,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
         let (batch_files, plan) = batch_files;
         let observed = plan.observe()?;
         let recorded = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             validate_scope(&store, &scope)?;
             if !accepts(&store, lease.as_ref())? {
                 return Ok(());
@@ -198,7 +198,7 @@ fn resolve_scanned_files(
     let mut unresolved_media = std::collections::HashMap::new();
     for dest in transferred {
         let media = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             store
                 .file_coverage_by_path(&dest.path.display().to_string())
                 .ok()
@@ -235,7 +235,7 @@ fn attach_missing_posters(state: &ApiState, dir_to_scan: &std::path::Path) {
     // L1a: index range on this directory only; no unit coverage, no full scan.
     let targets = state
         .store
-        .lock()
+        .as_ref()
         .file_media_under(dir_to_scan)
         .unwrap_or_default();
     for (media_id, row_path) in targets {
@@ -245,7 +245,7 @@ fn attach_missing_posters(state: &ApiState, dir_to_scan: &std::path::Path) {
         {
             continue;
         }
-        let Some(real) = state.store.lock().get_media(media_id).ok().flatten() else {
+        let Some(real) = state.store.as_ref().get_media(media_id).ok().flatten() else {
             continue;
         };
         let _ = crate::poster_fetch::attach_poster(state, &real, &row_path);

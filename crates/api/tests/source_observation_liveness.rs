@@ -6,7 +6,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use domain::{Confidence, FilePresence, LedgerId, MediaId, QualitySource};
-use parking_lot::Mutex;
 use store::test_support::FixtureFile;
 use store::{MarkerResultReplacement, SourceObservation, Store, StoredMediaMarker};
 
@@ -96,14 +95,17 @@ impl Drop for ReleaseOnDrop {
 #[test]
 fn slow_source_observation_does_not_block_store() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
-    let row = fixture(&store.lock(), temp.path(), None);
-    store.lock().put_media_marker(&marker(&row, "old")).unwrap();
-    let before = current_marker(&store.lock(), &row);
+    let store = Arc::new(Store::open(temp.path()).unwrap());
+    let row = fixture(store.as_ref(), temp.path(), None);
+    store
+        .as_ref()
+        .put_media_marker(&marker(&row, "old"))
+        .unwrap();
+    let before = current_marker(store.as_ref(), &row);
     let id = row.file_id.unwrap();
 
     // Owned snapshot under a short read; the lock is released before observing.
-    let snapshots = store.lock().source_snapshots(&[id]).unwrap();
+    let snapshots = store.as_ref().source_snapshots(&[id]).unwrap();
     let (release, gate) = mpsc::channel::<()>();
     let mut release = ReleaseOnDrop(Some(release));
     let (entered_tx, entered) = mpsc::channel::<()>();
@@ -124,7 +126,7 @@ fn slow_source_observation_does_not_block_store() {
     let started = Instant::now();
     let reader = {
         let store = store.clone();
-        std::thread::spawn(move || store.lock().source_snapshots(&[id]).unwrap().len())
+        std::thread::spawn(move || store.as_ref().source_snapshots(&[id]).unwrap().len())
     };
     let (done_tx, done) = mpsc::channel();
     std::thread::spawn(move || done_tx.send(reader.join().unwrap()).ok());
@@ -141,7 +143,7 @@ fn slow_source_observation_does_not_block_store() {
     // The file version moves after observation: publication is rejected, markers kept.
     std::fs::write(&row.path, b"rewritten after observation").unwrap();
     {
-        let store = store.lock();
+        let store = store.as_ref();
         let file = store
             .file_coverage_by_path(&row.path)
             .unwrap()
@@ -158,44 +160,44 @@ fn slow_source_observation_does_not_block_store() {
             .replace_file_source(&scope, id, &file.version, &stat, 5_000)
             .unwrap();
     }
-    let moved = store.lock().source_snapshots(&[id]).unwrap();
+    let moved = store.as_ref().source_snapshots(&[id]).unwrap();
     assert_ne!(
         moved[0].version, observed[0].expected,
         "fixture must move the version"
     );
     let markers_before = before;
     let stale_publication = store
-        .lock()
+        .as_ref()
         .replace_marker_results_batch_checked(&[replacement(&row)], &observed);
     assert!(stale_publication.is_err(), "{stale_publication:?}");
-    let markers_after_rejection = current_marker(&store.lock(), &row);
+    let markers_after_rejection = current_marker(store.as_ref(), &row);
     assert_eq!(markers_after_rejection, markers_before);
 
     // Unknown observation keeps the last valid facts.
-    let fresh = store.lock().source_snapshots(&[id]).unwrap();
+    let fresh = store.as_ref().source_snapshots(&[id]).unwrap();
     let unknown = store::observe_sources_with(&fresh, |_| FilePresence::Unknown);
     let unknown_observation = &unknown[0];
     assert_eq!(unknown_observation.presence, FilePresence::Unknown);
     assert!(
         store
-            .lock()
+            .as_ref()
             .replace_marker_results_batch_checked(&[replacement(&row)], &unknown)
             .is_err()
     );
-    assert_eq!(current_marker(&store.lock(), &row), markers_before);
+    assert_eq!(current_marker(store.as_ref(), &row), markers_before);
 
     // Missing follows the explicit deletion policy (file_deleted), Present publishes.
     let missing: Vec<SourceObservation> =
         store::observe_sources_with(&fresh, |_| FilePresence::Missing);
     let error = store
-        .lock()
+        .as_ref()
         .replace_marker_results_batch_checked(&[replacement(&row)], &missing)
         .unwrap_err();
     assert!(error.to_string().contains("file_deleted"), "{error}");
     let present = store::observe_sources(&fresh);
     store
-        .lock()
+        .as_ref()
         .replace_marker_results_batch_checked(&[replacement(&row)], &present)
         .unwrap();
-    assert_eq!(current_marker(&store.lock(), &row).unwrap().source, "new");
+    assert_eq!(current_marker(store.as_ref(), &row).unwrap().source, "new");
 }

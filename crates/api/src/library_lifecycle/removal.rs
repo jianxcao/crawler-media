@@ -145,7 +145,7 @@ async fn window<T: Send + 'static>(
         let work = work.clone();
         match state
             .fs_work
-            .run_to_completion(move || work(&shared.lock()))
+            .run_to_completion(move || work(&(&shared)))
             .await
         {
             Ok(result) => return result.map_err(|e| e.to_string()),

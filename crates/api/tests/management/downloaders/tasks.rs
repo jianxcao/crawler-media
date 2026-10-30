@@ -57,6 +57,7 @@ fn seed_subscribe_for_pending(store: &Store) -> Subscribe {
         search_interval_secs: 1800,
         keep_old_versions: false,
     };
+    seed_subscribe_media(store, subscribe.media_id);
     store.insert_subscribe(&subscribe).unwrap();
     subscribe
 }

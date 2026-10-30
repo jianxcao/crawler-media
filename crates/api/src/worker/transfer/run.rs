@@ -4,7 +4,8 @@ use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed_r
 
 use crate::management::ApiState;
 
-use super::plan::{TransferPlan, resolve_transfer_plan, validate_committed_transfer_plan};
+use super::decision::{ActiveTransfer, ensure_current};
+use super::plan::{TransferPlan, resolve_transfer_plan, with_plan_write};
 use super::publication::{observe_transfer_files, publish_transfer_file};
 use super::recorder::{PlannedPublicationRecorder, PublicationRecorder};
 use super::removals::{observe_transfer_removals, queue_transfer_removals};
@@ -55,7 +56,7 @@ fn commit_transfer_outcome(
     plan: &TransferPlan,
 ) -> Result<Vec<domain::LibraryFile>, String> {
     let default_transfer_mode = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.transfer_mode().unwrap_or_else(|_| "copy".into())
     };
 
@@ -66,41 +67,59 @@ fn commit_transfer_outcome(
     // Commit replacement file/source mapping and facts in a short Store section
     let mut published = Vec::with_capacity(outcome.files.len());
     {
-        let store = state.store.lock();
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        let store = state.store.as_ref();
+        ensure_current(state, store, subscribe)?;
         // Publication already validated the pre-publication fingerprint before
         // each reservation; the scoped fingerprint now reflects this round's
         // own published rows, so only the untouched plan parts are re-checked.
-        validate_committed_transfer_plan(&store, subscribe, lease, plan)?;
-        for (coverage, observation) in outcome.files.iter().zip(&observations) {
-            let path = coverage.file.path.to_string_lossy().to_string();
-            let source_path = recorded_file_source(outcome, coverage.file.file_id)
-                .map(|source| source.display().to_string());
-            let existing = store
-                .file_coverage_by_path(&path)
-                .map_err(|e| e.to_string())?;
-            let identity_ok = existing
-                .as_ref()
-                .map(|existing| (existing.file.file_id, existing.file.media_id))
-                == Some((coverage.file.file_id, coverage.file.media_id));
-            let source_ok = store
-                .ledger_source_path_matches(&path, source_path.as_deref())
-                .map_err(|e| e.to_string())?;
-            if !identity_ok || !source_ok {
-                return Err(format!("Transfer reservation missing or replaced: {path}"));
-            }
-            published.push(
-                publish_transfer_file(
-                    &store,
-                    &plan.library_id,
-                    plan.config_revision,
-                    coverage,
-                    source_path.as_deref().map(std::path::Path::new),
-                    observation,
-                )
-                .map_err(|e| e.to_string())?,
-            );
-        }
-        queue_transfer_removals(state, &store, &removed)?;
+        with_plan_write(
+            store,
+            lease,
+            None,
+            &std::collections::HashSet::new(),
+            plan,
+            |db| {
+                for (coverage, observation) in outcome.files.iter().zip(&observations) {
+                    let path = coverage.file.path.to_string_lossy().to_string();
+                    let source_path = recorded_file_source(outcome, coverage.file.file_id)
+                        .map(|source| source.display().to_string());
+                    let existing = db.file_coverage_by_path(&path).map_err(|e| e.to_string())?;
+                    let identity_ok = existing
+                        .as_ref()
+                        .map(|existing| (existing.file.file_id, existing.file.media_id))
+                        == Some((coverage.file.file_id, coverage.file.media_id));
+                    let source_ok = db
+                        .ledger_source_path_matches(&path, source_path.as_deref())
+                        .map_err(|e| e.to_string())?;
+                    if !identity_ok || !source_ok {
+                        return Err(format!("Transfer reservation missing or replaced: {path}"));
+                    }
+                    published.push(
+                        publish_transfer_file(
+                            db,
+                            &plan.library_id,
+                            plan.config_revision,
+                            coverage,
+                            source_path.as_deref().map(std::path::Path::new),
+                            observation,
+                        )
+                        .map_err(|e| e.to_string())?,
+                    );
+                }
+                queue_transfer_removals(state, db, &removed)?;
+
+                for coverage in &outcome.files {
+                    let path = coverage.file.path.to_string_lossy().to_string();
+                    db.clear_ledger_missing(&path).map_err(|error| {
+                        tracing::error!(path = %path, %error, "清理 Library 缺失标记失败");
+                        error.to_string()
+                    })?;
+                }
+                Ok(())
+            },
+        )?;
 
         store
             .save_subscribe_facts(subscribe.id, &outcome.facts)
@@ -117,32 +136,29 @@ fn commit_transfer_outcome(
         store
             .mark_pending_imported(subscribe.id, &outcome.transferred_enclosures)
             .map_err(|e| e.to_string())?;
-        for coverage in &outcome.files {
-            let path = coverage.file.path.to_string_lossy().to_string();
-            store.clear_ledger_missing(&path).map_err(|error| {
-                tracing::error!(path = %path, %error, "清理 Library 缺失标记失败");
-                error.to_string()
-            })?;
-        }
     }
 
-    // Review N-1: capped wait for a source probe; exhausted waits are rejected.
-    let exhausted = crate::probe_wait::exhausted_probe_waits(
-        state,
-        subscribe.id,
-        &outcome.awaiting_probe_enclosures,
-    );
     // M6: queue replaced files instead of deleting inline; a failed delete
     // must not abort the commit and is retried later (outside the Store lock).
-    {
-        let store = state.store.lock();
+    let exhausted = {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        let store = state.store.as_ref();
+        ensure_current(state, store, subscribe)?;
+        let exhausted = crate::probe_wait::exhausted_probe_waits(
+            state,
+            subscribe.id,
+            &outcome.awaiting_probe_enclosures,
+        );
         store
             .mark_pending_rejected(subscribe.id, &outcome.rejected_enclosures)
             .map_err(|e| e.to_string())?;
         store
             .mark_pending_rejected(subscribe.id, &exhausted)
             .map_err(|e| e.to_string())?;
-    }
+        exhausted
+    };
+    crate::probe_wait::notify_exhausted_probe_waits(state, &exhausted);
     crate::http::file_delete::retry_queued_deletions(&state.store).map_err(|e| e.to_string())?;
     Ok(published)
 }
@@ -162,7 +178,7 @@ fn load_transfer_context(
     String,
 > {
     let (media, filter, wash_filter) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let media = store
             .get_media(subscribe.media_id)
             .map_err(|e| e.to_string())?
@@ -201,7 +217,7 @@ fn restore_identities(
     routed: &crate::delivery::RoutedDownloader<'_>,
     pending: &[(i32, crate::store::PendingDownload)],
 ) {
-    let hashes = match state.store.lock().load_pending_info_hashes(subscribe.id) {
+    let hashes = match state.store.load_pending_info_hashes(subscribe.id) {
         Ok(hashes) => hashes,
         Err(error) => {
             tracing::warn!(subscribe_id = %subscribe.id, %error, "读取 pending info hash 失败");
@@ -303,24 +319,30 @@ fn load_pending_transfer(
     state: &ApiState,
     subscribe_id: SubscribeId,
 ) -> Result<Option<(Subscribe, Vec<(i32, crate::store::PendingDownload)>)>, String> {
-    let subscribe = match state.store.lock().get_subscribe(subscribe_id) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            tracing::info!(subscribe_id = %subscribe_id, "订阅已不存在，跳过 Transfer");
+    let (subscribe, pending) = {
+        let guard = state.subscribe_guard(subscribe_id);
+        let _guard = guard.lock();
+        if state.subscribe_is_deleting(subscribe_id) {
             return Ok(None);
         }
-        Err(e) => return Err(e.to_string()),
+        let Some(subscribe) = state
+            .store
+            .get_subscribe(subscribe_id)
+            .map_err(|error| error.to_string())?
+        else {
+            tracing::info!(%subscribe_id, "订阅已不存在，跳过 Transfer");
+            return Ok(None);
+        };
+        let pending = state
+            .store
+            .load_pending(subscribe_id)
+            .map_err(|error| error.to_string())?;
+        (subscribe, pending)
     };
-
-    let pending = state
-        .store
-        .lock()
-        .load_pending(subscribe.id)
-        .map_err(|e| e.to_string())?;
     // H3: release rows whose task provably vanished from the client, so a
     // slot never stays blocked just because nobody opened the task center.
-    let pending = crate::pending_reconcile::reconcile_subscribe(state, subscribe.id, pending);
-    crate::selective_files::retry_deferred(state, subscribe.id, &pending);
+    let pending = crate::pending_reconcile::reconcile_subscribe(state, &subscribe, pending);
+    crate::selective_files::retry_deferred(state, &subscribe, &pending);
 
     if pending.is_empty() {
         return Ok(None);
@@ -338,6 +360,10 @@ enum Attempt {
 /// Blocking-context entry: wait for the target Library to go idle **without** any
 /// Subscribe/Store lock held, then re-lock, re-read and re-validate before acting.
 pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), String> {
+    let Some(_active) = ActiveTransfer::begin(state, subscribe_id) else {
+        tracing::debug!(%subscribe_id, "Transfer round already active");
+        return Ok(());
+    };
     for _ in 0..3 {
         let Some(library_id) = prepare_transfer_target(state, subscribe_id)? else {
             return Ok(());
@@ -361,7 +387,6 @@ fn prepare_transfer_target(
 ) -> Result<Option<String>, String> {
     let Some(subscribe) = state
         .store
-        .lock()
         .get_subscribe(subscribe_id)
         .map_err(|e| e.to_string())?
     else {
@@ -369,7 +394,6 @@ fn prepare_transfer_target(
     };
     let media = state
         .store
-        .lock()
         .get_media(subscribe.media_id)
         .map_err(|error| error.to_string())?
         .ok_or("Media not found")?;
@@ -383,9 +407,6 @@ fn transfer_after_idle(
     subscribe_id: SubscribeId,
     waited_library: &str,
 ) -> Result<Attempt, String> {
-    let guard = state.subscribe_guard(subscribe_id);
-    let _guard = guard.lock();
-
     if state.subscribe_is_deleting(subscribe_id) {
         tracing::info!(subscribe_id = %subscribe_id, "订阅正在删除中，跳过 Transfer");
         return Ok(Attempt::Done);
@@ -398,7 +419,6 @@ fn transfer_after_idle(
 
     let media = state
         .store
-        .lock()
         .get_media(subscribe.media_id)
         .map_err(|error| error.to_string())?
         .ok_or("Media not found")?;
@@ -500,7 +520,6 @@ fn transfer_after_idle(
 fn arm_hardlink_fallback(state: &ApiState) -> u64 {
     let fallback_copy = state
         .store
-        .lock()
         .get_setting(crate::settings_keys::LIBRARY_HARDLINK_FALLBACK)
         .ok()
         .flatten()
@@ -615,7 +634,7 @@ fn rollback_new_files(
                 tracing::info!(path = %path.display(), "回滚放弃提交的 Transfer 新文件");
                 // The ledger row was reserved before publishing: drop it too.
                 let ledger_path = path.to_string_lossy().to_string();
-                if let Err(error) = state.store.lock().delete_ledger_path(&ledger_path) {
+                if let Err(error) = state.store.delete_ledger_path(&ledger_path) {
                     tracing::warn!(path = %ledger_path, %error, "回滚时删除预留台账行失败");
                 }
             }

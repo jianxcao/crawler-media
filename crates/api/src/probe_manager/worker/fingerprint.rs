@@ -20,11 +20,7 @@ pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
         if let Some((refreshed, unit)) = recovered {
             let current = step(&manager, {
                 let job_id = refreshed.id.clone();
-                move |manager| {
-                    manager
-                        .reader()
-                        .and_then(|store| store.get_probe_job(&job_id))
-                }
+                move |manager| manager.store.get_probe_job(&job_id)
             })
             .await;
             match current {
@@ -44,8 +40,8 @@ pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
                             let job_id = refreshed.id.clone();
                             move |manager| {
                                 if let Err(error) = manager
-                                    .writer()
-                                    .and_then(|store| store.cancel_probe_job(&job_id, &reason))
+                                    .store
+                                    .library_write(|store| store.cancel_probe_job(&job_id, &reason))
                                 {
                                     tracing::error!(%error, job_id, "取消恢复的刷新任务失败");
                                 }

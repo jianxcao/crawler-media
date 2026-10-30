@@ -3,6 +3,15 @@ use store::Store;
 
 /// Ledger-side source check (no IO); safe to run under the store lock.
 pub(crate) fn ensure_source_recorded(store: &Store, row: &FileCoverage) -> Result<(), String> {
+    store
+        .library_read_snapshot(|db| ensure_source_recorded_on(db, row))
+        .map_err(|error| error.to_string())?
+}
+
+pub(crate) fn ensure_source_recorded_on(
+    store: &store::LibraryConnection<'_>,
+    row: &FileCoverage,
+) -> Result<(), String> {
     let current = store
         .file_coverage_by_id(row.file.file_id)
         .map_err(|error| {

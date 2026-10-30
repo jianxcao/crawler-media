@@ -12,7 +12,7 @@ pub(super) fn changed_media_files(state: &ApiState, dir: &Path) -> Vec<PathBuf> 
         .iter()
         .map(|path| path.display().to_string())
         .collect();
-    let versions = match state.store.lock().ledger_source_versions(&paths) {
+    let versions = match state.store.as_ref().ledger_source_versions(&paths) {
         Ok(versions) => versions,
         Err(error) => {
             tracing::error!(path = %dir.display(), %error, "读取目录事件的媒体源版本失败，保留扫描请求");

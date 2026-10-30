@@ -2,7 +2,7 @@ use super::*;
 
 struct DeleteGate {
     path: String,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     remove_ledger: bool,
 }
 impl api::fingerprint_job::CaptureGate for DeleteGate {
@@ -12,13 +12,13 @@ impl api::fingerprint_job::CaptureGate for DeleteGate {
         Box::pin(async move {
             let _ = std::fs::remove_file(&self.path);
             if self.remove_ledger {
-                self.store.lock().delete_ledger_path(&self.path).unwrap();
+                self.store.as_ref().delete_ledger_path(&self.path).unwrap();
             }
         })
     }
 }
 struct DeleteCapture {
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     calls: AtomicUsize,
     delete_during: bool,
     fail: bool,
@@ -29,7 +29,7 @@ impl FingerprintCaptureEngine for DeleteCapture {
         if self.delete_during {
             let _ = std::fs::remove_file(&r.path);
             self.store
-                .lock()
+                .as_ref()
                 .delete_ledger_path(r.path.to_str().unwrap())
                 .unwrap();
         }
@@ -104,7 +104,7 @@ fn cancelled_unit_cannot_reuse_a_cached_fingerprint() {
         metrics_json: "{}".into(),
     };
     {
-        let store = f.store.lock();
+        let store = f.store.as_ref();
         store
             .complete_fingerprint_attempt(&attempt, Some(&sample))
             .unwrap();
@@ -139,7 +139,7 @@ fn cancelled_unit_cannot_reuse_a_cached_fingerprint() {
             .unwrap();
     }
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()),
         matcher: f.engine.clone(),
         capture: f.engine.clone(),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
@@ -175,7 +175,7 @@ fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
     row.file.path = std::path::PathBuf::from(&renamed);
     std::fs::rename(&old, &row.file.path).unwrap();
     store::test_support::force_file_path(
-        &f.store.lock(),
+        f.store.as_ref(),
         old.to_str().unwrap(),
         row.file.path.to_str().unwrap(),
     )
@@ -187,7 +187,7 @@ fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
         fail: true,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
@@ -224,7 +224,7 @@ fn control_deleting_file_and_ledger_before_capture_cancels() {
         fail: true,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
@@ -255,7 +255,7 @@ fn deleting_source_during_capture_must_not_reinsert_sample() {
         fail: false,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
@@ -264,7 +264,7 @@ fn deleting_source_during_capture_must_not_reinsert_sample() {
     let res = tokio::runtime::Runtime::new().unwrap().block_on(
         api::fingerprint_job::capture_episode_adaptive(&ctx, &capture_request(row.clone())),
     );
-    let st = f.store.lock();
+    let st = f.store.as_ref();
     let samples = st
         .find_covering_fingerprint_samples(&api::store::FingerprintSampleQuery {
             ledger_id: row.file.file_id.to_string(),
@@ -307,7 +307,7 @@ impl FingerprintCaptureEngine for EmptyAudioCapture {
 fn capture_refactor_preserves_persisted_error_kind() {
     let f = setup("uniform", &[1, 2, 3]);
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()),
         matcher: f.engine.clone(),
         capture: Arc::new(EmptyAudioCapture),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
@@ -322,7 +322,7 @@ fn capture_refactor_preserves_persisted_error_kind() {
     assert!(result.is_err());
     let attempts = f
         .store
-        .lock()
+        .as_ref()
         .list_fingerprint_attempts_for_job("delete-job")
         .unwrap();
     assert!(!attempts.is_empty());

@@ -120,7 +120,7 @@ async fn unknown_cache_source_is_400_and_api_key_session_stream_authenticates() 
     .unwrap();
     let psid = {
         let handle = fixture.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let user = store.user_by_token(TOKEN).unwrap().unwrap().id;
         let version = store.get_file_version(file_id).unwrap().unwrap();
         store

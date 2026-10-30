@@ -9,7 +9,6 @@ use axum::http::StatusCode;
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -145,7 +144,7 @@ fn production_password_setup_rejects_known_bearers() {
 async fn seed_admin_rolls_back_when_token_insert_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
 
     // 触发器拦截对 user_tokens 的写入
     let conn = Connection::open(data_dir.join("app.db")).unwrap();
@@ -169,12 +168,12 @@ async fn seed_admin_rolls_back_when_token_insert_fails() {
     // 验证用户未被部分写入
     let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
     assert!(
-        store.lock().get_user(admin_id).unwrap().is_none(),
+        store.as_ref().get_user(admin_id).unwrap().is_none(),
         "seed 失败绝不残留管理员行"
     );
 }
 
-fn build_test_app(store: Arc<Mutex<Store>>, tmp: &tempfile::TempDir, token: &str) -> axum::Router {
+fn build_test_app(store: Arc<Store>, tmp: &tempfile::TempDir, token: &str) -> axum::Router {
     let state = ApiState::new_arc_with_admin_password(
         store,
         token.to_string(),
@@ -194,7 +193,7 @@ async fn cli_token_rotates_and_refreshes_on_restart() {
     let data_dir = tmp.path().join("data");
 
     // 首次启动：指定 token-a
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
     let app = build_test_app(store.clone(), &tmp, "token-a");
 
     let me_a = app
@@ -270,7 +269,7 @@ fn request(method: &str, uri: &str, body: Value) -> axum::http::Request<axum::bo
 async fn bootstrap_admin_password_and_cli_token_are_separated() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
-    let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
+    let store = Arc::new(Store::open(&data_dir).unwrap());
 
     let cli_token = "cli-bearer-secret-999";
     let admin_pw = "admin-login-pwd-888";

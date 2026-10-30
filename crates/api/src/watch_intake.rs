@@ -7,7 +7,7 @@ use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 pub fn run(state: &ApiState) -> Result<(), String> {
     let (intake, movie_library, tv_library, nfo) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let Some(path) = store.watch_intake().map_err(|e| e.to_string())? else {
             return Ok(());
         };
@@ -73,7 +73,7 @@ pub fn run(state: &ApiState) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let transferred = outcome.transferred;
     {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
         for parked in outcome.unidentified {
             store
@@ -82,13 +82,13 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         }
     }
     let plan = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
         crate::watch_ledger::plan_paths(&store, transferred.clone())?
     };
     let observed = plan.observe()?;
     let inserted = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
         observed.record(&store)?
     };
@@ -126,7 +126,7 @@ fn finish_intake_metadata(
 ) -> Result<(), String> {
     // 为没有 TMDB ID 的影视条目自动匹配 TMDB 元数据与海报
     let unresolved_media = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let mut map = std::collections::HashMap::new();
         for dest in transferred {
             if let Ok(Some(row)) = store.file_coverage_by_path(&dest.path.display().to_string())
@@ -140,7 +140,7 @@ fn finish_intake_metadata(
         map
     };
     for (_, (media, dest)) in unresolved_media {
-        check_intake_libraries(&state.store.lock(), movie_lease, tv_lease)?;
+        check_intake_libraries(&state.store.as_ref(), movie_lease, tv_lease)?;
         let resolved = crate::auto_resolve::resolve_scanned_media(state, &media, &dest);
         let active_media = if let Some(canonical) = resolved {
             crate::auto_resolve::rebind_scan_rows(state, media.id, canonical.id, &inserted)?;
@@ -159,7 +159,7 @@ fn finish_intake_metadata(
 
     // 自动补封面：目标媒体库目录下缺 poster.jpg 的文件从 TMDB 拉海报 + 背板
     let targets: Vec<(domain::MediaId, PathBuf)> = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         transferred
             .iter()
             .filter_map(|t| {
@@ -178,8 +178,8 @@ fn finish_intake_metadata(
         {
             continue;
         }
-        check_intake_libraries(&state.store.lock(), movie_lease, tv_lease)?;
-        let Some(real) = state.store.lock().get_media(media_id).ok().flatten() else {
+        check_intake_libraries(&state.store.as_ref(), movie_lease, tv_lease)?;
+        let Some(real) = state.store.as_ref().get_media(media_id).ok().flatten() else {
             continue;
         };
         let _ = crate::poster_fetch::attach_poster(state, &real, &row_path);
@@ -242,7 +242,7 @@ mod tests {
 
         run(&state).unwrap();
 
-        let rows = state.store.lock().list_file_coverage().unwrap();
+        let rows = state.store.as_ref().list_file_coverage().unwrap();
         assert_eq!(rows.len(), 1);
         assert!(
             state.probe.is_queued(&rows[0].file.file_id.to_string()),
@@ -265,7 +265,7 @@ mod tests {
         .unwrap();
         let tv_library = state
             .store
-            .lock()
+            .as_ref()
             .default_library(MediaKind::Tv)
             .unwrap()
             .unwrap();
@@ -289,7 +289,7 @@ mod tests {
             bangumi_id: None,
             anilist_id: None,
         };
-        let media = state.store.lock().ensure_media(media).unwrap();
+        let media = state.store.as_ref().ensure_media(media).unwrap();
         let fixture = store::test_support::FixtureFile {
             media_id: media.id,
             path: episode_path.display().to_string(),
@@ -297,7 +297,7 @@ mod tests {
             episode: Some(1),
             ..Default::default()
         };
-        store::test_support::publish_fixture_file(&state.store.lock(), &fixture).unwrap();
+        store::test_support::publish_fixture_file(&state.store.as_ref(), &fixture).unwrap();
 
         assert_eq!(
             crate::http::library::enqueue_probes_for_paths(
@@ -329,13 +329,13 @@ mod tests {
         .unwrap();
         let tv_library = state
             .store
-            .lock()
+            .as_ref()
             .default_library(MediaKind::Tv)
             .unwrap()
             .unwrap();
         state
             .store
-            .lock()
+            .as_ref()
             .set_library_intro_settings(&tv_library.id, true, true)
             .unwrap();
         let episode_path = tv_library.root_paths[0]
@@ -346,7 +346,7 @@ mod tests {
 
         let media = state
             .store
-            .lock()
+            .as_ref()
             .ensure_media(Media {
                 id: MediaId::new(),
                 kind: MediaKind::Tv,
@@ -368,7 +368,7 @@ mod tests {
             episode: Some(1),
             ..Default::default()
         };
-        store::test_support::publish_fixture_file(&state.store.lock(), &fixture).unwrap();
+        store::test_support::publish_fixture_file(&state.store.as_ref(), &fixture).unwrap();
 
         assert_eq!(
             crate::http::library::enqueue_probes_for_paths(

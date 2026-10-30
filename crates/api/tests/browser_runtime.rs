@@ -63,7 +63,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 }
 
 type Endpoints = Arc<Mutex<Vec<String>>>;
-fn routed_app(root: &std::path::Path, store: Arc<Mutex<Store>>) -> (axum::Router, Endpoints) {
+fn routed_app(root: &std::path::Path, store: Arc<Store>) -> (axum::Router, Endpoints) {
     let overlay = root.join("profiles");
     std::fs::create_dir_all(&overlay).unwrap();
     std::fs::write(
@@ -175,7 +175,7 @@ async fn browser_settings_reject_websocket_discovery_and_accepts_managed_key() {
 async fn browser_settings_store_failure_is_not_success() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state(tmp.path());
-    let path = state.store().lock().sqlite_path().to_owned();
+    let path = state.store().sqlite_path().to_owned();
     let db = rusqlite::Connection::open(path).unwrap();
     db.execute_batch("CREATE TRIGGER reject_browser_setting BEFORE INSERT ON settings WHEN NEW.key = 'cdp.url' BEGIN SELECT RAISE(ABORT, 'fixture setting failure'); END;").unwrap();
     let response = router(state)
@@ -191,8 +191,8 @@ async fn browser_settings_store_failure_is_not_success() {
 #[tokio::test]
 async fn search_never_uses_browser_even_when_cdp_is_configured() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
-    site(&store.lock(), Some("http://site.invalid:9222"));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    site(store.as_ref(), Some("http://site.invalid:9222"));
     let (app, endpoints) = routed_app(tmp.path(), store.clone());
     save(
         &app,
@@ -206,14 +206,14 @@ async fn search_never_uses_browser_even_when_cdp_is_configured() {
 #[tokio::test]
 async fn failed_save_restores_existing_route() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let app = router(state(tmp.path()));
     save(
         &app,
         json!({"cdp":{"enabled":true,"url":"http://old.invalid:9223"}}),
     )
     .await;
-    let path = store.lock().sqlite_path().to_owned();
+    let path = store.as_ref().sqlite_path().to_owned();
     let db = rusqlite::Connection::open(path).unwrap();
     db.execute_batch("CREATE TRIGGER reject_browser_flag BEFORE INSERT ON settings WHEN NEW.key = 'cdp.enabled' BEGIN SELECT RAISE(ABORT, 'fixture flag failure'); END;").unwrap();
     let response = app
@@ -230,13 +230,13 @@ async fn failed_save_restores_existing_route() {
 #[test]
 fn startup_loads_saved_cdp_settings() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     store
-        .lock()
+        .as_ref()
         .put_setting(api::settings_keys::CDP_ENABLED, "1")
         .unwrap();
     store
-        .lock()
+        .as_ref()
         .put_setting(api::settings_keys::CDP_URL, "http://127.0.0.1:9222")
         .unwrap();
     let browser = api::runtime_browser::production_browser(store).unwrap();

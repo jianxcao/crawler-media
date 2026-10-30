@@ -103,7 +103,7 @@ fn parse_preview_kind(kind: &str) -> Result<MediaKind, Response> {
 }
 
 /// 一次锁快照后续渲染所需的库/下载器/命名/监听配置，再释放。
-/// metadata IO 必须在锁外，否则 scrape 配置会再次 `store.lock()` 自锁。
+/// metadata IO 必须在锁外，否则 scrape 配置会再次 `(&store)` 自锁。
 fn load_snapshot(
     store: &crate::Store,
     kind: MediaKind,

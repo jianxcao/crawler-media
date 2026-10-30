@@ -9,24 +9,20 @@ use axum::http::StatusCode;
 
 use super::{STORE_READ_WAIT, STORE_WRITE_WAIT, StoreCallError, store_read_handle};
 
-fn store(root: &std::path::Path) -> Arc<parking_lot::Mutex<crate::Store>> {
-    Arc::new(parking_lot::Mutex::new(
-        crate::Store::open(root.join("data")).unwrap(),
-    ))
+fn store(root: &std::path::Path) -> Arc<crate::Store> {
+    Arc::new(crate::Store::open(root.join("data")).unwrap())
 }
 
 /// Another thread holds the lock for far longer than the deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contended_lock_is_busy_within_the_deadline() {
+async fn exhausted_read_pool_is_busy_within_the_deadline() {
     let tmp = tempfile::tempdir().unwrap();
     let handle = store(tmp.path());
-    let held = handle.clone();
-    let locked = std::thread::spawn(move || {
-        let _guard = held.lock();
-        std::thread::sleep(Duration::from_millis(1500));
-    });
-    std::thread::sleep(Duration::from_millis(20));
-
+    handle
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let pool = handle.reader_pool(store::Db::Library);
+    let _held = pool.try_checkout().unwrap();
     let deadline = Duration::from_millis(100);
     let started = Instant::now();
     let outcome = store_read_handle(handle, deadline, |store| {
@@ -43,7 +39,6 @@ async fn contended_lock_is_busy_within_the_deadline() {
         waited < Duration::from_millis(600),
         "the seam waited {waited:?} for a {deadline:?} deadline"
     );
-    locked.join().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -132,15 +127,22 @@ fn read_budget_covers_a_long_batch_and_write_budget_stays_short() {
 async fn cancelled_read_does_not_run_after_waiting_for_a_connection() {
     let tmp = tempfile::tempdir().unwrap();
     let handle = store(tmp.path());
-    let readers = Arc::new(crate::store_readers::StoreReaders::open(&handle.lock(), 1).unwrap());
-    let held = readers.checkout(Duration::ZERO).unwrap();
+    handle
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let readers = handle.reader_pool(store::Db::Library);
+    let held = readers.try_checkout().unwrap();
     let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = ran.clone();
-    let pool = readers.clone();
-    let waiting = tokio::spawn(super::store_read_readers(
-        pool,
+    let waiting = tokio::spawn(super::store_read_handle(
+        handle,
         Duration::from_secs(1),
-        move |_| observed.store(true, std::sync::atomic::Ordering::SeqCst),
+        move |store| {
+            store.with_read(store::Db::Library, |_| {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        },
     ));
     tokio::time::sleep(Duration::from_millis(100)).await;
     waiting.abort();
@@ -157,10 +159,13 @@ async fn cancelled_read_does_not_run_after_waiting_for_a_connection() {
 async fn pooled_read_waits_for_return_then_reads_without_the_writer_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let writer = store(tmp.path());
-    let readers = Arc::new(crate::store_readers::StoreReaders::open(&writer.lock(), 1).unwrap());
-    let held = readers.checkout(Duration::ZERO).unwrap();
-    let queued = tokio::spawn(super::store_read_readers(
-        readers,
+    writer
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let readers = writer.reader_pool(store::Db::Library);
+    let held = readers.try_checkout().unwrap();
+    let queued = tokio::spawn(super::store_read_handle(
+        writer.clone(),
         Duration::from_secs(1),
         |store| store.list_libraries(),
     ));
@@ -172,9 +177,13 @@ async fn pooled_read_waits_for_return_then_reads_without_the_writer_lock() {
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _writer = writer.lock();
-        locked_tx.send(()).unwrap();
-        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        writer
+            .with_writer(store::Db::Library, |_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(())
+            })
+            .unwrap();
     });
     locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     drop(held);
@@ -189,12 +198,19 @@ async fn pooled_read_waits_for_return_then_reads_without_the_writer_lock() {
 async fn pool_wait_expires_with_busy_within_the_request_deadline() {
     let tmp = tempfile::tempdir().unwrap();
     let writer = store(tmp.path());
-    let readers = Arc::new(crate::store_readers::StoreReaders::open(&writer.lock(), 1).unwrap());
-    let _held = readers.checkout(Duration::ZERO).unwrap();
+    writer
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let readers = writer.reader_pool(store::Db::Library);
+    let _held = readers.try_checkout().unwrap();
     let deadline = Duration::from_millis(100);
     let started = Instant::now();
-    let outcome: Result<(), _> =
-        super::store_read_readers(readers, deadline, |_| panic!("pool remains full")).await;
+    let outcome = super::store_read_handle(writer, deadline, |store| {
+        store.with_read(store::Db::Library, |_| -> Result<(), store::StoreError> {
+            panic!("pool remains full")
+        })
+    })
+    .await;
     assert!(matches!(outcome, Err(StoreCallError::Busy)));
     assert!(started.elapsed() < Duration::from_millis(500));
 }

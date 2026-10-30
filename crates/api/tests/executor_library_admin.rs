@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,7 +52,7 @@ impl Fixture {
         .unwrap();
         let token = "admin-route-token".to_string();
         let handle = state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         let user = domain::User {
             id: domain::UserId::new(),
             login: "admin-route".into(),
@@ -76,7 +82,7 @@ impl Fixture {
         let path = library.root_paths[0].join("fixture.mkv");
         std::fs::write(&path, b"fixture").unwrap();
         let file = store::test_support::publish_fixture_file(
-            &store,
+            store,
             &store::test_support::FixtureFile {
                 media_id: media,
                 path: path.display().to_string(),
@@ -84,7 +90,6 @@ impl Fixture {
             },
         )
         .unwrap();
-        drop(store);
         Self {
             _dir: dir,
             state,
@@ -132,7 +137,7 @@ fn admin_read_routes_keep_executor_responsive_under_store_contention() {
         let store = f.state.store();
         let (tx, rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _guard = store.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::Library);
             tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
         });
@@ -169,7 +174,7 @@ fn physical_deletion_refuses_exhausted_filesystem_budget_before_facts_change() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert!(store.file_coverage_by_id(f.file.file_id).unwrap().is_some());
         assert!(store.list_pending_file_deletions().unwrap().is_empty());
         assert_eq!(std::fs::read(&f.file.path).unwrap(), b"fixture");
@@ -189,7 +194,7 @@ fn physical_deletion_purges_orphan_media_and_finishes_durable_intent() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let handle = f.state.store();
-        let store = handle.lock();
+        let store = handle.as_ref();
         assert!(store.file_coverage_by_id(f.file.file_id).unwrap().is_none());
         assert!(store.list_pending_file_deletions().unwrap().is_empty());
         // Its only file is gone, so the orphan Media is purged too (2026-10-29 E2E).
@@ -201,8 +206,7 @@ fn physical_deletion_purges_orphan_media_and_finishes_durable_intent() {
 #[test]
 fn admin_cleanup_failure_reports_pending_conflict_and_retry_finishes_intent() {
     let f = Fixture::new();
-    let db =
-        rusqlite::Connection::open(f.state.store().lock().data_dir().join("library.db")).unwrap();
+    let db = rusqlite::Connection::open(f.state.store().data_dir().join("library.db")).unwrap();
     db.execute_batch(
         "CREATE TRIGGER fail_cleanup BEFORE DELETE ON library_files
         BEGIN SELECT RAISE(ABORT,'cleanup unavailable'); END;",
@@ -229,18 +233,12 @@ fn admin_cleanup_failure_reports_pending_conflict_and_retry_finishes_intent() {
     assert!(
         f.state
             .store()
-            .lock()
             .file_coverage_by_id(f.file.file_id)
             .unwrap()
             .is_some()
     );
     assert_eq!(
-        f.state
-            .store()
-            .lock()
-            .list_pending_file_deletions()
-            .unwrap()
-            .len(),
+        f.state.store().list_pending_file_deletions().unwrap().len(),
         1
     );
     db.execute_batch("DROP TRIGGER fail_cleanup").unwrap();
@@ -255,7 +253,6 @@ fn admin_cleanup_failure_reports_pending_conflict_and_retry_finishes_intent() {
     assert!(
         f.state
             .store()
-            .lock()
             .file_coverage_by_id(f.file.file_id)
             .unwrap()
             .is_none()
@@ -263,7 +260,6 @@ fn admin_cleanup_failure_reports_pending_conflict_and_retry_finishes_intent() {
     assert!(
         f.state
             .store()
-            .lock()
             .list_pending_file_deletions()
             .unwrap()
             .is_empty()
@@ -288,7 +284,6 @@ fn physical_deletion_preserves_a_source_changed_without_a_new_file_row() {
         assert!(
             f.state
                 .store()
-                .lock()
                 .file_coverage_by_id(f.file.file_id)
                 .unwrap()
                 .is_some()
@@ -296,7 +291,6 @@ fn physical_deletion_preserves_a_source_changed_without_a_new_file_row() {
         assert!(
             f.state
                 .store()
-                .lock()
                 .list_pending_file_deletions()
                 .unwrap()
                 .is_empty()
@@ -309,8 +303,7 @@ fn retransfer_is_budgeted_and_publishes_the_actual_restored_source_version() {
     let f = Fixture::new();
     let source = f._dir.path().join("source.mkv");
     std::fs::write(&source, b"restored source").unwrap();
-    let db =
-        rusqlite::Connection::open(f.state.store().lock().data_dir().join("library.db")).unwrap();
+    let db = rusqlite::Connection::open(f.state.store().data_dir().join("library.db")).unwrap();
     db.execute("UPDATE library_files SET source_path=?2,presence_state='missing',missing_at=1 WHERE file_id=?1",
         rusqlite::params![f.file.file_id.to_string(),source.display().to_string()]).unwrap();
     std::fs::remove_file(&f.file.path).unwrap();
@@ -332,7 +325,6 @@ fn retransfer_is_budgeted_and_publishes_the_actual_restored_source_version() {
     let current = f
         .state
         .store()
-        .lock()
         .file_coverage_by_id(f.file.file_id)
         .unwrap()
         .unwrap();
@@ -363,9 +355,11 @@ fn ledger_filesystem_observation_releases_store_and_executor() {
     let store = f.state.store();
     let observer = std::thread::spawn(move || {
         started.recv_timeout(Duration::from_secs(3)).unwrap();
-        let guard = store
-            .try_lock_for(Duration::from_millis(100))
-            .expect("metadata held Store");
+        store
+            .writers()
+            .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+            .expect("metadata held Library writer");
+        let guard = store.as_ref();
         assert!(!guard.list_libraries().unwrap().is_empty());
     });
     let (response, elapsed) = runtime().block_on(async {

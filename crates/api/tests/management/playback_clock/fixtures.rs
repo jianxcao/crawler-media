@@ -143,7 +143,7 @@ pub(super) fn seed_old_playback_log(tmp: &tempfile::TempDir, media_id: &str) {
 pub(super) struct ClockEnv {
     pub(super) app: axum::Router,
     pub(super) clock: Arc<FakePlaybackClock>,
-    pub(super) store: Arc<Mutex<api::Store>>,
+    pub(super) store: Arc<api::Store>,
     pub(super) user: domain::UserId,
     pub(super) media_id: String,
     pub(super) base_ms: i64,
@@ -169,7 +169,7 @@ impl ClockEnv {
         let media_id = seed_movie(&app, tmp).await;
         let store = st.store();
         let user = {
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .user_by_token("management-secret")
                 .unwrap()

@@ -65,7 +65,7 @@ pub(crate) fn observe_transfer_modes(files: &[FileCoverage], default_mode: &str)
 /// actually ended up with (a hardlink is only visible here), its source path and
 /// the sidecar artwork beside it are written with the file.
 pub(crate) fn publish_transfer_file(
-    store: &store::Store,
+    store: &store::LibraryConnection<'_>,
     library_id: &str,
     config_revision: i64,
     coverage: &FileCoverage,

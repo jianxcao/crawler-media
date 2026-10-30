@@ -37,9 +37,11 @@ fn collection_artwork_observation_does_not_hold_store_or_executor() {
             rx.recv_timeout(Duration::from_secs(2))
                 .expect("file seam must be used");
             let before = Instant::now();
-            let guard = store
-                .try_lock_for(Duration::from_millis(100))
-                .expect("slow artwork holds Store");
+            store
+                .writers()
+                .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
+                .expect("slow artwork holds Library writer");
+            let guard = store.as_ref();
             assert!(!guard.list_libraries().unwrap().is_empty());
             before.elapsed()
         });

@@ -34,6 +34,7 @@ struct SlowMaintenance {
 impl DatabaseExecutor for SlowMaintenance {
     fn execute(
         &self,
+        _conn: &rusqlite::Connection,
         target: &DatabaseTarget,
         _vacuum_enabled: bool,
         _context: &MaintenanceContext<'_>,

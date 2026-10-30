@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{ProbeManager, ProbeUnit};
 use super::{single_episode, single_season};
+#[cfg(test)]
 use crate::Store;
 use crate::fingerprint_job::fingerprint_cache_key;
 use crate::scrape_store::ScrapeStoreExt;
@@ -60,13 +61,12 @@ pub(super) fn compare_and_store_markers(
         let chapter_count = replacement.chapter_updates.len();
         let chapter_updates_clone = replacement.chapter_updates.clone();
         let members = source_observations(&comparison.samples.season_rows)?;
-        {
-            let store = mgr.writer()?;
-            validate_active_unit(&store, unit)?;
-            validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
-            validate_season_rows(&store, &comparison.samples.season_rows)?;
-            store.replace_marker_results_batch_checked(&[replacement], &members)?;
-        }
+        mgr.store.library_write(|store| {
+            validate_active_unit(store, unit)?;
+            validate_publication_rows(store, std::slice::from_ref(&unit.row))?;
+            validate_season_rows(store, &comparison.samples.season_rows)?;
+            store.replace_marker_results_batch_checked(&[replacement], &members)
+        })?;
         if let Some(service) = mgr.chapter_frames() {
             crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
                 &chapter_updates_clone,
@@ -83,13 +83,12 @@ pub(super) fn compare_and_store_markers(
     } else {
         let members = source_observations(&comparison.samples.season_rows)?;
         let live_rows = rows_present_on_disk(&comparison.samples.all_rows)?;
-        let updates = {
-            let store = mgr.writer()?;
-            validate_active_unit(&store, unit)?;
-            validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
-            validate_season_rows(&store, &comparison.samples.season_rows)?;
-            persist_markers_checked(&store, &live_rows, &comparison.markers, false, &members)?
-        };
+        let updates = mgr.store.library_write(|store| {
+            validate_active_unit(store, unit)?;
+            validate_publication_rows(store, std::slice::from_ref(&unit.row))?;
+            validate_season_rows(store, &comparison.samples.season_rows)?;
+            persist_markers_checked(store, &live_rows, &comparison.markers, false, &members)
+        })?;
         // Drop Store before enqueueing; the service re-reads it when it runs.
         if let Some(service) = mgr.chapter_frames() {
             crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
@@ -106,7 +105,7 @@ pub(super) fn compare_and_store_markers(
 }
 
 pub(super) fn validate_active_unit(
-    store: &Store,
+    store: &store::LibraryConnection<'_>,
     unit: &ProbeUnit,
 ) -> Result<(), crate::store::StoreError> {
     if let Some(job_id) = unit.job_id.as_deref()
@@ -122,11 +121,11 @@ pub(super) fn validate_active_unit(
 /// Call only while holding Store, immediately before publishing the computed result.
 /// Ledger-only publication check; run [`observe_rows`] (outside the lock) first.
 pub(super) fn validate_publication_rows(
-    store: &Store,
+    store: &store::LibraryConnection<'_>,
     rows: &[FileCoverage],
 ) -> Result<(), crate::store::StoreError> {
     for row in rows {
-        crate::fingerprint_job::source::ensure_source_recorded(store, row)
+        crate::fingerprint_job::source::ensure_source_recorded_on(store, row)
             .map_err(crate::store::StoreError::Missing)?;
     }
     Ok(())
@@ -173,7 +172,7 @@ pub(super) fn source_observations(
 
 /// Every comparison input participates, including rows outside a partial job lease.
 pub(super) fn validate_season_rows(
-    store: &Store,
+    store: &store::LibraryConnection<'_>,
     rows: &[FileCoverage],
 ) -> Result<(), crate::store::StoreError> {
     validate_publication_rows(store, rows)?;
@@ -207,7 +206,7 @@ fn season_input_unchanged(
     unit: &ProbeUnit,
 ) -> Result<bool, crate::store::StoreError> {
     let digest = season_digest(mgr, unit)?;
-    let stored = mgr.reader()?.season_comparison_digest(
+    let stored = mgr.store.season_comparison_digest(
         &unit.row.file.media_id.to_string(),
         super::require_episode_coordinates(&unit.row)?.0,
     )?;
@@ -221,15 +220,16 @@ fn remember_season_digest(
 ) -> Result<(), crate::store::StoreError> {
     let digest = comparison_digest(samples);
     observe_rows(&samples.season_rows)?;
-    let store = mgr.writer()?;
-    validate_active_unit(&store, unit)?;
-    validate_season_rows(&store, &samples.season_rows)?;
-    store.save_season_comparison_digest(
-        &unit.row.file.media_id.to_string(),
-        super::require_episode_coordinates(&unit.row)?.0,
-        &digest,
-        mgr.clock.lock().now_ms(),
-    )
+    mgr.store.library_write(|store| {
+        validate_active_unit(store, unit)?;
+        validate_season_rows(store, &samples.season_rows)?;
+        store.save_season_comparison_digest(
+            &unit.row.file.media_id.to_string(),
+            super::require_episode_coordinates(&unit.row)?.0,
+            &digest,
+            mgr.clock.lock().now_ms(),
+        )
+    })
 }
 
 fn remember_comparison(mgr: &ProbeManager, unit: &ProbeUnit, samples: &SeasonFingerprintSamples) {
@@ -357,7 +357,7 @@ fn load_season_samples(
     unit: &ProbeUnit,
 ) -> Result<SeasonFingerprintSamples, crate::store::StoreError> {
     let season = super::require_episode_coordinates(&unit.row)?.0;
-    let store = mgr.reader()?;
+    let store = mgr.store.as_ref();
     let all_rows = store.file_coverage_for_media(unit.row.file.media_id)?;
     let season_rows: Vec<_> = all_rows
         .iter()
@@ -505,7 +505,7 @@ fn build_marker_replacement(
     comparison: &MarkerComparison,
 ) -> Result<MarkerResultReplacement, crate::store::StoreError> {
     let season = super::require_episode_coordinates(&unit.row)?.0;
-    let store = mgr.reader()?;
+    let store = mgr.store.as_ref();
     let mut chapter_updates = Vec::with_capacity(comparison.samples.season_rows.len());
     for row in &comparison.samples.season_rows {
         let matched = comparison
@@ -604,11 +604,11 @@ pub(super) fn persist_marker(
             presence: domain::FilePresence::Present,
         })
         .collect::<Vec<_>>();
-    persist_markers_checked(store, rows, &[marker], overwrite, &members)
+    store.library_write(|db| persist_markers_checked(db, rows, &[marker], overwrite, &members))
 }
 
 fn persist_markers_checked(
-    store: &Store,
+    store: &store::LibraryConnection<'_>,
     rows: &[FileCoverage],
     markers: &[crate::store::StoredMediaMarker],
     overwrite: bool,
@@ -628,7 +628,7 @@ fn persist_markers_checked(
                 })
         })
     }) {
-        match crate::fingerprint_job::source::ensure_source_recorded(store, row) {
+        match crate::fingerprint_job::source::ensure_source_recorded_on(store, row) {
             Ok(()) => live.push(row.clone()),
             Err(reason) if crate::fingerprint_job::source::is_file_deleted(&reason) => {
                 tracing::info!(file_id = %row.file.file_id, %reason, "skip unavailable marker publication target");

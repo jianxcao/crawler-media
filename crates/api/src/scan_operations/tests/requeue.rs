@@ -13,7 +13,7 @@ async fn dirty_event_during_round_requeues_with_cumulative_report() {
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
@@ -35,7 +35,7 @@ async fn dirty_event_during_round_requeues_with_cumulative_report() {
         &hook_op_id,
         Box::new(move || {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .enqueue_scan(&library_id, &hook_sig, std::slice::from_ref(&target), 1001)
                 .unwrap();
@@ -58,7 +58,7 @@ async fn dirty_event_during_round_requeues_with_cumulative_report() {
         done.report
     );
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
-    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(
         rows.iter()
@@ -78,7 +78,7 @@ async fn running_transition_keeps_requeued_cumulative_report() {
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
@@ -106,7 +106,7 @@ async fn running_transition_keeps_requeued_cumulative_report() {
             // 第一轮：并入第二个事件 → 本轮补扫重排并落库累计报告。
             {
                 let store = state.store();
-                let guard = store.lock();
+                let guard = store.as_ref();
                 guard
                     .enqueue_scan(&library_id, &hook_sig, std::slice::from_ref(&target), 1001)
                     .unwrap();
@@ -120,7 +120,6 @@ async fn running_transition_keeps_requeued_cumulative_report() {
                 Box::new(move || {
                     let report = state_round2
                         .store()
-                        .lock()
                         .scan_operation(&op_id_round2)
                         .unwrap()
                         .map(|op| op.report);
@@ -160,7 +159,7 @@ async fn requeued_failed_round_keeps_bounded_failure_history() {
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -175,7 +174,7 @@ async fn requeued_failed_round_keeps_bounded_failure_history() {
         &op_id,
         Box::new(move || {
             let store = state.store();
-            let guard = store.lock();
+            let guard = store.as_ref();
             guard
                 .enqueue_scan(&library_id, &hook_sig, &[], 1001)
                 .unwrap();
@@ -222,8 +221,5 @@ async fn requeued_failed_round_keeps_bounded_failure_history() {
     // 第一轮已提交的前缀 + 第二轮的成功轮，都要在累计计数里。
     assert_eq!(done.report["scanned"], 2, "{}", done.report);
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
-    assert_eq!(
-        fix.state.store().lock().list_file_coverage().unwrap().len(),
-        1
-    );
+    assert_eq!(fix.state.store().list_file_coverage().unwrap().len(), 1);
 }

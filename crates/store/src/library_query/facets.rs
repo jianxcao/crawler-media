@@ -204,24 +204,23 @@ pub(super) fn without(filter: &BrowseFilter, dimension: Dimension) -> BrowseFilt
 impl Store {
     /// Ten facet dimensions plus the total of the fully applied filter.
     pub fn library_facets(&self, request: &FacetRequest) -> Result<LibraryFacets, StoreError> {
-        self.library_facets_inner(request)
+        self.with_library_read(|db| db.library_facets(request))
     }
 
     pub fn library_facets_with_stats(
         &self,
         request: &FacetRequest,
     ) -> Result<(LibraryFacets, super::items::QueryWorkStats), StoreError> {
-        let observer = super::items::stats::QueryWorkScope::new(&[&self.app, &self.library]);
-        let facets = self.library_facets_inner(request)?;
-        let rows = facets.groups.values().map(Vec::len).sum::<usize>() as u64;
-        Ok((facets, observer.stats(rows)))
+        let (facets, mut stats) = self.with_stats(crate::stats::StatsScope::Both, || {
+            self.library_facets_inner(request)
+        });
+        let facets = facets?;
+        stats.rows_returned = facets.groups.values().map(Vec::len).sum::<usize>() as u64;
+        Ok((facets, stats))
     }
 
     fn library_facets_inner(&self, request: &FacetRequest) -> Result<LibraryFacets, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        let result = library_facets_on(&tx, request)?;
-        tx.commit()?;
-        Ok(result)
+        self.with_library_read(|db| db.library_facets_inner(request))
     }
 }
 
@@ -332,26 +331,32 @@ mod tests {
         let store = Store::open(tmp.path()).unwrap();
         let library = support::seed(&store, domain::MediaKind::Movie, 4);
         store
-            .library
-            .authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-                AuthAction::Read {
-                    table_name: "media_metadata",
-                    ..
-                }
-                | AuthAction::Read {
-                    table_name: "library_metadata_inputs",
-                    ..
-                }
-                | AuthAction::Read {
-                    table_name: "media_metadata_overrides",
-                    ..
-                }
-                | AuthAction::Read {
-                    table_name: "media_metadata_effective",
-                    ..
-                } => Authorization::Deny,
-                _ => Authorization::Allow,
-            }));
+            .configure_reader_pool_size(crate::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        store
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+                    AuthAction::Read {
+                        table_name: "media_metadata",
+                        ..
+                    }
+                    | AuthAction::Read {
+                        table_name: "library_metadata_inputs",
+                        ..
+                    }
+                    | AuthAction::Read {
+                        table_name: "media_metadata_overrides",
+                        ..
+                    }
+                    | AuthAction::Read {
+                        table_name: "media_metadata_effective",
+                        ..
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }));
+                Ok(())
+            })
+            .unwrap();
         for (genres, expected) in [
             (vec!["Drama".into(), "Comedy".into()], 4),
             (vec!["Drama".into()], 2),
@@ -371,8 +376,11 @@ mod tests {
             assert_eq!(actual.total, expected);
         }
         store
-            .library
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -380,6 +388,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).unwrap();
         let library = support::seed(&store, domain::MediaKind::Movie, 4);
+        store
+            .configure_reader_pool_size(crate::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
         let writer = Store::open(tmp.path()).unwrap();
         let (start_tx, start_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -414,24 +425,29 @@ mod tests {
             done_tx.send(()).unwrap();
         });
         let mut triggered = false;
-        store.library.authorizer(Some(move |ctx: AuthContext<'_>| {
-            if !triggered
-                && matches!(
-                    ctx.action,
-                    AuthAction::Read {
-                        table_name: "library_query_counts",
-                        ..
+        store
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                    if !triggered
+                        && matches!(
+                            ctx.action,
+                            AuthAction::Read {
+                                table_name: "library_query_counts",
+                                ..
+                            }
+                        )
+                    {
+                        triggered = true;
+                        start_tx.send(()).unwrap();
+                        done_rx
+                            .recv_timeout(DEFAULT_GATE_TIMEOUT)
+                            .expect("the concurrent integrity operation never completed");
                     }
-                )
-            {
-                triggered = true;
-                start_tx.send(()).unwrap();
-                done_rx
-                    .recv_timeout(DEFAULT_GATE_TIMEOUT)
-                    .expect("the concurrent integrity operation never completed");
-            }
-            Authorization::Allow
-        }));
+                    Authorization::Allow
+                }));
+                Ok(())
+            })
+            .unwrap();
         let request = FacetRequest {
             library_id: library,
             user_id: None,
@@ -441,8 +457,11 @@ mod tests {
         let first = store.library_facets(&request).unwrap();
         worker.join().unwrap();
         store
-            .library
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            .with_read(crate::Db::Library, |conn| {
+                conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(
             first.groups["genres"]
                 .iter()
@@ -462,3 +481,6 @@ mod tests {
         );
     }
 }
+
+#[path = "facets/connection.rs"]
+mod connection;

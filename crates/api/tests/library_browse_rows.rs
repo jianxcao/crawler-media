@@ -36,7 +36,6 @@ fn base_state(tmp: &tempfile::TempDir) -> ApiState {
 fn movie_library(state: &ApiState) -> (String, PathBuf) {
     let library = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -67,7 +66,7 @@ fn seed_row(state: &ApiState, media_id: MediaId, path: &Path, nfo: Option<&str>)
         filter_score: None,
         ..Default::default()
     };
-    publish_fixture_file(&state.store().lock(), &spec).unwrap();
+    publish_fixture_file(&state.store(), &spec).unwrap();
 }
 
 fn insert_media(state: &ApiState, media_id: MediaId, title: &str) {
@@ -84,7 +83,7 @@ fn insert_media(state: &ApiState, media_id: MediaId, title: &str) {
         bangumi_id: None,
         anilist_id: None,
     };
-    state.store().lock().insert_media(&media).unwrap();
+    state.store().insert_media(&media).unwrap();
 }
 
 async fn get_json(app: &axum::Router, url: &str) -> Value {
@@ -163,7 +162,6 @@ async fn nested_libraries_keep_their_own_rows() {
     std::fs::create_dir_all(&child_root).unwrap();
     let child = api_state
         .store()
-        .lock()
         .create_library(
             MediaKind::Movie,
             "child",
@@ -252,7 +250,6 @@ fn published_file_row(
 fn library_root_id(api_state: &ApiState, library_id: &str) -> String {
     api_state
         .store()
-        .lock()
         .list_library_roots()
         .unwrap()
         .into_iter()
@@ -278,7 +275,7 @@ fn publish_published_files(
         let file = published_file_row(library_id, &root_id, media_id, index);
         ids.push(file.file_id);
         store
-            .lock()
+            .as_ref()
             .publish_files(
                 &scope,
                 &[store::library_write::FilePublication {
@@ -404,7 +401,6 @@ async fn pending_files_and_multi_unit_coverage_are_state_aware() {
     let units = [domain::UnitKey::new(1, 1), domain::UnitKey::new(1, 2)];
     api_state
         .store()
-        .lock()
         .publish_files(
             &scope,
             &[store::library_write::FilePublication {
@@ -430,7 +426,6 @@ async fn pending_files_and_multi_unit_coverage_are_state_aware() {
     };
     api_state
         .store()
-        .lock()
         .reserve_transfer(
             &scope,
             &pending,

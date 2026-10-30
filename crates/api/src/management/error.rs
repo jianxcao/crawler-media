@@ -61,10 +61,21 @@ impl IntoResponse for ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "store.error",
-            message: error.to_string(),
+        match error {
+            StoreError::WriteBusy
+            | StoreError::ReadBusy
+            | StoreError::ReadClosed
+            | StoreError::ReadDeadline
+            | StoreError::ReadCancelled => Self::with(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请稍后重试".into(),
+            ),
+            error => Self::with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                error.to_string(),
+            ),
         }
     }
 }

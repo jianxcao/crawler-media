@@ -38,6 +38,22 @@ pub struct VisibleLibraries {
 }
 
 impl VisibleLibraries {
+    pub(crate) fn load_on(
+        store: &store::LibraryConnection<'_>,
+        user: Option<UserId>,
+        is_admin: bool,
+    ) -> Result<Self, StoreError> {
+        let libraries = store
+            .list_libraries()?
+            .into_iter()
+            .filter(|library| {
+                crate::http::library::library_visible_on(store, library, user, is_admin)
+            })
+            .filter_map(|library| Some((library.id.parse().ok()?, library)))
+            .collect();
+        Ok(Self { libraries })
+    }
+
     pub fn load(store: &Store, user_id: Option<UserId>) -> Result<Self, StoreError> {
         let libraries = store
             .list_libraries()?

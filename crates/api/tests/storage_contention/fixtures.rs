@@ -50,12 +50,12 @@ pub(crate) fn seed_library(
     folder: &str,
 ) -> (LibraryId, String, PathBuf, Media) {
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     let root = dir.join(folder);
     let library = store
         .create_library(kind, name, &[root.to_str().unwrap()], "everyone", true, &[])
         .unwrap();
-    let (root_id, root_path) = root_of(&store, &library.id);
+    let (root_id, root_path) = root_of(store, &library.id);
     let media = media(kind, name);
     store.insert_media(&media).unwrap();
     (library.id.parse().unwrap(), root_id, root_path, media)
@@ -100,11 +100,11 @@ pub(crate) fn fixture(title: &str) -> Fixture {
     );
     {
         let binding = state.store();
-        let store = binding.lock();
+        let store = binding.as_ref();
         let template = file_template(series_library, &series_root_id, series.id, MediaKind::Tv);
         let episode_one = episode_file(&template, &series_root, 1, 1);
         publish(
-            &store,
+            store,
             &series_library,
             &[episode_one],
             &[UnitKey::new(1, 1)],
@@ -124,7 +124,7 @@ pub(crate) fn fixture(title: &str) -> Fixture {
             ..template
         };
         publish(
-            &store,
+            store,
             &unowned_library,
             &[movie_file],
             &[UnitKey::WHOLE],
@@ -244,15 +244,17 @@ pub(crate) fn publish(
             probe_required: false,
         })
         .collect();
-    let config_revision = store.library_config_revision(&library_id.to_string())?;
-    store.publish_files(
-        &WriteScope {
-            library_id: *library_id,
-            config_revision,
-        },
-        &publications,
-        now_ms,
-    )
+    store.library_write(|connection| {
+        let config_revision = connection.library_config_revision(&library_id.to_string())?;
+        connection.publish_files(
+            &WriteScope {
+                library_id: *library_id,
+                config_revision,
+            },
+            &publications,
+            now_ms,
+        )
+    })
 }
 
 pub(crate) fn heartbeat_body(
@@ -337,7 +339,7 @@ pub(crate) async fn beat_start(
 
 pub(crate) fn revision(state: &ApiState, library_id: &str) -> i64 {
     let binding = state.store();
-    let store = binding.lock();
+    let store = binding.as_ref();
     store.library_config_revision(library_id).unwrap()
 }
 

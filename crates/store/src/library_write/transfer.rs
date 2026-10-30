@@ -28,94 +28,7 @@ impl Store {
         mode: library::TransferMode,
         _now_ms: i64,
     ) -> Result<FileCoverage, StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        ensure_library_writable(&tx, &scope.library_id.to_string())?;
-        ensure_config_revision(&tx, scope)?;
-        ensure_media_writable(&tx, candidate.file.media_id)?;
-        if candidate.file.library_id != scope.library_id {
-            return Err(StoreError::Protected(format!(
-                "transfer candidate library {} is outside write scope {}",
-                candidate.file.library_id, scope.library_id
-            )));
-        }
-
-        // Root-relative destinations resolve once, here; keys are always absolute.
-        let absolutized =
-            super::root_ownership::ensure_root_owns_path(&tx, &candidate.file)?.map(|file| {
-                FileCoverage {
-                    path_key: candidate.path_key.clone(),
-                    file,
-                    units: candidate.units.clone(),
-                }
-            });
-        let candidate = absolutized.as_ref().unwrap_or(candidate);
-        let dest_path_str = candidate.file.path.to_string_lossy().to_string();
-        let dest_key = crate::path_key::canonical_recorded_key(&tx, &dest_path_str);
-
-        let existing = load_reservation(&tx, scope.library_id, &dest_key)?;
-
-        let mut reserved = candidate.clone();
-
-        if let Some((existing_id, existing_media, existing_root, pub_state, src_path, tr_mode)) =
-            existing
-        {
-            if existing_media != candidate.file.media_id.to_string() {
-                return Err(StoreError::Invalid(
-                    "Transfer destination is already owned by another Media".into(),
-                ));
-            }
-            if pub_state != "pending"
-                || existing_root != candidate.file.root_id
-                || src_path.as_deref() != Some(source.to_string_lossy().as_ref())
-                || tr_mode.as_deref() != Some(mode.as_str())
-            {
-                return Err(StoreError::Protected(
-                    "Transfer destination reservation identity or source changed".into(),
-                ));
-            }
-
-            let file_id = existing_id.parse::<LedgerId>()?;
-            reserved.file.file_id = file_id;
-            let units = self.get_file_units(file_id)?;
-            if !units.is_empty() {
-                reserved.units = units;
-            }
-        }
-
-        reserved.file.publication = FilePublication::Pending;
-        reserved.file.source_path = Some(source.to_path_buf());
-        reserved.file.transfer_mode = Some(mode.as_str().to_string());
-
-        // Upsert pending file row
-        let file_id_str = reserved.file.file_id.to_string();
-        let exists: i64 = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_files WHERE file_id = ?1)",
-            params![file_id_str],
-            |r| r.get(0),
-        )?;
-
-        if exists != 0 {
-            ensure_same_reservation(&tx, &file_id_str, scope, &dest_path_str)?;
-            tx.execute(
-                "UPDATE library_files SET
-                    publication_state = 'pending',
-                    source_path = ?2,
-                    transfer_mode = ?3
-                 WHERE file_id = ?1",
-                params![
-                    file_id_str,
-                    source.to_string_lossy().to_string(),
-                    mode.as_str()
-                ],
-            )?;
-        } else {
-            super::publish::insert_file_row(&tx, &reserved.file)?;
-        }
-
-        sync_coverage(&tx, &reserved.file, &reserved.units)?;
-        tx.commit()?;
-
-        Ok(reserved)
+        self.with_library_write(|db| db.reserve_transfer(scope, candidate, source, mode, _now_ms))
     }
 
     /// Mark a transferred file as `Published` with the expected version.
@@ -126,52 +39,7 @@ impl Store {
         expected: &FileVersion,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        crate::pending_file_deletions::ensure_path_not_pending_deletion(
-            &tx,
-            &coverage.file.path.to_string_lossy(),
-        )?;
-        ensure_library_writable(&tx, &scope.library_id.to_string())?;
-        ensure_config_revision(&tx, scope)?;
-
-        let file_id_str = coverage.file.file_id.to_string();
-        let (library_id, media_id) = persisted_owner(&tx, &file_id_str)?;
-        if library_id != scope.library_id.to_string()
-            || library_id != coverage.file.library_id.to_string()
-            || media_id != coverage.file.media_id.to_string()
-        {
-            return Err(StoreError::Protected(format!(
-                "transfer file {file_id_str} is not owned by write scope {}",
-                scope.library_id
-            )));
-        }
-        ensure_media_writable(&tx, coverage.file.media_id)?;
-        super::publish::ensure_file_version(&tx, &file_id_str, expected)?;
-
-        let changed = tx.execute(
-            "UPDATE library_files SET
-                publication_state = 'published'
-             WHERE file_id = ?1 AND library_id = ?2 AND file_revision = ?3
-               AND source_version = ?4 AND publication_state = 'pending'",
-            params![
-                file_id_str,
-                library_id,
-                expected.revision,
-                expected.source_version
-            ],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::Protected(format!(
-                "transfer file {file_id_str} is no longer a pending reservation"
-            )));
-        }
-
-        sync_coverage(&tx, &coverage.file, &coverage.units)?;
-        super::publish::enqueue_probe(&tx, coverage.file.file_id, now_ms)?;
-        reduce_library_media(&tx, scope.library_id, coverage.file.media_id)?;
-
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| db.finish_transfer(scope, coverage, expected, now_ms))
     }
 }
 
@@ -246,3 +114,6 @@ fn load_reservation(
     .optional()
     .map_err(Into::into)
 }
+
+#[path = "transfer/connection.rs"]
+mod connection;

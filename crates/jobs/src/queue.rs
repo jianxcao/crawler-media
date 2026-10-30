@@ -49,6 +49,12 @@ impl Queue {
         Ok(Self { conn })
     }
 
+    /// Borrow this Queue's actual writer for database maintenance. The caller
+    /// retains its writer guard; no parallel connection is opened.
+    pub fn with_connection<T>(&self, work: impl FnOnce(&Connection) -> T) -> T {
+        work(&self.conn)
+    }
+
     pub fn enqueue(&self, kind: JobKind, payload: &str, run_after: i64) -> Result<Job, JobError> {
         self.enqueue_with_key(kind, payload, run_after, None)
     }

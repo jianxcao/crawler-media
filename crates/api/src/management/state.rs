@@ -19,19 +19,14 @@ use crate::store::StoreError;
 use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
 use domain::{SubscribeId, UserId};
 
-/// Production Library reader connections; the read gate admits the same count.
-const LIBRARY_READERS: usize = 2;
+/// Production Library reader capacity.
+pub(crate) const STORE_READERS: usize = 8;
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub(crate) store: Arc<Mutex<Store>>,
-    /// L1 读侧：请求读用的只读 Store 池，永不等待写锁（见 `store_readers`）。
-    pub(crate) store_readers: Arc<crate::store_readers::StoreReaders>,
-    pub(crate) library_reads: Arc<store::LibraryReadPool>,
-    library_read_shutdown: Arc<LibraryReadShutdown>,
-    /// Bounded async admission for `library_reads` (one permit per connection).
-    pub(crate) library_read_gate: Arc<crate::library_read_work::LibraryReadGate>,
-    /// Shared app writer, independent of the outer Library writer.
+    pub(crate) store: Arc<Store>,
+    pub(crate) library_reads: Arc<store::ReaderPool>,
+    /// Shared database writers, acquired only at the mutation seam.
     pub(crate) writers: Arc<store::Writers>,
     /// 两套登录协议共用的 offlock 密码校验与 CAS 签发服务。
     pub(crate) password_login: Arc<crate::password_login::PasswordLogin>,
@@ -65,7 +60,8 @@ pub struct ApiState {
     /// Library 封面渲染与版本化发布（生产默认真实渲染器，测试可注入）。
     pub(crate) cover_service: Arc<crate::library_cover_service::LibraryCoverService>,
     pub(crate) library_work: Arc<crate::library_lifecycle::LibraryWorkRegistry>,
-    pub jobs: Arc<Mutex<jobs::Queue>>,
+    pub jobs: Arc<crate::JobsWriter>,
+    pub(crate) jobs_readers: Arc<store::ReaderPool>,
     /// 后台 job_loop 控制（停止意图与正在运行的 blocking worker 跟踪）。
     pub(crate) job_loop_control: Arc<crate::job_loop::JobLoopControl>,
     /// H-1: false while another instance holds the data-directory lease.
@@ -80,8 +76,12 @@ pub struct ApiState {
     pub(crate) maintenance_lock: Arc<Mutex<()>>,
     /// Job attempts still executing in this process; protects them from timeout recovery.
     pub(crate) active_job_attempts: Arc<Mutex<HashMap<domain::JobId, jobs::Job>>>,
+    pub(crate) job_attempt_coordinator: Arc<Mutex<()>>,
     /// Serializes a Subscribe pause/update against a worker's final add step.
     subscribe_guards: Arc<Mutex<HashMap<SubscribeId, Weak<Mutex<()>>>>>,
+    pub(crate) active_transfers: Arc<Mutex<std::collections::HashSet<SubscribeId>>>,
+    /// Wake deletion waiters after a round finishes recording its external effects.
+    pub(crate) subscribe_round_finished: Arc<tokio::sync::Notify>,
     /// Deletion reservations prevent workers and manual triggers from starting
     /// new work while asynchronous cleanup runs without holding a sync guard.
     deleting_subscribes: Arc<Mutex<HashSet<SubscribeId>>>,
@@ -139,14 +139,6 @@ pub struct ApiState {
     pub(crate) statistics_role_lookups: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-struct LibraryReadShutdown(Arc<store::LibraryReadPool>);
-
-impl Drop for LibraryReadShutdown {
-    fn drop(&mut self) {
-        self.0.close();
-    }
-}
-
 fn apply_admin_bootstrap(
     store: &Store,
     action: crate::bootstrap_credentials::AdminBootstrapAction,
@@ -177,14 +169,24 @@ impl ApiState {
         self
     }
 
-    /// Shared Fanart cache: schema validation/initialization runs on first use only.
-    pub(crate) fn fanart_cache(&self) -> Result<Arc<media::cache::CatalogCache>, media::TmdbError> {
-        if let Some(cache) = self.fanart_cache.get() {
-            return Ok(cache.clone());
-        }
-        let path = self.store.lock().cache_db_path();
-        let cache = media::fanart::open_cache(&path)?;
-        Ok(self.fanart_cache.get_or_init(|| cache).clone())
+    /// Source clients share this application's Cache writer and readonly pool.
+    pub fn catalog_cache(
+        &self,
+        source: media::response_cache::CacheSource,
+    ) -> media::cache::CatalogCache {
+        media::cache::CatalogCache::with_backend(
+            Arc::new(crate::catalog_storage::StoreCache(self.store.clone())),
+            source,
+            0,
+        )
+    }
+
+    pub(crate) fn fanart_cache(&self) -> Arc<media::cache::CatalogCache> {
+        self.fanart_cache
+            .get_or_init(|| {
+                Arc::new(self.catalog_cache(media::response_cache::CacheSource::Fanart))
+            })
+            .clone()
     }
 
     pub fn new<F>(
@@ -198,14 +200,14 @@ impl ApiState {
     where
         F: Fetcher + 'static,
     {
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(store);
         Self::new_arc(store, token, profiles, fetcher, downloader, library_root)
     }
 
-    /// Variant that takes the store already wrapped in Arc<Mutex<>>, so
+    /// Variant that takes the Store already shared through Arc, so
     /// callers can share it with runtime-configurable clients (e.g. TMDB).
     pub fn new_arc<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         token: String,
         profiles: ProfileSet,
         fetcher: Arc<F>,
@@ -227,7 +229,7 @@ impl ApiState {
     }
 
     pub fn new_arc_with_admin_password<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         token: String,
         admin_password: Option<String>,
         profiles: ProfileSet,
@@ -244,7 +246,7 @@ impl ApiState {
             crate::bootstrap_credentials::BootstrapMode::TestFixture
         };
         let action = crate::bootstrap_credentials::prepare_admin_credentials(
-            &store.lock(),
+            &store.as_ref(),
             &token,
             admin_password.as_deref(),
             mode,
@@ -262,7 +264,7 @@ impl ApiState {
     }
 
     pub fn new_arc_with_admin_bootstrap<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
@@ -273,28 +275,23 @@ impl ApiState {
         F: Fetcher + 'static,
     {
         std::fs::create_dir_all(&library_root)?;
-        apply_admin_bootstrap(&store.lock(), action)?;
-        let jellyfin_server_id = startup::jellyfin_server_id(&store.lock())?;
-        let jobs_path = store.lock().data_dir().join("jobs.db");
+        apply_admin_bootstrap(&store.as_ref(), action)?;
+        let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref())?;
+        let jobs_path = store.as_ref().data_dir().join("jobs.db");
         let jobs = open_jobs(&jobs_path)?;
-        let library_reads = Arc::new(
-            store
-                .lock()
-                .open_library_read_pool(NonZeroUsize::new(LIBRARY_READERS).unwrap())?,
-        );
-        let data_dir = store.lock().data_dir().to_path_buf();
-        let writers = store.lock().writers();
-        let store_readers = Arc::new(crate::store_readers::StoreReaders::open(
-            &store.lock(),
-            crate::store_readers::STORE_READERS,
-        )?);
+        let jobs_readers = crate::jobs_readers::open(&jobs_path)?;
+        store.configure_reader_pool_size(
+            store::Db::Library,
+            NonZeroUsize::new(STORE_READERS)
+                .ok_or_else(|| StoreError::Invalid("Library reader capacity is zero".into()))?,
+        )?;
+        let library_reads = store.reader_pool(store::Db::Library);
+        let data_dir = store.data_dir().to_path_buf();
+        let writers = store.writers();
         // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
         // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
         let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-        let probe = Arc::new(crate::probe_manager::ProbeManager::with_shared_readers(
-            store.clone(),
-            store_readers.clone(),
-        ));
+        let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone())?);
         probe.set_library_registry(library_work.clone());
         let startup_browser = crate::runtime_browser::startup_browser(store.clone());
         let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
@@ -303,20 +300,13 @@ impl ApiState {
         ));
         probe.set_chapter_frames(chapter_frames.clone());
         let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
-        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> =
-            Arc::new(crate::media_posters::service::MediaPosterService::new(
-                store_readers.clone(),
-                catalog.clone(),
-            ));
+        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
+            crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
+        );
         let state = Self {
             store: store.clone(),
-            library_read_shutdown: Arc::new(LibraryReadShutdown(library_reads.clone())),
-            library_read_gate: Arc::new(crate::library_read_work::LibraryReadGate::new(
-                LIBRARY_READERS,
-            )),
             library_reads,
             writers,
-            store_readers,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(
                 Arc::new(crate::password_login::Argon2Engine),
                 2,
@@ -340,14 +330,18 @@ impl ApiState {
             cover_service: Arc::new(crate::library_cover_service::LibraryCoverService::local()),
             scan_coordinator: Arc::new(crate::scan_operations::ScanCoordinator::new()),
             library_work,
-            jobs: Arc::new(Mutex::new(jobs)),
+            jobs: Arc::new(crate::JobsWriter::new(jobs)),
+            jobs_readers,
             job_loop_control: Arc::new(crate::job_loop::JobLoopControl::new()),
             instance_writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             write_gate: Arc::new(crate::write_gate::WriteGate::new()),
             maintenance_executor: Arc::new(crate::maintenance::SqliteExecutor),
             maintenance_lock: Arc::new(Mutex::new(())),
             active_job_attempts: Arc::new(Mutex::new(HashMap::new())),
+            job_attempt_coordinator: Arc::new(Mutex::new(())),
             subscribe_guards: Arc::new(Mutex::new(HashMap::new())),
+            active_transfers: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            subscribe_round_finished: Arc::new(tokio::sync::Notify::new()),
             deleting_subscribes: Arc::new(Mutex::new(HashSet::new())),
             jellyfin_server_id: Arc::new(jellyfin_server_id),
             indexer: Arc::new(Indexer::new(profiles, fetcher)),
@@ -436,12 +430,9 @@ impl ApiState {
     }
 
     /// A one-reader fixture makes pool saturation observable through the Router.
-    pub fn with_library_read_pool_size(mut self, size: NonZeroUsize) -> Result<Self, StoreError> {
-        let pool = Arc::new(self.store.lock().open_library_read_pool(size)?);
-        self.library_reads = pool.clone();
-        self.library_read_gate =
-            Arc::new(crate::library_read_work::LibraryReadGate::new(size.get()));
-        self.library_read_shutdown = Arc::new(LibraryReadShutdown(pool));
+    pub fn with_library_read_pool_size(self, size: NonZeroUsize) -> Result<Self, StoreError> {
+        self.store
+            .configure_reader_pool_size(store::Db::Library, size)?;
         Ok(self)
     }
 
@@ -460,7 +451,7 @@ impl ApiState {
     }
 
     #[doc(hidden)]
-    pub fn library_read_pool_weak(&self) -> Weak<store::LibraryReadPool> {
+    pub fn library_read_pool_weak(&self) -> Weak<store::ReaderPool> {
         Arc::downgrade(&self.library_reads)
     }
 
@@ -632,11 +623,15 @@ impl ApiState {
         self.jellyfin_server_id.as_str()
     }
 
-    pub fn store(&self) -> Arc<Mutex<Store>> {
+    pub fn store(&self) -> Arc<Store> {
         self.store.clone()
     }
 
-    pub fn jobs(&self) -> Arc<Mutex<jobs::Queue>> {
+    pub fn jobs_readers(&self) -> Arc<store::ReaderPool> {
+        self.jobs_readers.clone()
+    }
+
+    pub fn jobs(&self) -> Arc<crate::JobsWriter> {
         self.jobs.clone()
     }
 

@@ -1,14 +1,12 @@
 use api::library_lifecycle::LibraryWorkRegistry;
-use parking_lot::Mutex;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn freeze_cancels_existing_work_and_blocks_new_leases() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Mutex::new(store::Store::open(temp.path()).unwrap());
+    let store = store::Store::open(temp.path()).unwrap();
     let root = temp.path().join("extra");
     let library = store
-        .lock()
         .create_library(
             domain::MediaKind::Tv,
             "Extra",
@@ -68,15 +66,11 @@ fn watched(name: &str) -> bool {
     }
 }
 
-fn two_libraries(
-    store: &Mutex<store::Store>,
-    temp: &std::path::Path,
-) -> (store::Library, store::Library) {
+fn two_libraries(store: &store::Store, temp: &std::path::Path) -> (store::Library, store::Library) {
     let make = |name: &str| {
         let root = temp.join(name);
         std::fs::create_dir_all(&root).unwrap();
         store
-            .lock()
             .create_library(
                 domain::MediaKind::Movie,
                 name,
@@ -100,7 +94,7 @@ fn target_lease_inside_source_publication_does_not_deadlock_freeze() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(store::Store::open(temp.path()).unwrap()));
+    let store = Arc::new(store::Store::open(temp.path()).unwrap());
     let (source, target) = two_libraries(&store, temp.path());
     let registry = Arc::new(LibraryWorkRegistry::default());
     let lease = registry.acquire(&store, &source.id).unwrap();
@@ -127,7 +121,7 @@ fn target_lease_inside_source_publication_does_not_deadlock_freeze() {
                 in_gate_tx.send(()).unwrap();
                 // Wait for the durable removal mark: the freeze is now committed
                 // and about to cancel this very gate.
-                while store.lock().library_accepts_work(&source_id).unwrap() {
+                while store.as_ref().library_accepts_work(&source_id).unwrap() {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 let target_lease = registry.acquire(&store, &target_id);
@@ -164,7 +158,7 @@ fn cancel_during_publication_allows_nested_lease_drop() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(store::Store::open(temp.path()).unwrap()));
+    let store = Arc::new(store::Store::open(temp.path()).unwrap());
     let (source, target) = two_libraries(&store, temp.path());
     let registry = Arc::new(LibraryWorkRegistry::default());
     let lease = registry.acquire(&store, &source.id).unwrap();

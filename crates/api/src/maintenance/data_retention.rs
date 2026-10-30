@@ -60,7 +60,7 @@ pub(crate) fn load_cursor(
 ) -> (i64, Option<DataRetentionCursor>) {
     let key = cursor_key(class);
     let raw = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.get_setting(&key)
     };
     let Ok(Some(raw)) = raw else {
@@ -93,7 +93,7 @@ fn persist_cursor(
     cursor: Option<&DataRetentionCursor>,
 ) -> Result<(), String> {
     let key = cursor_key(class);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     match cursor {
         Some(cursor) => {
             let stored = StoredCursor {
@@ -174,7 +174,7 @@ pub fn run_data_retention(
             }
 
             let batch = {
-                let store = state.store.lock();
+                let store = state.store.as_ref();
                 store.prune_data_history(
                     *class,
                     active_cutoff,

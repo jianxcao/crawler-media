@@ -39,7 +39,7 @@ fn verify_captured_scope(
 ) -> Result<(), ScanRunError> {
     let Some(op_id) = op_id else { return Ok(()) };
     let persisted = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.scan_operation(op_id)
     };
     match persisted {

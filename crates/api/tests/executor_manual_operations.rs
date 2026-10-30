@@ -1,4 +1,10 @@
 //! Manual mutation routes keep Store waits and external IO off the runtime.
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 #[path = "management/common.rs"]
 mod common;
@@ -11,16 +17,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
-struct SlowFetch {
-    store: OnceLock<Arc<parking_lot::Mutex<Store>>>,
-}
+// A different thread may legitimately own the Subscribe writer while this
+// read-only search runs. Runtime responsiveness is the observable contract here.
+struct SlowFetch;
 impl Fetcher for SlowFetch {
     fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
-        let handle = self.store.get().unwrap();
-        assert!(
-            handle.try_lock_for(Duration::from_millis(100)).is_some(),
-            "Fetcher must run outside Store"
-        );
         std::thread::sleep(Duration::from_millis(500));
         Ok(common::nexusphp().into())
     }
@@ -42,9 +43,7 @@ impl Fixture {
 
     fn build(downloader: Option<Arc<dyn downloader::Downloader>>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let fetcher = Arc::new(SlowFetch {
-            store: OnceLock::new(),
-        });
+        let fetcher = Arc::new(SlowFetch);
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
@@ -56,7 +55,6 @@ impl Fixture {
             tmp.path().join("library"),
         )
         .unwrap();
-        fetcher.store.set(state.store()).ok().unwrap();
         let app = router(state.clone());
         let created = runtime().block_on(async {
             common::create_site(&app).await;
@@ -64,7 +62,7 @@ impl Fixture {
         });
         let subscribe = created["id"].as_str().unwrap().to_string();
         let shared = state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         let sub = store
             .get_subscribe(subscribe.parse().unwrap())
             .unwrap()
@@ -80,7 +78,7 @@ impl Fixture {
             .insert_unidentified(path.display().to_string(), domain::Confidence::Low)
             .unwrap();
         store::test_support::publish_fixture_file(
-            &store,
+            store,
             &store::test_support::FixtureFile {
                 media_id: sub.media_id,
                 path: library.root_paths[0]
@@ -91,7 +89,6 @@ impl Fixture {
             },
         )
         .unwrap();
-        drop(store);
         Self {
             _tmp: tmp,
             state,
@@ -138,9 +135,14 @@ fn runtime() -> tokio::runtime::Runtime {
 
 fn contend(f: &Fixture, route: usize) {
     let handle = f.state.store();
+    let db = if route == 0 {
+        store::Db::Subscribe
+    } else {
+        store::Db::Library
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _guard = handle.lock();
+        let _guard = crate::writer_hold::WriterHold::acquire(handle.clone(), db);
         tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -186,9 +188,14 @@ fn manual_routes_recheck_readonly_after_waiting_without_mutating() {
         let f = Fixture::new();
         let handle = f.state.store();
         let state = f.state.clone();
+        let db = if route == 0 {
+            store::Db::Subscribe
+        } else {
+            store::Db::Library
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _guard = handle.lock();
+            let _guard = crate::writer_hold::WriterHold::acquire(handle.clone(), db);
             tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(250));
             let _ = state.with_instance_writable(false);
@@ -200,7 +207,7 @@ fn manual_routes_recheck_readonly_after_waiting_without_mutating() {
         holder.join().unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT, "route={route}");
         let shared = f.state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         assert!(
             store
                 .get_unidentified(f.path.to_str().unwrap())
@@ -239,7 +246,7 @@ fn manual_routes_keep_busy_zero_effect_when_worker_capacity_is_full() {
             "route={route}"
         );
         let shared = f.state.store();
-        let store = shared.lock();
+        let store = shared.as_ref();
         assert!(
             store
                 .get_unidentified(f.path.to_str().unwrap())

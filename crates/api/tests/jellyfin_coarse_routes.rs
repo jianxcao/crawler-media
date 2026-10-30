@@ -61,13 +61,12 @@ fn coarse() -> Coarse {
     std::fs::create_dir_all(&shows_root).unwrap();
     let user = state
         .store()
-        .lock()
         .user_id_by_token("management-secret")
         .unwrap()
         .unwrap();
     let media = {
         let guard = state.store();
-        let store = guard.lock();
+        let store = guard.as_ref();
         let library = store
             .create_library(
                 MediaKind::Movie,
@@ -80,7 +79,7 @@ fn coarse() -> Coarse {
             .unwrap();
         for index in 0..4 {
             let title = format!("Movie {index:02}");
-            let movie = insert_movie(&store, &movies_root, &title);
+            let movie = insert_movie(store, &movies_root, &title);
             if index == 3 {
                 store
                     .upsert_unit(
@@ -110,7 +109,7 @@ fn coarse() -> Coarse {
                 &[],
             )
             .unwrap();
-        let series = insert_series(&store, &shows_root, "Target Show");
+        let series = insert_series(store, &shows_root, "Target Show");
         (library.id, series)
     };
     Coarse {

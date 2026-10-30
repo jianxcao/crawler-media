@@ -29,7 +29,6 @@ fn tv_library(state: &ApiState, name: &str, root: &std::path::Path) -> String {
     std::fs::create_dir_all(root).unwrap();
     state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Tv,
             name,
@@ -47,7 +46,6 @@ async fn wait_succeeded(state: &ApiState, operation_id: &str) {
         loop {
             let operation = state
                 .store()
-                .lock()
                 .library_removal(operation_id)
                 .unwrap()
                 .unwrap();
@@ -68,7 +66,7 @@ async fn removal_deletes_versioned_covers_of_the_removed_library_only() {
     let state = new_state(&temp, &temp.path().join("data"));
     let removed = tv_library(&state, "Removed", &temp.path().join("tv_removed"));
     let kept = tv_library(&state, "Kept", &temp.path().join("tv_kept"));
-    let covers = state.store().lock().library_covers_dir();
+    let covers = state.store().library_covers_dir();
     std::fs::create_dir_all(&covers).unwrap();
     let versioned = covers.join(format!("library-{removed}-7c1f.jpg"));
     let untouched = covers.join(format!("library-{kept}-9d2a.jpg"));
@@ -93,7 +91,7 @@ async fn startup_reconciles_covers_left_by_an_interrupted_removal() {
     let state = new_state(&temp, &data_dir);
     let removed = tv_library(&state, "Removed", &temp.path().join("tv_removed"));
     let _kept = tv_library(&state, "Kept", &temp.path().join("tv_kept"));
-    let covers = state.store().lock().library_covers_dir();
+    let covers = state.store().library_covers_dir();
     std::fs::create_dir_all(&covers).unwrap();
     let cover = covers.join(format!("library-{removed}-7c1f.jpg"));
     std::fs::write(&cover, b"cover").unwrap();
@@ -111,12 +109,5 @@ async fn startup_reconciles_covers_left_by_an_interrupted_removal() {
         !cover.exists(),
         "startup reconciliation must finish the interrupted cleanup"
     );
-    assert!(
-        restarted
-            .store()
-            .lock()
-            .get_library(&removed)
-            .unwrap()
-            .is_none()
-    );
+    assert!(restarted.store().get_library(&removed).unwrap().is_none());
 }

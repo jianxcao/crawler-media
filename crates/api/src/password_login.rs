@@ -78,10 +78,7 @@ impl PasswordLogin {
                 .and_then(|_| state.require_write_admitted())
                 .map_err(LoginError::Admission)?;
             let credential = {
-                let reader = state
-                    .store_readers
-                    .checkout(crate::http::store_wait::STORE_READ_WAIT)
-                    .ok_or(LoginError::Busy)?;
+                let reader = state.store.clone();
                 reader.login_credential(&username)?
             };
             let Some(credential) = credential else {
@@ -90,7 +87,7 @@ impl PasswordLogin {
             if !engine.verify(&password, &credential.observed_password) {
                 return Ok(None);
             }
-            crate::http::store_wait::with_app_admission(&state, || {
+            crate::http::store_wait::with_write_admission(&state, || {
                 state.writers.with_app(|app| {
                     let token = app.finish_verified_login(
                         &credential.user_id.to_string(),

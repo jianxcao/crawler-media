@@ -106,7 +106,7 @@ impl ChapterFrameRunner for FakeRunner {
 
 struct Fixture {
     _temp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
+    store: Arc<Store>,
     registry: Arc<LibraryWorkRegistry>,
     runner: Arc<FakeRunner>,
     gate: Arc<Gate>,
@@ -177,7 +177,7 @@ impl Fixture {
             rows.push(published);
         }
 
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(store);
         let registry = Arc::new(LibraryWorkRegistry::default());
         let gate = Arc::new(Gate::new());
         let runner = Arc::new(FakeRunner::new(gate.clone()));
@@ -209,7 +209,7 @@ impl Fixture {
     }
 
     fn counts(&self) -> store::ChapterFrameTaskCounts {
-        self.store.lock().chapter_frame_task_counts().unwrap()
+        self.store.as_ref().chapter_frame_task_counts().unwrap()
     }
 
     fn durable_total(&self) -> usize {

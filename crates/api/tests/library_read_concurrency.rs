@@ -142,7 +142,7 @@ fn item_index_revalidates_revoked_credentials_and_library_access() {
             let reader = tokio::spawn(router(state.clone()).oneshot(request));
             tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()).await.unwrap();
             if revoke_token {
-                state.store().lock().revoke_user_tokens(user).unwrap();
+                state.store().revoke_user_tokens(user).unwrap();
             } else {
                 let conn = rusqlite::Connection::open(dir.path().join("data/library.db")).unwrap();
                 conn.execute("UPDATE libraries SET access_mode='selected', member_ids_json='[]' WHERE library_id=?1", [library.to_string()]).unwrap();
@@ -238,6 +238,49 @@ fn slow_library_reader_does_not_hold_writer_store_mutex(endpoint: &str) {
         );
         assert_eq!(reader.await.unwrap().unwrap().status(), StatusCode::OK);
     });
+}
+
+#[test]
+fn dropping_api_state_preserves_a_shared_store_for_reads_and_new_state() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
+    let make_state = || {
+        ApiState::new_arc(
+            store.clone(),
+            "management-secret".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+            dir.path().join("library"),
+        )
+        .unwrap()
+    };
+    let state = make_state();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap();
+    drop(state);
+    assert_eq!(
+        store
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
+        library.id,
+        "dropping an API owner must not close a Store still owned by another caller"
+    );
+    let rebuilt = make_state();
+    assert!(Arc::ptr_eq(&store, &rebuilt.store()));
+    assert_eq!(
+        rebuilt
+            .store()
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
+        library.id
+    );
 }
 
 #[test]
@@ -574,6 +617,7 @@ fn dropped_caller_retains_worker_permit_and_lease_until_exit() {
                 .unwrap();
         }
     }));
+    let pool = state.library_read_pool_weak().upgrade().unwrap();
     runtime.block_on(async {
         let app = router(state);
         let request = || {
@@ -591,10 +635,21 @@ fn dropped_caller_retains_worker_permit_and_lease_until_exit() {
         reader.abort();
         let _ = reader.await;
         assert_eq!(budget.available_permits(), 0);
+        let started = Instant::now();
+        let mut competing = request();
+        competing.extensions_mut().insert(QueryTiming {
+            started,
+            deadline: started + Duration::from_millis(200),
+        });
         assert_eq!(
-            app.clone().oneshot(request()).await.unwrap().status(),
+            app.clone().oneshot(competing).await.unwrap().status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+        assert_eq!(budget.available_permits(), 0);
+        assert!(matches!(
+            pool.try_checkout(),
+            Err(store::LibraryReadError::Busy)
+        ));
         release_tx.send(()).unwrap();
         let mut recovered = false;
         for _ in 0..20 {

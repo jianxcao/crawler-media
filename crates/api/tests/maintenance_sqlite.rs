@@ -16,9 +16,7 @@ use jobs::JobKind;
 
 #[path = "maintenance_support/mod.rs"]
 mod support;
-use support::{
-    DB_LIGHT, DB_VACUUM, data_dir, db_entry, enqueue_claim, progress_of, temp_state, unix_now,
-};
+use support::{DB_LIGHT, DB_VACUUM, db_entry, enqueue_claim, progress_of, temp_state, unix_now};
 
 // ---------------------------------------------------------------------------
 // 真实 SQLite 执行器
@@ -61,15 +59,12 @@ fn optimize_keeps_business_data_and_default_never_vacuums() {
     let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
     state
         .store()
-        .lock()
         .put_setting("maintenance.keep", "kept")
         .unwrap();
-    let conn = rusqlite::Connection::open(data_dir(&state).join("app.db")).unwrap();
-    conn.execute_batch("CREATE TABLE business (id INTEGER PRIMARY KEY, name TEXT)")
+    state
+        .store()
+        .put_setting("business.payload", "row")
         .unwrap();
-    conn.execute("INSERT INTO business (name) VALUES ('row')", [])
-        .unwrap();
-    drop(conn);
 
     let job = enqueue_claim(&state, JobKind::DatabaseMaintenance, DB_LIGHT, unix_now());
     run(&state, &job).unwrap();
@@ -94,7 +89,7 @@ fn optimize_keeps_business_data_and_default_never_vacuums() {
     let store = state.store();
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .get_setting("maintenance.keep")
             .unwrap()
             .as_deref(),
@@ -102,17 +97,17 @@ fn optimize_keeps_business_data_and_default_never_vacuums() {
     );
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .get_setting("maintenance.vacuum_last_success.app")
             .unwrap(),
         None,
         "没有 VACUUM 成功就不得推进冷却时间"
     );
-    let conn = rusqlite::Connection::open(data_dir(&state).join("app.db")).unwrap();
-    let rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM business", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(rows, 1, "optimize 不得改动业务数据");
+    assert_eq!(
+        store.get_setting("business.payload").unwrap().as_deref(),
+        Some("row"),
+        "optimize 不得改动业务数据"
+    );
 }
 
 #[test]
@@ -133,7 +128,6 @@ fn vacuum_runs_only_when_enabled_and_cooldown_allows() {
     );
     let recorded = state
         .store()
-        .lock()
         .get_setting("maintenance.vacuum_last_success.app")
         .unwrap();
     assert!(recorded.is_some(), "VACUUM 成功后必须记录成功时间");
@@ -169,7 +163,12 @@ fn unreadable_vacuum_cooldown_skips_instead_of_running() {
         cancelled: &cancelled,
     };
     let report = executor
-        .execute(&app_target(&data, &app), true, &context)
+        .execute(
+            &rusqlite::Connection::open(&app).unwrap(),
+            &app_target(&data, &app),
+            true,
+            &context,
+        )
         .unwrap();
 
     assert_eq!(report.outcome, DatabaseOutcome::Skipped);
@@ -203,7 +202,12 @@ fn busy_database_is_skipped_not_failed() {
         cancelled: &cancelled,
     };
     let report = executor
-        .execute(&app_target(&data, &app), true, &context)
+        .execute(
+            &rusqlite::Connection::open(&app).unwrap(),
+            &app_target(&data, &app),
+            true,
+            &context,
+        )
         .unwrap();
 
     assert_eq!(report.outcome, DatabaseOutcome::Skipped);
@@ -231,7 +235,12 @@ fn insufficient_disk_headroom_skips_vacuum() {
         cancelled: &cancelled,
     };
     let report = executor
-        .execute(&app_target(&data, &app), true, &context)
+        .execute(
+            &rusqlite::Connection::open(&app).unwrap(),
+            &app_target(&data, &app),
+            true,
+            &context,
+        )
         .unwrap();
 
     assert_eq!(report.outcome, DatabaseOutcome::Skipped);
@@ -270,7 +279,14 @@ fn interrupted_vacuum_fails_bounded_and_leaves_no_watchdog_thread() {
 
     let before = live_threads();
     for _ in 0..20 {
-        let report = executor.execute(&target, true, &context).unwrap();
+        let report = executor
+            .execute(
+                &rusqlite::Connection::open(&app).unwrap(),
+                &target,
+                true,
+                &context,
+            )
+            .unwrap();
         assert_eq!(
             report.outcome,
             DatabaseOutcome::Failed,

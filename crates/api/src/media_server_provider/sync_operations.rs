@@ -1,22 +1,20 @@
 //! Synchronous protocol stages run in the bounded HTTP blocking budget.
 use super::*;
 impl ApiServerProvider {
-    pub(super) fn bounded_store(
+    pub(super) fn bounded_store<T>(
         &self,
-    ) -> Result<parking_lot::MutexGuard<'_, crate::Store>, String> {
-        self.state
-            .store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or_else(|| {
-                tracing::warn!("Jellyfin Store lock busy");
-                "store lock busy".to_owned()
-            })
+        work: impl FnOnce(&crate::Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        crate::http::store_wait::with_foreground_store(&self.state, |store| {
+            read_store(&self.state, |_| work(store))
+        })
+        .map_err(admission_error)?
     }
-    pub(super) fn bounded_reader(&self) -> Result<crate::store_readers::StoreReader, String> {
-        self.state
-            .store_readers
-            .checkout(crate::http::store_wait::STORE_READ_WAIT)
-            .ok_or_else(|| "Store read pool busy".to_string())
+    pub(super) fn bounded_reader<T>(
+        &self,
+        work: impl FnOnce(&crate::Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        read_store(&self.state, work)
     }
     pub(super) async fn run_sync<T: Send + 'static>(
         &self,
@@ -33,27 +31,30 @@ impl ApiServerProvider {
             })
     }
     pub(super) fn get_user_sync(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
-        let store = self.bounded_reader()?;
-        let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
-            return Ok(None);
-        };
-        let role = store.user_role(user.id).unwrap_or_else(|_| "member".into());
-        Ok(Some(ServerUser {
-            id: user.id,
-            login: user.login,
-            is_admin: role == "admin",
-        }))
+        self.bounded_reader(|store| {
+            let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
+                return Ok(None);
+            };
+            let role = store.user_role(user.id).unwrap_or_else(|_| "member".into());
+            Ok(Some(ServerUser {
+                id: user.id,
+                login: user.login,
+                is_admin: role == "admin",
+            }))
+        })
     }
     pub(super) fn resolve_cover_bytes_sync(
         &self,
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let store = self.bounded_reader()?;
-        if let Ok(Some(lib)) = store.get_library(id)
-            && crate::http::library::library_visible(&store, &lib, user_id)
-        {
-            drop(store);
+        let library = self.bounded_reader(|store| {
+            Ok(store
+                .get_library(id)
+                .map_err(|error| error.to_string())?
+                .filter(|lib| crate::http::library::library_visible(store, lib, user_id)))
+        })?;
+        if let Some(lib) = library {
             let cover = lib
                 .cover_path
                 .as_deref()
@@ -74,10 +75,7 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = {
-            let store = self.bounded_reader()?;
-            items::resolve_entry(&store, user_id, id)?
-        };
+        let entry = self.bounded_reader(|store| items::resolve_entry(store, user_id, id))?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -97,10 +95,7 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = {
-            let store = self.bounded_reader()?;
-            items::resolve_entry(&store, user_id, id)?
-        };
+        let entry = self.bounded_reader(|store| items::resolve_entry(store, user_id, id))?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -126,10 +121,7 @@ impl ApiServerProvider {
         {
             return Ok(None);
         }
-        let entry = {
-            let store = self.bounded_reader()?;
-            items::resolve_entry(&store, Some(user_id), id)?
-        };
+        let entry = self.bounded_reader(|store| items::resolve_entry(store, Some(user_id), id))?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -140,26 +132,31 @@ impl ApiServerProvider {
             let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
                 return Ok(None);
             };
-            let store = self.bounded_reader()?;
-            let Some(file) = store
-                .visible_file(user_id, physical.file_id)
-                .map_err(|e| e.to_string())?
+            let Some(file) = self.bounded_reader(|store| {
+                let Some(file) = store
+                    .visible_file(user_id, physical.file_id)
+                    .map_err(|e| e.to_string())?
+                else {
+                    return Ok(None);
+                };
+                let covers = store
+                    .file_covers_unit(
+                        physical.file_id,
+                        entry.media.id,
+                        domain::UnitKey::new(entry.unit.0, entry.unit.1),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !covers
+                    || file.media_id != entry.media.id
+                    || file.version.revision != physical.revision
+                {
+                    return Ok(None);
+                }
+                Ok(Some(file))
+            })?
             else {
                 return Ok(None);
             };
-            let covers = store
-                .file_covers_unit(
-                    physical.file_id,
-                    entry.media.id,
-                    domain::UnitKey::new(entry.unit.0, entry.unit.1),
-                )
-                .map_err(|e| e.to_string())?;
-            if !covers
-                || file.media_id != entry.media.id
-                || file.version.revision != physical.revision
-            {
-                return Ok(None);
-            }
             file
         } else {
             entry.file.clone()
@@ -183,10 +180,11 @@ impl ApiServerProvider {
         user_id: UserId,
         device_id: &str,
     ) -> Result<bool, String> {
-        let store = self.bounded_reader()?;
-        store
-            .is_device_revoked(user_id, device_id)
-            .map_err(|e| e.to_string())
+        self.bounded_reader(|store| {
+            store
+                .is_device_revoked(user_id, device_id)
+                .map_err(|e| e.to_string())
+        })
     }
     pub(super) fn set_user_marks_sync(
         &self,
@@ -201,28 +199,37 @@ impl ApiServerProvider {
             ));
         }
 
-        let store = self
-            .state
-            .store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or(UserMarksError::Unavailable)?;
-        if !self.state.instance_writable() {
-            return Err(UserMarksError::Internal(
-                "instance is read-only or under maintenance".into(),
-            ));
-        }
-        let Some((media_id, season, episode)) =
-            resolve_mark_unit(&store, user_id, id).map_err(UserMarksError::Internal)?
-        else {
-            return Ok(false);
-        };
-        let change = crate::store::playback::PlaybackMutation::marks(
-            user_id, season, episode, played, favorite,
-        );
-        store
-            .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
-            .map_err(|error| user_marks::mark_error(error, user_id, media_id))?;
-        Ok(true)
+        crate::http::store_wait::with_foreground_store(&self.state, |store| {
+            store
+                .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+                    let Some((media_id, season, episode)) =
+                        resolve_mark_unit(store, user_id, id).map_err(UserMarksError::Internal)?
+                    else {
+                        return Ok(false);
+                    };
+                    let change = crate::store::playback::PlaybackMutation::marks(
+                        user_id, season, episode, played, favorite,
+                    );
+                    store
+                        .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
+                        .map_err(|error| user_marks::mark_error(error, user_id, media_id))?;
+                    Ok(true)
+                })
+                .map_err(|error| match error {
+                    store::StoreError::ReadBusy
+                    | store::StoreError::ReadClosed
+                    | store::StoreError::ReadDeadline
+                    | store::StoreError::ReadCancelled => UserMarksError::Unavailable,
+                    error => UserMarksError::Internal(error.to_string()),
+                })?
+        })
+        .map_err(|response| {
+            if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
+                UserMarksError::Unavailable
+            } else {
+                UserMarksError::Internal(admission_error(response))
+            }
+        })?
     }
     pub(super) fn issue_play_session_sync(
         &self,
@@ -240,21 +247,19 @@ impl ApiServerProvider {
         let ledger_id = domain::LedgerId::from_str(&target.ledger_id).map_err(|e| e.to_string())?;
         // 播放域时间走注入时钟；`issue_play_session` 的 `issued_at` 是**秒**。
         let now = self.state.playback_clock.now_ms() / 1000;
-        let store = self.bounded_store()?;
-        if !self.state.instance_writable() {
-            return Err("instance is read-only or under maintenance".into());
-        }
-        store
-            .issue_play_session(
-                user_id,
-                device_id,
-                ledger_id,
-                target.media.id,
-                domain::UnitKey::new(target.season, target.episode),
-                &target.file.version,
-                now,
-            )
-            .map_err(|e| e.to_string())
+        self.bounded_store(|store| {
+            store
+                .issue_play_session(
+                    user_id,
+                    device_id,
+                    ledger_id,
+                    target.media.id,
+                    domain::UnitKey::new(target.season, target.episode),
+                    &target.file.version,
+                    now,
+                )
+                .map_err(|e| e.to_string())
+        })
     }
     pub(super) fn report_playback_event_sync(
         &self,
@@ -280,5 +285,27 @@ impl ApiServerProvider {
             event,
             identity,
         )
+    }
+}
+
+pub(super) fn read_store<T>(
+    state: &ApiState,
+    work: impl FnOnce(&crate::Store) -> Result<T, String>,
+) -> Result<T, String> {
+    state
+        .store
+        .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
+            work(&state.store)
+        })
+        .map_err(|error| error.to_string())?
+}
+
+fn admission_error(response: axum::response::Response) -> String {
+    match response.status() {
+        axum::http::StatusCode::CONFLICT => "instance is read-only or under maintenance".into(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE => {
+            "Store writer is busy or under maintenance".into()
+        }
+        status => format!("Store write admission failed: {status}"),
     }
 }

@@ -20,7 +20,7 @@ struct Fx {
 
 fn library(fix: &PresenceFixture, name: &str, root: &str) -> (LibraryId, String) {
     let store = fix.state.store();
-    let store = store.lock();
+    let store = store.as_ref();
     let lib = store
         .create_library(MediaKind::Tv, name, &[root], "everyone", true, &[])
         .unwrap();
@@ -41,7 +41,6 @@ fn fixture() -> Fx {
     let media = MediaId::new();
     fix.state
         .store()
-        .lock()
         .insert_media(&Media {
             id: media,
             kind: MediaKind::Tv,
@@ -111,7 +110,7 @@ fn reserve(
     scope: &WriteScope,
     c: &FileCoverage,
 ) -> Result<FileCoverage, store::StoreError> {
-    fx.fix.state.store().lock().reserve_transfer(
+    fx.fix.state.store().reserve_transfer(
         scope,
         c,
         Path::new("/dl/src.mkv"),
@@ -124,7 +123,6 @@ fn state_of(fx: &Fx, id: LedgerId) -> Option<(LibraryId, FilePublication)> {
     fx.fix
         .state
         .store()
-        .lock()
         .file_coverage_by_id(id)
         .unwrap()
         .map(|c| (c.file.library_id, c.file.publication))
@@ -145,7 +143,7 @@ fn reserve_rejects_file_id_collision_with_unrelated_published_row() {
     let reserved = reserve(&fx, &scope(&fx.a), &first).unwrap();
     let store = fx.fix.state.store();
     store
-        .lock()
+        .as_ref()
         .finish_transfer(&scope(&fx.a), &reserved, &reserved.file.version, 2_000)
         .unwrap();
     let mut other = candidate(&fx, &fx.a, "/tv_a/Show/S01E02.mkv", first.file.file_id);
@@ -165,7 +163,7 @@ fn finish_rejects_file_of_another_library_and_non_pending_rows() {
     let store = fx.fix.state.store();
     let wrong =
         store
-            .lock()
+            .as_ref()
             .finish_transfer(&scope(&fx.a), &reserved, &reserved.file.version, 2_000);
     assert!(wrong.is_err());
     assert_eq!(
@@ -173,12 +171,12 @@ fn finish_rejects_file_of_another_library_and_non_pending_rows() {
         Some((fx.b.0, FilePublication::Pending))
     );
     store
-        .lock()
+        .as_ref()
         .finish_transfer(&scope(&fx.b), &reserved, &reserved.file.version, 3_000)
         .unwrap();
     let again =
         store
-            .lock()
+            .as_ref()
             .finish_transfer(&scope(&fx.b), &reserved, &reserved.file.version, 4_000);
     assert!(
         again.is_err(),
@@ -192,10 +190,10 @@ fn finish_rejects_frozen_media() {
     let c = candidate(&fx, &fx.a, "/tv_a/Show/S01E01.mkv", LedgerId::new());
     let reserved = reserve(&fx, &scope(&fx.a), &c).unwrap();
     let store = fx.fix.state.store();
-    store::test_support::set_media_identity_state(&store.lock(), fx.media, "merging").unwrap();
+    store::test_support::set_media_identity_state(store.as_ref(), fx.media, "merging").unwrap();
     let result =
         store
-            .lock()
+            .as_ref()
             .finish_transfer(&scope(&fx.a), &reserved, &reserved.file.version, 2_000);
     assert!(result.is_err());
     assert_eq!(

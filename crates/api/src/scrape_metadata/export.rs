@@ -58,7 +58,7 @@ pub(crate) fn begin_sidecar_export(
     let (operation_id, export_id) = next_ids();
     // S01: the Store mutex is held only for database phases; the sidecar is read
     // between them and every decision is re-made against current rows.
-    let target = state.store.lock().nfo_export_target_unobserved(
+    let target = state.store.as_ref().nfo_export_target_unobserved(
         video,
         &sidecar,
         scope,
@@ -79,8 +79,7 @@ pub(crate) fn begin_sidecar_export(
         })?;
     request.expected_digest = observation.digest.clone();
     let edits = state
-        .store
-        .lock()
+        .store.as_ref()
         .nfo_local_edits_observed(&request, &observation)
         .inspect_err(|error| {
             tracing::error!(%error, media_id = %media.id, path = %request.path.display(), "NFO sidecar 本地编辑捕获失败，本文件不导出");
@@ -104,7 +103,7 @@ pub(crate) fn begin_sidecar_export(
 /// revalidates the operation and the file/config binding before registering.
 pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest) {
     let now_ms = state.playback_clock.now_ms();
-    let lock = || state.store.lock();
+    let lock = || state.store.as_ref();
     match store::metadata::export_driver::export_nfo_sidecar_phased(lock, &request, now_ms) {
         Ok(outcome) => tracing::info!(
             operation_id = %request.operation_id,
@@ -125,7 +124,7 @@ pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest)
 
 /// Drive every unfinished export now; returns how many were driven.
 pub(crate) fn resume_sidecar_exports(state: &ApiState, now_ms: i64) -> usize {
-    let pending = match state.store.lock().pending_nfo_exports() {
+    let pending = match state.store.as_ref().pending_nfo_exports() {
         Ok(pending) => pending,
         Err(error) => {
             tracing::error!(%error, "恢复未完成的 NFO 导出失败");
@@ -134,7 +133,7 @@ pub(crate) fn resume_sidecar_exports(state: &ApiState, now_ms: i64) -> usize {
     };
     let mut driven = 0;
     for request in pending {
-        let lock = || state.store.lock();
+        let lock = || state.store.as_ref();
         match store::metadata::export_driver::resume_nfo_export_phased(lock, &request, now_ms) {
             Ok(outcome) => {
                 driven += 1;

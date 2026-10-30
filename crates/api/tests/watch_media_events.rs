@@ -30,7 +30,6 @@ async fn baseline(fix: &PresenceFixture) -> (std::path::PathBuf, Arc<StrmGraceTr
 fn operations(fix: &PresenceFixture) -> Vec<store::ScanOperation> {
     fix.state
         .store()
-        .lock()
         .scan_operations_for_library(&fix.library_id)
         .unwrap()
 }
@@ -86,7 +85,6 @@ fn directory_only_event_ingests_a_new_strm_and_then_settles() {
         assert!(
             fix.state
                 .store()
-                .lock()
                 .file_coverage_by_path(new_media.to_str().unwrap())
                 .unwrap()
                 .is_some()
@@ -109,14 +107,12 @@ fn directory_only_deletion_and_restore_preserve_the_ledger_and_user_facts() {
         let row = fix
             .state
             .store()
-            .lock()
             .file_coverage_by_path(media.to_str().unwrap())
             .unwrap()
             .expect("scanned STRM is a recorded file");
         let user = domain::UserId::new();
         fix.state
             .store()
-            .lock()
             .set_playback_progress(user, row.file.media_id, 12_345)
             .unwrap();
         std::fs::remove_file(&media).unwrap();
@@ -124,7 +120,6 @@ fn directory_only_deletion_and_restore_preserve_the_ledger_and_user_facts() {
         assert!(
             fix.state
                 .store()
-                .lock()
                 .missing_at_by_path()
                 .unwrap()
                 .contains_key(&row.path_key)
@@ -132,7 +127,7 @@ fn directory_only_deletion_and_restore_preserve_the_ledger_and_user_facts() {
         std::fs::write(&media, "https://example.invalid/first.mkv").unwrap();
         handle_fs_events(&fix.state, &tracker, vec![event(media.parent().unwrap())]);
         let store = fix.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         assert!(
             !store
                 .missing_at_by_path()

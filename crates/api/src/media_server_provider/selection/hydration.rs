@@ -9,13 +9,11 @@ pub(super) fn load(
         .iter()
         .map(|item| item.coverage.file.file_id)
         .collect::<Vec<_>>();
-    let reader = state
-        .store_readers
-        .checkout(SELECTION_DEADLINE)
-        .ok_or("Library reader pool busy")?;
-    reader
-        .page_hydration(&files)
-        .map_err(|error| error.to_string())
+    super::super::sync_operations::read_store(state, |reader| {
+        reader
+            .page_hydration(&files)
+            .map_err(|error| error.to_string())
+    })
 }
 
 pub(super) fn facts<'a>(

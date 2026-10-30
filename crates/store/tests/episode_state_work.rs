@@ -79,6 +79,11 @@ fn large_unit_request_uses_bounded_windows_and_preserves_assertions() {
     db.execute("INSERT INTO playback_units(user_id,media_id,season,episode,played,has_played_assertion,played_changed_at_ms) VALUES (?1,?2,1,-1,1,1,10)", params![user.to_string(), media.to_string()]).unwrap();
     db.execute("INSERT INTO playback_units(user_id,media_id,season,episode,played,has_played_assertion,played_changed_at_ms) VALUES (?1,?2,1,501,0,1,10)", params![user.to_string(), media.to_string()]).unwrap();
     let units: Vec<_> = (0..1_000).map(|episode| UnitKey::new(1, episode)).collect();
+    let (_, single) = store.with_stats(StatsScope::Library, || {
+        store
+            .effective_unit_states(user, media, &units[..1])
+            .unwrap()
+    });
     let (states, work) = store.with_stats(StatsScope::Library, || {
         store.effective_unit_states(user, media, &units).unwrap()
     });
@@ -86,9 +91,12 @@ fn large_unit_request_uses_bounded_windows_and_preserves_assertions() {
     assert!(states[0].as_ref().unwrap().played);
     assert!(!states[501].as_ref().unwrap().played);
     assert!(states[999].as_ref().unwrap().played);
+    // Both calls include the same lease validation and snapshot bookkeeping.
+    // The one-key call performs one business query; keep the existing allowance
+    // of at most six business statements across all bounded windows.
     assert!(
-        work.statements <= 6,
-        "one query per fixed key window: {work:?}"
+        work.statements <= single.statements + 5,
+        "one query per fixed key window: single={single:?}, batch={work:?}"
     );
 }
 

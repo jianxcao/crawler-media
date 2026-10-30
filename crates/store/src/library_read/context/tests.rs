@@ -29,6 +29,30 @@ fn busy_timeout(conn: &rusqlite::Connection) -> u64 {
         .unwrap()
 }
 
+fn scoped_timeout(store: &Store, db: crate::Db) -> u64 {
+    store.with_read(db, |conn| Ok(busy_timeout(conn))).unwrap()
+}
+
+fn restored_timeout(store: &Store, db: crate::Db) -> u64 {
+    store
+        .with_writer(db, |conn| {
+            assert_eq!(
+                busy_timeout(conn),
+                5000,
+                "reader policy must not change a writer"
+            );
+            Ok(())
+        })
+        .unwrap();
+    let pool = store.reader_pool(db);
+    let mut lease = pool.try_checkout().unwrap();
+    let mut next = budget();
+    next.deadline = Instant::now() + Duration::from_secs(10);
+    lease
+        .with_connection(&next, |conn| Ok(busy_timeout(conn)))
+        .unwrap()
+}
+
 #[test]
 fn short_policy_restores_after_error_cancel_and_panic() {
     let dir = tempfile::tempdir().unwrap();
@@ -36,25 +60,31 @@ fn short_policy_restores_after_error_cancel_and_panic() {
     let first = budget();
     let cancelled = Arc::clone(&first.cancelled);
     let result = store.with_query_budget(&first, |s| {
-        assert!(busy_timeout(&s.app) <= 3000);
-        assert!(busy_timeout(&s.library) <= 3000);
+        assert!(scoped_timeout(s, crate::Db::App) <= 3000);
+        assert!(scoped_timeout(s, crate::Db::Library) <= 3000);
         cancelled.store(true, Ordering::Release);
         Err::<(), _>(LibraryReadError::Unauthorized)
     });
     assert!(matches!(result, Err(LibraryReadError::Cancelled)));
-    assert_eq!(busy_timeout(&store.app), 5000);
-    assert_eq!(busy_timeout(&store.library), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::App), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::Library), 5000);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _: Result<(), LibraryReadError> =
-            store.with_query_budget(&budget(), |_s| panic!("short fault"));
+        let _: Result<(), LibraryReadError> = store.with_query_budget(&budget(), |s| {
+            s.with_read(
+                crate::Db::Library,
+                |_conn| -> Result<(), crate::StoreError> { panic!("short fault") },
+            )?;
+            Ok(())
+        });
     }));
-    assert_eq!(busy_timeout(&store.app), 5000);
-    assert_eq!(busy_timeout(&store.library), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::App), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::Library), 5000);
     let count = store
         .with_query_budget(&budget(), |s| {
-            Ok(s.library
-                .query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get::<_, i64>(0))
-                .map_err(crate::StoreError::from)?)
+            Ok(s.with_read(crate::Db::Library, |conn| {
+                conn.query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get::<_, i64>(0))
+                    .map_err(Into::into)
+            })?)
         })
         .unwrap();
     assert!(count >= 0);
@@ -65,14 +95,15 @@ fn sql_error_does_not_leave_short_policy_installed() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let result: Result<(), LibraryReadError> = store.with_query_budget(&budget(), |s| {
-        s.library
-            .execute_batch("SELECT * FROM no_such_table")
-            .map_err(crate::StoreError::from)?;
+        s.with_read(crate::Db::Library, |conn| {
+            conn.execute_batch("SELECT * FROM no_such_table")
+                .map_err(Into::into)
+        })?;
         Ok(())
     });
     assert!(matches!(result, Err(LibraryReadError::Store(_))));
-    assert_eq!(busy_timeout(&store.app), 5000);
-    assert_eq!(busy_timeout(&store.library), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::App), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::Library), 5000);
 }
 
 #[path = "../../../tests/query_work/support.rs"]
@@ -102,9 +133,7 @@ fn count_and_page_keep_one_library_snapshot_during_a_concurrent_publish() {
         include_total: true,
     };
     let before = store.library_item_page(&query).unwrap();
-    let pool = store
-        .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-        .unwrap();
+    let pool = crate::test_support::reader_pool_for_fixture(&store, NonZeroUsize::new(1).unwrap());
     let mut lease = pool.try_checkout().unwrap();
     let (start, started) = std::sync::mpsc::channel();
     let (done, finished) = std::sync::mpsc::channel();
@@ -165,20 +194,20 @@ fn short_policy_interrupts_active_sql_then_allows_next_read() {
         cancelled: Arc::new(AtomicBool::new(false)),
     };
     let result: Result<(), LibraryReadError> = store.with_query_budget(&short, |s| {
-        s.library.query_row(
+        s.with_read(crate::Db::Library, |conn| conn.query_row(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n",
             [], |r| r.get::<_, i64>(0),
-        ).map_err(crate::StoreError::from)?;
+        ).map_err(Into::into))?;
         Ok(())
     });
     assert!(matches!(result, Err(LibraryReadError::Deadline)));
-    assert_eq!(busy_timeout(&store.library), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::Library), 5000);
     store
         .with_query_budget(&budget(), |s| {
-            let count: i64 = s
-                .library
-                .query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get(0))
-                .map_err(crate::StoreError::from)?;
+            let count: i64 = s.with_read(crate::Db::Library, |conn| {
+                conn.query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get(0))
+                    .map_err(Into::into)
+            })?;
             assert!(count > 0);
             Ok(())
         })
@@ -196,15 +225,18 @@ fn nested_short_stage_rejection_keeps_outer_cancellation_active() {
     let result = store.with_query_budget(&outer, |s| {
         let nested = s.with_query_budget(&budget(), |_s| Ok(()));
         assert!(matches!(nested, Err(LibraryReadError::NestedBudget)));
+        s.with_read(crate::Db::Library, |conn| {
         cancelled.store(true, Ordering::Release);
-        let sql = s.library.query_row(
+        let sql = conn.query_row(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n",
             [], |r| r.get::<_, i64>(0),
         );
         observed.store(sql.is_err(), Ordering::Release);
         Ok(())
+        })?;
+        Ok(())
     });
     assert!(matches!(result, Err(LibraryReadError::Cancelled)));
     assert!(interrupted.load(Ordering::Acquire));
-    assert_eq!(busy_timeout(&store.library), 5000);
+    assert_eq!(restored_timeout(&store, crate::Db::Library), 5000);
 }

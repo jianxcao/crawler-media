@@ -6,7 +6,7 @@
 //! source version and full-file timeline. Another source never inherits it.
 
 use domain::{MediaId, TimelineMode, UnitKey};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, params};
 
 use super::types::BoundPlaybackEvent;
 use crate::StoreError;
@@ -23,7 +23,7 @@ pub(super) struct EventResumeSnapshot {
 }
 
 pub(super) fn read_event_resume(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,

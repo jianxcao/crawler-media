@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn transfer_settings_patch_is_cas_and_null_clears_without_touching_roots() {
     let f = PresenceFixture::new();
-    let roots = f.state.store().lock().list_library_roots().unwrap();
+    let roots = f.state.store().list_library_roots().unwrap();
     let (status, initial) = f
         .request("GET", "/api/v1/settings/transfer", Some(&f.admin_token))
         .await;
@@ -45,8 +45,8 @@ async fn transfer_settings_patch_is_cas_and_null_clears_without_touching_roots()
     assert_eq!(cleared["data"]["watch_intake"], Value::Null);
     assert_eq!(cleared["data"]["transfer_mode"], "copy");
     assert_eq!(cleared["data"]["scrape"], true);
-    assert_eq!(f.state.store().lock().watch_intake().unwrap(), None);
-    assert_eq!(f.state.store().lock().list_library_roots().unwrap(), roots);
+    assert_eq!(f.state.store().watch_intake().unwrap(), None);
+    assert_eq!(f.state.store().list_library_roots().unwrap(), roots);
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn transfer_settings_reject_unknown_and_bad_fields_without_writes() {
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-        assert_eq!(f.state.store().lock().transfer_mode().unwrap(), "hardlink");
+        assert_eq!(f.state.store().transfer_mode().unwrap(), "hardlink");
     }
 }
 

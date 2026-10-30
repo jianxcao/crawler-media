@@ -10,7 +10,7 @@ async fn chunk_failure_after_ledger_commit_reports_its_prefix() {
     let sig = fix.signature();
     let op = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -52,7 +52,7 @@ async fn chunk_failure_after_ledger_commit_reports_its_prefix() {
         done.report
     );
     assert_eq!(
-        fix.state.store().lock().list_file_coverage().unwrap().len(),
+        fix.state.store().list_file_coverage().unwrap().len(),
         1,
         "ledger 已提交，报告必须承认这段前缀"
     );
@@ -85,12 +85,7 @@ fn missing_operation_fails_closed_without_ledgering() {
         Ok(_) => panic!("无法对账的 operation 不得放行"),
     }
     assert!(
-        fix.state
-            .store()
-            .lock()
-            .list_file_coverage()
-            .unwrap()
-            .is_empty(),
+        fix.state.store().list_file_coverage().unwrap().is_empty(),
         "失败关闭时不得登记任何文件"
     );
 }
@@ -107,7 +102,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     // 轮 1: 扫描入库
     let op1 = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap()
@@ -119,7 +114,6 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     let row = fix
         .state
         .store()
-        .lock()
         .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .unwrap();
@@ -134,13 +128,11 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     };
     fix.state
         .store()
-        .lock()
         .put_file_meta(&row.file.file_id.to_string(), &tracks)
         .unwrap();
     assert!(
         fix.state
             .store()
-            .lock()
             .get_file_meta(&row.file.file_id.to_string())
             .unwrap()
             .is_some()
@@ -166,7 +158,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     // 轮 2: 重扫（发生失效失败）
     let op2 = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 2000)
             .unwrap()
@@ -179,7 +171,6 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     let versions = fix
         .state
         .store()
-        .lock()
         .ledger_source_versions(&[file.display().to_string()])
         .unwrap();
     let (_v_ms, v_size, _) = versions.get(&file.display().to_string()).cloned().unwrap();
@@ -191,7 +182,6 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     assert!(
         fix.state
             .store()
-            .lock()
             .get_file_meta(&row.file.file_id.to_string())
             .unwrap()
             .is_some()
@@ -206,7 +196,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     // 轮 3: 故障解除后重扫，必须重试失效与重挂探测义务
     let op3 = {
         let store = fix.state.store();
-        let guard = store.lock();
+        let guard = store.as_ref();
         guard
             .enqueue_scan(&fix.library_id, &sig, &[], 3000)
             .unwrap()
@@ -219,7 +209,6 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     assert!(
         fix.state
             .store()
-            .lock()
             .get_file_meta(&row.file.file_id.to_string())
             .unwrap()
             .is_none(),
@@ -228,7 +217,6 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     let versions3 = fix
         .state
         .store()
-        .lock()
         .ledger_source_versions(&[file.display().to_string()])
         .unwrap();
     let (_, v3_size, _) = versions3.get(&file.display().to_string()).cloned().unwrap();
@@ -238,7 +226,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
         "故障解除后新版本已确认"
     );
 
-    let obs = fix.state.store().lock().scan_probe_obligations(10).unwrap();
+    let obs = fix.state.store().scan_probe_obligations(10).unwrap();
     assert!(
         obs.iter().any(|o| o.ledger_id == row.file.file_id),
         "探测义务必须挂上"

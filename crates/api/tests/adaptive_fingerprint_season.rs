@@ -1,3 +1,9 @@
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use api::Store;
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use domain::{Confidence, FileCoverage, MediaId, MediaKind, QualitySource, UnitKey};
@@ -33,10 +39,10 @@ fn publish_coverage(
 #[test]
 fn season_refresh_does_not_overwrite_recapture_policy() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     store
-        .lock()
+        .as_ref()
         .insert_media(&domain::Media {
             id: media_id,
             kind: MediaKind::Tv,
@@ -54,8 +60,13 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
-    let row = publish_coverage(&store.lock(), media_id, &tv_root.join("Test.S01E01.mkv"), 1);
+    store::test_support::reconfigure_default_root(store.as_ref(), MediaKind::Tv, &tv_root).unwrap();
+    let row = publish_coverage(
+        store.as_ref(),
+        media_id,
+        &tv_root.join("Test.S01E01.mkv"),
+        1,
+    );
 
     let mgr = ProbeManager::new(store.clone()).unwrap();
     let unit = ProbeUnit {
@@ -74,7 +85,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
 
     // Verify in database that reuse_fingerprint_cache is false, and reuse_media_info_cache is true
     let active_unit = store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&row.file.file_id.to_string())
         .unwrap()
         .expect("active probe unit should exist");
@@ -92,10 +103,10 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
 #[test]
 fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     store
-        .lock()
+        .as_ref()
         .insert_media(&domain::Media {
             id: media_id,
             kind: MediaKind::Tv,
@@ -113,9 +124,9 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
+    store::test_support::reconfigure_default_root(store.as_ref(), MediaKind::Tv, &tv_root).unwrap();
     let row = publish_coverage(
-        &store.lock(),
+        store.as_ref(),
         media_id,
         &tv_root.join("Test.Rollback.S01E01.mkv"),
         1,
@@ -123,7 +134,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     // Initial marker
     store
-        .lock()
+        .as_ref()
         .put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,
@@ -148,7 +159,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
         reuse_media_info_cache: true,
     };
     store
-        .lock()
+        .as_ref()
         .create_probe_job(
             job_id,
             "marker_refresh",
@@ -161,7 +172,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     // Old visible marker is kept intact
     let visible_marker = store
-        .lock()
+        .as_ref()
         .get_media_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
@@ -171,10 +182,10 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 #[tokio::test]
 async fn seed_episodes_retain_markers_after_season_template_built() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
     let media_id = MediaId::new();
     store
-        .lock()
+        .as_ref()
         .insert_media(&domain::Media {
             id: media_id,
             kind: MediaKind::Tv,
@@ -192,13 +203,13 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
+    store::test_support::reconfigure_default_root(store.as_ref(), MediaKind::Tv, &tv_root).unwrap();
     let ep1_path = tv_root.join("Test.Retain.S01E01.mkv");
     let ep2_path = tv_root.join("Test.Retain.S01E02.mkv");
     std::fs::write(&ep1_path, b"dummy").unwrap();
     std::fs::write(&ep2_path, b"dummy").unwrap();
-    let row1 = publish_coverage(&store.lock(), media_id, &ep1_path, 1);
-    let row2 = publish_coverage(&store.lock(), media_id, &ep2_path, 2);
+    let row1 = publish_coverage(store.as_ref(), media_id, &ep1_path, 1);
+    let row2 = publish_coverage(store.as_ref(), media_id, &ep2_path, 2);
 
     let shared_engine = Arc::new(SharedMatchEngine);
     let mgr =

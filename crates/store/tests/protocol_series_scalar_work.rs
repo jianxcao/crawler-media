@@ -133,10 +133,10 @@ impl Fixture {
                 .unwrap()
         });
         assert_eq!((scalar.episodes, scalar.completed), (episodes, episodes));
-        let pool = self
-            .store
-            .open_library_read_pool(NonZeroUsize::new(1).unwrap())
-            .unwrap();
+        let pool = store::test_support::reader_pool_for_fixture(
+            &self.store,
+            NonZeroUsize::new(1).unwrap(),
+        );
         let context = self
             .store
             .prepare_library_read(

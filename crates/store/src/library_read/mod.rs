@@ -3,12 +3,13 @@ mod context;
 mod lease;
 mod pool;
 mod query;
+mod wait;
 
 pub(crate) use budget::{WriterQueryPolicy, active_query_budget, check_writer_budget};
 pub(crate) use context::authorized_ids_on;
 pub use context::{LibraryReadContext, LibraryReadRequest, ReadCredential};
-pub use lease::{LibraryReadLease, QueryBudget};
-pub use pool::LibraryReadPool;
+pub use lease::{QueryBudget, ReaderLease};
+pub use pool::ReaderPool;
 pub use query::LibraryReadResult;
 
 #[derive(Debug, thiserror::Error)]

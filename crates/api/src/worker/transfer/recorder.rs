@@ -2,7 +2,8 @@ use domain::Subscribe;
 
 use crate::management::ApiState;
 
-use super::plan::{TransferPlan, validate_transfer_plan_at};
+use super::decision::ensure_current;
+use super::plan::{TransferPlan, with_plan_write};
 
 pub(crate) struct PublicationRecorder<'a> {
     pub state: &'a ApiState,
@@ -22,43 +23,16 @@ impl PublicationRecorder<'_> {
         ignored_files: &std::collections::HashSet<String>,
     ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
         let result = (|| -> Result<domain::FileCoverage, String> {
-            let store = self.state.store.lock();
-            // This lock spans validation and reservation, never filesystem work.
-            if !store
-                .subscribe_snapshot_is_current(&self.snapshot, ignored_files)
+            let guard = self.state.subscribe_guard(self.subscribe.id);
+            let _guard = guard.lock();
+            let store = self.state.store.as_ref();
+            ensure_current(self.state, store, self.subscribe)?;
+            if store
+                .load_subscribe_facts(self.subscribe.id)
                 .map_err(|error| error.to_string())?
+                != self.snapshot.saved
             {
-                return Err("Transfer Subscribe facts or Library ownership changed".into());
-            }
-            if let Some(plan) = plan {
-                validate_transfer_plan_at(
-                    &store,
-                    self.subscribe,
-                    self.lease,
-                    Some(&self.fingerprint),
-                    ignored_files,
-                    plan,
-                )?;
-            } else {
-                self.lease
-                    .control()
-                    .check()
-                    .map_err(|error| error.to_string())?;
-                if !store
-                    .library_accepts_work(self.lease.library_id())
-                    .map_err(|e| e.to_string())?
-                    || store
-                        .read_fingerprint(self.lease.library_id(), self.subscribe.media_id)
-                        .map_err(|e| e.to_string())?
-                        != self.fingerprint
-                    || store
-                        .get_subscribe(self.subscribe.id)
-                        .map_err(|e| e.to_string())?
-                        .as_ref()
-                        != Some(self.subscribe)
-                {
-                    return Err("Transfer source or Library configuration changed".into());
-                }
+                return Err("Transfer Subscribe facts changed".into());
             }
             if candidate.file.media_id != self.subscribe.media_id
                 || candidate.file.library_id.to_string() != self.lease.library_id()
@@ -73,25 +47,27 @@ impl PublicationRecorder<'_> {
             // The reservation owns the pending row identity: an interrupted round
             // that left the same destination behind is recovered here rather than
             // re-created, and a conflicting owner/source/mode is refused.
-            let config_revision = match plan {
-                Some(plan) => plan.config_revision,
-                None => store
-                    .library_config_revision(self.lease.library_id())
-                    .map_err(|e| e.to_string())?,
-            };
-            let scope = store::library_write::WriteScope {
-                library_id: candidate.file.library_id,
-                config_revision,
-            };
-            store
-                .reserve_transfer(
+            self.publication_write(plan, Some(&self.fingerprint), ignored_files, |db| {
+                super::snapshot::validate_library_snapshot(db, &self.snapshot, ignored_files)?;
+                let config_revision = match plan {
+                    Some(plan) => plan.config_revision,
+                    None => db
+                        .library_config_revision(self.lease.library_id())
+                        .map_err(|error| error.to_string())?,
+                };
+                let scope = store::library_write::WriteScope {
+                    library_id: candidate.file.library_id,
+                    config_revision,
+                };
+                db.reserve_transfer(
                     &scope,
                     candidate,
                     source,
                     mode,
                     crate::job_loop::unix_now() * 1000,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|error| error.to_string())
+            })
         })();
         result.map_err(|error| {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication reservation failed");
@@ -118,25 +94,30 @@ impl PublicationRecorder<'_> {
         let source = library::observe_source(&candidate.file.path)
             .map_err(|error| fail(error.to_string()))?;
         {
-            let store = self.state.store.lock();
-            let config_revision = match plan {
-                Some(plan) => plan.config_revision,
-                None => store
-                    .library_config_revision(self.lease.library_id())
-                    .map_err(|e| fail(e.to_string()))?,
-            };
-            let scope = store::library_write::WriteScope {
-                library_id: candidate.file.library_id,
-                config_revision,
-            };
-            store
-                .finish_transfer(
+            let guard = self.state.subscribe_guard(self.subscribe.id);
+            let _guard = guard.lock();
+            let store = self.state.store.as_ref();
+            ensure_current(self.state, store, self.subscribe).map_err(fail)?;
+            self.publication_write(plan, None, &std::collections::HashSet::new(), |db| {
+                let config_revision = match plan {
+                    Some(plan) => plan.config_revision,
+                    None => db
+                        .library_config_revision(self.lease.library_id())
+                        .map_err(|error| error.to_string())?,
+                };
+                let scope = store::library_write::WriteScope {
+                    library_id: candidate.file.library_id,
+                    config_revision,
+                };
+                db.finish_transfer(
                     &scope,
                     candidate,
                     &candidate.file.version,
                     crate::job_loop::unix_now() * 1000,
                 )
-                .map_err(|error| fail(error.to_string()))
+                .map_err(|error| error.to_string())
+            })
+            .map_err(fail)
         }?;
         if let Some(plan) = plan {
             plan.published_removals.lock().insert(
@@ -145,6 +126,43 @@ impl PublicationRecorder<'_> {
             );
         }
         Ok(())
+    }
+    fn publication_write<T>(
+        &self,
+        plan: Option<&TransferPlan>,
+        fingerprint: Option<&store::ReadFingerprint>,
+        ignored: &std::collections::HashSet<String>,
+        work: impl FnOnce(&store::LibraryConnection<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let store = self.state.store.as_ref();
+        if let Some(plan) = plan {
+            return with_plan_write(store, self.lease, fingerprint, ignored, plan, work);
+        }
+        store.library_write_with_error(
+            |error| error.to_string(),
+            |db| {
+                self.lease
+                    .control()
+                    .check()
+                    .map_err(|error| error.to_string())?;
+                let fingerprint_changed = match fingerprint {
+                    Some(expected) => {
+                        db.read_fingerprint(self.lease.library_id(), self.subscribe.media_id)
+                            .map_err(|error| error.to_string())?
+                            != *expected
+                    }
+                    None => false,
+                };
+                if !db
+                    .library_accepts_work(self.lease.library_id())
+                    .map_err(|error| error.to_string())?
+                    || fingerprint_changed
+                {
+                    return Err("Transfer source or Library configuration changed".into());
+                }
+                work(db)
+            },
+        )
     }
 }
 

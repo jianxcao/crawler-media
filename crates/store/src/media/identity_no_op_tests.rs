@@ -18,16 +18,23 @@ use domain::{LibraryId, MediaKind};
 impl Store {
     /// Rows this Store's `library.db` connection has written (SQLite's own counter).
     fn test_total_changes(&self) -> u64 {
-        self.library.total_changes()
+        self.with_writer(crate::Db::Library, |conn| Ok(conn.total_changes()))
+            .unwrap()
     }
 
     fn test_execute(&self, sql: &str, id: &str) -> Result<(), StoreError> {
-        self.library.execute(sql, [id])?;
+        self.with_writer(crate::Db::Library, |conn| {
+            conn.execute(sql, [id]).map_err(Into::into)
+        })?;
         Ok(())
     }
 
     fn test_scalar<T: rusqlite::types::FromSql>(&self, sql: &str, id: &str) -> T {
-        self.library.query_row(sql, [id], |row| row.get(0)).unwrap()
+        self.with_read(crate::Db::Library, |conn| {
+            conn.query_row(sql, [id], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap()
     }
 }
 

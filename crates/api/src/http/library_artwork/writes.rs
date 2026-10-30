@@ -21,7 +21,7 @@ fn capture(
     media: domain::MediaId,
     backdrop: bool,
 ) -> Result<Target, Response> {
-    store_wait::with_bounded_store(state.store(), |store| {
+    store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
         let library_id = library.parse().map_err(|_| {
@@ -58,8 +58,7 @@ fn capture(
             media,
             path,
         })
-    })
-    .unwrap_or_else(|| Err(store_wait::busy_response()))
+    })?
 }
 
 fn validate(store: &crate::Store, state: &ApiState, target: &Target) -> Result<(), Response> {
@@ -123,8 +122,8 @@ fn publish_bytes(
     lease: &crate::library_lifecycle::LibraryWorkLease,
 ) -> Response {
     let published = lease.publish(|| {
-        store_wait::with_bounded_store(state.store(), |store| validate(store, state, target))
-            .unwrap_or_else(|| Err(store_wait::busy_response()))
+        store_wait::with_foreground_store(state, |store| validate(store, state, target))
+            .and_then(std::convert::identity)
             .map_err(|response| format!("artwork rejected ({})", response.status()))?;
         std::fs::write(&target.path, bytes).map_err(|error| error.to_string())
     });

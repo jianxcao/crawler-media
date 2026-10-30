@@ -32,7 +32,7 @@ fn request(method: &str, uri: &str, body: Value) -> Request<Body> {
 fn seed(root: &Path, state: &ApiState) -> String {
     let library_root = root.join("movies");
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard
         .create_library(
             domain::MediaKind::Movie,
@@ -65,7 +65,7 @@ fn seed(root: &Path, state: &ApiState) -> String {
         };
         guard.insert_media(&media).unwrap();
         publish_fixture_file(
-            &guard,
+            guard,
             &FixtureFile {
                 file_id: Some(domain::LedgerId::new()),
                 media_id: media.id,
