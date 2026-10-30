@@ -9,6 +9,11 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
         .await?
         .ok_or("Library removal missing")?;
     if operation.state == "succeeded" {
+        let owned = id.to_owned();
+        window(state, move |store| {
+            store.clean_library_removal_batch(&owned)
+        })
+        .await?;
         return Ok(());
     }
     let library = operation.library_id;

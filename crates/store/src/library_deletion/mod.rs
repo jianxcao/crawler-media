@@ -195,6 +195,25 @@ impl Store {
             .optional()?)
     }
 
+    /// Public completion includes the independent Subscribe detachment commit.
+    /// The durable succeeded receipt still drives recovery between those commits.
+    pub fn library_removal_status(&self, id: &str) -> Result<Option<LibraryRemoval>, StoreError> {
+        let Some(mut operation) = self.library_removal(id)? else {
+            return Ok(None);
+        };
+        if operation.state == SUCCEEDED_STATE {
+            let bound: bool = self.subscribe.query_row(
+                "SELECT EXISTS(SELECT 1 FROM subscribes WHERE library_id=?1)",
+                [&operation.library_id],
+                |row| row.get(0),
+            )?;
+            if bound {
+                operation.state = "cleaning".into();
+            }
+        }
+        Ok(Some(operation))
+    }
+
     /// Removals still owned by the driver (`state != succeeded`), so retention keeps them.
     pub fn pending_library_removals(&self) -> Result<Vec<LibraryRemoval>, StoreError> {
         Ok(self

@@ -7,6 +7,7 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
         .library_removal(id)?
         .ok_or_else(|| StoreError::Missing(id.into()))?;
     if operation.state == "succeeded" {
+        store.detach_subscribes_from_library(operation.library_id.parse()?)?;
         return Ok(operation);
     }
     if operation.state != "cleaning" {
@@ -88,7 +89,10 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
     validate_revision(&tx, id, &operation.library_id)?;
     finalize(&tx, id, &operation.library_id)?;
     tx.commit()?;
+    // Finalization is durable before subscribe.db takes its own write lock.
+    // A failed detach leaves the succeeded receipt available for recovery.
     crate::path_key::reload_root_aliases(&store.library)?;
+    store.detach_subscribes_from_library(operation.library_id.parse()?)?;
     tracing::info!(operation_id=id,library_id=%operation.library_id,"Library 索引删除完成，磁盘文件保留");
     store
         .library_removal(id)?

@@ -109,6 +109,7 @@ pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
 mod search_history;
 pub use search_history::{HistoryDeleteOutcome, HistoryDeletePlan};
 mod sites;
+mod subscribe_detach;
 mod subscribe_wanted;
 mod subscribes;
 mod users;

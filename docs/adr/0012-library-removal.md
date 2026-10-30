@@ -28,7 +28,9 @@ The sequence (since `ffa96c36`, 2026-10-29) is freeze/snapshot → prevent new w
 
 The durable operation stores the cleanup scope so a restart or partial cross-database cleanup can resume safely. It does not pretend the four databases share a transaction. Cleanup retries must preserve the snapshot count and not revive canceled work. Frozen libraries are hidden from ordinary browsing/new Playback and remain visible for administrative status/retry. Static artwork read endpoints remain public under the existing image-authentication contract.
 
-Explicit Subscribe bindings to a removed Library remain bindings with an actionable unavailable-target state. They are not silently redirected to a default Library, and the Subscribe itself is not deleted.
+After Library finalization commits, explicit Subscribe bindings to that Library are cleared in a separate IMMEDIATE transaction on subscribe.db. The Subscribe itself is retained and subsequent Transfer resolves the current default Library of the same MediaKind. If that transaction fails or the process stops between commits, the durable succeeded removal receipt drives idempotent detachment on retry or startup; cleanup never acquires write locks on both databases together.
+
+The durable succeeded receipt records Library finalization. Public removal status and repeated DELETE responses continue to report `cleaning` while Subscribe bindings to that Library remain, and expose `succeeded` only after the independent detachment commit is visible. This uses the existing states and does not rewrite the durable receipt during recovery.
 
 ### Reimport identity comes from reliable work-level aliases
 

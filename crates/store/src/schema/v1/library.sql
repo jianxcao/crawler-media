@@ -301,6 +301,7 @@ CREATE TABLE playback_session_ids (
  issued_at INTEGER NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0), state TEXT NOT NULL CHECK(state IN ('pending','active','closed')),
  PRIMARY KEY(user_id,device_id,play_session_id)
 );
+CREATE INDEX playback_session_ids_media ON playback_session_ids(media_id);
 CREATE INDEX session_id_expiry ON playback_session_ids(issued_at);
 CREATE INDEX session_generation ON playback_session_ids(user_id,device_id,generation DESC);
 CREATE TABLE playback_sessions (
@@ -314,8 +315,9 @@ CREATE TABLE playback_sessions (
  tracks_version INTEGER, play_session_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0),
  last_report_at_ms INTEGER NOT NULL DEFAULT 0, last_event_sequence INTEGER, PRIMARY KEY(user_id,device_id)
 );
--- Media identity survives file cleanup. Playback cleanup uses file/user/session
--- keys; no production path deletes playback facts by Media id.
+CREATE INDEX playback_sessions_media ON playback_sessions(media_id);
+-- Historic Playback facts survive file cleanup; orphan Media cleanup removes
+-- owned sessions and per-user state through their Media identity.
 CREATE TABLE playback_logs (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, media_id TEXT NOT NULL, season INTEGER, episode INTEGER,
  client TEXT, device_name TEXT, device_id TEXT NOT NULL, play_method TEXT NOT NULL DEFAULT 'local',
@@ -452,6 +454,7 @@ CREATE TABLE probe_job_units (
  status TEXT NOT NULL,error TEXT,reuse_media_info_cache INTEGER NOT NULL DEFAULT 0,stage TEXT NOT NULL DEFAULT 'metadata',
  sampling_plan_json TEXT,detection_outcome_json TEXT,PRIMARY KEY(job_id,file_id)
 );
+CREATE INDEX probe_unit_file ON probe_job_units(file_id,job_id);
 CREATE UNIQUE INDEX probe_unit_active ON probe_job_units(file_id) WHERE status IN ('queued','running');
 CREATE INDEX probe_unit_dispatch ON probe_job_units(stage,status,job_id) WHERE status='queued';
 CREATE INDEX probe_unit_status ON probe_job_units(job_id,status);

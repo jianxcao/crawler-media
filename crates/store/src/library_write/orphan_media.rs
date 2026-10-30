@@ -17,10 +17,6 @@ use crate::StoreError;
 
 /// Child tables keyed by `media_id`, deleted before `media` (FK order).
 const OWNED: &[&str] = &[
-    "user_library_items",
-    "library_item_terms",
-    "library_protocol_terms",
-    "library_protocol_people",
     "library_units",
     "library_items",
     "library_metadata_inputs",

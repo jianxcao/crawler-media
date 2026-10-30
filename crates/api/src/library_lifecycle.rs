@@ -58,8 +58,16 @@ pub(crate) fn launch_library_removal(
     mut operation: store::LibraryRemoval,
     handle: tokio::runtime::Handle,
 ) -> Result<store::LibraryRemoval, String> {
+    let mut response = operation.clone();
     if operation.state == "succeeded" {
-        return Ok(operation);
+        let store = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+            .ok_or_else(|| "runtime.busy".to_string())?;
+        response = store
+            .library_removal_status(&operation.operation_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Library removal {} missing", operation.operation_id))?;
     }
     if !state
         .library_work
@@ -67,7 +75,7 @@ pub(crate) fn launch_library_removal(
         .lock()
         .insert(operation.operation_id.clone())
     {
-        return Ok(operation);
+        return Ok(response);
     }
     if operation.state == "failed" {
         if let Err(error) =
@@ -85,6 +93,7 @@ pub(crate) fn launch_library_removal(
         }
         operation.state = "draining".into();
         operation.error = None;
+        response = operation.clone();
     }
     let state = state.clone();
     let operation_id = operation.operation_id.clone();
@@ -109,7 +118,7 @@ pub(crate) fn launch_library_removal(
         state.library_work.removals.lock().remove(&operation_id);
         crate::root_reassign_work::notify(&state);
     });
-    Ok(operation)
+    Ok(response)
 }
 
 /// Backoff between automatic drain attempts. A transient failure (busy disk,
@@ -134,21 +143,43 @@ async fn drain_with_retry(state: &ApiState, operation_id: &str) -> Result<(), St
         attempt += 1;
         tracing::warn!(%operation_id, %error, attempt, ?delay, "Library 删除失败，稍后自动重试");
         let owned = operation_id.to_owned();
-        let note = format!("retry {attempt} after error: {error}");
-        let _ = crate::http::store_wait::store_blocking(state.store(), move |store| {
-            store.set_removal_state(&owned, "draining", Some(&note))
-        })
-        .await;
+        let operation =
+            crate::http::store_wait::store_read(state, move |store| store.library_removal(&owned))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Library removal {operation_id} missing"))?;
+        if operation.state != "succeeded" {
+            let owned = operation_id.to_owned();
+            let note = format!("retry {attempt} after error: {error}");
+            crate::http::store_wait::store_blocking(state.store(), move |store| {
+                store.set_removal_state(&owned, "draining", Some(&note))
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        }
         tokio::time::sleep(delay).await;
     }
 }
 
 pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
-    let operations = state
-        .store
-        .lock()
-        .pending_library_removals()
-        .map_err(|e| e.to_string())?;
+    let operations = {
+        let store = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+            .ok_or_else(|| "runtime.busy".to_string())?;
+        let mut operations = store
+            .pending_library_removals()
+            .map_err(|e| e.to_string())?;
+        // A crash can leave library.db finalized before subscribe.db commits.
+        operations.extend(
+            store
+                .succeeded_library_removals()
+                .map_err(|e| e.to_string())?,
+        );
+        operations
+    };
     for operation in operations {
         state.library_work.cancel(&operation.library_id);
         if operation.state == "failed" {
