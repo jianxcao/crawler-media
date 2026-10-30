@@ -291,7 +291,10 @@ impl ApiState {
         // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
         // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
         let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-        let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone()));
+        let probe = Arc::new(crate::probe_manager::ProbeManager::with_shared_readers(
+            store.clone(),
+            store_readers.clone(),
+        ));
         probe.set_library_registry(library_work.clone());
         let startup_browser = crate::runtime_browser::startup_browser(store.clone());
         let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(

@@ -13,16 +13,35 @@ use super::{library_for_file, require_visible_library};
 
 /// Queue metadata extraction and enabled TV fingerprint extraction.
 fn enqueue_probe(state: &ApiState, row: &domain::FileCoverage) -> bool {
-    matches!(
-        state
-            .probe
-            .request_probe(row, ProbeRequestOrigin::Detail)
-            .unwrap_or(ProbeRequestResult::Cancelled),
-        ProbeRequestResult::Queued { .. }
-    )
+    match state.probe.request_probe(row, ProbeRequestOrigin::Detail) {
+        Ok(ProbeRequestResult::Queued { .. }) => true,
+        Ok(_) => false,
+        Err(error) => {
+            tracing::warn!(%error, file_id = %row.file.file_id, "探测暂未入队，保留后续请求重试");
+            false
+        }
+    }
 }
 
-pub(crate) fn ensure_probe_enqueued(state: &ApiState, row: &domain::FileCoverage) -> bool {
+/// Async callers share the existing HTTP blocking budget for probe admission.
+pub(crate) async fn ensure_probe_enqueued(state: &ApiState, row: &domain::FileCoverage) -> bool {
+    let worker = state.clone();
+    let row = row.clone();
+    match state
+        .http_work
+        .run_to_completion(move || ensure_probe_enqueued_blocking(&worker, &row))
+        .await
+    {
+        Ok(queued) => queued,
+        Err(error) => {
+            tracing::warn!(%error, "探测入队阻塞工作暂不可用");
+            false
+        }
+    }
+}
+
+/// Blocking scan and protocol stages already hold their own work budget.
+pub(crate) fn ensure_probe_enqueued_blocking(state: &ApiState, row: &domain::FileCoverage) -> bool {
     enqueue_probe(state, row)
 }
 
@@ -65,7 +84,13 @@ fn committed_coverage(
 /// than the writer's in-memory copy.
 pub(crate) fn enqueue_probes_for_files(state: &ApiState, files: &[domain::LibraryFile]) -> usize {
     let rows: Vec<_> = {
-        let store = state.store.lock();
+        let Some(store) = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        else {
+            tracing::warn!("探测入队读取池暂不可用");
+            return 0;
+        };
         files
             .iter()
             .filter_map(|file| committed_coverage(&store, &file.path, Some(file.media_id)))
@@ -79,7 +104,13 @@ pub(crate) fn enqueue_probes_for_paths(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> usize {
     let rows: Vec<_> = {
-        let store = state.store.lock();
+        let Some(store) = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        else {
+            tracing::warn!("探测入队读取池暂不可用");
+            return 0;
+        };
         paths
             .into_iter()
             .filter_map(|path| committed_coverage(&store, &path, None))
@@ -112,8 +143,10 @@ fn probe_item_blocking(
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
     let (rows, media_kind) = {
-        let handle = state.store();
-        let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        let Some(store) = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        else {
             return crate::http::store_wait::busy_response();
         };
         if let Err(response) = state

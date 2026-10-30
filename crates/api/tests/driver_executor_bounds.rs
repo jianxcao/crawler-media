@@ -496,6 +496,7 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
         api::probe_manager::ProbeManager::new(store.clone())
+            .unwrap()
             .with_tracks_probe(probe.clone() as Arc<dyn api::probe_manager::TracksProbe>),
     );
     assert!(

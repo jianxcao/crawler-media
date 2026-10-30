@@ -30,15 +30,25 @@ pub(super) fn apply_marker_refresh(
             mgr.cancel_unit(unit, "file_deleted");
             return;
         }
+        Err(error) if super::store_access::is_busy(&error) => {
+            defer_refresh(mgr, job, unit);
+            return;
+        }
         Err(error) => {
             fail_job(mgr, job, "读取刷新任务季信息失败");
             tracing::error!(%error, job_id = %job.id, "读取声纹刷新任务季信息失败");
             return;
         }
     };
-    let all_rows = mgr.store.lock().list_file_coverage();
+    let all_rows = mgr
+        .reader()
+        .and_then(|store| store.file_coverage_for_media(media_id));
     let all_rows = match all_rows {
         Ok(rows) => rows,
+        Err(error) if super::store_access::is_busy(&error) => {
+            defer_refresh(mgr, job, unit);
+            return;
+        }
         Err(error) => {
             fail_job(mgr, job, "读取媒体台账失败");
             tracing::error!(%error, job_id = %job.id, "生成声纹刷新结果时读取媒体台账失败");
@@ -49,6 +59,10 @@ pub(super) fn apply_marker_refresh(
         mgr, job, unit, media_id, &seasons, &all_rows,
     ) {
         Ok(replacements) => replacements,
+        Err((_, error)) if super::store_access::is_busy(&error) => {
+            defer_refresh(mgr, job, unit);
+            return;
+        }
         Err((season, error)) => {
             if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
             {
@@ -69,7 +83,7 @@ pub(super) fn apply_marker_refresh(
         .collect::<Vec<_>>();
     let members = markers::source_observations(&rows);
     let publication = members.and_then(|members| {
-        let store = mgr.store.lock();
+        let store = mgr.writer()?;
         markers::validate_season_rows(&store, &rows).and_then(|()| {
             // Validate every original job member under this same lock, not just the
             // anchor or the expanded lease that ended during result preparation.
@@ -78,6 +92,10 @@ pub(super) fn apply_marker_refresh(
         })
     });
     if let Err(error) = publication {
+        if super::store_access::is_busy(&error) {
+            defer_refresh(mgr, job, unit);
+            return;
+        }
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
         {
             mgr.cancel_unit(unit, "file_deleted");
@@ -127,7 +145,7 @@ fn marker_refresh_seasons(
 ) -> Result<Vec<u32>, crate::store::StoreError> {
     let mut rows = Vec::new();
     {
-        let store = mgr.store.lock();
+        let store = mgr.reader()?;
         for unit in store.probe_job_units(&job.id)? {
             let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
             crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
@@ -152,7 +170,7 @@ fn prepare_season_replacements(
     all_rows: &[domain::FileCoverage],
 ) -> Result<Vec<crate::store::MarkerResultReplacement>, (u32, crate::store::StoreError)> {
     let sampling_mode = {
-        let store = mgr.store.lock();
+        let store = mgr.reader().map_err(|error| (0, error))?;
         crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
             .ok()
             .map(|c| c.effective.fingerprint_sampling_mode)
@@ -191,8 +209,8 @@ fn prepare_season_replacements(
                 let job_id = job.id.clone();
                 let season_val = *season;
 
-                tokio::task::block_in_place(|| {
-                    handle.block_on(async {
+                handle
+                    .block_on(async {
                         super::season::run_adaptive_season_pipeline(
                             mgr,
                             &job_id,
@@ -202,8 +220,14 @@ fn prepare_season_replacements(
                         )
                         .await
                     })
-                })
-                .map_err(|e| (*season, crate::store::StoreError::Missing(e)))?
+                    .map_err(|error| {
+                        let error = if super::store_access::is_busy_message(&error) {
+                            super::store_access::busy_error()
+                        } else {
+                            crate::store::StoreError::Missing(error)
+                        };
+                        (*season, error)
+                    })?
             } else {
                 let mut anchor_unit = unit.clone();
                 anchor_unit.row = row;
@@ -236,7 +260,7 @@ fn scope_replacement_to_job(
     job: &crate::store::ProbeJob,
     replacement: &mut crate::store::MarkerResultReplacement,
 ) -> Result<(), crate::store::StoreError> {
-    let units = mgr.store.lock().probe_job_units(&job.id)?;
+    let units = mgr.reader()?.probe_job_units(&job.id)?;
     let members: std::collections::HashSet<String> =
         units.into_iter().map(|unit| unit.ledger_id).collect();
     let before = replacement.chapter_updates.len();
@@ -255,11 +279,20 @@ fn scope_replacement_to_job(
     Ok(())
 }
 
+pub(super) fn defer_refresh(mgr: &ProbeManager, job: &crate::store::ProbeJob, unit: &ProbeUnit) {
+    let mut pending = mgr.recovered_marker_refreshes.lock();
+    if !pending.iter().any(|(queued, _)| queued.id == job.id) {
+        pending.push((job.clone(), unit.clone()));
+    }
+    tracing::warn!(job_id = %job.id, "标记发布繁忙，保留完成单元等待下一次发布");
+    drop(pending);
+    mgr.wake.notify_one();
+}
+
 fn fail_job(mgr: &ProbeManager, job: &crate::store::ProbeJob, message: &str) {
     if let Err(error) = mgr
-        .store
-        .lock()
-        .finish_probe_job(&job.id, false, Some(message))
+        .writer()
+        .and_then(|store| store.finish_probe_job(&job.id, false, Some(message)))
     {
         tracing::error!(%error, job_id = %job.id, %message, "持久化声纹任务失败状态失败");
     }

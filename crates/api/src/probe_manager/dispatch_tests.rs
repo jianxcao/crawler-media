@@ -8,7 +8,7 @@ fn metadata_dispatch_handoff_finishes_before_sender_returns() {
     let store = Arc::new(parking_lot::Mutex::new(
         store::Store::open(tmp.path()).unwrap(),
     ));
-    let manager = Arc::new(ProbeManager::new(store));
+    let manager = Arc::new(ProbeManager::new(store).unwrap());
     let (tx, mut rx) = mpsc::channel(1);
     let (published, receive) = std::sync::mpsc::channel();
     let (finished, completion) = std::sync::mpsc::channel();
@@ -56,7 +56,8 @@ fn metadata_dispatch_full_and_closed_keep_accounting_unchanged() {
     let tmp = tempfile::tempdir().unwrap();
     let manager = ProbeManager::new(Arc::new(parking_lot::Mutex::new(
         store::Store::open(tmp.path()).unwrap(),
-    )));
+    )))
+    .unwrap();
     let (tx, rx) = mpsc::channel(1);
     let id = || ProbeDispatchId {
         job_id: "job".into(),

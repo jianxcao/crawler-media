@@ -316,11 +316,9 @@ async fn bounded_windows_preserve_a_large_durable_backlog() {
     let gate = Gate::new();
     gate.release();
     let capture = Arc::new(GatedCapture::new(gate.clone()));
-    let manager = Arc::new(ProbeManager::with_engines(
-        store.clone(),
-        capture.clone(),
-        capture.clone(),
-    ));
+    let manager = Arc::new(
+        ProbeManager::with_engines(store.clone(), capture.clone(), capture.clone()).unwrap(),
+    );
 
     let metadata_pending = store
         .lock()

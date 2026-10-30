@@ -113,7 +113,8 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
         case,
         reads: Arc::new(AtomicUsize::new(0)),
     });
-    let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone());
+    let manager =
+        ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone()).unwrap();
     let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
     let rows: Vec<_> = episodes
         .iter()

@@ -292,21 +292,25 @@ impl LibraryWorkRegistry {
         self.acquire_bounded_kind(store, library_id, LibraryWorkKind::Ordinary)
     }
 
-    pub(crate) fn acquire_optional(
-        self: &Arc<Self>,
-        store: &Mutex<store::Store>,
-        library_id: &str,
-        kind: LibraryWorkKind,
-    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
-        self.acquire_bounded_kind(store, library_id, kind)
-    }
-
     pub(crate) fn acquire_from_readers(
         self: &Arc<Self>,
         readers: &Arc<crate::store_readers::StoreReaders>,
         library_id: &str,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         self.acquire_bounded_with(library_id, LibraryWorkKind::Ordinary, || {
+            readers
+                .checkout(crate::http::store_wait::STORE_READ_WAIT)
+                .ok_or(BoundedLeaseError::StoreBusy)
+        })
+    }
+
+    pub(crate) fn acquire_optional_from_readers(
+        self: &Arc<Self>,
+        readers: &Arc<crate::store_readers::StoreReaders>,
+        library_id: &str,
+        kind: LibraryWorkKind,
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
+        self.acquire_bounded_with(library_id, kind, || {
             readers
                 .checkout(crate::http::store_wait::STORE_READ_WAIT)
                 .ok_or(BoundedLeaseError::StoreBusy)

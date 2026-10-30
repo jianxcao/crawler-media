@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::{ProbeManager, ProbeUnit, single_episode, single_season};
-use crate::http::store_wait::{STORE_READ_WAIT, STORE_WRITE_WAIT, store_read_handle};
+use crate::http::store_wait::STORE_WRITE_WAIT;
 
 /// Stream facts reader; tests inject a deterministic source replacement here.
 pub trait TracksProbe: Send + Sync {
@@ -64,18 +64,23 @@ async fn reused_media_duration(
     ledger_id: &str,
     source_version: &str,
     started_at: Instant,
-) -> Option<i64> {
+) -> Result<Option<i64>, TrackProbeError> {
     if !unit.reuse_media_info_cache {
-        return None;
+        return Ok(None);
     }
     let ledger = ledger_id.to_string();
     let version = source_version.to_string();
-    let duration_ms = store_read_handle(mgr.store.clone(), STORE_READ_WAIT, move |store| {
-        reusable_media_duration(store, &ledger, &version)
-    })
-    .await
-    .ok()
-    .flatten()?;
+    let duration_ms = mgr
+        .store_access()
+        .read_async(move |store| reusable_media_duration(store, &ledger, &version))
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, ledger_id, "媒体信息缓存读池繁忙，保留单元等待重试");
+            TrackProbeError::Retry
+        })?;
+    let Some(duration_ms) = duration_ms else {
+        return Ok(None);
+    };
     mgr.timings
         .record_media_info(unit.job_id.as_deref(), 0, true);
     tracing::info!(
@@ -88,7 +93,7 @@ async fn reused_media_duration(
         elapsed_ms = started_at.elapsed().as_millis() as u64,
         "【媒体信息】版本未变化，复用已缓存流信息和媒体时长"
     );
-    Some(duration_ms)
+    Ok(Some(duration_ms))
 }
 
 pub(super) async fn probe_tracks_and_store(
@@ -109,7 +114,7 @@ pub(super) async fn probe_tracks_and_store(
         "【媒体信息】流信息探测开始"
     );
     if let Some(cached) =
-        reused_media_duration(mgr, unit, &ledger_id, source_version, started_at).await
+        reused_media_duration(mgr, unit, &ledger_id, source_version, started_at).await?
     {
         return Ok(Some(cached));
     }
@@ -118,15 +123,16 @@ pub(super) async fn probe_tracks_and_store(
         .map_err(|()| TrackProbeError::Failed)?;
     let (tracks, duration_ms) = tracks;
     let published = {
-        if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
-            return Err(TrackProbeError::Failed);
-        }
         let unit_for_write = unit.clone();
         let tracks_for_write = tracks.clone();
         let version = source_version.to_string();
         let store = mgr.store.clone();
         match tokio::task::spawn_blocking(move || {
-            let store = store.try_lock_for(STORE_WRITE_WAIT)?;
+            crate::fingerprint_job::source::observe_source(&unit_for_write.row)
+                .map_err(|_| TrackProbeError::Failed)?;
+            let Some(store) = store.try_lock_for(STORE_WRITE_WAIT) else {
+                return Ok(None);
+            };
             if !super::worker::unit_is_active(&store, &unit_for_write)
                 || crate::fingerprint_job::source::ensure_source_recorded(
                     &store,
@@ -134,26 +140,27 @@ pub(super) async fn probe_tracks_and_store(
                 )
                 .is_err()
             {
-                return Some(None);
+                return Ok(Some(None));
             }
-            Some(Some(super::probe::publish_probe_tracks(
+            Ok(Some(Some(super::probe::publish_probe_tracks(
                 &store,
                 &unit_for_write,
                 &version,
                 &tracks_for_write,
                 duration_ms,
-            )))
+            ))))
         })
         .await
         {
-            Ok(Some(Some(published))) => published,
+            Ok(Ok(Some(Some(published)))) => published,
             // The lock stayed contended for the write budget: keep the durable row
             // and let the job's retry re-run the stage rather than publishing half.
-            Ok(Some(None)) => return Err(TrackProbeError::Retry),
-            Ok(None) => {
+            Ok(Ok(Some(None))) => return Err(TrackProbeError::Retry),
+            Ok(Ok(None)) => {
                 tracing::warn!(ledger_id, "流信息发布未拿到 Store 锁，稍后重试");
                 return Err(TrackProbeError::Retry);
             }
+            Ok(Err(error)) => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     ?error,

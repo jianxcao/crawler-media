@@ -67,7 +67,7 @@ fn run_restored_anchor_capture_test() {
         anchor: f.units[0].row.file.file_id,
         triggered: std::sync::atomic::AtomicBool::new(false),
     });
-    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
+    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture).unwrap();
     {
         let store = f.store.lock();
         let specs: Vec<_> = ids
@@ -174,7 +174,7 @@ fn final_outro_deletion_must_not_publish_deleted_episode() {
         target: row.file.path.to_string_lossy().into_owned(),
         mode: "delete-outro",
     });
-    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
+    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture).unwrap();
     let result = raw_season(&f);
     println!(
         "after final outro deleted ledger={:?}; replacement={result:?}",
@@ -200,7 +200,7 @@ fn inconclusive_silent_fingerprint_must_not_be_refreshed_as_success() {
         target: f.units[0].row.file.path.to_string_lossy().into_owned(),
         mode: "silent-intro",
     });
-    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
+    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture).unwrap();
     let result = raw_season(&f);
     if let Ok(rep) = &result {
         f.store
@@ -390,11 +390,8 @@ async fn restarted_refresh_still_rejects_unresolved_results() {
         target: f.units[0].row.file.path.to_string_lossy().into_owned(),
         mode: "silent-intro",
     });
-    let restarted = Arc::new(ProbeManager::with_engines(
-        f.store.clone(),
-        f.engine.clone(),
-        capture,
-    ));
+    let restarted =
+        Arc::new(ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture).unwrap());
     assert!(restarted.try_start_workers());
     let job = wait_for_terminal(&f.store, "review9-job").await;
     assert_eq!(

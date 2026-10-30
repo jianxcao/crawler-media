@@ -4,7 +4,8 @@
 
 mod probe;
 pub(crate) use probe::{
-    enqueue_probes_for_files, enqueue_probes_for_paths, ensure_probe_enqueued, probe_item,
+    enqueue_probes_for_files, enqueue_probes_for_paths, ensure_probe_enqueued,
+    ensure_probe_enqueued_blocking, probe_item,
 };
 
 use axum::Json;

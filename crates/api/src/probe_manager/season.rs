@@ -8,8 +8,11 @@ use marker::adaptive::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::ProbeUnit;
 use super::single_episode;
-use super::{ProbeManager, ProbeUnit};
+
+#[path = "season_access.rs"]
+mod access;
 use crate::fingerprint_job::{
     AdaptiveCaptureContext, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
     FingerprintCaptureProfile, capture_episode_adaptive, capture_profile_key,
@@ -19,6 +22,8 @@ use crate::store::{
     MarkerResultReplacement, StoredFingerprintModel, StoredFingerprintModelMember,
     StoredMediaMarker,
 };
+use access::SeasonAccess;
+pub use access::run_adaptive_season_pipeline;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeasonSamplingPlan {
@@ -32,7 +37,7 @@ pub struct SeasonSamplingPlan {
 
 /// Fixed collaborators of one season pipeline run, grouped to keep the steps readable.
 struct SeasonPipeline<'a> {
-    mgr: &'a ProbeManager,
+    mgr: &'a SeasonAccess,
     job_id: &'a str,
     media_id: MediaId,
     season: u32,
@@ -53,8 +58,8 @@ struct SeasonPipelineState {
 #[cfg(test)]
 mod tests;
 
-pub async fn run_adaptive_season_pipeline(
-    mgr: &ProbeManager,
+async fn run_adaptive_season_pipeline_inner(
+    mgr: &SeasonAccess,
     job_id: &str,
     media_id: MediaId,
     season: u32,
@@ -63,12 +68,12 @@ pub async fn run_adaptive_season_pipeline(
     for unit in units {
         super::require_single_unit(&unit.row).map_err(|error| error.to_string())?;
     }
-    let sampling_mode = effective_sampling_mode(mgr);
+    let sampling_mode = effective_sampling_mode(mgr)?;
     let profile_key = capture_profile_key(&FingerprintCaptureProfile::default());
     let policy = SamplingPolicy::default();
 
     // Collect descriptors
-    let descriptors = collect_episode_descriptors(mgr, units);
+    let descriptors = collect_episode_descriptors(mgr, units)?;
     let seed_ids = select_seed_episodes(&descriptors, &policy);
     let seed_set: HashSet<String> = seed_ids.iter().cloned().collect();
 
@@ -81,7 +86,7 @@ pub async fn run_adaptive_season_pipeline(
         seed_ledger_ids: seed_ids,
     };
 
-    let (gate, _leases) = super::progress::MetadataPriorityGate::for_rows(mgr, units)?;
+    let (gate, _leases) = mgr.gate.clone().lease_rows(units)?;
     let ctx = adaptive_capture_context(mgr, std::sync::Arc::new(gate));
     let pipeline = SeasonPipeline {
         mgr,
@@ -97,8 +102,7 @@ pub async fn run_adaptive_season_pipeline(
     // 1. 种子单元优先处理，边采集边建模；2. 其余单元用已有模板验证。
     let mut state = SeasonPipelineState::default();
     for unit in order_seed_units_first(units, &seed_set) {
-        let availability =
-            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
+        let availability = pipeline.mgr.store_access().source_available(&unit.row);
         if let Err(error) = availability {
             if !crate::fingerprint_job::source::is_file_deleted(&error) {
                 return Err(error);
@@ -122,7 +126,7 @@ pub async fn run_adaptive_season_pipeline(
     // 在所有单元采集完成后，使用全季收集的全部有效证据重新建模，
     // 发现可能存在的第二种变体或在种子阶段未识别出的模板，并重新验证所有单元。
     if state.collected_evidences.len() >= 2 {
-        build_and_persist_templates(&pipeline, &state.collected_evidences, &mut state.templates);
+        build_and_persist_templates(&pipeline, &state.collected_evidences, &mut state.templates)?;
     }
     reverify_detections(&pipeline, &state.templates, &mut state.detections);
 
@@ -149,8 +153,8 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
     for unit in units {
         let active = pipeline
             .mgr
-            .store
-            .lock()
+            .reader()
+            .map_err(|error| error.to_string())?
             .fingerprint_source_active(pipeline.job_id, &unit.row.file.file_id.to_string())
             .map_err(|error| format!("source_check_failed: {error}"))?;
         if !active {
@@ -159,8 +163,7 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
         if pipeline.ctx.gate.work_control(&unit.row).is_cancelled() {
             return Err("Library probe source cancelled or changed".into());
         }
-        let availability =
-            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
+        let availability = pipeline.mgr.store_access().source_available(&unit.row);
         if let Err(error) = availability {
             if crate::fingerprint_job::source::is_file_deleted(&error) {
                 pipeline.mgr.cancel_unit(unit, "file_deleted");
@@ -171,30 +174,41 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
     Ok(())
 }
 
-fn effective_sampling_mode(mgr: &ProbeManager) -> String {
-    let store = mgr.store.lock();
-    store
+fn effective_sampling_mode(mgr: &SeasonAccess) -> Result<String, String> {
+    let store = mgr.reader().map_err(|error| error.to_string())?;
+    Ok(store
         .get_scrape_config()
-        .ok()
-        .map(|c| c.effective.fingerprint_sampling_mode)
-        .unwrap_or_else(|| "full_window".to_string())
+        .map_err(|error| error.to_string())?
+        .effective
+        .fingerprint_sampling_mode)
 }
 
-fn collect_episode_descriptors(mgr: &ProbeManager, units: &[ProbeUnit]) -> Vec<EpisodeDescriptor> {
-    let store = mgr.store.lock();
-    units
+fn collect_episode_descriptors(
+    mgr: &SeasonAccess,
+    units: &[ProbeUnit],
+) -> Result<Vec<EpisodeDescriptor>, String> {
+    let observed = units
         .iter()
-        .filter_map(|unit| {
+        .map(|unit| {
+            (
+                unit,
+                crate::fingerprint_job::current_source_version(&unit.row.file.path),
+            )
+        })
+        .collect::<Vec<_>>();
+    let store = mgr.reader().map_err(|error| error.to_string())?;
+    Ok(observed
+        .into_iter()
+        .filter_map(|(unit, source_version)| {
             let ledger_id = unit.row.file.file_id.to_string();
-            let path = std::path::Path::new(&unit.row.file.path);
             Some(EpisodeDescriptor {
                 ledger_id: ledger_id.clone(),
                 episode: single_episode(&unit.row)?,
-                source_version: crate::fingerprint_job::current_source_version(path),
+                source_version,
                 duration_ms: known_media_duration(&store, &ledger_id).unwrap_or(0),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn known_media_duration(store: &crate::Store, ledger_id: &str) -> Option<i64> {
@@ -206,11 +220,11 @@ fn known_media_duration(store: &crate::Store, ledger_id: &str) -> Option<i64> {
 }
 
 fn adaptive_capture_context(
-    mgr: &ProbeManager,
+    mgr: &SeasonAccess,
     gate: std::sync::Arc<dyn crate::fingerprint_job::CaptureGate>,
 ) -> AdaptiveCaptureContext {
     AdaptiveCaptureContext {
-        store: mgr.store.clone(),
+        store: mgr.store_access(),
         matcher: mgr.fingerprint_engine.clone(),
         capture: mgr.capture_engine.clone(),
         gate,
@@ -244,11 +258,15 @@ async fn run_season_unit(
         CapturePolicy::Recapture
     };
 
+    let media_duration_ms = {
+        let reader = pipeline.mgr.reader().map_err(|error| error.to_string())?;
+        known_media_duration(&reader, &ledger_id)
+    };
     let req = EpisodeCaptureRequest {
         job_id: pipeline.job_id.to_string(),
         row: unit.row.clone(),
         source_version: crate::fingerprint_job::current_source_version(path),
-        media_duration_ms: known_media_duration(&pipeline.mgr.store.lock(), &ledger_id),
+        media_duration_ms,
         audio_stream_index: None,
         capture_profile_key: pipeline.profile_key.to_string(),
         policy: pipeline.policy.clone(),
@@ -269,7 +287,7 @@ async fn run_season_unit(
 
     // 种子阶段收集到足够证据后立即建模，并回填已经产生的检测结果。
     if is_seed && state.collected_evidences.len() >= 2 {
-        build_and_persist_templates(pipeline, &state.collected_evidences, &mut state.templates);
+        build_and_persist_templates(pipeline, &state.collected_evidences, &mut state.templates)?;
         reverify_detections(pipeline, &state.templates, &mut state.detections);
     }
     Ok(())
@@ -279,7 +297,7 @@ fn build_and_persist_templates(
     pipeline: &SeasonPipeline<'_>,
     collected_evidences: &[EpisodeEvidence],
     templates: &mut TemplateContext,
-) {
+) -> Result<(), String> {
     let comparison_start = std::time::Instant::now();
     let models = build_season_models(
         pipeline.mgr.fingerprint_engine.as_ref(),
@@ -302,7 +320,7 @@ fn build_and_persist_templates(
                     .insert(reference.sample_id.clone(), evidence.clone());
             }
         }
-        persist_season_model(pipeline, model);
+        persist_season_model(pipeline, model)?;
     }
 
     for evidence in collected_evidences {
@@ -311,9 +329,13 @@ fn build_and_persist_templates(
             .insert(evidence.sample_id.clone(), evidence.clone());
     }
     templates.models = models;
+    Ok(())
 }
 
-fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
+fn persist_season_model(
+    pipeline: &SeasonPipeline<'_>,
+    model: &TemplateModel,
+) -> Result<(), String> {
     let model_json = serde_json::to_string(model).unwrap_or_else(|_| "{}".to_string());
     let stored_model = StoredFingerprintModel {
         model_id: model.model_id.clone(),
@@ -340,14 +362,14 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
         })
         .collect();
 
-    let store = pipeline.mgr.store.lock();
+    let store = pipeline.mgr.writer().map_err(|error| error.to_string())?;
     // Comparison runs without Store. Recheck the durable origin under the same
     // writer guard as model publication; never reacquire Registry from here.
     let origin = match store.get_probe_job(pipeline.job_id) {
         Ok(origin) => origin,
         Err(error) => {
             tracing::error!(%error, job_id=pipeline.job_id, "season model origin lookup failed");
-            return;
+            return Err(error.to_string());
         }
     };
     if origin.as_ref().is_some_and(|job| !job.is_active()) {
@@ -355,7 +377,7 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
             job_id = pipeline.job_id,
             "cancelled season model publication"
         );
-        return;
+        return Err("file_deleted: season model source cancelled".into());
     }
     match store.probe_job_units(pipeline.job_id) {
         Ok(units)
@@ -367,12 +389,12 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
                 job_id = pipeline.job_id,
                 "cancelled season model member publication"
             );
-            return;
+            return Err("file_deleted: season model source cancelled".into());
         }
         Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, job_id=pipeline.job_id, "season model member lookup failed");
-            return;
+            return Err(error.to_string());
         }
     }
     let automatic = origin
@@ -401,7 +423,7 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
             model_id = %model.model_id,
             "cancelled Library season model publication"
         );
-        return;
+        return Err("file_deleted: season model source cancelled".into());
     }
     if let Err(error) = store.put_fingerprint_model(&stored_model, &members) {
         if matches!(
@@ -414,7 +436,9 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
             tracing::error!(%error, media_id=%pipeline.media_id, model_id=%model.model_id,
                 "failed to persist fingerprint season model");
         }
+        return Err(error.to_string());
     }
+    Ok(())
 }
 
 fn reverify_detections(
@@ -494,7 +518,7 @@ fn build_marker_replacement(
         std::collections::BTreeMap::new();
     let mut chapter_updates = Vec::new();
     let updated_at = now_secs();
-    let store = pipeline.mgr.store.lock();
+    let store = pipeline.mgr.reader().map_err(|error| error.to_string())?;
 
     for unit in units {
         let ledger_id = unit.row.file.file_id.to_string();

@@ -45,6 +45,7 @@ pub use ledger_presence::{
     LedgerPresenceOutcome, LedgerPresenceResult,
 };
 mod libraries;
+mod library_statistics;
 mod library_stats;
 pub use library_stats::LibraryRosterStats;
 pub mod files;

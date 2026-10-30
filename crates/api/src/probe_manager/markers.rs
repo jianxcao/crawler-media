@@ -61,7 +61,7 @@ pub(super) fn compare_and_store_markers(
         let chapter_updates_clone = replacement.chapter_updates.clone();
         let members = source_observations(&comparison.samples.season_rows)?;
         {
-            let store = mgr.store.lock();
+            let store = mgr.writer()?;
             validate_active_unit(&store, unit)?;
             validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
             validate_season_rows(&store, &comparison.samples.season_rows)?;
@@ -84,7 +84,7 @@ pub(super) fn compare_and_store_markers(
         let members = source_observations(&comparison.samples.season_rows)?;
         let live_rows = rows_present_on_disk(&comparison.samples.all_rows)?;
         let updates = {
-            let store = mgr.store.lock();
+            let store = mgr.writer()?;
             validate_active_unit(&store, unit)?;
             validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
             validate_season_rows(&store, &comparison.samples.season_rows)?;
@@ -207,7 +207,7 @@ fn season_input_unchanged(
     unit: &ProbeUnit,
 ) -> Result<bool, crate::store::StoreError> {
     let digest = season_digest(mgr, unit)?;
-    let stored = mgr.store.lock().season_comparison_digest(
+    let stored = mgr.reader()?.season_comparison_digest(
         &unit.row.file.media_id.to_string(),
         super::require_episode_coordinates(&unit.row)?.0,
     )?;
@@ -221,7 +221,7 @@ fn remember_season_digest(
 ) -> Result<(), crate::store::StoreError> {
     let digest = comparison_digest(samples);
     observe_rows(&samples.season_rows)?;
-    let store = mgr.store.lock();
+    let store = mgr.writer()?;
     validate_active_unit(&store, unit)?;
     validate_season_rows(&store, &samples.season_rows)?;
     store.save_season_comparison_digest(
@@ -357,8 +357,8 @@ fn load_season_samples(
     unit: &ProbeUnit,
 ) -> Result<SeasonFingerprintSamples, crate::store::StoreError> {
     let season = super::require_episode_coordinates(&unit.row)?.0;
-    let store = mgr.store.lock();
-    let all_rows = store.list_file_coverage()?;
+    let store = mgr.reader()?;
+    let all_rows = store.file_coverage_for_media(unit.row.file.media_id)?;
     let season_rows: Vec<_> = all_rows
         .iter()
         .filter(|row| {
@@ -505,7 +505,7 @@ fn build_marker_replacement(
     comparison: &MarkerComparison,
 ) -> Result<MarkerResultReplacement, crate::store::StoreError> {
     let season = super::require_episode_coordinates(&unit.row)?.0;
-    let store = mgr.store.lock();
+    let store = mgr.reader()?;
     let mut chapter_updates = Vec::with_capacity(comparison.samples.season_rows.len());
     for row in &comparison.samples.season_rows {
         let matched = comparison

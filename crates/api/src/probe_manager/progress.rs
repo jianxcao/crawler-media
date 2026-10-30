@@ -12,7 +12,7 @@ pub struct MetadataPriorityGate {
     metadata_pending: Arc<AtomicUsize>,
     metadata_idle: Arc<Notify>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
-    store: Arc<parking_lot::Mutex<store::Store>>,
+    readers: Arc<crate::store_readers::StoreReaders>,
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
     kind: crate::library_lifecycle::LibraryWorkKind,
     owners: Option<Arc<std::collections::HashMap<String, (String, marker::WorkControl)>>>,
@@ -24,7 +24,7 @@ impl MetadataPriorityGate {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
             shutting_down: manager.shutting_down.clone(),
-            store: manager.store.clone(),
+            readers: manager.readers.clone(),
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
@@ -36,7 +36,7 @@ impl MetadataPriorityGate {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
             shutting_down: manager.shutting_down.clone(),
-            store: manager.store.clone(),
+            readers: manager.readers.clone(),
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
@@ -48,16 +48,24 @@ impl MetadataPriorityGate {
         manager: &ProbeManager,
         units: &[super::ProbeUnit],
     ) -> Result<(Self, Vec<crate::library_lifecycle::LibraryWorkLease>), String> {
-        let mut gate = Self::from_manager(manager);
+        Self::from_manager(manager).lease_rows(units)
+    }
+
+    pub(super) fn lease_rows(
+        mut self,
+        units: &[super::ProbeUnit],
+    ) -> Result<(Self, Vec<crate::library_lifecycle::LibraryWorkLease>), String> {
+        let gate = &mut self;
         if let Some(unit) = units.first() {
             gate.kind = super::tracks::optional_work_kind(unit);
         }
         let Some(registry) = gate.registry.as_ref() else {
-            return Ok((gate, Vec::new()));
+            return Ok((self, Vec::new()));
         };
         let owners = {
-            let store = manager
-                .dispatch_store()
+            let store = gate
+                .readers
+                .checkout(crate::http::store_wait::STORE_READ_WAIT)
                 .ok_or_else(|| "probe Store busy".to_string())?;
             units
                 .iter()
@@ -75,7 +83,7 @@ impl MetadataPriorityGate {
         for (_, owner) in &owners {
             if !controls.contains_key(owner) {
                 let lease = registry
-                    .acquire_optional(&manager.store, owner, gate.kind)
+                    .acquire_optional_from_readers(&gate.readers, owner, gate.kind)
                     .map_err(|error| error.to_string())?;
                 controls.insert(owner.clone(), lease.control().signal().clone());
                 leases.push(lease);
@@ -95,7 +103,7 @@ impl MetadataPriorityGate {
                 return Err("Library probe source cancelled or changed".into());
             }
         }
-        Ok((gate, leases))
+        Ok((self, leases))
     }
 }
 
@@ -109,7 +117,7 @@ mod tests {
         let store = Arc::new(parking_lot::Mutex::new(
             store::Store::open(temp.path()).unwrap(),
         ));
-        let manager = ProbeManager::new(store.clone());
+        let manager = ProbeManager::new(store.clone()).unwrap();
         let registry = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
         *manager.library_work.lock() = Some(registry.clone());
         let media = domain::Media {
@@ -191,10 +199,13 @@ impl CaptureGate for MetadataPriorityGate {
             return marker::WorkControl::default();
         }
         let owner = {
-            let store = self.store.lock();
-            crate::fingerprint_job::source::ensure_source_recorded(&store, row)
-                .ok()
-                .map(|()| row.file.library_id.to_string())
+            self.readers
+                .checkout(crate::http::store_wait::STORE_READ_WAIT)
+                .and_then(|store| {
+                    crate::fingerprint_job::source::ensure_source_recorded(&store, row)
+                        .ok()
+                        .map(|()| row.file.library_id.to_string())
+                })
         };
         // A registry-backed capture without an active original lease fails closed.
         // Never switch an old pipeline to a new Library at the same path.

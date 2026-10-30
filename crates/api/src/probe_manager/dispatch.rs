@@ -144,7 +144,7 @@ impl ProbeManager {
             self.seen.lock().remove(&ledger_id);
             return false;
         };
-        let Some(store) = self.dispatch_store() else {
+        let Some(store) = self.dispatch_reader() else {
             return false;
         };
         let current_job = store.get_probe_job(&current_job_id);
@@ -302,7 +302,7 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let Some(store) = self.dispatch_store() else {
+        let Some(store) = self.dispatch_reader() else {
             return;
         };
         let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, free) {
@@ -334,7 +334,7 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let Some(store) = self.dispatch_store() else {
+        let Some(store) = self.dispatch_reader() else {
             return;
         };
         let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, free) {
@@ -387,7 +387,7 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        let Some(store) = self.dispatch_store() else {
+        let Some(store) = self.dispatch_reader() else {
             self.seen.lock().remove(&id.ledger_id);
             self.wake.notify_one();
             return None;
@@ -474,7 +474,7 @@ impl ProbeManager {
         ledger_id: &str,
         source_version: &str,
     ) -> Result<(Option<i64>, u32), store::StoreError> {
-        let store = self.dispatch_store().ok_or_else(|| {
+        let store = self.dispatch_reader().ok_or_else(|| {
             store::StoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "probe Store busy",

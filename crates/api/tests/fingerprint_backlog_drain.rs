@@ -119,10 +119,10 @@ impl Fixture {
         let mut setting = store.lock().get_scrape_config().unwrap().setting;
         setting.fingerprint_duration_secs = Some(90);
         store.lock().save_scrape_config(&setting).unwrap();
-        let manager = Arc::new(ProbeManager::with_fingerprint_engine(
-            store.clone(),
-            Arc::new(FixtureFingerprint),
-        ));
+        let manager = Arc::new(
+            ProbeManager::with_fingerprint_engine(store.clone(), Arc::new(FixtureFingerprint))
+                .unwrap(),
+        );
         let mut rows = Vec::new();
         let mut jobs = Vec::new();
         for episode in 1..=33 {

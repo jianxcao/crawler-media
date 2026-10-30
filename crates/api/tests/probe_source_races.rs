@@ -105,10 +105,9 @@ async fn scenario(
         replaced: AtomicBool::new(false),
         start_secs: AtomicU32::new(10),
     });
-    scenario.manager = Arc::new(ProbeManager::with_fingerprint_engine(
-        scenario.store.clone(),
-        engine.clone(),
-    ));
+    scenario.manager = Arc::new(
+        ProbeManager::with_fingerprint_engine(scenario.store.clone(), engine.clone()).unwrap(),
+    );
     scenario.manager.try_start_workers();
     (scenario, engine)
 }
@@ -268,6 +267,7 @@ async fn disk_change_during_tracks_cannot_publish_details_or_nfo() {
     scenario.manager.shutdown_workers().await.unwrap();
     scenario.manager = Arc::new(
         ProbeManager::with_fingerprint_engine(scenario.store.clone(), scenario.engine.clone())
+            .unwrap()
             .with_tracks_probe(Arc::new(ReplacingTracks)),
     );
     let row = scenario.ledgers[0].clone();

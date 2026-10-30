@@ -375,7 +375,7 @@ mod tests {
         let ledger = row.file.file_id.to_string();
         let library = row.file.library_id.to_string();
         let shared = Arc::new(Mutex::new(store));
-        let manager = ProbeManager::new(shared.clone());
+        let manager = ProbeManager::new(shared.clone()).unwrap();
         let readers =
             Arc::new(crate::store_readers::StoreReaders::open(&shared.lock(), 1).unwrap());
         // A stale page still owns the recorded source after the deletion freeze
@@ -426,7 +426,7 @@ mod tests {
     fn page_metadata_completion_before_sender_returns_releases_seen() {
         let dir = tempfile::tempdir().unwrap();
         let (store, row) = published_row(dir.path());
-        let manager = ProbeManager::new(Arc::new(Mutex::new(store)));
+        let manager = ProbeManager::new(Arc::new(Mutex::new(store))).unwrap();
         let ledger_id = row.file.file_id.to_string();
         let unit = ProbeUnit {
             row,
@@ -515,7 +515,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let store = Arc::new(Mutex::new(store));
-        let manager = Arc::new(ProbeManager::new(store.clone()));
+        let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
         let writable = Arc::new(AtomicBool::new(true));
         let readers = Arc::new(crate::store_readers::StoreReaders::open(&store.lock(), 1).unwrap());
         let guard = store.lock();
@@ -608,7 +608,7 @@ mod tests {
             .unwrap();
         let ledger_id = row.file.file_id.to_string();
         let store = Arc::new(Mutex::new(store));
-        let manager = Arc::new(ProbeManager::new(store.clone()));
+        let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
         let guard = store.lock();
 
         let probe = manager.clone();

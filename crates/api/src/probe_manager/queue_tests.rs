@@ -35,7 +35,7 @@ fn seed_probe_library(store: &Store, tmp: &tempfile::TempDir, media_id: MediaId,
 fn force_probe_during_existing_probe_is_rejected_until_terminal() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = ProbeManager::new(store);
+    let manager = ProbeManager::new(store).unwrap();
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "movie.mkv", None, None),
         kind: MediaKind::Movie,
@@ -83,7 +83,7 @@ fn force_probe_during_existing_probe_is_rejected_until_terminal() {
 fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
             MediaId::new(),
@@ -154,7 +154,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
     let ledger_id = unit.row.file.file_id.to_string();
     seed_probe_library(&store.lock(), &tmp, unit.row.file.media_id, MediaKind::Tv);
     super::super::test_support::publish_into(&store.lock(), &mut unit.row);
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
 
     assert!(manager.enqueue(unit.clone()));
     assert!(manager.is_queued(&ledger_id));
@@ -171,7 +171,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
     );
     drop(manager);
 
-    let restarted = ProbeManager::new(store.clone());
+    let restarted = ProbeManager::new(store.clone()).unwrap();
     assert!(restarted.is_queued(&ledger_id));
     assert_eq!(
         restarted
@@ -189,7 +189,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
 fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = ProbeManager::new(store);
+    let manager = ProbeManager::new(store).unwrap();
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "episode.mkv", Some(1), Some(1)),
         kind: MediaKind::Tv,
@@ -211,7 +211,7 @@ fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
 async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(ProbeManager::new(store));
+    let manager = Arc::new(ProbeManager::new(store).unwrap());
     let unit = ProbeUnit {
         row: super::super::test_support::coverage(MediaId::new(), "episode.mkv", Some(1), Some(1)),
         kind: MediaKind::Tv,
@@ -243,7 +243,7 @@ async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
 fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
             MediaId::new(),
@@ -306,7 +306,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
     let voiceprint_job_id = voiceprint_job.id;
 
     drop(manager);
-    let restarted = ProbeManager::new(store.clone());
+    let restarted = ProbeManager::new(store.clone()).unwrap();
     assert!(restarted.is_queued(&ledger_id));
     let recovered = restarted.take_fingerprint_for_test().unwrap();
     assert_eq!(
@@ -402,7 +402,7 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
             .cancel_probe_unit("interrupted-cancel", &ledger_id, "file_deleted")
             .unwrap();
 
-        let manager = ProbeManager::new(store.clone());
+        let manager = ProbeManager::new(store.clone()).unwrap();
 
         let job = store
             .lock()
@@ -509,7 +509,7 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
             .unwrap()
             .is_none()
     );
-    let _restarted = ProbeManager::new(store.clone());
+    let _restarted = ProbeManager::new(store.clone()).unwrap();
     let recovered = store.lock().get_probe_job(job_id).unwrap().unwrap();
     assert_eq!(recovered.status, "cancelled");
     assert_eq!(recovered.error.as_deref(), Some("file_deleted"));
@@ -528,7 +528,7 @@ fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
 fn failed_probe_is_persisted_and_can_be_retried() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let mut unit = ProbeUnit {
         row: super::super::test_support::coverage(
             MediaId::new(),
@@ -605,8 +605,8 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
             })
             .collect()
     };
-    let first = ProbeManager::new(store.clone());
-    let second = ProbeManager::new(store.clone());
+    let first = ProbeManager::new(store.clone()).unwrap();
+    let second = ProbeManager::new(store.clone()).unwrap();
 
     assert_eq!(first.enqueue_marker_refresh(units()), 2);
     let scope = super::super::marker_refresh_scope(media_id, 1);
@@ -652,7 +652,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
     for row in rows.iter_mut() {
         super::super::test_support::publish_into(&store.lock(), row);
     }
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let active_unit = ProbeUnit {
         row: rows[1].clone(),
         kind: MediaKind::Tv,
@@ -711,7 +711,7 @@ fn explicit_tv_refresh_works_with_switches_off_but_automatic_force_does_not() {
             &[],
         )
         .unwrap();
-    let manager = ProbeManager::new(store);
+    let manager = ProbeManager::new(store).unwrap();
     assert_eq!(
         fingerprint_duration(&manager, &library.id, MediaKind::Tv, true),
         Some(180)

@@ -9,7 +9,9 @@ async fn metadata_publication_retries_after_store_is_busy() {
     let row = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
-        api::probe_manager::ProbeManager::new(store.clone()).with_tracks_probe(probe.clone()),
+        api::probe_manager::ProbeManager::new(store.clone())
+            .unwrap()
+            .with_tracks_probe(probe.clone()),
     );
     assert!(manager.try_start_workers());
     let result = manager
@@ -69,8 +71,11 @@ fn configured_metadata_concurrency_runs_two_gated_probes() {
     let first = seed_probe_candidate_in(&store);
     let second = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
-    let manager =
-        Arc::new(api::probe_manager::ProbeManager::new(store).with_tracks_probe(probe.clone()));
+    let manager = Arc::new(
+        api::probe_manager::ProbeManager::new(store)
+            .unwrap()
+            .with_tracks_probe(probe.clone()),
+    );
     runtime.block_on(async {
         assert!(manager.try_start_workers());
     });
@@ -212,7 +217,9 @@ async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
     let second = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
-        api::probe_manager::ProbeManager::new(store.clone()).with_tracks_probe(probe.clone()),
+        api::probe_manager::ProbeManager::new(store.clone())
+            .unwrap()
+            .with_tracks_probe(probe.clone()),
     );
     manager.try_start_workers();
     let first_job = manager
@@ -260,7 +267,7 @@ async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
         second_waited,
         "both shutdown callers must wait for active work"
     );
-    let _replacement = api::probe_manager::ProbeManager::new(store.clone());
+    let _replacement = api::probe_manager::ProbeManager::new(store.clone()).unwrap();
     assert_eq!(
         store.lock().get_probe_job(&job_id).unwrap().unwrap().status,
         "succeeded"
@@ -275,7 +282,7 @@ async fn shutdown_waits_for_running_probe_and_releases_capture_gate() {
 async fn shutdown_completes_when_workers_are_waiting_for_queue_items() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(parking_lot::Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(api::probe_manager::ProbeManager::new(store));
+    let manager = Arc::new(api::probe_manager::ProbeManager::new(store).unwrap());
     manager.try_start_workers();
     tokio::time::timeout(Duration::from_secs(2), async {
         while manager.worker_count() < 4 {
@@ -299,7 +306,9 @@ async fn timed_out_shutdown_blocks_recovery_until_old_probe_exits() {
     let row = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
     let manager = Arc::new(
-        api::probe_manager::ProbeManager::new(store.clone()).with_tracks_probe(probe.clone()),
+        api::probe_manager::ProbeManager::new(store.clone())
+            .unwrap()
+            .with_tracks_probe(probe.clone()),
     );
     assert!(manager.try_start_workers());
     let result = manager
@@ -320,7 +329,7 @@ async fn timed_out_shutdown_blocks_recovery_until_old_probe_exits() {
     let replacement_store = Arc::new(parking_lot::Mutex::new(
         Store::open(tmp.path().join("data")).unwrap(),
     ));
-    let replacement = Arc::new(api::probe_manager::ProbeManager::new(replacement_store));
+    let replacement = Arc::new(api::probe_manager::ProbeManager::new(replacement_store).unwrap());
     let old_still_running = store.lock().probe_job_units(&job_id).unwrap()[0].status == "running";
     let refused_start = !replacement.try_start_workers();
     probe.release();
@@ -367,6 +376,7 @@ async fn failed_metadata_probe_releases_capture_gate_and_finishes_job() {
     let row = seed_probe_candidate_in(&store);
     let manager = Arc::new(
         api::probe_manager::ProbeManager::new(store.clone())
+            .unwrap()
             .with_tracks_probe(Arc::new(FailedTracks)),
     );
     manager.try_start_workers();

@@ -162,7 +162,7 @@ async fn reuse_valid_does_not_read_media() {
     let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
     let engine = Arc::new(MockEngine::new(0));
     let ctx = AdaptiveCaptureContext {
-        store: store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
@@ -202,7 +202,7 @@ async fn recapture_requires_new_job_evidence() {
     let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
     let engine = Arc::new(MockEngine::new(0));
     let ctx = AdaptiveCaptureContext {
-        store: store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
@@ -247,7 +247,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     // Fails 5 times -> should exhaust 4 attempts budget and fail
     let engine = Arc::new(MockEngine::new(5));
     let ctx = AdaptiveCaptureContext {
-        store: store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(store.clone()).unwrap(),
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),

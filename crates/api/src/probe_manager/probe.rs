@@ -89,14 +89,12 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
     }
     let library_id = unit.row.file.library_id.to_string();
     let explicit_refresh = unit.marker_refresh_id.is_some();
-    let duration = crate::http::store_wait::store_read_handle(
-        mgr.store.clone(),
-        crate::http::store_wait::STORE_READ_WAIT,
-        move |store| {
+    let duration = mgr
+        .store_access()
+        .read_async(move |store| {
             fingerprint_duration_for_store(store, &library_id, MediaKind::Tv, explicit_refresh)
-        },
-    )
-    .await;
+        })
+        .await;
     let duration = match duration {
         Ok(duration) => duration,
         Err(error) => {
@@ -151,7 +149,10 @@ pub(super) async fn probe_fingerprint_detailed(
         };
     }
     let sampling_mode = {
-        let store = mgr.store.lock();
+        let store = match mgr.reader() {
+            Ok(store) => store,
+            Err(_) => return super::stages::FingerprintRunOutcome::Retry,
+        };
         crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
             .ok()
             .map(|c| c.effective.fingerprint_sampling_mode)
@@ -162,14 +163,7 @@ pub(super) async fn probe_fingerprint_detailed(
         && unit.kind == MediaKind::Tv
         && let Some(result) = probe_adaptive_season(mgr, unit, started_at).await
     {
-        return if result {
-            super::stages::FingerprintRunOutcome::Complete
-        } else {
-            super::stages::FingerprintRunOutcome::Failed {
-                error_kind: "adaptive_failure".into(),
-                error: "Adaptive season failed".into(),
-            }
-        };
+        return result;
     }
 
     let path = PathBuf::from(&unit.row.file.path);
@@ -202,9 +196,13 @@ pub(super) async fn probe_fingerprint_detailed(
             ledger_id = %unit.row.file.file_id,
             "【片头片尾】标记发布失败"
         );
-        outcome = super::stages::FingerprintRunOutcome::Failed {
-            error_kind: "marker_store_error".into(),
-            error: error.to_string(),
+        outcome = if super::store_access::is_busy(&error) {
+            super::stages::FingerprintRunOutcome::Retry
+        } else {
+            super::stages::FingerprintRunOutcome::Failed {
+                error_kind: "marker_store_error".into(),
+                error: error.to_string(),
+            }
         };
     }
 
@@ -237,6 +235,9 @@ pub(super) async fn probe_fingerprint_detailed(
                 "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
             );
         }
+        super::stages::FingerprintRunOutcome::Retry => {
+            tracing::warn!(job_id = ?job_id, "声纹写入繁忙，保留持久单元等待重试");
+        }
         super::stages::FingerprintRunOutcome::Cancelled { reason } => {
             tracing::info!(
                 job_id = ?job_id,
@@ -254,7 +255,7 @@ async fn probe_adaptive_season(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
     started_at: Instant,
-) -> Option<bool> {
+) -> Option<super::stages::FingerprintRunOutcome> {
     let job_id = unit.job_id.clone();
     if unit.marker_refresh_id.is_some() {
         tracing::info!(
@@ -265,13 +266,18 @@ async fn probe_adaptive_season(
             ledger_id = %unit.row.file.file_id,
             "【自适应声纹】刷新任务由整季管道统一执行，单集单元跳过重复的旧全量采集"
         );
-        return Some(true);
+        return Some(super::stages::FingerprintRunOutcome::Complete);
     }
 
     let season = super::require_episode_coordinates(&unit.row).ok()?.0;
     let season_units: Vec<ProbeUnit> = {
-        let store = mgr.store.lock();
-        let rows = store.list_file_coverage().unwrap_or_default();
+        let store = match mgr.reader() {
+            Ok(store) => store,
+            Err(_) => return Some(super::stages::FingerprintRunOutcome::Retry),
+        };
+        let rows = store
+            .file_coverage_for_media(unit.row.file.media_id)
+            .unwrap_or_default();
         rows.into_iter()
             .filter(|r| {
                 r.file.media_id == unit.row.file.media_id && super::covers_season(r, season)
@@ -313,17 +319,22 @@ async fn probe_adaptive_season(
                     .collect::<Vec<_>>();
                 let members = super::markers::source_observations(&rows);
                 let publication = members.and_then(|members| {
-                    let store = mgr.store.lock();
+                    let store = mgr.writer()?;
                     super::markers::validate_active_unit(&store, unit)?;
                     super::markers::validate_season_rows(&store, &rows).and_then(|()| {
                         store.replace_marker_results_batch_checked(&[replacement], &members)
                     })
                 });
                 if let Err(e) = publication {
+                    if super::store_access::is_busy(&e) {
+                        return Some(super::stages::FingerprintRunOutcome::Retry);
+                    }
                     if matches!(&e, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
                     {
                         mgr.cancel_unit(unit, "file_deleted");
-                        return Some(false);
+                        return Some(super::stages::FingerprintRunOutcome::Cancelled {
+                            reason: "file_deleted".into(),
+                        });
                     }
                     tracing::error!(error = %e, "自适应整季标记替换失败");
                 } else {
@@ -341,13 +352,18 @@ async fn probe_adaptive_season(
                         elapsed_ms = started_at.elapsed().as_millis() as u64,
                         "【自适应声纹】整季自适应处理完成，标记和章节已原子替换并触发场景帧生成"
                     );
-                    return Some(true);
+                    return Some(super::stages::FingerprintRunOutcome::Complete);
                 }
             }
             Err(err) => {
+                if super::store_access::is_busy_message(&err) {
+                    return Some(super::stages::FingerprintRunOutcome::Retry);
+                }
                 if crate::fingerprint_job::source::is_file_deleted(&err) {
                     mgr.cancel_unit(unit, "file_deleted");
-                    return Some(false);
+                    return Some(super::stages::FingerprintRunOutcome::Cancelled {
+                        reason: "file_deleted".into(),
+                    });
                 }
                 tracing::warn!(error = %err, "自适应整季处理失败，回退到普通全窗口采集");
             }
@@ -363,7 +379,7 @@ pub(super) fn fingerprint_duration(
     kind: MediaKind,
     explicit_refresh: bool,
 ) -> Option<u32> {
-    let store = mgr.dispatch_store()?;
+    let store = mgr.reader().ok()?;
     fingerprint_duration_for_store(&store, library_id, kind, explicit_refresh)
 }
 
@@ -404,8 +420,14 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
 ) -> super::stages::FingerprintRunOutcome {
     let ledger_id = unit.row.file.file_id.to_string();
     let started = Instant::now();
-    let cached = match mgr.store.lock().get_fingerprint_cache(&ledger_id) {
+    let cached = match mgr
+        .reader()
+        .and_then(|reader| reader.get_fingerprint_cache(&ledger_id))
+    {
         Ok(cache) => cache,
+        Err(error) if super::store_access::is_busy(&error) => {
+            return super::stages::FingerprintRunOutcome::Retry;
+        }
         Err(error) => {
             tracing::error!(%error, ledger_id, "【声纹】读取指纹缓存失败，回退到重新采集");
             None
@@ -446,7 +468,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     };
     let publication =
         super::markers::observe_rows(std::slice::from_ref(&unit.row)).and_then(|()| {
-            let store = mgr.store.lock();
+            let store = mgr.writer()?;
             super::markers::validate_active_unit(&store, unit)?;
             super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
                 .and_then(|()| {
@@ -466,6 +488,9 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
             };
         }
         tracing::error!(%error, ledger_id, "【声纹】版本化指纹缓存持久化失败");
+        if super::store_access::is_busy(&error) {
+            return super::stages::FingerprintRunOutcome::Retry;
+        }
         return super::stages::FingerprintRunOutcome::Failed {
             error_kind: "store_error".into(),
             error: error.to_string(),
@@ -488,14 +513,17 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     );
 
     let job_id = unit.job_id.clone().unwrap_or_else(|| "direct".to_string());
-    super::stages::record_fingerprint_stages(
+    if let Err(error) = super::stages::record_fingerprint_stages(
         mgr,
         &ledger_id,
         &job_id,
         &outcome.cache.cache_key,
         outcome.outro_error.as_deref(),
         mgr.clock.lock().now_ms(),
-    );
+    ) {
+        tracing::warn!(%error, ledger_id, "声纹阶段状态未保存，保留单元等待重试");
+        return super::stages::FingerprintRunOutcome::Retry;
+    }
     super::stages::capture_outcome(unit, outcome.outro_error, require_complete_markers)
 }
 

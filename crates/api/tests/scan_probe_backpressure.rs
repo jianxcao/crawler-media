@@ -126,7 +126,7 @@ async fn scan_backlog_survives_full_window_and_restart_then_drains() {
             )
             .unwrap();
     }
-    let recovered = std::sync::Arc::new(ProbeManager::new(store.clone()));
+    let recovered = std::sync::Arc::new(ProbeManager::new(store.clone()).unwrap());
     assert!(recovered.queued_ledger_count() <= 64);
     assert!(recovered.try_start_workers());
     tokio::time::timeout(std::time::Duration::from_secs(15), async {

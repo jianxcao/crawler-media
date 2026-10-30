@@ -57,7 +57,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
     store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
     let row = publish_coverage(&store.lock(), media_id, &tv_root.join("Test.S01E01.mkv"), 1);
 
-    let mgr = ProbeManager::new(store.clone());
+    let mgr = ProbeManager::new(store.clone()).unwrap();
     let unit = ProbeUnit {
         row: row.clone(),
         kind: MediaKind::Tv,
@@ -201,7 +201,8 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
     let row2 = publish_coverage(&store.lock(), media_id, &ep2_path, 2);
 
     let shared_engine = Arc::new(SharedMatchEngine);
-    let mgr = ProbeManager::with_engines(store.clone(), shared_engine.clone(), shared_engine);
+    let mgr =
+        ProbeManager::with_engines(store.clone(), shared_engine.clone(), shared_engine).unwrap();
 
     let unit1 = ProbeUnit {
         row: row1.clone(),
@@ -348,3 +349,6 @@ impl marker::FingerprintEngine for SharedMatchEngine {
             .collect()
     }
 }
+
+#[path = "adaptive_fingerprint_season/lock.rs"]
+mod lock;

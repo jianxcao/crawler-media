@@ -126,7 +126,7 @@ pub(crate) async fn progress(
             file: file.clone(),
             units: vec![domain::UnitKey::new(season, episode)],
         };
-        let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
+        let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage).await;
     }
     let now_ms = state.playback_clock.now_ms();
     // Review L2: the position write is the second Store section; same seam.

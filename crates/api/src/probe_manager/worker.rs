@@ -1,3 +1,7 @@
+#[path = "worker/fingerprint.rs"]
+mod fingerprint;
+use fingerprint::run_fingerprint_worker;
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -58,25 +62,33 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     let bootstrap = manager.clone();
     let handle = tokio::spawn(async move {
         if recovery_deferred {
-            if let Err(error) = step(&bootstrap, |manager| manager.recover_pending_jobs()).await {
-                tracing::error!(%error, "延迟恢复探测任务失败");
-                bootstrap.recovery_deferred.store(true, Ordering::SeqCst);
-                return;
-            }
-            if bootstrap.shutting_down.load(Ordering::SeqCst) {
-                return;
+            loop {
+                let recovered = step(&bootstrap, |manager| {
+                    manager.recovery_deferred.store(false, Ordering::SeqCst);
+                    manager.recover_pending_jobs();
+                    !manager.recovery_deferred.load(Ordering::SeqCst)
+                })
+                .await;
+                if matches!(recovered, Ok(true)) {
+                    break;
+                }
+                if let Err(error) = recovered {
+                    tracing::error!(%error, "延迟恢复探测任务失败");
+                    bootstrap.recovery_deferred.store(true, Ordering::SeqCst);
+                }
+                if bootstrap.shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
         let configured = step(&bootstrap, |manager| {
-            manager
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .and_then(|store| {
-                    store
-                        .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
-                        .ok()
-                        .flatten()
-                })
+            manager.dispatch_reader().and_then(|store| {
+                store
+                    .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
+                    .ok()
+                    .flatten()
+            })
         })
         .await
         .map(|setting| metadata_worker_count(setting.as_deref()));
@@ -317,10 +329,7 @@ async fn process_metadata(
 }
 
 fn is_temporary_busy(reason: &str) -> bool {
-    matches!(
-        reason,
-        "probe Store busy" | "Library Store busy" | "Library Registry busy"
-    )
+    super::store_access::is_busy_message(reason)
 }
 
 async fn retry_dispatch(
@@ -372,11 +381,11 @@ async fn retry_dispatch(
     }
 }
 fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
-    let Some(store) = manager.dispatch_store() else {
+    let Some(reader) = manager.dispatch_reader() else {
         return;
     };
     let missing = match super::ledger_id(&id.ledger_id) {
-        Some(file_id) => match store.file_coverage_by_id(file_id) {
+        Some(file_id) => match reader.file_coverage_by_id(file_id) {
             Ok(row) => row.is_none(),
             Err(error) => {
                 tracing::error!(%error, ledger_id = %id.ledger_id, "检查待派发文件失败");
@@ -385,7 +394,17 @@ fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) 
         },
         None => false,
     };
+    drop(reader);
     if !missing {
+        return;
+    }
+    let Some(store) = manager.dispatch_store() else {
+        return;
+    };
+    // The source may have been republished while waiting for the writer.
+    let still_missing = super::ledger_id(&id.ledger_id)
+        .is_some_and(|file_id| matches!(store.file_coverage_by_id(file_id), Ok(None)));
+    if !still_missing {
         return;
     }
     if let Err(error) = store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted") {
@@ -430,186 +449,28 @@ impl Drop for FingerprintWindowGuard {
 /// Every `wake.notify_waiters()` call site (window full, recovery, page admission) means
 /// "durable ids may now fit again"; without a consumer those signals were dead code.
 async fn run_window_dispatcher(manager: Arc<ProbeManager>) {
+    let mut retry = tokio::time::interval(std::time::Duration::from_secs(1));
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tokio::select! {
+        let recover_completed = tokio::select! {
             _ = wait_for_shutdown(&manager) => break,
-            _ = manager.wake.notified() => {},
-        }
+            _ = manager.wake.notified() => false,
+            _ = retry.tick() => true,
+        };
         if manager.shutting_down.load(Ordering::SeqCst) {
             break;
         }
-        if let Err(error) = step(&manager, |manager| manager.refill_drained_windows()).await {
+        if let Err(error) = step(&manager, move |manager| {
+            if recover_completed {
+                manager.recover_completed_jobs();
+            }
+            manager.refill_drained_windows();
+        })
+        .await
+        {
             tracing::warn!(%error, "探测窗口补充失败，保留持久队列");
         }
     }
-}
-
-async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
-    loop {
-        let recovered = {
-            let mut list = manager.recovered_marker_refreshes.lock();
-            if !list.is_empty() {
-                Some(list.remove(0))
-            } else {
-                None
-            }
-        };
-        if let Some((refreshed, unit)) = recovered {
-            let _leases = match acquire_recovered_refresh_leases(&manager, &unit).await {
-                Ok(leases) => leases,
-                Err(reason) => {
-                    if !manager.shutting_down.load(Ordering::SeqCst) {
-                        let _ = step(&manager, {
-                            let job_id = refreshed.id.clone();
-                            move |manager| {
-                                if let Err(error) =
-                                    manager.store.lock().cancel_probe_job(&job_id, &reason)
-                                {
-                                    tracing::error!(%error, job_id, "取消恢复的刷新任务失败");
-                                }
-                            }
-                        })
-                        .await;
-                    }
-                    continue;
-                }
-            };
-            wait_for_metadata_idle(&manager).await;
-            let _ = step(&manager, move |manager| {
-                super::marker_jobs::apply_marker_refresh(manager, &refreshed, &unit);
-                super::timings::log_terminal_job(&manager.store, &manager.timings, &refreshed);
-            })
-            .await;
-            continue;
-        }
-
-        let message = {
-            let mut rx = manager.fingerprint_rx.lock().take();
-            let message = match rx.as_mut() {
-                Some(rx) => tokio::select! {
-                    _ = wait_for_shutdown(&manager) => None,
-                    message = rx.recv() => message,
-                },
-                None => None,
-            };
-            if message.is_some() {
-                *manager.fingerprint_rx.lock() = rx;
-            }
-            message
-        };
-        let Some((id, work)) = message else { break };
-        let _window = FingerprintWindowGuard(manager.clone());
-        if manager
-            .shutting_down
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            manager.seen.lock().remove(&id.ledger_id);
-            continue;
-        }
-        let owns_running = process_fingerprint(&manager, work).await;
-        retry_dispatch(&manager, &id, owns_running).await;
-    }
-}
-
-async fn acquire_recovered_refresh_leases(
-    manager: &Arc<ProbeManager>,
-    unit: &ProbeUnit,
-) -> Result<Vec<crate::library_lifecycle::LibraryWorkLease>, String> {
-    loop {
-        let leased = step(manager, {
-            let unit = unit.clone();
-            move |manager| refresh_leases(manager, &unit)
-        })
-        .await;
-        match leased {
-            Ok(Ok(leases)) => return Ok(leases),
-            Ok(Err(reason)) if !is_temporary_busy(&reason) => return Err(reason),
-            Ok(Err(_)) => {}
-            Err(error) => tracing::warn!(%error, "恢复刷新租约失败，稍后重试"),
-        }
-        if manager.shutting_down.load(Ordering::SeqCst) {
-            return Err("probe worker shutting down".into());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::FingerprintWork) -> bool {
-    let owns_running = work.start_job;
-    let unit = work.unit.clone();
-    let ready = step(&manager, {
-        let unit = unit.clone();
-        move |manager| {
-            source_ready(manager, &unit)
-                && (!work.start_job || start_persisted_unit(manager, &unit))
-        }
-    })
-    .await
-    .unwrap_or(false);
-    if !ready {
-        return false;
-    }
-    let leased = step(&manager, {
-        let unit = unit.clone();
-        move |manager| {
-            if unit.marker_refresh_id.is_some() {
-                refresh_leases(manager, &unit)
-            } else {
-                work_lease(manager, &unit, true).map(|lease| lease.into_iter().collect())
-            }
-        }
-    })
-    .await;
-    let _refresh_leases = match leased {
-        Ok(Ok(leases)) => leases,
-        Ok(Err(reason)) => {
-            if !is_temporary_busy(&reason) {
-                let _ = step(manager, {
-                    let unit = unit.clone();
-                    move |manager| manager.cancel_unit(&unit, &reason)
-                })
-                .await;
-            }
-            return owns_running;
-        }
-        Err(_) => return owns_running,
-    };
-    // The full-window and adaptive pipelines include synchronous source reads
-    // and SQL between awaits. Drive the whole future on one bounded worker;
-    // the permit stays with it until its final publication has really finished.
-    let runtime = tokio::runtime::Handle::current();
-    let outcome = match step(manager, move |manager| {
-        runtime.block_on(probe::probe_fingerprint_detailed(manager, &work))
-    })
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::error!(%error, "声纹流水线 worker 失败，保留持久单元供重试");
-            return owns_running;
-        }
-    };
-    let _ = step(&manager, move |manager| {
-        if !source_ready(manager, &unit) {
-            return;
-        }
-        match outcome {
-            super::stages::FingerprintRunOutcome::Complete => {
-                manager.finish_with_status(&unit, "succeeded", None, None);
-            }
-            super::stages::FingerprintRunOutcome::Partial { error_kind, error } => {
-                manager.finish_with_status(&unit, "partial", Some(&error_kind), Some(&error));
-            }
-            super::stages::FingerprintRunOutcome::Failed { error_kind, error } => {
-                manager.finish_with_status(&unit, "failed", Some(&error_kind), Some(&error));
-            }
-            super::stages::FingerprintRunOutcome::Cancelled { reason } => {
-                manager.cancel_unit(&unit, &reason);
-            }
-        }
-    })
-    .await;
-    owns_running
 }
 
 fn refresh_leases(
@@ -622,9 +483,9 @@ fn refresh_leases(
     // Refresh expands its requested units to every row of the same Media.
     // Hold every original owner until publication, not only during capture.
     let rows = manager
-        .dispatch_store()
-        .ok_or_else(|| "probe Store busy".to_string())?
-        .list_file_coverage()
+        .reader()
+        .map_err(|error| error.to_string())?
+        .file_coverage_for_media(unit.row.file.media_id)
         .map_err(|e| e.to_string())?;
     let units: Vec<_> = rows
         .into_iter()
@@ -648,26 +509,24 @@ pub(super) fn work_lease(
         return Ok(None);
     };
     let library_id = {
-        let store = manager
-            .dispatch_store()
-            .ok_or_else(|| "probe Store busy".to_string())?;
+        let store = manager.reader().map_err(|error| error.to_string())?;
         crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
         unit.row.file.library_id.to_string()
     };
     let acquired = if optional {
-        registry.acquire_optional(
-            &manager.store,
+        registry.acquire_optional_from_readers(
+            &manager.readers,
             &library_id,
             super::tracks::optional_work_kind(unit),
         )
     } else {
-        registry.acquire_bounded(&manager.store, &library_id)
+        registry.acquire_from_readers(&manager.readers, &library_id)
     };
     acquired.map(Some).map_err(|error| error.to_string())
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
-    let Some(store) = manager.dispatch_store() else {
+    let Some(store) = manager.dispatch_reader() else {
         return false;
     };
     if !unit_is_active(&store, unit) {
@@ -768,7 +627,9 @@ fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
         }
         Err(error) => {
             tracing::error!(%error, ledger_id, job_id = ?unit.job_id, "探测任务开始状态写入失败");
-            manager.finish(unit, false);
+            if !super::store_access::is_busy(&error) {
+                manager.finish(unit, false);
+            }
             false
         }
     }

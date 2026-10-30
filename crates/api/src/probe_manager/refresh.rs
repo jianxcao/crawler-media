@@ -52,14 +52,19 @@ impl ProbeManager {
                 reuse_media_info_cache: true,
             })
             .collect::<Vec<_>>();
-        match self.store.lock().create_probe_job(
+        let Ok(store) = self.writer() else {
+            return 0;
+        };
+        let created = store.create_probe_job(
             &job_id,
             "marker_refresh",
             &media_id.to_string(),
             Some(season),
             &scope,
             &specs,
-        ) {
+        );
+        drop(store);
+        match created {
             Ok(true) => {}
             Ok(false) => {
                 tracing::info!(%media_id, season, "该剧该季已有片头片尾刷新任务，拒绝重复入队");

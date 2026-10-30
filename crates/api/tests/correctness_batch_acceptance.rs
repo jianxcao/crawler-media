@@ -34,6 +34,7 @@ fn fixture(fail_probe: bool) -> PresenceFixture {
     let mut fix = std::thread::spawn(PresenceFixture::new).join().unwrap();
     fix.state.probe = Arc::new(
         api::probe_manager::ProbeManager::new(fix.state.store())
+            .unwrap()
             .with_tracks_probe(Arc::new(FixtureTracks { fail: fail_probe })),
     );
     fix
@@ -150,6 +151,7 @@ async fn failed_scan_probe_preserves_obligation_until_restart_retry_is_accepted(
     // must still arrange a new job, which uses fake successful stream IO.
     fix.state.probe = Arc::new(
         api::probe_manager::ProbeManager::new(store_arc.clone())
+            .unwrap()
             .with_tracks_probe(Arc::new(FixtureTracks { fail: false })),
     );
     assert_eq!(

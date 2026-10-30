@@ -53,7 +53,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let cached =
         seed_old_refresh_result(&store.lock(), media_id, &rows[0].file.file_id.to_string());
 
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let units = rows
         .iter()
         .map(|row| ProbeUnit {

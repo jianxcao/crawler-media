@@ -73,15 +73,6 @@ pub(crate) fn observe_source(row: &FileCoverage) -> Result<(), String> {
     }
 }
 
-/// Ledger check under a short lock, then the disk observation outside it.
-pub(crate) fn ensure_source_available(
-    store: &parking_lot::Mutex<Store>,
-    row: &FileCoverage,
-) -> Result<(), String> {
-    ensure_source_recorded(&store.lock(), row)?;
-    observe_source(row)
-}
-
 pub(crate) fn is_file_deleted(error: &str) -> bool {
     error.starts_with("file_deleted")
 }

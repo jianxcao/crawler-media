@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::Store;
 use crate::store::ProbeJob;
 
 #[derive(Clone, Default)]
@@ -90,13 +89,13 @@ impl ProbeTimingLedger {
 }
 
 pub(super) fn log_terminal_job(
-    store: &Arc<Mutex<Store>>,
+    store: &super::ProbeStoreAccess,
     timings: &ProbeTimingLedger,
     fallback: &ProbeJob,
 ) {
     let job = store
-        .lock()
-        .get_probe_job(&fallback.id)
+        .reader()
+        .and_then(|store| store.get_probe_job(&fallback.id))
         .ok()
         .flatten()
         .unwrap_or_else(|| fallback.clone());
@@ -149,14 +148,14 @@ fn now_ms() -> i64 {
 /// using the in-memory counters. Both describe real capture work, so they are summed rather
 /// than one set replacing the other.
 fn terminal_timing_summary(
-    store: &Arc<Mutex<Store>>,
+    store: &super::ProbeStoreAccess,
     timings: &ProbeTimingLedger,
     job_id: &str,
 ) -> ProbeTimingSummary {
     let mut summary = timings.take(job_id);
     let attempts = store
-        .lock()
-        .list_fingerprint_attempts_for_job(job_id)
+        .reader()
+        .and_then(|store| store.list_fingerprint_attempts_for_job(job_id))
         .unwrap_or_default();
     for attempt in &attempts {
         let elapsed_ms = attempt
@@ -234,7 +233,11 @@ mod terminal_timing_tests {
         // in-memory counters for both the intro and the outro capture.
         timings.record_fingerprint(Some(job_id), false, false, 25, 24);
 
-        let summary = terminal_timing_summary(&store, &timings, job_id);
+        let summary = terminal_timing_summary(
+            &super::super::ProbeStoreAccess::new(store.clone()).unwrap(),
+            &timings,
+            job_id,
+        );
 
         assert_eq!(summary.intro_reads, 5);
         assert_eq!(summary.intro_elapsed_ms, 4 * 10 + 25);

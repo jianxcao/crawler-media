@@ -101,7 +101,7 @@ fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation
     let fixture = fixture();
     let store = &fixture.store;
     let row = &fixture.row;
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     for origin in [
         ProbeRequestOrigin::Detail,
         ProbeRequestOrigin::Filesystem,
@@ -160,7 +160,7 @@ fn recovery_retires_missing_source_queued_after_presence_snapshot() {
             }],
         )
         .unwrap();
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     assert_eq!(
         store.lock().get_probe_job("late").unwrap().unwrap().status,
         "cancelled"
@@ -179,7 +179,7 @@ fn recovery_retires_missing_source_queued_after_presence_snapshot() {
 fn missing_source_cannot_be_persisted_by_any_admission_path() {
     let fixture = fixture();
     let store = &fixture.store;
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let unit = ProbeUnit {
         row: fixture.row.clone(),
         kind: MediaKind::Movie,

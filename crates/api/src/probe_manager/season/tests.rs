@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use store::playback::MediaMergeRequest;
 
 use super::*;
+use crate::probe_manager::ProbeManager;
 
 fn media(store: &store::Store) -> MediaId {
     let id = MediaId::new();
@@ -47,13 +48,14 @@ fn model(file: &domain::LibraryFile) -> TemplateModel {
 
 fn publish(manager: &ProbeManager, media_id: MediaId, model: &TemplateModel) {
     let policy = SamplingPolicy::default();
+    let access = SeasonAccess::from_manager(manager);
     let ctx = adaptive_capture_context(
-        manager,
+        &access,
         Arc::new(crate::fingerprint_job::adaptive::NoopGate),
     );
-    persist_season_model(
+    let _ = persist_season_model(
         &SeasonPipeline {
-            mgr: manager,
+            mgr: &access,
             job_id: "pipeline-job",
             media_id,
             season: 1,
@@ -70,7 +72,7 @@ fn publish(manager: &ProbeManager, media_id: MediaId, model: &TemplateModel) {
 fn pipeline_publication_drops_transferred_media_without_redirecting() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(store::Store::open(dir.path()).unwrap()));
-    let manager = ProbeManager::new(store.clone());
+    let manager = ProbeManager::new(store.clone()).unwrap();
     let guard = store.lock();
     let loser = media(&guard);
     let survivor = media(&guard);

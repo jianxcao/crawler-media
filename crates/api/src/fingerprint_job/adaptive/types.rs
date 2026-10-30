@@ -7,9 +7,7 @@ use marker::adaptive::{
     EpisodeEvidence, SamplingPolicy, SourceCostSummary, TemplateContext, VerifiedInterval,
 };
 use marker::fingerprint::capture_types::FingerprintCaptureEngine;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use store::Store;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +24,7 @@ pub trait CaptureGate: Send + Sync {
 }
 
 pub struct AdaptiveCaptureContext {
-    pub store: Arc<Mutex<Store>>,
+    pub store: crate::probe_manager::ProbeStoreAccess,
     pub matcher: Arc<dyn FingerprintEngine>,
     pub capture: Arc<dyn FingerprintCaptureEngine>,
     pub gate: Arc<dyn CaptureGate>,

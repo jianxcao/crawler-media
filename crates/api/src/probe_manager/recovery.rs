@@ -80,7 +80,7 @@ mod tests {
                 .lock()
                 .begin_library_removal(&libraries[0].id)
                 .unwrap();
-            let manager = ProbeManager::new(store.clone());
+            let manager = ProbeManager::new(store.clone()).unwrap();
             let units = store.lock().probe_job_units("mixed").unwrap();
             assert_eq!(
                 units
@@ -118,8 +118,14 @@ mod tests {
 
 impl ProbeManager {
     pub(crate) fn recover_pending_jobs(&self) {
-        if let Err(error) = self.store.lock().reset_running_probe_units() {
+        if let Err(error) = self
+            .writer()
+            .and_then(|store| store.reset_running_probe_units())
+        {
             tracing::error!(%error, "恢复探测任务时重置运行中单元失败");
+            if super::store_access::is_busy(&error) {
+                self.recovery_deferred.store(true, Ordering::SeqCst);
+            }
             return;
         }
         self.retire_missing_source_work();
@@ -136,7 +142,10 @@ impl ProbeManager {
     /// that work: probing a source that is known to be absent only burns IO.
     fn retire_missing_source_work(&self) {
         loop {
-            let refs = match self.store.lock().missing_source_probe_unit_refs(256) {
+            let refs = match self
+                .reader()
+                .and_then(|store| store.missing_source_probe_unit_refs(256))
+            {
                 Ok(refs) => refs,
                 Err(error) => {
                     tracing::error!(%error, "恢复时读取缺失源文件探测工作失败");
@@ -150,20 +159,21 @@ impl ProbeManager {
             for (job_id, ledger_id) in &refs {
                 self.seen.lock().remove(ledger_id);
                 let kind = self
-                    .store
-                    .lock()
-                    .get_probe_job(job_id)
+                    .reader()
+                    .and_then(|store| store.get_probe_job(job_id))
                     .ok()
                     .flatten()
                     .map(|job| job.kind);
                 // A marker refresh publishes one atomic season snapshot: losing any member
                 // retires the whole snapshot, exactly like the removed-library repair.
                 let result = if kind.as_deref() == Some("marker_refresh") {
-                    self.store.lock().cancel_probe_job(job_id, "file_missing")
+                    self.writer()
+                        .and_then(|store| store.cancel_probe_job(job_id, "file_missing"))
                 } else {
-                    self.store
-                        .lock()
-                        .cancel_probe_unit(job_id, ledger_id, "file_missing")
+                    self.writer()
+                        .and_then(|store| {
+                            store.cancel_probe_unit(job_id, ledger_id, "file_missing")
+                        })
                         .map(|_| ())
                 };
                 match result {
@@ -184,7 +194,10 @@ impl ProbeManager {
     }
 
     fn repair_removed_window(&self) {
-        let refs = match self.store.lock().active_probe_unit_refs(64) {
+        let refs = match self
+            .reader()
+            .and_then(|store| store.active_probe_unit_refs(64))
+        {
             Ok(refs) => refs,
             Err(error) => {
                 tracing::error!(%error, "读取待修复探测窗口失败");
@@ -197,34 +210,34 @@ impl ProbeManager {
                 continue;
             }
             let kind = self
-                .store
-                .lock()
-                .get_probe_job(&job_id)
+                .reader()
+                .and_then(|store| store.get_probe_job(&job_id))
                 .ok()
                 .flatten()
                 .map(|job| job.kind);
             if kind.as_deref() == Some("marker_refresh") {
                 if let Err(error) = self
-                    .store
-                    .lock()
-                    .cancel_probe_job(&job_id, "Library removed")
+                    .writer()
+                    .and_then(|store| store.cancel_probe_job(&job_id, "Library removed"))
                 {
                     tracing::error!(%error, %job_id, "恢复时取消删除库任务失败");
                 }
                 continue;
             }
-            if let Err(error) =
-                self.store
-                    .lock()
-                    .cancel_probe_unit(&job_id, &ledger_id, "Library removed")
+            if let Err(error) = self
+                .writer()
+                .and_then(|store| store.cancel_probe_unit(&job_id, &ledger_id, "Library removed"))
             {
                 tracing::error!(%error, %job_id, %ledger_id, "恢复时取消删除库单元失败");
             }
         }
     }
 
-    fn recover_completed_jobs(&self) {
-        let jobs = match self.store.lock().active_completed_probe_jobs(64) {
+    pub(super) fn recover_completed_jobs(&self) {
+        let jobs = match self
+            .reader()
+            .and_then(|store| store.active_completed_probe_jobs(64))
+        {
             Ok(jobs) => jobs,
             Err(error) => {
                 tracing::error!(%error, "读取已完成待收尾探测任务失败");
@@ -238,9 +251,8 @@ impl ProbeManager {
 
     fn recover_marker_refreshes(&self) {
         let jobs = match self
-            .store
-            .lock()
-            .active_probe_jobs_by_kind("marker_refresh")
+            .reader()
+            .and_then(|store| store.active_probe_jobs_by_kind("marker_refresh"))
         {
             Ok(jobs) => jobs,
             Err(error) => {
@@ -255,7 +267,10 @@ impl ProbeManager {
                     .find(|unit| unit.status == "cancelled")
                     .and_then(|unit| unit.error.as_deref())
                     .unwrap_or("file_deleted");
-                if let Err(error) = self.store.lock().cancel_probe_job(&job.id, reason) {
+                if let Err(error) = self
+                    .writer()
+                    .and_then(|store| store.cancel_probe_job(&job.id, reason))
+                {
                     tracing::error!(%error, job_id = %job.id, "恢复原子刷新取消状态失败");
                 }
                 continue;
@@ -263,9 +278,8 @@ impl ProbeManager {
             let removed = self.removed_recovery_units(&units);
             if !removed.is_empty() {
                 if let Err(error) = self
-                    .store
-                    .lock()
-                    .cancel_probe_job(&job.id, "Library removed")
+                    .writer()
+                    .and_then(|store| store.cancel_probe_job(&job.id, "Library removed"))
                 {
                     tracing::error!(%error, job_id = %job.id, "恢复时取消删除库刷新失败");
                 }
@@ -282,20 +296,22 @@ impl ProbeManager {
     }
 
     fn finalize_recovered_job(&self, job: &crate::store::ProbeJob) {
-        let refreshed = self.store.lock().get_probe_job(&job.id);
+        let refreshed = self.reader().and_then(|store| store.get_probe_job(&job.id));
         let refreshed = match refreshed {
             Ok(Some(refreshed)) => refreshed,
             Ok(None) => {
                 tracing::error!(job_id = %job.id, "恢复探测任务后数据库中找不到任务记录");
                 return;
             }
+            Err(error) if super::store_access::is_busy(&error) => {
+                tracing::warn!(%error, job_id = %job.id, "恢复探测任务暂时繁忙，保留任务");
+                return;
+            }
             Err(error) => {
                 tracing::error!(%error, job_id = %job.id, "恢复探测任务后读取任务状态失败");
-                match self
-                    .store
-                    .lock()
-                    .fail_completed_probe_job(&job.id, "重启恢复时无法读取已完成任务状态")
-                {
+                match self.writer().and_then(|store| {
+                    store.fail_completed_probe_job(&job.id, "重启恢复时无法读取已完成任务状态")
+                }) {
                     Ok(true) => {
                         tracing::error!(job_id = %job.id, "已将无法确认状态的完成任务标记失败并释放任务范围")
                     }
@@ -311,11 +327,9 @@ impl ProbeManager {
         };
         if refreshed.completed >= refreshed.total && refreshed.is_active() {
             if refreshed.failed > 0 {
-                if let Err(error) =
-                    self.store
-                        .lock()
-                        .finish_probe_job(&job.id, false, refreshed.error.as_deref())
-                {
+                if let Err(error) = self.writer().and_then(|store| {
+                    store.finish_probe_job(&job.id, false, refreshed.error.as_deref())
+                }) {
                     tracing::error!(%error, job_id = %job.id, "持久化恢复任务的失败状态失败");
                 }
             } else if refreshed.kind == "marker_refresh" {
@@ -323,40 +337,52 @@ impl ProbeManager {
                     Ok(unit) => {
                         // 不在构造期间同步执行整季计算，避免等待尚未启动的 worker 导致死锁。
                         // 暂存到 recovered_marker_refreshes，在 try_start_workers 启动 worker 后异步处理。
-                        self.recovered_marker_refreshes
-                            .lock()
-                            .push((refreshed, unit));
+                        let mut pending = self.recovered_marker_refreshes.lock();
+                        if !pending.iter().any(|(job, _)| job.id == refreshed.id) {
+                            pending.push((refreshed, unit));
+                        }
                     }
                     Err(crate::store::StoreError::Missing(reason))
                         if crate::fingerprint_job::source::is_file_deleted(&reason) =>
                     {
-                        if let Err(error) =
-                            self.store.lock().cancel_probe_job(&job.id, "file_deleted")
+                        if let Err(error) = self
+                            .writer()
+                            .and_then(|store| store.cancel_probe_job(&job.id, "file_deleted"))
                         {
                             tracing::error!(%error, job_id = %job.id, "恢复时持久化任务取消状态失败");
                         } else {
                             tracing::info!(job_id = %job.id, reason = "file_deleted", "源文件已删除，取消待发布的刷新任务");
                         }
                     }
+                    Err(error) if super::store_access::is_busy(&error) => {
+                        tracing::warn!(%error, job_id = %job.id, "恢复刷新任务暂时繁忙，保留任务");
+                    }
                     Err(error) => {
-                        if let Err(finish_error) = self.store.lock().finish_probe_job(
-                            &job.id,
-                            false,
-                            Some("重启恢复时无法读取任务台账"),
-                        ) {
+                        if let Err(finish_error) = self.writer().and_then(|store| {
+                            store.finish_probe_job(
+                                &job.id,
+                                false,
+                                Some("重启恢复时无法读取任务台账"),
+                            )
+                        }) {
                             tracing::error!(%finish_error, job_id = %job.id, "持久化无法恢复的片头片尾任务失败状态失败");
                         }
                         tracing::error!(%error, job_id = %job.id, "完成的片头片尾任务无法恢复，已标记失败并释放任务范围");
                     }
                 }
-            } else if let Err(error) = self.store.lock().finish_probe_job(&job.id, true, None) {
+            } else if let Err(error) = self
+                .writer()
+                .and_then(|store| store.finish_probe_job(&job.id, true, None))
+            {
                 tracing::error!(%error, job_id = %job.id, "持久化恢复任务的成功状态失败");
             }
         }
     }
 
     fn removed_recovery_units(&self, units: &[crate::store::ProbeJobUnit]) -> Vec<String> {
-        let store = self.store.lock();
+        let Ok(store) = self.reader() else {
+            return Vec::new();
+        };
         units
             .iter()
             .filter(|unit| {
@@ -379,9 +405,8 @@ impl ProbeManager {
     ) {
         for persisted in units.iter().filter(|unit| unit.status == "queued") {
             if self
-                .store
-                .lock()
-                .get_probe_job(&job.id)
+                .reader()
+                .and_then(|store| store.get_probe_job(&job.id))
                 .ok()
                 .flatten()
                 .is_some_and(|job| !job.is_active())
@@ -390,14 +415,18 @@ impl ProbeManager {
             }
             // 旧实现以原始字符串查台账；id 解析失败的字符串必然查不到行，与 Ok(None) 同一分支。
             let row = match super::ledger_id(&persisted.ledger_id) {
-                Some(file_id) => self.store.lock().file_coverage_by_id(file_id),
+                Some(file_id) => self
+                    .reader()
+                    .and_then(|store| store.file_coverage_by_id(file_id)),
                 None => Ok(None),
             };
             let row = match row {
                 Ok(Some(row)) => row,
                 Ok(None) => {
                     let result = {
-                        let store = self.store.lock();
+                        let Ok(store) = self.writer() else {
+                            continue;
+                        };
                         store
                             .cancel_probe_unit(&job.id, &persisted.ledger_id, "file_deleted")
                             .and_then(|(_, _, _)| {
@@ -412,14 +441,20 @@ impl ProbeManager {
                     }
                     continue;
                 }
+                Err(error) if super::store_access::is_busy(&error) => {
+                    tracing::warn!(%error, job_id = %job.id, "恢复任务读池繁忙，保留单元");
+                    continue;
+                }
                 Err(error) => {
                     tracing::error!(%error, job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务读取台账失败");
-                    if let Err(finish_error) = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务时读取媒体台账失败"),
-                    ) {
+                    if let Err(finish_error) = self.writer().and_then(|store| {
+                        store.finish_probe_unit(
+                            &job.id,
+                            &persisted.ledger_id,
+                            false,
+                            Some("恢复任务时读取媒体台账失败"),
+                        )
+                    }) {
                         tracing::error!(%finish_error, job_id = %job.id, ledger_id = %persisted.ledger_id, "持久化恢复失败的任务单元失败");
                     }
                     continue;
@@ -429,12 +464,14 @@ impl ProbeManager {
                 Ok(kind) => kind,
                 Err(kind) => {
                     tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, %kind, "恢复探测任务媒体类型无效");
-                    let _ = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务时媒体类型无效"),
-                    );
+                    let _ = self.writer().and_then(|store| {
+                        store.finish_probe_unit(
+                            &job.id,
+                            &persisted.ledger_id,
+                            false,
+                            Some("恢复任务时媒体类型无效"),
+                        )
+                    });
                     continue;
                 }
             };
@@ -467,7 +504,7 @@ impl ProbeManager {
     ) -> Result<ProbeUnit, crate::store::StoreError> {
         let mut recorded = Vec::new();
         {
-            let store = self.store.lock();
+            let store = self.reader()?;
             for unit in &store.probe_job_units(&job.id)? {
                 let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
                 crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
@@ -476,7 +513,7 @@ impl ProbeManager {
             }
         }
         super::markers::observe_rows(&recorded)?;
-        let store = self.store.lock();
+        let store = self.reader()?;
         let persisted_units = store.probe_job_units(&job.id)?;
         let persisted = persisted_units.into_iter().next().ok_or_else(|| {
             crate::store::StoreError::Missing(format!("units for job {}", job.id))

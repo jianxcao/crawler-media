@@ -185,10 +185,8 @@ impl ProbeScenario {
         let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
         let engine = Arc::new(FakeFingerprintEngine::new());
         let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000_000));
-        let manager = Arc::new(ProbeManager::with_fingerprint_engine(
-            store.clone(),
-            engine.clone(),
-        ));
+        let manager =
+            Arc::new(ProbeManager::with_fingerprint_engine(store.clone(), engine.clone()).unwrap());
         manager.set_clock(clock.clone());
         if tokio::runtime::Handle::try_current().is_ok() {
             assert!(manager.try_start_workers(), "fixture workers must start");
@@ -316,10 +314,9 @@ impl ProbeScenario {
             .shutdown_workers()
             .await
             .expect("stop fixture workers");
-        self.manager = Arc::new(ProbeManager::with_fingerprint_engine(
-            self.store.clone(),
-            self.engine.clone(),
-        ));
+        self.manager = Arc::new(
+            ProbeManager::with_fingerprint_engine(self.store.clone(), self.engine.clone()).unwrap(),
+        );
         self.manager.set_clock(self.clock.clone());
         assert!(
             self.manager.try_start_workers(),

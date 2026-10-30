@@ -17,7 +17,7 @@ fn unit() -> ProbeUnit {
 fn missing_metadata_job_stops_fingerprint_enqueue_without_deadlock() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(ProbeManager::new(store.clone()));
+    let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut unit = unit();
@@ -43,7 +43,7 @@ fn missing_metadata_job_stops_fingerprint_enqueue_without_deadlock() {
 fn deleted_probe_cancellation_and_detail_enqueue_remain_responsive() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(ProbeManager::new(store.clone()));
+    let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     for cancel in [false, true] {
@@ -84,7 +84,7 @@ fn deleted_probe_cancellation_and_detail_enqueue_remain_responsive() {
 fn discarded_dispatch_releases_store_before_waiting_for_seen() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(ProbeManager::new(store.clone()));
+    let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     // Forced enqueue owns seen before it persists a job. A discarded dispatch
     // must not take the opposite order while removing its in-memory identity.
     let seen = manager.seen.lock();
@@ -126,7 +126,7 @@ fn discarded_dispatch_releases_store_before_waiting_for_seen() {
 fn cancelled_source_releases_store_before_waiting_for_seen() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let manager = Arc::new(ProbeManager::new(store.clone()));
+    let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     let seen = manager.seen.lock();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let worker_manager = manager.clone();

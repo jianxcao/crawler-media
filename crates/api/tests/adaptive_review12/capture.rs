@@ -139,7 +139,7 @@ fn cancelled_unit_cannot_reuse_a_cached_fingerprint() {
             .unwrap();
     }
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: f.store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
         matcher: f.engine.clone(),
         capture: f.engine.clone(),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
@@ -187,7 +187,7 @@ fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
         fail: true,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: f.store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
@@ -224,7 +224,7 @@ fn control_deleting_file_and_ledger_before_capture_cancels() {
         fail: true,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: f.store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
@@ -255,7 +255,7 @@ fn deleting_source_during_capture_must_not_reinsert_sample() {
         fail: false,
     });
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: f.store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
@@ -307,7 +307,7 @@ impl FingerprintCaptureEngine for EmptyAudioCapture {
 fn capture_refactor_preserves_persisted_error_kind() {
     let f = setup("uniform", &[1, 2, 3]);
     let ctx = api::fingerprint_job::AdaptiveCaptureContext {
-        store: f.store.clone(),
+        store: api::probe_manager::ProbeStoreAccess::new(f.store.clone()).unwrap(),
         matcher: f.engine.clone(),
         capture: Arc::new(EmptyAudioCapture),
         gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),

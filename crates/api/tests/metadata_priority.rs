@@ -59,7 +59,7 @@ fn coverage() -> FileCoverage {
 async fn new_metadata_waits_only_for_current_sample() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let mgr = Arc::new(ProbeManager::new(store.clone()));
+    let mgr = Arc::new(ProbeManager::new(store.clone()).unwrap());
 
     let gate = MetadataPriorityGate::new(mgr.clone());
 

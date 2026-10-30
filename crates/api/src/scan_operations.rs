@@ -369,8 +369,37 @@ fn run_operation(state: &ApiState, op: &ScanOperation) {
         op.is_full_scope(),
         Some(&op.id),
     );
+    if result.is_ok() {
+        refresh_scan_statistics(state, op, &lease);
+    }
     let outcome = scan_outcome(&admission.base_report, result);
     record_scan_outcome(&state.store.lock(), &op.id, op.dirty_rev, outcome);
+}
+
+/// Maintenance follows the whole round's cleanup, before its completion receipt.
+/// Refused maintenance does not undo registrations already committed by the scan.
+fn refresh_scan_statistics(
+    state: &ApiState,
+    op: &ScanOperation,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+) {
+    let result = crate::http::store_wait::with_foreground_store(state, |store| {
+        if lease.control().is_cancelled() || !store.library_accepts_work(&op.library_id)? {
+            return Ok(());
+        }
+        store.optimize_library_statistics()
+    });
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
+            %error, op_id = %op.id, library_id = %op.library_id,
+            "扫描结束后刷新 Library 查询统计失败，保留已完成的扫描结果"
+        ),
+        Err(response) => tracing::warn!(
+            status = %response.status(), op_id = %op.id, library_id = %op.library_id,
+            "扫描结束后的 Library 查询统计维护暂不可用，保留已完成的扫描结果"
+        ),
+    }
 }
 
 fn finish_scan_failure(state: &ApiState, op: &ScanOperation, reason: &str) {

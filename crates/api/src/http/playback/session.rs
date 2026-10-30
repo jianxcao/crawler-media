@@ -69,7 +69,7 @@ pub(crate) async fn start_session(
         Err(response) => return response,
     };
     if let Some(coverage) = coverage {
-        let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
+        let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage).await;
     }
     tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
     let is_strm = file

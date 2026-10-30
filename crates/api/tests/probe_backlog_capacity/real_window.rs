@@ -84,11 +84,8 @@ async fn full_fingerprint_window_preserves_completed_metadata() {
     let (_temp, store, rows) = fixture();
     let gate = Gate::new();
     let capture = Arc::new(GatedCapture::new(gate.clone()));
-    let manager = Arc::new(ProbeManager::with_engines(
-        store.clone(),
-        capture.clone(),
-        capture,
-    ));
+    let manager =
+        Arc::new(ProbeManager::with_engines(store.clone(), capture.clone(), capture).unwrap());
     let unit = |row: domain::FileCoverage| ProbeUnit {
         row,
         kind: MediaKind::Tv,

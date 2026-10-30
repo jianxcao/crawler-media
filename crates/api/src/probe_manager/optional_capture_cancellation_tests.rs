@@ -125,7 +125,7 @@ fn optional_capture_state(
         harness.store.clone(),
         capture.clone(),
         capture,
-    ));
+    ).unwrap());
     manager.set_library_registry(state.library_work.clone());
     state.probe = manager;
     {
@@ -485,7 +485,7 @@ fn disabling_detection_during_comparison_prevents_season_model_publication() {
         harness.store.clone(),
         matcher,
         capture,
-    ));
+    ).unwrap());
     manager.set_library_registry(state.library_work.clone());
     state.probe = manager.clone();
     assert_eq!(manager.enqueue_marker_refresh(harness.make_units()), 2);

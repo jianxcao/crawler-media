@@ -78,12 +78,14 @@ impl ApiServerProvider {
     ) -> MediaItemSnapshot {
         let state = self.state.clone();
         let fallback = snapshot.clone();
-        let task = tokio::task::spawn_blocking(move || {
-            let mut snapshot = snapshot;
-            enrich_snapshot_blocking(&state, &mut snapshot);
-            snapshot
-        })
-        .await;
+        let budget = state.http_work.clone();
+        let task = budget
+            .run_to_completion(move || {
+                let mut snapshot = snapshot;
+                enrich_snapshot_blocking(&state, &mut snapshot);
+                snapshot
+            })
+            .await;
         match task {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -104,7 +106,7 @@ pub(super) fn enrich_snapshot_blocking(state: &ApiState, snapshot: &mut MediaIte
             file: snapshot.file.clone(),
             units: snapshot.unit.into_iter().collect(),
         };
-        crate::http::library::ensure_probe_enqueued(state, &coverage);
+        crate::http::library::ensure_probe_enqueued_blocking(state, &coverage);
     }
     let Some(merge) = catalog_merge(state, snapshot) else {
         return;

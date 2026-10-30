@@ -123,7 +123,7 @@ impl RefreshHarness {
         };
 
         let registry = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-        let manager = Arc::new(ProbeManager::new(store.clone()));
+        let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
         manager.set_library_registry(registry.clone());
         let scope = format!("marker-refresh:{media_id}:all");
 
@@ -239,7 +239,7 @@ fn restored_presence_does_not_revive_cancelled_probe_unit() {
 async fn check_restored_presence() {
     let harness = RefreshHarness::new();
     let manager =
-        ProbeManager::new(harness.store.clone()).with_tracks_probe(Arc::new(PresenceRaceTracks));
+        ProbeManager::new(harness.store.clone()).unwrap().with_tracks_probe(Arc::new(PresenceRaceTracks));
     let ids: Vec<String> = harness
         .rows
         .iter()
@@ -575,7 +575,7 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
         .begin_library_removal(&harness.library_id)
         .unwrap();
 
-    let restarted = ProbeManager::new(harness.store.clone());
+    let restarted = ProbeManager::new(harness.store.clone()).unwrap();
     restarted.recover_pending_jobs();
 
     let job = harness
@@ -652,7 +652,7 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
 
     std::fs::remove_file(&harness.rows[deleted_index].file.path).unwrap();
 
-    let restarted = ProbeManager::new(harness.store.clone());
+    let restarted = ProbeManager::new(harness.store.clone()).unwrap();
     restarted.recover_pending_jobs();
 
     let job = harness

@@ -10,6 +10,9 @@ use rusqlite::{OptionalExtension, params};
 use super::maps::{LIBRARY_FILE_COLUMNS, group_file_coverage, map_file_unit};
 use super::{Store, StoreError};
 
+#[path = "ledger/coverage_page.rs"]
+mod coverage_page;
+
 /// Which recorded files a request read sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileReadScope {
@@ -270,6 +273,16 @@ impl Store {
             out.push((media_id.parse::<MediaId>()?, std::path::PathBuf::from(path)));
         }
         Ok(out)
+    }
+
+    /// Read at most 200 complete file coverage records after a Library-local cursor.
+    pub fn list_file_coverage_page(
+        &self,
+        library: LibraryId,
+        after: Option<LedgerId>,
+        limit: usize,
+    ) -> Result<Vec<FileCoverage>, StoreError> {
+        coverage_page::read(self, library, after, limit)
     }
 
     /// Every file with its unit coverage, plus the unfiltered-scan work the read cost.
