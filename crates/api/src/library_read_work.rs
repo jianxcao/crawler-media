@@ -115,30 +115,23 @@ pub(crate) async fn run_store_query_stage_named<T: Send + 'static>(
     }
 }
 
-/// 身份读（token→用户 / 用户→角色 / 用户详情）走 app.db 的**专用读连接**，不拿 `Store` 锁。
-///
-/// Task 27：同一次读原来和写事务共用进程级 `Mutex<Store>`。一次长扫描期间写者连续
-/// 重取锁，读侧被饿住超过请求预算就判繁忙——扫描期间每个成员请求（心跳在内）都
-/// 停摆。app.db 是 WAL，专用读连接读的是最后一次提交的快照，因此这里既不等锁、
-/// 也不占 `http_work` 预算（中间件不该和 handler 抢 permit：handler 打满预算时，
-/// 所有请求先在 auth 层被判繁忙还要被迫重新登录）。拿不到一致快照时按连接的
-/// `busy_timeout` 退让，`DatabaseBusy` 由 [`error_is_unavailable`] 翻成
-/// 503 `runtime.busy`——那才是这个错误码该覆盖的情形。
-///
-/// 阶段名保持不变：`library_read_metrics` 按 `timeout_stage == "auth"` 断言，
-/// 只是不再存在 `auth_wait` 那段锁等待。
+/// Identity reads borrow the shared read-only Store pool within the request deadline.
 pub(crate) async fn run_app_read_stage_named<T: Send + 'static>(
     state: &ApiState,
     deadline: Instant,
     stage: &'static str,
-    work: impl FnOnce(&store::AppReader) -> Result<T, store::StoreError> + Send + 'static,
+    work: impl FnOnce(&store::Store) -> Result<T, store::StoreError> + Send + 'static,
 ) -> Result<T, LibraryReadError> {
     let phase = StageMetrics::start(stage);
     if Instant::now() >= deadline {
         phase.timeout();
         return Err(LibraryReadError::Deadline);
     }
-    let reader = state.app_reader.clone();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Some(reader) = state.store_readers.checkout_async(remaining).await else {
+        phase.timeout();
+        return Err(LibraryReadError::Deadline);
+    };
     let remaining = deadline.saturating_duration_since(Instant::now());
     let task = tokio::task::spawn_blocking(move || work(&reader));
     match tokio::time::timeout(remaining, task).await {

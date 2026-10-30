@@ -20,12 +20,6 @@ use crate::management::ApiState;
 
 /// 任务端点（列表 / 详情 / 手动操作）的 blocking 预算。
 pub(super) const JOBS_READ_DEADLINE: Duration = Duration::from_secs(2);
-/// 任务读端点等进程级 `Store` 锁的上界。
-///
-/// Review L2: 长批（扫描 / 完整性）会把锁拿走几分钟；任务列表不能跟着排队，也不能
-/// 在执行器线程上等。等待有界，超时回 503 让前端重试（Review L2/L4）。
-const JOBS_STORE_LOCK_WAIT: Duration = Duration::from_secs(1);
-
 /// blocking 预算打满 / 等待超时：读端点用 503 + 重试表达。
 pub(super) fn jobs_budget_response(error: BlockingError) -> Response {
     match error {
@@ -45,13 +39,14 @@ pub(super) fn jobs_budget_response(error: BlockingError) -> Response {
     }
 }
 
-/// 有界等待 `Store` 锁的快照读。拿不到返回 `None`（调用方回 503）。
+/// Bounded snapshot read from the shared read-only Store pool.
 pub(super) fn with_bounded_store<T>(
     state: &ApiState,
     work: impl FnOnce(&crate::Store) -> T,
 ) -> Option<T> {
-    let store = state.store();
-    let guard = store.try_lock_for(JOBS_STORE_LOCK_WAIT)?;
+    let guard = state
+        .store_readers
+        .checkout(super::store_wait::STORE_READ_WAIT)?;
     Some(work(&guard))
 }
 

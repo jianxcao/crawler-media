@@ -1,7 +1,7 @@
 //! Site connectivity maintenance: verify / login / check-in.
 
 use super::*;
-use crate::http::store_wait::{busy_response, store_read, with_bounded_store};
+use crate::http::store_wait::{STORE_READ_WAIT, busy_response, store_read};
 
 mod credentials;
 use credentials::AdmittedCredentials;
@@ -81,16 +81,19 @@ async fn maintain_site(state: ApiState, id: String, action: Action) -> Response 
     let result = state
         .http_work
         .run_to_completion(move || {
-            let site = with_bounded_store(worker.store(), |store| {
-                worker.require_writable()?;
-                worker.require_write_admitted()?;
+            worker.require_writable()?;
+            worker.require_write_admitted()?;
+            let site = {
+                let store = worker
+                    .store_readers
+                    .checkout(STORE_READ_WAIT)
+                    .ok_or_else(busy_response)?;
                 store
                     .get_site(id)
                     .ok()
                     .flatten()
                     .ok_or_else(|| err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"))
-            })
-            .ok_or_else(busy_response)??;
+            }?;
             let _policy = crate::check_in::site_policy(&worker, &site).map_err(|error| {
                 err(
                     StatusCode::BAD_REQUEST,

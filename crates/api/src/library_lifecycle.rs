@@ -301,11 +301,36 @@ impl LibraryWorkRegistry {
         self.acquire_bounded_kind(store, library_id, kind)
     }
 
+    pub(crate) fn acquire_from_readers(
+        self: &Arc<Self>,
+        readers: &Arc<crate::store_readers::StoreReaders>,
+        library_id: &str,
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
+        self.acquire_bounded_with(library_id, LibraryWorkKind::Ordinary, || {
+            readers
+                .checkout(crate::http::store_wait::STORE_READ_WAIT)
+                .ok_or(BoundedLeaseError::StoreBusy)
+        })
+    }
+
     fn acquire_bounded_kind(
         self: &Arc<Self>,
         store: &Mutex<store::Store>,
         library_id: &str,
         kind: LibraryWorkKind,
+    ) -> Result<LibraryWorkLease, BoundedLeaseError> {
+        self.acquire_bounded_with(library_id, kind, || {
+            store
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or(BoundedLeaseError::StoreBusy)
+        })
+    }
+
+    fn acquire_bounded_with<R: std::ops::Deref<Target = store::Store>>(
+        self: &Arc<Self>,
+        library_id: &str,
+        kind: LibraryWorkKind,
+        acquire: impl FnOnce() -> Result<R, BoundedLeaseError>,
     ) -> Result<LibraryWorkLease, BoundedLeaseError> {
         let mut entries = self
             .entries
@@ -315,9 +340,7 @@ impl LibraryWorkRegistry {
         if entry.blocked_by.is_some() {
             return Err(BoundedLeaseError::Reconfiguring);
         }
-        let store = store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or(BoundedLeaseError::StoreBusy)?;
+        let store = acquire()?;
         if entry.cancelled
             || !store
                 .library_accepts_work(library_id)

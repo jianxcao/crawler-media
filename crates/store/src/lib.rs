@@ -16,8 +16,9 @@ mod chapter_frame_tasks;
 mod file_reads;
 mod instance_lock;
 pub use instance_lock::AppHeartbeat;
-mod app_reader;
-pub use app_reader::AppReader;
+mod app_auth;
+mod writers;
+pub use writers::{App, Db, Writers};
 mod pending_file_deletions;
 mod pending_progress;
 mod protocol_index;
@@ -221,6 +222,8 @@ pub fn rfc3339_from_secs(secs: i64) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("app writer is temporarily busy")]
+    WriteBusy,
     #[error("library {library_id} query projection is temporarily unavailable")]
     QueryUnavailable { library_id: domain::LibraryId },
     #[error(transparent)]
@@ -281,6 +284,8 @@ pub struct Store {
     pub(crate) role_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     app_path: PathBuf,
     pub(crate) app: Connection,
+    writers: std::sync::Arc<Writers>,
+    read_only: bool,
     pub(crate) cache: Connection,
     pub(crate) library: Connection,
     pub(crate) subscribe: Connection,

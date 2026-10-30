@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use media::{CatalogGet, TmdbError};
-use parking_lot::Mutex;
 
-use crate::Store;
+use crate::ApiState;
 use crate::http_agent;
 
 /// TMDB HTTP client whose API key is read live from settings KV
@@ -11,18 +10,20 @@ use crate::http_agent;
 /// restart. main.rs seeds the KV from the `CRAWLER_MEDIA_TMDB_KEY` env var
 /// at startup when the env is present.
 pub struct TmdbHttp {
-    store: Arc<Mutex<Store>>,
+    readers: Arc<crate::store_readers::StoreReaders>,
 }
 
 impl TmdbHttp {
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
-        Self { store }
+    pub fn new(state: &ApiState) -> Self {
+        Self {
+            readers: state.store_readers.clone(),
+        }
     }
 
     fn api_key(&self) -> Option<String> {
         let store = self
-            .store
-            .try_lock_for(std::time::Duration::from_millis(500))?;
+            .readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)?;
         store
             .get_setting(crate::settings_keys::TMDB_API_KEY)
             .ok()

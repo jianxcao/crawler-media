@@ -1,10 +1,10 @@
 use domain::UserId;
 use rusqlite::{OptionalExtension, params};
 
-use super::{Store, StoreError};
+use super::StoreError;
 use crate::users::SETTING_CLI_TOKEN;
 
-impl Store {
+impl crate::writers::App<'_> {
     fn revoked_list(&self) -> Result<Vec<String>, StoreError> {
         Ok(self
             .get_setting("playback.revoked_devices")?
@@ -15,7 +15,15 @@ impl Store {
     fn revoked_device_key(user_id: UserId, device_id: &str) -> String {
         format!("{user_id}:{device_id}")
     }
+}
 
+fn valid_device_identity(device_id: &str) -> bool {
+    !device_id.trim().is_empty()
+        && device_id != "jellyfin-client"
+        && !device_id.starts_with("unidentified:")
+}
+
+impl crate::writers::App<'_> {
     pub fn is_device_revoked(&self, user_id: UserId, device_id: &str) -> Result<bool, StoreError> {
         let key = Self::revoked_device_key(user_id, device_id);
         Ok(self.revoked_list()?.iter().any(|id| id == &key))
@@ -66,7 +74,7 @@ impl Store {
     }
 
     pub fn revoke_device(&self, user_id: UserId, device_id: &str) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         let tokens = {
             let mut stmt = tx.prepare(
                 "SELECT c.token FROM playback_device_credentials c JOIN user_tokens t
@@ -140,8 +148,4 @@ impl Store {
     }
 }
 
-fn valid_device_identity(device_id: &str) -> bool {
-    !device_id.trim().is_empty()
-        && device_id != "jellyfin-client"
-        && !device_id.starts_with("unidentified:")
-}
+mod app_access;

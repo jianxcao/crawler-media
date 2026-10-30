@@ -171,7 +171,7 @@ impl MediaServerProvider for ApiServerProvider {
         token: &str,
         deadline: Option<std::time::Instant>,
     ) -> Result<Option<UserId>, media_server::provider::QueryError> {
-        // Task 27：token→用户是 app.db 的一次读，走专用读连接（`AppReader`），
+        // token→用户走共享只读 Store 池，
         // 不再排在进程级 `Store` 锁后面——否则扫描期间 Jellyfin 协议面（Infuse/
         // Emby 客户端）与自有 API 一样每个请求都 503。阶段名仍是 `auth`：
         // `library_read_metrics` 按 `timeout_stage == "auth"` 观察。
@@ -306,7 +306,10 @@ impl MediaServerProvider for ApiServerProvider {
         let budget = state.http_work.clone();
         budget
             .run(std::time::Duration::from_secs(30), move || {
-                let store = state.store.lock();
+                let store = state
+                    .store_readers
+                    .checkout(crate::http::store_wait::STORE_READ_WAIT)
+                    .ok_or_else(|| "Store read pool busy".to_string())?;
                 let ownership = store
                     .library_ownership()
                     .map_err(|error| error.to_string())?;
@@ -314,18 +317,26 @@ impl MediaServerProvider for ApiServerProvider {
                     .user_role(user_id)
                     .map_err(|error| error.to_string())?;
                 let libraries = store.list_libraries().map_err(|error| error.to_string())?;
+                let libraries = libraries
+                    .into_iter()
+                    .filter(|lib| {
+                        ownership.accepts_work(&lib.id)
+                            && if role == "admin" {
+                                lib.admin_visible
+                            } else {
+                                lib.access_mode == "everyone" || lib.member_ids.contains(&user_id)
+                            }
+                    })
+                    .collect::<Vec<_>>();
+                drop(store);
                 let mut list = Vec::new();
                 for lib in libraries {
-                    let visible = ownership.accepts_work(&lib.id)
-                        && if role == "admin" {
-                            lib.admin_visible
-                        } else {
-                            lib.access_mode == "everyone" || lib.member_ids.contains(&user_id)
-                        };
-                    if !visible {
-                        continue;
-                    }
-                    let cover_path = crate::http::library::library_cover_path(&store, &lib);
+                    let cover_path = lib
+                        .cover_path
+                        .as_deref()
+                        .filter(|path| !path.is_empty() && *path != "none")
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_file());
                     let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
                     list.push(ServerLibrary {
                         id: lib.id,

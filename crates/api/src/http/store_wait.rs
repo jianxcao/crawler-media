@@ -168,18 +168,72 @@ where
     let result = state
         .http_work
         .run_to_completion(move || {
-            with_bounded_store(worker.store(), |store| {
-                worker.require_writable()?;
-                worker.require_write_admitted()?;
-                Ok(observe_store_work(store, metrics, work))
-            })
+            with_foreground_store(&worker, |store| observe_store_work(store, metrics, work))
         })
         .await;
     match result {
-        Ok(Some(value)) => value,
-        Ok(None) | Err(crate::blocking_budget::BlockingError::Busy) => Err(busy_response()),
+        Ok(value) => value,
+        Err(crate::blocking_budget::BlockingError::Busy) => Err(busy_response()),
         Err(error) => Err(StoreCallError::Worker(error.to_string()).response()),
     }
+}
+
+/// Bounded foreground mutation for callers already on a blocking worker.
+/// Check admission at the outer Store and again at every actual App writer.
+pub(crate) fn with_foreground_store<T>(
+    state: &ApiState,
+    work: impl FnOnce(&crate::Store) -> T,
+) -> Result<T, Response> {
+    with_bounded_store(state.store(), |store| {
+        state.require_writable()?;
+        state.require_write_admitted()?;
+        with_app_admission(state, || work(store))
+    })
+    .unwrap_or_else(|| Err(busy_response()))
+}
+
+/// Apply the same foreground policy at every actual App writer acquisition.
+/// This scope is synchronous and runs only on a blocking worker.
+pub(crate) fn with_app_admission<T>(
+    state: &ApiState,
+    work: impl FnOnce() -> T,
+) -> Result<T, Response> {
+    let writable = state.instance_writable.clone();
+    let gate = state.write_gate.clone();
+    let refusal = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let observed = refusal.clone();
+    let result = state.writers.with_write_admission(
+        STORE_WRITE_WAIT,
+        move || {
+            let response = if !writable.load(std::sync::atomic::Ordering::SeqCst) {
+                Some(err(
+                    StatusCode::CONFLICT,
+                    "instance.read_only",
+                    "当前实例为只读",
+                ))
+            } else {
+                gate.admit().err().map(crate::write_gate::busy_response)
+            };
+            if let Some(response) = response {
+                *observed.lock() = Some(response);
+                return Err(store::StoreError::Protected(
+                    "foreground write admission closed".into(),
+                ));
+            }
+            Ok(())
+        },
+        work,
+    );
+    if let Some(response) = refusal.lock().take() {
+        return Err(response);
+    }
+    result.map_err(|error| match error {
+        store::StoreError::WriteBusy => busy_response(),
+        error => {
+            tracing::error!(%error, "App writer scope failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "写入失败")
+        }
+    })
 }
 
 fn observe_store_work<T>(

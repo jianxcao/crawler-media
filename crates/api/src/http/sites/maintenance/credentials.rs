@@ -6,7 +6,7 @@ use domain::{Site, SiteId};
 use hooks::{PluginError, SiteCredentials};
 
 use crate::ApiState;
-use crate::http::store_wait::{busy_response, with_bounded_store};
+use crate::http::store_wait::{STORE_READ_WAIT, busy_response, with_foreground_store};
 
 pub(super) struct AdmittedCredentials<'a> {
     state: &'a ApiState,
@@ -28,24 +28,12 @@ impl<'a> AdmittedCredentials<'a> {
         &self,
         work: impl FnOnce(&crate::Store) -> Result<T, PluginError>,
     ) -> Result<T, PluginError> {
-        let outcome = with_bounded_store(self.state.store(), |store| {
-            if let Err(response) = self
-                .state
-                .require_writable()
-                .and_then(|_| self.state.require_write_admitted())
-            {
-                self.rejected.replace(Some(response));
-                tracing::warn!(site_id = %self.expected.id, "Site credential publication rejected by write admission");
-                return Err(PluginError::Fetch(
-                    "Site maintenance write admission changed".into(),
-                ));
-            }
-            work(store)
-        });
-        outcome.unwrap_or_else(|| {
-            self.rejected.replace(Some(busy_response()));
-            Err(PluginError::Fetch("Site credential Store is busy".into()))
-        })
+        with_foreground_store(self.state, work).map_err(|response| self.refused(response))?
+    }
+    fn refused(&self, response: Response) -> PluginError {
+        self.rejected.replace(Some(response));
+        tracing::warn!(site_id = %self.expected.id, "Site credential publication rejected by write admission");
+        PluginError::Fetch("Site maintenance write admission changed".into())
     }
     fn unchanged_site(&self, store: &crate::Store) -> Result<Site, PluginError> {
         let current = store
@@ -64,7 +52,16 @@ impl SiteCredentials for AdmittedCredentials<'_> {
         if id != self.expected.id {
             return Err(PluginError::NotFound);
         }
-        self.with_store(|store| self.unchanged_site(store))
+        self.state
+            .require_writable()
+            .and_then(|_| self.state.require_write_admitted())
+            .map_err(|response| self.refused(response))?;
+        let reader = self
+            .state
+            .store_readers
+            .checkout(STORE_READ_WAIT)
+            .ok_or_else(|| self.refused(busy_response()))?;
+        self.unchanged_site(&reader)
     }
     fn save(&self, site: &Site) -> Result<(), PluginError> {
         if site.id != self.expected.id {

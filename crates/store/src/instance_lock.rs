@@ -1,51 +1,37 @@
-//! G-M5: single-instance lease on the data directory. One row; the owner
-//! refreshes `heartbeat_at`, and a lease older than the TTL may be taken over.
-//!
-//! Review L1: the heartbeat runs on its own app.db connection
-//! ([`AppHeartbeat`]) instead of the process-wide `Store` lock. A batch
-//! (integrity / scan) may hold that lock for minutes; when the heartbeat shares
-//! it, the lease goes stale, its TTL expires and a second instance takes the
-//! data directory over while the first one is still writing.
-//!
-//! `heartbeat_at` is Unix **milliseconds**. Whole-second callers keep working
-//! through the `_secs`-shaped signatures, which convert; millisecond resolution
-//! exists so a test can shrink the TTL below one second.
+//! Single-instance lease on the data directory. App writes use the shared
+//! writer handle, so a Library scan cannot delay lease refresh or shutdown.
+//! Lease times are stored in Unix milliseconds.
 
-use std::path::Path;
-use std::sync::Mutex;
-
+use super::{Store, StoreError, Writers};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::sync::Arc;
 
-use super::{Store, StoreError};
-
-/// Dedicated app.db connection that only refreshes the lease.
-///
-/// It exists so the lease stays fresh while another thread holds the
-/// process-wide `Store` lock. Deliberately exposes only [`Self::heartbeat`]:
-/// acquiring and releasing the lease belong to the process that owns it.
+/// Shared App writer handle for instance lease refresh and clean shutdown.
 pub struct AppHeartbeat {
-    conn: Mutex<Connection>,
+    writers: Arc<Writers>,
 }
 
 impl AppHeartbeat {
-    fn open(app_path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(app_path)?;
-        // 连接策略与其它库同一处：`DbKind::Heartbeat` 只把 `busy_timeout` 拉长到
-        // 心跳间隔的一半，耐久性（FULL）与其它权威库一致。
-        super::open::apply_connection_policy(&conn, super::open::DbKind::Heartbeat)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+    pub fn heartbeat(&self, owner: &str, now_ms: i64) -> Result<bool, StoreError> {
+        self.writers
+            .with_app(|app| app.heartbeat_instance_lock_ms(owner, now_ms))
     }
 
-    /// Refresh the lease held by `owner` at `now_ms` (Unix milliseconds).
-    /// `false` means another instance took the lease over.
-    pub fn heartbeat(&self, owner: &str, now_ms: i64) -> Result<bool, StoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Invalid("instance heartbeat connection poisoned".into()))?;
-        heartbeat_on(&conn, owner, now_ms)
+    pub fn release(&self, owner: &str) -> Result<(), StoreError> {
+        self.writers
+            .with_app(|app| app.release_instance_lock(owner))
+    }
+}
+
+impl crate::App<'_> {
+    pub fn heartbeat_instance_lock_ms(&self, owner: &str, now_ms: i64) -> Result<bool, StoreError> {
+        heartbeat_on(self.app, owner, now_ms)
+    }
+
+    pub fn release_instance_lock(&self, owner: &str) -> Result<(), StoreError> {
+        self.app
+            .execute("DELETE FROM instance_lock WHERE id=1 AND owner=?1", [owner])?;
+        Ok(())
     }
 }
 
@@ -58,12 +44,13 @@ fn heartbeat_on(conn: &Connection, owner: &str, now_ms: i64) -> Result<bool, Sto
 }
 
 impl Store {
-    /// Open the dedicated lease-heartbeat connection for this store's app.db.
+    /// Clone the App writer handle used for lease refresh.
     ///
-    /// `open_at` allows a non-default app.db path, so the heartbeat takes the
-    /// path from the store rather than assuming `data_dir/app.db`.
+    /// No connection or outer Store guard is needed after cloning this handle.
     pub fn open_app_heartbeat(&self) -> Result<AppHeartbeat, StoreError> {
-        AppHeartbeat::open(&self.app_path)
+        Ok(AppHeartbeat {
+            writers: self.writers(),
+        })
     }
 
     /// Take the lease for `owner` at `now` (Unix seconds) with a
@@ -86,7 +73,8 @@ impl Store {
         now_ms: i64,
         ttl_ms: i64,
     ) -> Result<Option<String>, StoreError> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.app, TransactionBehavior::Immediate)?;
+        self.with_app(|app| {
+        let tx = rusqlite::Transaction::new_unchecked(app.app, TransactionBehavior::Immediate)?;
         let current: Option<(String, i64)> = tx
             .query_row(
                 "SELECT owner, heartbeat_at FROM instance_lock WHERE id = 1",
@@ -107,21 +95,24 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(None)
+        })
     }
 
     /// Refresh the lease at whole-second resolution. `false` means another
     /// instance took it over.
     pub fn heartbeat_instance_lock(&self, owner: &str, now: i64) -> Result<bool, StoreError> {
-        heartbeat_on(&self.app, owner, now.saturating_mul(1000))
+        self.with_app(|app| heartbeat_on(app.app, owner, now.saturating_mul(1000)))
     }
 
     /// Drop the lease if `owner` still holds it (clean shutdown).
     pub fn release_instance_lock(&self, owner: &str) -> Result<(), StoreError> {
-        self.app.execute(
-            "DELETE FROM instance_lock WHERE id = 1 AND owner = ?1",
-            [owner],
-        )?;
-        Ok(())
+        self.with_app(|app| {
+            app.app.execute(
+                "DELETE FROM instance_lock WHERE id = 1 AND owner = ?1",
+                [owner],
+            )?;
+            Ok(())
+        })
     }
 }
 
@@ -156,7 +147,13 @@ mod tests {
         store
             .try_acquire_instance_lock_ms("owner", 1_000, 60_000)
             .unwrap();
-        store.app.execute("DROP TABLE instance_lock", []).unwrap();
+        store
+            .writers()
+            .with_writer(crate::Db::App, |conn| {
+                conn.execute("DROP TABLE instance_lock", [])?;
+                Ok(())
+            })
+            .unwrap();
         assert!(heartbeat.heartbeat("owner", 2_000).is_err());
     }
 }

@@ -81,7 +81,10 @@ pub(crate) fn resolve_transfer_plan(
     media: &Media,
     subscribe: &Subscribe,
 ) -> Result<TransferPlan, String> {
-    let store = state.store.lock();
+    let store = state
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        .ok_or_else(|| "runtime.busy".to_string())?;
     let library = match subscribe.library_id {
         Some(id) => store.get_library(&id.to_string()),
         None => store.default_library(media.kind),

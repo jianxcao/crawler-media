@@ -2143,6 +2143,7 @@ dependencies = [
  "jobs",
  "library",
  "media",
+ "parking_lot",
  "password-hash",
  "release",
  "roxmltree",

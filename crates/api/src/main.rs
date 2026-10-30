@@ -127,11 +127,12 @@ fn seed_store_settings(store: &parking_lot::Mutex<Store>, config: &ServerConfig)
 }
 
 fn load_catalog_sources(
-    store: &std::sync::Arc<parking_lot::Mutex<Store>>,
+    state: &ApiState,
     catalog_db: &std::path::Path,
     tvdb_key: Option<&str>,
 ) -> Vec<Arc<dyn api::catalog::Catalog>> {
     let mut sources: Vec<Arc<dyn api::catalog::Catalog>> = Vec::new();
+    let store = state.store();
     let metadata_language = store
         .lock()
         .metadata_language()
@@ -139,7 +140,7 @@ fn load_catalog_sources(
         .map(|state| state.language)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "zh-CN".to_string());
-    match media::Tmdb::new(TmdbHttp::new(store.clone()), catalog_db) {
+    match media::Tmdb::new(TmdbHttp::new(state), catalog_db) {
         Ok(tmdb) => sources.push(TmdbCatalog::new(tmdb.with_language(&metadata_language))),
         Err(error) => tracing::error!(%error, "跳过 TMDB：无法打开 catalog 缓存"),
     }
@@ -236,7 +237,7 @@ fn create_api_state(
     .with_browser(Arc::new(browser));
 
     let sources = load_catalog_sources(
-        &store,
+        &state,
         &data_dir.join("cache.db"),
         config.tvdb_key.as_deref(),
     );

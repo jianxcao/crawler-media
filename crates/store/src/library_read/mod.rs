@@ -4,6 +4,7 @@ mod lease;
 mod pool;
 mod query;
 
+pub(crate) use budget::{WriterQueryPolicy, active_query_budget, check_writer_budget};
 pub(crate) use context::authorized_ids_on;
 pub use context::{LibraryReadContext, LibraryReadRequest, ReadCredential};
 pub use lease::{LibraryReadLease, QueryBudget};

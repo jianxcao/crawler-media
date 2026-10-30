@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -10,7 +10,47 @@ use rusqlite::Connection;
 use super::{LibraryReadError, QueryBudget};
 use crate::{Store, StoreError};
 
-thread_local! { static SHORT_STAGE_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
+thread_local! {
+    static ACTIVE_BUDGET: RefCell<Option<QueryBudget>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn active_query_budget() -> Option<QueryBudget> {
+    ACTIVE_BUDGET.with(|active| active.borrow().clone())
+}
+
+/// A writer receives the operation's budget only after acquiring its mutex.
+/// The connection must still be held when this policy is dropped.
+pub(crate) struct WriterQueryPolicy<'a>(&'a Connection);
+
+impl<'a> WriterQueryPolicy<'a> {
+    pub(crate) fn install(conn: &'a Connection, budget: &QueryBudget) -> Result<Self, StoreError> {
+        ShortPolicy::install(conn, budget, 1).map_err(writer_budget_error)?;
+        Ok(Self(conn))
+    }
+}
+
+impl Drop for WriterQueryPolicy<'_> {
+    fn drop(&mut self) {
+        ShortPolicy::reset(self.0);
+    }
+}
+
+pub(crate) fn check_writer_budget(budget: &QueryBudget) -> Result<(), StoreError> {
+    budget.check().map_err(writer_budget_error)
+}
+
+fn writer_budget_error(error: LibraryReadError) -> StoreError {
+    match error {
+        LibraryReadError::Store(error) => error,
+        // with_query_budget maps the operation's cancellation/deadline after
+        // its callback returns. At the Connection seam this is a SQLite interrupt.
+        error => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            Some(error.to_string()),
+        )
+        .into(),
+    }
+}
 
 struct ShortPolicy<'a> {
     app: &'a Connection,
@@ -18,7 +58,11 @@ struct ShortPolicy<'a> {
 }
 
 impl ShortPolicy<'_> {
-    fn install(conn: &Connection, budget: &QueryBudget) -> Result<(), LibraryReadError> {
+    fn install(
+        conn: &Connection,
+        budget: &QueryBudget,
+        interval: i32,
+    ) -> Result<(), LibraryReadError> {
         budget.check()?;
         let remaining = budget
             .deadline
@@ -28,7 +72,7 @@ impl ShortPolicy<'_> {
         let cancelled: Arc<AtomicBool> = Arc::clone(&budget.cancelled);
         let deadline = budget.deadline;
         conn.progress_handler(
-            1000,
+            interval,
             Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
         );
         Ok(())
@@ -45,7 +89,7 @@ impl Drop for ShortPolicy<'_> {
     fn drop(&mut self) {
         Self::reset(self.app);
         Self::reset(self.library);
-        SHORT_STAGE_ACTIVE.with(|active| active.set(false));
+        ACTIVE_BUDGET.with(|active| *active.borrow_mut() = None);
     }
 }
 
@@ -57,11 +101,12 @@ impl Store {
         budget: &QueryBudget,
         work: impl FnOnce(&Store) -> Result<T, LibraryReadError>,
     ) -> Result<T, LibraryReadError> {
-        let entered = SHORT_STAGE_ACTIVE.with(|active| {
-            if active.get() {
+        let entered = ACTIVE_BUDGET.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.is_some() {
                 false
             } else {
-                active.set(true);
+                *active = Some(budget.clone());
                 true
             }
         });
@@ -72,8 +117,8 @@ impl Store {
             app: &self.app,
             library: &self.library,
         };
-        ShortPolicy::install(guard.app, budget)?;
-        if let Err(error) = ShortPolicy::install(guard.library, budget) {
+        ShortPolicy::install(guard.app, budget, 1000)?;
+        if let Err(error) = ShortPolicy::install(guard.library, budget, 1000) {
             drop(guard);
             return Err(error);
         }

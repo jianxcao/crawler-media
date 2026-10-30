@@ -7,16 +7,22 @@
 use super::{Store, StoreError};
 
 impl Store {
-    /// Run `write` inside an IMMEDIATE transaction on the app connection.
-    ///
-    /// A `StoreError` from the callback rolls the transaction back, so a
-    /// partially applied set of app.db writes is never persisted.
+    /// Run related App writes atomically on their shared writer.
+    pub fn app_write<T>(
+        &self,
+        write: impl FnOnce(&crate::App<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.with_app(|app| app.app_write(write))
+    }
+}
+
+impl crate::App<'_> {
     pub fn app_write<T>(
         &self,
         write: impl FnOnce(&Self) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.app,
+            self.app,
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let value = match write(self) {

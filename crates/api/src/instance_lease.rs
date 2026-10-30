@@ -8,7 +8,7 @@
 //! read-only), and a step backward can delay takeover of a crashed holder.
 //! Keep the hosts' clocks synced; the TTL (60 s) is the tolerance window.
 //!
-//! Review L1: the heartbeat refreshes the lease on its own app.db connection
+//! The heartbeat refreshes the lease through the shared app writer
 //! ([`Store::open_app_heartbeat`]) and never takes `state.store.lock()`. A batch
 //! holding that lock for longer than the TTL must not let a second instance take
 //! the directory over. Two consecutive heartbeat errors degrade this instance to
@@ -37,8 +37,7 @@ pub const LEASE_HEARTBEAT_ENV: &str = "CRAWLER_MEDIA_LEASE_HEARTBEAT_MS";
 pub const LEASE_TTL_ENV: &str = "CRAWLER_MEDIA_LEASE_TTL_MS";
 
 pub struct InstanceLease {
-    store: Arc<Mutex<Store>>,
-    /// Review L1: dedicated app.db connection, so refreshing the lease does not
+    /// Shared app writer, so refreshing the lease does not
     /// queue behind a long batch holding the global `Store` lock.
     heartbeat: AppHeartbeat,
     owner: String,
@@ -90,7 +89,7 @@ pub(crate) fn retry_interval() -> Duration {
 
 impl Drop for InstanceLease {
     fn drop(&mut self) {
-        if let Err(error) = self.store.lock().release_instance_lock(&self.owner) {
+        if let Err(error) = self.heartbeat.release(&self.owner) {
             tracing::warn!(%error, "释放实例锁失败");
         }
     }
@@ -135,7 +134,6 @@ pub(crate) fn acquire(store: &Arc<Mutex<Store>>) -> std::io::Result<Option<Arc<I
     };
     tracing::info!(%owner, ttl_ms = lease_ttl_ms(), "已获取数据目录实例锁（仅支持单实例运行）");
     let lease = Arc::new(InstanceLease {
-        store: store.clone(),
         heartbeat,
         owner,
         lost: AtomicBool::new(false),

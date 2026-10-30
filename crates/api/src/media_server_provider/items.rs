@@ -2,6 +2,9 @@ use super::user_marks::{item_is_played, unit_play_count};
 use super::*;
 use std::time::SystemTime;
 
+mod ingest_time;
+pub(super) use ingest_time::{file_date_created, latest_ingest_by_media, with_date_created};
+
 /// A public protocol id resolved to the entry it names.
 pub(super) struct ResolvedEntry {
     pub file: domain::LibraryFile,
@@ -101,19 +104,24 @@ pub(super) fn entry_snapshot(
     id: &str,
 ) -> Result<Option<MediaItemSnapshot>, String> {
     let entry = {
-        let store = state.store.lock();
+        let store = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+            .ok_or_else(|| "Store read pool busy".to_string())?;
         resolve_entry(&store, Some(user_id), id)?
     };
-    Ok(entry.map(|entry| {
-        snapshot_from_entry(
-            state,
-            user_id,
-            entry.file,
-            entry.unit,
-            entry.media,
-            entry.is_series,
-        )
-    }))
+    entry
+        .map(|entry| {
+            snapshot_from_entry(
+                state,
+                user_id,
+                entry.file,
+                entry.unit,
+                entry.media,
+                entry.is_series,
+            )
+        })
+        .transpose()
 }
 
 pub(super) fn snapshot_from_entry(
@@ -123,10 +131,13 @@ pub(super) fn snapshot_from_entry(
     unit: (i32, i32),
     media: domain::Media,
     is_series: bool,
-) -> MediaItemSnapshot {
+) -> Result<MediaItemSnapshot, String> {
     // 锁内只取 owned DB 事实。
     let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) = {
-        let store = state.store.lock();
+        let store = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+            .ok_or_else(|| "Store read pool busy".to_string())?;
         let (season, episode) = unit_columns(unit);
         let marker = store
             .get_media_marker(file.media_id, season, episode)
@@ -194,7 +205,7 @@ pub(super) fn snapshot_from_entry(
         ),
         file_date_created(state.file_stats.as_ref(), &file.path),
     );
-    MediaItemSnapshot {
+    Ok(MediaItemSnapshot {
         file,
         unit: snapshot_unit(unit),
         played,
@@ -210,7 +221,7 @@ pub(super) fn snapshot_from_entry(
         intro_end_ms: marker.as_ref().and_then(|item| item.intro_end_ms),
         outro_start_ms: marker.as_ref().and_then(|item| item.outro_start_ms),
         outro_end_ms: marker.as_ref().and_then(|item| item.outro_end_ms),
-    }
+    })
 }
 
 fn direct_series_rollup(
@@ -309,7 +320,10 @@ fn list_visible_items_blocking(
     parent_id: Option<&str>,
     library_scope: Option<&str>,
 ) -> Result<Vec<MediaItemSnapshot>, String> {
-    let store_guard = state.store.lock();
+    let store_guard = state
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        .ok_or_else(|| "Store read pool busy".to_string())?;
     let snapshot = collect_pending(&store_guard, user_id, parent_id, library_scope)?;
     drop(store_guard);
     let (pending, ingest_paths) = snapshot;
@@ -740,56 +754,6 @@ fn playback_ticks(
         })
         .unwrap_or(0)
         * 10_000
-}
-
-/// 锁外：把「可见行的 ingest 时间」按 Media 取最大值。
-pub(super) fn latest_ingest_by_media(
-    browse: &dyn crate::file_stat_read::FileStatRead,
-    paths: &[(domain::MediaId, String)],
-) -> HashMap<domain::MediaId, SystemTime> {
-    let mut latest = HashMap::new();
-    for (media_id, path) in paths {
-        let Some(created) = file_date_created(browse, std::path::Path::new(path)) else {
-            continue;
-        };
-        latest
-            .entry(*media_id)
-            .and_modify(|current: &mut SystemTime| *current = (*current).max(created))
-            .or_insert(created);
-    }
-    latest
-}
-
-pub(super) fn file_date_created(
-    browse: &dyn crate::file_stat_read::FileStatRead,
-    path: &std::path::Path,
-) -> Option<SystemTime> {
-    let metadata = match browse.metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated unavailable for media file");
-            return None;
-        }
-    };
-    let created = metadata.created().or_else(|error| {
-            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated uses modified time because creation time is unavailable");
-        metadata.modified()
-    });
-    match created {
-        Ok(created) => Some(created),
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated unavailable for media file");
-            None
-        }
-    }
-}
-
-pub(super) fn with_date_created(
-    mut metadata: media_server::provider::MediaItemMetadata,
-    date_created: Option<SystemTime>,
-) -> media_server::provider::MediaItemMetadata {
-    metadata.date_created = date_created.and_then(crate::compact_time::format_rfc3339_utc);
-    metadata
 }
 
 #[cfg(test)]

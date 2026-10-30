@@ -31,11 +31,8 @@ pub struct ApiState {
     library_read_shutdown: Arc<LibraryReadShutdown>,
     /// Bounded async admission for `library_reads` (one permit per connection).
     pub(crate) library_read_gate: Arc<crate::library_read_work::LibraryReadGate>,
-    /// 身份读专用的 app.db 只读连接（Task 27）：token→用户 / 用户→角色 / 用户详情。
-    ///
-    /// 它**不参与** `store` 那把进程级锁，因此长写事务（扫描、完整性）期间成员请求
-    /// 仍能完成鉴权；见 `store::AppReader`。
-    pub(crate) app_reader: Arc<store::AppReader>,
+    /// Shared app writer, independent of the outer Library writer.
+    pub(crate) writers: Arc<store::Writers>,
     /// 两套登录协议共用的 offlock 密码校验与 CAS 签发服务。
     pub(crate) password_login: Arc<crate::password_login::PasswordLogin>,
     /// 有界 blocking 预算：owned 快照上的 stat/catalog 计算准入（生产默认 8）。
@@ -286,8 +283,7 @@ impl ApiState {
                 .open_library_read_pool(NonZeroUsize::new(LIBRARY_READERS).unwrap())?,
         );
         let data_dir = store.lock().data_dir().to_path_buf();
-        // Task 27：身份读走自己的 app.db 连接，不再排在 `store` 锁后面。
-        let app_reader = Arc::new(store.lock().open_app_reader()?);
+        let writers = store.lock().writers();
         let store_readers = Arc::new(crate::store_readers::StoreReaders::open(
             &store.lock(),
             crate::store_readers::STORE_READERS,
@@ -316,7 +312,7 @@ impl ApiState {
                 LIBRARY_READERS,
             )),
             library_reads,
-            app_reader,
+            writers,
             store_readers,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(
                 Arc::new(crate::password_login::Argon2Engine),

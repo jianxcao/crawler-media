@@ -32,6 +32,14 @@ pub struct UserRemovalService {
     state: Arc<ApiState>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum UserRemovalError {
+    #[error("User removal admission rejected: {0:?}")]
+    Admission(axum::response::Response),
+    #[error("{0}")]
+    Operation(String),
+}
+
 impl UserRemovalService {
     pub fn new(state: Arc<ApiState>) -> Self {
         Self { state }
@@ -44,7 +52,7 @@ impl UserRemovalService {
     /// one. Each phase is idempotent; a failure is written back into the record (phase kept,
     /// `error` set) and returned, never swallowed.
     pub fn start_removal(&self, user_id: UserId) -> Result<String, String> {
-        let record = self.accept(user_id)?;
+        let record = self.accept(user_id).map_err(|error| error.to_string())?;
         self.drive(user_id, record)
     }
 
@@ -52,35 +60,30 @@ impl UserRemovalService {
     /// phase (disable + revoke tokens) runs right away, so the User loses access before the
     /// caller answers. The returned record is what `DELETE` reports; the remaining phases
     /// run in [`UserRemovalService::continue_removal`].
-    pub fn accept(&self, user_id: UserId) -> Result<UserRemovalRecord, String> {
+    pub fn accept(&self, user_id: UserId) -> Result<UserRemovalRecord, UserRemovalError> {
         let record = self.accept_record(user_id)?;
         if record.phase != "disabling" {
             return Ok(record);
         }
-        let store = self
-            .state
-            .store
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            .ok_or("User removal Store busy")?;
-        self.state
-            .require_writable()
-            .and_then(|_| self.state.require_write_admitted())
-            .map_err(|response| format!("User removal admission changed: {}", response.status()))?;
-        let mut record = record;
-        match run_phase(&store, user_id, "disabling") {
-            Ok(Some(next)) => {
-                record.phase = next.into();
-                record.error = None;
+        crate::http::store_wait::with_foreground_store(&self.state, |store| {
+            let mut record = record;
+            match run_phase(store, user_id, "disabling") {
+                Ok(Some(next)) => {
+                    record.phase = next.into();
+                    record.error = None;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%user_id, operation_id = %record.operation_id, %error, "User removal disabling failed");
+                    record.error = Some(error);
+                }
             }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(%user_id, operation_id = %record.operation_id, %error, "User removal disabling failed");
-                record.error = Some(error);
-            }
-        }
-        record.updated_at = crate::job_loop::unix_now();
-        write_record(&store, user_id, &record)?;
-        Ok(record)
+            record.updated_at = crate::job_loop::unix_now();
+            write_record(store, user_id, &record)?;
+            Ok(record)
+        })
+        .map_err(UserRemovalError::Admission)?
+        .map_err(UserRemovalError::Operation)
     }
 
     /// Drive an accepted removal to its end (or to a recorded failure).
@@ -90,25 +93,14 @@ impl UserRemovalService {
         self.drive(user_id, record)
     }
 
-    fn accept_record(&self, user_id: UserId) -> Result<UserRemovalRecord, String> {
-        let record = {
-            let store = self
-                .state
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or("User removal Store busy")?;
-            self.state
-                .require_writable()
-                .and_then(|_| self.state.require_write_admitted())
-                .map_err(|response| {
-                    format!("User removal admission changed: {}", response.status())
-                })?;
+    fn accept_record(&self, user_id: UserId) -> Result<UserRemovalRecord, UserRemovalError> {
+        crate::http::store_wait::with_foreground_store(&self.state, |store| {
             let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
             if user_id == admin_id {
                 return Err("Cannot delete admin user".into());
             }
-            match read_record(&store, user_id)? {
-                Some(record) => record,
+            match read_record(store, user_id)? {
+                Some(record) => Ok(record),
                 None => {
                     store
                         .get_user(user_id)
@@ -123,12 +115,13 @@ impl UserRemovalService {
                         error: None,
                         updated_at: crate::job_loop::unix_now(),
                     };
-                    write_record(&store, user_id, &record)?;
-                    record
+                    write_record(store, user_id, &record)?;
+                    Ok(record)
                 }
             }
-        };
-        Ok(record)
+        })
+        .map_err(UserRemovalError::Admission)?
+        .map_err(UserRemovalError::Operation)
     }
 
     fn drive(&self, user_id: UserId, mut record: UserRemovalRecord) -> Result<String, String> {

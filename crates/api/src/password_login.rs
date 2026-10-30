@@ -1,9 +1,9 @@
 //! 两套登录协议（REST `/api/v1/auth/login` 与 Jellyfin `/Users/AuthenticateByName`）
 //! 共用的密码校验与 CAS 签发服务。
 //!
-//! Argon2 校验必须离开 Store 锁：闭包先在锁内取一次不可变快照，然后在
+//! Argon2 校验先从只读池获取不可变凭据快照，然后在
 //! `spawn_blocking` 中做 CPU 密集的 verify，最后只用一次短锁完成
-//! `finish_verified_login` 的 CAS 与 token→user 查询。并发 permit 由闭包
+//! App writer 上完成 `finish_verified_login` 的 CAS 与 token→user 查询。并发 permit 由闭包
 //! 持有，直到 CAS 结束才释放，避免校验排队期间无限堆积阻塞线程。
 
 use std::sync::Arc;
@@ -73,16 +73,16 @@ impl PasswordLogin {
         tokio::task::spawn_blocking(move || {
             // permit 必须活到 CAS 结束：闭包返回前不得让出并发槽位。
             let _permit: OwnedSemaphorePermit = permit;
+            state
+                .require_writable()
+                .and_then(|_| state.require_write_admitted())
+                .map_err(LoginError::Admission)?;
             let credential = {
-                let store = state
-                    .store
-                    .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+                let reader = state
+                    .store_readers
+                    .checkout(crate::http::store_wait::STORE_READ_WAIT)
                     .ok_or(LoginError::Busy)?;
-                state
-                    .require_writable()
-                    .and_then(|_| state.require_write_admitted())
-                    .map_err(LoginError::Admission)?;
-                store.login_credential(&username)?
+                reader.login_credential(&username)?
             };
             let Some(credential) = credential else {
                 return Ok(None);
@@ -90,27 +90,27 @@ impl PasswordLogin {
             if !engine.verify(&password, &credential.observed_password) {
                 return Ok(None);
             }
-            let store = state
-                .store
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-                .ok_or(LoginError::Busy)?;
-            state
-                .require_writable()
-                .and_then(|_| state.require_write_admitted())
-                .map_err(LoginError::Admission)?;
-            let token = store.finish_verified_login(
-                &credential.user_id.to_string(),
-                &credential.observed_password,
-            )?;
-            match token {
-                None => Ok(None),
-                Some(token) => {
-                    let user = store.user_by_token(&token)?.ok_or_else(|| {
-                        LoginError::Worker("issued token has no active user".into())
-                    })?;
-                    Ok(Some((token, user)))
-                }
-            }
+            crate::http::store_wait::with_app_admission(&state, || {
+                state.writers.with_app(|app| {
+                    let token = app.finish_verified_login(
+                        &credential.user_id.to_string(),
+                        &credential.observed_password,
+                    )?;
+                    match token {
+                        None => Ok(None),
+                        Some(token) => {
+                            let user = app.user_by_token(&token)?.ok_or_else(|| {
+                                store::StoreError::Protected(
+                                    "issued token has no active user".into(),
+                                )
+                            })?;
+                            Ok(Some((token, user)))
+                        }
+                    }
+                })
+            })
+            .map_err(LoginError::Admission)?
+            .map_err(LoginError::Store)
         })
         .await
         .map_err(|error| LoginError::Worker(error.to_string()))?

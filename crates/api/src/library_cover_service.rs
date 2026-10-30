@@ -212,11 +212,11 @@ async fn prepare(state: &ApiState, id: &str) -> Result<(CoverLease, Arc<CoverSna
         .run_to_completion(move || {
             let lease = worker
                 .library_work()
-                .acquire_bounded(&worker.store, &id)
+                .acquire_from_readers(&worker.store_readers, &id)
                 .map_err(|error| format!("cover.unavailable: {error}"))?;
-            let handle = worker.store();
-            let store = handle
-                .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+            let store = worker
+                .store_readers
+                .checkout(crate::http::store_wait::STORE_READ_WAIT)
                 .ok_or_else(|| "runtime.busy".to_string())?;
             Ok((Arc::new(lease), Arc::new(snapshot_from_store(&store, &id)?)))
         })
@@ -244,7 +244,11 @@ async fn existing_off_executor(
 
 /// 锁内只取 owned DB 事实。
 pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
-    snapshot_from_store(&state.store.lock(), id)
+    let store = state
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        .ok_or_else(|| "runtime.busy".to_string())?;
+    snapshot_from_store(&store, id)
 }
 
 fn snapshot_from_store(store: &crate::Store, id: &str) -> Result<CoverSnapshot, String> {
@@ -427,7 +431,13 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
 /// bytes behind forever; every startup retries, so the cleanup is idempotent.
 pub fn purge_removed_library_covers(state: &ApiState) {
     let (covers_dir, removals) = {
-        let store = state.store.lock();
+        let Some(store) = state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+        else {
+            tracing::warn!("Store read pool busy, skipping removed Library cover reconciliation");
+            return;
+        };
         (
             store.library_covers_dir(),
             store.succeeded_library_removals(),

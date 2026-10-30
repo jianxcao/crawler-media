@@ -144,3 +144,12 @@ fn normalize_path(path: Option<String>) -> Option<String> {
     path.map(|path| path.trim().to_string())
         .filter(|path| !path.is_empty())
 }
+
+impl crate::App<'_> {
+    pub fn transfer_settings(&self) -> Result<TransferSettings, StoreError> {
+        match self.get_setting(KEY)? {
+            Some(raw) => Ok(serde_json::from_str(&raw)?),
+            None => Ok(TransferSettings::default()),
+        }
+    }
+}

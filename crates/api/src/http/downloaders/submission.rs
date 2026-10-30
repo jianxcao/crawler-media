@@ -438,20 +438,24 @@ fn finish_manual_submission(state: &ApiState, prepared: PreparedSubmission) -> R
                     "downloader_name": Value::Null,
                     "updated_at": crate::store::now_rfc3339(),
                 });
-                let store = state.store.lock();
-                if state.require_writable().is_err() || state.require_write_admitted().is_err() {
-                    tracing::debug!("Protected manual submission skips target preference cache");
-                    return ok(
-                        json!({ "ok": true, "save_path": response_save_path, "units": units }),
-                    )
-                    .into_response();
+                let saved = crate::http::store_wait::with_foreground_store(&state, |store| {
+                    let raw = store.get_setting("download.target_prefs")?;
+                    let mut prefs = raw
+                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                        .unwrap_or_else(|| json!({}));
+                    prefs[cat] = pref;
+                    store.put_setting("download.target_prefs", &prefs.to_string())
+                });
+                match saved {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "Submitted Torrent target preferences could not be saved")
+                    }
+                    Err(response) => {
+                        tracing::warn!(status = %response.status(), "Submitted Torrent target preferences rejected by write admission");
+                        return response;
+                    }
                 }
-                let raw = store.get_setting("download.target_prefs").ok().flatten();
-                let mut prefs = raw
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                    .unwrap_or_else(|| json!({}));
-                prefs[cat] = pref;
-                let _ = store.put_setting("download.target_prefs", &prefs.to_string());
             }
             tracing::info!(torrent = %torrent.title, downloader_id = ?downloader_id, "种子已提交给下载器");
             ok(json!({ "ok": true, "save_path": response_save_path, "units": units }))

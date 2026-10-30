@@ -190,18 +190,13 @@ pub(crate) async fn delete_user(
                 return Ok((completed, None));
             }
             let service = removal::UserRemovalService::new(std::sync::Arc::new(worker.clone()));
-            let record = service.accept(id).map_err(|error| {
-                if let Err(response) = worker
-                    .require_writable()
-                    .and_then(|_| worker.require_write_admitted())
-                {
-                    return response;
-                }
-                err(
+            let record = service.accept(id).map_err(|error| match error {
+                removal::UserRemovalError::Admission(response) => response,
+                removal::UserRemovalError::Operation(message) => err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "user.removal_failed",
-                    &error,
-                )
+                    &message,
+                ),
             })?;
             Ok((record, Some(service)))
         })

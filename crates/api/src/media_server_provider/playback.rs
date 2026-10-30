@@ -20,7 +20,7 @@ pub(super) fn resolve_target(
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
     let entry = {
-        let store = provider.bounded_store()?;
+        let store = provider.bounded_reader()?;
         super::items::resolve_entry(&store, Some(user_id), id)?
     };
     let Some(entry) = entry else {
@@ -44,7 +44,7 @@ pub(super) fn resolve_target(
                 file_id: entry.file.file_id,
                 revision: entry.file.version.revision,
             };
-            let store = provider.bounded_store()?;
+            let store = provider.bounded_reader()?;
             let resolved = store
                 .resolve_playback(user_id, &item, Some(&source), None)
                 .map_err(|error| error.to_string())?;

@@ -91,7 +91,7 @@ fn validate(store: &crate::Store, state: &ApiState, target: &Target) -> Result<(
 }
 
 fn update_lock(state: &ApiState, target: &Target, source: Option<&str>) -> Result<(), Response> {
-    store_wait::with_bounded_store(state.store(), |store| {
+    store_wait::with_foreground_store(state, |store| {
         validate(store, state, target)?;
         match source {
             Some(source) => store.put_setting(
@@ -103,8 +103,7 @@ fn update_lock(state: &ApiState, target: &Target, source: Option<&str>) -> Resul
                 .map(|_| ()),
         }
         .map_err(storage_error)
-    })
-    .unwrap_or_else(|| Err(store_wait::busy_response()))
+    })?
 }
 
 fn storage_error(error: store::StoreError) -> Response {

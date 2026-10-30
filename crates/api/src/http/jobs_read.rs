@@ -236,10 +236,9 @@ fn def_visible_to_user(
         return false;
     };
     store
-        .get_subscribe(subscribe_id)
-        .ok()
-        .flatten()
-        .is_some_and(|subscribe| subscribe.user_id == user_id)
+        .subscribe_ids_for_user(user_id)
+        .unwrap_or_default()
+        .contains(&subscribe_id)
 }
 
 pub(crate) async fn list_jobs(
@@ -318,9 +317,26 @@ fn visible_defs(
         .user_role(user_id)
         .map(|role| role == "admin")
         .unwrap_or(false);
+    let owned = if admin {
+        std::collections::HashSet::new()
+    } else {
+        store.subscribe_ids_for_user(user_id).unwrap_or_default()
+    };
     defs.into_iter()
         .filter(|def| {
-            if !def_visible_to_user(def, store, user_id, admin) {
+            let visible = admin
+                || def.kind != JobKind::SubscribeSearch
+                || serde_json::from_str::<Value>(&def.payload)
+                    .ok()
+                    .and_then(|payload| {
+                        payload
+                            .get("subscribe_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .and_then(|id| domain::SubscribeId::from_str(&id).ok())
+                    .is_some_and(|id| owned.contains(&id));
+            if !visible {
                 return false;
             }
             // scope=system 仅保留系统级任务，排除条目级任务

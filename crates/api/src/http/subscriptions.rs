@@ -327,8 +327,8 @@ pub(crate) fn resolve_subscribe(
         }
     };
     let store = state
-        .store
-        .try_lock_for(super::store_wait::STORE_READ_WAIT)
+        .store_readers
+        .checkout(super::store_wait::STORE_READ_WAIT)
         .ok_or_else(super::store_wait::busy_response)?;
     resolve_subscribe_on(&store, raw, user_id)
 }
@@ -452,7 +452,20 @@ pub(crate) async fn guarded_blocking(
     state: &ApiState,
     work: impl FnOnce() -> Response + Send + 'static,
 ) -> Response {
-    match state.http_work.run_to_completion(work).await {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || {
+            if let Err(response) = worker
+                .require_writable()
+                .and_then(|_| worker.require_write_admitted())
+            {
+                return response;
+            }
+            super::store_wait::with_app_admission(&worker, work).unwrap_or_else(|response| response)
+        })
+        .await
+    {
         Ok(response) => response,
         Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
         Err(error) => {

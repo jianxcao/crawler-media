@@ -32,6 +32,200 @@ pub struct LoginCredential {
 }
 
 impl Store {
+    /// 先计算哈希，并在单一事务中原子插入用户及其密码；失败则全部回滚。
+    pub fn insert_user_with_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
+        let prepared =
+            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
+        self.insert_user_with_prepared_password(user, &prepared)
+    }
+
+    /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
+    pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
+        let prepared =
+            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
+        self.update_user_with_prepared_password(user, &prepared)
+    }
+
+    /// 在单一事务中原子插入种子管理员（id、login、password、role=admin）并登记 CLI Token。
+    /// 任何一步失败整个事务完整回滚，绝不残留无密码或无 Token 的半成状态。
+    pub fn seed_admin_with_credentials(
+        &self,
+        user_id: UserId,
+        password: &str,
+        cli_token: &str,
+    ) -> Result<(), StoreError> {
+        let hashed = crate::password::hash_password(password).map_err(|e| {
+            tracing::error!(%user_id, error = %e, "种子管理员密码哈希失败");
+            StoreError::PasswordHash(e)
+        })?;
+        self.with_app(|app| app.seed_admin_with_hash(user_id, &hashed, cli_token))
+    }
+
+    /// 设置用户密码（凭据存 users 表，与会话 token 分离；改密即旧密码失效）。
+    /// 所有输入密码均通过 Argon2id 加盐哈希后存储（ADR-0010），严禁按前缀跳过哈希。
+    pub fn set_password(&self, user_id: UserId, password: &str) -> Result<(), StoreError> {
+        let value_to_store =
+            crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
+        self.with_app(|app| {
+            app.app.execute(
+                "UPDATE users SET password = ?1 WHERE id = ?2",
+                params![value_to_store, user_id.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn transfer_user_subscribes(&self, from: UserId, to: UserId) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.subscribe)?;
+        tx.execute(
+            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
+            params![to.to_string(), from.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clean_user_library_data(
+        &self,
+        user_id: UserId,
+        admin_id: UserId,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        tx.execute(
+            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
+            params![admin_id.to_string(), user_id.to_string()],
+        )?;
+        for table in [
+            "playback_units",
+            "playback_sessions",
+            "playback_session_ids",
+            "playback_logs",
+            "playback_metrics",
+            "user_library_items",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id = ?1"),
+                params![user_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_user(&self, id: UserId) -> Result<bool, StoreError> {
+        let admin_id = self.admin_user_id()?;
+        if id == admin_id {
+            return Err(StoreError::Protected("admin user".into()));
+        }
+        if self.get_user(id)?.is_none() {
+            return Ok(false);
+        }
+
+        // SQLite 文件之间无法组成一个原子事务。先做可恢复的所有权转移：任一步失败时
+        // 用户仍存在，重试即可；最后才删除不可恢复的成员私有状态和用户行。
+        self.transfer_user_subscribes(id, admin_id)?;
+        self.clean_user_library_data(id, admin_id)?;
+        self.finish_user_removal(id)
+    }
+
+    /// 校验密码并签发新会话 token（凭据与会话分离：密码存 users.password，
+    /// user_tokens 只存会话 token）。返回新签发的会话 token。
+    /// 同一用户重复登录会轮换会话（旧会话 token 失效，表有界）。
+    pub fn verify_user_password(
+        &self,
+        login: &str,
+        password: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if password.is_empty() {
+            return Ok(None);
+        }
+        let Some(credential) = self.login_credential(login)? else {
+            return Ok(None);
+        };
+        if !crate::password::verify_password(password, &credential.observed_password) {
+            return Ok(None);
+        }
+
+        self.finish_verified_login(
+            &credential.user_id.to_string(),
+            &credential.observed_password,
+        )
+    }
+}
+
+fn apply_cli_token_tx(
+    tx: &rusqlite::Transaction<'_>,
+    admin_id: UserId,
+    token: &str,
+) -> Result<(), StoreError> {
+    let existing_owner: Option<String> = tx
+        .query_row(
+            "SELECT user_id FROM user_tokens WHERE token = ?1",
+            params![token],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(owner) = existing_owner
+        && owner != admin_id.to_string()
+    {
+        tracing::error!(%admin_id, "待登记的 CLI Token 与现有其他用户会话碰撞，拒绝提升权限");
+        return Err(StoreError::CredentialConflict(
+            "待配置的系统 CLI Token 与现有其他用户的会话凭据碰撞".into(),
+        ));
+    }
+    let old_token: Option<String> = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![SETTING_CLI_TOKEN],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(old) = old_token {
+        if old != token {
+            tx.execute(
+                "DELETE FROM user_tokens WHERE user_id = ?1 AND token = ?2",
+                params![admin_id.to_string(), old],
+            )?;
+        }
+    } else {
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![admin_id.to_string()],
+        )?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO user_tokens (token, user_id, created_at) VALUES (?1, ?2, ?3)",
+        params![token, admin_id.to_string(), now_unix()],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![SETTING_CLI_TOKEN, token],
+    )?;
+    Ok(())
+}
+
+impl crate::writers::App<'_> {
+    fn seed_admin_with_hash(
+        &self,
+        user_id: UserId,
+        hashed: &str,
+        cli_token: &str,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.app)?;
+        tx.execute(
+            "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')
+             ON CONFLICT(id) DO UPDATE SET password = excluded.password, enabled = 1, role = 'admin'",
+            params![user_id.to_string(), hashed],
+        )?;
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+        )?;
+        apply_cli_token_tx(&tx, user_id, cli_token)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn insert_user(&self, user: &User) -> Result<(), StoreError> {
         self.app.execute(
             "INSERT INTO users (id, login, enabled, role) VALUES (?1, ?2, ?3, ?4)",
@@ -45,19 +239,12 @@ impl Store {
         Ok(())
     }
 
-    /// 先计算哈希，并在单一事务中原子插入用户及其密码；失败则全部回滚。
-    pub fn insert_user_with_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
-        let prepared =
-            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
-        self.insert_user_with_prepared_password(user, &prepared)
-    }
-
     pub fn insert_user_with_prepared_password(
         &self,
         user: &User,
         prepared: &crate::password::PreparedPassword,
     ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -72,19 +259,12 @@ impl Store {
         Ok(())
     }
 
-    /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
-    pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
-        let prepared =
-            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
-        self.update_user_with_prepared_password(user, &prepared)
-    }
-
     pub fn update_user_with_prepared_password(
         &self,
         user: &User,
         prepared: &crate::password::PreparedPassword,
     ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         let cli_token: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
@@ -128,13 +308,11 @@ impl Store {
 
     /// "admin" | "member" — defaults to member for rows without a role.
     pub fn user_role(&self, id: UserId) -> Result<String, StoreError> {
-        self.role_lookups
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        super::app_reader::user_role_on(&self.app, id)
+        super::app_auth::user_role_on(self.app, id)
     }
 
     pub fn get_user(&self, id: UserId) -> Result<Option<User>, StoreError> {
-        super::app_reader::get_user_on(&self.app, id)
+        super::app_auth::get_user_on(self.app, id)
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, StoreError> {
@@ -169,35 +347,8 @@ impl Store {
         admin_id: UserId,
         token: &str,
     ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         apply_cli_token_tx(&tx, admin_id, token)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// 在单一事务中原子插入种子管理员（id、login、password、role=admin）并登记 CLI Token。
-    /// 任何一步失败整个事务完整回滚，绝不残留无密码或无 Token 的半成状态。
-    pub fn seed_admin_with_credentials(
-        &self,
-        user_id: UserId,
-        password: &str,
-        cli_token: &str,
-    ) -> Result<(), StoreError> {
-        let hashed = crate::password::hash_password(password).map_err(|e| {
-            tracing::error!(%user_id, error = %e, "种子管理员密码哈希失败");
-            StoreError::PasswordHash(e)
-        })?;
-        let tx = crate::write_tx(&self.app)?;
-        tx.execute(
-            "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')
-             ON CONFLICT(id) DO UPDATE SET password = excluded.password, enabled = 1, role = 'admin'",
-            params![user_id.to_string(), hashed],
-        )?;
-        tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![user_id.to_string()],
-        )?;
-        apply_cli_token_tx(&tx, user_id, cli_token)?;
         tx.commit()?;
         Ok(())
     }
@@ -270,7 +421,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         let mut deleted = 0;
         for token in tokens {
             if cli_token.as_deref() == Some(token) {
@@ -282,20 +433,8 @@ impl Store {
         Ok(deleted)
     }
 
-    /// 设置用户密码（凭据存 users 表，与会话 token 分离；改密即旧密码失效）。
-    /// 所有输入密码均通过 Argon2id 加盐哈希后存储（ADR-0010），严禁按前缀跳过哈希。
-    pub fn set_password(&self, user_id: UserId, password: &str) -> Result<(), StoreError> {
-        let value_to_store =
-            crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
-        self.app.execute(
-            "UPDATE users SET password = ?1 WHERE id = ?2",
-            params![value_to_store, user_id.to_string()],
-        )?;
-        Ok(())
-    }
-
     pub fn save_user(&self, user: &User) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         tx.execute(
             "UPDATE users SET login = ?1, enabled = ?2, role = ?3 WHERE id = ?4",
             params![
@@ -336,45 +475,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn transfer_user_subscribes(&self, from: UserId, to: UserId) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.subscribe)?;
-        tx.execute(
-            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
-            params![to.to_string(), from.to_string()],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn clean_user_library_data(
-        &self,
-        user_id: UserId,
-        admin_id: UserId,
-    ) -> Result<(), StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        tx.execute(
-            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
-            params![admin_id.to_string(), user_id.to_string()],
-        )?;
-        for table in [
-            "playback_units",
-            "playback_sessions",
-            "playback_session_ids",
-            "playback_logs",
-            "playback_metrics",
-            "user_library_items",
-        ] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE user_id = ?1"),
-                params![user_id.to_string()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         tx.execute(
             "DELETE FROM user_tokens WHERE user_id = ?1",
             params![user_id.to_string()],
@@ -396,26 +498,10 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn delete_user(&self, id: UserId) -> Result<bool, StoreError> {
-        let admin_id = self.admin_user_id()?;
-        if id == admin_id {
-            return Err(StoreError::Protected("admin user".into()));
-        }
-        if self.get_user(id)?.is_none() {
-            return Ok(false);
-        }
-
-        // SQLite 文件之间无法组成一个原子事务。先做可恢复的所有权转移：任一步失败时
-        // 用户仍存在，重试即可；最后才删除不可恢复的成员私有状态和用户行。
-        self.transfer_user_subscribes(id, admin_id)?;
-        self.clean_user_library_data(id, admin_id)?;
-        self.finish_user_removal(id)
-    }
-
     /// 只解析未过期的会话 token（签发后 Session TTL 秒内有效；管理员配置的系统 CLI token 持续有效）。
     pub fn user_by_token(&self, token: &str) -> Result<Option<User>, StoreError> {
-        // SQL 只有一份：身份读连接（`AppReader`）与写连接读的是同一段鉴权口径。
-        super::app_reader::user_by_token_on(&self.app, token, now_unix())
+        // Store 与读池连接共用同一段鉴权 SQL。
+        super::app_auth::user_by_token_on(self.app, token, now_unix())
     }
 
     pub fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, StoreError> {
@@ -432,38 +518,6 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    /// 校验密码并签发新会话 token（凭据与会话分离：密码存 users.password，
-    /// user_tokens 只存会话 token）。返回新签发的会话 token。
-    /// 同一用户重复登录会轮换会话（旧会话 token 失效，表有界）。
-    pub fn verify_user_password(
-        &self,
-        login: &str,
-        password: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if password.is_empty() {
-            return Ok(None);
-        }
-        let user_info = self
-            .app
-            .query_row(
-                "SELECT id, password FROM users WHERE login = ?1 AND enabled = 1",
-                params![login],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()?;
-        let Some((uid_str, stored_pw_opt)) = user_info else {
-            return Ok(None);
-        };
-        let Some(stored_pw) = stored_pw_opt else {
-            return Ok(None);
-        };
-        if !crate::password::verify_password(password, &stored_pw) {
-            return Ok(None);
-        }
-
-        self.finish_verified_login(&uid_str, &stored_pw)
     }
 
     /// 读取密码校验所需的不可变登录快照（用户 id + 当时观察到的 password 列）。
@@ -506,7 +560,7 @@ impl Store {
             tracing::warn!(user_id = %user_id, "非 Argon2 观测凭据拒绝签发会话 token");
             return Ok(None);
         }
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         let active = tx
             .query_row(
                 "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
@@ -531,53 +585,4 @@ impl Store {
     }
 }
 
-fn apply_cli_token_tx(
-    tx: &rusqlite::Transaction<'_>,
-    admin_id: UserId,
-    token: &str,
-) -> Result<(), StoreError> {
-    let existing_owner: Option<String> = tx
-        .query_row(
-            "SELECT user_id FROM user_tokens WHERE token = ?1",
-            params![token],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(owner) = existing_owner
-        && owner != admin_id.to_string()
-    {
-        tracing::error!(%admin_id, "待登记的 CLI Token 与现有其他用户会话碰撞，拒绝提升权限");
-        return Err(StoreError::CredentialConflict(
-            "待配置的系统 CLI Token 与现有其他用户的会话凭据碰撞".into(),
-        ));
-    }
-    let old_token: Option<String> = tx
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            params![SETTING_CLI_TOKEN],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(old) = old_token {
-        if old != token {
-            tx.execute(
-                "DELETE FROM user_tokens WHERE user_id = ?1 AND token = ?2",
-                params![admin_id.to_string(), old],
-            )?;
-        }
-    } else {
-        tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![admin_id.to_string()],
-        )?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO user_tokens (token, user_id, created_at) VALUES (?1, ?2, ?3)",
-        params![token, admin_id.to_string(), now_unix()],
-    )?;
-    tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params![SETTING_CLI_TOKEN, token],
-    )?;
-    Ok(())
-}
+mod app_access;

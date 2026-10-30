@@ -174,7 +174,7 @@ fn cookie_token(request: &Request) -> Option<String> {
 /// 身份 / 角色查询的绝对预算。
 ///
 /// 生产上这是一次 app.db 单行读（几十微秒），走的是**专用读连接**
-/// （[`store::AppReader`]，Task 27）：长写事务期间读者读的是 WAL 的最后提交快照，
+/// （共享 StoreReaders 池）：长写事务期间读者读的是 WAL 的最后提交快照，
 /// 不必排在进程级 `Store` 锁后面。因此 1 s 现在只兜底两种情况——读连接拿不到
 /// 一致快照（WAL checkpoint / `busy_timeout` 用尽），或 blocking worker 卡住；
 /// 两者都给 503 `runtime.busy` + `Retry-After`，让客户端重试，而不是重建会话。
@@ -217,13 +217,13 @@ fn auth_stage_response(error: &store::LibraryReadError) -> Response {
     }
 }
 
-/// 身份读：app.db 的专用读连接，**不拿 `Store` 锁**（Task 27）。
+/// 身份读通过共享只读 Store 池，不拿 writer 锁。
 ///
 /// 唯一的读路径：认证、管理员角色、`/auth/me` 都从这里走，因为三者读的都是 app.db
 /// 的单行。预算内的失败一律交给 [`auth_stage_response`] 分类（繁忙→503，真错→500）。
 async fn auth_app_read<T, F>(state: &ApiState, work: F) -> Result<T, Response>
 where
-    F: FnOnce(&store::AppReader) -> Result<T, store::StoreError> + Send + 'static,
+    F: FnOnce(&crate::Store) -> Result<T, store::StoreError> + Send + 'static,
     T: Send + 'static,
 {
     let deadline = std::time::Instant::now() + AUTH_READ_DEADLINE;
@@ -232,39 +232,18 @@ where
         .map_err(|error| auth_stage_response(&error))
 }
 
-/// 会写 app.db 的身份操作（注销会话）仍然走 `Store` 写连接。
-///
-/// 写必须与其它写者串行——那正是 `Store` 锁的职责。等不到锁时同样给繁忙（一次性
-/// 动作，重试成本低），不把写挤进读连接。
+/// Session revocation uses the common bounded writer and actual App admission.
 async fn auth_store_write<T, F>(state: &ApiState, work: F) -> Result<T, Response>
 where
     F: FnOnce(&crate::Store) -> Result<T, store::StoreError> + Send + 'static,
     T: Send + 'static,
 {
-    let store = state.store();
-    let task = tokio::task::spawn_blocking(move || match store.try_lock_for(AUTH_READ_DEADLINE) {
-        Some(guard) => work(&guard).map_err(Some),
-        None => Err(None),
-    });
-    match tokio::time::timeout(AUTH_READ_DEADLINE, task).await {
-        Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(Some(error)))) => {
+    super::store_wait::store_write(state, work)
+        .await?
+        .map_err(|error| {
             tracing::error!(%error, "会话撤销失败");
-            Err(auth_error_response())
-        }
-        Ok(Ok(Err(None))) => {
-            tracing::warn!("会话撤销等不到 Store 锁，请求按繁忙重试");
-            Err(auth_busy_response())
-        }
-        Ok(Err(error)) => {
-            tracing::error!(%error, "会话撤销 worker 失败");
-            Err(auth_error_response())
-        }
-        Err(_) => {
-            tracing::warn!("会话撤销超过预算，请求按繁忙重试");
-            Err(auth_busy_response())
-        }
-    }
+            auth_error_response()
+        })
 }
 
 /// Resolve the acting user from the bearer token (or session cookie).

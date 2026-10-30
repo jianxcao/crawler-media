@@ -52,8 +52,8 @@ fn activities_blocking(
         queue.jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit)
     };
     let Some(store) = state
-        .store
-        .try_lock_for(crate::http::store_wait::STORE_READ_WAIT)
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
     else {
         return crate::http::store_wait::busy_response();
     };

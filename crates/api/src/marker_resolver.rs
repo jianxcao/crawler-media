@@ -113,7 +113,7 @@ fn clear_for_refresh(
 ) -> Result<(), ChapterRefreshError> {
     let lease = state
         .library_work
-        .acquire_bounded(&state.store, &row.file.library_id.to_string())
+        .acquire_from_readers(&state.store_readers, &row.file.library_id.to_string())
         .map_err(|error| {
             tracing::warn!(%error, file_id=%row.file.file_id, "chapter refresh lease was rejected");
             ChapterRefreshError::Unavailable(axum::http::StatusCode::CONFLICT)
@@ -202,7 +202,7 @@ fn resolve_item_chapters_blocking(
 ) -> Vec<ChapterMarker> {
     let _lease = match state
         .library_work()
-        .acquire_bounded(&state.store, &row.file.library_id.to_string())
+        .acquire_from_readers(&state.store_readers, &row.file.library_id.to_string())
     {
         Ok(lease) => lease,
         Err(_) => return Vec::new(),
@@ -274,8 +274,10 @@ fn snapshot(
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Option<ResolveSnapshot> {
-    let handle = state.store();
-    let Some(store) = handle.try_lock_for(crate::http::store_wait::STORE_READ_WAIT) else {
+    let Some(store) = state
+        .store_readers
+        .checkout(crate::http::store_wait::STORE_READ_WAIT)
+    else {
         tracing::warn!(file_id=%row.file.file_id, "chapter snapshot Store busy");
         return None;
     };

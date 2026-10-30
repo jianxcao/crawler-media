@@ -10,6 +10,7 @@ license.workspace = true
 test-support = []
 
 [dependencies]
+parking_lot.workspace = true
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true

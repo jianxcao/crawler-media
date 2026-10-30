@@ -396,10 +396,13 @@ impl Store {
         tx.commit()?;
         // L4: per-subscription settings (`subscribe.<name>:<id>`, e.g. the
         // completion notice marker) live in the app database; drop them too.
-        self.app.execute(
-            "DELETE FROM settings WHERE key LIKE 'subscribe.%:' || ?1",
-            params![id.to_string()],
-        )?;
+        self.with_app(|app| {
+            app.app.execute(
+                "DELETE FROM settings WHERE key LIKE 'subscribe.%:' || ?1",
+                params![id.to_string()],
+            )?;
+            Ok(())
+        })?;
         Ok(n > 0)
     }
 
@@ -719,5 +722,24 @@ impl Store {
             facts.upsert(season, episode, fact);
         }
         Ok(facts)
+    }
+}
+
+impl Store {
+    /// Subscription ownership roster for in-memory job filtering.
+    pub fn subscribe_ids_for_user(
+        &self,
+        user_id: domain::UserId,
+    ) -> Result<std::collections::HashSet<domain::SubscribeId>, StoreError> {
+        let mut statement = self
+            .subscribe
+            .prepare("SELECT id FROM subscribes WHERE user_id=?1")?;
+        let values = statement
+            .query_map([user_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        values
+            .into_iter()
+            .map(|value| value.parse().map_err(Into::into))
+            .collect()
     }
 }

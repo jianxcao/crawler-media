@@ -12,6 +12,12 @@ impl ApiServerProvider {
                 "store lock busy".to_owned()
             })
     }
+    pub(super) fn bounded_reader(&self) -> Result<crate::store_readers::StoreReader, String> {
+        self.state
+            .store_readers
+            .checkout(crate::http::store_wait::STORE_READ_WAIT)
+            .ok_or_else(|| "Store read pool busy".to_string())
+    }
     pub(super) async fn run_sync<T: Send + 'static>(
         &self,
         work: impl FnOnce(ApiServerProvider) -> T + Send + 'static,
@@ -27,7 +33,7 @@ impl ApiServerProvider {
             })
     }
     pub(super) fn get_user_sync(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
-        let store = self.bounded_store()?;
+        let store = self.bounded_reader()?;
         let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
             return Ok(None);
         };
@@ -43,17 +49,23 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let store = self.bounded_store()?;
+        let store = self.bounded_reader()?;
         if let Ok(Some(lib)) = store.get_library(id)
             && crate::http::library::library_visible(&store, &lib, user_id)
         {
-            if let Some(cover) = crate::http::library::library_cover_path(&store, &lib) {
-                drop(store);
-                return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
-            }
-            let kind = lib.kind;
             drop(store);
-            return default_library_cover(kind).map(Some);
+            let cover = lib
+                .cover_path
+                .as_deref()
+                .filter(|path| !path.is_empty() && *path != "none")
+                .map(PathBuf::from)
+                .filter(|path| path.is_file());
+            return match cover {
+                Some(cover) => std::fs::read(cover)
+                    .map(Some)
+                    .map_err(|error| error.to_string()),
+                None => default_library_cover(lib.kind).map(Some),
+            };
         }
         Ok(None)
     }
@@ -63,7 +75,7 @@ impl ApiServerProvider {
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
         let entry = {
-            let store = self.bounded_store()?;
+            let store = self.bounded_reader()?;
             items::resolve_entry(&store, user_id, id)?
         };
         let Some(entry) = entry else {
@@ -86,7 +98,7 @@ impl ApiServerProvider {
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
         let entry = {
-            let store = self.bounded_store()?;
+            let store = self.bounded_reader()?;
             items::resolve_entry(&store, user_id, id)?
         };
         let Some(entry) = entry else {
@@ -115,7 +127,7 @@ impl ApiServerProvider {
             return Ok(None);
         }
         let entry = {
-            let store = self.bounded_store()?;
+            let store = self.bounded_reader()?;
             items::resolve_entry(&store, Some(user_id), id)?
         };
         let Some(entry) = entry else {
@@ -128,7 +140,7 @@ impl ApiServerProvider {
             let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
                 return Ok(None);
             };
-            let store = self.bounded_store()?;
+            let store = self.bounded_reader()?;
             let Some(file) = store
                 .visible_file(user_id, physical.file_id)
                 .map_err(|e| e.to_string())?
@@ -171,7 +183,7 @@ impl ApiServerProvider {
         user_id: UserId,
         device_id: &str,
     ) -> Result<bool, String> {
-        let store = self.bounded_store()?;
+        let store = self.bounded_reader()?;
         store
             .is_device_revoked(user_id, device_id)
             .map_err(|e| e.to_string())

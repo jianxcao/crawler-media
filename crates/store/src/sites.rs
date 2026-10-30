@@ -1,10 +1,34 @@
 use domain::{Filter, FilterId, Site, SiteId};
 use rusqlite::{OptionalExtension, params};
 
+use super::StoreError;
 use super::maps::{map_site, parse_atoms, serialize_atoms};
-use super::{Store, StoreError};
 
-impl Store {
+/// Raw `filters` columns; atom decoding happens outside the row closure so a
+/// stale shape can surface as `StoreError::Invalid` instead of a SQL error.
+type RawFilterRow = (String, String, String, i64);
+
+fn raw_filter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawFilterRow> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, i64>(3).unwrap_or(0),
+    ))
+}
+
+fn build_filter(
+    (raw_id, name, atoms_json, keep_old_versions): RawFilterRow,
+) -> Result<Filter, StoreError> {
+    Ok(Filter {
+        id: super::maps::parse_id(raw_id, 0)?,
+        name,
+        atoms: parse_atoms(&atoms_json)?,
+        keep_old_versions: keep_old_versions != 0,
+    })
+}
+
+impl crate::writers::App<'_> {
     pub fn insert_site(&self, site: &Site) -> Result<(), StoreError> {
         self.app.execute(
             "INSERT INTO sites (
@@ -81,7 +105,7 @@ impl Store {
     /// Publish a maintenance result only against the exact Site it observed.
     /// The IMMEDIATE transaction also excludes writers using another connection.
     pub fn save_site_if_current(&self, site: &Site, expected: &Site) -> Result<bool, StoreError> {
-        let tx = crate::write_tx(&self.app)?;
+        let tx = crate::write_tx(self.app)?;
         if site.id != expected.id || self.get_site(expected.id)?.as_ref() != Some(expected) {
             return Ok(false);
         }
@@ -172,26 +196,4 @@ impl Store {
     }
 }
 
-/// Raw `filters` columns; atom decoding happens outside the row closure so a
-/// stale shape can surface as `StoreError::Invalid` instead of a SQL error.
-type RawFilterRow = (String, String, String, i64);
-
-fn raw_filter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawFilterRow> {
-    Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, String>(1)?,
-        row.get::<_, String>(2)?,
-        row.get::<_, i64>(3).unwrap_or(0),
-    ))
-}
-
-fn build_filter(
-    (raw_id, name, atoms_json, keep_old_versions): RawFilterRow,
-) -> Result<Filter, StoreError> {
-    Ok(Filter {
-        id: super::maps::parse_id(raw_id, 0)?,
-        name,
-        atoms: parse_atoms(&atoms_json)?,
-        keep_old_versions: keep_old_versions != 0,
-    })
-}
+mod app_access;
