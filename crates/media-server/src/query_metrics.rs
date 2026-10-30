@@ -32,6 +32,7 @@ pub struct QueryMetricsSnapshot {
     pub sort_operations: Option<u64>,
     pub fullscan_steps: Option<u64>,
     pub statements: Option<u64>,
+    pub reader_checkouts: Option<u64>,
     pub sqlite_profile_ms: Option<f64>,
     pub pool_rejections: u64,
     pub timeouts: u64,

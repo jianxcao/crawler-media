@@ -1,10 +1,12 @@
 //! Library admin views: raw ledger rows and unidentified files.
+use axum::body::HttpBody;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Instant;
 
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
@@ -19,6 +21,8 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
         };
     let files = state.file_stats.clone();
     match super::fs::read_work(&state, move || {
+        let rows = items.len();
+        let observe_started = Instant::now();
         // Disk observation (hardlink count, unknown sizes) runs after the store lock is released.
         for (item, (path, is_strm, saved_mode, size_bytes)) in items.iter_mut().zip(pending) {
             let meta = (!is_strm || size_bytes.is_none())
@@ -35,7 +39,19 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             ));
             item["file_size"] = json!(file_size);
         }
-        ok_list(items).into_response()
+        let observe_ms = observe_started.elapsed().as_secs_f64() * 1000.;
+        let serialize_started = Instant::now();
+        let response = ok_list(items).into_response();
+        let serialize_ms = serialize_started.elapsed().as_secs_f64() * 1000.;
+        let body_bytes = response.body().size_hint().exact();
+        tracing::debug!(
+            rows,
+            observe_ms,
+            serialize_ms,
+            body_bytes,
+            "ledger response work completed"
+        );
+        response
     })
     .await
     {
@@ -49,7 +65,8 @@ type LedgerFileObservation = (std::path::PathBuf, bool, Option<String>, Option<u
 fn capture_ledger(
     store: &crate::Store,
 ) -> Result<(Vec<Value>, Vec<LedgerFileObservation>, String), Response> {
-    let rows_with_mode = match store.list_file_coverage() {
+    let sql_started = Instant::now();
+    let rows_with_mode = match store.ledger_rows() {
         Ok(rows) => rows,
         Err(error) => {
             return Err(err(
@@ -59,6 +76,9 @@ fn capture_ledger(
             ));
         }
     };
+    let sql_ms = sql_started.elapsed().as_secs_f64() * 1000.;
+    let rows = rows_with_mode.len();
+    tracing::debug!(rows, sql_ms, "ledger fact capture completed");
     let global_transfer_mode = match store.transfer_mode() {
         Ok(mode) => mode,
         Err(error) => {
@@ -69,16 +89,15 @@ fn capture_ledger(
             ));
         }
     };
-    let mut items: Vec<Value> = Vec::new();
+    let assembly_started = Instant::now();
+    let mut items: Vec<Value> = Vec::with_capacity(rows);
     let mut pending = Vec::with_capacity(rows_with_mode.len());
-    for coverage in rows_with_mode {
+    for row in rows_with_mode {
+        let coverage = row.coverage;
         let file = coverage.file;
-        let media = store.get_media(file.media_id).ok().flatten();
-        let library_id = media.as_ref().and_then(|media| {
-            crate::http::library::library_for_file(store, &file, media).map(|library| library.id)
-        });
-        let title = media.as_ref().map(|m| m.title.clone()).unwrap_or_default();
-        let kind = media.as_ref().map(|m| m.kind.as_str()).unwrap_or("movie");
+        let library_id = file.library_id.to_string();
+        let title = row.media_title;
+        let kind = row.media_kind.as_str();
         let is_strm = file
             .path
             .extension()
@@ -112,6 +131,8 @@ fn capture_ledger(
             "filter_score": file.filter_score,
         }));
     }
+    let assembly_ms = assembly_started.elapsed().as_secs_f64() * 1000.;
+    tracing::debug!(rows, assembly_ms, "ledger JSON values assembled");
     Ok((items, pending, global_transfer_mode))
 }
 

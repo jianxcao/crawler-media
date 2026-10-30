@@ -210,6 +210,8 @@ fn observe_store_work<T>(
     let (value, stats) = store.with_stats(store::stats::StatsScope::Both, || work(store));
     metrics.update(|snapshot| {
         snapshot.statements = Some(snapshot.statements.unwrap_or(0) + stats.statements);
+        snapshot.reader_checkouts =
+            Some(snapshot.reader_checkouts.unwrap_or(0) + stats.reader_checkouts);
         snapshot.vm_steps = Some(snapshot.vm_steps.unwrap_or(0) + stats.vm_steps);
         snapshot.fullscan_steps = Some(snapshot.fullscan_steps.unwrap_or(0) + stats.fullscan_steps);
         snapshot.sort_operations =

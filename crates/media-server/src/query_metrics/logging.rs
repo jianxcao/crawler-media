@@ -19,7 +19,7 @@ impl QueryMetrics {
                     validation_lock_held_ms=?measured("validate_held", s.validation_lock_held_ms),
                     elapsed_ms=s.elapsed_ms, retry_count=s.retry_count, returned=?s.returned, total=?s.total,
                     vm_steps=?s.vm_steps, sort_operations=?s.sort_operations,
-                    fullscan_steps=?s.fullscan_steps, statements=?s.statements,
+                    fullscan_steps=?s.fullscan_steps, statements=?s.statements, reader_checkouts=?s.reader_checkouts,
                     sqlite_profile_ms=?s.sqlite_profile_ms,
                     timeout_stage=?s.timeout_stage, remaining_budget_ms=?s.remaining_budget_ms,
                     worker_stop_delay_ms=?s.worker_stop_delay_ms,

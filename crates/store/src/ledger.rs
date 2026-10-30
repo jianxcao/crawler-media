@@ -10,6 +10,10 @@ use rusqlite::{OptionalExtension, params};
 use super::maps::{LIBRARY_FILE_COLUMNS, group_file_coverage, map_file_unit};
 use super::{Store, StoreError};
 
+#[path = "ledger/admin_read.rs"]
+mod admin_read;
+pub use admin_read::LedgerRow;
+
 #[path = "ledger/coverage_page.rs"]
 mod coverage_page;
 

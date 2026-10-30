@@ -38,7 +38,7 @@ mod fingerprint_cache;
 mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
-pub use ledger::FileReadScope;
+pub use ledger::{FileReadScope, LedgerRow};
 pub use library_query::{
     ContinueEntry, ContinuePage, ContinueQuery, FavoriteOrder, HomeEntry, HomeQuery, HomeWindow,
     HydratedFile, PageSnapshot, PageValidation, PlaybackViewPage, PlaybackViewQuery,
