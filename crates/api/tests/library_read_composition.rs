@@ -1,4 +1,5 @@
-//! Complete protocol responses retain one authorization attempt through all segments.
+//! Complete protocol responses retain one authorization attempt through publication.
+//! Latest selects both played tiers together; races happen after that selection.
 use api::{ApiState, Store, router};
 use axum::{
     body::{Body, to_bytes},
@@ -183,7 +184,7 @@ fn ids(items: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn latest_acl_change_during_second_segment_recomputes_complete_response() {
+async fn latest_acl_change_after_selection_recomputes_complete_response() {
     for prefix in ["", "/emby"] {
         let mut fixture = Fixture::new(true);
         let db = fixture.library_db();
@@ -193,7 +194,7 @@ async fn latest_acl_change_during_second_segment_recomputes_complete_response() 
         fixture.state = fixture
             .state
             .with_protocol_selection_barrier(Arc::new(move |_| {
-                if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+                if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                     hide(&rusqlite::Connection::open(&db).unwrap(), &a);
                 }
             }));
@@ -207,20 +208,20 @@ async fn latest_acl_change_during_second_segment_recomputes_complete_response() 
         assert_eq!(ids(&body), [fixture.b_item]);
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            4,
-            "both segments must be recomputed"
+            2,
+            "the complete selection must be recomputed"
         );
     }
 }
 
 #[tokio::test]
-async fn latest_role_change_during_second_segment_discards_earlier_item() {
+async fn latest_role_change_after_selection_discards_unauthorized_item() {
     let mut fixture = Fixture::new(true);
     let db = fixture.app_db();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     fixture.state = fixture.state.with_protocol_selection_barrier(Arc::new(move |_| {
-        if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+        if observed.fetch_add(1, Ordering::SeqCst) == 0 {
             rusqlite::Connection::open(&db).unwrap().execute(
                 "UPDATE users SET role='member' WHERE id=(SELECT user_id FROM user_tokens WHERE token=?1)", [TOKEN]).unwrap();
         }
@@ -228,11 +229,11 @@ async fn latest_role_change_during_second_segment_discards_earlier_item() {
     let (status, body) = get(fixture.state, "/Users/me/Items/Latest?Limit=2", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(ids(&body), [fixture.b_item]);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn latest_second_segment_token_revocation_rejects_entire_response() {
+async fn latest_token_revocation_after_selection_rejects_entire_response() {
     let mut fixture = Fixture::new(true);
     let db = fixture.app_db();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -240,7 +241,7 @@ async fn latest_second_segment_token_revocation_rejects_entire_response() {
     fixture.state = fixture
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
-            if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                 rusqlite::Connection::open(&db)
                     .unwrap()
                     .execute("DELETE FROM user_tokens WHERE token=?1", [TOKEN])
@@ -249,7 +250,7 @@ async fn latest_second_segment_token_revocation_rejects_entire_response() {
         }));
     let (status, _) = get(fixture.state, "/emby/Users/me/Items/Latest?Limit=2", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -269,10 +270,10 @@ async fn latest_two_changes_reject_without_third_complete_attempt() {
                         conn.is_autocommit(),
                         "Library writer must not retain a transaction"
                     );
-                    if call == 1 {
+                    if call == 0 {
                         hide(conn, &a);
                     }
-                    if call == 3 {
+                    if call == 1 {
                         let changed = conn.execute(
                             "UPDATE libraries SET display_locale='en-US' WHERE library_id=?1",
                             [&b],
@@ -293,7 +294,7 @@ async fn latest_two_changes_reject_without_third_complete_attempt() {
         "selection barrier calls: {}",
         calls.load(Ordering::SeqCst)
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -309,7 +310,7 @@ async fn latest_complete_retry_uses_original_deadline_remainder() {
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
             let call = observed.fetch_add(1, Ordering::SeqCst);
-            if call == 1 {
+            if call == 0 {
                 hide(&rusqlite::Connection::open(&db).unwrap(), &a);
                 std::thread::sleep(
                     deadline
@@ -317,7 +318,7 @@ async fn latest_complete_retry_uses_original_deadline_remainder() {
                         .saturating_sub(Duration::from_secs(2)),
                 );
             }
-            if call == 3 {
+            if call == 1 {
                 std::thread::sleep(
                     deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
                 );
@@ -331,7 +332,7 @@ async fn latest_complete_retry_uses_original_deadline_remainder() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -492,7 +493,7 @@ async fn explicit_library_identity_survives_context_retry_after_role_loss() {
 }
 
 #[tokio::test]
-async fn latest_member_acl_change_during_second_segment_discards_earlier_item() {
+async fn latest_member_acl_change_after_selection_discards_unauthorized_item() {
     let mut fixture = Fixture::new(true);
     let app = rusqlite::Connection::open(fixture.app_db()).unwrap();
     app.execute(
@@ -520,7 +521,7 @@ async fn latest_member_acl_change_during_second_segment_discards_earlier_item() 
     fixture.state = fixture
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
-            if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                 rusqlite::Connection::open(&db)
                     .unwrap()
                     .execute(
@@ -533,7 +534,7 @@ async fn latest_member_acl_change_during_second_segment_discards_earlier_item() 
     let (status, body) = get(fixture.state, "/Users/me/Items/Latest?Limit=2", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(ids(&body), [fixture.b_item]);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -547,7 +548,7 @@ async fn latest_metrics_publish_whole_final_response_and_one_complete_retry() {
     fixture.state = fixture
         .state
         .with_protocol_selection_barrier(Arc::new(move |_| {
-            if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                 hide(&rusqlite::Connection::open(&db).unwrap(), &a);
             }
         }));
@@ -571,14 +572,14 @@ async fn latest_metrics_publish_whole_final_response_and_one_complete_retry() {
         Some(1),
         "discarded segment rows cannot be published in metrics"
     );
-    assert_eq!(s.total, Some(1), "Latest totals cover both final segments");
+    assert_eq!(s.total, None, "Latest never computes an unused exact total");
     assert_eq!(s.retry_count, 1);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(s.vm_steps.unwrap() > 0 && s.statements.unwrap() > 0);
 }
 
 #[tokio::test]
-async fn latest_metrics_leave_unselected_segment_total_absent_without_extra_query() {
+async fn latest_metrics_leave_exact_total_absent_for_all_selection_modes() {
     use media_server::query_metrics::QueryMetrics;
     let fixture = Fixture::new(true);
     let selected = Arc::new(AtomicUsize::new(0));
@@ -588,11 +589,7 @@ async fn latest_metrics_leave_unselected_segment_total_absent_without_extra_quer
         .with_protocol_selection_barrier(Arc::new(move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
         }));
-    for (query, total, segments) in [
-        ("Limit=1", None, 1),
-        ("Limit=1&IsPlayed=false", Some(1), 1),
-        ("Limit=2", Some(2), 2),
-    ] {
+    for query in ["Limit=1", "Limit=1&IsPlayed=false", "Limit=2"] {
         selected.store(0, Ordering::SeqCst);
         let timing = QueryTiming::start();
         let metrics = QueryMetrics::new(timing, true);
@@ -609,12 +606,12 @@ async fn latest_metrics_leave_unselected_segment_total_absent_without_extra_quer
                 .unwrap();
         let s = metrics.snapshot();
         assert_eq!(s.returned, Some(body.as_array().unwrap().len() as u64));
-        assert_eq!(s.total, total);
+        assert_eq!(s.total, None, "Latest has no exact wire total");
         assert_eq!(s.retry_count, 0);
         assert_eq!(
             selected.load(Ordering::SeqCst),
-            segments,
-            "metrics cannot add a segment query"
+            1,
+            "Latest uses one complete selection, including both played tiers"
         );
     }
 }

@@ -81,7 +81,15 @@ async fn actual_request_metrics_preserve_short_timing_origin_and_final_counts() 
             "{s:?}"
         );
         assert_eq!(s.returned, Some(0), "{s:?}");
-        assert_eq!(s.total, Some(0), "{s:?}");
+        assert_eq!(
+            s.total,
+            if uri.contains("/Latest?") {
+                None
+            } else {
+                Some(0)
+            },
+            "Latest omits an exact total; paged endpoints retain it: {s:?}"
+        );
         assert!(
             s.vm_steps.unwrap() > 0 && s.statements.unwrap() > 0,
             "{s:?}"
