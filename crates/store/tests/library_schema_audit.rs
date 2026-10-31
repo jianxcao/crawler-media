@@ -2,10 +2,10 @@
 //! (`docs/audits/2026-10-26-library-schema-audit.md`).
 //!
 //! `library_query_plans.rs` pins the six indexes v3 *added*. This file pins the
-//! two v3 left behind that no statement reached, and the read shapes that decide
-//! whether the neighbouring protocol indexes earn their keep. A future cleanup
-//! that re-adds `protocol_terms_value` / `protocol_people_name` has to delete an
-//! assertion here, i.e. argue with the planner.
+//! unread term index v3 left behind, and the read shapes that decide whether
+//! neighbouring protocol indexes earn their keep. Task 12.2 introduced a direct
+//! Person name/image lookup, so its new name-leading index must earn its place
+//! with a seek that also serves the image preference order.
 
 use domain::MediaKind;
 use rusqlite::Connection;
@@ -49,26 +49,46 @@ fn index_exists(conn: &Connection, name: &str) -> bool {
         == 1
 }
 
-/// Both dropped indexes had no statement that could reach them: the only
-/// `library_protocol_terms` predicate carries `library_id` + `media_id` as
-/// equalities and seeks the primary key, and the only
-/// `library_protocol_people` predicate leads with `wire_id`/`tmdb_id`.
+/// The unused value-first term index stays dropped; Person names now have a
+/// direct reader in `protocol/entities.rs::protocol_person` (Task 12.2).
 #[test]
-fn unread_protocol_indexes_stay_dropped() {
+fn unread_protocol_term_index_stays_dropped() {
     let (_tmp, conn) = open_library_db();
-    for name in ["protocol_terms_value", "protocol_people_name"] {
-        assert!(
-            !index_exists(&conn, name),
-            "{name} must not come back: it has no reader (see the schema audit)"
-        );
-    }
+    assert!(
+        !index_exists(&conn, "protocol_terms_value"),
+        "protocol_terms_value must not come back without a reader"
+    );
     for name in [
         "protocol_terms_media",
         "protocol_people_wire",
         "protocol_people_tmdb",
+        "protocol_people_name",
     ] {
         assert!(index_exists(&conn, name), "{name} must exist");
     }
+}
+
+/// The production Person-by-name lookup must seek only that person's rows and
+/// prefer an available image without sorting all people or all memberships.
+#[test]
+fn person_name_image_lookup_uses_name_leading_index_without_sorting() {
+    let (_tmp, conn) = open_library_db();
+    let text = plan_text(
+        &conn,
+        "SELECT p.wire_id,p.display_name,p.role,p.character,NULLIF(p.tmdb_id,''),p.image_url \
+         FROM library_protocol_people p \
+         JOIN library_items i ON i.library_id=p.library_id AND i.media_id=p.media_id \
+         WHERE p.name_key=?1 AND p.library_id IN (SELECT value FROM json_each(?2)) \
+           AND i.available_file_count>0 ORDER BY p.image_url DESC LIMIT 1",
+    );
+    assert!(
+        text.contains("SEARCH p USING INDEX protocol_people_name (name_key=?)"),
+        "Person lookup must seek the name-leading image index: {text}"
+    );
+    assert!(
+        !text.contains("SCAN p") && !text.contains("TEMP B-TREE"),
+        "Person lookup must not scan unrelated names or sort memberships: {text}"
+    );
 }
 
 /// `library_query/protocol/membership.rs:17` — the term predicate the protocol
