@@ -155,7 +155,9 @@ fn played_series_vm_steps(episodes: i32) -> u64 {
         .unwrap();
     let mut db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
     let tx = db.transaction().unwrap();
-    for e in 1..=episodes {
+    // Seed historical assertions in bulk; the final public mutation must also
+    // publish the user projection consumed by the protocol query.
+    for e in 1..episodes {
         tx.execute(
             "INSERT INTO playback_units(user_id,media_id,season,episode,played,has_played_assertion,played_changed_at_ms) VALUES(?1,?2,1,?3,1,1,2)",
             rusqlite::params![user.to_string(), media.to_string(), e],
@@ -163,6 +165,19 @@ fn played_series_vm_steps(episodes: i32) -> u64 {
         .unwrap();
     }
     tx.commit().unwrap();
+    store
+        .mutate_playback(
+            media,
+            &store::playback::PlaybackMutation::marks(user, 1, episodes, Some(true), None),
+            2,
+        )
+        .unwrap();
+    let summary = store
+        .get_user_library_summary(user, lib.id.parse().unwrap(), media)
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.completed_episode_count, i64::from(episodes));
+    assert!(summary.played);
     let query = ProtocolItemQuery {
         user_id: user,
         parent: ProtocolParent::Library(lib.id.parse().unwrap()),

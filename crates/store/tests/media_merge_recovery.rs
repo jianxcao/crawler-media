@@ -351,9 +351,10 @@ fn media_merge_refreshes_survivor_summaries_and_moves_season_metadata() {
     );
     assert_eq!(
         read_summary(&db, user_b, f.library, f.survivor),
-        Some((0, 0, 1, 0, 50, 1, 0, None, None, None, None, 1)),
+        Some((0, 0, 1, 0, 50, 1, 0, Some(1), Some(1), None, None, 1)),
         "the loser's favourite is visible on the survivor without a new write"
     );
+    assert_favorite_only_merge_continuation(&f, user_b);
 
     // `media_seasons` no longer exists (v4), so only the episode rows and the
     // summaries are facts a merge has to move.
@@ -380,6 +381,47 @@ fn media_merge_refreshes_survivor_summaries_and_moves_season_metadata() {
     assert_eq!(read_summary(&db, user_b, f.library, f.survivor), before_b);
     assert_eq!(before_a.map(|row| row.11), Some(1));
     assert_eq!(before_b.map(|row| row.11), Some(1));
+}
+
+fn assert_favorite_only_merge_continuation(f: &MergeFixture, user: &str) {
+    let user = user.parse().unwrap();
+    f.store
+        .insert_user(&domain::User {
+            id: user,
+            login: "merged-favorite".into(),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    let query = store::library_query::ContinueQuery {
+        user_id: user,
+        libraries: vec![f.library],
+        parent: domain::ProtocolParent::Library(f.library),
+        media_id: Some(f.survivor),
+        season: None,
+        limit: 10,
+        offset: 0,
+    };
+    let next = f.store.next_up_page(&query).unwrap();
+    assert_eq!(
+        next.total, 1,
+        "a favorite-only show still starts at its first episode"
+    );
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(
+        next.items[0].reference.item,
+        domain::TypedItemId::Unit {
+            media: f.survivor,
+            key: domain::UnitKey::new(1, 1),
+        }
+    );
+    assert_eq!(next.items[0].last_played_at, 0);
+    let resume = f.store.resume_page(&query).unwrap();
+    assert_eq!(
+        resume.total, 0,
+        "a favorite alone must not create resume progress"
+    );
+    assert!(resume.items.is_empty());
 }
 
 #[test]

@@ -95,6 +95,7 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "user_items_resume",
     "user_items_home",
     "user_continue_scope",
+    "user_continue_media",
     "user_continue_resume",
     "user_continue_owner_resume",
     "user_continue_owner_season_resume",

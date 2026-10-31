@@ -317,6 +317,7 @@ CREATE TABLE user_library_continue_units (
  FOREIGN KEY(library_id,media_id,season,episode) REFERENCES library_units(library_id,media_id,season,episode) ON DELETE CASCADE
 ) WITHOUT ROWID;
 CREATE INDEX user_continue_scope ON user_library_continue_units(user_id,media_id,season,episode,library_id);
+CREATE INDEX user_continue_media ON user_library_continue_units(media_id,library_id,season,episode);
 CREATE INDEX user_continue_resume ON user_library_continue_units(user_id,watch_activity_at DESC,media_id,library_id,season,episode) WHERE position_ms>0;
 CREATE INDEX user_continue_owner_resume ON user_library_continue_units(user_id,library_id,media_id,watch_activity_at DESC,season DESC,episode DESC) WHERE position_ms>0;
 CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(user_id,library_id,media_id,season,watch_activity_at DESC,episode DESC) WHERE position_ms>0;

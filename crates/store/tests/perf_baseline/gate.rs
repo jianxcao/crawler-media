@@ -142,9 +142,13 @@ fn limits(store: &store::Store) -> Vec<Limit> {
         // knows; changing `publish_slots` independently of the file count means recalibrating.
         scaled_limit(ops::PUBLISH_INSERT, Some((1_750, 120)), (900, 60)),
         scaled_limit(ops::PUBLISH_REPUBLISH, Some((1_750, 120)), (900, 60)),
-        // The heartbeat: one event per client tick, 23 statements (write tx, event row,
-        // per-user summary, counters). 25 catches a second reduction or an extra round trip.
-        role_limit(ops::PLAYBACK_PROGRESS_WRITE, Some(25), (8, 0)),
+        // The heartbeat includes Task 8's continuation projection maintenance for
+        // this single-owner movie: read available coordinates, read existing
+        // continuation rows, and upsert the changed progress coordinate (+3 SQL).
+        // Keep the former 25-statement business allowance plus exactly those
+        // three statements; reader overhead is still measured separately below.
+        // Scan and role budgets stay unchanged, catching a second reduction.
+        role_limit(ops::PLAYBACK_PROGRESS_WRITE, Some(28), (8, 0)),
         limit(ops::PLAYBACK_UNSCOPED, Some(2), ZERO_SCAN),
         limit(ops::INTEGRITY_STATUS, Some(4), ZERO_SCAN),
     ];
