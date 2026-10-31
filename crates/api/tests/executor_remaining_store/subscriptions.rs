@@ -92,8 +92,8 @@ fn subscription_detail_and_depth_routes_keep_executor_responsive() {
     }
 }
 
-struct SlowCatalog(Arc<Store>);
-impl api::catalog::Catalog for SlowCatalog {
+struct SlowCachedCatalog(Arc<Store>);
+impl api::catalog::Catalog for SlowCachedCatalog {
     fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
         Ok(vec![])
     }
@@ -109,24 +109,28 @@ impl api::catalog::Catalog for SlowCatalog {
     fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
         Ok(None)
     }
-    fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
+    fn cached_season_episodes(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
         assert!(
             self.0
                 .writers()
                 .with_writer_timeout(Duration::from_millis(100), store::Db::Library, |_| Ok(()))
                 .is_ok(),
-            "Catalog called under Store"
+            "Cached catalog called under Store writer"
         );
         std::thread::sleep(Duration::from_millis(500));
-        Ok(vec![media::SeasonEpisode {
+        Ok(Some(vec![media::SeasonEpisode {
             episode_number: 1,
             air_date: Some("2024-01-01".into()),
-        }])
+        }]))
     }
 }
 
 #[test]
-fn subscription_detail_catalog_is_off_executor_and_outside_store() {
+fn subscription_detail_cached_catalog_is_off_executor_and_outside_store() {
     let mut f = Fixture::new();
     let id = seed_subscribe(&f);
     let id = {
@@ -160,7 +164,7 @@ fn subscription_detail_catalog_is_off_executor_and_outside_store() {
     f.state = f
         .state
         .clone()
-        .with_catalog(Arc::new(SlowCatalog(f.state.store())));
+        .with_catalog(Arc::new(SlowCachedCatalog(f.state.store())));
     let (response, elapsed) = runtime().block_on(async {
         let started = Instant::now();
         tokio::join!(
