@@ -380,8 +380,8 @@ fn playback_source_selection_seeks_units_by_media_not_the_whole_library() {
 /// `person_wanted` set.
 ///
 /// This pins the shape that makes it cheap: one materialisation, a `MULTI-INDEX OR`
-/// that seeks `protocol_people_wire` **and** `protocol_people_tmdb` (so both indexes
-/// still earn their keep), and no per-card primary-key walk of the people table.
+/// that seeks both wire and TMDB identities by their leading keys. Equivalent
+/// TMDB-leading indexes are valid; no per-card people-table walk is allowed.
 #[test]
 fn person_filter_resolves_identities_once_and_seeks_both_person_indexes() {
     let (_tmp, conn) = open_library_db();
@@ -409,16 +409,27 @@ fn person_filter_resolves_identities_once_and_seeks_both_person_indexes() {
     let text = plan_text(&conn, sql);
     println!("person filter plan: {text}");
     assert!(
-        text.contains("MATERIALIZE person_wanted"),
-        "the identity set must be materialised once: {text}"
+        text.matches("MATERIALIZE person_wanted").count() == 1,
+        "the identity set must be materialised exactly once: {text}"
     );
     assert!(
         text.contains("protocol_people_wire"),
         "the wire-id identity must be found through protocol_people_wire: {text}"
     );
     assert!(
-        text.contains("protocol_people_tmdb"),
-        "the tmdb-id identity must be found through protocol_people_tmdb: {text}"
+        text.split(" | ").any(|step| {
+            step.starts_with("SEARCH a USING")
+                && (step.contains("protocol_people_tmdb")
+                    || step.contains("protocol_people_image_tmdb"))
+                && step.contains("(tmdb_id=?)")
+        }),
+        "the tmdb-id identity must use a TMDB-leading index seek: {text}"
+    );
+    assert!(
+        !text
+            .split(" | ")
+            .any(|step| step.starts_with("SCAN a ") || step.starts_with("SCAN p ")),
+        "people aliases must not scan the large source table: {text}"
     );
     assert!(
         !text.contains("SEARCH a USING PRIMARY KEY (library_id=?)"),
