@@ -69,27 +69,34 @@ pub(crate) async fn season_detail(
                 Ok(None) => return err(StatusCode::NOT_FOUND, "media.missing", "条目不存在"),
                 Err(response) => return response,
             };
-            let meta_episodes = catalog.season_details(&tmdb_id, season).unwrap_or_default();
-            match catalog.season_episodes(&tmdb_id, season) {
-                Ok(episodes) => {
-                    let items: Vec<Value> = episodes
-                        .into_iter()
-                        .map(|ep| {
-                            let ep_num = ep.episode_number;
-                            let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
-                            json!({
-                                "episode_number": ep_num,
-                                "name": meta.and_then(|m| m.name.clone()),
-                                "overview": meta.and_then(|m| m.overview.clone()),
-                                "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
-                                "air_date": ep.air_date,
-                            })
-                        })
-                        .collect();
-                    ok(json!({ "episodes": items })).into_response()
+            let meta_episodes = match catalog.cached_season_details(&tmdb_id, season) {
+                Ok(Some(rows)) => rows,
+                Ok(None) | Err(_) => Vec::new(),
+            };
+            let episodes = match catalog.cached_season_episodes(&tmdb_id, season) {
+                Ok(Some(episodes)) => episodes,
+                Ok(None) => {
+                    return ok(json!({ "episodes": [] })).into_response();
                 }
-                Err(error) => err(StatusCode::BAD_GATEWAY, "media.upstream", &error),
-            }
+                Err(error) => {
+                    return err(StatusCode::BAD_GATEWAY, "media.upstream", &error);
+                }
+            };
+            let items: Vec<Value> = episodes
+                .into_iter()
+                .map(|ep| {
+                    let ep_num = ep.episode_number;
+                    let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
+                    json!({
+                        "episode_number": ep_num,
+                        "name": meta.and_then(|m| m.name.clone()),
+                        "overview": meta.and_then(|m| m.overview.clone()),
+                        "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
+                        "air_date": ep.air_date,
+                    })
+                })
+                .collect();
+            ok(json!({ "episodes": items })).into_response()
         })
         .await;
     match work {

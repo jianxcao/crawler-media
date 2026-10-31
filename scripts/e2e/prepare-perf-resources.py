@@ -93,6 +93,12 @@ def prepare_poster_media(client, manifest):
     return media_id
 
 
+def warm_genres(client):
+    """Request movie and tv genre lists so later samples read the catalog cache."""
+    for kind in ('movie', 'tv'):
+        client.call(f'{PREFIX}/genres/{kind}')
+
+
 def prepare_catalog(client, manifest, api_key=None):
     """Opt-in real catalog IDs; neither credentials nor upstream bodies are logged."""
     if api_key:
@@ -117,6 +123,13 @@ def prepare_catalog(client, manifest, api_key=None):
     record_resource(manifest, 'catalog_douban', lambda: catalog_choice(hits, 'douban', 'movie'))
     record_resource(manifest, 'catalog_collection', lambda: collection_identifier(client.call(
         PREFIX + '/discover/movie/collection/popular?source=tmdb')))
+    try:
+        warm_genres(client)
+    except (ApiError, OSError, ValueError, KeyError) as error:
+        reason = f'HTTP {error.status}' if isinstance(error, ApiError) else type(error).__name__
+        manifest.setdefault('resource_failures', {})['genres'] = reason
+    else:
+        manifest.setdefault('resource_failures', {}).pop('genres', None)
 
 
 def operation_id(receipt):
@@ -267,6 +280,12 @@ def main():
     prepare(Client(args.base, token), manifest, args.root)
     if os.environ.get('PERF_TMDB_API_KEY'):
         prepare_catalog(Client(args.base, token), manifest, os.environ['PERF_TMDB_API_KEY'])
+    else:
+        try:
+            warm_genres(Client(args.base, token))
+        except (ApiError, OSError, ValueError, KeyError) as error:
+            reason = f'HTTP {error.status}' if isinstance(error, ApiError) else type(error).__name__
+            manifest.setdefault('resource_failures', {})['genres'] = reason
     if manifest['resources'].get('catalog_movie'):
         record_resource(manifest, 'poster_media', lambda: prepare_poster_media(
             Client(args.base, token), manifest))

@@ -147,6 +147,79 @@ class PrepareResourcesTests(unittest.TestCase):
         self.assertEqual(manifest['resources']['catalog_person_avatar'], 'https://images/avatar.jpg')
         self.assertEqual(manifest['resources']['catalog_person_name'], 'Observed Person')
 
+    def test_warm_genres_requests_movie_and_tv(self):
+        class Genres:
+            def __init__(self):
+                self.paths = []
+
+            def call(self, path, method='GET', body=None):
+                self.paths.append((method, path))
+                return {'genres': []}
+
+        client = Genres()
+        resources.warm_genres(client)
+        self.assertEqual(client.paths, [
+            ('GET', '/api/v1/genres/movie'),
+            ('GET', '/api/v1/genres/tv'),
+        ])
+
+    def test_prepare_catalog_warms_movie_and_tv_genres(self):
+        class CatalogApi:
+            def __init__(self):
+                self.paths = []
+
+            def call(self, path, method='GET', body=None):
+                self.paths.append((method, path))
+                if path.endswith('/settings/metadata'):
+                    return {}
+                if '/search/titles' in path:
+                    if 'provider=douban' in path:
+                        return {'titles': []}
+                    kind = 'tv' if 'Game' in path else 'movie'
+                    return {'titles': [{
+                        'provider': 'tmdb', 'kind': kind, 'external_id': kind + '-real'}]}
+                if path.startswith('/api/v1/media/movie/'):
+                    return {'info': {'cast': []}}
+                if '/collection/' in path:
+                    return {'collection_id': 'popular', 'items': [{'id': 'real'}]}
+                if path.startswith('/api/v1/genres/'):
+                    return {'genres': [{'id': 18, 'name': 'Drama'}]}
+                raise AssertionError(path)
+
+        client = CatalogApi()
+        manifest = {'resources': {}}
+        resources.prepare_catalog(client, manifest, api_key='abc')
+        self.assertEqual(client.paths[-2:], [
+            ('GET', '/api/v1/genres/movie'),
+            ('GET', '/api/v1/genres/tv'),
+        ])
+        self.assertEqual(manifest['resources']['catalog_movie'], 'movie-real')
+        self.assertNotIn('genres', manifest.get('resource_failures', {}))
+
+    def test_genre_warmup_failure_keeps_recorded_catalog_ids(self):
+        class CatalogApi:
+            def call(self, path, method='GET', body=None):
+                if path.startswith('/api/v1/genres/'):
+                    raise resources.ApiError(502, path, b'upstream')
+                if path.endswith('/settings/metadata'):
+                    return {}
+                if '/search/titles' in path:
+                    if 'provider=douban' in path:
+                        return {'titles': []}
+                    kind = 'tv' if 'Game' in path else 'movie'
+                    return {'titles': [{
+                        'provider': 'tmdb', 'kind': kind, 'external_id': kind + '-real'}]}
+                if path.startswith('/api/v1/media/movie/'):
+                    return {'info': {'cast': []}}
+                if '/collection/' in path:
+                    return {'collection_id': 'popular', 'items': [{'id': 'real'}]}
+                raise AssertionError(path)
+
+        manifest = {'resources': {}}
+        resources.prepare_catalog(CatalogApi(), manifest, api_key='abc')
+        self.assertEqual(manifest['resources']['catalog_movie'], 'movie-real')
+        self.assertEqual(manifest['resource_failures']['genres'], 'HTTP 502')
+
 
 if __name__ == '__main__':
     unittest.main()

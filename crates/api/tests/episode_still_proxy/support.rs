@@ -7,6 +7,7 @@ use axum::{
 use domain::{EntityScope, FieldValue, LibraryFile, Media, MediaId, MediaKind, MetadataFields};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -36,7 +37,21 @@ impl Fetcher for NoFetch {
         ))
     }
 }
-struct StillCatalog;
+pub struct StillCatalog {
+    pub origin_fetches: AtomicUsize,
+}
+impl StillCatalog {
+    pub fn new() -> Self {
+        Self {
+            origin_fetches: AtomicUsize::new(0),
+        }
+    }
+
+    fn remember_origin(&self) -> Result<(), String> {
+        self.origin_fetches.fetch_add(1, Ordering::SeqCst);
+        Err("season hot path must not origin-fetch".into())
+    }
+}
 impl Catalog for StillCatalog {
     fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
         Ok(vec![])
@@ -54,30 +69,107 @@ impl Catalog for StillCatalog {
         Ok(None)
     }
     fn season_details(&self, _: &str, _: u32) -> Result<Vec<media::EpisodeMeta>, String> {
-        Ok(REFERENCES
-            .iter()
-            .map(|(number, path, _)| media::EpisodeMeta {
-                episode_number: *number,
-                name: Some(format!("Episode {number}")),
-                still_path: Some((*path).into()),
-                ..Default::default()
-            })
-            .collect())
+        self.remember_origin()?;
+        Ok(Vec::new())
     }
     fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
-        Ok(REFERENCES
-            .iter()
-            .map(|(number, _, _)| media::SeasonEpisode {
-                episode_number: *number,
-                air_date: None,
-            })
-            .collect())
+        self.remember_origin()?;
+        Ok(Vec::new())
     }
+    fn cached_season_details(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        Ok(Some(
+            REFERENCES
+                .iter()
+                .map(|(number, path, _)| media::EpisodeMeta {
+                    episode_number: *number,
+                    name: Some(format!("Episode {number}")),
+                    still_path: Some((*path).into()),
+                    ..Default::default()
+                })
+                .collect(),
+        ))
+    }
+    fn cached_season_episodes(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        Ok(Some(
+            REFERENCES
+                .iter()
+                .map(|(number, _, _)| media::SeasonEpisode {
+                    episode_number: *number,
+                    air_date: None,
+                })
+                .collect(),
+        ))
+    }
+}
+pub struct ColdSeason {
+    pub origin_fetches: AtomicUsize,
+}
+impl Catalog for ColdSeason {
+    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
+        Ok(None)
+    }
+    fn season_details(&self, _: &str, _: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        self.origin_fetches.fetch_add(1, Ordering::SeqCst);
+        Err("season hot path must not origin-fetch".into())
+    }
+    fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
+        self.origin_fetches.fetch_add(1, Ordering::SeqCst);
+        Err("season hot path must not origin-fetch".into())
+    }
+    fn cached_season_details(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        Ok(None)
+    }
+    fn cached_season_episodes(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        Ok(None)
+    }
+}
+pub fn catalog_app(catalog: Arc<dyn Catalog>) -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let state = ApiState::new(
+        Store::open(dir.path().join("data")).unwrap(),
+        TOKEN.into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
+        dir.path().join("library"),
+    )
+    .unwrap()
+    .with_catalog(catalog);
+    (dir, api::router(state))
 }
 pub struct Fixture {
     pub _dir: tempfile::TempDir,
     pub state: ApiState,
     pub owned: LibraryFile,
+    pub catalog: Arc<StillCatalog>,
 }
 impl Fixture {
     /// Construct before the runtime, so no background probe or real network starts.
@@ -150,6 +242,7 @@ impl Fixture {
                 },
             );
         }
+        let catalog = Arc::new(StillCatalog::new());
         let state = ApiState::new(
             store,
             TOKEN.into(),
@@ -159,11 +252,12 @@ impl Fixture {
             dir.path().join("library"),
         )
         .unwrap()
-        .with_catalog(Arc::new(StillCatalog));
+        .with_catalog(catalog.clone());
         Self {
             _dir: dir,
             state,
             owned,
+            catalog,
         }
     }
     pub fn app(&self) -> Router {

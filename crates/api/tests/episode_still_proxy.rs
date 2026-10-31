@@ -2,6 +2,8 @@
 #[path = "episode_still_proxy/support.rs"]
 mod support;
 use axum::{body::to_bytes, http::StatusCode};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use support::*;
 
 #[test]
@@ -53,5 +55,20 @@ fn catalog_season_episode_stills_use_the_same_proxy_contract() {
                 .unwrap();
             assert_proxy_reference(row["still_url"].as_str().unwrap(), expected);
         }
+        assert_eq!(fixture.catalog.origin_fetches.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn season_detail_cache_miss_does_not_origin_fetch() {
+    use std::sync::atomic::AtomicUsize;
+    let catalog = Arc::new(support::ColdSeason {
+        origin_fetches: AtomicUsize::new(0),
+    });
+    let (_dir, app) = support::catalog_app(catalog.clone());
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let season = get_json(app, "/api/v1/media/tv/123/season/1").await;
+        assert_eq!(season["data"]["episodes"].as_array().unwrap().len(), 0);
+        assert_eq!(catalog.origin_fetches.load(Ordering::SeqCst), 0);
     });
 }
