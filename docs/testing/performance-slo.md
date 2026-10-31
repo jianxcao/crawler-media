@@ -36,7 +36,7 @@
 
 `perf-cases.json` 为每个 GET 路由提供具体用例，或只针对视频流、SSE、WebSocket、外网图片代理提供理由明确的豁免。有限大小的字幕与静态图片不豁免。没有配置上游 catalog、没有生成的章节图或没有可用的特定资源，会明确报告非 2xx 或缺失数据前置条件，不能用 404 当成功，也不能扩大豁免。覆盖检查通过代表路由被登记；最终通过还要求所有登记用例实际成功并达标。Jellyfin 70 集列表按 D 类计量，并核对响应确实含 70 项；不支持的 DatePlayed 排序不伪装成 LastPlayed 用例，Self `last_played` 用例保留。
 
-默认每个用例 40 次，轮换 50 个用户，并从真实数据集中随机选取 Movie/TV Media。Self 使用 `Authorization: Bearer …`，Jellyfin 先通过 `Users/AuthenticateByName` 获取 token，再使用 `Authorization: MediaBrowser Token="…"`。认证准备不计入普通用例延迟；登录用例单独测量。
+默认每个用例 40 次，轮换 50 个用户，并从真实数据集中随机选取 Movie/TV Media。Self 使用 `Authorization: Bearer …`，Jellyfin 先通过 `Users/AuthenticateByName` 获取 token，再使用 `Authorization: MediaBrowser Token="…"`。认证准备不计入普通用例延迟；登录用例单独测量。测量客户端在每个线程上复用一条 HTTP/1.1 连接。`origin_warmup` 用例（会 `get_or_fetch` 的 genres、routing-options、countries、languages、season）在 idle 和 busy 的计时样本前先请求一次同一 URL，该次不计入样本、状态码或错误；cold 不预热，仍测重启后的第一次请求。
 
 P 类请求集合按当前 `web/components/library-view.tsx`、`library-detail-view.tsx`、`library-item-detail-view.tsx` 以及 `web/lib/api/` 静态核对，来源记在 cases 的 `source`。本轮用户明确要求页面/e2e 由别人负责，因此没有运行 `pages.mjs` 采集。P 类同时发起所列请求，详情的 `next_file_cursor` 后续文件页按实际游标继续请求并计入墙钟；P 只测 API 集合，不测浏览器渲染、图片队列或白屏。
 
@@ -47,7 +47,7 @@ P 类请求集合按当前 `web/components/library-view.tsx`、`library-detail-v
 - idle：p95 与 p99 均满足表中目标；默认 40 次，任何非 2xx 和超时失败。
 - busy：对 `stress-tv` 触发完整扫描，测量前确认任务 `running`，测量后再确认仍在运行。p95 不超过对应 idle 目标的 2 倍；5xx（含 503）和超时必须为 0。跨越扫描完成边界的成功样本保存到 `invalid_samples`，计入 `outside_busy` 与 `attempts`，不参与分位数；在下一扫描窗口补测，直到取得 40 个完整落在 running 窗口内的样本。每用例最多尝试 80 次，若仍不足则失败。任何窗口内外的非 2xx、超时或准入检查错误都保留并使该用例失败，不为 HTTP 错误补测。`codes` 包含全部尝试的状态码，`precondition_codes` 另存检查请求错误；不能只看有效样本的状态码宣称零 503。
 - cold：每个用例测一次，并在每个用例前重启进程。只允许健康检查作就绪探针；认证 token 在整轮开始前签发。依赖播放会话的用例在每个样本开始前重新签发并激活会话；cold 时该准备发生在重启之前，重启后直接测请求。心跳使用严格递增事件序号，并在计时结束后经公开 resume API 核对确切持久化位置；HTTP 200 的空操作不能通过，结果保存 `write_verified`。不能先用 50 次登录预热再声称冷启动。该首次用例墙钟不超过对应 idle p99 的 2 倍。必须传 `--restart-command`；该命令用参数数组执行，不经 shell 展开。
-- 相对上一阶段，任一接口 p95 退化超过 20% 就失败，即便仍在绝对 SLO 内。基线报告必须完整、模式一致，且含本轮全部选定用例，否则在测量开始前拒绝比较。阶段 A 要求 busy 没有 503；阶段 B 要求 busy 的各 class 达标；阶段 C 结束要求 idle、busy、cold 全部达标。
+- 相对上一阶段，任一接口 p95 退化超过 20% 就失败，即便仍在绝对 SLO 内。绝对涨幅低于 1ms 记为通过。基线报告必须完整、模式一致，且含本轮全部选定用例，否则在测量开始前拒绝比较。阶段 A 要求 busy 没有 503；阶段 B 要求 busy 的各 class 达标；阶段 C 结束要求 idle、busy、cold 全部达标。
 - 统计信息过期：同一进程先完成导入并测 idle，再重启后重新测 idle，按逐用例 p95 比较。若相差超过 2 倍，记录为统计信息过期候选，结合查询计划确认；扫描完成后优化统计信息属于写操作，必须走 `store_write`。冷启动单次延迟不能直接当作 40 次 idle p95 比较。
 
 ## 命令

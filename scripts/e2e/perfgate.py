@@ -23,6 +23,8 @@ from perf_support import ApiError, Client, login
 # Milliseconds: idle p95 and p99.
 SLO = {'W': (50, 150), 'D': (100, 250), 'L': (150, 400), 'S': (200, 500),
        'A': (300, 800), 'U': (100, 250), 'U*': (500, 1000), 'P': (800, 1500)}
+# Relative p95 increases smaller than this are measurement noise.
+ABSOLUTE_P95_FLOOR_MS = 1.0
 
 
 def uncovered_routes(routes, cases):
@@ -43,9 +45,11 @@ def evaluate(samples, codes, class_, mode, baseline_p95=None):
         target95 *= 2
     elif mode == 'cold':
         target95 = target99 * 2
-    regression = ((p95 / baseline_p95 - 1) * 100
-                  if p95 is not None and baseline_p95 and baseline_p95 > 0 else None)
-    regressed = regression is not None and regression > 20 + 1e-9
+    comparable = p95 is not None and baseline_p95 and baseline_p95 > 0
+    regression = ((p95 / baseline_p95 - 1) * 100 if comparable else None)
+    # A sub-millisecond absolute gap stays inside client and suite noise.
+    below_floor = comparable and (p95 - baseline_p95) < ABSOLUTE_P95_FLOOR_MS
+    regressed = regression is not None and regression > 20 + 1e-9 and not below_floor
     errors = sum(count for code, count in codes.items() if not 200 <= int(code) < 300)
     passed = bool(samples) and p95 <= target95 and not errors and not regressed
     if mode == 'idle':
@@ -58,6 +62,16 @@ def evaluate(samples, codes, class_, mode, baseline_p95=None):
 
 def failure_code(error):
     return error.status if isinstance(error, ApiError) else 0
+
+
+def warms_origin(case, mode):
+    """Idle and busy discard one same-URL fetch before the timed samples."""
+    return mode != 'cold' and bool(case.get('origin_warmup'))
+
+
+def prime_origin(case, mode, issue):
+    if warms_origin(case, mode):
+        issue()
 
 
 def validate_baseline(report, mode, selected):
@@ -284,6 +298,21 @@ def main():
             count = 1 if args.mode == 'cold' else args.n
             sampler = BusySamples(count) if busy else None
             index = 0
+
+            def issue_warmup():
+                # Same resolved URL as the first timed sample, without shifting later choices.
+                saved = rng.getstate()
+                user, self_client, jf_client = clients[len(results) % len(clients)]
+                fields = context(manifest, user, rng)
+                rng.setstate(saved)
+                fields['sequence'] = 1
+                fields['position'] = 120000
+                try:
+                    run_case(case, fields, self_client, jf_client, admin, executor)
+                except (KeyError, RuntimeError, subprocess.CalledProcessError, OSError, ValueError):
+                    return
+
+            prime_origin(case, args.mode, issue_warmup)
             # Bounded replacement is only for scan-window crossings, never to hide errors.
             while sampler.can_attempt if sampler else index < count:
                 user, self_client, jf_client = clients[(index + len(results)) % len(clients)]

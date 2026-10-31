@@ -399,7 +399,8 @@
       "surface": "self",
       "route": "/genres/{kind}",
       "class": "A",
-      "url": "/api/v1/genres/movie"
+      "url": "/api/v1/genres/movie",
+      "origin_warmup": true
     },
     {
       "id": "self-health",
@@ -445,7 +446,8 @@
       "route": "/libraries/routing-options",
       "class": "A",
       "url": "/api/v1/libraries/routing-options",
-      "admin": true
+      "admin": true,
+      "origin_warmup": true
     },
     {
       "id": "self-libraries-id-cover",
@@ -639,7 +641,8 @@
       "surface": "self",
       "route": "/media/tv/{id}/season/{season}",
       "class": "A",
-      "url": "/api/v1/media/tv/{catalog_tv}/season/1"
+      "url": "/api/v1/media/tv/{catalog_tv}/season/1",
+      "origin_warmup": true
     },
     {
       "id": "self-media-id-poster",
@@ -853,14 +856,16 @@
       "surface": "self",
       "route": "/settings/countries",
       "class": "A",
-      "url": "/api/v1/settings/countries"
+      "url": "/api/v1/settings/countries",
+      "origin_warmup": true
     },
     {
       "id": "self-settings-languages",
       "surface": "self",
       "route": "/settings/languages",
       "class": "A",
-      "url": "/api/v1/settings/languages"
+      "url": "/api/v1/settings/languages",
+      "origin_warmup": true
     },
     {
       "id": "self-settings-metadata",

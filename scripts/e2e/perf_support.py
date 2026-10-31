@@ -1,10 +1,10 @@
 """HTTP and dataset helpers shared by the local performance tools (stdlib only)."""
+import http.client
 import json
 from pathlib import Path
+import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 
 class ApiError(RuntimeError):
@@ -17,6 +17,35 @@ class ApiError(RuntimeError):
 class Client:
     def __init__(self, base, token=None, jellyfin=False, timeout=30):
         self.base, self.token, self.jellyfin, self.timeout = base.rstrip('/'), token, jellyfin, timeout
+        # One HTTP/1.1 connection per thread. Page bundles share a client across workers.
+        self._local = threading.local()
+
+    def close(self):
+        self._drop_connection()
+
+    def _drop_connection(self):
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        self._local.conn = None
+
+    def _connection(self):
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            return conn
+        parts = urllib.parse.urlsplit(self.base)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            raise ValueError('client base must be an absolute http(s) URL')
+        port = parts.port or (443 if parts.scheme == 'https' else 80)
+        if parts.scheme == 'https':
+            conn = http.client.HTTPSConnection(parts.hostname, port, timeout=self.timeout)
+        else:
+            conn = http.client.HTTPConnection(parts.hostname, port, timeout=self.timeout)
+        self._local.conn = conn
+        return conn
 
     def raw(self, path, method='GET', body=None, auth=True):
         headers = {}
@@ -27,17 +56,24 @@ class Client:
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode()
             headers['Content-Type'] = 'application/json'
-        req = urllib.request.Request(self.base + urllib.parse.quote(path, safe='/?&=%:,+'),
-                                     data=data, headers=headers, method=method)
+        target = urllib.parse.quote(path, safe='/?&=%:,+')
+        # Only idempotent reads are retried. A stale keepalive socket must not repeat a write.
+        attempts = 2 if method.upper() in ('GET', 'HEAD') else 1
         started = time.perf_counter()
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+        for attempt in range(attempts):
+            try:
+                conn = self._connection()
+                conn.request(method, target, body=data, headers=headers)
+                response = conn.getresponse()
                 payload, code = response.read(), response.status
-        except urllib.error.HTTPError as error:
-            payload, code = error.read(), error.code
-        except (OSError, TimeoutError):
-            payload, code = b'', 0
-        return code, (time.perf_counter() - started) * 1000, payload
+                if getattr(response, 'will_close', False):
+                    self._drop_connection()
+                return code, (time.perf_counter() - started) * 1000, payload
+            except (http.client.HTTPException, OSError, TimeoutError):
+                self._drop_connection()
+                if attempt + 1 >= attempts:
+                    return 0, (time.perf_counter() - started) * 1000, b''
+        return 0, (time.perf_counter() - started) * 1000, b''
 
     def call(self, path, method='GET', body=None, envelope=True):
         code, _, payload = self.raw(path, method, body)

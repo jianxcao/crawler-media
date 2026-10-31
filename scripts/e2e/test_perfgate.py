@@ -152,6 +152,113 @@ class PerfGateTests(unittest.TestCase):
         self.assertEqual(perfgate.percentile(list(range(1, 41)), .95), 38)
         self.assertEqual(perfgate.percentile(list(range(1, 41)), .99), 40)
 
+    def test_relative_p95_under_one_millisecond_floor_passes(self):
+        result = perfgate.evaluate([0.9] * 40, {200: 40}, 'L', 'idle', 0.4)
+        self.assertGreater(result['regression_percent'], 20)
+        self.assertFalse(result['regressed'])
+        self.assertTrue(result['passed'])
+
+    def test_relative_p95_at_or_above_floor_still_fails(self):
+        under_floor = perfgate.evaluate([1.5] * 40, {200: 40}, 'L', 'idle', 0.5)
+        self.assertEqual(under_floor['p95'] - 0.5, 1.0)
+        self.assertGreater(under_floor['regression_percent'], 20)
+        self.assertTrue(under_floor['regressed'])
+        self.assertFalse(under_floor['passed'])
+        above = perfgate.evaluate([1.5] * 40, {200: 40}, 'L', 'idle', 0.4)
+        self.assertGreater(above['p95'] - 0.4, 1.0)
+        self.assertTrue(above['regressed'])
+        self.assertFalse(above['passed'])
+
+    def test_absolute_slo_still_fails_when_relative_change_is_small(self):
+        result = perfgate.evaluate([160.0] * 40, {200: 40}, 'L', 'idle', 159.0)
+        self.assertLess(result['regression_percent'], 20)
+        self.assertFalse(result['regressed'])
+        self.assertFalse(result['passed'])
+
+    def test_origin_fetch_cases_warm_once_and_cold_does_not(self):
+        import json
+        cases = json.loads(Path(__file__).with_name('perf-cases.json').read_text())['cases']
+        warmed = {case['id'] for case in cases if case.get('origin_warmup')}
+        self.assertEqual(warmed, {
+            'self-genres-kind',
+            'self-libraries-routing-options',
+            'self-settings-countries',
+            'self-settings-languages',
+            'self-media-tv-id-season-season',
+        })
+        genre = next(case for case in cases if case['id'] == 'self-genres-kind')
+        health = next(case for case in cases if case['id'] == 'self-health')
+        calls = []
+        perfgate.prime_origin(genre, 'idle', lambda: calls.append('warm'))
+        perfgate.prime_origin(genre, 'busy', lambda: calls.append('warm'))
+        perfgate.prime_origin(genre, 'cold', lambda: calls.append('warm'))
+        perfgate.prime_origin(health, 'idle', lambda: calls.append('warm'))
+        self.assertEqual(calls, ['warm', 'warm'])
+
+    def test_raw_reuses_one_connection_and_retries_a_closed_socket(self):
+        from perf_support import Client
+        import socketserver
+        from http.server import BaseHTTPRequestHandler
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(2)
+
+            def do_GET(self):
+                if self.path == '/missing':
+                    body, status = b'no', 404
+                else:
+                    body, status = b'ok', 200
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                if self.path == '/drop':
+                    self.close_connection = True
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        class Server(socketserver.TCPServer):
+            allow_reuse_address = True
+
+            def __init__(self):
+                self.accepts = 0
+                super().__init__(('127.0.0.1', 0), Handler)
+
+            def process_request(self, request, client_address):
+                self.accepts += 1
+                super().process_request(request, client_address)
+
+        server = Server()
+        client = Client('http://127.0.0.1:%d' % server.server_address[1], token='fixture-token')
+        thread = __import__('threading').Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            first = client.raw('/ping')
+            second = client.raw('/ping')
+            self.assertEqual(first[0], 200)
+            self.assertEqual(second[0], 200)
+            self.assertEqual(first[2], b'ok')
+            self.assertEqual(server.accepts, 1)
+            missing = client.raw('/missing')
+            self.assertEqual(missing[0], 404)
+            self.assertEqual(missing[2], b'no')
+            self.assertEqual(server.accepts, 1)
+            closed = client.raw('/drop')
+            self.assertEqual(closed[0], 200)
+            again = client.raw('/ping')
+            self.assertEqual(again[0], 200)
+            self.assertGreaterEqual(server.accepts, 2)
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == '__main__':
     unittest.main()
