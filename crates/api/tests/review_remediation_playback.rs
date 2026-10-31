@@ -361,7 +361,6 @@ async fn zero_playback_limits_return_a_bounded_page() {
         let body = json(response).await;
         let items = body["data"]["items"]
             .as_array()
-            .or_else(|| body["data"].as_array())
             .unwrap_or_else(|| panic!("{route} missing bounded collection: {body}"));
         assert_eq!(
             items.len(),

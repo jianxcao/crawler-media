@@ -224,6 +224,10 @@ pub(super) fn member_playback_routes() -> Router<ApiState> {
         .route("/playback/up-next", get(playback_views::up_next))
         .route("/playback/favorites", get(playback_views::favorites))
         .route(
+            "/playback/favorites/position",
+            get(playback_views::favorite_position),
+        )
+        .route(
             "/playback/favorites/gallery",
             get(playback_views::favorites_gallery),
         )

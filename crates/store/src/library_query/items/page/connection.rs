@@ -18,6 +18,10 @@ impl crate::LibraryConnection<'_> {
 
     pub fn library_item_titles(&self, query: &LibraryQuery) -> Result<Vec<String>, StoreError> {
         self.ensure_library_query_ready(query.library_id)?;
+        if matches!(query.order, BrowseOrder::LastPlayed) {
+            return last_played::titles(self.library, query);
+        }
+
         let base = ItemQuerySql::build_for_order(
             query.library_id,
             &query.filter,

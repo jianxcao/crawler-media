@@ -200,7 +200,11 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
         "new favourite must lead: {favorites}"
     );
     let gallery = get(&app, "/api/v1/playback/favorites/gallery?limit=10", &token).await;
-    assert_eq!(gallery[0]["media_item_id"], newer.to_string(), "{gallery}");
+    assert_eq!(
+        gallery["items"][0]["media_item_id"],
+        newer.to_string(),
+        "{gallery}"
+    );
     let played = store.as_ref().user_active_media_ids(member).unwrap();
     assert_eq!(played[0].0, newer);
     assert_eq!(
@@ -280,7 +284,11 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
         "playback must not promote an old favourite: {favorites}"
     );
     let gallery = get(&app, "/api/v1/playback/favorites/gallery?limit=10", &token).await;
-    assert_eq!(gallery[0]["media_item_id"], recent.to_string(), "{gallery}");
+    assert_eq!(
+        gallery["items"][0]["media_item_id"],
+        recent.to_string(),
+        "{gallery}"
+    );
 
     drop(store);
     drop(state);
@@ -322,5 +330,9 @@ async fn favorite_coverage_spans_every_visible_library_holding_the_media() {
     assert_eq!(data["total"], 1, "{data}");
     assert_eq!(data["items"][0]["file_count"], 2, "{data}");
     let gallery = get(&app, "/api/v1/playback/favorites/gallery", &token).await;
-    assert_eq!(gallery.as_array().map(Vec::len), Some(1), "{gallery}");
+    assert_eq!(
+        gallery["items"].as_array().map(Vec::len),
+        Some(1),
+        "{gallery}"
+    );
 }

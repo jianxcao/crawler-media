@@ -144,6 +144,8 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "collection_media",
     "collection_items_order",
     "playback_unit_media",
+    "playback_favorite_order",
+    "playback_favorite_winner",
     "playback_activity",
     "user_items_media",
     "user_items_activity",

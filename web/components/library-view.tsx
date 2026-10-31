@@ -209,28 +209,22 @@ export function LibraryView({ hero }: { hero?: ReactNode }) {
             ? listUpNext(UP_NEXT_COUNT).catch(() => null)
             : Promise.resolve(null),
           favoritesRow && favoritesRow.kind === "favorites"
-            ? listFavorites(
-                FAVORITES_COUNT,
-                0,
-                // 「未看优先」是首页这一行的默认：没看完的提前（全量页不传，保持收藏时间序）
-                favoritesRow.sort === "unwatched_first",
-                {
-                  sort:
-                    favoritesRow.sort === "unwatched_first" ? "favorited_at" : favoritesRow.sort,
-                  // 反转了自然方向才带 order，与海报墙同一条规矩
-                  order: orderParamFor(
-                    FAVORITES_SORT_PRESETS[favoritesRow.sort].direction,
-                    favoritesRow.reversed,
-                  ),
-                },
-              ).catch(() => null)
+            ? listFavorites({
+                limit: FAVORITES_COUNT,
+                unwatched_first: favoritesRow.sort === "unwatched_first",
+                sort: favoritesRow.sort === "unwatched_first" ? "favorited_at" : favoritesRow.sort,
+                order: orderParamFor(
+                  FAVORITES_SORT_PRESETS[favoritesRow.sort].direction,
+                  favoritesRow.reversed,
+                ),
+              }).catch(() => null)
             : Promise.resolve(null),
         ]);
         if (seq !== reloadSeq.current) return;
         if (latestUpNext !== null) setUpNext(latestUpNext);
         else setUpNext((previous) => previous ?? []);
         if (latestFavorites !== null) setFavorites(latestFavorites);
-        else setFavorites((previous) => previous ?? { items: [], total: 0 });
+        else setFavorites((previous) => previous ?? { items: [], total: 0, next_cursor: null });
 
         const fetches = rowFetches(
           rows,
@@ -273,7 +267,7 @@ export function LibraryView({ hero }: { hero?: ReactNode }) {
     lastLoadedHome = {
       libraries,
       upNext: upNext ?? [],
-      favorites: favorites ?? { items: [], total: 0 },
+      favorites: favorites ?? { items: [], total: 0, next_cursor: null },
       itemsByKey,
     };
   }, [libraries, upNext, favorites, itemsByKey]);

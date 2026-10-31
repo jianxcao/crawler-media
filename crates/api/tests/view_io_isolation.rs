@@ -262,7 +262,9 @@ async fn slow_gallery_and_episodes_do_not_hold_store() {
         .await
         .unwrap();
     let gallery: Value = serde_json::from_slice(&body_bytes).unwrap();
-    let items = gallery["data"].as_array().expect("gallery items array");
+    let items = gallery["data"]["items"]
+        .as_array()
+        .expect("gallery items array");
     assert_eq!(items.len(), 1, "real gallery payload must not be empty");
     assert_eq!(items[0]["title"], "Test Movie");
     let images = items[0]["images"].as_array().expect("images array");
@@ -332,4 +334,51 @@ async fn playback_item_observes_poster_without_holding_store() {
             "poster_url": format!("/posters/{ledger_id}"),
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn favorite_views_do_not_publish_files_deleted_during_artwork_observation() {
+    for endpoint in ["favorites", "favorites/gallery"] {
+        let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let gate = Arc::new(Gate::new());
+        let state = make_state(tmp.path(), Arc::new(GatedFileRead { gate: gate.clone() }));
+        let (_, library, media) = seed_movie(&state, tmp.path());
+        let files = state
+            .store()
+            .file_coverage_for_media(media)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.file.file_id)
+            .collect::<Vec<_>>();
+        let app = router(state.clone());
+        let response = tokio::spawn(async move {
+            app.oneshot(
+                Request::get(format!("/api/v1/playback/{endpoint}"))
+                    .header("authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        wait_entered(&gate).await;
+        let _release = ReleaseOnDrop(gate.clone());
+        assert_eq!(
+            state
+                .store()
+                .delete_files(library.parse().unwrap(), &files)
+                .unwrap(),
+            1
+        );
+        gate.release();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["data"]["items"].as_array().unwrap().is_empty(),
+            "{endpoint} published a deleted favorite: {body}"
+        );
+        assert_eq!(body["data"]["total"], 0);
+    }
 }

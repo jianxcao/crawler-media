@@ -197,7 +197,7 @@ async fn similar_and_gallery_and_forecast_respond() {
         .unwrap();
     let gallery = json_body(gallery_resp).await;
     assert!(
-        gallery["data"].as_array().unwrap().is_empty(),
+        gallery["data"]["items"].as_array().unwrap().is_empty(),
         "no favorites yet"
     );
 

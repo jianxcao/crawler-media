@@ -11,6 +11,9 @@ use domain::{LibraryId, MediaId, MediaKind};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
 
+#[path = "page/last_played.rs"]
+mod last_played;
+
 pub(crate) const MAX_ITEM_PAGE: usize = 500;
 pub(crate) const ITEM_KEY_OFFSET: usize = 23;
 
@@ -79,6 +82,17 @@ pub(crate) fn order_spec(query: &LibraryQuery) -> Vec<OrderTerm> {
     if query.filter.unwatched_first {
         spec.push(OrderTerm {
             expr: super::WATCH_TIER_SQL,
+            descending: false,
+            kind: KeyKind::Int,
+        });
+    }
+    if matches!(query.order, BrowseOrder::LastPlayed) {
+        spec.push(OrderTerm {
+            expr: if query.descending {
+                "CASE WHEN COALESCE(u.last_played_at,0)>0 THEN 0 ELSE 1 END"
+            } else {
+                "CASE WHEN COALESCE(u.last_played_at,0)>0 THEN 1 ELSE 0 END"
+            },
             descending: false,
             kind: KeyKind::Int,
         });
@@ -377,19 +391,24 @@ pub(crate) fn library_item_page_on(
         None
     };
     let spec = order_spec(query);
-    let (sql, limit, values) = page_statement(query, &base, &spec)?;
-    let kinds: Vec<KeyKind> = spec[..spec.len() - 1]
-        .iter()
-        .map(|term| term.kind)
-        .collect();
-    let (page, stats) = read_page(
-        conn,
-        &sql,
-        values,
-        &kinds,
-        limit,
-        matches!(query.page, BrowsePage::Cursor { .. }),
-    )?;
+    let (page, stats) = if matches!(query.order, BrowseOrder::LastPlayed) {
+        last_played::page(conn, query, &base, &spec)?
+    } else {
+        let (sql, limit, values) = page_statement(query, &base, &spec)?;
+        let kinds: Vec<KeyKind> = spec[..spec.len() - 1]
+            .iter()
+            .map(|term| term.kind)
+            .collect();
+        let (page, stats) = read_page(
+            conn,
+            &sql,
+            values,
+            &kinds,
+            limit,
+            matches!(query.page, BrowsePage::Cursor { .. }),
+        )?;
+        (page, stats)
+    };
     let next_cursor = match (page.truncated, page.last_keys) {
         (true, Some(keys)) => {
             let media_id = page
@@ -471,6 +490,10 @@ pub(crate) fn library_item_index_on(
     query: &LibraryQuery,
 ) -> Result<Vec<IndexBucket>, StoreError> {
     ensure_library_query_ready_on(conn, query.library_id)?;
+    if matches!(query.order, BrowseOrder::LastPlayed) {
+        return last_played::index(conn, query);
+    }
+
     let base = ItemQuerySql::build_for_order(
         query.library_id,
         &query.filter,

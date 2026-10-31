@@ -245,7 +245,7 @@ test("写回时只存与默认不同的字段，默认库行不带来源", () =>
   const rows = buildHomeRows(
     {
       rows: [
-        { id: "favorites", sort: "rating" },
+        { id: "favorites", sort: "year" },
         { id: "lib:00000000-0000-4000-8000-000000000001", sort: "release_date", hidden: true },
         { id: "row:x", library_id: "00000000-0000-4000-8000-000000000003", sort: "rating", unwatched: true, name: "周末补番" },
         { id: "row:c", collection_id: 7 },
@@ -256,7 +256,7 @@ test("写回时只存与默认不同的字段，默认库行不带来源", () =>
   );
   const picked = ["favorites", "lib:00000000-0000-4000-8000-000000000001", "row:x", "row:c"].map((id) => rows.find((row) => row.id === id));
   assert.deepEqual(rowsToPrefs(picked), [
-    { id: "favorites", sort: "rating" },
+    { id: "favorites", sort: "year" },
     { id: "lib:00000000-0000-4000-8000-000000000001", hidden: true, sort: "release_date" },
     { id: "row:x", library_id: "00000000-0000-4000-8000-000000000003", sort: "rating", name: "周末补番" },
     { id: "row:c", collection_id: 7, sort: "release_date" },

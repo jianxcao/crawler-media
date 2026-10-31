@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import { useToast } from "@/components/feedback";
+import { FavoriteWindow, StaleFavoriteWindow } from "@/lib/favorite-window";
+import { favoriteFailures, initialFavoriteFailures } from "@/lib/favorite-failures";
 import { MasonryIcon, MoreIcon, PosterGridIcon } from "@/components/icons";
 import { WallLoadMore, WallLoadPrev, WallRecallPill } from "@/components/wall-chrome";
 import { WallSortControl } from "@/components/library-filter-bar";
@@ -25,17 +27,17 @@ import {
 import type { LibraryGalleryGroup } from "@/lib/api/libraries";
 import { galleryMarkTarget } from "@/lib/gallery-mark-target";
 import {
+  FAVORITE_SORTS,
   type FavoriteItem,
   type FavoriteSort,
   type FavoriteSortParams,
   listFavorites,
   listFavoritesGallery,
   setPlaybackMarks,
+  seekFavoritesPosition,
 } from "@/lib/api/playback";
 import {
-  PREF_TO_SORT,
   SORT_DIRECTIONS,
-  SORT_PREF_LABELS,
   orderParam,
   useWallSortPref,
   type WallSortPref,
@@ -75,16 +77,17 @@ const FAVORITES_SORT_STORAGE_KEY = "crawler-media.favorites.wall-sort";
  * （服务端也是同一份实现，见 items.sort_item_ids）。图廊也吃全部档位——
  * 与单库页不同，收藏图廊的接口与海报墙传同一个 sort，两种形态永远是同一份名单
  */
-const SORT_OPTIONS: readonly (readonly [WallSortPref, string])[] = [
-  ["default", "最近收藏"],
-  ...(Object.entries(SORT_PREF_LABELS) as [WallSortPref, string][]),
-];
+const SORT_OPTIONS = FAVORITE_SORTS.map((sort): readonly [WallSortPref, string] => {
+  if (sort === "title") return ["title", "按标题"];
+  if (sort === "year") return ["release_date", "按上映年份"];
+  return ["default", "最近收藏"];
+});
 
 /** 「最近收藏」档的自然方向是新→旧，与「最近添加」同一种说法。 */
 const FAVORITED_DIRECTION = { naturalAsc: false, asc: "旧→新", desc: "新→旧" } as const;
 
 function directionOf(sort: FavoriteSort) {
-  return sort === "favorited_at" ? FAVORITED_DIRECTION : SORT_DIRECTIONS[sort];
+  return sort === "favorited_at" ? FAVORITED_DIRECTION : SORT_DIRECTIONS[sort === "year" ? "release_date" : "title"];
 }
 
 /**
@@ -105,6 +108,8 @@ interface FavoritesSnapshot {
   total: number;
   /** 这份窗口在整份名单里的起点（「回到上次位置」跳过来后不为 0） */
   wallStart: number;
+  wallNextCursor: string | null;
+  wallLoadedEnd: number;
   /** 图床浏览模式已加载的整个窗口；空数组 = 这一次浏览没进过图廊 */
   galleryGroups: LibraryGalleryGroup[];
   galleryHasMore: boolean;
@@ -172,7 +177,7 @@ export function FavoritesView() {
     useWallSortPref(FAVORITES_SORT_STORAGE_KEY);
   // 当前真正生效的服务端排序键：默认档是「最近收藏」
   const effectiveSort: FavoriteSort =
-    sortPref === "default" ? "favorited_at" : PREF_TO_SORT[sortPref];
+    sortPref === "title" ? "title" : sortPref === "release_date" ? "year" : "favorited_at";
   const sortAscending = directionOf(effectiveSort).naturalAsc !== sortReversed;
   // 两种形态的请求都带同一份：不反转时不带 order，服务端按自然方向排
   const sortParams = useMemo<FavoriteSortParams>(
@@ -183,7 +188,7 @@ export function FavoritesView() {
           ? sortReversed
             ? "asc"
             : undefined
-          : orderParam(effectiveSort, sortReversed),
+          : orderParam(effectiveSort === "year" ? "release_date" : effectiveSort, sortReversed),
     }),
     [effectiveSort, sortReversed],
   );
@@ -191,7 +196,7 @@ export function FavoritesView() {
   const sortRef = useRef(sortParams);
   sortRef.current = sortParams;
   // 这份排序的指纹：窗口按它取、位置记录按它分记。默认档为空串，老记录不失效
-  const sortKey = `${sortPref === "default" ? "" : effectiveSort}${sortReversed ? ":rev" : ""}`;
+  const sortKey = `${effectiveSort}${sortReversed ? ":rev" : ""}`;
   const [galleryPreferred, setGalleryMode] = useVideoGalleryMode();
   const [galleryGrouped, setGalleryGrouped] = useVideoGalleryGrouped();
   const [density, setDensity] = usePhotoWallDensity();
@@ -215,7 +220,17 @@ export function FavoritesView() {
   const [total, setTotal] = useState(initialSnapshot?.total ?? 0);
   // 当前窗口在整份名单里的起点：0 = 墙首；「回到上次位置」跳过来后不为 0
   const [wallStart, setWallStart] = useState(initialSnapshot?.wallStart ?? 0);
-  const [failed, setFailed] = useState(false);
+  const [failures, reportRead] = useReducer(favoriteFailures, initialFavoriteFailures);
+  const wallPages = useMemo(() => new FavoriteWindow(listFavorites, seekFavoritesPosition), []);
+  const galleryPages = useMemo(() => new FavoriteWindow(listFavoritesGallery, seekFavoritesPosition), []);
+  const [wallNextCursor, setWallNextCursor] = useState(initialSnapshot?.wallNextCursor ?? null);
+  const wallLoadedEnd = useRef(initialSnapshot?.wallLoadedEnd ?? 0);
+  const wallRequest = useRef(0);
+  const galleryRequest = useRef(0);
+  useEffect(() => () => {
+    wallPages.invalidate();
+    galleryPages.invalidate();
+  }, [wallPages, galleryPages]);
   // 起点的 ref 版：几个回调每次都读最新值，不必为它重建回调链
   const wallOffset = useRef(initialSnapshot?.wallStart ?? 0);
   // 翻页请求进行中：哨兵重新观察时不重复发同一页
@@ -225,70 +240,54 @@ export function FavoritesView() {
   // 海报墙顶部的锚：跳转后滚回墙首，位置记录也按它量首个可见格
   const wallTop = useRef<HTMLDivElement>(null);
 
-  /** 墙尾追加一页。 */
-  const load = useCallback(async (offset: number) => {
-    if (loading.current) return;
+  /** Cursor append keeps the raw selected position, independently of UI dedup. */
+  const load = useCallback(async (start: number) => {
+    if (loading.current || loadingPrev.current) return;
     loading.current = true;
+    const request = ++wallRequest.current;
     try {
-      const page = await listFavorites(PAGE_SIZE, offset, false, sortRef.current);
-      setTotal(page.total);
-      setItems((prev) => {
-        if (!prev) return page.items;
-        // 与前置加载/跳转交叠着回来时同一部可能拿到两次，按 id 去重再拼
-        const seen = new Set(prev.map((i) => i.media_item_id));
-        return [...prev, ...page.items.filter((i) => !seen.has(i.media_item_id))];
+      const page = await wallPages.page(start, PAGE_SIZE, sortRef.current);
+      if (request !== wallRequest.current) return;
+      if (page.total !== null) setTotal(page.total);
+      wallLoadedEnd.current = start + page.items.length;
+      setWallNextCursor(page.next_cursor);
+      setItems((previous) => {
+        const seen = new Set((previous ?? []).map((item) => item.media_item_id));
+        return [...(previous ?? []), ...page.items.filter((item) => !seen.has(item.media_item_id))];
       });
-      setFailed(false);
-    } catch {
-      setFailed(true);
+      reportRead({ channel: "wall", failed: false });
+    } catch (error) {
+      if (!(error instanceof StaleFavoriteWindow) && request === wallRequest.current) reportRead({ channel: "wall", failed: true });
     } finally {
-      loading.current = false;
+      if (request === wallRequest.current) loading.current = false;
     }
-  }, []);
+  }, [wallPages]);
 
-  /**
-   * 按已加载的页数重拉整个窗口并整体替换：快照恢复出来的是离开这一屏时的旧
-   * 数据，在详情页取消了收藏的那部要跟着消失。不缩窗口、不动滚动位置；请求
-   * 失败就留着旧窗口，下次返回再对账。
-   */
   const reload = useCallback(async (loadedCount: number) => {
     if (loading.current) return;
     loading.current = true;
-    const start = wallOffset.current;
+    const request = ++wallRequest.current;
     try {
-      const pages = await Promise.all(
-        Array.from({ length: Math.ceil(loadedCount / PAGE_SIZE) }, (_, page) =>
-          listFavorites(PAGE_SIZE, start + page * PAGE_SIZE, false, sortRef.current),
-        ),
-      );
-      const rows = pages.flatMap((page) => page.items);
-      if (rows.length === 0 && start > 0) {
-        // 这一段整个被取消收藏了（跳到过靠后的位置，回来时那里已经空了）：
-        // 退回墙首重取，否则明明还有收藏，这一屏却什么都没有
-        wallOffset.current = 0;
-        setWallStart(0);
-        const head = await listFavorites(PAGE_SIZE, 0, false, sortRef.current);
-        setTotal(head.total);
-        setItems(head.items);
-      } else {
-        setTotal(pages[0].total);
-        setItems(rows);
-      }
-      setFailed(false);
-    } catch {
-      setFailed(true);
+      const page = await wallPages.refresh(wallOffset.current, loadedCount, PAGE_SIZE, sortRef.current);
+      if (request !== wallRequest.current) return;
+      wallOffset.current = page.start;
+      wallLoadedEnd.current = page.start + page.items.length;
+      setWallStart(page.start);
+      setWallNextCursor(page.next_cursor);
+      if (page.total !== null) setTotal(page.total);
+      setItems(page.items);
+      reportRead({ channel: "wall", failed: false });
+    } catch (error) {
+      if (!(error instanceof StaleFavoriteWindow) && request === wallRequest.current) reportRead({ channel: "wall", failed: true });
     } finally {
-      loading.current = false;
+      if (request === wallRequest.current) loading.current = false;
     }
-  }, []);
+  }, [wallPages]);
 
   const loaded = items?.length ?? 0;
-  const hasMore = items !== null && wallStart + loaded < total;
-  /** 收藏是跨库的一面墙，每一格落回它自己所属的库 */
+  const hasMore = items !== null && wallNextCursor !== null;
   const ownerLibraryOf = useCallback((item: FavoriteItem) => item.library_id, []);
-  const loadMore = useCallback(() => {
-    void load(wallStart + loaded);
-  }, [load, loaded, wallStart]);
+  const loadMore = useCallback(() => { void load(wallLoadedEnd.current); }, [load]);
 
   /* —— 向上补页 ——
      「回到上次位置」会把整个窗口换成从那一段开始的一页，窗口起点因此不为 0：
@@ -298,34 +297,31 @@ export function FavoritesView() {
   // 前置加载前滚动容器的高度；null = 本次 items 变化不是前置加载，不必补偿
   const prependFrom = useRef<number | null>(null);
   const loadPrev = useCallback(() => {
-    if (loadingPrev.current) return;
+    if (loadingPrev.current || loading.current) return;
     const until = wallOffset.current;
-    if (until <= 0) return; // 已经到墙首，上方没有东西可补
+    if (until <= 0) return;
     loadingPrev.current = true;
+    const request = ++wallRequest.current;
     const from = Math.max(0, until - PAGE_SIZE);
-    listFavorites(until - from, from, false, sortRef.current)
+    wallPages.page(from, until - from, sortRef.current)
       .then((page) => {
-        // 一部都没拿到（这一段刚好被取消收藏取空了）：起点保持不动就此打住，
-        // 否则起点一路往前挪、哨兵每次都重新观察，会把这段空区间反复请求
+        if (request !== wallRequest.current) return;
+        reportRead({ channel: "wall", failed: false });
         if (page.items.length === 0) return;
-        // 起点按**实拿到的条数**回推：拿少了（并发取消收藏）时窗口起点仍与
-        // 已加载内容对得上，「上次位置」才不会整体错位
-        const start = until - page.items.length;
-        wallOffset.current = start;
+        wallOffset.current = from;
         prependFrom.current = scrollElement?.scrollHeight ?? null;
-        setTotal(page.total);
-        setWallStart(start);
+        if (page.total !== null) setTotal(page.total);
+        setWallStart(from);
         setItems((current) => {
-          const seen = new Set((current ?? []).map((i) => i.media_item_id));
-          return [...page.items.filter((i) => !seen.has(i.media_item_id)), ...(current ?? [])];
+          const seen = new Set((current ?? []).map((item) => item.media_item_id));
+          return [...page.items.filter((item) => !seen.has(item.media_item_id)), ...(current ?? [])];
         });
       })
-      // 失败就先不补：哨兵还在墙顶，用户下次滑离再滑回来会重新触发
-      .catch(() => {})
-      .finally(() => {
-        loadingPrev.current = false;
-      });
-  }, [scrollElement]);
+      .catch((error) => {
+        if (!(error instanceof StaleFavoriteWindow) && request === wallRequest.current) reportRead({ channel: "wall", failed: true });
+      })
+      .finally(() => { if (request === wallRequest.current) loadingPrev.current = false; });
+  }, [scrollElement, wallPages]);
 
   // 前置加载的滚动补偿：墙长高了多少就把 scrollTop 加回多少。放 layout effect
   // 里在绘制前完成；补完立刻让虚拟化窗口重量一次——滚动事件要到下一帧才来，
@@ -344,27 +340,30 @@ export function FavoritesView() {
    * 跳到整份名单里的某个位置：换掉整个窗口（而不是从头一页页追加过去），
    * 此后向下照常滚动加载，向上由墙顶哨兵把上文补回来（loadPrev）。
    */
-  const jumpTo = useCallback((offset: number) => {
-    // 跳转期间两头的哨兵都挡住，别让旧窗口的追加/补页插进来
+  const jumpTo = useCallback((start: number) => {
+    wallPages.invalidate();
+    const request = ++wallRequest.current;
     loading.current = true;
     loadingPrev.current = true;
-    wallOffset.current = offset;
-    listFavorites(PAGE_SIZE, offset, false, sortRef.current)
+    wallPages.page(start, PAGE_SIZE, sortRef.current)
       .then((page) => {
-        setTotal(page.total);
-        setWallStart(offset);
+        if (request !== wallRequest.current) return;
+        wallOffset.current = start;
+        wallLoadedEnd.current = start + page.items.length;
+        setWallNextCursor(page.next_cursor);
+        if (page.total !== null) setTotal(page.total);
+        setWallStart(start);
         setItems(page.items);
-        setFailed(false);
-        // 瞬时而不是平滑：墙上的内容已经整段换掉，平滑滚过去的是一堆不存在的
-        // 旧内容；落地后墙顶哨兵还会立刻补一页，那一下的滚动补偿会打断动画
+        reportRead({ channel: "wall", failed: false });
         wallTop.current?.scrollIntoView({ block: "start", behavior: "instant" });
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (!(error instanceof StaleFavoriteWindow) && request === wallRequest.current) reportRead({ channel: "wall", failed: true });
+      })
       .finally(() => {
-        loading.current = false;
-        loadingPrev.current = false;
+        if (request === wallRequest.current) { loading.current = false; loadingPrev.current = false; }
       });
-  }, []);
+  }, [wallPages]);
 
   /**
    * 海报墙的窗口该按哪个排序取：
@@ -401,61 +400,65 @@ export function FavoritesView() {
   const loadMoreGallery = useCallback(() => {
     if (galleryLoading.current) return;
     galleryLoading.current = true;
-    const offset = galleryLoaded.current;
-    listFavoritesGallery({ limit: GALLERY_PAGE_SIZE, offset, ...sortRef.current })
+    const request = ++galleryRequest.current;
+    const start = galleryLoaded.current;
+    galleryPages.page(start, GALLERY_PAGE_SIZE, sortRef.current)
       .then((page) => {
-        galleryLoaded.current = offset + page.length;
-        setGalleryGroups((current) => dedupeGalleryGroups([...current, ...page]));
-        setGalleryHasMore(page.length >= GALLERY_PAGE_SIZE);
+        if (request !== galleryRequest.current) return;
+        galleryLoaded.current = start + page.items.length;
+        setGalleryGroups((current) => dedupeGalleryGroups([...current, ...page.items]));
+        setGalleryHasMore(page.next_cursor !== null);
+        if (page.total !== null) setTotal(page.total);
+        reportRead({ channel: "gallery", failed: false });
       })
-      .catch(() => setGalleryHasMore(false))
-      .finally(() => {
-        galleryLoading.current = false;
-      });
-  }, []);
+      .catch((error) => {
+        if (!(error instanceof StaleFavoriteWindow) && request === galleryRequest.current) reportRead({ channel: "gallery", failed: true });
+      })
+      .finally(() => { if (request === galleryRequest.current) galleryLoading.current = false; });
+  }, [galleryPages]);
 
-  /** 图廊窗口的对账，与海报墙的 reload 同一个意思（整窗重拉、整体替换）。 */
   const refreshGallery = useCallback(() => {
     const start = galleryStart.current;
-    const loadedGroups = galleryLoaded.current - start;
-    if (loadedGroups <= 0 || galleryLoading.current) return;
-    galleryLoading.current = true; // 对账期间别让滚动哨兵同时追加下一页
-    Promise.all(
-      Array.from({ length: Math.ceil(loadedGroups / GALLERY_PAGE_SIZE) }, (_, page) =>
-        listFavoritesGallery({
-          limit: GALLERY_PAGE_SIZE,
-          offset: start + page * GALLERY_PAGE_SIZE,
-          ...sortRef.current,
-        }),
-      ),
-    )
-      .then((pages) => {
-        galleryLoaded.current = start + pages.reduce((sum, page) => sum + page.length, 0);
-        setGalleryGroups(dedupeGalleryGroups(pages.flat()));
-        setGalleryHasMore((pages.at(-1)?.length ?? 0) >= GALLERY_PAGE_SIZE);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        galleryLoading.current = false;
-      });
-  }, []);
-
-  /** 图廊跳到某个位置：与海报墙的 jumpTo 是同一件事——换掉整个窗口。 */
-  const jumpGalleryTo = useCallback((offset: number) => {
-    galleryLoading.current = true; // 跳转期间挡住滚动哨兵与对账，别让旧窗口的页插进来
-    galleryStart.current = offset;
-    listFavoritesGallery({ limit: GALLERY_PAGE_SIZE, offset, ...sortRef.current })
+    const count = galleryLoaded.current - start;
+    if (count <= 0 || galleryLoading.current) return;
+    galleryLoading.current = true;
+    const request = ++galleryRequest.current;
+    galleryPages.refresh(start, count, GALLERY_PAGE_SIZE, sortRef.current)
       .then((page) => {
-        galleryLoaded.current = offset + page.length;
-        setGalleryGroups(dedupeGalleryGroups(page));
-        setGalleryHasMore(page.length >= GALLERY_PAGE_SIZE);
+        if (request !== galleryRequest.current) return;
+        galleryStart.current = page.start;
+        galleryLoaded.current = page.start + page.items.length;
+        setGalleryGroups(dedupeGalleryGroups(page.items));
+        setGalleryHasMore(page.next_cursor !== null);
+        if (page.total !== null) setTotal(page.total);
+        reportRead({ channel: "gallery", failed: false });
+      })
+      .catch((error) => {
+        if (!(error instanceof StaleFavoriteWindow) && request === galleryRequest.current) reportRead({ channel: "gallery", failed: true });
+      })
+      .finally(() => { if (request === galleryRequest.current) galleryLoading.current = false; });
+  }, [galleryPages]);
+
+  const jumpGalleryTo = useCallback((start: number) => {
+    galleryPages.invalidate();
+    const request = ++galleryRequest.current;
+    galleryLoading.current = true;
+    galleryPages.page(start, GALLERY_PAGE_SIZE, sortRef.current)
+      .then((page) => {
+        if (request !== galleryRequest.current) return;
+        galleryStart.current = start;
+        galleryLoaded.current = start + page.items.length;
+        setGalleryGroups(dedupeGalleryGroups(page.items));
+        setGalleryHasMore(page.next_cursor !== null);
+        if (page.total !== null) setTotal(page.total);
+        reportRead({ channel: "gallery", failed: false });
         wallTop.current?.scrollIntoView({ block: "start", behavior: "smooth" });
       })
-      .catch(() => {})
-      .finally(() => {
-        galleryLoading.current = false;
-      });
-  }, []);
+      .catch((error) => {
+        if (!(error instanceof StaleFavoriteWindow) && request === galleryRequest.current) reportRead({ channel: "gallery", failed: true });
+      })
+      .finally(() => { if (request === galleryRequest.current) galleryLoading.current = false; });
+  }, [galleryPages]);
 
   // 这份图廊窗口是按哪个排序取的；null = 还没取过（快照没带图廊窗口回来）
   const galleryWindowSort = useRef<string | null>(
@@ -472,12 +475,15 @@ export function FavoritesView() {
       return;
     }
     galleryWindowSort.current = sortKey;
+    galleryPages.invalidate();
+    galleryRequest.current += 1;
+    galleryLoading.current = false;
     galleryStart.current = 0;
     galleryLoaded.current = 0;
     setGalleryGroups([]);
     setGalleryHasMore(false);
     loadMoreGallery();
-  }, [galleryPreferred, sortReady, sortKey, loadMoreGallery, refreshGallery]);
+  }, [galleryPreferred, sortReady, sortKey, loadMoreGallery, refreshGallery, galleryPages]);
 
   /**
    * 灯箱里点心：取消收藏后**不把瓦片抽走**——正在看的这张图连同它所在的那一段
@@ -512,6 +518,8 @@ export function FavoritesView() {
       items,
       total,
       wallStart,
+      wallNextCursor,
+      wallLoadedEnd: wallLoadedEnd.current,
       galleryGroups,
       galleryHasMore,
       galleryStart: galleryStart.current,
@@ -519,7 +527,7 @@ export function FavoritesView() {
       // 窗口按哪个排序取的就记哪个：偏好读出来之前窗口还是快照那份，记它原来的键
       sortKey: wallWindowSort.current ?? sortKey,
     };
-  }, [galleryGroups, galleryHasMore, items, total, wallStart, sortKey]);
+  }, [galleryGroups, galleryHasMore, items, total, wallStart, sortKey, wallNextCursor]);
 
   // 收藏一部都没有时不给切换键：两种形态都是空页，多一颗键只会让人以为点了没反应
   const empty = items !== null && items.length === 0;
@@ -654,7 +662,7 @@ export function FavoritesView() {
         {!empty && items !== null && (
           <div className="mt-3 flex items-center">
             <WallSortControl
-              value={sortPref}
+              value={effectiveSort === "title" ? "title" : effectiveSort === "year" ? "release_date" : "default"}
               options={SORT_OPTIONS}
               onChange={setSortPref}
               disabled={!sortReady}
@@ -667,7 +675,7 @@ export function FavoritesView() {
           </div>
         )}
 
-        {failed && items === null && (
+        {failures.wall && items === null && (
           <div className="mt-16 flex flex-col items-center gap-3 text-center">
             <p className="text-ui text-[var(--text-muted)]">收藏加载失败</p>
             <button
@@ -677,6 +685,18 @@ export function FavoritesView() {
             >
               重试
             </button>
+          </div>
+        )}
+
+        {(gallery ? failures.gallery : failures.wall) && items !== null && (
+          <div role="alert" className="mt-4 text-ui text-[var(--text-muted)]">
+            收藏加载失败，已保留当前内容。
+            <button type="button" className="ml-3 text-white" onClick={() => {
+              if (gallery) {
+                if (galleryLoaded.current > galleryStart.current) refreshGallery();
+                else loadMoreGallery();
+              } else void reload(Math.max(loaded, PAGE_SIZE));
+            }}>重试</button>
           </div>
         )}
 

@@ -304,7 +304,7 @@ CREATE TABLE user_library_items (
  CHECK(completed_episode_count BETWEEN 0 AND owned_episode_count)
 ) WITHOUT ROWID;
 CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id);
-CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id);
+CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id DESC);
 CREATE INDEX user_items_next ON user_library_items(user_id,activity_at DESC,media_id,library_id) WHERE next_season IS NOT NULL;
 CREATE INDEX user_items_resume ON user_library_items(user_id,resume_activity_at DESC,media_id,library_id) WHERE resume_season IS NOT NULL;
 CREATE INDEX user_items_home ON user_library_items(user_id,activity_at DESC,media_id,library_id)
@@ -538,3 +538,6 @@ CREATE TABLE protocol_entity_overlap_rebuild (
  owner_libraries_json TEXT NOT NULL CHECK(json_valid(owner_libraries_json)),member_count INTEGER NOT NULL CHECK(member_count>0),
  PRIMARY KEY(operation_id,entity_kind,name,owner_libraries_json)
 ) WITHOUT ROWID;
+
+CREATE INDEX playback_favorite_order ON playback_units(user_id,favorite_at DESC,media_id ASC,season DESC,episode DESC) WHERE favorite=1;
+CREATE INDEX playback_favorite_winner ON playback_units(user_id,media_id,favorite_at DESC,season DESC,episode DESC) WHERE favorite=1;

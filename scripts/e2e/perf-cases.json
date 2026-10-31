@@ -691,6 +691,13 @@
       "url": "/api/v1/playback/favorites?limit=50"
     },
     {
+      "id": "self-playback-favorites-position",
+      "surface": "self",
+      "route": "/playback/favorites/position",
+      "class": "L",
+      "url": "/api/v1/playback/favorites/position?start=20"
+    },
+    {
       "id": "self-playback-favorites-gallery",
       "surface": "self",
       "route": "/playback/favorites/gallery",

@@ -1,82 +1,115 @@
-//! SQL on one explicitly borrowed database connection.
+//! Favorite candidates and navigation on one explicitly borrowed read snapshot.
+use rusqlite::{Row, params_from_iter};
+
+use super::cursor::{Cursor, Primary, invalid};
+use super::query::Query;
 use super::*;
 
+fn row(row: &Row<'_>, q: &PlaybackViewQuery) -> Result<(PlaybackViewRow, Cursor), StoreError> {
+    let media: String = row.get(0)?;
+    let library: String = row.get(1)?;
+    let primary = match q.order {
+        FavoriteOrder::FavoritedAt => Primary::Time(row.get(4)?),
+        FavoriteOrder::Title => Primary::Title(row.get(6)?),
+        FavoriteOrder::Year => Primary::Year(row.get(7)?),
+    };
+    let cursor = Cursor::new(q, row.get(5)?, primary, media.clone())?;
+    Ok((
+        PlaybackViewRow {
+            media_id: media.parse().map_err(|_| invalid())?,
+            library_id: library.parse().map_err(|_| invalid())?,
+            unit: UnitKey {
+                season: row.get(2)?,
+                episode: row.get(3)?,
+            },
+            favorited_at: row.get(4)?,
+        },
+        cursor,
+    ))
+}
 impl crate::LibraryConnection<'_> {
     pub fn playback_favorite_page(
         &self,
         q: &PlaybackViewQuery,
     ) -> Result<PlaybackViewPage, StoreError> {
-        if q.libraries.is_empty() || q.limit == 0 {
-            return Ok(PlaybackViewPage::default());
-        }
-        let libs = vec!["?"; q.libraries.len()].join(",");
-        let base = format!(
-            "WITH fav AS (
-               SELECT media_id, season, episode, favorite_at,
-                      ROW_NUMBER() OVER (PARTITION BY media_id
-                        ORDER BY favorite_at DESC, season DESC, episode DESC) AS rn
-               FROM playback_units WHERE user_id = ?1 AND favorite != 0),
-             item AS (
-               SELECT media_id, MIN(library_id) AS library_id, MIN(title_sort) AS title_sort,
-                      MAX(year) AS year
-               FROM library_items WHERE library_id IN ({libs}) GROUP BY media_id),
-             tier AS (
-               SELECT media_id, MAX(seen) AS seen, MAX(played) AS played
-               FROM user_library_items WHERE user_id = ?1 AND library_id IN ({libs})
-               GROUP BY media_id)
-             SELECT f.media_id, i.library_id, f.season, f.episode, f.favorite_at,
-                    CASE WHEN COALESCE(t.seen,0)=0 THEN 0 WHEN t.played!=0 THEN 2 ELSE 1 END AS tier,
-                    i.title_sort, i.year
-             FROM fav f JOIN item i ON i.media_id = f.media_id
-             LEFT JOIN tier t ON t.media_id = f.media_id
-             WHERE f.rn = 1"
-        );
-        let mut args: Vec<Value> = vec![Value::Text(q.user.to_string())];
-        for _ in 0..2 {
-            args.extend(q.libraries.iter().map(|l| Value::Text(l.to_string())));
-        }
-        // Positional `?` after `?1` continue numbering from 2, so both IN lists bind in order.
-        let total: i64 = self.library.query_row(
-            &format!("SELECT COUNT(*) FROM ({base})"),
-            params_from_iter(args.iter()),
-            |row| row.get(0),
-        )?;
-        let dir = if q.descending { "DESC" } else { "ASC" };
-        let primary = match q.order {
-            FavoriteOrder::FavoritedAt => format!("favorite_at {dir}"),
-            FavoriteOrder::Title => format!("title_sort {dir}"),
-            FavoriteOrder::Year => format!("year {dir}"),
+        let after = q
+            .after
+            .as_deref()
+            .map(|raw| Cursor::decode(q, raw))
+            .transpose()?;
+        let mut query = Query::new(q);
+        let total = if after.is_none() {
+            let count: i64 = self.library.query_row(
+                &format!("SELECT COUNT(*) FROM ({})", query.base),
+                params_from_iter(query.values.iter()),
+                |row| row.get(0),
+            )?;
+            Some(count.max(0) as usize)
+        } else {
+            None
         };
-        let tier = if q.unwatched_first { "tier ASC, " } else { "" };
+        let limit = q.limit.clamp(1, 200);
+        let predicate = after
+            .as_ref()
+            .map(|cursor| query.seek(q, cursor))
+            .map(|seek| format!(" WHERE {seek}"))
+            .unwrap_or_default();
         let sql = format!(
-            "SELECT * FROM ({base}) ORDER BY {tier}{primary}, media_id ASC LIMIT ? OFFSET ?"
+            "SELECT * FROM ({}){predicate} ORDER BY {} LIMIT {}",
+            query.base,
+            Query::order(q, false),
+            limit + 1
         );
-        args.push(Value::Integer(q.limit as i64));
-        args.push(Value::Integer(q.offset as i64));
-        let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, i32>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })?;
+        let mut statement = self.library.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(query.values.iter()))?;
         let mut items = Vec::new();
-        for row in rows {
-            let (media, library, season, episode, favorited_at) = row?;
-            let invalid = |what: &str| StoreError::Invalid(format!("favorite page {what}"));
-            items.push(PlaybackViewRow {
-                media_id: media.parse().map_err(|_| invalid("media_id"))?,
-                library_id: library.parse().map_err(|_| invalid("library_id"))?,
-                unit: UnitKey { season, episode },
-                favorited_at,
-            });
+        let mut boundary = None;
+        while let Some(raw) = rows.next()? {
+            if items.len() == limit {
+                return Ok(PlaybackViewPage {
+                    items,
+                    total,
+                    next_cursor: boundary,
+                });
+            }
+            let (item, cursor) = row(raw, q)?;
+            boundary = Some(cursor.encode()?);
+            items.push(item);
         }
         Ok(PlaybackViewPage {
             items,
-            total: total as usize,
+            total,
+            next_cursor: None,
         })
+    }
+
+    pub fn playback_favorite_position(
+        &self,
+        q: &PlaybackViewQuery,
+        start: usize,
+    ) -> Result<Option<String>, StoreError> {
+        if q.after.is_some() {
+            return Err(StoreError::Invalid(
+                "favorite position does not accept after".into(),
+            ));
+        }
+        if start == 0 {
+            return Ok(None);
+        }
+        let query = Query::new(q);
+        let offset = i64::try_from(start - 1).unwrap_or(i64::MAX);
+        for (reverse, offset) in [(false, offset), (true, 0)] {
+            let sql = format!(
+                "SELECT * FROM ({}) ORDER BY {} LIMIT 1 OFFSET {offset}",
+                query.base,
+                Query::order(q, reverse)
+            );
+            let mut statement = self.library.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(query.values.iter()))?;
+            if let Some(raw) = rows.next()? {
+                return Ok(Some(row(raw, q)?.1.encode()?));
+            }
+        }
+        Ok(None)
     }
 }

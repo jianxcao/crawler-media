@@ -6,7 +6,6 @@ import type {
   LibraryGalleryGroup,
   LibraryItem,
   LibraryItemOrder,
-  LibraryItemSort,
 } from "@/lib/api/libraries";
 import type { LibraryKind, MediaType } from "@/lib/media-types";
 
@@ -105,63 +104,60 @@ export interface FavoriteItem extends LibraryItem {
 
 export interface FavoritesPage {
   items: FavoriteItem[];
-  /** 去重后的收藏作品总数；items 受 limit 截断 */
-  total: number;
+  /** Exact on the head page; continuations do not count again. */
+  total: number | null;
+  next_cursor: string | null;
 }
 
-/**
- * 「全部收藏」页的排序档：`favorited_at`（最近收藏在前）是这面墙独有的默认档，
- * 其余与单库海报墙同一套键——服务端也是同一份实现，同一档在两处排出同一个顺序。
- */
-export type FavoriteSort = "favorited_at" | Exclude<LibraryItemSort, "probing">;
+export const FAVORITE_SORTS = ["favorited_at", "title", "year"] as const;
+export type FavoriteSort = (typeof FAVORITE_SORTS)[number];
 
-/** 收藏页两种形态共用的排序参数：海报墙与图廊必须传同一个值，两者才是同一份名单。 */
 export interface FavoriteSortParams {
   sort?: FavoriteSort;
-  /** 方向；不给 = 该档的自然方向（收藏时间新→旧、标题 A→Z…） */
   order?: LibraryItemOrder;
 }
-
-function favoriteSortQuery(query: URLSearchParams, params?: FavoriteSortParams): void {
-  // 默认档不带参数：与加排序之前的请求逐字相同
-  if (params?.sort && params.sort !== "favorited_at") query.set("sort", params.sort);
-  if (params?.order) query.set("order", params.order);
+export interface FavoritePageParams extends FavoriteSortParams {
+  limit?: number;
+  after?: string;
+  unwatched_first?: boolean;
 }
 
-/** 当前账号在可见媒体库中收藏的作品（网页与 Jellyfin 客户端点的心同一份），
- *  默认最近收藏在前。首页横滚行取前 20；「全部收藏」海报墙按 offset 滚动加载，
- *  排序档与单库海报墙对齐（`sort`）。 */
-export async function listFavorites(
-  limit = 20,
-  offset = 0,
-  /**
-   * 把还没看完的整体提前。**只有首页那一行传 true**：那一行是「我想看的」，
-   * 而「全部收藏」页是完整账本，该老老实实按收藏时间排。
-   */
-  unwatchedFirst = false,
-  sort?: FavoriteSortParams,
-): Promise<FavoritesPage> {
-  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-  if (unwatchedFirst) query.set("unwatched_first", "true");
-  favoriteSortQuery(query, sort);
+function favoriteQuery(params: FavoriteSortParams & { unwatched_first?: boolean }): URLSearchParams {
+  const query = new URLSearchParams();
+  if (params.sort) query.set("sort", params.sort);
+  if (params.order) query.set("order", params.order);
+  if (params.unwatched_first) query.set("unwatched_first", "true");
+  return query;
+}
+
+export async function listFavorites(params: FavoritePageParams = {}): Promise<FavoritesPage> {
+  const query = favoriteQuery(params);
+  query.set("limit", String(params.limit ?? 20));
+  if (params.after) query.set("after", params.after);
   const response = await request<ApiEnvelope<FavoritesPage>>(`/playback/favorites?${query}`);
   return response.data;
 }
 
-/**
- * 「全部收藏」页图床浏览模式的数据源：与 listFavorites 同一份名单与顺序
- * （`sort` / `order` 传同一个值），一组是一部作品的全部图（海报 / 剧照 / 分集
- * 剧照 / 章节场景图）。分页口径同单库图廊——offset / limit 都按作品数，没有图的
- * 作品也占一组，拿满一页就还有下一页；收藏跨库，每组自带详情落点库。
- */
-export async function listFavoritesGallery(
-  params: { limit: number; offset: number } & FavoriteSortParams,
-): Promise<LibraryGalleryGroup[]> {
-  const query = new URLSearchParams({ limit: String(params.limit), offset: String(params.offset) });
-  favoriteSortQuery(query, params);
-  const response = await request<ApiEnvelope<LibraryGalleryGroup[]>>(
-    `/playback/favorites/gallery?${query}`,
-  );
+export interface FavoritesGalleryPage {
+  items: LibraryGalleryGroup[];
+  total: number | null;
+  next_cursor: string | null;
+}
+
+export async function listFavoritesGallery(params: FavoritePageParams = {}): Promise<FavoritesGalleryPage> {
+  const query = favoriteQuery(params);
+  query.set("limit", String(params.limit ?? 20));
+  if (params.after) query.set("after", params.after);
+  const response = await request<ApiEnvelope<FavoritesGalleryPage>>(`/playback/favorites/gallery?${query}`);
+  return response.data;
+}
+
+export async function seekFavoritesPosition(
+  params: FavoriteSortParams & { start: number; unwatched_first?: boolean },
+): Promise<{ start: number; after: string | null }> {
+  const query = favoriteQuery(params);
+  query.set("start", String(params.start));
+  const response = await request<ApiEnvelope<{ start: number; after: string | null }>>(`/playback/favorites/position?${query}`);
   return response.data;
 }
 

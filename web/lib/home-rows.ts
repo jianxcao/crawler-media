@@ -30,7 +30,7 @@ export type HomeRowOrder = "asc" | "desc";
 
 /** 「我的收藏」行的排序档。未看优先是它的默认（见 playback_favorites 的 unwatched_first）。 */
 export type FavoritesSort =
-  "unwatched_first" | "favorited_at" | "rating" | "title";
+  "unwatched_first" | "favorited_at" | "year" | "title";
 
 /** 服务端存的一行（settings.schemas.HomeRowPref）；除 id 外全部可空，空即默认。 */
 export interface HomeRowPref {
@@ -229,10 +229,10 @@ export const FAVORITES_SORT_PRESETS: Record<
     direction: { naturalAsc: false, asc: "旧→新", desc: "新→旧" },
     hint: "收藏时间",
   },
-  rating: {
-    name: (r) => (r ? "评分最低" : "评分最高"),
-    direction: { naturalAsc: false, asc: "低→高", desc: "高→低" },
-    hint: "评分",
+  year: {
+    name: (r) => (r ? "最早上映" : "最近上映"),
+    direction: { naturalAsc: false, asc: "旧→新", desc: "新→旧" },
+    hint: "上映年份",
   },
   title: {
     name: (r) => (r ? "片名 Z–A" : "片名 A–Z"),
