@@ -123,9 +123,15 @@ fn collection_ownership_and_current_response_remain_intact() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_response(response).await;
-        assert_eq!(body["data"][0]["media_item_id"], f.media.to_string());
+        assert_eq!(body["data"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["total"], 1);
+        assert!(body["data"]["next_cursor"].is_null());
+        assert_eq!(
+            body["data"]["items"][0]["media_item_id"],
+            f.media.to_string()
+        );
         assert!(
-            body["data"][0]["poster_url"]
+            body["data"]["items"][0]["poster_url"]
                 .as_str()
                 .unwrap()
                 .starts_with("/posters/")
