@@ -280,20 +280,46 @@ enum Configuration {
     Countries,
 }
 
+fn languages_body(rows: &[media::LanguageRow]) -> serde_json::Value {
+    json!({"languages": rows.iter().map(|row| json!({
+        "code": row.code, "name": row.name, "english_name": row.english_name,
+    })).collect::<Vec<_>>()})
+}
+
+fn countries_body(rows: &[media::CountryRow]) -> serde_json::Value {
+    json!({"countries": rows.iter().map(|row| json!({
+        "code": row.code, "name": row.native_name, "english_name": row.english_name,
+    })).collect::<Vec<_>>()})
+}
+
+fn cached_configuration(
+    memory: &crate::configuration_memory::ConfigurationMemory,
+    kind: Configuration,
+) -> Option<serde_json::Value> {
+    match kind {
+        Configuration::Languages => memory.languages().map(|rows| languages_body(&rows)),
+        Configuration::Countries => memory.countries().map(|rows| countries_body(&rows)),
+    }
+}
+
 async fn configuration(state: &ApiState, kind: Configuration) -> Response {
+    if let Some(value) = cached_configuration(&state.configuration_memory, kind) {
+        return ok(value).into_response();
+    }
     let catalog = state.catalog.clone();
+    let memory = state.configuration_memory.clone();
     let result = state
         .http_work
         .run(super::library::BROWSE_DEADLINE, move || match kind {
             Configuration::Languages => catalog.configuration_languages().map(|rows| {
-                json!({"languages": rows.into_iter().map(|row| json!({
-                    "code": row.code, "name": row.name, "english_name": row.english_name,
-                })).collect::<Vec<_>>()})
+                let value = languages_body(&rows);
+                memory.store_languages(rows);
+                value
             }),
             Configuration::Countries => catalog.configuration_countries().map(|rows| {
-                json!({"countries": rows.into_iter().map(|row| json!({
-                    "code": row.code, "name": row.native_name, "english_name": row.english_name,
-                })).collect::<Vec<_>>()})
+                let value = countries_body(&rows);
+                memory.store_countries(rows);
+                value
             }),
         })
         .await;

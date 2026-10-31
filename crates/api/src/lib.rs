@@ -47,6 +47,7 @@ pub mod bootstrap_credentials;
 pub mod catalog;
 mod catalog_cache;
 mod catalog_fanout;
+mod configuration_memory;
 mod catalog_storage;
 pub mod chapter_frame_service;
 mod claim;

@@ -1,7 +1,7 @@
 //! Complete catalog results must not monopolize Tokio workers or serialize a wall.
-use api::{ApiState, Store, catalog::Catalog};
+use api::{catalog::Catalog, ApiState, Store};
 use axum::{
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
 use domain::{Media, MediaId, MediaKind};
@@ -10,8 +10,8 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::{CatalogHit, CountryRow, PersonDetails};
 use serde_json::Value;
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
@@ -27,6 +27,8 @@ impl Fetcher for Offline {
 struct Source {
     active: AtomicUsize,
     peak: AtomicUsize,
+    country_calls: AtomicUsize,
+    language_calls: AtomicUsize,
 }
 impl Source {
     fn section(&self, label: &str) -> Result<Vec<CatalogHit>, String> {
@@ -89,11 +91,21 @@ impl Catalog for Source {
         )])
     }
     fn configuration_countries(&self) -> Result<Vec<CountryRow>, String> {
+        self.country_calls.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(200));
         Ok(vec![CountryRow {
             code: "CN".into(),
             english_name: "China".into(),
             native_name: "中国".into(),
+        }])
+    }
+    fn configuration_languages(&self) -> Result<Vec<media::LanguageRow>, String> {
+        self.language_calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![media::LanguageRow {
+            code: "zh".into(),
+            english_name: "Chinese".into(),
+            name: "中文".into(),
         }])
     }
     fn person_details(&self, _: &str) -> Result<Option<PersonDetails>, String> {
@@ -202,11 +214,9 @@ fn catalog_title_search_preserves_results_without_blocking_async_worker() {
     let titles = response.1["data"]["titles"].as_array().unwrap();
     assert!(titles.iter().any(|row| row["title"] == "movie title"));
     assert!(titles.iter().any(|row| row["title"] == "TV title"));
-    assert!(
-        titles
-            .iter()
-            .all(|row| row["poster_url"].as_str().is_some())
-    );
+    assert!(titles
+        .iter()
+        .all(|row| row["poster_url"].as_str().is_some()));
 }
 #[test]
 fn discover_sections_have_bounded_parallelism_and_complete_results() {
@@ -261,19 +271,15 @@ fn cold_person_and_routing_results_keep_existing_fields() {
     });
     assert_eq!(person.0, StatusCode::OK);
     assert_eq!(person.1["data"]["name"], "Jane Roe");
-    assert!(
-        person.1["data"]["avatar_url"]
-            .as_str()
-            .is_some_and(|url| url.ends_with("/jane.jpg"))
-    );
+    assert!(person.1["data"]["avatar_url"]
+        .as_str()
+        .is_some_and(|url| url.ends_with("/jane.jpg")));
     assert_eq!(routing.0, StatusCode::OK);
     assert_eq!(routing.1["data"]["movie_genres"][0]["label"], "Movie Drama");
     assert_eq!(routing.1["data"]["tv_genres"][0]["label"], "TV Drama");
-    assert!(
-        routing.1["data"]["region_presets"]
-            .as_array()
-            .is_some_and(|rows| !rows.is_empty())
-    );
+    assert!(routing.1["data"]["region_presets"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
 }
 
 struct FailedConfiguration;
@@ -300,6 +306,102 @@ impl Catalog for FailedConfiguration {
         Err("finite country source unavailable".into())
     }
 }
+#[test]
+fn configuration_hit_reads_process_memory_without_another_catalog_call() {
+    let source = Arc::new(Source::default());
+    let (_dir, app) = fixture(source.clone());
+    runtime().block_on(async {
+        for (uri, counter, sample) in [
+            (
+                "/api/v1/settings/countries",
+                &source.country_calls,
+                serde_json::json!({"code":"CN","name":"中国","english_name":"China"}),
+            ),
+            (
+                "/api/v1/settings/languages",
+                &source.language_calls,
+                serde_json::json!({"code":"zh","name":"中文","english_name":"Chinese"}),
+            ),
+        ] {
+            let (status, body) = get(app.clone(), uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            let rows = if uri.ends_with("countries") {
+                &body["data"]["countries"]
+            } else {
+                &body["data"]["languages"]
+            };
+            assert_eq!(rows[0], sample, "{uri}");
+            assert_eq!(counter.load(Ordering::SeqCst), 1, "{uri}");
+            let started = Instant::now();
+            let (again_status, again) = get(app.clone(), uri).await;
+            assert!(
+                started.elapsed() < Duration::from_millis(50),
+                "{uri} hit reread the catalog in {:?}",
+                started.elapsed()
+            );
+            assert_eq!(again_status, StatusCode::OK, "{uri}: {again}");
+            assert_eq!(again, body, "{uri}");
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                1,
+                "{uri} hit called catalog"
+            );
+        }
+    });
+}
+
+struct FlakyCountries {
+    calls: AtomicUsize,
+}
+impl Catalog for FlakyCountries {
+    fn search_movie(&self, _: &str) -> Result<Vec<CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn search_tv(&self, _: &str) -> Result<Vec<CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_movie(&self) -> Result<Vec<CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_tv(&self) -> Result<Vec<CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
+        Ok(None)
+    }
+    fn configuration_countries(&self) -> Result<Vec<CountryRow>, String> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            Err("finite country source unavailable".into())
+        } else {
+            Ok(vec![CountryRow {
+                code: "CN".into(),
+                english_name: "China".into(),
+                native_name: "中国".into(),
+            }])
+        }
+    }
+}
+#[test]
+fn configuration_failure_is_not_cached_and_the_next_success_is() {
+    let source = Arc::new(FlakyCountries {
+        calls: AtomicUsize::new(0),
+    });
+    let (_dir, app) = fixture(source.clone());
+    runtime().block_on(async {
+        let (status, body) = get(app.clone(), "/api/v1/settings/countries").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        let (status, body) = get(app.clone(), "/api/v1/settings/countries").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["countries"][0]["code"], "CN");
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+        let (status, _) = get(app, "/api/v1/settings/countries").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    });
+}
+
 #[test]
 fn catalog_configuration_failure_is_not_a_successful_empty_document() {
     let (_dir, app) = fixture(Arc::new(FailedConfiguration));

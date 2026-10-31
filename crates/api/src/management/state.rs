@@ -13,11 +13,11 @@ use indexer::{Fetcher, Indexer, ProfileSet};
 use parking_lot::Mutex;
 
 use super::query_phase::{QueryPhaseSnapshot, QueryPhaseTotals};
-use crate::Store;
 use crate::catalog::{Catalog, EmptyCatalog};
 use crate::poster_fetch::{HttpPoster, PosterFetch};
 use crate::store::StoreError;
-use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
+use crate::system_logs::{LogBuffer, DEFAULT_CAPACITY};
+use crate::Store;
 use domain::{SubscribeId, UserId};
 
 /// Production Library reader capacity.
@@ -93,6 +93,8 @@ pub struct ApiState {
     #[allow(dead_code)]
     pub(crate) library_root: Arc<PathBuf>,
     pub(crate) catalog: Arc<dyn Catalog>,
+    /// Parsed country and language tables for this process.
+    pub(crate) configuration_memory: Arc<crate::configuration_memory::ConfigurationMemory>,
     pub(super) scan_catalog: Arc<
         Mutex<(
             Arc<dyn Catalog>,
@@ -353,6 +355,9 @@ impl ApiState {
             downloader,
             library_root: Arc::new(library_root),
             catalog: catalog.clone(),
+            configuration_memory: Arc::new(
+                crate::configuration_memory::ConfigurationMemory::default(),
+            ),
             scan_catalog: Arc::new(Mutex::new((catalog, media_posters.clone()))),
             poster_fetch: Arc::new(HttpPoster),
             fanart_cache: Arc::default(),
