@@ -1,4 +1,6 @@
-use domain::{AtomRule, Confidence, Filter, Release, Torrent};
+use domain::{AtomRule, Confidence, Filter, Release, Torrent, UnknownHrPolicy};
+
+use crate::platform::platform_matches;
 
 #[derive(Debug, Clone)]
 pub struct ScoredTorrent {
@@ -156,7 +158,12 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
             .as_deref()
             .is_some_and(|got| source_matches(got, want)),
         AtomRule::Free => torrent.free,
-        AtomRule::Hr => torrent.hr,
+        AtomRule::Hr { unknown } => torrent.hr.unwrap_or(*unknown == UnknownHrPolicy::Exclude),
+        AtomRule::Platform(want) => platform_matches(&torrent.title, want),
+        AtomRule::Team(want) => parsed
+            .group
+            .as_deref()
+            .is_some_and(|got| got.eq_ignore_ascii_case(want)),
         AtomRule::Codec(want) => parsed
             .codec
             .as_deref()

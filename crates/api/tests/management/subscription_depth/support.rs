@@ -203,7 +203,7 @@ pub(crate) fn seed_pending_torrent(
         size_bytes: Some(1024 * 1024),
         seeders: Some(5),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

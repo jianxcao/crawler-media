@@ -125,7 +125,7 @@ fn pending(enclosure: &str, downloader_id: Option<DownloaderId>) -> api::store::
             size_bytes: Some(100),
             seeders: None,
             free: false,
-            hr: false,
+            hr: Some(false),
             imdb_id: None,
             id: None,
             leechers: None,

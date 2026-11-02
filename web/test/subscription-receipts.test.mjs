@@ -58,3 +58,24 @@ test("downloads are scoped to the subscription's wanted hashes", async () => {
   const shown = await api.listActiveSubscriptionDownloads(["bbb"]);
   assert.deepEqual(shown.map((t) => t.info_hash), ["bbb"]);
 });
+
+test('rule-set API saves atoms directly and reloads every condition unchanged', async () => {
+  const atoms = [
+    { kind: 'hr', value: null, priority: 100, exclude: true, unknown: 'exclude' },
+    { kind: 'platform', value: 'netflix', priority: 234, exclude: false },
+    { kind: 'team', value: 'Group-A', priority: 345, exclude: true },
+    { kind: 'title_match', value: 'CUSTOM', priority: 456, exclude: false },
+  ];
+  let stored;
+  const api = await load(async (_path, init) => {
+    if (init?.body) stored = { id: 'filter-1', ...JSON.parse(init.body) };
+    return envelope(init?.body ? stored : [stored]);
+  });
+  await api.createRuleSet('Strict', atoms, true);
+  assert.deepEqual(stored, { id: 'filter-1', name: 'Strict', atoms, keep_old_versions: true });
+  const [reloaded] = await api.listRuleSets();
+  const renamed = await api.updateRuleSet(reloaded.id, 'Renamed', reloaded.atoms, false);
+  assert.deepEqual(renamed, {
+    id: 'filter-1', name: 'Renamed', atoms, keep_old_versions: false,
+  });
+});

@@ -11,7 +11,7 @@ fn torrent() -> Torrent {
         size_bytes: None,
         seeders: None,
         free: true,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

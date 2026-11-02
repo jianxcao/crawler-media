@@ -27,14 +27,27 @@ pub struct FilterAtom {
     pub exclude: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnknownHrPolicy {
+    Exclude,
+    Allow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AtomRule {
     Resolution(String),
     Source(String),
     Free,
-    Hr,
+    Hr {
+        unknown: UnknownHrPolicy,
+    },
     Codec(String),
     TitleMatch(String),
+    /// 流媒体平台（规范名或发布标题中的平台标记）。
+    Platform(String),
+    /// Release 解析出的制作组，按完整名称匹配。
+    Team(String),
     /// HDR 格式（Release.hdr，如 `HDR10` / `DV`；区别于 `Hr` 的考核标志）。
     Hdr(String),
     /// 体积区间（MiB，按单集均摊比较：整季包用总体积 ÷ 集数）。

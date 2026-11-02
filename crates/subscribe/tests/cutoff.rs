@@ -60,7 +60,7 @@ fn scored_candidate(
             size_bytes: Some(1),
             seeders: Some(1),
             free: true,
-            hr: false,
+            hr: Some(false),
             imdb_id: None,
             id: None,
             leechers: None,

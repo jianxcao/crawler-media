@@ -96,7 +96,7 @@ fn merge_pending_keeps_existing_downloads_across_search_rounds() {
         size_bytes: Some(100),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,

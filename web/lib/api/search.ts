@@ -53,7 +53,7 @@ export interface TorrentHit {
   poster_url?: string | null;
   free: boolean;
   /** H&R 考核：true=有考核，false=明确无考核 */
-  hr: boolean;
+  hr: boolean | null;
   imdb_id: string | null;
   detail_url: string | null;
   /** 站点分类（Movies / TV / Anime…） */

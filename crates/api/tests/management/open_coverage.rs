@@ -168,7 +168,7 @@ fn seed_open_tv_progress(store: &Store, subscribe_id: domain::SubscribeId) {
                         size_bytes: None,
                         seeders: None,
                         free: false,
-                        hr: false,
+                        hr: Some(false),
                         imdb_id: None,
                         id: None,
                         leechers: None,

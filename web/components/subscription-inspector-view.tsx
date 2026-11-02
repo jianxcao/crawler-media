@@ -23,7 +23,7 @@ import { PageNav } from "@/components/page-nav";
 import { usePageTitle } from "@/lib/use-page-title";
 import { useBackNavigation } from "@/lib/back-navigation";
 import { PosterImage } from "@/components/poster-image";
-import { specSummary } from "@/components/rule-sets-panel";
+import { ruleSetSummary } from "@/components/rule-sets-panel";
 import { useSubscribeEntry } from "@/components/subscribe-entry";
 import { SubscriptionAdjustDialog } from "@/components/subscription-adjust-dialog";
 import { SubscriptionCancelDialog } from "@/components/subscription-cancel-dialog";
@@ -59,7 +59,6 @@ import { formatBytes, formatDuration } from "@/lib/format";
 import { shouldShowResourceTiming } from "@/lib/resource-timing";
 import { subscriptionStatus, subscriptionStatusMeta } from "@/lib/subscription-ui";
 import { targetLibraryNotice } from "@/lib/subscription-target-library";
-import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
 import { useJobs } from "@/lib/jobs";
 import { formatDateTime, formatRelativeTime } from "@/lib/time";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -1132,7 +1131,7 @@ function RuleSetSwitchDialog({
         )}
         <div className="mt-4 space-y-1.5">
           {ruleSets.map((rs) => {
-            const chips = specSummary(ruleSetSpecFromAtoms(rs.atoms));
+            const chips = ruleSetSummary(rs.atoms, { keepOldVersions: rs.keep_old_versions });
             const current = rs.id === currentId;
             return (
               <button

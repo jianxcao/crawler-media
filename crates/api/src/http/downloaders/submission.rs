@@ -267,7 +267,7 @@ fn build_submit_torrent(body: &SubmitInput) -> (Torrent, Release, Vec<Value>) {
         size_bytes: body.size_bytes,
         seeders: None,
         free: false,
-        hr: false,
+        hr: None,
         imdb_id: None,
         id: body.torrent_id.clone(),
         leechers: None,

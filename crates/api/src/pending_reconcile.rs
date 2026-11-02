@@ -265,7 +265,7 @@ mod tests {
                 size_bytes: None,
                 seeders: None,
                 free: false,
-                hr: false,
+                hr: None,
                 imdb_id: None,
                 id: None,
                 leechers: None,

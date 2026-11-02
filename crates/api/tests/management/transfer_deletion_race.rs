@@ -67,7 +67,7 @@ fn make_torrent() -> Torrent {
         size_bytes: Some(1024),
         seeders: Some(10),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,

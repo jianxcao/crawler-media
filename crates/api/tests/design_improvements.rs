@@ -95,7 +95,9 @@ fn sample_atoms() -> Vec<FilterAtom> {
         },
         FilterAtom {
             priority: 10,
-            rule: AtomRule::Hr,
+            rule: AtomRule::Hr {
+                unknown: domain::UnknownHrPolicy::Allow,
+            },
             exclude: true,
         },
     ]

@@ -159,7 +159,7 @@ fn seed_pending(root: &Path, enclosure: &str) -> String {
         size_bytes: Some(100),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,

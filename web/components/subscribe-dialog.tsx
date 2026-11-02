@@ -8,7 +8,7 @@ import { BrandLoader } from "@/components/brand-loader";
 import { CheckIcon } from "@/components/icons";
 import { Modal } from "@/components/modal";
 import { PosterImage } from "@/components/poster-image";
-import { RuleSetEditorDialog, specSummary } from "@/components/rule-sets-panel";
+import { RuleSetEditorDialog, ruleSetSummary } from "@/components/rule-sets-panel";
 import { SubscriptionCancelDialog } from "@/components/subscription-cancel-dialog";
 import { UpgradeRunReportView } from "@/components/upgrade-run-dialog";
 import { listLibraries, type MediaLibrary } from "@/lib/api/libraries";
@@ -31,7 +31,6 @@ import {
 import { cachedImageUrl } from "@/lib/image-proxy";
 import type { MediaType } from "@/lib/media-types";
 import { usePermissions } from "@/lib/permissions";
-import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
 
 /**
  * 订阅弹层只传递 Discover 签发的 titleRef；来源识别与 TMDB 锚定由后端负责。
@@ -611,7 +610,7 @@ export function SubscribeDialog({
                   {(() => {
                     const picked = selectableRules.find((r) => r.id === ruleSetId);
                     if (!picked) return null;
-                    const chips = specSummary(ruleSetSpecFromAtoms(picked.atoms));
+                    const chips = ruleSetSummary(picked.atoms, { keepOldVersions: picked.keep_old_versions });
                     return (
                       <p className="mt-1.5 flex flex-wrap gap-1.5">
                         {chips.length === 0 ? (

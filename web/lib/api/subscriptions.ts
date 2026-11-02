@@ -248,54 +248,15 @@ export interface SubscriptionDetail extends Subscription {
   wanted: WantedItem[];
 }
 
-/** 规则组过滤条件（见后端匹配器 RuleSetSpec）：全部键可缺省=不限。 */
-export interface RuleSetSpec {
-  /** 允许的分辨率；列表顺序即偏好顺序（排前面的评分更高） */
-  resolutions?: string[];
-  /** 允许的片源档（remux/blu-ray/web-dl/rip/tv）；顺序即偏好，与分辨率一样参与选优 */
-  media_sources?: string[];
-  video_codecs?: string[];
-  /** 流媒体平台白名单（规范值，见 lib/platforms.ts）；空=不限。与制作组各自独立生效 */
-  platforms?: string[];
-  /** 流媒体平台黑名单（规范值）；命中即排除，优先于白名单 */
-  platforms_block?: string[];
-  release_groups_allow?: string[];
-  release_groups_block?: string[];
-  /** HDR 白名单兼偏好序（DV/HDR10+/HDR10/HLG/SDR，SDR=未标注）；任一命中即过 */
-  hdr_levels?: string[];
-  /** HDR 黑名单：资源带其中任一格式即排除 */
-  hdr_block?: string[];
-  free_only?: boolean;
-  min_seeders?: number | null;
-  /** 体积区间按「每集均摊」评估：整季包用总体积 ÷ 集数比较 */
-  size_min_mb?: number | null;
-  size_max_mb?: number | null;
-  exclude_hr?: boolean;
-  hr_unknown_policy?: "lenient" | "strict";
-  /** 要求的字幕语言（BCP 47，任一命中即过；"zh" 含简/繁/未标简繁）；空=不限 */
-  subtitle_languages_require?: string[];
-  /** 要求的音轨语言（cmn=国语、yue=粤语…）；空=不限 */
-  audio_languages_require?: string[];
-  /** 洗版目标片源档；缺省=不洗版（docs/design/quality-upgrade.md §3.2） */
-  upgrade_source?: "web-dl" | "blu-ray" | "remux" | null;
-  /** 洗版目标分辨率；缺省=分辨率偏好首选（都缺省则 1080p），须在 resolutions 内 */
-  cutoff_resolution?: string | null;
-  /** 洗到新版本后保留旧版本（多版本共存，收藏家模式）；缺省=旧版本进回收站 */
-  upgrade_keep_old?: boolean;
-  /** 参与洗版比较的维度及优先级（顺序即位次）；缺省 ["resolution","source"] */
-  upgrade_ladder?: string[];
-  /** 按优先级排列的首选站点；首选站点资源优先，同站点内仍按质量评分。 */
-  sites?: string[];
-}
-
 /** 规则组原子（见 self.md RuleSet.atoms；exclude 黑名单原子命中即排除）。 */
-export interface RuleSetAtom {
+interface RuleSetAtomFields {
   kind:
     | "resolution"
     | "source"
     | "video_codec"
     | "free"
-    | "hr"
+    | "platform"
+    | "team"
     | "title_match"
     | "hdr"
     | "size"
@@ -309,6 +270,14 @@ export interface RuleSetAtom {
   priority: number;
   exclude?: boolean;
 }
+
+export type RuleSetAtom = RuleSetAtomFields | {
+  kind: "hr";
+  value: null;
+  priority: number;
+  exclude?: boolean;
+  unknown: "exclude" | "allow";
+};
 
 /** 规则组（见 self.md RuleSet；旧 spec 对象已折叠为 atoms 原子列表）。 */
 export interface RuleSet {
@@ -994,158 +963,29 @@ export function listRuleSets(init?: RequestInit): Promise<RuleSet[]> {
   return unwrap(request<ApiEnvelope<RuleSet[]>>("/rule-sets", init));
 }
 
-/** 把旧 RuleSetSpec（偏好列表/布尔）折叠为新契约的 atoms 原子列表。 */
-export function specToAtoms(spec: RuleSetSpec): RuleSetAtom[] {
-  const atoms: RuleSetAtom[] = [];
-
-  // 分辨率按画质梯队赋有业务意义的分数（2160p=100, 1080p=70, 720p=50），绝对不能从 0 起算！
-  const resolutionWeights: Record<string, number> = {
-    "2160p": 100,
-    "4k": 100,
-    "1080p": 70,
-    "1080i": 65,
-    "720p": 50,
-    "480p": 30,
-  };
-  for (const resolution of spec.resolutions ?? []) {
-    const p = resolutionWeights[resolution.toLowerCase()] ?? 60;
-    atoms.push({ kind: "resolution", value: resolution, priority: p });
-  }
-
-  // 来源档位权重（Remux / BluRay 优先于 WEB-DL）
-  const sourceWeights: Record<string, number> = {
-    remux: 90,
-    bluray: 85,
-    "blu-ray": 85,
-    "web-dl": 70,
-    webrip: 60,
-    hdtv: 50,
-  };
-  for (const source of spec.media_sources ?? []) {
-    const p = sourceWeights[source.toLowerCase()] ?? 50;
-    atoms.push({ kind: "source", value: source, priority: p });
-  }
-
-  if (spec.free_only) atoms.push({ kind: "free", value: null, priority: 50 });
-  if (spec.exclude_hr) atoms.push({ kind: "hr", value: null, priority: 100, exclude: true });
-
-  // 视频编码白名单（按画质阶梯赋优先级）
-  const codecWeights: Record<string, number> = {
-    av1: 95,
-    hevc: 90,
-    "h.265": 90,
-    h265: 90,
-    x265: 90,
-    avc: 70,
-    "h.264": 70,
-    h264: 70,
-    x264: 70,
-  };
-  for (const codec of spec.video_codecs ?? []) {
-    const p = codecWeights[codec.toLowerCase()] ?? 60;
-    atoms.push({ kind: "video_codec", value: codec, priority: p });
-  }
-
-  // 平台白名单（作为 title_match 包含匹配）
-  for (const platform of spec.platforms ?? []) {
-    atoms.push({ kind: "title_match", value: platform, priority: 60 });
-  }
-
-  // 制作组白名单
-  for (const group of spec.release_groups_allow ?? []) {
-    atoms.push({ kind: "title_match", value: group, priority: 60 });
-  }
-
-  // HDR 白名单（兼偏好序）
-  const hdrWeights: Record<string, number> = {
-    dovi: 100,
-    dv: 100,
-    "dolby vision": 100,
-    "hdr10+": 90,
-    hdr10: 80,
-    hdr: 70,
-  };
-  for (const level of spec.hdr_levels ?? []) {
-    const p = hdrWeights[level.toLowerCase()] ?? 60;
-    atoms.push({ kind: "hdr", value: level, priority: p });
-  }
-
-  // 体积区间：单边缺省用 0（无下限）/ 空（无上限）
-  if (spec.size_min_mb != null || spec.size_max_mb != null) {
-    atoms.push({
-      kind: "size",
-      value: `${spec.size_min_mb ?? 0}-${spec.size_max_mb ?? ""}`,
-      priority: 50,
-    });
-  }
-  if (spec.min_seeders != null) {
-    atoms.push({ kind: "min_seeders", value: String(spec.min_seeders), priority: 50 });
-  }
-  for (const lang of spec.subtitle_languages_require ?? []) {
-    atoms.push({ kind: "subtitle_language", value: lang, priority: 50 });
-  }
-  for (const lang of spec.audio_languages_require ?? []) {
-    atoms.push({ kind: "audio_language", value: lang, priority: 50 });
-  }
-  const preferredSites = spec.sites ?? [];
-  preferredSites.forEach((site, index) => {
-    // Atom priority encodes the tier: earlier sites must strictly outrank later ones.
-    atoms.push({ kind: "site", value: site, priority: (preferredSites.length - index) * 50 });
-  });
-  // 洗版目标档位（规则面板「洗到哪一档」）：cutoff_resolution + upgrade_source → wash_target
-  const upgradeParts: string[] = [];
-  if (spec.cutoff_resolution) upgradeParts.push(spec.cutoff_resolution);
-  if (spec.upgrade_source) upgradeParts.push(spec.upgrade_source);
-  if (upgradeParts.length > 0) {
-    atoms.push({ kind: "wash_target", value: upgradeParts.join(" "), priority: 50 });
-  }
-  // 洗版比较维度顺序（顺序即位次）
-  if ((spec.upgrade_ladder ?? []).length > 0) {
-    atoms.push({ kind: "upgrade_ladder", value: spec.upgrade_ladder!.join(","), priority: 50 });
-  }
-  // 黑名单 → exclude 原子（命中即排除；平台/制作组标记通常可见于标题）
-  for (const block of spec.platforms_block ?? []) {
-    atoms.push({ kind: "title_match", value: block, priority: 100, exclude: true });
-  }
-  for (const block of spec.release_groups_block ?? []) {
-    atoms.push({ kind: "title_match", value: block, priority: 100, exclude: true });
-  }
-  for (const block of spec.hdr_block ?? []) {
-    atoms.push({ kind: "hdr", value: block, priority: 100, exclude: true });
-  }
-  return atoms;
+/** 创建规则组，原样保存原子条件。 */
+export function createRuleSet(
+  name: string,
+  atoms: RuleSetAtom[],
+  keepOldVersions = false,
+): Promise<RuleSet> {
+  return unwrap(request<ApiEnvelope<RuleSet>>("/rule-sets", {
+    method: "POST",
+    body: JSON.stringify({ name, atoms, keep_old_versions: keepOldVersions }),
+  }));
 }
 
-export function createRuleSet(name: string, spec: RuleSetSpec): Promise<RuleSet> {
-  return unwrap(
-    request<ApiEnvelope<RuleSet>>("/rule-sets", {
-      method: "POST",
-      body: JSON.stringify({
-        name,
-        atoms: specToAtoms(spec),
-        keep_old_versions: spec.upgrade_keep_old ?? false,
-      }),
-    }),
-  );
-}
-
-/** 更新规则组（只影响之后的匹配评估，不追溯已投递的工单）。 */
+/** 更新规则组（只影响之后的匹配评估）。 */
 export function updateRuleSet(
   id: string,
   name: string,
-  spec: RuleSetSpec,
-  overrideAtoms?: RuleSetAtom[],
+  atoms: RuleSetAtom[],
+  keepOldVersions = false,
 ): Promise<RuleSet> {
-  return unwrap(
-    request<ApiEnvelope<RuleSet>>(`/rule-sets/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        name,
-        atoms: overrideAtoms ?? specToAtoms(spec),
-        keep_old_versions: spec.upgrade_keep_old ?? false,
-      }),
-    }),
-  );
+  return unwrap(request<ApiEnvelope<RuleSet>>(`/rule-sets/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, atoms, keep_old_versions: keepOldVersions }),
+  }));
 }
 
 /** 设为默认规则组（新订阅未指定规则组时使用；不改已有订阅的挂靠）。 */

@@ -13,7 +13,7 @@ fn make_test_torrent() -> Torrent {
         size_bytes: Some(100),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -142,6 +142,40 @@ fn actual_submission_refreshes_submitted_at_timestamp() {
         Some(3000),
         "确认重投后必须更新 submitted_at 赋予新的宽限期"
     );
+}
+
+#[test]
+fn pending_torrents_preserve_unknown_and_known_hr_states() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (sub_id, mut torrent) = create_sub(&store);
+    for (index, hr) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        torrent.hr = hr;
+        torrent.enclosure = format!("https://pt.example/dl/{index}");
+        store
+            .record_pending_submission(
+                sub_id,
+                100,
+                &PendingDownload {
+                    submitted_at: None,
+                    torrent: torrent.clone(),
+                    release_override: None,
+                    downloader_id: None,
+                },
+            )
+            .unwrap();
+    }
+    let loaded = store.load_pending(sub_id).unwrap();
+    assert_eq!(loaded.len(), 3);
+    for (index, expected) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        let pending = loaded
+            .iter()
+            .find(|(_, pending)| {
+                pending.torrent.enclosure == format!("https://pt.example/dl/{index}")
+            })
+            .unwrap();
+        assert_eq!(pending.1.torrent.hr, expected);
+    }
 }
 
 #[test]

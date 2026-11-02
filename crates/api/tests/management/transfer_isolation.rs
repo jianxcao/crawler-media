@@ -37,7 +37,7 @@ fn torrent(title: &str, enclosure: &str) -> domain::Torrent {
         size_bytes: None,
         seeders: None,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

@@ -94,7 +94,7 @@ fn parse_html(site: &Site, profile: &Profile, body: &str) -> Result<Vec<Torrent>
             seeders: optional_text(item, profile.fields.seeders.as_ref())
                 .and_then(|s| s.parse().ok()),
             free: present(item, profile.fields.free.as_ref()),
-            hr: present(item, profile.fields.hr.as_ref()),
+            hr: hr_present(item, profile.fields.hr.as_ref()),
             imdb_id: None,
             id: extract_id(&enclosure_url).or_else(|| detail_url.as_deref().and_then(extract_id)),
             leechers: optional_text(item, profile.fields.leechers.as_ref())
@@ -156,7 +156,7 @@ impl MTeamItem {
             size_bytes: self.size.as_deref().and_then(parse_size),
             seeders: status.seeders.as_deref().and_then(|s| s.parse().ok()),
             free,
-            hr: status.hr.unwrap_or(false),
+            hr: status.hr,
             imdb_id: None,
             id,
             leechers: status.leechers.as_deref().and_then(|s| s.parse().ok()),
@@ -212,7 +212,7 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
                 .hr
                 .as_ref()
                 .and_then(|f| xml_field(item, f))
-                .is_some_and(|s| truthy(&s)),
+                .and_then(|s| hr_flag(&s)),
             imdb_id: None,
             id,
             leechers: rss
@@ -272,6 +272,26 @@ fn present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> bool {
         return false;
     };
     root.select(&sel).next().is_some()
+}
+
+fn hr_present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> Option<bool> {
+    let field = field?;
+    let selector = match Selector::parse(&field.selector) {
+        Ok(selector) => selector,
+        Err(error) => {
+            tracing::warn!(selector = %field.selector, ?error, "H&R selector 无效，状态未知");
+            return None;
+        }
+    };
+    Some(root.select(&selector).next().is_some())
+}
+
+fn hr_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" => Some(true),
+        "0" | "false" | "no" | "n" => Some(false),
+        _ => None,
+    }
 }
 
 fn xml_field(item: roxmltree::Node<'_, '_>, field: &Field) -> Option<String> {

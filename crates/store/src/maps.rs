@@ -254,8 +254,10 @@ pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
                 domain::AtomRule::Source(v) => ("source", Some(serde_json::json!(v))),
                 domain::AtomRule::Codec(v) => ("video_codec", Some(serde_json::json!(v))),
                 domain::AtomRule::Free => ("free", None),
-                domain::AtomRule::Hr => ("hr", None),
+                domain::AtomRule::Hr { .. } => ("hr", None),
                 domain::AtomRule::TitleMatch(v) => ("title", Some(serde_json::json!(v))),
+                domain::AtomRule::Platform(v) => ("platform", Some(serde_json::json!(v))),
+                domain::AtomRule::Team(v) => ("team", Some(serde_json::json!(v))),
                 domain::AtomRule::Hdr(v) => ("hdr", Some(serde_json::json!(v))),
                 domain::AtomRule::Size { min_mb, max_mb } => (
                     "size",
@@ -277,6 +279,9 @@ pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
             obj.insert("priority".into(), serde_json::json!(atom.priority));
             obj.insert("rule".into(), serde_json::json!(kind));
             obj.insert("exclude".into(), serde_json::json!(atom.exclude));
+            if let domain::AtomRule::Hr { unknown } = atom.rule {
+                obj.insert("unknown".into(), serde_json::json!(unknown));
+            }
             if let Some(value) = value {
                 obj.insert("value".into(), value);
             }
@@ -320,43 +325,45 @@ fn parse_atoms_json(raw: &str) -> Option<Vec<FilterAtom>> {
     else {
         return None;
     };
-    Some(
-        items
-            .into_iter()
-            .filter_map(|item| {
-                let priority = item["priority"].as_i64()? as i32;
-                let kind = item["rule"].as_str()?;
-                let exclude = item["exclude"].as_bool().unwrap_or(false);
-                let value = item.get("value").unwrap_or(&serde_json::Value::Null);
-                let text = atom_text(value);
-                let rule = match kind {
-                    "resolution" => domain::AtomRule::Resolution(text),
-                    "source" => domain::AtomRule::Source(text),
-                    "video_codec" => domain::AtomRule::Codec(text),
-                    "free" => domain::AtomRule::Free,
-                    "hr" => domain::AtomRule::Hr,
-                    "title" => domain::AtomRule::TitleMatch(text),
-                    "hdr" => domain::AtomRule::Hdr(text),
-                    "size" => domain::AtomRule::Size {
-                        min_mb: value["min_mb"].as_u64().filter(|m| *m > 0),
-                        max_mb: value["max_mb"].as_u64().filter(|m| *m > 0),
-                    },
-                    "min_seeders" => domain::AtomRule::MinSeeders(text.parse().ok()?),
-                    "subtitle" => domain::AtomRule::SubtitleLanguage(text),
-                    "audio" => domain::AtomRule::AudioLanguage(text),
-                    "site" => domain::AtomRule::Site(text),
-                    "wash_target" => domain::AtomRule::WashTarget(text),
-                    "upgrade_ladder" => domain::AtomRule::UpgradeLadder(text),
-                    _ => return None,
-                };
-                Some(FilterAtom {
-                    priority,
-                    rule,
-                    exclude,
-                })
+    items
+        .into_iter()
+        .map(|item| {
+            let priority = item["priority"].as_i64()? as i32;
+            let kind = item["rule"].as_str()?;
+            let exclude = item["exclude"].as_bool().unwrap_or(false);
+            let value = item.get("value").unwrap_or(&serde_json::Value::Null);
+            let text = atom_text(value);
+            let rule = match kind {
+                "resolution" => domain::AtomRule::Resolution(text),
+                "source" => domain::AtomRule::Source(text),
+                "video_codec" => domain::AtomRule::Codec(text),
+                "free" => domain::AtomRule::Free,
+                "hr" => domain::AtomRule::Hr {
+                    unknown: serde_json::from_value(item.get("unknown")?.clone()).ok()?,
+                },
+                "title" => domain::AtomRule::TitleMatch(text),
+                "platform" => domain::AtomRule::Platform(text),
+                "team" => domain::AtomRule::Team(text),
+                "hdr" => domain::AtomRule::Hdr(text),
+                "size" => domain::AtomRule::Size {
+                    min_mb: value["min_mb"].as_u64().filter(|m| *m > 0),
+                    max_mb: value["max_mb"].as_u64().filter(|m| *m > 0),
+                },
+                "min_seeders" => domain::AtomRule::MinSeeders(text.parse().ok()?),
+                "subtitle" => domain::AtomRule::SubtitleLanguage(text),
+                "audio" => domain::AtomRule::AudioLanguage(text),
+                "site" => domain::AtomRule::Site(text),
+                "wash_target" => domain::AtomRule::WashTarget(text),
+                "upgrade_ladder" => domain::AtomRule::UpgradeLadder(text),
+                _ => return None,
+            };
+            Some(FilterAtom {
+                priority,
+                rule,
+                exclude,
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 pub(super) fn torrent_from_json(value: &serde_json::Value) -> Result<Torrent, StoreError> {
@@ -382,7 +389,7 @@ pub(super) fn torrent_from_json(value: &serde_json::Value) -> Result<Torrent, St
             .and_then(|v| v.as_u64())
             .map(|v| v as u32),
         free: value.get("free").and_then(|v| v.as_bool()).unwrap_or(false),
-        hr: value.get("hr").and_then(|v| v.as_bool()).unwrap_or(false),
+        hr: value.get("hr").and_then(|v| v.as_bool()),
         imdb_id: value
             .get("imdb_id")
             .and_then(|v| v.as_str())

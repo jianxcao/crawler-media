@@ -4,11 +4,12 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use domain::{AtomRule, Filter, FilterAtom, FilterId};
+use domain::{AtomRule, Filter, FilterAtom, FilterId, UnknownHrPolicy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
+use crate::http::strict_json::StrictJson;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::settings_keys;
@@ -31,6 +32,8 @@ pub(crate) struct AtomInput {
     /// 当前原子命中时排除该 Torrent。
     #[serde(default)]
     exclude: bool,
+    #[serde(default)]
+    unknown: Option<UnknownHrPolicy>,
 }
 
 fn atom_from_input(input: AtomInput) -> Result<FilterAtom, String> {
@@ -45,9 +48,15 @@ fn atom_from_input(input: AtomInput) -> Result<FilterAtom, String> {
         "resolution" => AtomRule::Resolution(value()?),
         "source" => AtomRule::Source(value()?),
         "free" => AtomRule::Free,
-        "hr" => AtomRule::Hr,
+        "hr" => AtomRule::Hr {
+            unknown: input
+                .unknown
+                .ok_or_else(|| "hr atom 需要 unknown（exclude/allow）".to_string())?,
+        },
         "video_codec" => AtomRule::Codec(value()?),
         "title_match" => AtomRule::TitleMatch(value()?),
+        "platform" => AtomRule::Platform(value()?),
+        "team" => AtomRule::Team(value()?),
         "hdr" => AtomRule::Hdr(value()?),
         "size" => parse_size_atom(&input.kind, &input.value)?,
         "min_seeders" => AtomRule::MinSeeders(
@@ -105,9 +114,11 @@ fn atom_json(atom: &FilterAtom) -> Value {
         AtomRule::Resolution(v) => ("resolution", Some(v.clone())),
         AtomRule::Source(v) => ("source", Some(v.clone())),
         AtomRule::Free => ("free", None),
-        AtomRule::Hr => ("hr", None),
+        AtomRule::Hr { .. } => ("hr", None),
         AtomRule::Codec(v) => ("video_codec", Some(v.clone())),
         AtomRule::TitleMatch(v) => ("title_match", Some(v.clone())),
+        AtomRule::Platform(v) => ("platform", Some(v.clone())),
+        AtomRule::Team(v) => ("team", Some(v.clone())),
         AtomRule::Hdr(v) => ("hdr", Some(v.clone())),
         AtomRule::Size { min_mb, max_mb } => (
             "size",
@@ -124,12 +135,16 @@ fn atom_json(atom: &FilterAtom) -> Value {
         AtomRule::WashTarget(v) => ("wash_target", Some(v.clone())),
         AtomRule::UpgradeLadder(v) => ("upgrade_ladder", Some(v.clone())),
     };
-    json!({
+    let mut value = json!({
         "kind": kind,
         "value": value,
         "priority": atom.priority,
         "exclude": atom.exclude,
-    })
+    });
+    if let AtomRule::Hr { unknown } = atom.rule {
+        value["unknown"] = json!(unknown);
+    }
+    value
 }
 
 fn rule_set_json(filter: &Filter, is_default: bool) -> Value {
@@ -176,7 +191,7 @@ pub(crate) async fn list_rule_sets(State(state): State<ApiState>) -> Response {
 
 pub(crate) async fn create_rule_set(
     State(state): State<ApiState>,
-    Json(body): Json<RuleSetInput>,
+    StrictJson(body): StrictJson<RuleSetInput>,
 ) -> Response {
     if body.name.trim().is_empty() {
         return err(
@@ -267,7 +282,7 @@ pub(crate) async fn get_rule_set(
 pub(crate) async fn patch_rule_set(
     State(state): State<ApiState>,
     Path(id): Path<String>,
-    Json(body): Json<RuleSetInput>,
+    StrictJson(body): StrictJson<RuleSetInput>,
 ) -> Response {
     let id = match FilterId::from_str(&id) {
         Ok(id) => id,

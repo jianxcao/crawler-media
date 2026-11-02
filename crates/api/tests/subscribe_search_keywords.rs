@@ -89,7 +89,7 @@ fn torrent(title: &str) -> Torrent {
         size_bytes: None,
         seeders: None,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

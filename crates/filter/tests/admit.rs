@@ -44,22 +44,24 @@ fn search_demo() -> Vec<Torrent> {
 #[test]
 fn exclude_only_filter_admits_non_hr_and_rejects_hr() {
     let mut clean = search_demo().remove(0);
-    clean.hr = false;
+    clean.hr = Some(false);
     let mut hr = clean.clone();
-    hr.hr = true;
+    hr.hr = Some(true);
     let filter = Filter {
         id: FilterId::new(),
         name: "no HR".into(),
         atoms: vec![FilterAtom {
             priority: 100,
-            rule: AtomRule::Hr,
+            rule: AtomRule::Hr {
+                unknown: domain::UnknownHrPolicy::Allow,
+            },
             exclude: true,
         }],
         keep_old_versions: false,
     };
     let outcome = filter::admit(vec![clean, hr], &filter);
     assert_eq!(outcome.admitted.len(), 1);
-    assert!(!outcome.admitted[0].torrent.hr);
+    assert_eq!(outcome.admitted[0].torrent.hr, Some(false));
     assert_eq!(outcome.rejected.len(), 1);
 }
 
@@ -112,7 +114,9 @@ fn quality_filter() -> Filter {
             },
             FilterAtom {
                 priority: 5,
-                rule: AtomRule::Hr,
+                rule: AtomRule::Hr {
+                    unknown: domain::UnknownHrPolicy::Allow,
+                },
                 exclude: false,
             },
             FilterAtom {
@@ -151,7 +155,7 @@ fn junk_titles_that_match_no_atom_are_rejected_with_score_zero() {
         size_bytes: Some(700_000_000),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -182,7 +186,7 @@ fn low_confidence_release_is_not_an_auto_download_candidate() {
         size_bytes: None,
         seeders: None,
         free: true,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -228,7 +232,7 @@ fn torrent(title: &str, size_mb: Option<u64>, seeders: Option<u32>) -> Torrent {
         size_bytes: size_mb.map(|mb| mb * 1024 * 1024),
         seeders,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

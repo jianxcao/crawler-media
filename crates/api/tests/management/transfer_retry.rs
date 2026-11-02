@@ -91,7 +91,7 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
         size_bytes: None,
         seeders: None,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,

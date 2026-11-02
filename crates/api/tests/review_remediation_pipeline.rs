@@ -105,7 +105,7 @@ async fn source_quality_survives_persistence_for_wash_cut() {
         size_bytes: None,
         seeders: None,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,

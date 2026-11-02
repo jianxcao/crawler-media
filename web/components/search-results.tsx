@@ -190,7 +190,7 @@ function toHitView(hit: TorrentHit): HitView {
     free: hit.free,
     download_volume_factor: hit.free ? 0 : 1,
     upload_volume_factor: 1,
-    hit_and_run: hit.hr ? true : false,
+    hit_and_run: hit.hr,
     detail_url: hit.detail_url ?? null,
     download_url: hit.enclosure,
     // 种子结果不再强求显示容易被外域防盗链阻断的海报图，直接置空，让视图专注于文件名、做种数与规格

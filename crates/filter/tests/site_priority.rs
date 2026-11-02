@@ -8,7 +8,7 @@ fn torrent(site_id: SiteId, title: &str) -> Torrent {
         size_bytes: Some(1_000_000_000),
         seeders: Some(100),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
