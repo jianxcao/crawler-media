@@ -68,7 +68,7 @@ P 类请求集合按当前 `web/components/library-view.tsx`、`library-detail-v
 
 ## 命令
 
-同一时间仅允许运行一个 cargo 进程，build/test/clippy 串行，使用 `-j8`，测试 `-- --test-threads=8`。第一次建实例：
+同一时间仅允许运行一个 cargo 进程，build/test/clippy 串行，使用 `-j4`，测试 `-- --test-threads=4`。第一次建实例：
 
 ```sh
 zsh scripts/e2e/stress-up.sh /tmp/e2e-stress
@@ -81,7 +81,7 @@ python3 scripts/e2e/perfgate.py cold \
   --out .e2e/perf/baseline-cold.json
 ```
 
-`stress-up.sh` 默认先运行 `cargo build --release -j8 -p api`；已有匹配的 release 构建时可设置 `PERF_SKIP_BUILD=1`，由操作者核对 health 的 commit。`restart` 模式仅停止并重启同一个隔离实例、等待健康，不重建、不扫描、不重新播种。运行中的实例拒绝重复启动。所有步骤可从仓库外调用。
+`stress-up.sh` 默认先运行 `cargo build --release -j4 -p api`；已有匹配的 release 构建时可设置 `PERF_SKIP_BUILD=1`，由操作者核对 health 的 commit。`restart` 模式仅停止并重启同一个隔离实例、等待健康，不重建、不扫描、不重新播种。运行中的实例拒绝重复启动。所有步骤可从仓库外调用。
 
 后续阶段保持同一数据规格，替换 `phaseA/phaseE/phaseB/phaseC` 名称并指向上一阶段报告：
 

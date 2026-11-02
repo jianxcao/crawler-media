@@ -42,13 +42,13 @@
 | `jobs.db` | Job 定义、执行、重试事实 | 否 |
 | `cache.db` | 六来源外部响应缓存及缓存自身索引；无浏览修订/事件表 | 是（按停用连接或受控清理流程，不直接 unlink 活跃 WAL 文件） |
 
-“旧数据可丢”只适用于这次未上线切换，**不是以后可以删除 library/subscribe/jobs 的产品语义**。Media 从 app.db 移入 library.db 不意味着依附于文件：删除 Library 必须保留 Media 和观看状态。
+“旧数据可丢”只适用于这次未上线切换，**不是以后可以删除 library/subscribe/jobs 的产品语义**。Media 从 app.db 移入 library.db 不意味着删除磁盘内容。删除 Library 的当前规则以 ADR-0012 为准：仍有其他文件或 Collection/Subscribe 引用的 Media 保留；没有这些引用的孤儿 Media 连同 favorites/Playback 进度一起清除。
 
 同库FK用于明确的从属关系；禁止library/file删除通过FK级联删除Media或User观看事实。跨文件ID无外键，不宣称有跨文件原子事务。User删除、Subscribe创建/调度仍需可恢复的业务操作，不能误把整个实例当作一个事务；Playback进度/会话/历史则放同库并用同一事务提交。
 
 ## 4. 核心表与键（目标模型）
 
-以下列出业务字段和关键约束，保持为目标合同；复用现有操作/探测/播放字段时不得因清单省略而删除功能。完整生产 DDL 已位于 `crates/store/src/schema/v1/`（字段字典见[数据库文档](../../database/README.md)）；前后端主调用已接入当前模型，H1–H6及完整规模/现场验收仍未闭环，不能用本文或表创建代替运行时证据。
+以下列出业务字段和关键约束，保持为目标合同；复用现有操作/探测/播放字段时不得因清单省略而删除功能。完整生产 DDL 已位于 `crates/store/src/schema/v1/`（字段字典见[数据库文档](../../database/README.md)）；前后端主调用已接入当前模型；H1–H6 已有历史修复记录（见页首引用），不能按旧状态重做。完整规模和当前版本的现场验收仍需独立证据，不能用本文、表创建或历史修复记录替代。
 
 ### 4.1 Media 与元数据
 

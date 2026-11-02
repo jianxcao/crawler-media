@@ -8,7 +8,7 @@ mkdir -p "$R/data"
 export CRAWLER_MEDIA_TOKEN=${CRAWLER_MEDIA_TOKEN:-changeme}
 export CRAWLER_MEDIA_ADMIN_PASSWORD=${CRAWLER_MEDIA_ADMIN_PASSWORD:-local-perf-admin-password}
 if [[ "$MODE" != restart && ${PERF_SKIP_BUILD:-0} != 1 ]]; then
-  cargo build --manifest-path "$P/Cargo.toml" --release -j8 -p api
+  cargo build --manifest-path "$P/Cargo.toml" --release -j4 -p api
 fi
 if [[ -f "$R/pid" ]] && kill -0 "$(cat "$R/pid")" 2>/dev/null; then
   if [[ "$MODE" != restart ]]; then
