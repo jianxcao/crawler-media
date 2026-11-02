@@ -36,44 +36,12 @@ pub(super) struct SeasonConsensus {
     pub consensus_clusters: usize,
 }
 
-pub(super) fn find_season_consensus<F, C>(episode_count: usize, mut compare: F) -> SeasonConsensus
+pub(super) fn find_season_consensus<F, C>(episode_count: usize, compare: F) -> SeasonConsensus
 where
     F: FnMut(usize, usize) -> C,
     C: IntoIterator<Item = CommonSegment>,
 {
-    let mut matches = Vec::new();
-    let mut pairs_checked = 0;
-    let mut candidate_pairs = 0;
-    for first in 0..episode_count {
-        for second in first + 1..episode_count {
-            pairs_checked += 1;
-            let pair_started = std::time::Instant::now();
-            let candidates = compare(first, second).into_iter().collect::<Vec<_>>();
-            candidate_pairs += usize::from(!candidates.is_empty());
-            tracing::debug!(
-                first_episode_index = first,
-                second_episode_index = second,
-                candidates = candidates.len(),
-                intervals = ?candidates.iter().map(|segment| (
-                    segment.start1_sec,
-                    segment.end1_sec,
-                    segment.start2_sec,
-                    segment.end2_sec,
-                    segment.duration_sec,
-                    segment.score,
-                )).collect::<Vec<_>>(),
-                elapsed_ms = pair_started.elapsed().as_millis() as u64,
-                "【片头片尾】单集对比候选明细"
-            );
-            for segment in candidates {
-                matches.push(PairMatch {
-                    first,
-                    second,
-                    segment,
-                });
-            }
-        }
-    }
+    let (matches, pairs_checked, candidate_pairs) = collect_pair_matches(episode_count, compare);
 
     let minimum_support = minimum_support(episode_count);
     let candidate_segments = matches.len();
@@ -164,6 +132,51 @@ where
         rejected_episode_support_clusters,
         minimum_support,
     }
+}
+
+fn collect_pair_matches<F, C>(
+    episode_count: usize,
+    mut compare: F,
+) -> (Vec<PairMatch>, usize, usize)
+where
+    F: FnMut(usize, usize) -> C,
+    C: IntoIterator<Item = CommonSegment>,
+{
+    let mut matches = Vec::new();
+    let mut pairs_checked = 0;
+    let mut candidate_pairs = 0;
+    for first in 0..episode_count {
+        for second in first + 1..episode_count {
+            pairs_checked += 1;
+            let pair_started = std::time::Instant::now();
+            let candidates = compare(first, second).into_iter().collect::<Vec<_>>();
+            candidate_pairs += usize::from(!candidates.is_empty());
+            tracing::debug!(
+                first_episode_index = first,
+                second_episode_index = second,
+                candidates = candidates.len(),
+                intervals = ?candidates.iter().map(|segment| (
+                    segment.start1_sec,
+                    segment.end1_sec,
+                    segment.start2_sec,
+                    segment.end2_sec,
+                    segment.duration_sec,
+                    segment.score,
+                )).collect::<Vec<_>>(),
+                elapsed_ms = pair_started.elapsed().as_millis() as u64,
+                "【片头片尾】单集对比候选明细"
+            );
+            for segment in candidates {
+                matches.push(PairMatch {
+                    first,
+                    second,
+                    segment,
+                });
+            }
+        }
+    }
+
+    (matches, pairs_checked, candidate_pairs)
 }
 
 fn minimum_support(episode_count: usize) -> usize {

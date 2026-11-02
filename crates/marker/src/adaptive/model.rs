@@ -148,36 +148,7 @@ fn build_models_for_kind(
     kind: SegmentKind,
     policy: &SamplingPolicy,
 ) -> Vec<TemplateModel> {
-    let mut matches = Vec::new();
-    for i in 0..evidence.len() {
-        for j in i + 1..evidence.len() {
-            // Distinct episodes required for templates
-            if evidence[i].episode == evidence[j].episode {
-                continue;
-            }
-
-            let segments = engine.find_common_segments(
-                &evidence[i].capture.words,
-                &evidence[j].capture.words,
-                (policy.min_match_duration_ms as f32) / 1000.0,
-                (policy.max_match_duration_ms as f32) / 1000.0,
-            );
-
-            for seg in segments {
-                let duration_ms = (seg.duration_sec * 1000.0) as i64;
-                if duration_ms >= policy.min_match_duration_ms
-                    && duration_ms <= policy.max_match_duration_ms
-                    && seg.score <= policy.max_score
-                {
-                    matches.push(PairCandidate {
-                        first_idx: i,
-                        second_idx: j,
-                        segment: seg,
-                    });
-                }
-            }
-        }
-    }
+    let matches = collect_pair_candidates(engine, evidence, policy);
 
     if matches.is_empty() {
         return Vec::new();
@@ -276,6 +247,45 @@ fn build_models_for_kind(
     }
 
     template_models
+}
+
+fn collect_pair_candidates(
+    engine: &dyn FingerprintEngine,
+    evidence: &[&EpisodeEvidence],
+    policy: &SamplingPolicy,
+) -> Vec<PairCandidate> {
+    let mut matches = Vec::new();
+    for i in 0..evidence.len() {
+        for j in i + 1..evidence.len() {
+            // Distinct episodes required for templates
+            if evidence[i].episode == evidence[j].episode {
+                continue;
+            }
+
+            let segments = engine.find_common_segments(
+                &evidence[i].capture.words,
+                &evidence[j].capture.words,
+                (policy.min_match_duration_ms as f32) / 1000.0,
+                (policy.max_match_duration_ms as f32) / 1000.0,
+            );
+
+            for seg in segments {
+                let duration_ms = (seg.duration_sec * 1000.0) as i64;
+                if duration_ms >= policy.min_match_duration_ms
+                    && duration_ms <= policy.max_match_duration_ms
+                    && seg.score <= policy.max_score
+                {
+                    matches.push(PairCandidate {
+                        first_idx: i,
+                        second_idx: j,
+                        segment: seg,
+                    });
+                }
+            }
+        }
+    }
+
+    matches
 }
 
 fn cluster_matches(matches: &[PairCandidate], evidence: &[&EpisodeEvidence]) -> Vec<Vec<usize>> {
