@@ -32,7 +32,7 @@ Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、
 
 Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。Store 核对 application_id/user_version，并从唯一生产 DDL 生成表、索引和视图定义清单，对照 sqlite_schema（包括表内约束），拒绝缺失、定义不同或额外对象；诊断/故障注入 trigger 不属于该结构清单。Jobs 同样从唯一 DDL 校验对象定义和单例。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
 
-连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。app/library/subscribe 与 Jobs Queue 显式 synchronous=FULL；Store 的可重建 cache 使用 NORMAL。当前连接策略还设置 cache_size=-16384、temp_store=MEMORY、journal_size_limit=67108864、mmap_size=268435456；空库在 WAL/建表前设置 auto_vacuum=INCREMENTAL。实例 app 心跳 busy_timeout 为 10000ms。独立 media ResponseCache 仅显式设置 WAL/timeout/FK，策略统一尚需测量。页缓存和 mmap 是每连接预算，temp_store 与 journal_size_limit 不提供全进程内存/WAL硬上限；不把构建默认当耐久性合同。
+连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。app/library/subscribe 与 Jobs Queue 显式 synchronous=FULL；Store 的可重建 cache 使用 NORMAL。当前连接策略还设置 cache_size=-16384、temp_store=MEMORY、journal_size_limit=67108864、mmap_size=268435456；空库在 WAL/建表前设置 auto_vacuum=INCREMENTAL。实例 app 心跳复用同一 App writer，busy_timeout 同为 5000ms。独立 media ResponseCache 仅显式设置 WAL/timeout/FK，策略统一尚需测量。页缓存和 mmap 是每连接预算，temp_store 与 journal_size_limit 不提供全进程内存/WAL硬上限；不把构建默认当耐久性合同。
 
 Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务内创建全部对象、单例和身份头；独立 Queue 与 API 共用。已有非空文件只读预检，旧/未知/未来或损坏当前布局拒绝且不修补；保留事实队列及备份提示。没有 Store→Jobs 生产依赖。
 

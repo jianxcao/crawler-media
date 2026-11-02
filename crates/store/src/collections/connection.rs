@@ -40,14 +40,11 @@ impl crate::LibraryConnection<'_> {
         name: &str,
     ) -> Result<String, StoreError> {
         let id = domain::CollectionId::new().to_string();
-        let max: i64 = self
-            .library
-            .query_row(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM collections WHERE user_id = ?1",
-                params![user_id.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        let max: i64 = self.library.query_row(
+            "SELECT COALESCE(MAX(sort_order), 0) FROM collections WHERE user_id = ?1",
+            params![user_id.to_string()],
+            |row| row.get(0),
+        )?;
         self.library.execute(
             "INSERT INTO collections (id, user_id, visibility, name, sort_order, created_at)
              VALUES (?1, ?2, 'private', ?3, ?4, ?5)",
@@ -116,13 +113,11 @@ impl crate::LibraryConnection<'_> {
                 &tx, *media,
             )?;
         }
-        let max: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM collection_items WHERE collection_id = ?1",
-                params![collection_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        let max: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sort_order), 0) FROM collection_items WHERE collection_id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )?;
         let n = tx.execute(
             "INSERT OR IGNORE INTO collection_items (collection_id, media_id, sort_order, added_at)
              VALUES (?1, ?2, ?3, ?4)",

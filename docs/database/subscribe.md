@@ -6,7 +6,7 @@
 
 `subscribes.created_at` / `updated_at` 没有空串默认值；写入必须显式提供非 NULL 时间戳。Store 对当前 DDL 的表/索引定义进行只读预检，不导入数据或改写已有不同定义。没有历史 schema fixture、迁移或字段兼容。
 
-共 **4 张业务表、47 字段、3 个显式命名索引、0 外键、0 CHECK、0 触发器**。
+共 **4 张业务表、47 字段、3 个显式命名索引、3 外键、0 CHECK、0 触发器**。
 
 ## 表目录
 
@@ -67,7 +67,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
-| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 逻辑引用本库 `subscribes.id`。 |
+| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 外键引用本库 `subscribes.id`，随父行删除级联清理。 |
 | `season` | `INTEGER` | 2 | 是 | `-1` | 覆盖槽季号；无季用 -1。 |
 | `episode` | `INTEGER` | 3 | 是 | `-1` | 覆盖槽集号；无集用 -1。 |
 | `score` | `INTEGER` | — | 是 | 无 | 已拥有文件的评分。 |
@@ -76,7 +76,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 **键与约束**
 
 - `PRIMARY KEY(subscribe_id,season,episode)`。
-- 无显式外键。
+- `subscribe_id REFERENCES subscribes(id) ON DELETE CASCADE`；删除父行后迟到的子行写入被拒绝。
 
 **显式命名索引**
 
@@ -90,7 +90,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
-| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 逻辑引用本库 `subscribes.id`。 |
+| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 外键引用本库 `subscribes.id`，随父行删除级联清理。 |
 | `season` | `INTEGER` | 2 | 是 | `-1` | 履历对应的季槽；无季用 -1。 |
 | `episode` | `INTEGER` | 3 | 是 | `-1` | 履历对应的集槽；无集用 -1。 |
 | `search_attempts` | `INTEGER` | — | 是 | `0` | 累计搜索次数。 |
@@ -103,7 +103,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 **键与约束**
 
 - `PRIMARY KEY(subscribe_id,season,episode)`。
-- 无显式外键。
+- `subscribe_id REFERENCES subscribes(id) ON DELETE CASCADE`；删除父行后迟到的子行写入被拒绝。
 
 **显式命名索引**
 
@@ -115,7 +115,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
-| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 逻辑引用本库 `subscribes.id`。 |
+| `subscribe_id` | `TEXT` | 1 | 是 | 无 | 外键引用本库 `subscribes.id`，随父行删除级联清理。 |
 | `enclosure` | `TEXT` | 2 | 是 | 无 | Torrent 下载入口，参与去重。 |
 | `title` | `TEXT` | — | 是 | 无 | Torrent 标题。 |
 | `score` | `INTEGER` | — | 是 | 无 | 提交时评分。 |
@@ -132,7 +132,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 **键与约束**
 
 - `PRIMARY KEY(subscribe_id,enclosure)`。
-- 无显式外键。
+- `subscribe_id REFERENCES subscribes(id) ON DELETE CASCADE`；删除父行后迟到的子行写入被拒绝。
 
 **显式命名索引**
 

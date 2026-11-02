@@ -344,6 +344,7 @@ fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
             path: Some(path.display().to_string()),
         },
     );
+    store.insert_subscribe(&subscribe).unwrap();
     store.save_subscribe_facts(subscribe.id, &facts).unwrap();
     subscribe.library_id = Some(domain::LibraryId::from_str(&b.id).unwrap());
     store.update_subscribe(&subscribe).unwrap();

@@ -90,6 +90,7 @@ impl Fixture {
             follow_future: false,
             search_interval_secs: 1800,
         };
+        store.insert_subscribe(&subscribe).unwrap();
         Self {
             tmp,
             store,

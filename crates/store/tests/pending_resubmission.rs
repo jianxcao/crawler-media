@@ -71,6 +71,49 @@ fn create_sub(store: &Store) -> (SubscribeId, Torrent) {
     (subscribe.id, make_test_torrent())
 }
 
+#[test]
+fn deleted_subscribe_cannot_be_recreated_by_late_child_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (id, torrent) = create_sub(&store);
+    let pending = || PendingDownload {
+        torrent: torrent.clone(),
+        release_override: None,
+        downloader_id: None,
+        submitted_at: Some(100),
+    };
+    let mut facts = domain::SubscribeFacts::default();
+    facts.upsert(
+        None,
+        None,
+        domain::QualityFact {
+            score: 10,
+            path: Some("fixture.mkv".into()),
+        },
+    );
+    store.save_subscribe_facts(id, &facts).unwrap();
+    store
+        .touch_wanted_searches(id, &[(None, None)], 100)
+        .unwrap();
+    store.record_pending_submission(id, 10, &pending()).unwrap();
+    assert!(store.delete_subscribe(id).unwrap());
+    assert!(store.load_pending(id).unwrap().is_empty());
+    assert!(store.load_wanted_history(id).unwrap().is_empty());
+    assert!(store.load_subscribe_facts(id).unwrap().movie().is_none());
+
+    assert!(
+        store.record_pending_submission(id, 10, &pending()).is_err(),
+        "a downloader callback must not recreate pending rows after Subscribe deletion"
+    );
+    assert!(store.save_subscribe_facts(id, &facts).is_err());
+    assert!(
+        store
+            .touch_wanted_searches(id, &[(None, None)], 200)
+            .is_err()
+    );
+    assert!(store.list_all_pending_routed().unwrap().is_empty());
+}
+
 fn assert_merge_does_not_bump_timestamp(store: &Store, sub_id: SubscribeId, torrent: &Torrent) {
     store
         .merge_pending(

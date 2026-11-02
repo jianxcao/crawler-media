@@ -205,12 +205,6 @@ impl Store {
     pub fn delete_subscribe(&self, id: SubscribeId) -> Result<bool, StoreError> {
         let deleted = self.with_writer(crate::Db::Subscribe, |subscribe| {
             let tx = crate::write_tx(subscribe)?;
-            for table in ["pending_downloads", "subscribe_facts", "subscribe_wanted"] {
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE subscribe_id = ?1"),
-                    params![id.to_string()],
-                )?;
-            }
             let n = tx.execute(
                 "DELETE FROM subscribes WHERE id = ?1",
                 params![id.to_string()],

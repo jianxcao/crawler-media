@@ -27,7 +27,7 @@ fn reject_episode_two(path: &Path) {
 fn touch_and_reset_apply_to_every_unit() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let id = SubscribeId::new();
+    let id = create_subscribe(&store);
     let units: Units = vec![(Some(1), Some(1)), (Some(1), Some(2)), (None, None)];
 
     store.touch_wanted_searches(id, &units, 100).unwrap();
@@ -64,7 +64,7 @@ fn touch_and_reset_apply_to_every_unit() {
 fn failing_unit_rolls_back_the_earlier_units() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let id = SubscribeId::new();
+    let id = create_subscribe(&store);
     store
         .touch_wanted_searches(id, &[(Some(1), Some(1))], 100)
         .unwrap();
@@ -93,7 +93,7 @@ fn failing_unit_rolls_back_the_earlier_units() {
 fn batch_inside_an_existing_transaction_does_not_nest() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let id = SubscribeId::new();
+    let id = create_subscribe(&store);
     let units: Units = vec![(Some(2), Some(1)), (Some(2), Some(2))];
 
     // wanted_write 在 subscribe 连接上已经开了事务；批量方法必须沿用而不是
@@ -112,4 +112,40 @@ fn batch_inside_an_existing_transaction_does_not_nest() {
         assert_eq!(rows[unit].search_attempts, 0, "touch 之后又被 reset");
         assert_eq!(rows[unit].last_search_at, None);
     }
+}
+
+fn create_subscribe(store: &Store) -> SubscribeId {
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Wanted fixture".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let subscribe = domain::Subscribe {
+        id: SubscribeId::new(),
+        user_id: domain::UserId::new(),
+        media_id: media.id,
+        coverage: domain::Coverage::Movie,
+        fetch_mode: domain::FetchMode::Search,
+        filter_id: store.list_filters().unwrap()[0].id,
+        wash_cut: false,
+        wash_cut_filter_id: None,
+        keep_old_versions: false,
+        full_season_pack: false,
+        downloader_id: None,
+        library_id: None,
+        tracking_state: "active".into(),
+        follow_future: false,
+        search_interval_secs: 1800,
+    };
+    store.insert_subscribe(&subscribe).unwrap();
+    subscribe.id
 }
