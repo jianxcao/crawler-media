@@ -1,10 +1,6 @@
 use super::*;
 
-#[test]
-fn facets_count_each_dimension_without_its_own_condition() {
-    let (_tmp, store, library, _scope) = seeded();
-    let library_id = library.id.parse().unwrap();
-
+fn assert_unfiltered_facets(store: &Store, library_id: LibraryId) {
     let unfiltered = store
         .library_facets(&FacetRequest {
             library_id,
@@ -82,6 +78,14 @@ fn facets_count_each_dimension_without_its_own_condition() {
             .collect::<Vec<_>>(),
         [("true", 1), ("false", 2)]
     );
+}
+
+#[test]
+fn facets_count_each_dimension_without_its_own_condition() {
+    let (_tmp, store, library, _scope) = seeded();
+    let library_id = library.id.parse().unwrap();
+
+    assert_unfiltered_facets(&store, library_id);
 
     // With a genre filter the genre dimension ignores its own condition: both genres keep
     // their library-wide counts, while every other dimension is restricted by the filter.

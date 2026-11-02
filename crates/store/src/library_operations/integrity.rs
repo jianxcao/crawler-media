@@ -213,34 +213,8 @@ pub(crate) fn apply_integrity_batch(
             error: None,
         })
     } else {
-        if plan.repair && state.unrepaired > 0 {
-            return Err(StoreError::Protected(
-                "Integrity repair verification failed; owner retained".into(),
-            ));
-        }
-        if integrity_query::finish_counts(tx, &owner, lib_id, operation_id, plan.repair)? {
-            state.report.query_count_mismatch = true;
-            state.report.totals.query_projection_mismatches += 1;
-            state.issues_found += 1;
-            if plan.repair {
-                state.issues_repaired += 1;
-            }
-        }
-        // Every Media was compared (and, in repair mode, re-verified) page by page.
-        let clean = if plan.repair {
-            state.unrepaired == 0
-        } else {
-            state.issues_found == 0
-        };
-        tx.execute(
-            "UPDATE libraries SET integrity_state = ?2, lifecycle_state='ready' WHERE library_id = ?1",
-            params![library, if clean { "clean" } else { "failed" }],
-        )?;
-        let final_state = if plan.repair && !clean {
-            "failed"
-        } else {
-            "succeeded"
-        };
+        let final_state =
+            finish_integrity_batch(tx, &owner, library, lib_id, plan, operation_id, &mut state)?;
         write_integrity_cursor(tx, operation_id, &state, final_state, now_ms)?;
         Ok(OperationStatus {
             operation_id: operation_id.to_string(),
@@ -249,6 +223,46 @@ pub(crate) fn apply_integrity_batch(
             error: None,
         })
     }
+}
+
+fn finish_integrity_batch(
+    tx: &Connection,
+    owner: &IntegrityOwner,
+    library: &str,
+    library_id: LibraryId,
+    plan: &IntegrityPlan,
+    operation_id: &str,
+    state: &mut IntegrityCursor,
+) -> Result<&'static str, StoreError> {
+    if plan.repair && state.unrepaired > 0 {
+        return Err(StoreError::Protected(
+            "Integrity repair verification failed; owner retained".into(),
+        ));
+    }
+    if integrity_query::finish_counts(tx, owner, library_id, operation_id, plan.repair)? {
+        state.report.query_count_mismatch = true;
+        state.report.totals.query_projection_mismatches += 1;
+        state.issues_found += 1;
+        if plan.repair {
+            state.issues_repaired += 1;
+        }
+    }
+    // Every Media was compared (and, in repair mode, re-verified) page by page.
+    let clean = if plan.repair {
+        state.unrepaired == 0
+    } else {
+        state.issues_found == 0
+    };
+    tx.execute(
+        "UPDATE libraries SET integrity_state = ?2, lifecycle_state='ready' WHERE library_id = ?1",
+        params![library, if clean { "clean" } else { "failed" }],
+    )?;
+    let final_state = if plan.repair && !clean {
+        "failed"
+    } else {
+        "succeeded"
+    };
+    Ok(final_state)
 }
 
 fn read_integrity_cursor(

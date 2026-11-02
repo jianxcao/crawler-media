@@ -46,91 +46,7 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
 
-    // The first metadata ledger is real so a snapshot can resolve its row.
-    let media_id = MediaId::new();
-    store
-        .insert_media(&domain::Media {
-            id: media_id,
-            kind: MediaKind::Movie,
-            title: "Window Fixture".into(),
-            year: None,
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: None,
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        })
-        .unwrap();
-    let row = FixtureFile {
-        file_id: Some(LedgerId::new()),
-        media_id,
-        path: temp
-            .path()
-            .join("window.mkv")
-            .to_string_lossy()
-            .into_owned(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-        ..Default::default()
-    };
-    let library = store
-        .create_library(
-            MediaKind::Movie,
-            "Window",
-            &[temp.path().to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    store
-        .set_library_intro_settings(&library.id, true, true)
-        .unwrap();
-    store::test_support::publish_fixture_file(&store, &row).unwrap();
-
-    let metadata_ids: Vec<String> =
-        std::iter::once(row.file_id.expect("fixture file id").to_string())
-            .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
-            .collect();
-    let metadata_specs: Vec<_> = metadata_ids.iter().map(|id| spec(id)).collect();
-    assert!(
-        store
-            .create_probe_job(
-                "metadata-job",
-                "media_probe",
-                "media-1",
-                None,
-                "scope-metadata",
-                &metadata_specs,
-            )
-            .unwrap()
-    );
-
-    let fingerprint_ids: Vec<String> = (0..FINGERPRINT_PENDING)
-        .map(|index| format!("ledger-f-{index:06}"))
-        .collect();
-    record_fingerprint_owners(&store, &row, &fingerprint_ids, temp.path());
-    let fingerprint_specs: Vec<_> = fingerprint_ids.iter().map(|id| spec(id)).collect();
-    assert!(
-        store
-            .create_probe_job(
-                "fingerprint-job",
-                "fingerprint_probe",
-                "media-1",
-                None,
-                "scope-fingerprint",
-                &fingerprint_specs,
-            )
-            .unwrap()
-    );
+    seed_pending_dispatch_jobs(&store, temp.path());
 
     let metadata_window = store
         .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, 64)
@@ -174,8 +90,35 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     );
     assert_eq!(snapshot.source_version, "");
 
+    assert_metadata_advances_to_fingerprint(&store, &metadata_window[0]);
+
+    let (pending, terminal) = durable_counts(&store);
+    assert_eq!(
+        pending + terminal,
+        (METADATA_PENDING + FINGERPRINT_PENDING) as i64,
+        "durable pending plus terminal must equal the original row count"
+    );
+    assert_eq!(terminal, 1);
+
+    // The window queries never materialize more than the requested bound.
+    assert!(
+        store
+            .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, 8)
+            .unwrap()
+            .len()
+            <= 8
+    );
+    assert!(
+        store
+            .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, 4)
+            .unwrap()
+            .len()
+            <= 4
+    );
+}
+
+fn assert_metadata_advances_to_fingerprint(store: &Store, first: &store::ProbeDispatchId) {
     // Metadata -> fingerprint is persisted, not guessed from memory.
-    let first = metadata_window[0].clone();
     assert!(
         store
             .start_probe_unit(&first.job_id, &first.ledger_id)
@@ -215,29 +158,89 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     store
         .finish_probe_unit(&first.job_id, &first.ledger_id, true, None)
         .unwrap();
+}
 
-    let (pending, terminal) = durable_counts(&store);
-    assert_eq!(
-        pending + terminal,
-        (METADATA_PENDING + FINGERPRINT_PENDING) as i64,
-        "durable pending plus terminal must equal the original row count"
-    );
-    assert_eq!(terminal, 1);
+fn seed_pending_dispatch_jobs(store: &Store, root: &std::path::Path) {
+    // The first metadata ledger is real so a snapshot can resolve its row.
+    let media_id = MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: MediaKind::Movie,
+            title: "Window Fixture".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id,
+        path: root.join("window.mkv").to_string_lossy().into_owned(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        ..Default::default()
+    };
+    let library = store
+        .create_library(
+            MediaKind::Movie,
+            "Window",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .set_library_intro_settings(&library.id, true, true)
+        .unwrap();
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 
-    // The window queries never materialize more than the requested bound.
+    let metadata_ids: Vec<String> =
+        std::iter::once(row.file_id.expect("fixture file id").to_string())
+            .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
+            .collect();
+    let metadata_specs: Vec<_> = metadata_ids.iter().map(|id| spec(id)).collect();
     assert!(
         store
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, 8)
+            .create_probe_job(
+                "metadata-job",
+                "media_probe",
+                "media-1",
+                None,
+                "scope-metadata",
+                &metadata_specs,
+            )
             .unwrap()
-            .len()
-            <= 8
     );
+
+    let fingerprint_ids: Vec<String> = (0..FINGERPRINT_PENDING)
+        .map(|index| format!("ledger-f-{index:06}"))
+        .collect();
+    record_fingerprint_owners(store, &row, &fingerprint_ids, root);
+    let fingerprint_specs: Vec<_> = fingerprint_ids.iter().map(|id| spec(id)).collect();
     assert!(
         store
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, 4)
+            .create_probe_job(
+                "fingerprint-job",
+                "fingerprint_probe",
+                "media-1",
+                None,
+                "scope-fingerprint",
+                &fingerprint_specs,
+            )
             .unwrap()
-            .len()
-            <= 4
     );
 }
 

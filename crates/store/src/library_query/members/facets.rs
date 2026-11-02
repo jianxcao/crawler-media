@@ -266,6 +266,24 @@ fn watch_summary_cte() -> String {
         .to_string()
 }
 
+fn append_watch_summary_output(dimension: Dimension, summary: &str, outputs: &mut Vec<String>) {
+    // Unfiltered tiers all come from the one materialised pass (?1 library, ?2 user).
+    let all = "(SELECT member_count FROM library_query_counts WHERE library_id=?1 AND surface='browse' AND dimension='all' AND value='*')";
+    let key = dimension.key();
+    outputs.push(format!(
+        "SELECT '{key}','unwatched',COALESCE(({all}) - (SELECT n_seen FROM {summary}),0) WHERE 1"
+    ));
+    outputs.push(format!(
+        "SELECT '{key}','watching',COALESCE((SELECT n_seen - n_played FROM {summary}),0) WHERE 1"
+    ));
+    outputs.push(format!(
+        "SELECT '{key}','played',COALESCE((SELECT n_played FROM {summary}),0) WHERE 1"
+    ));
+    outputs.push(format!(
+        "SELECT '{key}','favorite',COALESCE((SELECT n_favorite FROM {summary}),0) WHERE (SELECT n_favorite FROM {summary}) > 0"
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_dimension_output(
     request: &FacetRequest,
@@ -288,21 +306,7 @@ fn append_dimension_output(
         .unwrap_or(full);
     if *dimension == Dimension::Watch {
         if let Some(summary) = watch_summary {
-            // Unfiltered tiers all come from the one materialised pass (?1 library, ?2 user).
-            let all = "(SELECT member_count FROM library_query_counts WHERE library_id=?1 AND surface='browse' AND dimension='all' AND value='*')";
-            let key = dimension.key();
-            outputs.push(format!(
-                "SELECT '{key}','unwatched',COALESCE(({all}) - (SELECT n_seen FROM {summary}),0) WHERE 1"
-            ));
-            outputs.push(format!(
-                "SELECT '{key}','watching',COALESCE((SELECT n_seen - n_played FROM {summary}),0) WHERE 1"
-            ));
-            outputs.push(format!(
-                "SELECT '{key}','played',COALESCE((SELECT n_played FROM {summary}),0) WHERE 1"
-            ));
-            outputs.push(format!(
-                "SELECT '{key}','favorite',COALESCE((SELECT n_favorite FROM {summary}),0) WHERE (SELECT n_favorite FROM {summary}) > 0"
-            ));
+            append_watch_summary_output(*dimension, summary, outputs);
             return;
         }
         let uid = bindings.push(

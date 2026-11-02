@@ -273,16 +273,10 @@ pub(crate) fn is_transient_catalog_key(cache_key: &str) -> bool {
     )
 }
 
-fn prune_transient_catalog(
-    conn: &Connection,
-    cutoff_ms: i64,
+fn catalog_cursor_position(
     cursor: Option<&DataRetentionCursor>,
-    limit: usize,
-    dry_run: bool,
-) -> Result<DataRetentionBatch, StoreError> {
-    let cutoff_secs = cutoff_ms.div_euclid(1000);
-    let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
-    let (cursor_source, cursor_entry) = match cursor {
+) -> Result<(Option<&str>, Option<i64>), StoreError> {
+    match cursor {
         Some(cursor) => {
             let (source, entry_id) = cursor.id.split_once(':').ok_or_else(|| {
                 StoreError::Invalid(format!(
@@ -304,10 +298,22 @@ fn prune_transient_catalog(
                     cursor.id
                 ))
             })?;
-            (Some(source), Some(entry_id))
+            Ok((Some(source), Some(entry_id)))
         }
-        None => (None, None),
-    };
+        None => Ok((None, None)),
+    }
+}
+
+fn prune_transient_catalog(
+    conn: &Connection,
+    cutoff_ms: i64,
+    cursor: Option<&DataRetentionCursor>,
+    limit: usize,
+    dry_run: bool,
+) -> Result<DataRetentionBatch, StoreError> {
+    let cutoff_secs = cutoff_ms.div_euclid(1000);
+    let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
+    let (cursor_source, cursor_entry) = catalog_cursor_position(cursor)?;
 
     // The single `catalog_cache` table split into one table per source. The
     // union keeps the same (fetched_at, entry_id) order; `source` only breaks

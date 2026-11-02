@@ -397,14 +397,32 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
     let b_progress = store.unit_state(user, b, -1, -1).expect("read B unit");
     assert!(b_progress.is_none(), "B never inherits A's progress");
 
+    assert_reassigned_session_event_is_stale(store, user, a, moved, &session, issued.generation);
+    assert_eq!(
+        store
+            .unit_state(user, a, -1, -1)
+            .expect("read A")
+            .expect("A"),
+        before_a
+    );
+}
+
+fn assert_reassigned_session_event_is_stale(
+    store: &Store,
+    user: UserId,
+    a: MediaId,
+    moved: LedgerId,
+    session: &str,
+    generation: i64,
+) {
     let moved_file = file(store, moved);
     let late = store
         .commit_playback_event(
             &BoundPlaybackEvent {
                 user_id: user,
                 device_id: "dev-1".into(),
-                session_id: session.clone(),
-                generation: issued.generation,
+                session_id: session.to_string(),
+                generation,
                 event_sequence: Some(2),
                 item: TypedItemId::Work(a),
                 source_id: PhysicalSourceId {
@@ -431,13 +449,6 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
         late,
         EventOutcome::IgnoredStale,
         "closed session writes nothing"
-    );
-    assert_eq!(
-        store
-            .unit_state(user, a, -1, -1)
-            .expect("read A")
-            .expect("A"),
-        before_a
     );
 }
 
