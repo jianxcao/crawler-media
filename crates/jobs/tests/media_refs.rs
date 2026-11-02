@@ -14,15 +14,10 @@ fn rewrite_media_refs_updates_def_queued_and_running_payloads_and_is_idempotent(
 
     // 1. Definition payload
     let def = queue
-        .upsert_def(NewDef {
-            kind: JobKind::CatalogRefresh,
-            name: "refresh-def".into(),
-            schedule: Some(Schedule::Interval { secs: 3600 }),
-            enabled: true,
-            payload: json!({ "media_id": from_id, "extra": "keep" }).to_string(),
-            timeout_secs: None,
-            concurrency_key: None,
-        })
+        .upsert_def(catalog_refresh_def(
+            "refresh-def",
+            json!({ "media_id": from_id, "extra": "keep" }).to_string(),
+        ))
         .unwrap();
 
     // 2. Queued job
@@ -59,15 +54,10 @@ fn rewrite_media_refs_updates_def_queued_and_running_payloads_and_is_idempotent(
 
     // 5. Unrelated def and job
     let unrelated_def = queue
-        .upsert_def(NewDef {
-            kind: JobKind::CatalogRefresh,
-            name: "unrelated-def".into(),
-            schedule: Some(Schedule::Interval { secs: 3600 }),
-            enabled: true,
-            payload: json!({ "media_id": unrelated_id, "note": "leave alone" }).to_string(),
-            timeout_secs: None,
-            concurrency_key: None,
-        })
+        .upsert_def(catalog_refresh_def(
+            "unrelated-def",
+            json!({ "media_id": unrelated_id, "note": "leave alone" }).to_string(),
+        ))
         .unwrap();
     let _unrelated_queued = queue
         .enqueue(
@@ -79,15 +69,10 @@ fn rewrite_media_refs_updates_def_queued_and_running_payloads_and_is_idempotent(
 
     // 6. Non-json or non-matching payload
     let non_json_def = queue
-        .upsert_def(NewDef {
-            kind: JobKind::CatalogRefresh,
-            name: "non-json-def".into(),
-            schedule: Some(Schedule::Interval { secs: 3600 }),
-            enabled: true,
-            payload: "raw string payload".to_string(),
-            timeout_secs: None,
-            concurrency_key: None,
-        })
+        .upsert_def(catalog_refresh_def(
+            "non-json-def",
+            "raw string payload".to_string(),
+        ))
         .unwrap();
     let _non_json_queued = queue
         .enqueue(JobKind::CatalogRefresh, "raw string job payload", 0)
@@ -108,68 +93,53 @@ fn rewrite_media_refs_updates_def_queued_and_running_payloads_and_is_idempotent(
     let conn = rusqlite::Connection::open(&db_path).unwrap();
 
     // Def payload updated
-    let def_payload: String = conn
-        .query_row(
-            "SELECT payload FROM job_defs WHERE id = ?1",
-            params![def.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let def_payload = read_payload(&conn, "job_defs", def.id);
     let def_json: serde_json::Value = serde_json::from_str(&def_payload).unwrap();
     assert_eq!(def_json["media_id"], to_id);
     assert_eq!(def_json["extra"], "keep");
 
     // Queued job payload updated
-    let queued_payload: String = conn
-        .query_row(
-            "SELECT payload FROM jobs WHERE id = ?1",
-            params![queued_job.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let queued_payload = read_payload(&conn, "jobs", queued_job.id);
     let queued_json: serde_json::Value = serde_json::from_str(&queued_payload).unwrap();
     assert_eq!(queued_json["media_id"], to_id);
 
     // Running job payload updated
-    let running_payload: String = conn
-        .query_row(
-            "SELECT payload FROM jobs WHERE id = ?1",
-            params![running_job.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let running_payload = read_payload(&conn, "jobs", running_job.id);
     let running_json: serde_json::Value = serde_json::from_str(&running_payload).unwrap();
     assert_eq!(running_json["media_id"], to_id);
 
     // Succeeded job payload was NOT updated
-    let term_payload: String = conn
-        .query_row(
-            "SELECT payload FROM jobs WHERE id = ?1",
-            params![term_job.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let term_payload = read_payload(&conn, "jobs", term_job.id);
     let term_json: serde_json::Value = serde_json::from_str(&term_payload).unwrap();
     assert_eq!(term_json["media_id"], from_id);
 
     // Unrelated payload untouched
-    let unrelated_payload: String = conn
-        .query_row(
-            "SELECT payload FROM job_defs WHERE id = ?1",
-            params![unrelated_def.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let unrelated_payload = read_payload(&conn, "job_defs", unrelated_def.id);
     let unrelated_json: serde_json::Value = serde_json::from_str(&unrelated_payload).unwrap();
     assert_eq!(unrelated_json["media_id"], unrelated_id);
 
     // Non-json untouched
-    let non_json_str: String = conn
-        .query_row(
-            "SELECT payload FROM job_defs WHERE id = ?1",
-            params![non_json_def.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let non_json_str = read_payload(&conn, "job_defs", non_json_def.id);
     assert_eq!(non_json_str, "raw string payload");
+}
+
+fn read_payload(conn: &rusqlite::Connection, table: &str, id: impl ToString) -> String {
+    conn.query_row(
+        &format!("SELECT payload FROM {table} WHERE id = ?1"),
+        params![id.to_string()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn catalog_refresh_def(name: &str, payload: String) -> NewDef {
+    NewDef {
+        kind: JobKind::CatalogRefresh,
+        name: name.into(),
+        schedule: Some(Schedule::Interval { secs: 3600 }),
+        enabled: true,
+        payload,
+        timeout_secs: None,
+        concurrency_key: None,
+    }
 }
