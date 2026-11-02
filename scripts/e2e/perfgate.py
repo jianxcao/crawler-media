@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import importlib.util
 import json
 import math
@@ -72,6 +73,21 @@ def warms_origin(case, mode):
 def prime_origin(case, mode, issue):
     if warms_origin(case, mode):
         issue()
+
+
+def close_clients(admin, clients):
+    admin.close()
+    for _, rest_client, protocol_client in clients:
+        rest_client.close()
+        protocol_client.close()
+
+
+@contextmanager
+def client_connections(admin, clients):
+    try:
+        yield
+    finally:
+        close_clients(admin, clients)
 
 
 def validate_baseline(report, mode, selected):
@@ -288,8 +304,8 @@ def main():
         clients.append((user, self_client, jf_client))
     busy = BusyScan(admin, manifest['libraries']['tv']) if args.mode == 'busy' else None
     results = {}
-    commit = admin.call('/api/v1/health').get('commit')
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with client_connections(admin, clients), ThreadPoolExecutor(max_workers=8) as executor:
+        commit = admin.call('/api/v1/health').get('commit')
         for case in selected:
             samples, codes, outside_busy, errors = [], Counter(), 0, []
             writes_verified = []
@@ -325,6 +341,9 @@ def main():
                     if case.get('prepare') == 'heartbeat' or case['id'] == 'self-playback-chapters':
                         prepare_heartbeat(self_client, fields)
                     if args.mode == 'cold':
+                        # This is an intentional connection boundary, not a
+                        # retry: writes must never reuse a pre-restart socket.
+                        close_clients(admin, clients)
                         subprocess.run(shlex.split(args.restart_command), check=True,
                                        stdout=subprocess.DEVNULL)
                     if busy:

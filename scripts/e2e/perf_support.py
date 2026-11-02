@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import urllib.parse
+import weakref
 
 
 class ApiError(RuntimeError):
@@ -19,13 +20,27 @@ class Client:
         self.base, self.token, self.jellyfin, self.timeout = base.rstrip('/'), token, jellyfin, timeout
         # One HTTP/1.1 connection per thread. Page bundles share a client across workers.
         self._local = threading.local()
+        self._connections = weakref.WeakSet()
+        self._connections_lock = threading.Lock()
 
     def close(self):
-        self._drop_connection()
+        # Called between requests: a planned backend restart invalidates sockets
+        # in every page worker, not only the thread driving the measurement.
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+            self._local = threading.local()
+        for conn in connections:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _drop_connection(self):
         conn = getattr(self._local, 'conn', None)
         if conn is not None:
+            with self._connections_lock:
+                self._connections.discard(conn)
             try:
                 conn.close()
             except OSError:
@@ -45,6 +60,8 @@ class Client:
         else:
             conn = http.client.HTTPConnection(parts.hostname, port, timeout=self.timeout)
         self._local.conn = conn
+        with self._connections_lock:
+            self._connections.add(conn)
         return conn
 
     def raw(self, path, method='GET', body=None, auth=True):
@@ -89,12 +106,15 @@ class Client:
 
 def login(base, username, password, jellyfin=False):
     client = Client(base, jellyfin=jellyfin)
-    if jellyfin:
-        result = client.call('/Users/AuthenticateByName', 'POST',
-                             {'Username': username, 'Pw': password}, envelope=False)
-        return Client(base, result['AccessToken'], jellyfin=True), result['User']['Id']
-    result = client.call('/api/v1/auth/login', 'POST', {'username': username, 'password': password})
-    return Client(base, result['token']), result['user']['id']
+    try:
+        if jellyfin:
+            result = client.call('/Users/AuthenticateByName', 'POST',
+                                 {'Username': username, 'Pw': password}, envelope=False)
+            return Client(base, result['AccessToken'], jellyfin=True), result['User']['Id']
+        result = client.call('/api/v1/auth/login', 'POST', {'username': username, 'password': password})
+        return Client(base, result['token']), result['user']['id']
+    finally:
+        client.close()
 
 
 def disable_auxiliary_scrape(client):

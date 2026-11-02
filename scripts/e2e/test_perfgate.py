@@ -260,5 +260,141 @@ class PerfGateTests(unittest.TestCase):
             server.server_close()
 
 
+class ColdConnectionTests(unittest.TestCase):
+    def setUp(self):
+        import socket
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(2)
+                self.server.connections.add(self.connection)
+
+            def do_GET(self):
+                self.respond(b'{"ok":true,"data":{"commit":"fixture"}}')
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                self.rfile.read(length)
+                self.server.writes.append(self.path)
+                if self.path == '/drop-write':
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.close_connection = True
+                    return
+                self.respond(b'{"ok":true,"data":{"written":true}}')
+
+            def respond(self, body):
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                return
+
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+
+            def __init__(self):
+                self.accepts = 0
+                self.connections = set()
+                self.writes = []
+                super().__init__(('127.0.0.1', 0), Handler)
+
+            def process_request(self, request, client_address):
+                self.accepts += 1
+                super().process_request(request, client_address)
+
+        self.server = Server()
+        self.base = 'http://127.0.0.1:%d' % self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def test_client_close_discards_main_and_page_worker_connections(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from perf_support import Client
+        client = Client(self.base)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.assertEqual(client.raw('/before')[0], 200)
+            self.assertEqual(executor.submit(client.raw, '/before').result()[0], 200)
+            self.assertEqual(self.server.accepts, 2)
+            client.close()
+            try:
+                self.assertEqual(client.raw('/after', 'POST', {})[0], 200)
+                self.assertEqual(executor.submit(client.raw, '/after', 'POST', {}).result()[0], 200)
+                self.assertEqual(self.server.accepts, 4,
+                                 'planned restart must discard every thread socket')
+                self.assertEqual(self.server.writes, ['/after', '/after'])
+            finally:
+                client.close()
+                executor.submit(client.close).result()
+
+    def test_cold_restart_keeps_each_write_on_a_fresh_connection_without_replay(self):
+        import contextlib
+        import io
+        import json
+        import socket
+        import subprocess
+        import sys
+        import tempfile
+        from unittest.mock import patch
+        from perf_support import Client
+
+        def restart(*args, **kwargs):
+            for connection in list(self.server.connections):
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            return subprocess.CompletedProcess(args[0], 0)
+
+        def login(base, username, password, jellyfin=False):
+            return Client(base, token='fixture', jellyfin=jellyfin), 'user'
+
+        with tempfile.TemporaryDirectory(dir='/tmp/crawler-storage-fixes') as directory:
+            root = Path(directory)
+            manifest = {'libraries': {'movie': 'movie', 'tv': 'tv'},
+                        'movies': [{'media_item_id': 'movie'}] * 501,
+                        'series': [{'media_item_id': 'series'}],
+                        'users': [{'id': 'user', 'login': 'user', 'collections': ['collection']}]}
+            config = {'exemptions': [], 'cases': [
+                {'id': 'first-write', 'surface': 'self', 'class': 'W',
+                 'url': '/first-write', 'method': 'POST', 'body': {}},
+                {'id': 'second-write', 'surface': 'self', 'class': 'W',
+                 'url': '/second-write', 'method': 'POST', 'body': {}}]}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            (root / 'cases.json').write_text(json.dumps(config))
+            argv = ['perfgate', 'cold', '--base-url', self.base,
+                    '--manifest', str(root / 'manifest.json'),
+                    '--cases', str(root / 'cases.json'), '--out', str(root / 'report.json'),
+                    '--restart-command', 'fixture-restart']
+            with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[]), \
+                    patch.object(perfgate, 'login', side_effect=login), \
+                    patch.object(perfgate.subprocess, 'run', side_effect=restart), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = perfgate.main()
+            report = json.loads((root / 'report.json').read_text())
+            self.assertEqual(result, 0, report)
+            self.assertTrue(report['passed'])
+            self.assertEqual(self.server.writes, ['/first-write', '/second-write'],
+                             'planned cold restarts must not lose or replay writes')
+
+    def test_unexpected_write_disconnect_stays_a_failure_without_replay(self):
+        from perf_support import Client
+        client = Client(self.base)
+        try:
+            code, _, _ = client.raw('/drop-write', 'POST', {})
+            self.assertEqual(code, 0)
+            self.assertEqual(self.server.writes, ['/drop-write'])
+        finally:
+            client.close()
+
+
 if __name__ == '__main__':
     unittest.main()
