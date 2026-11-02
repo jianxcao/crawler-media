@@ -8,7 +8,7 @@
 
 - Codex：代码与 Task 对账、单元/集成及性能工具验证、idle 证据核对、修复实际发现的问题。
 - 按原分工，由对应执行者完成 busy/cold、页面/E2E、VidHub/实际设备和现场验证；本清单不代表这些项目已执行，也不向其他执行者自动发送消息。
-- 功能代码验收基准为 `b2b902a0`。其后的文档和 `stress-up.sh` 构建并发修正不构成新功能实现；已有运行报告仍保留真实 health commit，不改写为新 HEAD。
+- 功能代码基准为 `b2b902a0`；后续文档和 `stress-up.sh` 构建并发修正不构成新功能实现。新一轮实际运行版本为 `df8c50bdf2e3`，结果索引见本地 `.e2e/perf/final-20261102-summary.md`；所有历史报告保留真实 health commit，不改写为新 HEAD。
 - 每次实际验收前记下 `git rev-parse HEAD`，刷新 `crates/api/build.rs` 后串行 release 构建，核对 health 的 commit。后续有 Rust/Web 行为修改，重跑对应测试和受影响验收。
 - 现有 workspace/Web 全套、clippy、fmt、release 与 idle 证据见本地 `.e2e/perf/phaseD-verification-summary.md`。这是已执行证据索引，不把本次清单审核写成重新执行全套。
 
@@ -51,7 +51,7 @@ Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89e
 ## 3. 必须保留的未完成项
 
 - [ ] 取得 `docs/superpowers/specs/2026-10-29-storage-redesign-review.md` 后核对 S-DB5 逐列 CHECK、Z4 六个函数、Z3 image-proxy 精确行为、报告 5.2 及 D1–D13 的未知细项/桩文件。收尾已执行 `git pull --ff-only`，报告仍缺失；不猜清单、不标全完成。可选优化与必须完成项分别按报告原要求判定。
-- [ ] 当前候选的完整 idle 仍需判定：两份完整报告均非全绿；第二轮剩余 Items 用例随后及同族增加样本的定向验证通过。保留完整轮与定向报告，不能拼接成“一轮全部通过”。后续确认稳定性时先查环境、数据分布、队列及执行条件，不提高预算或删掉失败样本。
+- [ ] 当前候选的完整 idle 仍需判定：保留阶段 D 两份完整报告及后续定向验证；新增当前构建每项 200 样本的完整报告，仍非全绿。Similar/详情集合中历史 ready 与本轮 pending 后回源的条件差异，以及人物缓存相对失败均保留在本地证据中；不能拼接成“一轮全部通过”，也不提高预算或删掉失败样本。
 - [ ] busy/cold 当前候选与当前缓存口径重测。现有 `phaseC-busy.json` / `phaseC-cold.json` 是旧提交且失败，不能替代当前版本结果。
 - [ ] 页面/E2E、真实客户端、NAS/实际来源、完整容量及故障恢复证据按下节补齐；未运行明确写 Not run。
 
@@ -68,7 +68,14 @@ Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89e
 | 容量与增长 | 至少 100k Media、1M 文件、1M Playback 单元，超长 TV、多版本/多库/多用户 | 记录 VmStep/FullscanStep/Sort、SQL/解码行和字节、分配/内存、锁等待/事务、WAL/DB/索引体积及吞吐；满足原设计第 8 节的增长边界，24k STRM 不能替代此门 |
 | 大批入库内存 | 多批扫描/Transfer，记录开始/峰值/完成后空闲及下一批，结合 heap/allocator/队列与缓存归属 | 定位持续存活对象及增长来源；RSS 未立即下降本身不等于泄漏，不能仅以清空进程或重启当修复。无证据前不宣称已解决 |
 
-## 5. 资源、报告与交付
+## 5. 已取得的局部规模与内存证据
+
+- 现有 Store release 集成测试已验证：无关库扩大到百万条，固定目标库的同页输出不变、Fullscan/Sort 为零，VmStep 不增长。
+- 现有 release 查询矩阵已验证 5k 与 100k 规模：固定 Movie 库的类型读取不随无关 TV 增长放大；简单分类分页工作量稳定。精确交集及 facets 的实际线性成本另记，不推广成所有查询 O(1)。
+- 独立实例已记录从空库入库、用户数据准备、完整 idle 到结束后静置的 RSS 与 vmmap；物理占用有明显回落。此夹具关闭实时监听，不代表 active watcher、目录批事件、错误密集扫描或实际 Transfer 的内存门已经通过。
+- 这些结果只关闭对应的局部测量缺口；上节完整容量、业务矩阵和外部执行项继续待验。原始日志与数字只保存在未提交的 `.e2e/perf/`。
+
+## 6. 资源、报告与交付
 
 - 单 cargo/test/build，`-j4`、`-- --test-threads=4`；用 `/tmp/cm-cargo.lock` 的 mkdir 锁串行协调。先定向，稳定功能树 workspace 全套仅一次；仅改本清单/文档/构建并发参数不重建全套 debug 缓存。
 - 独立临时目录 `/tmp/crawler-storage-fixes`。使用非默认夹具根时，给 perfgate 的临时 cases 配置同步替换 `fs/browse` 的固定目录，避免把旧 `/tmp/e2e-stress/media` 的 404 当功能失败。不修改 SLO 或历史报告。
