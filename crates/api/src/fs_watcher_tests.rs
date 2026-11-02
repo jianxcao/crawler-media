@@ -190,6 +190,57 @@ struct FakeWatcher {
     unwatch_calls: Arc<AtomicUsize>,
 }
 
+#[test]
+fn watcher_releases_strm_observations_only_after_the_last_covering_root_is_removed() {
+    use super::fs_watcher::StrmGraceTracker;
+    let temp = tempfile::tempdir().unwrap();
+    let removed = temp.path().join("removed");
+    let retained = temp.path().join("retained");
+    let nested = removed.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&retained).unwrap();
+    let removed_file = removed.join("movie.strm");
+    let retained_file = retained.join("movie.strm");
+    let nested_file = nested.join("movie.strm");
+    let pending_file = removed.join("pending.strm");
+    let url = "https://example.invalid/movie.mkv";
+    let tracker = StrmGraceTracker::new();
+    let mut watcher = FakeWatcher::new();
+    let mut state = FsWatcherState::new();
+    let mut desired = HashSet::from([removed.clone(), retained.clone(), nested.clone()]);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    for path in [&removed_file, &retained_file, &nested_file] {
+        assert!(tracker.on_created_or_modified(path, Some(url)));
+    }
+    tracker.mark_deleted(pending_file.clone(), Some(url.into()), 1_000);
+
+    desired.remove(&removed);
+    watcher.fail_unwatch_paths.insert(removed.clone());
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(
+        !tracker.on_created_or_modified(&removed_file, Some(url)),
+        "failed unwatch must retain active-root observations"
+    );
+    watcher.fail_unwatch_paths.clear();
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(!tracker.on_created_or_modified(&retained_file, Some(url)));
+    assert!(
+        !tracker.on_created_or_modified(&nested_file, Some(url)),
+        "overlapping active root must retain its observations"
+    );
+    assert!(
+        tracker.sweep_expired(1_100, 45).is_empty(),
+        "removed root must release its pending deletions"
+    );
+
+    desired.insert(removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(
+        tracker.on_created_or_modified(&removed_file, Some(url)),
+        "re-added root must start with a fresh observation"
+    );
+}
+
 impl FakeWatcher {
     fn new() -> Self {
         Self {
@@ -200,6 +251,43 @@ impl FakeWatcher {
             unwatch_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
+
+#[test]
+fn watcher_discards_queued_events_from_retired_roots_until_the_root_is_watched_again() {
+    use super::fs_watcher::StrmGraceTracker;
+    use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
+    let temp = tempfile::tempdir().unwrap();
+    let removed = temp.path().join("removed");
+    let retained = temp.path().join("retained");
+    std::fs::create_dir(&removed).unwrap();
+    std::fs::create_dir(&retained).unwrap();
+    let removed_file = removed.join("movie.strm");
+    let retained_file = retained.join("movie.strm");
+    let queued = vec![
+        DebouncedEvent::new(removed_file.clone(), DebouncedEventKind::Any),
+        DebouncedEvent::new(retained_file.clone(), DebouncedEventKind::Any),
+    ];
+    let mut watcher = FakeWatcher::new();
+    let mut state = FsWatcherState::new();
+    let tracker = StrmGraceTracker::new();
+    let mut desired = HashSet::from([removed.clone(), retained]);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert_eq!(state.relevant_events(&queued).len(), 2);
+
+    desired.remove(&removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    let delivered = state.relevant_events(&queued);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "retired-root queued event must be discarded"
+    );
+    assert_eq!(delivered[0].path, retained_file);
+
+    desired.insert(removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert_eq!(state.relevant_events(&queued).len(), 2);
 }
 
 impl FsWatcherSession for FakeWatcher {
@@ -367,7 +455,11 @@ fn test_watch_failure_retried_on_next_reconcile() {
     desired.insert(dir2.clone());
 
     // 第一轮：dir1 失败，dir2 成功
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(!state.active().contains(&dir1), "dir1 失败后不能在 active");
     assert!(state.active().contains(&dir2), "dir2 成功后必须在 active");
 
@@ -375,7 +467,11 @@ fn test_watch_failure_retried_on_next_reconcile() {
     watcher.fail_watch_paths.remove(&dir1);
 
     // 第二轮：重试 dir1
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir1), "重试后 dir1 必须在 active");
     assert!(state.active().contains(&dir2), "dir2 保持在 active");
 }
@@ -391,13 +487,21 @@ fn test_missing_directory_not_active_until_created() {
     desired.insert(dir.clone());
 
     // 第一次：目录不存在，不进入 active 也不调 watcher.watch
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(!state.active().contains(&dir));
     assert_eq!(watcher.watch_calls.load(Ordering::SeqCst), 0);
 
     // 创建目录后再次 reconcile
     std::fs::create_dir(&dir).unwrap();
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
     assert_eq!(watcher.watch_calls.load(Ordering::SeqCst), 1);
 }
@@ -414,18 +518,30 @@ fn test_unwatch_failure_keeps_active_and_retries() {
     desired.insert(dir.clone());
 
     // 成功加入
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
 
     // 从 desired 移除，但 unwatch 失败
     watcher.fail_unwatch_paths.insert(dir.clone());
     desired.remove(&dir);
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir), "unwatch 失败保留在 active");
 
     // 下一轮 unwatch 恢复成功
     watcher.fail_unwatch_paths.remove(&dir);
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(
         !state.active().contains(&dir),
         "unwatch 成功后从 active 移除"
@@ -444,13 +560,21 @@ fn test_config_error_preserves_active_set() {
     desired.insert(dir.clone());
 
     // 初始化注册
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
 
     // 模拟配置读取失败时的逻辑：不调用 reconcile（或者不传入空 desired），保持 active 不变
     let config_result: Result<HashSet<PathBuf>, &'static str> = Err("db error");
     match config_result {
-        Ok(new_desired) => state.reconcile(&mut watcher, &new_desired),
+        Ok(new_desired) => state.reconcile(
+            &mut watcher,
+            &new_desired,
+            &super::fs_watcher::StrmGraceTracker::new(),
+        ),
         Err(_) => {
             // 不执行 reconcile，保留 active
         }

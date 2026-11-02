@@ -12,6 +12,7 @@ use crate::management::ApiState;
 use crate::media_server_provider::items::unit_columns;
 
 mod directory;
+mod lifecycle;
 pub(crate) mod presence;
 /// STRM 延迟删除条目：记录删除时间戳与删除前的流媒体 URL。
 #[derive(Clone, Debug)]
@@ -139,15 +140,18 @@ impl StrmGraceTracker {
         let mut expired = Vec::new();
         map.retain(|path, item| {
             if now - item.deleted_at >= grace_secs {
-                // 超时后确认磁盘上是否真不存在
-                if !path.exists() {
-                    expired.push(path.clone());
-                }
+                expired.push(path.clone());
                 false
             } else {
                 true
             }
         });
+        if map.is_empty() {
+            *map = HashMap::new();
+        }
+        drop(map);
+        // Filesystem observation must not block tracker state changes.
+        expired.retain(|path| !path.exists());
         expired
     }
 }
@@ -207,7 +211,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     dirs = ?desired.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "fs_watcher 初始化监听目录列表"
                 );
-                watcher_state.reconcile(&mut debouncer, &desired);
+                watcher_state.reconcile(&mut debouncer, &desired, &tracker);
             }
             Err(error) => {
                 tracing::error!(%error, "初始化获取监听目录配置失败");
@@ -221,7 +225,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                 _ = refresh_interval.tick() => {
                     match current_dirs_to_watch(&state) {
                         Ok(desired) => {
-                            watcher_state.reconcile(&mut debouncer, &desired);
+                            watcher_state.reconcile(&mut debouncer, &desired, &tracker);
                         }
                         Err(error) => {
                             tracing::warn!(%error, "刷新监听目录配置失败，保留当前已有监听状态并待重试");
@@ -229,7 +233,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     }
                 }
                 Some(events) = rx.recv() => {
-                    let events = relevant_fs_events(&events);
+                    let events = watcher_state.relevant_events(&events);
                     if events.is_empty() {
                         continue;
                     }
@@ -741,7 +745,9 @@ impl FsWatcherState {
         &mut self,
         watcher: &mut W,
         desired: &HashSet<PathBuf>,
+        tracker: &StrmGraceTracker,
     ) {
+        let mut roots_changed = false;
         // 新增监听：desired - active
         let to_add: Vec<PathBuf> = desired.difference(&self.active).cloned().collect();
         for dir in to_add {
@@ -753,6 +759,7 @@ impl FsWatcherState {
                 Ok(()) => {
                     tracing::info!(dir = %dir.display(), "成功注册目录监听");
                     self.active.insert(dir);
+                    roots_changed = true;
                 }
                 Err(error) => {
                     tracing::error!(dir = %dir.display(), %error, "注册目录监听失败，保留待重试");
@@ -767,11 +774,17 @@ impl FsWatcherState {
                 Ok(()) => {
                     tracing::info!(dir = %dir.display(), "成功注销目录监听");
                     self.active.remove(&dir);
+                    roots_changed = true;
                 }
                 Err(error) => {
                     tracing::warn!(dir = %dir.display(), %error, "注销目录监听失败，保留在 active 待重试");
                 }
             }
+        }
+        // Failed unwatch calls stay active; overlapping roots retain their
+        // observations until the last successful watch has been removed.
+        if roots_changed || self.active.is_empty() {
+            tracker.retain_roots(&self.active);
         }
     }
 }
