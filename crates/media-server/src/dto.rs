@@ -112,6 +112,28 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
         "UserData": user_data,
     });
 
+    add_series_hierarchy(&mut value, &snapshot, &series_id);
+
+    if let Some(date_created) = snapshot.metadata.date_created.as_ref() {
+        value["DateCreated"] = json!(date_created);
+    }
+
+    if !snapshot.is_series
+        && let Some(name) = snapshot.metadata.episode_name.as_ref()
+    {
+        value["Name"] = json!(name);
+    }
+    add_artwork_and_streams(&mut value, &snapshot, &item_id);
+
+    let chapters = render_chapters_json(&snapshot);
+    if !chapters.is_empty() {
+        value["Chapters"] = json!(chapters);
+    }
+
+    value
+}
+
+fn add_series_hierarchy(value: &mut Value, snapshot: &MediaItemSnapshot, series_id: &str) {
     if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
         let season_num = snapshot.unit.map(|u| u.season as u32).unwrap_or(1);
         value["SeriesId"] = json!(series_id);
@@ -160,16 +182,9 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
                 .unwrap_or(0)
         );
     }
+}
 
-    if let Some(date_created) = snapshot.metadata.date_created.as_ref() {
-        value["DateCreated"] = json!(date_created);
-    }
-
-    if !snapshot.is_series
-        && let Some(name) = snapshot.metadata.episode_name.as_ref()
-    {
-        value["Name"] = json!(name);
-    }
+fn add_artwork_and_streams(value: &mut Value, snapshot: &MediaItemSnapshot, item_id: &str) {
     if snapshot.metadata.has_primary_image {
         let fallback_tag = if (snapshot.media.kind == domain::MediaKind::Tv
             && !snapshot.is_series
@@ -185,7 +200,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
         });
     }
     if !snapshot.is_series {
-        let media_streams = media_streams_with_item(&snapshot.metadata.tracks, Some(&item_id));
+        let media_streams = media_streams_with_item(&snapshot.metadata.tracks, Some(item_id));
         if !media_streams.is_empty() {
             value["MediaStreams"] = json!(media_streams);
         }
@@ -193,11 +208,4 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     if snapshot.metadata.has_backdrop_image {
         value["BackdropImageTags"] = json!(["fanart"]);
     }
-
-    let chapters = render_chapters_json(&snapshot);
-    if !chapters.is_empty() {
-        value["Chapters"] = json!(chapters);
-    }
-
-    value
 }

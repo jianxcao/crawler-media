@@ -53,51 +53,8 @@ pub async fn select_items(
     // folder 归属必须先于折叠：代表行在别的根下不能决定整个 series 是否属于
     // 这个 folder。先取未折叠的分集，再用 folder 内的行重建剧快照。
     if let ParentScope::Folder(root) = &scope {
-        if rows.iter().any(|row| row.is_series) {
-            let mut expanded = Vec::new();
-            for item in rows {
-                if item.is_series {
-                    let series_id = TypedItemId::Work(item.media.id).to_wire_string();
-                    let episodes = provider.list_visible_items(user, Some(&series_id)).await?;
-                    let in_folder: Vec<MediaItemSnapshot> = episodes
-                        .into_iter()
-                        .filter(|episode| episode.file.path.starts_with(root))
-                        .collect();
-                    if wants_series && let Some(representative) = in_folder.first() {
-                        let mut series = item;
-                        series.unit = representative.unit;
-                        series.file = representative.file.clone();
-                        series.metadata.child_count = Some(in_folder.len());
-                        series.metadata.season_count = Some(
-                            in_folder
-                                .iter()
-                                .filter_map(|episode| episode.unit.map(|u| u.season))
-                                .collect::<HashSet<_>>()
-                                .len(),
-                        );
-                        series.unplayed_item_count =
-                            Some(in_folder.iter().filter(|episode| !episode.played).count());
-                        series.played = in_folder.iter().all(|episode| episode.played);
-                        expanded.push(series);
-                    }
-                    if wants_episodes {
-                        expanded.extend(in_folder);
-                    }
-                } else if item.file.path.starts_with(root)
-                    && (item.media.kind != MediaKind::Tv
-                        || item.is_series && wants_series
-                        || !item.is_series && wants_episodes)
-                {
-                    expanded.push(item);
-                }
-            }
-            rows = expanded;
-        } else {
-            rows.retain(|item| {
-                item.file.path.starts_with(root)
-                    && (item.is_series && wants_series || !item.is_series && wants_episodes)
-            });
-        }
+        rows =
+            select_folder_items(provider, user, rows, root, wants_series, wants_episodes).await?;
     } else if wants_episodes && rows.iter().any(|row| row.is_series) {
         let mut expanded = Vec::new();
         for item in rows {
@@ -150,6 +107,62 @@ pub async fn select_items(
         rows = enriched;
     }
     Ok(select_page(rows, &query))
+}
+
+async fn select_folder_items(
+    provider: &(impl MediaServerProvider + ?Sized),
+    user: UserId,
+    mut rows: Vec<MediaItemSnapshot>,
+    root: &std::path::Path,
+    wants_series: bool,
+    wants_episodes: bool,
+) -> Result<Vec<MediaItemSnapshot>, String> {
+    if rows.iter().any(|row| row.is_series) {
+        let mut expanded = Vec::new();
+        for item in rows {
+            if item.is_series {
+                let series_id = TypedItemId::Work(item.media.id).to_wire_string();
+                let episodes = provider.list_visible_items(user, Some(&series_id)).await?;
+                let in_folder: Vec<MediaItemSnapshot> = episodes
+                    .into_iter()
+                    .filter(|episode| episode.file.path.starts_with(root))
+                    .collect();
+                if wants_series && let Some(representative) = in_folder.first() {
+                    let mut series = item;
+                    series.unit = representative.unit;
+                    series.file = representative.file.clone();
+                    series.metadata.child_count = Some(in_folder.len());
+                    series.metadata.season_count = Some(
+                        in_folder
+                            .iter()
+                            .filter_map(|episode| episode.unit.map(|u| u.season))
+                            .collect::<HashSet<_>>()
+                            .len(),
+                    );
+                    series.unplayed_item_count =
+                        Some(in_folder.iter().filter(|episode| !episode.played).count());
+                    series.played = in_folder.iter().all(|episode| episode.played);
+                    expanded.push(series);
+                }
+                if wants_episodes {
+                    expanded.extend(in_folder);
+                }
+            } else if item.file.path.starts_with(root)
+                && (item.media.kind != MediaKind::Tv
+                    || item.is_series && wants_series
+                    || !item.is_series && wants_episodes)
+            {
+                expanded.push(item);
+            }
+        }
+        rows = expanded;
+    } else {
+        rows.retain(|item| {
+            item.file.path.starts_with(root)
+                && (item.is_series && wants_series || !item.is_series && wants_episodes)
+        });
+    }
+    Ok(rows)
 }
 
 /// 测试 fixture 的 NextUp：一次候选读 + 按 Media 分组选第一条未看。
