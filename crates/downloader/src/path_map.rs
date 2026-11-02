@@ -86,3 +86,18 @@ mod tests {
         );
     }
 }
+
+/// Parse `from=to,from2=to2` path-mapping pairs from an environment value.
+pub fn parse_path_maps(raw: &str) -> Vec<PathMap> {
+    raw.split(',')
+        .filter_map(|pair| {
+            let (from, to) = pair.split_once('=')?;
+            let from = from.trim();
+            let to = to.trim();
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            Some(PathMap::new(from, to))
+        })
+        .collect()
+}
