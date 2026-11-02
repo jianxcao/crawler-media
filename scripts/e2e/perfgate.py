@@ -66,14 +66,18 @@ def failure_code(error):
     return error.status if isinstance(error, ApiError) else 0
 
 
-def warms_origin(case, mode):
-    """Idle and busy discard one same-URL fetch before the timed samples."""
-    return mode != 'cold' and bool(case.get('origin_warmup'))
+def prepare_cache(case, issue):
+    """Record cache population separately, before timing or a cold restart."""
+    if case.get('cache_read'):
+        return issue()
+    return None
 
 
-def prime_origin(case, mode, issue):
-    if warms_origin(case, mode):
-        issue()
+def comparable_p95(case, previous):
+    # Mixed first-origin/cache reports cannot establish a cache-read baseline.
+    if case.get('cache_read') and previous.get('latency_scope') != 'cached':
+        return None
+    return previous.get('p95')
 
 
 def close_clients(admin, clients):
@@ -104,6 +108,11 @@ def validate_baseline(report, mode, selected):
 def response_matches(case, payload):
     if case.get('response_contract') == 'similar':
         return similar_payload(payload) is not None
+    if case.get('response_contract') == 'discover':
+        response = json.loads(payload)
+        sections = response.get('data', {}).get('sections')
+        return isinstance(sections, list) and all(
+            isinstance(section, dict) and not section.get('error') for section in sections)
     if 'expected_items' not in case:
         return True
     response = json.loads(payload)
@@ -341,11 +350,16 @@ def main():
                 fields['sequence'] = 1
                 fields['position'] = 120000
                 try:
-                    run_case(case, fields, self_client, jf_client, admin, executor)
-                except (KeyError, RuntimeError, subprocess.CalledProcessError, OSError, ValueError):
-                    return
+                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor)
+                    return {'code': code, 'elapsed_ms': elapsed, 'response_verified': matches}
+                except (KeyError, RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
+                    return {'code': failure_code(error), 'elapsed_ms': None,
+                            'response_verified': False, 'error': type(error).__name__}
 
-            prime_origin(case, args.mode, issue_warmup)
+            population = prepare_cache(case, issue_warmup)
+            if population and (not 200 <= population['code'] < 300 or not population['response_verified']):
+                precondition_codes[population['code']] += 1
+                errors.append('cache preparation failed')
             # Bounded replacement is only for scan-window crossings, never to hide errors.
             while sampler.can_attempt if sampler else index < count:
                 user, self_client, jf_client = clients[(index + len(results)) % len(clients)]
@@ -410,14 +424,18 @@ def main():
                     codes[code] += 1
                 index += 1
             result = evaluate(samples, codes, case['class'], args.mode,
-                              baseline.get(case['id'], {}).get('p95'))
+                              comparable_p95(case, baseline.get(case['id'], {})))
             result.update({'class': case['class'], 'surface': case['surface'],
+                           'latency_scope': 'cached' if case.get('cache_read') else 'default',
+                           'cache_preparation': population,
                            'outside_busy': outside_busy, 'errors': sorted(set(errors)),
                            'attempts': sampler.attempts if sampler else count,
                            'invalid_samples': sampler.invalid if sampler else [],
                            'precondition_codes': dict(precondition_codes),
                            'response_verified': all(responses_verified),
                            'write_verified': all(writes_verified) if writes_verified else None})
+            if case.get('cache_read') and comparable_p95(case, baseline.get(case['id'], {})) is None:
+                result['baseline_note'] = 'Cache-read scope requires a cache-read baseline; absolute SLO enforced'
             if similar_observations:
                 result['recommendations'] = summarize_similar(similar_observations, percentile)
             if (sampler and sampler.failed) or errors or not all(responses_verified) or (writes_verified and not all(writes_verified)):

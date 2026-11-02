@@ -111,7 +111,8 @@
       "surface": "jellyfin",
       "route": "/Persons/{name}/Images/Primary",
       "class": "D",
-      "url": "/Persons/{image_person}/Images/Primary"
+      "url": "/Persons/{image_person}/Images/Primary",
+      "cache_read": true
     },
     {
       "id": "jellyfin-quickconnect-enabled",
@@ -326,21 +327,25 @@
       "surface": "self",
       "route": "/discover/{kind}",
       "class": "A",
-      "url": "/api/v1/discover/movie"
+      "url": "/api/v1/discover/movie",
+      "response_contract": "discover",
+      "cache_read": true
     },
     {
       "id": "self-discover-kind-collection-id",
       "surface": "self",
       "route": "/discover/{kind}/collection/{id}",
       "class": "A",
-      "url": "/api/v1/discover/movie/collection/{catalog_collection}"
+      "url": "/api/v1/discover/movie/collection/{catalog_collection}",
+      "cache_read": true
     },
     {
       "id": "self-discover-kind-filtered",
       "surface": "self",
       "route": "/discover/{kind}/filtered",
       "class": "A",
-      "url": "/api/v1/discover/movie/filtered"
+      "url": "/api/v1/discover/movie/filtered",
+      "cache_read": true
     },
     {
       "id": "self-downloaders",
@@ -400,7 +405,7 @@
       "route": "/genres/{kind}",
       "class": "A",
       "url": "/api/v1/genres/movie",
-      "origin_warmup": true
+      "cache_read": true
     },
     {
       "id": "self-health",
@@ -447,7 +452,7 @@
       "class": "A",
       "url": "/api/v1/libraries/routing-options",
       "admin": true,
-      "origin_warmup": true
+      "cache_read": true
     },
     {
       "id": "self-libraries-id-cover",
@@ -620,7 +625,8 @@
       "surface": "self",
       "route": "/media/douban/{id}",
       "class": "A",
-      "url": "/api/v1/media/douban/{catalog_douban}"
+      "url": "/api/v1/media/douban/{catalog_douban}",
+      "cache_read": true
     },
     {
       "id": "self-media-operations-id",
@@ -635,7 +641,8 @@
       "surface": "self",
       "route": "/media/person/{id}",
       "class": "A",
-      "url": "/api/v1/media/person/{catalog_person}"
+      "url": "/api/v1/media/person/{catalog_person}",
+      "cache_read": true
     },
     {
       "id": "self-media-tv-id-season-season",
@@ -643,21 +650,23 @@
       "route": "/media/tv/{id}/season/{season}",
       "class": "A",
       "url": "/api/v1/media/tv/{catalog_tv}/season/1",
-      "origin_warmup": true
+      "cache_read": true
     },
     {
       "id": "self-media-id-poster",
       "surface": "self",
       "route": "/media/{id}/poster",
       "class": "D",
-      "url": "/api/v1/media/{poster_media}/poster"
+      "url": "/api/v1/media/{poster_media}/poster",
+      "cache_read": true
     },
     {
       "id": "self-media-kind-id",
       "surface": "self",
       "route": "/media/{kind}/{id}",
       "class": "A",
-      "url": "/api/v1/media/movie/{catalog_movie}"
+      "url": "/api/v1/media/movie/{catalog_movie}",
+      "cache_read": true
     },
     {
       "id": "self-notify-config",
@@ -827,7 +836,8 @@
       "surface": "self",
       "route": "/search/titles",
       "class": "S",
-      "url": "/api/v1/search/titles?keyword=压测电影"
+      "url": "/api/v1/search/titles?keyword=压测电影",
+      "cache_read": true
     },
     {
       "id": "self-search-torrents",
@@ -858,7 +868,7 @@
       "route": "/settings/countries",
       "class": "A",
       "url": "/api/v1/settings/countries",
-      "origin_warmup": true
+      "cache_read": true
     },
     {
       "id": "self-settings-languages",
@@ -866,7 +876,7 @@
       "route": "/settings/languages",
       "class": "A",
       "url": "/api/v1/settings/languages",
-      "origin_warmup": true
+      "cache_read": true
     },
     {
       "id": "self-settings-metadata",

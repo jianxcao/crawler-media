@@ -175,25 +175,32 @@ class PerfGateTests(unittest.TestCase):
         self.assertFalse(result['regressed'])
         self.assertFalse(result['passed'])
 
-    def test_origin_fetch_cases_warm_once_and_cold_does_not(self):
+    def test_source_reads_prepare_cache_and_local_reads_do_not(self):
         import json
         cases = json.loads(Path(__file__).with_name('perf-cases.json').read_text())['cases']
-        warmed = {case['id'] for case in cases if case.get('origin_warmup')}
+        warmed = {case['id'] for case in cases if case.get('cache_read')}
         self.assertEqual(warmed, {
             'self-genres-kind',
             'self-libraries-routing-options',
             'self-settings-countries',
             'self-settings-languages',
             'self-media-tv-id-season-season',
+            'self-discover-kind',
+            'self-discover-kind-collection-id',
+            'self-discover-kind-filtered',
+            'self-media-douban-id',
+            'self-media-person-id',
+            'self-media-kind-id',
+            'self-media-id-poster',
+            'jellyfin-persons-name-images-primary',
+            'self-search-titles',
         })
         genre = next(case for case in cases if case['id'] == 'self-genres-kind')
         health = next(case for case in cases if case['id'] == 'self-health')
         calls = []
-        perfgate.prime_origin(genre, 'idle', lambda: calls.append('warm'))
-        perfgate.prime_origin(genre, 'busy', lambda: calls.append('warm'))
-        perfgate.prime_origin(genre, 'cold', lambda: calls.append('warm'))
-        perfgate.prime_origin(health, 'idle', lambda: calls.append('warm'))
-        self.assertEqual(calls, ['warm', 'warm'])
+        perfgate.prepare_cache(genre, lambda: calls.append('populate'))
+        perfgate.prepare_cache(health, lambda: calls.append('populate'))
+        self.assertEqual(calls, ['populate'])
 
     def test_raw_reuses_one_connection_and_retries_a_closed_socket(self):
         from perf_support import Client
