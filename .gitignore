@@ -27,3 +27,4 @@ web/tsconfig.tsbuildinfo
 *.db-wal
 *.db-shm
 docs/test-reports/
+.e2e/
