@@ -10,8 +10,6 @@ use super::StoreError;
 #[path = "schema/definitions.rs"]
 mod definitions;
 pub mod layout;
-#[path = "schema/v1/objects.rs"]
-pub mod v1;
 
 /// Insert the default Filter and the default
 /// Libraries with their roots. Idempotent: existing rows are kept.
