@@ -452,10 +452,6 @@ impl crate::writers::App<'_> {
 
     pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.app)?;
-        tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![user_id.to_string()],
-        )?;
         let n = tx.execute(
             "DELETE FROM users WHERE id = ?1",
             params![user_id.to_string()],

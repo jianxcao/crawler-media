@@ -14,6 +14,23 @@ impl crate::SubscribeConnection<'_> {
 }
 
 impl crate::LibraryConnection<'_> {
+    pub(crate) fn remove_user_memberships(&self, user_id: UserId) -> Result<(), StoreError> {
+        self.library.execute(
+            "UPDATE libraries
+             SET member_ids_json = (
+                 SELECT json_group_array(member.value)
+                 FROM json_each(libraries.member_ids_json) AS member
+                 WHERE member.value <> ?1
+             )
+             WHERE EXISTS (
+                 SELECT 1 FROM json_each(libraries.member_ids_json) AS member
+                 WHERE member.value = ?1
+             )",
+            params![user_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn clean_user_library_data(
         &self,
         user_id: UserId,

@@ -94,7 +94,11 @@ impl Store {
     }
 
     pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
-        self.with_app(|app| app.finish_user_removal(user_id))
+        let removed = self.with_app(|app| app.finish_user_removal(user_id))?;
+        // App commits and releases its writer before the independent Library write.
+        // Repeat cleanup even when an earlier attempt already removed the App user.
+        self.with_library_write(|library| library.remove_user_memberships(user_id))?;
+        Ok(removed)
     }
 
     pub fn list_setting_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {

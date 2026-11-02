@@ -260,11 +260,6 @@ fn seed_admin_recovery_revokes_old_cli_bearer_and_ordinary_sessions() {
     let store = Store::open(tmp.path()).unwrap();
     let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
 
-    // 预先建立旧 marker
-    store
-        .register_current_cli_token(admin_id, "old-cli-token")
-        .unwrap();
-
     // 模拟管理员密码被清空损坏，但残留了一个普通会话
     store
         .insert_user(&User {
@@ -273,6 +268,10 @@ fn seed_admin_recovery_revokes_old_cli_bearer_and_ordinary_sessions() {
             enabled: true,
             role: UserRole::Admin,
         })
+        .unwrap();
+    // 用户存在后登记旧 marker，令凭据始终具有有效归属。
+    store
+        .register_current_cli_token(admin_id, "old-cli-token")
         .unwrap();
     store.set_user_token(admin_id, "stale-session-123").unwrap();
     assert!(store.user_by_token("stale-session-123").unwrap().is_some());
