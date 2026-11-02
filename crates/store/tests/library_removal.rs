@@ -109,7 +109,6 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
         .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 1);
     assert!(store.file_coverage_by_path(&a_row.path).unwrap().is_none());
     assert!(
         store
@@ -125,11 +124,8 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     assert!(progress.favorite);
     assert_eq!(std::fs::read(&path).unwrap(), b"https://example.test/one");
     assert_eq!(
-        store
-            .clean_library_removal(&removal.operation_id)
-            .unwrap()
-            .removed_ledger_count,
-        1
+        store.clean_library_removal(&removal.operation_id).unwrap(),
+        done
     );
 }
 

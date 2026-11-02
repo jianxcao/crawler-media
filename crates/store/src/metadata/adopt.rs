@@ -104,15 +104,14 @@ fn upsert_source_snapshot(tx: &Connection, input: &MetadataAdoption) -> Result<(
     tx.execute(
         "INSERT INTO media_metadata_sources
             (media_id, entity_scope, season, episode, source, locale, provider_entity_id,
-             provider_work_id, normalized_json, present_fields_json, preferences_json,
+             provider_work_id, normalized_json, present_fields_json,
              selection_origins_json, fetched_at, source_revision)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)
          ON CONFLICT(media_id, entity_scope, season, episode, source, locale) DO UPDATE SET
              provider_entity_id = excluded.provider_entity_id,
              provider_work_id = excluded.provider_work_id,
              normalized_json = excluded.normalized_json,
              present_fields_json = excluded.present_fields_json,
-             preferences_json = excluded.preferences_json,
              selection_origins_json = excluded.selection_origins_json,
              fetched_at = excluded.fetched_at,
              source_revision = media_metadata_sources.source_revision + 1",
@@ -127,7 +126,6 @@ fn upsert_source_snapshot(tx: &Connection, input: &MetadataAdoption) -> Result<(
             input.provider_work_id,
             serde_json::to_string(&input.normalized.fields)?,
             serde_json::to_string(&present)?,
-            serde_json::to_string(&input.preferences)?,
             serde_json::to_string(&input.normalized.field_origins)?,
             input.fetched_at,
         ],

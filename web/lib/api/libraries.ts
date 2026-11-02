@@ -955,7 +955,6 @@ export interface LibraryRemoval {
   operation_id: string;
   library_id: string;
   state: "frozen" | "draining" | "cleaning" | "succeeded" | "failed";
-  removed_ledger_count: number;
   error: string | null;
 }
 

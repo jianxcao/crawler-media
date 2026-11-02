@@ -119,14 +119,13 @@ fn raw_receipt(fixture: &Fixture, id: &str) -> store::LibraryRemoval {
     Connection::open(fixture.temp.path().join("data/library.db"))
         .unwrap()
         .query_row(
-            "SELECT operation_id,library_id,state,removed_ledger_count,error FROM library_removals WHERE operation_id=?1",
+            "SELECT operation_id,library_id,state,error FROM library_removals WHERE operation_id=?1",
             [id],
             |row| Ok(store::LibraryRemoval {
                 operation_id: row.get(0)?,
                 library_id: row.get(1)?,
                 state: row.get(2)?,
-                removed_ledger_count: row.get(3)?,
-                error: row.get(4)?,
+                error: row.get(3)?,
             }),
         )
         .unwrap()

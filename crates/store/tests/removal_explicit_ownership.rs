@@ -68,7 +68,6 @@ fn unrelated_library_disk_error_cannot_prevent_removal() {
         .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 0);
     assert!(store.file_coverage_by_id(file.file_id).unwrap().is_some());
 }
 
@@ -165,6 +164,9 @@ fn removal_snapshot_and_cleanup_resume_in_finite_windows_and_validate_configurat
         .clean_library_removal(&operation.operation_id)
         .unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 301);
+    assert_eq!(
+        store::test_support::library_file_count(&store, &target.id),
+        0
+    );
     assert_eq!(std::fs::read(root.join("000.mkv")).unwrap(), b"keep");
 }

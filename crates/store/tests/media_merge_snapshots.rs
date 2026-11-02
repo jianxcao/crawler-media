@@ -18,9 +18,9 @@ fn snapshot(db: &Connection, media: &str, entity: &str, json: &str, fetched_at: 
     db.execute(
         "INSERT INTO media_metadata_sources
             (media_id, entity_scope, season, episode, source, locale, provider_entity_id,
-             provider_work_id, normalized_json, present_fields_json, preferences_json,
+             provider_work_id, normalized_json, present_fields_json,
              selection_origins_json, fetched_at, source_revision)
-         VALUES (?1, 'work', -1, -1, 'tmdb', 'zh-CN', ?2, ?2, ?3, '[]', '{}', '{}', ?4, 1)",
+         VALUES (?1, 'work', -1, -1, 'tmdb', 'zh-CN', ?2, ?2, ?3, '[]', '{}', ?4, 1)",
         params![media, entity, json, fetched_at],
     )
     .unwrap();
@@ -194,9 +194,9 @@ fn scoped_snapshot(
     db.execute(
         "INSERT INTO media_metadata_sources
             (media_id, entity_scope, season, episode, source, locale, provider_entity_id,
-             provider_work_id, normalized_json, present_fields_json, preferences_json,
+             provider_work_id, normalized_json, present_fields_json,
              selection_origins_json, fetched_at, source_revision)
-         VALUES (?1, ?2, ?3, ?4, 'tmdb', 'zh-CN', ?5, ?6, ?7, '[]', '{}', '{}', 100, 1)",
+         VALUES (?1, ?2, ?3, ?4, 'tmdb', 'zh-CN', ?5, ?6, ?7, '[]', '{}', 100, 1)",
         params![
             media,
             scope,

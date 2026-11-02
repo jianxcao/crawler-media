@@ -97,7 +97,6 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
 
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
     assert!(store.file_coverage_by_path(&row.path).unwrap().is_none());
     assert!(
@@ -111,7 +110,7 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
 }
 
 #[test]
-fn interruption_between_databases_recovers_original_operation_and_count() {
+fn interruption_between_databases_recovers_original_operation() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let store = Store::open(&data).unwrap();
@@ -136,7 +135,6 @@ fn interruption_between_databases_recovers_original_operation_and_count() {
     );
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 1);
     assert_eq!(
         store.clean_library_removal(&removal.operation_id).unwrap(),
         done
@@ -221,7 +219,6 @@ fn removal_reduces_preferred_file_summaries_and_purges_orphan_media() {
         .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
     assert!(
         store
@@ -311,7 +308,10 @@ fn large_removal_commits_bounded_batches_and_resumes() {
     let store = Store::open(&data).unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 250);
+    assert_eq!(
+        crate::test_support::library_file_count(&store, &library.id),
+        0
+    );
 }
 
 #[test]
@@ -346,9 +346,9 @@ fn library_removal_purges_orphan_media_and_owned_rows() {
             conn.execute(
                 "INSERT INTO media_metadata_sources (
                 media_id, entity_scope, source, locale, provider_entity_id, provider_work_id,
-                normalized_json, present_fields_json, preferences_json, selection_origins_json,
+                normalized_json, present_fields_json, selection_origins_json,
                 fetched_at, source_revision)
-             VALUES (?1, 'work', 'tmdb', 'zh-CN', '1', '1', '{}', '[]', '{}', '{}', 1, 0)",
+             VALUES (?1, 'work', 'tmdb', 'zh-CN', '1', '1', '{}', '[]', '{}', 1, 0)",
                 [&media],
             )
             .map_err(Into::into)

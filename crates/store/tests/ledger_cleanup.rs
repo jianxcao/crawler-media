@@ -239,9 +239,9 @@ fn seed_owned_rows(conn: &Connection, media: MediaId) {
     .unwrap();
     conn.execute(
         "INSERT INTO media_metadata_sources (media_id,entity_scope,source,locale,provider_entity_id,
-            provider_work_id,normalized_json,present_fields_json,preferences_json,selection_origins_json,
+            provider_work_id,normalized_json,present_fields_json,selection_origins_json,
             fetched_at,source_revision)
-         VALUES (?1,'work','tmdb','zh-CN','1','1','{}','[]','{}','{}',1,0)",
+         VALUES (?1,'work','tmdb','zh-CN','1','1','{}','[]','{}',1,0)",
         [&id],
     )
     .unwrap();

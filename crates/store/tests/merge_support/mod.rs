@@ -219,9 +219,9 @@ pub fn insert_metadata_source(
     conn.execute(
         "INSERT INTO media_metadata_sources
             (media_id, entity_scope, season, episode, source, locale, provider_entity_id,
-             provider_work_id, normalized_json, present_fields_json, preferences_json,
+             provider_work_id, normalized_json, present_fields_json,
              selection_origins_json, fetched_at, source_revision)
-         VALUES (?1, 'work', -1, -1, ?2, ?3, ?4, ?4, '{}', '[]', '{}', '{}', 1, 1)",
+         VALUES (?1, 'work', -1, -1, ?2, ?3, ?4, ?4, '{}', '[]', '{}', 1, 1)",
         params![media, source, locale, provider_entity_id],
     )
     .unwrap();

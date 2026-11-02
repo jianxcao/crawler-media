@@ -111,7 +111,7 @@ impl Fixture {
         let fields = if malformed { r#"{"title":37}"# } else { "{}" };
         db.execute("INSERT INTO media_metadata_sources
             SELECT media_id,'episode',1,?1,source,?2,provider_entity_id,provider_work_id,?3,
-              present_fields_json,preferences_json,selection_origins_json,fetched_at,source_revision
+              present_fields_json,selection_origins_json,fetched_at,source_revision
             FROM media_metadata_sources WHERE media_id=?4 AND entity_scope='episode' AND season=1 AND episode=1 AND locale='zh-CN'",
             params![episode,locale,fields,self.file.media_id.to_string()]).unwrap();
         db.execute("INSERT INTO media_metadata_overrides

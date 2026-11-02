@@ -23,7 +23,6 @@ pub struct LibraryRemoval {
     pub operation_id: String,
     pub library_id: String,
     pub state: String,
-    pub removed_ledger_count: usize,
     pub error: Option<String>,
 }
 
@@ -33,7 +32,7 @@ mod snapshot;
 
 use snapshot::RemovalRow;
 
-const COLS: &str = "operation_id, library_id, state, removed_ledger_count, error";
+const COLS: &str = "operation_id, library_id, state, error";
 
 /// `library_removals.state` of a finished removal. Every other state (`frozen`, `draining`,
 /// `cleaning`, `failed`) is still owned by the removal driver and must survive retention.
@@ -56,8 +55,7 @@ fn map_removal(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryRemoval> {
         operation_id: row.get(0)?,
         library_id: row.get(1)?,
         state: row.get(2)?,
-        removed_ledger_count: row.get(3)?,
-        error: row.get(4)?,
+        error: row.get(3)?,
     })
 }
 

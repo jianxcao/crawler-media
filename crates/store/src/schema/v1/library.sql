@@ -32,7 +32,6 @@ CREATE TABLE media_metadata_sources (
  locale TEXT NOT NULL, provider_entity_id TEXT NOT NULL, provider_work_id TEXT NOT NULL,
  normalized_json TEXT NOT NULL CHECK(json_valid(normalized_json)),
  present_fields_json TEXT NOT NULL CHECK(json_valid(present_fields_json)),
- preferences_json TEXT NOT NULL CHECK(json_valid(preferences_json)),
  selection_origins_json TEXT NOT NULL CHECK(json_valid(selection_origins_json)),
  fetched_at INTEGER NOT NULL, source_revision INTEGER NOT NULL CHECK(source_revision>=0),
  PRIMARY KEY(media_id,entity_scope,season,episode,source,locale),
@@ -397,7 +396,7 @@ CREATE TABLE library_query_count_rebuild (
 CREATE TABLE library_removals (
  operation_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
  config_revision INTEGER NOT NULL, snapshot_cursor TEXT NOT NULL DEFAULT '', snapshot_done INTEGER NOT NULL DEFAULT 0, total_files INTEGER NOT NULL DEFAULT 0,
- removed_ledger_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+ error TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
 );
 CREATE TABLE library_removal_roots (operation_id TEXT NOT NULL REFERENCES library_removals(operation_id),path TEXT NOT NULL,PRIMARY KEY(operation_id,path));
 CREATE TABLE library_removal_files (

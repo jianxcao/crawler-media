@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import { waitForLibraryRemoval, removalLabel } from "../lib/library-removal.ts";
 
-const operation = (state) => ({ operation_id: "op", library_id: "lib", state, removed_ledger_count: 0, error: null });
+const operation = (state) => ({ operation_id: "op", library_id: "lib", state, error: null });
 
 test("accepted removal stays pending through draining and cleaning until success", async () => {
   const states = ["draining", "cleaning", "succeeded"];

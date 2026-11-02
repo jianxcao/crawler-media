@@ -425,7 +425,7 @@ async fn remove(f: &Fixture, app: &Router) {
             .await;
             assert_ne!(status["state"], "failed", "{status}");
             if status["state"] == "succeeded" {
-                assert_eq!(status["removed_ledger_count"], 1);
+                assert!(status.get("removed_ledger_count").is_none());
                 break;
             }
             tokio::task::yield_now().await;

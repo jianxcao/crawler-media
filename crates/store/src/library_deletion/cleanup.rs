@@ -150,6 +150,6 @@ fn finalize(tx: &rusqlite::Connection, id: &str, library: &str) -> Result<(), St
          AND NOT EXISTS (SELECT 1 FROM library_removals r WHERE r.library_id=c.library_id AND r.state<>'succeeded')
          ORDER BY c.sort_order,c.library_id LIMIT 1))",[],
     )?;
-    tx.execute("UPDATE library_removals SET state='succeeded',error=NULL,removed_ledger_count=total_files,updated_at_ms=?2 WHERE operation_id=?1",params![id,crate::unix_now()*1000])?;
+    tx.execute("UPDATE library_removals SET state='succeeded',error=NULL,updated_at_ms=?2 WHERE operation_id=?1",params![id,crate::unix_now()*1000])?;
     Ok(())
 }
