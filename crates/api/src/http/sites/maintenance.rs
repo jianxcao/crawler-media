@@ -11,7 +11,11 @@ pub(crate) async fn verify_site(State(state): State<ApiState>, Path(id): Path<St
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let site = match store_read(&state, move |store| store.get_site(id).ok().flatten()).await {
+    let site = match store_read(&state, &[store::Db::App], move |store| {
+        store.get_site(id).ok().flatten()
+    })
+    .await
+    {
         Ok(Some(site)) => site,
         Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
         Err(error) => return error.response(),

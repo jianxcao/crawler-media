@@ -39,9 +39,11 @@ async fn page(
     user_id: domain::UserId,
     query: store::PlaybackViewQuery,
 ) -> Result<(Response, bool), Response> {
-    let selection = match crate::http::store_wait::store_read(state, move |store| {
-        super::favorite_read::capture(store, query)
-    })
+    let selection = match crate::http::store_wait::store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        move |store| super::favorite_read::capture(store, query),
+    )
     .await
     {
         Ok(Ok(selection)) => selection,
@@ -77,9 +79,11 @@ async fn page(
         .await;
 
     let response = gallery_response(groups_res, total, next_cursor);
-    let valid = match crate::http::store_wait::store_read(state, move |store| {
-        super::favorite_read::validate(store, user_id, &snapshot)
-    })
+    let valid = match crate::http::store_wait::store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        move |store| super::favorite_read::validate(store, user_id, &snapshot),
+    )
     .await
     {
         Ok(Ok(valid)) => valid,

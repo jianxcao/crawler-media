@@ -39,7 +39,11 @@ fn nullable_path<'de, D: serde::Deserializer<'de>>(
 }
 
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
-    match super::store_wait::store_read(&state, |store| store.transfer_settings()).await {
+    match super::store_wait::store_read(&state, &[store::Db::App], |store| {
+        store.transfer_settings()
+    })
+    .await
+    {
         Ok(Ok(settings)) => ok(serde_json::json!(settings)).into_response(),
         Ok(Err(error)) => failure(error),
         Err(error) => error.response(),

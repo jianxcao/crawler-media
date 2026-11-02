@@ -14,9 +14,10 @@ impl ApiServerProvider {
     }
     pub(super) fn bounded_reader<T>(
         &self,
+        databases: &[store::Db],
         work: impl FnOnce(&crate::Store) -> Result<T, String>,
     ) -> Result<T, String> {
-        read_store(&self.state, work)
+        read_store(&self.state, databases, work)
     }
     pub(super) async fn run_sync<T: Send + 'static>(
         &self,
@@ -33,7 +34,7 @@ impl ApiServerProvider {
             })
     }
     pub(super) fn get_user_sync(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
-        self.bounded_reader(|store| {
+        self.bounded_reader(&[store::Db::App], |store| {
             let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
                 return Ok(None);
             };
@@ -50,7 +51,7 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let library = self.bounded_reader(|store| {
+        let library = self.bounded_reader(item_databases(user_id), |store| {
             Ok(store
                 .get_library(id)
                 .map_err(|error| error.to_string())?
@@ -77,7 +78,9 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = self.bounded_reader(|store| items::resolve_entry(store, user_id, id))?;
+        let entry = self.bounded_reader(item_databases(user_id), |store| {
+            items::resolve_entry(store, user_id, id)
+        })?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -97,7 +100,9 @@ impl ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let entry = self.bounded_reader(|store| items::resolve_entry(store, user_id, id))?;
+        let entry = self.bounded_reader(item_databases(user_id), |store| {
+            items::resolve_entry(store, user_id, id)
+        })?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -123,7 +128,9 @@ impl ApiServerProvider {
         {
             return Ok(None);
         }
-        let entry = self.bounded_reader(|store| items::resolve_entry(store, Some(user_id), id))?;
+        let entry = self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+            items::resolve_entry(store, Some(user_id), id)
+        })?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -134,28 +141,29 @@ impl ApiServerProvider {
             let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
                 return Ok(None);
             };
-            let Some(file) = self.bounded_reader(|store| {
-                let Some(file) = store
-                    .visible_file(user_id, physical.file_id)
-                    .map_err(|e| e.to_string())?
-                else {
-                    return Ok(None);
-                };
-                let covers = store
-                    .file_covers_unit(
-                        physical.file_id,
-                        entry.media.id,
-                        domain::UnitKey::new(entry.unit.0, entry.unit.1),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if !covers
-                    || file.media_id != entry.media.id
-                    || file.version.revision != physical.revision
-                {
-                    return Ok(None);
-                }
-                Ok(Some(file))
-            })?
+            let Some(file) =
+                self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+                    let Some(file) = store
+                        .visible_file(user_id, physical.file_id)
+                        .map_err(|e| e.to_string())?
+                    else {
+                        return Ok(None);
+                    };
+                    let covers = store
+                        .file_covers_unit(
+                            physical.file_id,
+                            entry.media.id,
+                            domain::UnitKey::new(entry.unit.0, entry.unit.1),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    if !covers
+                        || file.media_id != entry.media.id
+                        || file.version.revision != physical.revision
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some(file))
+                })?
             else {
                 return Ok(None);
             };
@@ -182,7 +190,7 @@ impl ApiServerProvider {
         user_id: UserId,
         device_id: &str,
     ) -> Result<bool, String> {
-        self.bounded_reader(|store| {
+        self.bounded_reader(&[store::Db::App], |store| {
             store
                 .is_device_revoked(user_id, device_id)
                 .map_err(|e| e.to_string())
@@ -292,11 +300,12 @@ impl ApiServerProvider {
 
 pub(super) fn read_store<T>(
     state: &ApiState,
+    databases: &[store::Db],
     work: impl FnOnce(&crate::Store) -> Result<T, String>,
 ) -> Result<T, String> {
     state
         .store
-        .with_read_snapshot(crate::http::store_wait::STORE_READ_WAIT, || {
+        .with_read_snapshot(databases, crate::http::store_wait::STORE_READ_WAIT, || {
             work(&state.store)
         })
         .map_err(|error| error.to_string())?
@@ -309,5 +318,15 @@ fn admission_error(response: axum::response::Response) -> String {
             "Store writer is busy or under maintenance".into()
         }
         status => format!("Store write admission failed: {status}"),
+    }
+}
+
+/// Public artwork needs only published Library facts; authenticated reads also
+/// consult App roles before applying Library visibility.
+pub(super) fn item_databases(user: Option<UserId>) -> &'static [store::Db] {
+    if user.is_some() {
+        &[store::Db::Library, store::Db::App]
+    } else {
+        &[store::Db::Library]
     }
 }

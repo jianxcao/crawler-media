@@ -17,7 +17,7 @@ pub(crate) async fn get_scan_operation(
     // a scan that holds the lock (metadata, NFO) then stalls every other poll
     // on the same runtime — the waiter reports a timeout for a scan that
     // already finished. The read belongs on the blocking pool.
-    let read = super::super::store_wait::store_read(&state, move |store| {
+    let read = super::super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         store.scan_operation(&op_id).map(|found| (found, lib_id))
     })
     .await;

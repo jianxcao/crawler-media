@@ -81,7 +81,7 @@ async fn read<T: Send + 'static>(
     token: String,
     work: impl FnOnce(&crate::Store) -> Result<T, Response> + Send + 'static,
 ) -> Result<T, Response> {
-    store_wait::store_read(state, move |store| {
+    store_wait::store_read(state, &[store::Db::Library, store::Db::App], move |store| {
         ensure_user(store, user, &token)?;
         work(store)
     })

@@ -101,7 +101,7 @@ fn prune_absent_pending(
         // Review M-1: same rule as the background reconcile, including the
         // persisted info hash (D-M3).
         if let std::collections::hash_map::Entry::Vacant(entry) = hashes.entry(subscribe_id) {
-            let rows = with_store_read(state, |store| {
+            let rows = with_store_read(state, &[store::Db::Subscribe], |store| {
                 store
                     .load_pending_info_hashes(subscribe_id)
                     .unwrap_or_default()
@@ -282,7 +282,7 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
     let (pending, targets) = match state
         .http_work
         .run_to_completion(move || {
-            with_store_read(&initial_state, |store| {
+            with_store_read(&initial_state, &[store::Db::Subscribe], |store| {
                 prune_orphan_pending(store, &initial_state)
             })
         })
@@ -318,9 +318,11 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
             return busy_response();
         }
     };
-    match store_read(&state, move |store| {
-        map_task_rows(store, &kept, &snapshots, &reachable)
-    })
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| map_task_rows(store, &kept, &snapshots, &reachable),
+    )
     .await
     {
         Ok(items) => ok(json!({ "items": items, "sources": [] })).into_response(),

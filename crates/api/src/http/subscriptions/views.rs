@@ -239,9 +239,16 @@ pub(crate) async fn list_subscriptions(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
 ) -> Response {
-    let snapshots = match crate::http::store_wait::store_read(&state, move |store| {
-        super::snapshot::load_visible_subscription_views(store, user_id)
-    })
+    let snapshots = match crate::http::store_wait::store_read(
+        &state,
+        &[
+            store::Db::Library,
+            store::Db::App,
+            store::Db::Subscribe,
+            store::Db::Cache,
+        ],
+        move |store| super::snapshot::load_visible_subscription_views(store, user_id),
+    )
     .await
     {
         Ok(Ok(snapshots)) => snapshots,

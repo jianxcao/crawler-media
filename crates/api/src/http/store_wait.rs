@@ -1,7 +1,7 @@
 //! Off-executor Store access with per-database reader and writer admission.
 //!
-//! Request reads use [`store_read`] and borrow only the database each SQL method
-//! needs. Request writes use [`store_write`]; admission is checked again while
+//! Request reads use [`store_read`] and admit the stage's declared databases in
+//! a shared order before executing SQL. Request writes use [`store_write`]; admission is checked again while
 //! holding the actual database writer. Callers already on a blocking worker use
 //! [`with_store_read`] or [`with_foreground_store`] for the same policy.
 
@@ -93,22 +93,27 @@ pub(crate) fn busy_response() -> Response {
 /// `work` returns whatever the handler needs — usually `Result<T, Response>` so an
 /// inner read failure keeps its own code. Lock contention and worker failure are
 /// reported here, never as the handler's domain error.
-pub(crate) async fn store_read<T, F>(state: &ApiState, work: F) -> Result<T, StoreCallError>
+pub(crate) async fn store_read<T, F>(
+    state: &ApiState,
+    databases: &'static [store::Db],
+    work: F,
+) -> Result<T, StoreCallError>
 where
     F: FnOnce(&crate::Store) -> T + Send + 'static,
     T: Send + 'static,
 {
-    store_read_handle(state.store(), STORE_READ_WAIT, work).await
+    store_read_handle(state.store(), databases, STORE_READ_WAIT, work).await
 }
 
 /// Reader admission for callers that already run on a blocking worker.
 pub(crate) fn with_store_read<T>(
     state: &ApiState,
+    databases: &[store::Db],
     work: impl FnOnce(&crate::Store) -> T,
 ) -> Result<T, Response> {
     state
         .store
-        .with_read_snapshot(STORE_READ_WAIT, || work(&state.store))
+        .with_read_snapshot(databases, STORE_READ_WAIT, || work(&state.store))
         .map_err(|error| match error {
             store::StoreError::ReadBusy
             | store::StoreError::ReadClosed
@@ -227,6 +232,7 @@ pub(super) fn observe_store_work<T>(
 /// handle rather than the whole `ApiState`.
 pub(crate) async fn store_read_handle<T, F>(
     store: std::sync::Arc<crate::Store>,
+    databases: &'static [store::Db],
     deadline: Duration,
     work: F,
 ) -> Result<T, StoreCallError>
@@ -250,6 +256,7 @@ where
         store.with_query_budget(&budget, |store| {
             observe_store_work(store, metrics, |store| {
                 store.with_read_snapshot(
+                    databases,
                     reader_deadline.saturating_duration_since(std::time::Instant::now()),
                     || work(store),
                 )

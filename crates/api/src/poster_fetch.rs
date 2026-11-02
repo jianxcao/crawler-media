@@ -453,9 +453,10 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
 /// reference. The version check keeps a late worker from attaching artwork to a file
 /// that was replaced while the download ran.
 pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
-    let captured = crate::http::store_wait::with_store_read(state, |store| {
-        store.file_version_for_path(&video.to_string_lossy())
-    });
+    let captured =
+        crate::http::store_wait::with_store_read(state, &[store::Db::Library], |store| {
+            store.file_version_for_path(&video.to_string_lossy())
+        });
     let (file_id, version) = match captured {
         Ok(Ok(Some(version))) => version,
         Ok(Ok(None)) => return,

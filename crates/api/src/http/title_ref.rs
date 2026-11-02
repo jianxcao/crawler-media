@@ -151,45 +151,49 @@ fn preview_facts(
     current_user_id: Option<domain::UserId>,
     season: Option<u32>,
 ) -> Option<PreviewFacts> {
-    super::store_wait::with_store_read(state, |store| {
-        // 收敛到库内已有 Media 行（按 tmdb 别名 **带 kind**）：相同数字的
-        // movie/TV id 不得互相顶替（P2：preview tmdb:tv:123 不应命中 movie:123）。
-        let media = resolved
-            .tmdb_id
-            .as_deref()
-            .and_then(|id| {
-                store
-                    .get_media_by_alias_kind("tmdb", id, Some(resolved.kind))
-                    .ok()
-                    .flatten()
-            })
-            .unwrap_or(resolved);
-        let media_id = media.id;
-        let existing = store
-            .list_all_subscribes()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| {
-                if let Some(uid) = current_user_id {
-                    s.user_id == uid
-                } else {
-                    true
-                }
-            })
-            .filter(|s| s.media_id == media_id)
-            .find(|s| match (&s.coverage, season) {
-                (domain::Coverage::Tv { season, .. }, Some(target_season)) => {
-                    *season == target_season
-                }
-                _ => true,
-            })
-            .map(|s| s.id.to_string());
+    super::store_wait::with_store_read(
+        state,
+        &[store::Db::Library, store::Db::Subscribe],
+        |store| {
+            // 收敛到库内已有 Media 行（按 tmdb 别名 **带 kind**）：相同数字的
+            // movie/TV id 不得互相顶替（P2：preview tmdb:tv:123 不应命中 movie:123）。
+            let media = resolved
+                .tmdb_id
+                .as_deref()
+                .and_then(|id| {
+                    store
+                        .get_media_by_alias_kind("tmdb", id, Some(resolved.kind))
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or(resolved);
+            let media_id = media.id;
+            let existing = store
+                .list_all_subscribes()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| {
+                    if let Some(uid) = current_user_id {
+                        s.user_id == uid
+                    } else {
+                        true
+                    }
+                })
+                .filter(|s| s.media_id == media_id)
+                .find(|s| match (&s.coverage, season) {
+                    (domain::Coverage::Tv { season, .. }, Some(target_season)) => {
+                        *season == target_season
+                    }
+                    _ => true,
+                })
+                .map(|s| s.id.to_string());
 
-        let ledger = store.file_coverage_for_media(media_id).unwrap_or_default();
-        let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
-        let movie_owned = media.kind == MediaKind::Movie && has_owned;
-        (media, existing, owned_seasons, movie_owned)
-    })
+            let ledger = store.file_coverage_for_media(media_id).unwrap_or_default();
+            let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
+            let movie_owned = media.kind == MediaKind::Movie && has_owned;
+            (media, existing, owned_seasons, movie_owned)
+        },
+    )
     .ok()
 }
 

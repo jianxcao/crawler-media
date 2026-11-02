@@ -398,7 +398,9 @@ pub(crate) async fn remove_rows(
 pub(crate) async fn pending_deletions(
     State(state): State<crate::management::ApiState>,
 ) -> Response {
-    match super::store_wait::store_read(&state, pending_deletions_response).await {
+    match super::store_wait::store_read(&state, &[store::Db::Library], pending_deletions_response)
+        .await
+    {
         Ok(response) => response,
         Err(error) => error.response(),
     }

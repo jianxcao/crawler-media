@@ -347,15 +347,16 @@ pub(crate) async fn remove_task(
     Json(body): Json<TaskInput>,
 ) -> Response {
     let task_id = body.task_id.clone();
-    let (subscribe_id, pending) = match crate::http::store_wait::store_read(&state, move |store| {
-        resolve_task(store, &task_id)
-    })
-    .await
-    {
-        Ok(Ok(found)) => found,
-        Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
-        Err(error) => return error.response(),
-    };
+    let (subscribe_id, pending) =
+        match crate::http::store_wait::store_read(&state, &[store::Db::Subscribe], move |store| {
+            resolve_task(store, &task_id)
+        })
+        .await
+        {
+            Ok(Ok(found)) => found,
+            Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
+            Err(error) => return error.response(),
+        };
     let delete_files = body.delete_files;
     let torrent_for_remove = pending.torrent.clone();
     let enclosure = pending.torrent.enclosure.clone();
@@ -416,15 +417,16 @@ pub(crate) async fn replace_task(
     Json(body): Json<TaskInput>,
 ) -> Response {
     let task_id = body.task_id.clone();
-    let (subscribe_id, pending) = match crate::http::store_wait::store_read(&state, move |store| {
-        resolve_task(store, &task_id)
-    })
-    .await
-    {
-        Ok(Ok(found)) => found,
-        Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
-        Err(error) => return error.response(),
-    };
+    let (subscribe_id, pending) =
+        match crate::http::store_wait::store_read(&state, &[store::Db::Subscribe], move |store| {
+            resolve_task(store, &task_id)
+        })
+        .await
+        {
+            Ok(Ok(found)) => found,
+            Ok(Err(message)) => return err(StatusCode::NOT_FOUND, "task.missing", &message),
+            Err(error) => return error.response(),
+        };
     let payload = json!({
         "subscribe_id": subscribe_id.to_string(),
         "exclude_enclosure": pending.torrent.enclosure,

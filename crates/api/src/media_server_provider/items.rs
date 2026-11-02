@@ -104,8 +104,11 @@ pub(super) fn entry_snapshot(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<MediaItemSnapshot>, String> {
-    let entry =
-        super::sync_operations::read_store(state, |store| resolve_entry(store, Some(user_id), id))?;
+    let entry = super::sync_operations::read_store(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| resolve_entry(store, Some(user_id), id),
+    )?;
     entry
         .map(|entry| {
             snapshot_from_entry(
@@ -128,9 +131,14 @@ pub(super) fn snapshot_from_entry(
     media: domain::Media,
     is_series: bool,
 ) -> Result<MediaItemSnapshot, String> {
-    // 读 scope 内只取 owned DB 事实，每个 SQL 使用对应数据库的 reader。
+    // Series rollups also consult the user's App role; leaf facts stay Library-only.
+    let databases: &[store::Db] = if is_series {
+        &[store::Db::Library, store::Db::App]
+    } else {
+        &[store::Db::Library]
+    };
     let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) =
-        super::sync_operations::read_store(state, |store| {
+        super::sync_operations::read_store(state, databases, |store| {
             let (season, episode) = unit_columns(unit);
             let marker = store
                 .get_media_marker(file.media_id, season, episode)
@@ -314,9 +322,11 @@ fn list_visible_items_blocking(
     parent_id: Option<&str>,
     library_scope: Option<&str>,
 ) -> Result<Vec<MediaItemSnapshot>, String> {
-    let snapshot = super::sync_operations::read_store(state, |store| {
-        collect_pending(store, user_id, parent_id, library_scope)
-    })?;
+    let snapshot = super::sync_operations::read_store(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| collect_pending(store, user_id, parent_id, library_scope),
+    )?;
     let (pending, ingest_paths) = snapshot;
     let browse = state.file_stats.as_ref();
     let latest_ingest = latest_ingest_by_media(browse, &ingest_paths);

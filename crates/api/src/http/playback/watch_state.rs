@@ -42,45 +42,51 @@ pub(crate) async fn resume(
         Err(error) => return error.response(),
     };
     // Review L2: resume resolution reads the ledger and watch rows.
-    match store_read(&state, move |store| -> Response {
-        let (file, _media, resolved) =
-            match super::selection::resolve_playback_for(store, &selection, user_id) {
-                Ok(resolved) => resolved,
-                // 无显式源时，没有可播文件的单元（含 TV whole 单元）仍返回已记录的进度
-                Err(super::request::SelectionError::Unavailable) if selection.file_id.is_none() => {
-                    let season = selection.season_number.map_or(UNIT_WHOLE, |v| v as i32);
-                    let episode = selection.episode_number.map_or(UNIT_WHOLE, |v| v as i32);
-                    let watch = match watch_json(
-                        store,
-                        user_id,
-                        selection.media_item_id,
-                        season,
-                        episode,
-                    ) {
-                        Ok(watch) => watch,
-                        Err(response) => return response,
-                    };
-                    return ok(watch).into_response();
-                }
-                Err(error) => return error.response(),
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Response {
+            let (file, _media, resolved) =
+                match super::selection::resolve_playback_for(store, &selection, user_id) {
+                    Ok(resolved) => resolved,
+                    // 无显式源时，没有可播文件的单元（含 TV whole 单元）仍返回已记录的进度
+                    Err(super::request::SelectionError::Unavailable)
+                        if selection.file_id.is_none() =>
+                    {
+                        let season = selection.season_number.map_or(UNIT_WHOLE, |v| v as i32);
+                        let episode = selection.episode_number.map_or(UNIT_WHOLE, |v| v as i32);
+                        let watch = match watch_json(
+                            store,
+                            user_id,
+                            selection.media_item_id,
+                            season,
+                            episode,
+                        ) {
+                            Ok(watch) => watch,
+                            Err(response) => return response,
+                        };
+                        return ok(watch).into_response();
+                    }
+                    Err(error) => return error.response(),
+                };
+            let unit = resolved.target.unit;
+            let mut watch = match watch_json(
+                store,
+                user_id,
+                selection.media_item_id,
+                unit.season,
+                unit.episode,
+            ) {
+                Ok(watch) => watch,
+                Err(response) => return response,
             };
-        let unit = resolved.target.unit;
-        let mut watch = match watch_json(
-            store,
-            user_id,
-            selection.media_item_id,
-            unit.season,
-            unit.episode,
-        ) {
-            Ok(watch) => watch,
-            Err(response) => return response,
-        };
-        watch["file_id"] = json!(file.file_id.to_string());
-        watch["start_ms"] = json!(resolved.start_ms);
-        watch["duration_ms"] = json!(resolved.duration_ms);
-        watch["resume_status"] = json!(super::session::resume_status_name(resolved.status));
-        ok(watch).into_response()
-    })
+            watch["file_id"] = json!(file.file_id.to_string());
+            watch["start_ms"] = json!(resolved.start_ms);
+            watch["duration_ms"] = json!(resolved.duration_ms);
+            watch["resume_status"] = json!(super::session::resume_status_name(resolved.status));
+            ok(watch).into_response()
+        },
+    )
     .await
     {
         Ok(response) => response,
@@ -108,7 +114,7 @@ pub(crate) async fn marks(
         Ok(target) => target,
         Err(response) => return response,
     };
-    match store_read(&state, move |store| -> Response {
+    match store_read(&state, &[store::Db::Library, store::Db::App], move |store| -> Response {
         let Some((season, episode)) = super::selection::watch_unit(store, media_id, season, episode)
         else {
             return err(

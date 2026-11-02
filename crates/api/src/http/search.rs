@@ -107,7 +107,11 @@ pub(crate) async fn search_torrents(
     let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
         .then(|| history::next_history_target(user_id));
     // Review L2: the scoped Site list is a Store read on the search hot path.
-    let sites = match store_read(&state, move |store| scoped_sites(store, &sites_requested)).await {
+    let sites = match store_read(&state, &[store::Db::App], move |store| {
+        scoped_sites(store, &sites_requested)
+    })
+    .await
+    {
         Ok(sites) => sites,
         Err(error) => return error.response(),
     };
@@ -151,7 +155,11 @@ pub(crate) async fn search_stream(
     let page = query.page.unwrap_or(1).clamp(1, 100);
     let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
         .then(|| history::next_history_target(user_id));
-    let sites = match store_read(&state, move |store| scoped_sites(store, &sites_requested)).await {
+    let sites = match store_read(&state, &[store::Db::App], move |store| {
+        scoped_sites(store, &sites_requested)
+    })
+    .await
+    {
         Ok(sites) => sites,
         Err(error) => return error.response(),
     };
@@ -367,33 +375,37 @@ pub(crate) async fn search_library_items(
         },
     };
     let cursor = query.get("cursor").cloned();
-    let loaded = store_wait::store_read(&state, move |store| {
-        let visible =
-            crate::visible_scope::VisibleLibraries::load(store, user_id).map_err(|error| {
-                tracing::error!(%error, "加载可见库失败");
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "search.failed",
-                    "搜索执行失败，请稍后重试",
-                )
-            })?;
-        let page = store
-            .search_library_items(&visible.ids(), &keyword, limit, cursor.as_deref())
-            .map_err(|error| match error {
-                crate::store::StoreError::Invalid(message) => {
-                    err(StatusCode::BAD_REQUEST, "search.invalid", &message)
-                }
-                error => {
-                    tracing::error!(%error, "库内搜索失败");
+    let loaded = store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let visible =
+                crate::visible_scope::VisibleLibraries::load(store, user_id).map_err(|error| {
+                    tracing::error!(%error, "加载可见库失败");
                     err(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "search.failed",
                         "搜索执行失败，请稍后重试",
                     )
-                }
-            })?;
-        Ok::<_, Response>(page)
-    })
+                })?;
+            let page = store
+                .search_library_items(&visible.ids(), &keyword, limit, cursor.as_deref())
+                .map_err(|error| match error {
+                    crate::store::StoreError::Invalid(message) => {
+                        err(StatusCode::BAD_REQUEST, "search.invalid", &message)
+                    }
+                    error => {
+                        tracing::error!(%error, "库内搜索失败");
+                        err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "search.failed",
+                            "搜索执行失败，请稍后重试",
+                        )
+                    }
+                })?;
+            Ok::<_, Response>(page)
+        },
+    )
     .await;
     let page = match loaded {
         Ok(Ok(page)) => page,

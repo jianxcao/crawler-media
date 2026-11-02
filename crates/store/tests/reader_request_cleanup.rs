@@ -24,7 +24,7 @@ fn fixture() -> (tempfile::TempDir, Store) {
 fn assert_reader_recovered(store: &Store) {
     assert_eq!(store.reader_pool(Db::Library).available(), 1);
     store
-        .with_read_snapshot(Duration::from_secs(1), || {
+        .with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
             assert!(!store.list_libraries().unwrap().is_empty());
             assert_eq!(store.reader_pool(Db::Library).available(), 0);
         })
@@ -36,7 +36,7 @@ fn assert_reader_recovered(store: &Store) {
 fn panic_releases_the_active_snapshot_and_restores_request_policy() {
     let (_dir, store) = fixture();
     let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let _ = store.with_read_snapshot(Duration::from_secs(1), || {
+        let _ = store.with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
             store.list_libraries().unwrap();
             assert_eq!(store.reader_pool(Db::Library).available(), 0);
             panic!("request fixture panic");
@@ -49,7 +49,7 @@ fn panic_releases_the_active_snapshot_and_restores_request_policy() {
 #[test]
 fn sql_failure_releases_the_active_snapshot_before_returning_the_error() {
     let (_dir, store) = fixture();
-    let result = store.with_read_snapshot(Duration::from_secs(1), || {
+    let result = store.with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
         store.list_libraries().unwrap();
         store.with_read(Db::Library, |conn| {
             conn.query_row("SELECT value FROM missing_request_fixture", [], |row| {
@@ -75,7 +75,7 @@ fn cancellation_after_admission_releases_reader_and_cancellation_policy() {
     };
     let result = store.with_query_budget(&budget, |store| {
         store
-            .with_read_snapshot(Duration::from_secs(1), || {
+            .with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
                 store.list_libraries().unwrap();
                 cancelled.store(true, Ordering::Release);
                 assert!(matches!(
@@ -93,9 +93,10 @@ fn cancellation_after_admission_releases_reader_and_cancellation_policy() {
 fn nested_expired_deadline_cleans_up_and_does_not_poison_the_outer_scope() {
     let (_dir, store) = fixture();
     store
-        .with_read_snapshot(Duration::from_secs(1), || {
+        .with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
             let before = store.list_libraries().unwrap();
-            let expired = store.with_read_snapshot(Duration::ZERO, || store.list_libraries());
+            let expired =
+                store.with_read_snapshot(&[Db::Library], Duration::ZERO, || store.list_libraries());
             assert!(matches!(expired, Err(StoreError::ReadDeadline)));
             assert_eq!(store.list_libraries().unwrap(), before);
             assert_eq!(store.reader_pool(Db::Library).available(), 0);
@@ -107,7 +108,7 @@ fn nested_expired_deadline_cleans_up_and_does_not_poison_the_outer_scope() {
 #[test]
 fn an_expired_request_releases_its_already_admitted_reader() {
     let (_dir, store) = fixture();
-    let result = store.with_read_snapshot(Duration::from_secs(1), || {
+    let result = store.with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
         store.list_libraries().unwrap();
         assert_eq!(store.reader_pool(Db::Library).available(), 0);
         std::thread::sleep(Duration::from_secs(1));

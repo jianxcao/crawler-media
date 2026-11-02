@@ -178,7 +178,7 @@ fn create_error(error: StoreError) -> Response {
 
 async fn render_library(state: &ApiState, library: &crate::store::Library) -> Response {
     let library_snapshot = library.clone();
-    let loaded = super::store_wait::store_read(state, move |store| {
+    let loaded = super::store_wait::store_read(state, &[store::Db::Library], move |store| {
         let library = &library_snapshot;
         let stats = match crate::library_statistics::statistics_for(store, library) {
             Ok(stats) => stats,

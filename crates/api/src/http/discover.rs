@@ -96,7 +96,7 @@ pub(crate) async fn discover_kind(
         Ok(sections) => sections,
         Err(error) => return blocking_error(error),
     };
-    let tmdb_configured = match super::store_wait::store_read(&state, |store| {
+    let tmdb_configured = match super::store_wait::store_read(&state, &[store::Db::App], |store| {
         store
             .get_setting(crate::settings_keys::TMDB_API_KEY)
             .ok()

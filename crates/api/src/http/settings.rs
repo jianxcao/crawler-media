@@ -29,7 +29,7 @@ fn masked(key: Option<String>) -> Value {
 
 /// Metadata source configuration + status.
 pub(crate) async fn get_metadata(State(state): State<ApiState>) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
     let tmdb = store
         .get_setting(settings_keys::TMDB_API_KEY)
         .ok()
@@ -138,7 +138,7 @@ pub(crate) async fn put_metadata(
 
 /// Test the configured TMDB key with a live search.
 pub(crate) async fn test_metadata(State(state): State<ApiState>) -> Response {
-    let api_key = match super::store_wait::store_read(&state, |store| {
+    let api_key = match super::store_wait::store_read(&state, &[store::Db::App], |store| {
         store
             .get_setting(settings_keys::TMDB_API_KEY)
             .ok()

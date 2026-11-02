@@ -27,7 +27,7 @@ async fn exhausted_read_pool_is_busy_within_the_deadline() {
     let _held = pool.try_checkout().unwrap();
     let deadline = Duration::from_millis(100);
     let started = Instant::now();
-    let outcome = store_read_handle(handle, deadline, |store| {
+    let outcome = store_read_handle(handle, &[store::Db::Library], deadline, |store| {
         store.default_library(domain::MediaKind::Movie)
     })
     .await;
@@ -67,13 +67,18 @@ async fn a_real_read_failure_keeps_the_handlers_own_error() {
 
     let tmp = tempfile::tempdir().unwrap();
     let handle = store(tmp.path());
-    let outcome = store_read_handle(handle, Duration::from_millis(500), |_store| {
-        Err::<(), _>(crate::http::err(
-            StatusCode::NOT_FOUND,
-            "playback.item_missing",
-            "条目不存在",
-        ))
-    })
+    let outcome = store_read_handle(
+        handle,
+        &[store::Db::Library],
+        Duration::from_millis(500),
+        |_store| {
+            Err::<(), _>(crate::http::err(
+                StatusCode::NOT_FOUND,
+                "playback.item_missing",
+                "条目不存在",
+            ))
+        },
+    )
     .await;
 
     match outcome {
@@ -94,7 +99,7 @@ async fn an_idle_store_answers_immediately() {
     let handle = store(tmp.path());
     let deadline = Duration::from_secs(1);
     let started = Instant::now();
-    let outcome = store_read_handle(handle, deadline, |store| {
+    let outcome = store_read_handle(handle, &[store::Db::Library], deadline, |store| {
         store.default_library(domain::MediaKind::Movie)
     })
     .await;
@@ -138,6 +143,7 @@ async fn cancelled_read_does_not_run_after_waiting_for_a_connection() {
     let observed = ran.clone();
     let waiting = tokio::spawn(super::store_read_handle(
         handle,
+        &[store::Db::Library],
         Duration::from_secs(1),
         move |store| {
             store.with_read(store::Db::Library, |_| {
@@ -168,6 +174,7 @@ async fn pooled_read_waits_for_return_then_reads_without_the_writer_lock() {
     let held = readers.try_checkout().unwrap();
     let queued = tokio::spawn(super::store_read_handle(
         writer.clone(),
+        &[store::Db::Library],
         Duration::from_secs(1),
         |store| store.list_libraries(),
     ));
@@ -207,7 +214,7 @@ async fn pool_wait_expires_with_busy_within_the_request_deadline() {
     let _held = readers.try_checkout().unwrap();
     let deadline = Duration::from_millis(100);
     let started = Instant::now();
-    let outcome = super::store_read_handle(writer, deadline, |store| {
+    let outcome = super::store_read_handle(writer, &[store::Db::Library], deadline, |store| {
         store.with_read(store::Db::Library, |_| -> Result<(), store::StoreError> {
             panic!("pool remains full")
         })

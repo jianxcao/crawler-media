@@ -103,7 +103,7 @@ fn parse_path_maps(input: Vec<PathMapInput>) -> Vec<downloader::PathMap> {
 }
 
 pub(crate) async fn list_downloaders(State(state): State<ApiState>) -> Response {
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let rows = match store.list_downloaders() {
             Ok(rows) => rows,
             Err(error) => {
@@ -192,7 +192,7 @@ pub(crate) async fn get_downloader(
             );
         }
     };
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let Some(row) = store.get_downloader(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
         };
@@ -402,8 +402,10 @@ pub(crate) async fn get_limits(
         Err((status, code, msg)) => return err(status, code, &msg),
     };
     if let Some(id) = downloader_id {
-        match crate::http::store_wait::store_read(&state, move |store| store.get_downloader(id))
-            .await
+        match crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
+            store.get_downloader(id)
+        })
+        .await
         {
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => {

@@ -52,20 +52,21 @@ pub(crate) async fn path_reconciliation_preview(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let (library, rows) = match super::store_wait::store_read(&state, move |store| {
-        let library = store
-            .get_library(&id)
-            .map_err(housekeeping_store_error)?
-            .ok_or_else(missing_library)?;
-        let rows = super::library::files_in_library(store, &library);
-        Ok::<_, Response>((library, rows))
-    })
-    .await
-    {
-        Ok(Ok(value)) => value,
-        Ok(Err(response)) => return response,
-        Err(error) => return error.response(),
-    };
+    let (library, rows) =
+        match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
+            let library = store
+                .get_library(&id)
+                .map_err(housekeeping_store_error)?
+                .ok_or_else(missing_library)?;
+            let rows = super::library::files_in_library(store, &library);
+            Ok::<_, Response>((library, rows))
+        })
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(response)) => return response,
+            Err(error) => return error.response(),
+        };
 
     let roots = library.root_paths.clone();
     let control = library::WorkControl::default();
@@ -155,7 +156,7 @@ pub(crate) async fn path_reconciliations(
     Json(body): Json<Value>,
 ) -> Response {
     let capture_id = id.clone();
-    let captured = super::store_wait::store_read(&state, move |store| {
+    let captured = super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         let library = store
             .get_library(&capture_id)
             .map_err(housekeeping_store_error)?
@@ -406,7 +407,7 @@ pub(crate) async fn root_consolidation_preview(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
-    let library = match super::store_wait::store_read(&state, move |store| {
+    let library = match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         store
             .get_library(&id)
             .map_err(housekeeping_store_error)?

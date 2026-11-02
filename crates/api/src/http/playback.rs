@@ -155,36 +155,40 @@ pub(crate) async fn item(
 ) -> Response {
     // Review L2: the item's ledger facts are read off the executor; a contended
     // lock is answered with "busy, retry" instead of parking a worker.
-    let (media, library_id, preferred_coverage) = match store_read(&state, move |store| {
-        let Some(media_id) = resolve_media_id(&id) else {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        };
-        let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
-        let coverages = visible_coverages_for_media(store, &media, &all_coverages, user_id);
-        if coverages.is_empty() {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "playback.item_missing",
-                "条目不存在",
-            ));
-        }
-        let files: Vec<&domain::LibraryFile> =
-            coverages.iter().map(|coverage| &coverage.file).collect();
-        let library_id = library_id_for(store, &media, &files).unwrap_or_default();
-        let preferred_coverage = crate::http::library::preferred_coverage(&coverages).cloned();
-        Ok((media, library_id, preferred_coverage))
-    })
+    let (media, library_id, preferred_coverage) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let Some(media_id) = resolve_media_id(&id) else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let Some(media) = store.get_media(media_id).ok().flatten() else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
+            let coverages = visible_coverages_for_media(store, &media, &all_coverages, user_id);
+            if coverages.is_empty() {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            }
+            let files: Vec<&domain::LibraryFile> =
+                coverages.iter().map(|coverage| &coverage.file).collect();
+            let library_id = library_id_for(store, &media, &files).unwrap_or_default();
+            let preferred_coverage = crate::http::library::preferred_coverage(&coverages).cloned();
+            Ok((media, library_id, preferred_coverage))
+        },
+    )
     .await
     {
         Ok(Ok(value)) => value,
@@ -247,17 +251,21 @@ pub(crate) async fn decide(
 ) -> Response {
     // Review L2: the tier-0 decision reads the ledger; take the Store lock off the
     // executor and answer "busy, retry" instead of parking a worker on a batch.
-    match store_read(&state, move |store| -> Response {
-        let (file, _media, _, _) = match row_for(store, &body, user_id) {
-            Ok(row) => row,
-            Err(error) => return error.response(),
-        };
-        let tracks = store
-            .get_file_meta(&file.file_id.to_string())
-            .ok()
-            .flatten();
-        ok(direct_decision(&file, &body, tracks.as_ref())).into_response()
-    })
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Response {
+            let (file, _media, _, _) = match row_for(store, &body, user_id) {
+                Ok(row) => row,
+                Err(error) => return error.response(),
+            };
+            let tracks = store
+                .get_file_meta(&file.file_id.to_string())
+                .ok()
+                .flatten();
+            ok(direct_decision(&file, &body, tracks.as_ref())).into_response()
+        },
+    )
     .await
     {
         Ok(response) => response,
@@ -351,7 +359,7 @@ fn metric_media_id(
 /// GET/PUT /playback/policy — direct-play only; transcode flags persist in KV.
 pub(crate) async fn get_policy(State(state): State<ApiState>) -> Response {
     // Review L2: policy lives in the KV table; read it off the executor.
-    let result = store_read(&state, |store| -> Response {
+    let result = store_read(&state, &[store::Db::App], |store| -> Response {
         let prefs = store
             .get_setting("playback.policy")
             .ok()
@@ -435,7 +443,7 @@ pub(crate) async fn get_ui_prefs(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    match store_read(&state, move |store| {
+    match store_read(&state, &[store::Db::App], move |store| {
         let raw = store
             .get_setting(&ui_preferences_key(user_id))
             .ok()
@@ -504,36 +512,40 @@ pub(crate) async fn get_subtitle_file(
     axum::extract::Path((ledger_id, index)): axum::extract::Path<(String, u32)>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let (row, media_title, file_path, file_id) = match store_read(&state, move |store| {
-        let not_found = || err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
-        let Ok(file_id) = ledger_id.parse::<domain::LedgerId>() else {
-            return Err(not_found());
-        };
-        // G07: 先校验该文件对当前用户可见，防止普通成员跨 Library 读取字幕。
-        let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
-            return Err(not_found());
-        };
-        let Some(media) = store.get_media(file.media_id).ok().flatten() else {
-            return Err(not_found());
-        };
-        let Ok(Some(tracks)) = store.get_file_meta(&file.file_id.to_string()) else {
-            return Err(not_found());
-        };
-        let row = crate::subtitle_delivery::SubtitleRequest {
-            ledger_id: file.file_id,
-            source_path: file.path.clone(),
-            kind: media.kind,
-            tracks,
-            index,
-            wants_vtt: query
-                .get("format")
-                .map(|f| f.eq_ignore_ascii_case("vtt"))
-                .unwrap_or(false),
-        };
-        let file_path = file.path.display().to_string();
-        let fid = file.file_id;
-        Ok((row, media.title, file_path, fid))
-    })
+    let (row, media_title, file_path, file_id) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let not_found = || err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
+            let Ok(file_id) = ledger_id.parse::<domain::LedgerId>() else {
+                return Err(not_found());
+            };
+            // G07: 先校验该文件对当前用户可见，防止普通成员跨 Library 读取字幕。
+            let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
+                return Err(not_found());
+            };
+            let Some(media) = store.get_media(file.media_id).ok().flatten() else {
+                return Err(not_found());
+            };
+            let Ok(Some(tracks)) = store.get_file_meta(&file.file_id.to_string()) else {
+                return Err(not_found());
+            };
+            let row = crate::subtitle_delivery::SubtitleRequest {
+                ledger_id: file.file_id,
+                source_path: file.path.clone(),
+                kind: media.kind,
+                tracks,
+                index,
+                wants_vtt: query
+                    .get("format")
+                    .map(|f| f.eq_ignore_ascii_case("vtt"))
+                    .unwrap_or(false),
+            };
+            let file_path = file.path.display().to_string();
+            let fid = file.file_id;
+            Ok((row, media.title, file_path, fid))
+        },
+    )
     .await
     {
         Ok(Ok(value)) => value,

@@ -25,10 +25,14 @@ pub(crate) async fn favorite_position(
         Ok(query) => query,
         Err(response) => return response,
     };
-    match crate::http::store_wait::store_read(&state, move |store| {
-        super::favorite_read::scope(store, &mut query)?;
-        store.playback_favorite_position(&query, start)
-    })
+    match crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            super::favorite_read::scope(store, &mut query)?;
+            store.playback_favorite_position(&query, start)
+        },
+    )
     .await
     {
         Ok(Ok(after)) => ok(json!({"start": start, "after": after})).into_response(),

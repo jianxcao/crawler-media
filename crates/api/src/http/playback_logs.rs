@@ -150,89 +150,96 @@ pub(crate) async fn history(
         .and_then(|d| d.checked_mul(86_400))
         .map(|secs| now.saturating_sub(secs));
     // Review L2: the history page is Store work; keep the executor free.
-    match store_read(&state, move |store| -> Response {
-        let admin = store
-            .user_role(user_id)
-            .map(|role| role == "admin")
-            .unwrap_or(false);
-        let target_user = if admin {
-            match member_filter(query.get("member_id").map(String::as_str)) {
-                Ok(filter) => filter,
-                Err(response) => return response,
-            }
-        } else {
-            Some(user_id)
-        };
-        let scope = if admin && query.get("scope").is_some_and(|scope| scope == "all") {
-            "all"
-        } else {
-            "visible"
-        };
-        let visible_media = match visible_media_ids(store, user_id, scope) {
-            Ok(v) => v,
-            Err(error) => {
-                tracing::error!(%error, "加载播放历史可见范围失败");
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "playback.query_failed",
-                    "播放历史查询失败",
-                );
-            }
-        };
-        // SQL 侧做 keyset 分页 + 可见集合过滤 + hidden 计数：不再把整个表读进内存。
-        let log_scope = crate::store::PlaybackLogScope {
-            before,
-            // Store 对「只有 before_id 没有 before」返回 Invalid；旧实现忽略，保持一致。
-            before_id: if before.is_some() {
-                query.get("before_id").cloned()
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Response {
+            let admin = store
+                .user_role(user_id)
+                .map(|role| role == "admin")
+                .unwrap_or(false);
+            let target_user = if admin {
+                match member_filter(query.get("member_id").map(String::as_str)) {
+                    Ok(filter) => filter,
+                    Err(response) => return response,
+                }
             } else {
-                None
-            },
-            since,
-            user_id: target_user,
-            visible_media: visible_media.map(|ids| ids.into_iter().collect()),
-        };
-        let page = match store.playback_log_page(&log_scope, limit) {
-            Ok(page) => page,
-            Err(error) => {
-                tracing::error!(%error, "播放历史分页失败");
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "playback.query_failed",
-                    "播放历史查询失败",
-                );
-            }
-        };
-        // 本页所有 entry 的 media/成员名一次物化；渲染阶段不再查库。
-        let media_ids: Vec<domain::MediaId> = page.entries.iter().map(|log| log.media_id).collect();
-        let user_ids: Vec<domain::UserId> = page.entries.iter().map(|log| log.user_id).collect();
-        let read = match crate::playback_read::PlaybackRead::load(store, &media_ids, &user_ids) {
-            Ok(read) => Some(read),
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    %user_id,
-                    media_count = media_ids.len(),
-                    "加载播放历史媒体快照失败，本次历史报告降级为未关联 media"
-                );
-                None
-            }
-        };
-        let entries: Vec<Value> = render_entries(store, read.as_ref(), &page.entries);
-        // Composite cursor: encode both started_at (ms) and id to avoid
-        // skipping same-second records at the page boundary.
-        let cursor_log = page.entries.last().filter(|_| page.has_more);
-        let next_cursor = cursor_log.map(|log| (log.started_at as i128 * 1000).to_string());
-        let next_cursor_id = cursor_log.map(|log| log.id.clone());
-        ok(json!({
-            "entries": entries,
-            "hidden_count": page.hidden_count,
-            "has_more": page.has_more,
-            "next_cursor": next_cursor,
-            "next_cursor_id": next_cursor_id,
-        }))
-        .into_response()
-    })
+                Some(user_id)
+            };
+            let scope = if admin && query.get("scope").is_some_and(|scope| scope == "all") {
+                "all"
+            } else {
+                "visible"
+            };
+            let visible_media = match visible_media_ids(store, user_id, scope) {
+                Ok(v) => v,
+                Err(error) => {
+                    tracing::error!(%error, "加载播放历史可见范围失败");
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "playback.query_failed",
+                        "播放历史查询失败",
+                    );
+                }
+            };
+            // SQL 侧做 keyset 分页 + 可见集合过滤 + hidden 计数：不再把整个表读进内存。
+            let log_scope = crate::store::PlaybackLogScope {
+                before,
+                // Store 对「只有 before_id 没有 before」返回 Invalid；旧实现忽略，保持一致。
+                before_id: if before.is_some() {
+                    query.get("before_id").cloned()
+                } else {
+                    None
+                },
+                since,
+                user_id: target_user,
+                visible_media: visible_media.map(|ids| ids.into_iter().collect()),
+            };
+            let page = match store.playback_log_page(&log_scope, limit) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::error!(%error, "播放历史分页失败");
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "playback.query_failed",
+                        "播放历史查询失败",
+                    );
+                }
+            };
+            // 本页所有 entry 的 media/成员名一次物化；渲染阶段不再查库。
+            let media_ids: Vec<domain::MediaId> =
+                page.entries.iter().map(|log| log.media_id).collect();
+            let user_ids: Vec<domain::UserId> =
+                page.entries.iter().map(|log| log.user_id).collect();
+            let read = match crate::playback_read::PlaybackRead::load(store, &media_ids, &user_ids)
+            {
+                Ok(read) => Some(read),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        %user_id,
+                        media_count = media_ids.len(),
+                        "加载播放历史媒体快照失败，本次历史报告降级为未关联 media"
+                    );
+                    None
+                }
+            };
+            let entries: Vec<Value> = render_entries(store, read.as_ref(), &page.entries);
+            // Composite cursor: encode both started_at (ms) and id to avoid
+            // skipping same-second records at the page boundary.
+            let cursor_log = page.entries.last().filter(|_| page.has_more);
+            let next_cursor = cursor_log.map(|log| (log.started_at as i128 * 1000).to_string());
+            let next_cursor_id = cursor_log.map(|log| log.id.clone());
+            ok(json!({
+                "entries": entries,
+                "hidden_count": page.hidden_count,
+                "has_more": page.has_more,
+                "next_cursor": next_cursor,
+                "next_cursor_id": next_cursor_id,
+            }))
+            .into_response()
+        },
+    )
     .await
     {
         Ok(response) => response,

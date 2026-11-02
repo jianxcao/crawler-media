@@ -194,7 +194,7 @@ async fn capture_target(
     user: Option<domain::UserId>,
     query: ChapterQuery,
 ) -> Result<ChapterTarget, Response> {
-    super::store_wait::store_read(state, move |store| {
+    super::store_wait::store_read(state, &[store::Db::Library, store::Db::App], move |store| {
         let library = require_visible_library(store, &id, user)?;
         let media = store
             .get_media(media_id)
@@ -461,7 +461,7 @@ pub(crate) async fn chapter_image(
     let Ok(file_id) = domain::LedgerId::from_str(&ledger_id) else {
         return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在");
     };
-    let row = match super::store_wait::store_read(&state, move |store| {
+    let row = match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         store.file_coverage_by_id(file_id)
     })
     .await

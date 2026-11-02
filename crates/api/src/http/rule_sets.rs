@@ -143,7 +143,7 @@ fn rule_set_json(filter: &Filter, is_default: bool) -> Value {
 }
 
 pub(crate) async fn list_rule_sets(State(state): State<ApiState>) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let filters = match store.list_filters() {
             Ok(filters) => filters,
             Err(StoreError::Invalid(message)) => {
@@ -235,7 +235,7 @@ pub(crate) async fn get_rule_set(
             );
         }
     };
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let filter = match store.get_filter(id) {
             Ok(Some(filter)) => filter,
             Ok(None) => {

@@ -20,7 +20,7 @@ impl ApiServerProvider {
         let Some(device_id) = device_id else {
             return Ok(false);
         };
-        let Some(binding) = self.bounded_reader(|store| {
+        let Some(binding) = self.bounded_reader(&[store::Db::Library], |store| {
             store
                 .play_session_binding(user_id, device_id, session_id)
                 .map_err(|e| e.to_string())

@@ -471,37 +471,41 @@ fn similar_target(
     item_id: &str,
     user_id: Option<domain::UserId>,
 ) -> Result<Option<(domain::MediaKind, String)>, Response> {
-    crate::http::store_wait::with_store_read(state, |store| {
-        let library = require_visible_library(store, id, user_id)?;
-        let media_id = domain::MediaId::from_str(item_id)
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"))?;
-        let media = store
-            .get_media(media_id)
-            .map_err(|error| {
+    crate::http::store_wait::with_store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| {
+            let library = require_visible_library(store, id, user_id)?;
+            let media_id = domain::MediaId::from_str(item_id)
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"))?;
+            let media = store
+                .get_media(media_id)
+                .map_err(|error| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    )
+                })?
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"))?;
+            let rows = store.file_coverage_for_media(media_id).map_err(|error| {
                 err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
                 )
-            })?
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"))?;
-        let rows = store.file_coverage_for_media(media_id).map_err(|error| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            )
-        })?;
-        if !rows.iter().any(|row| {
-            row.file.library_id.to_string() == library.id
-                && row.file.publication == domain::FilePublication::Published
-        }) {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "条目不存在",
-            ));
-        }
-        Ok(media.tmdb_id.map(|id| (media.kind, id)))
-    })?
+            })?;
+            if !rows.iter().any(|row| {
+                row.file.library_id.to_string() == library.id
+                    && row.file.publication == domain::FilePublication::Published
+            }) {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
+            Ok(media.tmdb_id.map(|id| (media.kind, id)))
+        },
+    )?
 }

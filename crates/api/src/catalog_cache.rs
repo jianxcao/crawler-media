@@ -38,9 +38,11 @@ pub async fn list_catalog_cache(
     State(state): State<ApiState>,
     Query(query): Query<ListCatalogQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows = store_read(&state, |store| store.list_catalog_cache())
-        .await
-        .map_err(cache_store_error)??;
+    let rows = store_read(&state, &[store::Db::Cache], |store| {
+        store.list_catalog_cache()
+    })
+    .await
+    .map_err(cache_store_error)??;
     let aggregate = query.view.as_deref() == Some("aggregate");
     state
         .http_work

@@ -22,7 +22,7 @@ fn fixture() -> (tempfile::TempDir, Store) {
 fn a_nested_shorter_deadline_interrupts_sql_on_an_already_bound_reader() {
     let (_dir, store) = fixture();
     store
-        .with_read_snapshot(Duration::from_secs(2), || {
+        .with_read_snapshot(&[Db::Library], Duration::from_secs(2), || {
             store.list_libraries().unwrap();
             let started = Instant::now();
             let result = store.with_read_scope(Duration::from_millis(20), || {
@@ -51,7 +51,7 @@ fn a_nested_shorter_deadline_interrupts_sql_on_an_already_bound_reader() {
 #[test]
 fn a_new_cancel_token_interrupts_sql_on_an_already_bound_reader() {
     let (_dir, store) = fixture();
-    let result = store.with_read_snapshot(Duration::from_secs(2), || {
+    let result = store.with_read_snapshot(&[Db::Library], Duration::from_secs(2), || {
         store.list_libraries().unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let budget = QueryBudget {
@@ -98,7 +98,7 @@ fn a_new_cancel_token_interrupts_sql_on_an_already_bound_reader() {
 fn first_admission_in_a_shorter_read_scope_does_not_shorten_its_snapshot_owner() {
     let (_dir, store) = fixture();
     store
-        .with_read_snapshot(Duration::from_secs(2), || {
+        .with_read_snapshot(&[Db::Library], Duration::from_secs(2), || {
             store
                 .with_read_scope(Duration::from_millis(20), || store.list_libraries())
                 .unwrap()
@@ -115,7 +115,7 @@ fn first_admission_in_a_cancel_scope_does_not_keep_its_token_after_return() {
     let (_dir, store) = fixture();
     let cancelled = Arc::new(AtomicBool::new(false));
     store
-        .with_read_snapshot(Duration::from_secs(2), || {
+        .with_read_snapshot(&[Db::Library], Duration::from_secs(2), || {
             let inner = QueryBudget {
                 deadline: Instant::now() + Duration::from_secs(2),
                 cancelled: cancelled.clone(),
@@ -154,7 +154,7 @@ fn request_stats_include_the_whole_reader_session() {
     drop(lease);
     let (_, request) = store.with_stats(store::stats::StatsScope::Library, || {
         store
-            .with_read_snapshot(Duration::from_secs(2), || {
+            .with_read_snapshot(&[Db::Library], Duration::from_secs(2), || {
                 for _ in 0..2 {
                     assert_eq!(
                         store
@@ -181,7 +181,7 @@ fn reused_reader_busy_wait_fits_the_remaining_request_budget() {
     let wait = Duration::from_millis(200);
     let started = Instant::now();
     store
-        .with_read_snapshot(wait, || {
+        .with_read_snapshot(&[Db::Library], wait, || {
             store.list_libraries().unwrap();
             std::thread::sleep(Duration::from_millis(60));
             store

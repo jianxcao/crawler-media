@@ -78,58 +78,62 @@ pub(crate) async fn activity(
         .unwrap_or_else(|| "visible".to_string());
     let now = playback_now(&state);
     // Review L2: session/read snapshots are Store work; keep the executor free.
-    match store_read(&state, move |store| -> Response {
-        let admin = user_id
-            .and_then(|id| store.user_role(id).ok())
-            .is_some_and(|role| role == "admin");
-        let sessions: Vec<SessionRow> = store
-            .active_sessions(now, session_timeout_secs())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|session| !session.admin_ended)
-            .filter(|session| admin || user_id == Some(session.user_id))
-            .collect();
-        let media_ids: Vec<domain::MediaId> =
-            sessions.iter().map(|session| session.media_id).collect();
-        let user_ids: Vec<domain::UserId> =
-            sessions.iter().map(|session| session.user_id).collect();
-        let read = load_read(store, &media_ids, &user_ids);
-        let mut hidden = 0usize;
-        let items: Vec<Value> = sessions
-            .iter()
-            .filter_map(|session| {
-                let visible = session_library_visible(
-                    &read,
-                    store,
-                    session,
-                    user_id,
-                    if admin { &scope } else { "visible" },
-                );
-                if visible {
-                    Some(session_json(
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Response {
+            let admin = user_id
+                .and_then(|id| store.user_role(id).ok())
+                .is_some_and(|role| role == "admin");
+            let sessions: Vec<SessionRow> = store
+                .active_sessions(now, session_timeout_secs())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|session| !session.admin_ended)
+                .filter(|session| admin || user_id == Some(session.user_id))
+                .collect();
+            let media_ids: Vec<domain::MediaId> =
+                sessions.iter().map(|session| session.media_id).collect();
+            let user_ids: Vec<domain::UserId> =
+                sessions.iter().map(|session| session.user_id).collect();
+            let read = load_read(store, &media_ids, &user_ids);
+            let mut hidden = 0usize;
+            let items: Vec<Value> = sessions
+                .iter()
+                .filter_map(|session| {
+                    let visible = session_library_visible(
+                        &read,
+                        store,
                         session,
-                        crate::playback_read::media_target(
-                            &read,
-                            session.media_id,
-                            session.season,
-                            session.episode,
-                        ),
-                        &read.member_name(session.user_id),
-                    ))
-                } else {
-                    hidden += 1;
-                    None
-                }
-            })
-            .collect();
-        ok(json!({
-            "sessions": items,
-            "downloads": [],
-            "hidden_session_count": hidden,
-            "hidden_download_count": 0,
-        }))
-        .into_response()
-    })
+                        user_id,
+                        if admin { &scope } else { "visible" },
+                    );
+                    if visible {
+                        Some(session_json(
+                            session,
+                            crate::playback_read::media_target(
+                                &read,
+                                session.media_id,
+                                session.season,
+                                session.episode,
+                            ),
+                            &read.member_name(session.user_id),
+                        ))
+                    } else {
+                        hidden += 1;
+                        None
+                    }
+                })
+                .collect();
+            ok(json!({
+                "sessions": items,
+                "downloads": [],
+                "hidden_session_count": hidden,
+                "hidden_download_count": 0,
+            }))
+            .into_response()
+        },
+    )
     .await
     {
         Ok(response) => response,
@@ -215,7 +219,7 @@ pub(crate) async fn devices(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
     let now = playback_now(&state);
-    match store_read(&state, move |store| -> Response {
+    match store_read(&state, &[store::Db::Library, store::Db::App], move |store| -> Response {
         let admin = store
             .user_role(user_id)
             .map(|role| role == "admin")

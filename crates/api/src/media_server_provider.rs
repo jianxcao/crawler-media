@@ -307,28 +307,33 @@ impl MediaServerProvider for ApiServerProvider {
         let budget = state.http_work.clone();
         budget
             .run(std::time::Duration::from_secs(30), move || {
-                let libraries = sync_operations::read_store(&state, |store| {
-                    let ownership = store
-                        .library_ownership()
-                        .map_err(|error| error.to_string())?;
-                    let role = store
-                        .user_role(user_id)
-                        .map_err(|error| error.to_string())?;
-                    let libraries = store.list_libraries().map_err(|error| error.to_string())?;
-                    let libraries = libraries
-                        .into_iter()
-                        .filter(|lib| {
-                            ownership.accepts_work(&lib.id)
-                                && if role == "admin" {
-                                    lib.admin_visible
-                                } else {
-                                    lib.access_mode == "everyone"
-                                        || lib.member_ids.contains(&user_id)
-                                }
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(libraries)
-                })?;
+                let libraries = sync_operations::read_store(
+                    &state,
+                    &[store::Db::Library, store::Db::App],
+                    |store| {
+                        let ownership = store
+                            .library_ownership()
+                            .map_err(|error| error.to_string())?;
+                        let role = store
+                            .user_role(user_id)
+                            .map_err(|error| error.to_string())?;
+                        let libraries =
+                            store.list_libraries().map_err(|error| error.to_string())?;
+                        let libraries = libraries
+                            .into_iter()
+                            .filter(|lib| {
+                                ownership.accepts_work(&lib.id)
+                                    && if role == "admin" {
+                                        lib.admin_visible
+                                    } else {
+                                        lib.access_mode == "everyone"
+                                            || lib.member_ids.contains(&user_id)
+                                    }
+                            })
+                            .collect::<Vec<_>>();
+                        Ok(libraries)
+                    },
+                )?;
                 let mut list = Vec::new();
                 for lib in libraries {
                     let cover_path = lib
@@ -513,33 +518,34 @@ impl MediaServerProvider for ApiServerProvider {
         let id = id.to_owned();
         let facts = self
             .run_sync(move |provider| -> Result<_, String> {
-                let facts = provider.bounded_reader(|store| {
-                    let Some(entry) = items::resolve_entry(store, user_id, &id)? else {
-                        return Ok(None);
-                    };
-                    if entry.media.kind != MediaKind::Tv || entry.is_series {
-                        return Ok(None);
-                    }
-                    // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
-                    let Some((season, episode)) = items::snapshot_unit(entry.unit)
-                        .and_then(|unit| unit.episode_coordinates())
-                    else {
-                        return Ok(None);
-                    };
-                    // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
-                    let adopted_still = item_metadata::page_fields(
-                        store,
-                        &entry.file,
-                        entry.unit,
-                        &entry.media,
-                        entry.is_series,
-                    )
-                    .ok()
-                    .and_then(|fields| fields.still_url.value().cloned());
-                    let adopted_url =
-                        primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
-                    Ok(Some((entry, adopted_url, season, episode)))
-                })?;
+                let facts =
+                    provider.bounded_reader(sync_operations::item_databases(user_id), |store| {
+                        let Some(entry) = items::resolve_entry(store, user_id, &id)? else {
+                            return Ok(None);
+                        };
+                        if entry.media.kind != MediaKind::Tv || entry.is_series {
+                            return Ok(None);
+                        }
+                        // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
+                        let Some((season, episode)) = items::snapshot_unit(entry.unit)
+                            .and_then(|unit| unit.episode_coordinates())
+                        else {
+                            return Ok(None);
+                        };
+                        // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
+                        let adopted_still = item_metadata::page_fields(
+                            store,
+                            &entry.file,
+                            entry.unit,
+                            &entry.media,
+                            entry.is_series,
+                        )
+                        .ok()
+                        .and_then(|fields| fields.still_url.value().cloned());
+                        let adopted_url =
+                            primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
+                        Ok(Some((entry, adopted_url, season, episode)))
+                    })?;
                 let Some((entry, adopted_url, season, episode)) = facts else {
                     return Ok(None);
                 };
@@ -726,7 +732,7 @@ impl ApiServerProvider {
             .unwrap_or_default();
         let favorite = self
             .run_sync(move |provider| {
-                provider.bounded_reader(|store| {
+                provider.bounded_reader(&[store::Db::Library], |store| {
                     store
                         .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
                         .map(|state| state.is_some_and(|state| state.favorite))

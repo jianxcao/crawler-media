@@ -13,12 +13,17 @@ use crate::management::ApiState;
 
 /// GET /ledger — every ledger row (management view).
 pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
-    let (mut items, pending, global_transfer_mode) =
-        match super::store_wait::store_read(&state, capture_ledger).await {
-            Ok(Ok(facts)) => facts,
-            Ok(Err(response)) => return response,
-            Err(error) => return error.response(),
-        };
+    let (mut items, pending, global_transfer_mode) = match super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        capture_ledger,
+    )
+    .await
+    {
+        Ok(Ok(facts)) => facts,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
+    };
     let files = state.file_stats.clone();
     match super::fs::read_work(&state, move || {
         let rows = items.len();
@@ -177,7 +182,7 @@ pub(crate) async fn delete_ledger_row(
         Err(_) => return err(StatusCode::BAD_REQUEST, "ledger.invalid", "ledger id 无效"),
     };
     let delete_file = query.delete_file.unwrap_or(false);
-    let target = match super::store_wait::store_read(&state, move |store| {
+    let target = match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         ledger_delete_target(store, ledger_id, delete_file)
     })
     .await
@@ -300,15 +305,16 @@ pub(crate) async fn list_unidentified(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let library_id = query.get("library_id").cloned();
-    let mut items = match super::store_wait::store_read(&state, move |store| {
-        capture_unidentified(store, library_id.as_deref())
-    })
-    .await
-    {
-        Ok(Ok(items)) => items,
-        Ok(Err(response)) => return response,
-        Err(error) => return error.response(),
-    };
+    let mut items =
+        match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
+            capture_unidentified(store, library_id.as_deref())
+        })
+        .await
+        {
+            Ok(Ok(items)) => items,
+            Ok(Err(response)) => return response,
+            Err(error) => return error.response(),
+        };
     let files = state.file_stats.clone();
     match super::fs::read_work(&state, move || {
         // Unidentified rows have no persisted size; stat them after releasing the store lock.

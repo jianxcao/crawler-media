@@ -54,48 +54,49 @@ pub(crate) async fn patch_boost(
 }
 
 pub(crate) async fn boost_stats(State(state): State<ApiState>) -> Response {
-    let (rows, category) = match crate::http::store_wait::store_read(&state, |store| {
-        let sites = match store.list_sites() {
-            Ok(sites) => sites,
-            Err(error) => {
-                return Err(err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                ));
-            }
-        };
-        let rows: Vec<Value> = sites
-            .iter()
-            .map(|site| {
-                let raw = store
-                    .get_setting(&boost_key(&site.id.to_string()))
-                    .ok()
-                    .flatten()
-                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                    .unwrap_or_else(|| json!({ "enabled": false }));
-                json!({
-                    "site_id": site.id.to_string(),
-                    "site_name": site.name,
-                    "boost": raw,
+    let (rows, category) =
+        match crate::http::store_wait::store_read(&state, &[store::Db::App], |store| {
+            let sites = match store.list_sites() {
+                Ok(sites) => sites,
+                Err(error) => {
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    ));
+                }
+            };
+            let rows: Vec<Value> = sites
+                .iter()
+                .map(|site| {
+                    let raw = store
+                        .get_setting(&boost_key(&site.id.to_string()))
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                        .unwrap_or_else(|| json!({ "enabled": false }));
+                    json!({
+                        "site_id": site.id.to_string(),
+                        "site_name": site.name,
+                        "boost": raw,
+                    })
                 })
-            })
-            .collect();
-        // Live upload totals from the configured downloader (best-effort).
-        let category = store
-            .default_downloader()
-            .ok()
-            .flatten()
-            .and_then(|d| d.category)
-            .unwrap_or_default();
-        Ok((rows, category))
-    })
-    .await
-    {
-        Ok(Ok(inputs)) => inputs,
-        Ok(Err(response)) => return response,
-        Err(error) => return error.response(),
-    };
+                .collect();
+            // Live upload totals from the configured downloader (best-effort).
+            let category = store
+                .default_downloader()
+                .ok()
+                .flatten()
+                .and_then(|d| d.category)
+                .unwrap_or_default();
+            Ok((rows, category))
+        })
+        .await
+        {
+            Ok(Ok(inputs)) => inputs,
+            Ok(Err(response)) => return response,
+            Err(error) => return error.response(),
+        };
     // 上传统计是 best-effort telemetry：worker 忙/超时/上游失败都按 0 处理，
     // 不让 /boost-stats 因为遥测而改变响应契约。
     let state_for_work = state.clone();

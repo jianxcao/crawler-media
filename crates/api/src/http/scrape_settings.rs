@@ -109,7 +109,7 @@ pub(crate) async fn get_scrape_settings(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let is_admin = store
             .user_role(user_id)
             .map(|role| role == "admin")
@@ -162,7 +162,7 @@ pub(crate) async fn put_scrape_settings(
 /// POST /settings/scrape/preview-naming — render both composed patterns with a
 /// sample movie + sample episode so the UI can preview before saving.
 pub(crate) async fn preview_naming(State(state): State<ApiState>) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let config = match store.get_scrape_config() {
             Ok(config) => config,
             Err(error) => {

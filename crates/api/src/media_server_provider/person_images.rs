@@ -53,7 +53,7 @@ async fn read_person(
     let query = query.to_owned();
     provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(super::sync_operations::item_databases(user), |store| {
                 Ok(store
                     .protocol_person(user, &query)
                     .map_err(|error| error.to_string())?

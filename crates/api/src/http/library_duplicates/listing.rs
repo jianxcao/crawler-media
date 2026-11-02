@@ -47,7 +47,11 @@ fn store_error(error: store::StoreError) -> Response {
 
 /// Capture database facts off-executor, then observe each physical file once off-lock.
 pub(crate) async fn duplicates(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
-    let captured = match store_wait::store_read(&state, move |store| capture(store, &id)).await {
+    let captured = match store_wait::store_read(&state, &[store::Db::Library], move |store| {
+        capture(store, &id)
+    })
+    .await
+    {
         Ok(Ok(captured)) => captured,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),

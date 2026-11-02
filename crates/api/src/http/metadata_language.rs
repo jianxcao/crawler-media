@@ -17,11 +17,14 @@ pub(crate) struct Change {
     language: String,
 }
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
-    let result =
-        match super::store_wait::store_read(&state, |store| store.metadata_language()).await {
-            Ok(result) => result,
-            Err(error) => return error.response(),
-        };
+    let result = match super::store_wait::store_read(&state, &[store::Db::Library], |store| {
+        store.metadata_language()
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => return error.response(),
+    };
     match result {
         Ok(value) => ok(serde_json::json!(value)).into_response(),
         Err(error) => err(

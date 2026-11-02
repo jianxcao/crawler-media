@@ -22,7 +22,7 @@ pub(super) async fn entities(
     let search = search.map(str::to_owned);
     provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
                 let library_id = parent.and_then(|id| id.parse::<domain::LibraryId>().ok());
                 let page = store
                     .protocol_entities(&store::ProtocolEntityQuery {
@@ -56,7 +56,7 @@ pub(super) async fn counts(
 ) -> Result<ItemCounts, String> {
     provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
                 let value = store
                     .protocol_counts(user)
                     .map_err(|error| error.to_string())?;
@@ -77,7 +77,7 @@ pub(super) async fn seasons(
 ) -> Result<Vec<Season>, String> {
     provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
                 Ok(store
                     .protocol_seasons(user, media)
                     .map_err(|error| error.to_string())?
@@ -102,7 +102,7 @@ pub(super) async fn image(
     let lookup = query.clone();
     let captured = provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(super::sync_operations::item_databases(user), |store| {
                 let Some(reference) = store
                     .protocol_entity_representative(user, kind(entity_kind), &lookup)
                     .map_err(|error| error.to_string())?
@@ -157,7 +157,7 @@ pub(super) async fn image(
         .map_err(|error| error.to_string())??;
     let unchanged = provider
         .run_sync(move |provider| {
-            provider.bounded_reader(|store| {
+            provider.bounded_reader(super::sync_operations::item_databases(user), |store| {
                 let current = store
                     .protocol_entity_representative(user, kind(entity_kind), &query)
                     .map_err(|error| error.to_string())?;

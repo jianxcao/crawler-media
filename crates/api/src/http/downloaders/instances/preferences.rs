@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn target_prefs(State(state): State<ApiState>) -> Response {
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let raw = store.get_setting("download.target_prefs").ok().flatten();
         let prefs = raw
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())

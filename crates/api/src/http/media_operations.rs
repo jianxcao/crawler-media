@@ -177,7 +177,7 @@ pub(crate) async fn get_operation(
     State(state): State<ApiState>,
     Path(operation_id): Path<String>,
 ) -> Response {
-    let status = match super::store_wait::store_read(&state, move |store| {
+    let status = match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         store.media_operation_status(&operation_id)
     })
     .await

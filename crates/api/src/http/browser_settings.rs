@@ -13,14 +13,16 @@ use crate::runtime_browser::{BrowserSettings, BrowserSettingsError};
 
 pub(crate) async fn get_browser_settings(State(state): State<ApiState>) -> Response {
     let browser = state.browser.clone();
-    super::store_wait::store_read(&state, move |store| match BrowserSettings::load(store) {
-        Ok(settings) => {
-            let mut data = settings.response_with_store(store);
-            data["incompatible_endpoints"] =
-                serde_json::to_value(browser.incompatible_endpoints()).unwrap_or_default();
-            ok(data).into_response()
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
+        match BrowserSettings::load(store) {
+            Ok(settings) => {
+                let mut data = settings.response_with_store(store);
+                data["incompatible_endpoints"] =
+                    serde_json::to_value(browser.incompatible_endpoints()).unwrap_or_default();
+                ok(data).into_response()
+            }
+            Err(error) => settings_error(error),
         }
-        Err(error) => settings_error(error),
     })
     .await
     .unwrap_or_else(|error| error.response())
@@ -60,7 +62,7 @@ pub(crate) async fn get_obscura_status(State(state): State<ApiState>) -> Respons
 }
 
 pub(crate) async fn post_obscura_start(State(state): State<ApiState>) -> Response {
-    let policy = match super::store_wait::store_read(&state, |store| {
+    let policy = match super::store_wait::store_read(&state, &[store::Db::App], |store| {
         BrowserSettings::load(store).map(|settings| {
             settings
                 .obscura_install()
@@ -219,7 +221,7 @@ pub fn reconcile_obscura(state: &ApiState) {
 /// a start is detached onto the blocking pool so the request never waits on
 /// a download.
 pub async fn reconcile_off_runtime(state: &ApiState) {
-    match super::store_wait::store_read(state, load_want_on).await {
+    match super::store_wait::store_read(state, &[store::Db::App], load_want_on).await {
         Ok((want, _)) => {
             if let Some(reason) = not_started_reason(want) {
                 state.browser.set_managed_endpoint(None);

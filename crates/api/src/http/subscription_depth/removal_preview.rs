@@ -5,24 +5,28 @@ pub(crate) async fn removal_preview(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
-    let captured = crate::http::store_wait::store_read(&state, move |store| {
-        let (subscribe, media) =
-            crate::http::subscriptions::resolve_subscribe_on(store, &id, user_id)?;
-        let files = store
-            .file_coverage_for_media(subscribe.media_id)
-            .map_err(store_error)?;
-        let bytes: u64 = files
-            .iter()
-            .map(|coverage| coverage.file.size_bytes.unwrap_or(0))
-            .sum();
-        let titles: Vec<_> = store
-            .load_pending(subscribe.id)
-            .map_err(store_error)?
-            .into_iter()
-            .map(|(_, pending)| pending.torrent.title)
-            .collect();
-        Ok((media, files.len(), bytes, titles))
-    })
+    let captured = crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| {
+            let (subscribe, media) =
+                crate::http::subscriptions::resolve_subscribe_on(store, &id, user_id)?;
+            let files = store
+                .file_coverage_for_media(subscribe.media_id)
+                .map_err(store_error)?;
+            let bytes: u64 = files
+                .iter()
+                .map(|coverage| coverage.file.size_bytes.unwrap_or(0))
+                .sum();
+            let titles: Vec<_> = store
+                .load_pending(subscribe.id)
+                .map_err(store_error)?
+                .into_iter()
+                .map(|(_, pending)| pending.torrent.title)
+                .collect();
+            Ok((media, files.len(), bytes, titles))
+        },
+    )
     .await;
     let (media, file_count, bytes, mut titles) = match captured {
         Ok(Ok(captured)) => captured,

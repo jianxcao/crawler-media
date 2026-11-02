@@ -16,7 +16,11 @@ pub(crate) async fn verify_downloader(
             );
         }
     };
-    let row = match store_read(&state, move |store| store.get_downloader(id).ok().flatten()).await {
+    let row = match store_read(&state, &[store::Db::App], move |store| {
+        store.get_downloader(id).ok().flatten()
+    })
+    .await
+    {
         Ok(Some(row)) => row,
         Ok(None) => return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
         Err(error) => return error.response(),

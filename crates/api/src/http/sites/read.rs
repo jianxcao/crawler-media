@@ -6,7 +6,7 @@ pub(crate) async fn list_sites(
     State(state): State<ApiState>,
     Extension(user_id): Extension<domain::UserId>,
 ) -> Response {
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let sites = match store.list_sites() {
             Ok(sites) => sites,
             Err(error) => {
@@ -49,7 +49,7 @@ pub(crate) async fn get_site(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let Some(site) = store.get_site(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
         };

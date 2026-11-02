@@ -203,44 +203,48 @@ pub(crate) async fn probe_status(
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
     let season = query.season.unwrap_or(1);
-    let loaded = crate::http::store_wait::store_read(&state, move |store| {
-        let library = require_visible_library(store, &id, user_id)?;
-        let Some(_media) = store.get_media(media_id).map_err(chapter_store_error)? else {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "条目不存在",
-            ));
-        };
-        let library_id = library
-            .id
-            .parse::<domain::LibraryId>()
-            .map_err(|error| chapter_store_error(error.into()))?;
-        let rows = store
-            .file_coverage_in_library_season(library_id, media_id, season)
-            .map_err(chapter_store_error)?;
-        let visible = rows
-            .iter()
-            .any(|row| covers_season(row, season) && row.file.library_id.to_string() == library.id);
-        if !visible {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                "library.item_missing",
-                "该季没有在位文件",
-            ));
-        }
-        let job = store
-            .latest_marker_refresh_for_season(&media_id.to_string(), season)
-            .map_err(|error| {
-                tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "library.probe_status_failed",
-                    "读取片头片尾任务状态失败，请稍后重试",
-                )
-            })?;
-        Ok(job)
-    })
+    let loaded = crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let library = require_visible_library(store, &id, user_id)?;
+            let Some(_media) = store.get_media(media_id).map_err(chapter_store_error)? else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let library_id = library
+                .id
+                .parse::<domain::LibraryId>()
+                .map_err(|error| chapter_store_error(error.into()))?;
+            let rows = store
+                .file_coverage_in_library_season(library_id, media_id, season)
+                .map_err(chapter_store_error)?;
+            let visible = rows.iter().any(|row| {
+                covers_season(row, season) && row.file.library_id.to_string() == library.id
+            });
+            if !visible {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "该季没有在位文件",
+                ));
+            }
+            let job = store
+                .latest_marker_refresh_for_season(&media_id.to_string(), season)
+                .map_err(|error| {
+                    tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "library.probe_status_failed",
+                        "读取片头片尾任务状态失败，请稍后重试",
+                    )
+                })?;
+            Ok(job)
+        },
+    )
     .await;
     let job = match loaded {
         Ok(Ok(job)) => job,

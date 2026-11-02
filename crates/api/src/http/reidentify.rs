@@ -171,7 +171,7 @@ fn acquire_file_leases(
     state: &ApiState,
     file_ids: &[LedgerId],
 ) -> Result<Vec<LibraryWorkLease>, Response> {
-    let library_ids = super::store_wait::with_store_read(state, |store| {
+    let library_ids = super::store_wait::with_store_read(state, &[store::Db::Library], |store| {
         let mut ids = HashSet::new();
         for file_id in file_ids {
             if let Some((_, library_id)) =

@@ -126,39 +126,43 @@ pub(crate) async fn list_libraries(
     // 锁内只收集 owned DB/路径事实（removal / 封面候选路径）；逐 root `is_dir`、
     // 封面 `is_file` 仍在锁外、受 http_work 预算约束，慢挂载不再阻塞共享 Store
     // 和 Tokio worker。
-    let captured = super::store_wait::store_read(&state, move |store| {
-        let libraries = match store.list_libraries() {
-            Ok(libraries) => libraries,
-            Err(error) => {
-                return Err(err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                ));
-            }
-        };
-        let is_admin = user_id
-            .and_then(|uid| store.user_role(uid).ok())
-            .as_deref()
-            .map(|r| r == "admin")
-            .unwrap_or(false);
-        let manage_scope = query.get("scope").is_some_and(|s| s == "admin")
-            || query.get("manage").is_some_and(|s| s == "1" || s == "true");
-        let kind = query.get("kind").and_then(|k| MediaKind::from_str(k).ok());
-        let roster: Vec<Library> = libraries
-            .into_iter()
-            .filter(|library| {
-                (is_admin && manage_scope)
-                    || library_visible_with_role(&store, library, user_id, is_admin)
-            })
-            .filter(|library| kind.is_none_or(|k| library.kind == k))
-            .collect();
-        let facts: Vec<assets::LibraryFacts> = roster
-            .iter()
-            .map(|library| assets::library_facts(&store, library))
-            .collect();
-        Ok((facts, roster, is_admin))
-    })
+    let captured = super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let libraries = match store.list_libraries() {
+                Ok(libraries) => libraries,
+                Err(error) => {
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    ));
+                }
+            };
+            let is_admin = user_id
+                .and_then(|uid| store.user_role(uid).ok())
+                .as_deref()
+                .map(|r| r == "admin")
+                .unwrap_or(false);
+            let manage_scope = query.get("scope").is_some_and(|s| s == "admin")
+                || query.get("manage").is_some_and(|s| s == "1" || s == "true");
+            let kind = query.get("kind").and_then(|k| MediaKind::from_str(k).ok());
+            let roster: Vec<Library> = libraries
+                .into_iter()
+                .filter(|library| {
+                    (is_admin && manage_scope)
+                        || library_visible_with_role(&store, library, user_id, is_admin)
+                })
+                .filter(|library| kind.is_none_or(|k| library.kind == k))
+                .collect();
+            let facts: Vec<assets::LibraryFacts> = roster
+                .iter()
+                .map(|library| assets::library_facts(&store, library))
+                .collect();
+            Ok((facts, roster, is_admin))
+        },
+    )
     .await;
     let (facts, roster, is_admin) = match captured {
         Ok(Ok(captured)) => captured,
@@ -305,35 +309,39 @@ pub(crate) async fn item_detail(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    let loaded = super::store_wait::store_read(&state, move |store| {
-        require_visible_library(&store, &id, user_id)?;
-        let detail = match store.library_item_detail(lib_id, media_id, "") {
-            Ok(Some(detail)) => detail,
-            Ok(None) => {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "library.item_missing",
-                    "条目不存在",
-                ));
-            }
-            Err(error) => return Err(browse_store_error(error)),
-        };
-        let media = match store.get_media(media_id) {
-            Ok(media) => media,
-            Err(error) => return Err(browse_store_error(error)),
-        };
-        let file_ids: Vec<domain::LedgerId> =
-            detail.files.iter().map(|file| file.file_id).collect();
-        let details = match store.file_details_batch(&file_ids) {
-            Ok(details) => details,
-            Err(error) => return Err(browse_store_error(error)),
-        };
-        let probe_queued = match store.probe_queued_among(&file_ids) {
-            Ok(probe_queued) => probe_queued,
-            Err(error) => return Err(browse_store_error(error)),
-        };
-        Ok((detail, media, details, probe_queued))
-    })
+    let loaded = super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            require_visible_library(&store, &id, user_id)?;
+            let detail = match store.library_item_detail(lib_id, media_id, "") {
+                Ok(Some(detail)) => detail,
+                Ok(None) => {
+                    return Err(err(
+                        StatusCode::NOT_FOUND,
+                        "library.item_missing",
+                        "条目不存在",
+                    ));
+                }
+                Err(error) => return Err(browse_store_error(error)),
+            };
+            let media = match store.get_media(media_id) {
+                Ok(media) => media,
+                Err(error) => return Err(browse_store_error(error)),
+            };
+            let file_ids: Vec<domain::LedgerId> =
+                detail.files.iter().map(|file| file.file_id).collect();
+            let details = match store.file_details_batch(&file_ids) {
+                Ok(details) => details,
+                Err(error) => return Err(browse_store_error(error)),
+            };
+            let probe_queued = match store.probe_queued_among(&file_ids) {
+                Ok(probe_queued) => probe_queued,
+                Err(error) => return Err(browse_store_error(error)),
+            };
+            Ok((detail, media, details, probe_queued))
+        },
+    )
     .await;
     let (detail, media, details, probe_queued) = match loaded {
         Ok(Ok(loaded)) => loaded,
@@ -462,23 +470,27 @@ pub(crate) async fn item_files(
         }
     };
     let after = query.get("after").cloned();
-    let loaded = super::store_wait::store_read(&state, move |store| {
-        require_visible_library(store, &id, user_id)?;
-        let page = store
-            .library_file_page(lib_id, media_id, after.as_deref(), limit)
-            .map_err(browse_store_error)?;
-        let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
-        let units = store
-            .file_units(lib_id, media_id, &page.files)
-            .map_err(browse_store_error)?;
-        let details = store
-            .file_details_batch(&file_ids)
-            .map_err(browse_store_error)?;
-        let probe_queued = store
-            .probe_queued_among(&file_ids)
-            .map_err(browse_store_error)?;
-        Ok::<_, Response>((page, units, details, probe_queued))
-    })
+    let loaded = super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            require_visible_library(store, &id, user_id)?;
+            let page = store
+                .library_file_page(lib_id, media_id, after.as_deref(), limit)
+                .map_err(browse_store_error)?;
+            let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
+            let units = store
+                .file_units(lib_id, media_id, &page.files)
+                .map_err(browse_store_error)?;
+            let details = store
+                .file_details_batch(&file_ids)
+                .map_err(browse_store_error)?;
+            let probe_queued = store
+                .probe_queued_among(&file_ids)
+                .map_err(browse_store_error)?;
+            Ok::<_, Response>((page, units, details, probe_queued))
+        },
+    )
     .await;
     let (page, file_units, details, probe_queued) = match loaded {
         Ok(Ok(loaded)) => loaded,
@@ -615,51 +627,55 @@ pub(crate) async fn item_episodes(
         Err(_) => return missing_library(),
     };
     let read_id = id.clone();
-    let read = super::store_wait::store_read(&state, move |store| {
-        let is_admin = match user_id {
-            Some(user) => store.user_role(user).map_err(browse_store_error)? == "admin",
-            None => false,
-        };
-        store
-            .library_read_snapshot(|store| {
-                require_visible_library_on(store, &read_id, user_id, is_admin)?;
-                match store.get_library_item(lib_id, media_id) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return Err(err(
-                            StatusCode::NOT_FOUND,
-                            "library.item_missing",
-                            "条目不存在",
-                        ));
+    let read = super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let is_admin = match user_id {
+                Some(user) => store.user_role(user).map_err(browse_store_error)? == "admin",
+                None => false,
+            };
+            store
+                .library_read_snapshot(|store| {
+                    require_visible_library_on(store, &read_id, user_id, is_admin)?;
+                    match store.get_library_item(lib_id, media_id) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(err(
+                                StatusCode::NOT_FOUND,
+                                "library.item_missing",
+                                "条目不存在",
+                            ));
+                        }
+                        Err(error) => return Err(browse_store_error(error)),
                     }
-                    Err(error) => return Err(browse_store_error(error)),
-                }
-                let episodes = store
-                    .library_episodes(lib_id, media_id, season, "")
-                    .map_err(browse_store_error)?;
-                let mut states = HashMap::new();
-                let is_tv = store
-                    .get_media(media_id)
-                    .map_err(browse_store_error)?
-                    .is_none_or(|media| media.kind == domain::MediaKind::Tv);
-                if let Some(user_id) = user_id.filter(|_| is_tv) {
-                    let units: Vec<_> = episodes
-                        .iter()
-                        .map(|episode| {
-                            domain::UnitKey::new(episode.season as i32, episode.episode as i32)
-                        })
-                        .collect();
-                    let resolved = store
-                        .effective_unit_states(user_id, media_id, &units)
+                    let episodes = store
+                        .library_episodes(lib_id, media_id, season, "")
                         .map_err(browse_store_error)?;
-                    for (episode, state) in episodes.iter().zip(resolved) {
-                        states.insert((episode.season, episode.episode), state);
+                    let mut states = HashMap::new();
+                    let is_tv = store
+                        .get_media(media_id)
+                        .map_err(browse_store_error)?
+                        .is_none_or(|media| media.kind == domain::MediaKind::Tv);
+                    if let Some(user_id) = user_id.filter(|_| is_tv) {
+                        let units: Vec<_> = episodes
+                            .iter()
+                            .map(|episode| {
+                                domain::UnitKey::new(episode.season as i32, episode.episode as i32)
+                            })
+                            .collect();
+                        let resolved = store
+                            .effective_unit_states(user_id, media_id, &units)
+                            .map_err(browse_store_error)?;
+                        for (episode, state) in episodes.iter().zip(resolved) {
+                            states.insert((episode.season, episode.episode), state);
+                        }
                     }
-                }
-                Ok((episodes, states))
-            })
-            .map_err(browse_store_error)?
-    })
+                    Ok((episodes, states))
+                })
+                .map_err(browse_store_error)?
+        },
+    )
     .await;
     let (episodes, effective_states) = match read {
         Ok(Ok(value)) => value,

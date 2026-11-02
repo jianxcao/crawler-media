@@ -23,7 +23,11 @@ pub(crate) async fn preview(
         );
     };
     let (media, coverages, revision) =
-        match store_wait::store_read(&state, move |store| capture(store, library, media)).await {
+        match store_wait::store_read(&state, &[store::Db::Library], move |store| {
+            capture(store, library, media)
+        })
+        .await
+        {
             Ok(Ok(value)) => value,
             Ok(Err(response)) => return response,
             Err(error) => return error.response(),

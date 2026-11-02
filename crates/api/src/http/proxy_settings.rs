@@ -21,7 +21,7 @@ pub(crate) fn mask_proxy_url(url: &str) -> String {
 
 /// GET /settings/proxy — Read current metadata proxy configuration.
 pub(crate) async fn get_proxy(State(state): State<ApiState>) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let proxy_url = store
             .get_setting(settings_keys::PROXY_METADATA)
             .ok()
@@ -238,7 +238,7 @@ pub(crate) async fn test_proxy(
 /// POST /settings/proxy/diagnose — Check routing and connectivity for all major metadata domains.
 pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
     let (active_proxy, douban_bypass, tmdb_key) =
-        match super::store_wait::store_read(&state, |store| {
+        match super::store_wait::store_read(&state, &[store::Db::App], |store| {
             let key = store
                 .get_setting(settings_keys::TMDB_API_KEY)
                 .ok()

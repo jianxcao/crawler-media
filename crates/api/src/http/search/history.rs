@@ -305,7 +305,11 @@ pub(crate) async fn search_history(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
     // Review L2: off the executor; a contended lock answers 503 + Retry-After.
-    match store_read(&state, move |store| history_items(store, user_id)).await {
+    match store_read(&state, &[store::Db::App], move |store| {
+        history_items(store, user_id)
+    })
+    .await
+    {
         Ok(history) => ok(json!({ "items": history })).into_response(),
         Err(error) => error.response(),
     }
@@ -315,7 +319,7 @@ pub(crate) async fn get_presets(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    match store_read(&state, move |store| {
+    match store_read(&state, &[store::Db::App], move |store| {
         store
             .get_setting(&user_setting_key("search.presets", user_id))
             .ok()
@@ -360,7 +364,7 @@ pub(crate) async fn get_history_snapshot(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let id_for_read = id.clone();
-    let (vertical, payload) = match store_read(&state, move |store| {
+    let (vertical, payload) = match store_read(&state, &[store::Db::App], move |store| {
         if !history_items(store, user_id)
             .iter()
             .any(|item| item["id"].as_str() == Some(&id_for_read))

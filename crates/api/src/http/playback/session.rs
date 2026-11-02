@@ -27,17 +27,21 @@ pub(crate) async fn start_session(
     };
     // Review L2: session selection resolves the ledger row; a contended lock must
     // not park the worker that serves every other request on this runtime.
-    let (file, media, resolved, tracks) = match store_read(&state, move |store| {
-        let (file, media, resolved) = match resolve_playback_for(store, &selection, user_id) {
-            Ok(resolved) => resolved,
-            Err(error) => return Err(error.response()),
-        };
-        let tracks = store
-            .get_file_meta(&file.file_id.to_string())
-            .ok()
-            .flatten();
-        Ok((file, media, resolved, tracks))
-    })
+    let (file, media, resolved, tracks) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let (file, media, resolved) = match resolve_playback_for(store, &selection, user_id) {
+                Ok(resolved) => resolved,
+                Err(error) => return Err(error.response()),
+            };
+            let tracks = store
+                .get_file_meta(&file.file_id.to_string())
+                .ok()
+                .flatten();
+            Ok((file, media, resolved, tracks))
+        },
+    )
     .await
     {
         Ok(Ok(value)) => value,
@@ -54,7 +58,7 @@ pub(crate) async fn start_session(
     }
     let start_ms = resolved.start_ms;
     let file_id = file.file_id;
-    let coverage = store_read(&state, move |store| {
+    let coverage = store_read(&state, &[store::Db::Library], move |store| {
         store.file_coverage_by_id(file_id).ok().flatten()
     })
     .await
@@ -199,7 +203,7 @@ async fn session_chapters(
     let file_id = file.file_id;
     let expected = file.version.clone();
     let cached_media = media.clone();
-    let cached_chapters = match store_read(state, move |store| {
+    let cached_chapters = match store_read(state, &[store::Db::Library], move |store| {
         let coverage = store.file_coverage_by_id(file_id).ok().flatten()?;
         if coverage.file.version != expected || !coverage.units.contains(&unit) {
             return None;
@@ -241,7 +245,7 @@ async fn session_chapters(
         let media = media.clone();
         tokio::spawn(async move {
             let file_id = file.file_id;
-            let coverage = store_read(&state, move |store| {
+            let coverage = store_read(&state, &[store::Db::Library], move |store| {
                 store.file_coverage_by_id(file_id).ok().flatten()
             })
             .await;
@@ -328,9 +332,11 @@ pub(crate) async fn session_stream(
 ) -> Result<Response, StatusCode> {
     // Review L2: binding validation is a Store read on the streaming hot path.
     let device_id = query.device_id.clone();
-    let (path, is_strm) = match store_read(&state, move |store| {
-        session_source_path(store, user_id, &device_id, &play_session_id)
-    })
+    let (path, is_strm) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| session_source_path(store, user_id, &device_id, &play_session_id),
+    )
     .await
     {
         Ok(Ok(value)) => value,

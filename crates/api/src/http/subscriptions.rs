@@ -366,7 +366,7 @@ pub(crate) async fn get_subscription(
     Path(id): Path<String>,
 ) -> Response {
     let capture_id = id.clone();
-    let captured = super::store_wait::store_read(&state, move |store| {
+    let captured = super::store_wait::store_read(&state, &[store::Db::Library, store::Db::App, store::Db::Subscribe, store::Db::Cache], move |store| {
         let (subscribe, media) = resolve_subscribe_on(store, &capture_id, user_id)?;
         let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
         let wanted = crate::http::subscription_depth::wanted::capture(store, &media, &subscribe)
@@ -424,17 +424,21 @@ pub(crate) async fn get_subscription(
         Ok(body) => body,
         Err(error) => return super::library::browse_work_error(error),
     };
-    match super::store_wait::store_read(&state, move |store| {
-        let (current, _) = resolve_subscribe_on(store, &id, user_id)?;
-        if current.media_id != media_id {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "subscription.changed",
-                "订阅身份在读取期间变化，请刷新重试",
-            ));
-        }
-        Ok(())
-    })
+    match super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| {
+            let (current, _) = resolve_subscribe_on(store, &id, user_id)?;
+            if current.media_id != media_id {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "subscription.changed",
+                    "订阅身份在读取期间变化，请刷新重试",
+                ));
+            }
+            Ok(())
+        },
+    )
     .await
     {
         Ok(Ok(())) => ok(body).into_response(),

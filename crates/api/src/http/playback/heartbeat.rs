@@ -60,7 +60,7 @@ pub(crate) async fn progress(
     let body_for_read = body.clone();
     let device_id_for_read = device_id.clone();
     let (file, media, season, episode, duration_ms, source) =
-        match store_read(&state, move |store| -> Result<_, Response> {
+        match store_read(&state, &[store::Db::Library, store::Db::App], move |store| -> Result<_, Response> {
             let body = &body_for_read;
             let device_id = device_id_for_read.as_str();
             match store.is_device_revoked(user_id, device_id) {

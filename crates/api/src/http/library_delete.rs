@@ -82,7 +82,7 @@ pub(crate) async fn delete_item(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let files = match super::store_wait::store_read(&state, move |store| {
+    let files = match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         item_files(store, &library_id, media_id)
     })
     .await

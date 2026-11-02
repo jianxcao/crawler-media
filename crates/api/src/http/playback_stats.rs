@@ -45,54 +45,58 @@ pub(crate) async fn watch_stats(
     // （窗口 = days * 86_400 秒）。
     let now = state.playback_clock.now_ms() / 1000;
     // Review L2: watch statistics are Store reads; keep them off the executor.
-    match store_read(&state, move |store| -> Response {
-        let admin = store
-            .user_role(user_id)
-            .map(|role| role == "admin")
-            .unwrap_or(false);
-        let target_user = if admin {
-            match member_filter(query.get("member_id").map(String::as_str)) {
-                Ok(filter) => filter,
-                Err(response) => return response,
-            }
-        } else {
-            Some(user_id)
-        };
-        let scope = if admin && query.get("scope").is_some_and(|scope| scope == "all") {
-            "all"
-        } else {
-            "visible"
-        };
-        let visible: Option<Vec<domain::MediaId>> = match visible_media_ids(&store, user_id, scope)
-        {
-            Ok(v) => v.map(|ids| ids.into_iter().collect()),
-            Err(error) => {
-                tracing::error!(%error, "加载观看统计可见范围失败");
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "playback.query_failed",
-                    "观看统计查询失败",
-                );
-            }
-        };
-        let report = match store.playback_watch_report(
-            target_user,
-            visible.as_deref(),
-            now,
-            days as u16,
-            tz_minutes as i16,
-        ) {
-            Ok(report) => report,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        };
-        ok(stats_json(store, &report, days)).into_response()
-    })
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Response {
+            let admin = store
+                .user_role(user_id)
+                .map(|role| role == "admin")
+                .unwrap_or(false);
+            let target_user = if admin {
+                match member_filter(query.get("member_id").map(String::as_str)) {
+                    Ok(filter) => filter,
+                    Err(response) => return response,
+                }
+            } else {
+                Some(user_id)
+            };
+            let scope = if admin && query.get("scope").is_some_and(|scope| scope == "all") {
+                "all"
+            } else {
+                "visible"
+            };
+            let visible: Option<Vec<domain::MediaId>> =
+                match visible_media_ids(&store, user_id, scope) {
+                    Ok(v) => v.map(|ids| ids.into_iter().collect()),
+                    Err(error) => {
+                        tracing::error!(%error, "加载观看统计可见范围失败");
+                        return err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "playback.query_failed",
+                            "观看统计查询失败",
+                        );
+                    }
+                };
+            let report = match store.playback_watch_report(
+                target_user,
+                visible.as_deref(),
+                now,
+                days as u16,
+                tz_minutes as i16,
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    );
+                }
+            };
+            ok(stats_json(store, &report, days)).into_response()
+        },
+    )
     .await
     {
         Ok(response) => response,

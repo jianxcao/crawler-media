@@ -22,17 +22,21 @@ pub(crate) async fn episodes(
     };
     // Review L2: episode snapshots are a ledger read; take the lock off-executor.
     let id_for_read = id.clone();
-    let (media, visible_cloned, unit_states) = match store_read(&state, move |store| {
-        let is_admin = match user_id {
-            Some(user) => store.user_role(user).map_err(episode_store_error)? == "admin",
-            None => false,
-        };
-        store
-            .library_read_snapshot(|store| {
-                load_episode_snapshot(store, &id_for_read, user_id, season_number, is_admin)
-            })
-            .map_err(episode_store_error)?
-    })
+    let (media, visible_cloned, unit_states) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let is_admin = match user_id {
+                Some(user) => store.user_role(user).map_err(episode_store_error)? == "admin",
+                None => false,
+            };
+            store
+                .library_read_snapshot(|store| {
+                    load_episode_snapshot(store, &id_for_read, user_id, season_number, is_admin)
+                })
+                .map_err(episode_store_error)?
+        },
+    )
     .await
     {
         Ok(Ok(value)) => value,

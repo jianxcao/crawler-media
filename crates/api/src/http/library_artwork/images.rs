@@ -101,14 +101,18 @@ async fn artwork_bytes(
     kind: Kind,
 ) -> Response {
     let copied_headers = headers.clone();
-    let captured = store_wait::store_read(&state, move |store| {
-        let user = user_id(store, user, &copied_headers);
-        let file = raw_file.parse::<domain::LedgerId>().ok()?;
-        let coverage = store.file_coverage_by_id(file).ok().flatten()?;
-        let media = store.get_media(coverage.file.media_id).ok().flatten()?;
-        super::super::library::file_visible_to_user(store, &coverage.file, &media, user)
-            .then_some(coverage)
-    })
+    let captured = store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let user = user_id(store, user, &copied_headers);
+            let file = raw_file.parse::<domain::LedgerId>().ok()?;
+            let coverage = store.file_coverage_by_id(file).ok().flatten()?;
+            let media = store.get_media(coverage.file.media_id).ok().flatten()?;
+            super::super::library::file_visible_to_user(store, &coverage.file, &media, user)
+                .then_some(coverage)
+        },
+    )
     .await;
     let coverage = match captured {
         Ok(Some(facts)) => facts,
@@ -159,14 +163,18 @@ pub(crate) async fn library_cover(
     Path(id): Path<String>,
 ) -> Response {
     let copied_headers = headers.clone();
-    let capture = store_wait::store_read(&state, move |store| {
-        let user = user_id(store, user, &copied_headers);
-        store
-            .get_library(&id)
-            .ok()
-            .flatten()
-            .filter(|library| library_visible(store, library, user))
-    })
+    let capture = store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let user = user_id(store, user, &copied_headers);
+            store
+                .get_library(&id)
+                .ok()
+                .flatten()
+                .filter(|library| library_visible(store, library, user))
+        },
+    )
     .await;
     let library = match capture {
         Ok(Some(library)) => library,

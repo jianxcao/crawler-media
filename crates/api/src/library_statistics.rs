@@ -37,7 +37,7 @@ pub(crate) async fn collect_statistics_for_roster(
     _is_admin: bool,
 ) -> Result<HashMap<String, LibraryStatistics>, Response> {
     let roster = roster.to_vec();
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         roster
             .into_iter()
             .map(|library| {

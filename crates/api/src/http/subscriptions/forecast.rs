@@ -19,50 +19,54 @@ pub(crate) async fn release_forecast(
             );
         }
     };
-    crate::http::store_wait::store_read(&state, move |store| {
-        let Some(subscribe) = store.get_subscribe(subscribe_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "subscription.missing", "订阅不存在");
-        };
-        if let Err(response) = ensure_subscribe_owner(&store, &subscribe, user_id) {
-            return response;
-        }
-        let pending = store.load_pending(subscribe_id).unwrap_or_default();
-        let now = crate::job_loop::unix_now();
-        // 星期几 → 命中数（近 30 天）。
-        let mut weekday_counts = [0usize; 7];
-        let mut samples = 0usize;
-        for (_, item) in &pending {
-            let Some(time) = item.torrent.upload_time.as_deref() else {
-                continue;
+    crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::App, store::Db::Subscribe],
+        move |store| {
+            let Some(subscribe) = store.get_subscribe(subscribe_id).ok().flatten() else {
+                return err(StatusCode::NOT_FOUND, "subscription.missing", "订阅不存在");
             };
-            let Some(unix) = parse_upload_time(time) else {
-                continue;
-            };
-            if unix < now - 30 * 86_400 || unix > now {
-                continue;
+            if let Err(response) = ensure_subscribe_owner(&store, &subscribe, user_id) {
+                return response;
             }
-            let weekday = ((unix / 86_400) % 7).rem_euclid(7) as usize;
-            weekday_counts[weekday] += 1;
-            samples += 1;
-        }
-        if samples == 0 {
-            return ok(json!({ "samples": 0, "days": [] })).into_response();
-        }
-        // 未来 7 天：每天取对应星期的历史平均（至少 0）。
-        let days: Vec<Value> = (1..=7)
-            .map(|offset| {
-                let unix = now + offset * 86_400;
+            let pending = store.load_pending(subscribe_id).unwrap_or_default();
+            let now = crate::job_loop::unix_now();
+            // 星期几 → 命中数（近 30 天）。
+            let mut weekday_counts = [0usize; 7];
+            let mut samples = 0usize;
+            for (_, item) in &pending {
+                let Some(time) = item.torrent.upload_time.as_deref() else {
+                    continue;
+                };
+                let Some(unix) = parse_upload_time(time) else {
+                    continue;
+                };
+                if unix < now - 30 * 86_400 || unix > now {
+                    continue;
+                }
                 let weekday = ((unix / 86_400) % 7).rem_euclid(7) as usize;
-                let count = weekday_counts[weekday];
-                json!({
-                    "date": iso_date(unix),
-                    "weekday": weekday,
-                    "count": count,
+                weekday_counts[weekday] += 1;
+                samples += 1;
+            }
+            if samples == 0 {
+                return ok(json!({ "samples": 0, "days": [] })).into_response();
+            }
+            // 未来 7 天：每天取对应星期的历史平均（至少 0）。
+            let days: Vec<Value> = (1..=7)
+                .map(|offset| {
+                    let unix = now + offset * 86_400;
+                    let weekday = ((unix / 86_400) % 7).rem_euclid(7) as usize;
+                    let count = weekday_counts[weekday];
+                    json!({
+                        "date": iso_date(unix),
+                        "weekday": weekday,
+                        "count": count,
+                    })
                 })
-            })
-            .collect();
-        ok(json!({ "samples": samples, "days": days })).into_response()
-    })
+                .collect();
+            ok(json!({ "samples": samples, "days": days })).into_response()
+        },
+    )
     .await
     .unwrap_or_else(|error| error.response())
 }

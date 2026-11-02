@@ -77,7 +77,7 @@ pub(crate) async fn list_users(
     State(state): State<ApiState>,
     axum::Extension(_user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    store_read(&state, move |store| {
+    store_read(&state, &[store::Db::App], move |store| {
         let users = match store.list_users() {
             Ok(users) => users,
             Err(error) => {
@@ -224,6 +224,7 @@ pub(crate) async fn removal_status(
 ) -> Response {
     store_read(
         &state,
+        &[store::Db::App],
         move |store| match crate::user_removal::find_removal(store, &operation_id) {
             Ok(Some(record)) => ok(crate::user_removal::status_dto(&record)).into_response(),
             Ok(None) => err(

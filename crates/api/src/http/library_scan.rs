@@ -405,7 +405,7 @@ pub(crate) async fn missing(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
 ) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::Library, store::Db::App], move |store| {
         let library = match require_visible_library(&store, &id, user_id) {
             Ok(library) => library,
             Err(response) => return response,

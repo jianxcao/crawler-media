@@ -21,7 +21,7 @@ fn one_read_snapshot_checks_out_once_for_all_library_reads() {
     one_reader(&store, Db::Library);
     let pool = store.reader_pool(Db::Library);
     let (result, stats) = store.with_stats(store::stats::StatsScope::Library, || {
-        store.with_read_snapshot(Duration::from_secs(1), || {
+        store.with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
             let library = store
                 .default_library(domain::MediaKind::Movie)
                 .unwrap()
@@ -56,7 +56,7 @@ fn cache_reads_reuse_the_request_reader_and_keep_their_snapshot() {
         .unwrap();
     let pool = store.reader_pool(Db::Cache);
     store
-        .with_read_snapshot(Duration::from_secs(1), || {
+        .with_read_snapshot(&[Db::Cache], Duration::from_secs(1), || {
             assert_eq!(
                 store.get_catalog_cache("tmdb", "request-snapshot").unwrap(),
                 Some("before".into())
@@ -95,7 +95,7 @@ fn nested_request_scopes_reuse_both_databases_and_preserve_each_snapshot() {
         .put_catalog_cache("tmdb", "nested", "before", 1, None)
         .unwrap();
     let (result, stats) = store.with_stats(store::stats::StatsScope::Library, || {
-        store.with_read_snapshot(Duration::from_secs(1), || {
+        store.with_read_snapshot(&[Db::Library, Db::Cache], Duration::from_secs(1), || {
             let libraries = store.list_libraries().unwrap();
             assert_eq!(
                 store.get_catalog_cache("tmdb", "nested").unwrap(),
@@ -115,7 +115,7 @@ fn nested_request_scopes_reuse_both_databases_and_preserve_each_snapshot() {
                 .put_catalog_cache("tmdb", "nested", "after", 2, None)
                 .unwrap();
             store
-                .with_read_snapshot(Duration::from_secs(1), || {
+                .with_read_snapshot(&[Db::Library, Db::Cache], Duration::from_secs(1), || {
                     assert_eq!(store.list_libraries().unwrap(), libraries);
                     assert_eq!(
                         store.get_catalog_cache("tmdb", "nested").unwrap(),

@@ -219,9 +219,11 @@ pub(crate) async fn today_arrivals(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let snapshots = match crate::http::store_wait::store_read(&state, move |store| {
-        load_arrivals(store, user_id)
-    })
+    let snapshots = match crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| load_arrivals(store, user_id),
+    )
     .await
     {
         Ok(snapshots) => snapshots,

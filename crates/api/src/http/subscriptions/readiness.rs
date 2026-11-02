@@ -10,7 +10,7 @@ pub(crate) async fn automation_readiness(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<UserId>>,
 ) -> Response {
-    crate::http::store_wait::store_read(&state, move |store| {
+    crate::http::store_wait::store_read(&state, &[store::Db::Library, store::Db::App], move |store| {
     let sites = store.list_enabled_sites().unwrap_or_default();
     let filters = store.list_filters().unwrap_or_default();
     let downloader = store.default_downloader().ok().flatten();

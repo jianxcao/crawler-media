@@ -98,7 +98,7 @@ pub(crate) async fn get_config(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
 ) -> Response {
-    super::store_wait::store_read(&state, move |store| {
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let is_admin = user_id
             .and_then(|uid| store.get_user(uid).ok().flatten())
             .map(|u| u.role == domain::UserRole::Admin)
@@ -127,26 +127,27 @@ pub(crate) async fn put_config(State(state): State<ApiState>, Json(body): Json<V
 }
 
 pub(crate) async fn test(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let (base, token) = match super::store_wait::store_read(&state, move |store| {
-        let url = body["notify_url"].as_str().unwrap_or_default();
-        let token = body["notify_token"].as_str().unwrap_or_default();
-        let base = if url.is_empty() {
-            notify_url(&store).unwrap_or_default()
-        } else {
-            url.to_string()
+    let (base, token) =
+        match super::store_wait::store_read(&state, &[store::Db::App], move |store| {
+            let url = body["notify_url"].as_str().unwrap_or_default();
+            let token = body["notify_token"].as_str().unwrap_or_default();
+            let base = if url.is_empty() {
+                notify_url(&store).unwrap_or_default()
+            } else {
+                url.to_string()
+            };
+            let token = if token.is_empty() {
+                notify_token(&store).unwrap_or_default()
+            } else {
+                token.to_string()
+            };
+            (base, token)
+        })
+        .await
+        {
+            Ok(config) => config,
+            Err(error) => return error.response(),
         };
-        let token = if token.is_empty() {
-            notify_token(&store).unwrap_or_default()
-        } else {
-            token.to_string()
-        };
-        (base, token)
-    })
-    .await
-    {
-        Ok(config) => config,
-        Err(error) => return error.response(),
-    };
     if base.is_empty() || token.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,

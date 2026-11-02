@@ -77,7 +77,7 @@ pub(crate) async fn get_operation(
     State(state): State<ApiState>,
     Path((library_id, operation_id)): Path<(String, String)>,
 ) -> Response {
-    let read = super::store_wait::store_read(&state, move |store| {
+    let read = super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         store.library_operation_view(&operation_id).map(|view| {
             view.filter(|view| view.library_id == library_id)
                 .map(|view| storage_operations::operation_json(&view))
@@ -131,7 +131,7 @@ pub(crate) async fn reject_conflicting_writes(
         let library_id = library_path_param(&mut parts).await;
         let request = Request::from_parts(parts, body);
         let verdict = if let Some(library) = library_id.clone() {
-            match super::store_wait::store_read(&state, move |store| {
+            match super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
                 storage_operations::write_verdict_for_store(store, &library)
             })
             .await
@@ -205,48 +205,49 @@ pub(crate) async fn retry_operation(
 }
 
 fn retry_blocking(state: ApiState, library: String, operation: String) -> Response {
-    let view = super::store_wait::with_store_read(&state, |store| {
-        match store.library_operation_view(&operation) {
-            Ok(Some(view)) if view.library_id == library => {
-                if view.state != "failed"
-                    || !matches!(
-                        view.kind.as_str(),
-                        "roots" | "locale" | "default_locale" | "integrity"
-                    )
-                {
-                    return Err(err(
-                        StatusCode::CONFLICT,
-                        "library.operation_not_retryable",
-                        "operation is not a failed rebuild",
-                    ));
+    let view =
+        super::store_wait::with_store_read(&state, &[store::Db::Library], |store| {
+            match store.library_operation_view(&operation) {
+                Ok(Some(view)) if view.library_id == library => {
+                    if view.state != "failed"
+                        || !matches!(
+                            view.kind.as_str(),
+                            "roots" | "locale" | "default_locale" | "integrity"
+                        )
+                    {
+                        return Err(err(
+                            StatusCode::CONFLICT,
+                            "library.operation_not_retryable",
+                            "operation is not a failed rebuild",
+                        ));
+                    }
+                    if store
+                        .active_library_operation(&library)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        != Some(operation.as_str())
+                    {
+                        return Err(err(
+                            StatusCode::CONFLICT,
+                            "library.operation_not_owner",
+                            "operation does not own this Library",
+                        ));
+                    }
+                    Ok(view)
                 }
-                if store
-                    .active_library_operation(&library)
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    != Some(operation.as_str())
-                {
-                    return Err(err(
-                        StatusCode::CONFLICT,
-                        "library.operation_not_owner",
-                        "operation does not own this Library",
-                    ));
-                }
-                Ok(view)
+                Ok(_) => Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.operation_not_found",
+                    "operation not found",
+                )),
+                Err(error) => Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                )),
             }
-            Ok(_) => Err(err(
-                StatusCode::NOT_FOUND,
-                "library.operation_not_found",
-                "operation not found",
-            )),
-            Err(error) => Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            )),
-        }
-    });
+        });
     let view = match view {
         Ok(Ok(view)) => view,
         Ok(Err(response)) | Err(response) => return response,

@@ -78,9 +78,11 @@ pub(crate) async fn up_next(
         .unwrap_or(20)
         .clamp(1, 100);
     for attempt in 0..2 {
-        let captured = match super::super::store_wait::store_read(&state, move |store| {
-            read::capture(store, user, limit)
-        })
+        let captured = match super::super::store_wait::store_read(
+            &state,
+            &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+            move |store| read::capture(store, user, limit),
+        )
         .await
         {
             Ok(Ok(value)) => value,
@@ -103,9 +105,11 @@ pub(crate) async fn up_next(
             Ok(items) => items,
             Err(error) => return blocking_failed(error),
         };
-        let validation = match super::super::store_wait::store_read(&state, move |store| {
-            read::validate(store, user, &snapshot)
-        })
+        let validation = match super::super::store_wait::store_read(
+            &state,
+            &[store::Db::Library, store::Db::App],
+            move |store| read::validate(store, user, &snapshot),
+        )
         .await
         {
             Ok(Ok(value)) => value,

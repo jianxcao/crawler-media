@@ -139,11 +139,13 @@ async fn drain_with_retry(state: &ApiState, operation_id: &str) -> Result<(), St
         tracing::warn!(%operation_id, %error, attempt, ?delay, "Library 删除失败，稍后自动重试");
         let owned = operation_id.to_owned();
         let operation =
-            crate::http::store_wait::store_read(state, move |store| store.library_removal(&owned))
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("Library removal {operation_id} missing"))?;
+            crate::http::store_wait::store_read(state, &[store::Db::Library], move |store| {
+                store.library_removal(&owned)
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Library removal {operation_id} missing"))?;
         if operation.state != "succeeded" {
             let owned = operation_id.to_owned();
             let note = format!("retry {attempt} after error: {error}");

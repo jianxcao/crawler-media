@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::Store;
-use crate::http::store_wait::{STORE_WRITE_WAIT, store_read_handle};
+use crate::http::store_wait::store_blocking;
 use crate::library_lifecycle::{LibraryWorkLease, LibraryWorkRegistry};
 use crate::store::ChapterFrameTask;
 use library::WorkControl;
@@ -457,7 +457,7 @@ impl ChapterFrameService {
         let id = task.id.clone();
         let error = error.map(str::to_string);
         let logged = id.clone();
-        let outcome = store_read_handle(self.store.clone(), STORE_WRITE_WAIT, move |store| {
+        let outcome = store_blocking(self.store.clone(), move |store| {
             store.finish_chapter_frame_task(&id, succeeded, error.as_deref())
         })
         .await;
@@ -467,7 +467,7 @@ impl ChapterFrameService {
                 tracing::error!(%error, task = %logged, "章节帧任务终态写入失败");
             }
             Err(error) => {
-                tracing::warn!(?error, task = %logged, "章节帧任务终态未写入：Store 繁忙");
+                tracing::warn!(?error, task = %logged, "章节帧任务终态未写入：worker 失败");
             }
         }
     }

@@ -163,7 +163,7 @@ fn capture_plan(
     library_id: &str,
     file_id: domain::LedgerId,
 ) -> Result<DeletePlan, Box<Response>> {
-    super::store_wait::with_store_read(state, |store| {
+    super::store_wait::with_store_read(state, &[store::Db::Library], |store| {
         capture_plan_locked(store, library_id, file_id)
     })
     .map_err(Box::new)?

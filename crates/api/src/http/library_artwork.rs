@@ -306,7 +306,7 @@ async fn visible_library(
     id: String,
     user: Option<domain::UserId>,
 ) -> Result<store::Library, Response> {
-    store_wait::store_read(state, move |store| {
+    store_wait::store_read(state, &[store::Db::Library, store::Db::App], move |store| {
         require_visible_library(store, &id, user)
     })
     .await

@@ -19,8 +19,9 @@ pub(super) fn resolve_target(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
-    let entry =
-        provider.bounded_reader(|store| super::items::resolve_entry(store, Some(user_id), id))?;
+    let entry = provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+        super::items::resolve_entry(store, Some(user_id), id)
+    })?;
     let Some(entry) = entry else {
         return Ok(None);
     };
@@ -42,11 +43,12 @@ pub(super) fn resolve_target(
                 file_id: entry.file.file_id,
                 revision: entry.file.version.revision,
             };
-            let resolved = provider.bounded_reader(|store| {
-                store
-                    .resolve_playback(user_id, &item, Some(&source), None)
-                    .map_err(|error| error.to_string())
-            })?;
+            let resolved =
+                provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+                    store
+                        .resolve_playback(user_id, &item, Some(&source), None)
+                        .map_err(|error| error.to_string())
+                })?;
             (resolved.target.file.file_id == source.file_id
                 && resolved.target.file.version.revision == source.revision)
                 .then_some(resolved.duration_ms)

@@ -57,9 +57,11 @@ pub(crate) async fn preview(
         Err(response) => return response,
     };
     let downloader = body.downloader_id.clone();
-    let snapshot = match super::store_wait::store_read(&state, move |store| {
-        load_snapshot(store, kind, downloader.as_deref())
-    })
+    let snapshot = match super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| load_snapshot(store, kind, downloader.as_deref()),
+    )
     .await
     {
         Ok(Ok(snapshot)) => snapshot,
