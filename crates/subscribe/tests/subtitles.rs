@@ -1,12 +1,13 @@
 use std::fs;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use downloader::MemoryDownloader;
 use library::TransferMode;
-use subscribe::{RunInput, RunOutcome, SubscribeFacts, run};
+use subscribe::{RunInput, RunOutcome, run};
 
 fn movie_filter() -> Filter {
     Filter {

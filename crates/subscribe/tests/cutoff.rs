@@ -1,6 +1,7 @@
 use domain::{AtomRule, Coverage, Filter, FilterAtom, MediaId, Release, Subscribe, Torrent};
+use domain::{QualityFact, SubscribeFacts};
 use filter::ScoredTorrent;
-use subscribe::{QualityFact, SubscribeFacts, choose, target_reached};
+use subscribe::{choose, target_reached};
 
 fn tv_subscribe() -> Subscribe {
     Subscribe {

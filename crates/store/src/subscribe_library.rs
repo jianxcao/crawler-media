@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use domain::{QualityFact, SubscribeFacts};
 use std::collections::{HashMap, HashSet};
-use subscribe::{QualityFact, SubscribeFacts};
 
 use super::{StoreError, SubscribeLibrarySnapshot};
 use crate::library_scope::{LibraryPathResolver, LibraryPathScope, StrictOwner};

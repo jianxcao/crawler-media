@@ -1,7 +1,7 @@
 use domain::{Coverage, DownloaderId, MediaId, Release, Subscribe, SubscribeId, Torrent, UserId};
+use domain::{QualityFact, SubscribeFacts};
 use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
-use subscribe::{QualityFact, SubscribeFacts};
 
 use super::maps::{map_subscribe, torrent_from_json};
 use super::{Store, StoreError};

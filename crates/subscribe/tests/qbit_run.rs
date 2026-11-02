@@ -2,13 +2,14 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use downloader::{QbitConfig, QbitDownloader};
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, run};
 
 fn read_request(stream: &mut TcpStream) -> String {
     let mut request = Vec::new();

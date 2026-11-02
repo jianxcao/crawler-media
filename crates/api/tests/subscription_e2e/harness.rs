@@ -204,11 +204,11 @@ impl Harness {
         std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
         std::fs::write(&owned, probed_video(height, codec, false)).unwrap();
         let owned_path = owned.display().to_string();
-        let mut facts = subscribe::SubscribeFacts::default();
+        let mut facts = domain::SubscribeFacts::default();
         facts.replace(
             None,
             None,
-            subscribe::QualityFact {
+            domain::QualityFact {
                 score,
                 path: Some(owned_path.clone()),
             },

@@ -134,11 +134,11 @@ async fn list_subscribes_reports_owned_and_missing_tv_episodes() {
 fn seed_two_episodes(tmp: &tempfile::TempDir, subscribe_id: &str) {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let sub_id = domain::SubscribeId::from_str(subscribe_id).unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         Some(1),
         Some(1),
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some("/tmp/e1.mkv".into()),
         },
@@ -146,7 +146,7 @@ fn seed_two_episodes(tmp: &tempfile::TempDir, subscribe_id: &str) {
     facts.upsert(
         Some(1),
         Some(2),
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some("/tmp/e2.mkv".into()),
         },

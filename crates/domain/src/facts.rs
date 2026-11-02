@@ -10,7 +10,7 @@ pub struct QualityFact {
 pub struct SubscribeFacts {
     slots: HashMap<(Option<u32>, Option<u32>), QualityFact>,
     // Quality is supplied by the Library ledger, never inferred from a renamed path.
-    qualities: HashMap<String, domain::Release>,
+    qualities: HashMap<String, crate::Release>,
     /// Owned slots that already have an upgrade download in flight (H1).
     /// Transient: built from pending rows per round, never persisted.
     in_flight: std::collections::HashSet<(Option<u32>, Option<u32>)>,
@@ -36,11 +36,11 @@ impl SubscribeFacts {
         self.slots.get(&(season, episode))
     }
 
-    pub fn set_quality(&mut self, path: String, release: domain::Release) {
+    pub fn set_quality(&mut self, path: String, release: crate::Release) {
         self.qualities.insert(path, release);
     }
 
-    pub fn quality(&self, path: &str) -> Option<&domain::Release> {
+    pub fn quality(&self, path: &str) -> Option<&crate::Release> {
         self.qualities.get(path)
     }
 

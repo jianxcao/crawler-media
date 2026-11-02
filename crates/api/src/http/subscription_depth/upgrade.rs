@@ -17,7 +17,7 @@ pub(crate) async fn run_upgrade(
 struct Snapshot {
     subscribe: Subscribe,
     media: domain::Media,
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     pending: Vec<(i32, crate::store::PendingDownload)>,
     history: std::collections::HashMap<(Option<u32>, Option<u32>), crate::store::WantedHistory>,
     target_score: i32,

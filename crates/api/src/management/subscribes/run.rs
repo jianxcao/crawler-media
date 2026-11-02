@@ -23,7 +23,7 @@ struct RunContext {
 }
 
 struct RunFactsObservation {
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     snapshot: store::SubscribeLibrarySnapshot,
 }
 

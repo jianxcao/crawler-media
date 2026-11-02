@@ -1,6 +1,7 @@
+use domain::SubscribeFacts;
 use domain::{FileCoverage, LedgerId, Media, Subscribe, SubscribeId};
 use filter::ScoredTorrent;
-use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed_recorded};
+use subscribe::{Added, RunInput, RunOutcome, collect_completed_recorded};
 
 use crate::management::ApiState;
 

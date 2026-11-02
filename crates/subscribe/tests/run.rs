@@ -5,9 +5,10 @@ use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
 };
+use domain::{QualityFact, SubscribeFacts};
 use downloader::MemoryDownloader;
 use library::{FileQuality, MediaProbe, TransferMode};
-use subscribe::{QualityFact, RunInput, SubscribeFacts, run, run_with_probe};
+use subscribe::{RunInput, run, run_with_probe};
 
 struct FixedProbe;
 

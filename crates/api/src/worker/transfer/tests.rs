@@ -381,7 +381,7 @@ fn reserve(
 /// confirmed quality verdict (not the reservation's placeholder facts).
 fn outcome_of(coverage: domain::FileCoverage, source: &std::path::Path) -> subscribe::RunOutcome {
     subscribe::RunOutcome {
-        facts: subscribe::SubscribeFacts::default(),
+        facts: domain::SubscribeFacts::default(),
         file_sources: vec![domain::FileSource {
             file_id: coverage.file.file_id,
             destination: coverage.file.path.clone(),

@@ -711,7 +711,7 @@ fn facts_persist_same_score_wash_upgrade() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let sub_id = seed_facts_user_and_subscribe(&store);
 
-    use subscribe::{QualityFact, SubscribeFacts};
+    use domain::{QualityFact, SubscribeFacts};
     let mut facts = SubscribeFacts::default();
     facts.upsert(
         None,

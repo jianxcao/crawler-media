@@ -1,5 +1,6 @@
 use std::fs;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
@@ -7,7 +8,7 @@ use domain::{
 use downloader::MemoryDownloader;
 use hooks::{Bus, Hook, PluginError, Step};
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, run};
 
 #[test]
 fn veto_hook_prevents_add_to_downloader() {

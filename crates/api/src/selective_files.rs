@@ -24,7 +24,7 @@ pub(crate) fn enabled(state: &ApiState) -> bool {
 pub(crate) fn missing_episodes(
     subscribe: &domain::Subscribe,
     release: &domain::Release,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
 ) -> Option<BTreeSet<(u32, u32)>> {
     let episodes: Vec<(u32, u32)> = subscribe::pending_slots(subscribe, release)
         .into_iter()
@@ -116,7 +116,7 @@ pub(crate) fn apply<D: Downloader + ?Sized>(
     client: &D,
     subscribe: &domain::Subscribe,
     chosen: &[filter::ScoredTorrent],
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
     absolute: Option<&subscribe::AbsoluteEpisodes>,
 ) -> Vec<(String, String)> {
     let mut deferred = Vec::new();

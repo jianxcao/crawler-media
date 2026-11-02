@@ -75,11 +75,11 @@ async fn assert_upgrade_reports(app: &axum::Router, id: &str, tmp: &tempfile::Te
     assert!(report["data"]["summary"].as_str().unwrap().contains("缺失"));
 
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         Some(1),
         Some(1),
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 80,
             path: Some("/tv/e1.mkv".into()),
         },
@@ -178,11 +178,11 @@ async fn run_upgrade_applies_new_ruleset_and_activates_wash_cut() {
 
     // 写入一个 720p（得分 50）的已有事实
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         Some(1),
         Some(1),
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 50,
             path: Some("/fake/s01e01.mkv".into()),
         },

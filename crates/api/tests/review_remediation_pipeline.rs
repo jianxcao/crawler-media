@@ -79,11 +79,11 @@ async fn source_quality_survives_persistence_for_wash_cut() {
     let path = root.join("The.Matrix.2160p.Remux.mkv");
     std::fs::write(&path, b"owned").unwrap();
     let row = owned_row(sub.media_id, &path);
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some(row.path.clone()),
         },
@@ -254,11 +254,11 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
     let mut row = owned_row(media_id, &old);
     row.resolution = Some("720p".into());
     row.filter_score = Some(1);
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 1,
             path: Some(row.path.clone()),
         },

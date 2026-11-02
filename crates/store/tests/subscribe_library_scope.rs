@@ -5,9 +5,9 @@ use domain::{
     Confidence, Coverage, FetchMode, FilterId, LedgerId, LibraryId, Media, MediaId, MediaKind,
     QualitySource, Subscribe, SubscribeId, UserId,
 };
+use domain::{QualityFact, SubscribeFacts};
 use store::test_support::FixtureFile;
 use store::{Library, Store};
-use subscribe::{QualityFact, SubscribeFacts};
 
 struct Fixture {
     tmp: tempfile::TempDir,

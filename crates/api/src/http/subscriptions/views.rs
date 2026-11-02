@@ -108,7 +108,7 @@ pub(crate) fn render_subscription_snapshot(
 pub(crate) fn count_pipeline_units(
     subscribe: &Subscribe,
     pending: &[(i32, crate::store::PendingDownload)],
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
 ) -> i64 {
     if pending.is_empty() {
         return 0;
@@ -153,7 +153,7 @@ pub(super) fn progress(
     store: &crate::Store,
     subscribe: &Subscribe,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
 ) -> (i64, i64) {
     match subscribe.coverage {
         Coverage::Movie => (1, if facts.movie().is_some() { 1 } else { 0 }),
@@ -180,7 +180,7 @@ pub(super) fn progress(
 fn open_season_progress(
     store: &crate::Store,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
     season: u32,
     episode_from: u32,
 ) -> (i64, i64) {

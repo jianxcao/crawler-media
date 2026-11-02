@@ -335,11 +335,11 @@ fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
         follow_future: false,
         search_interval_secs: 1800,
     };
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some(path.display().to_string()),
         },

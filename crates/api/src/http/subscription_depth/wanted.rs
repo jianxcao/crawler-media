@@ -38,7 +38,7 @@ pub(crate) fn capture(
 struct WantedUnitContext<'a> {
     media: &'a domain::Media,
     subscribe: &'a Subscribe,
-    facts: &'a subscribe::SubscribeFacts,
+    facts: &'a domain::SubscribeFacts,
     pending: &'a [(i32, crate::store::PendingDownload)],
     pending_index: PendingUnitIndex,
     labels: HashMap<Unit, Option<String>>,
@@ -53,7 +53,7 @@ pub(crate) fn render(
     snapshot: WantedSnapshot,
     media: &domain::Media,
     subscribe: &Subscribe,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
     mut air_dates: HashMap<u32, Option<String>>,
 ) -> Vec<Value> {
     air_dates.extend(snapshot.air_dates.clone());

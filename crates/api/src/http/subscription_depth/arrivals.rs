@@ -21,7 +21,7 @@ pub(crate) struct ArrivalSnapshot {
     pub(crate) subscribe: domain::Subscribe,
     pub(crate) media: domain::Media,
     pub(crate) pending: Vec<(i32, crate::store::PendingDownload)>,
-    pub(crate) facts: subscribe::SubscribeFacts,
+    pub(crate) facts: domain::SubscribeFacts,
     pub(crate) rows: Vec<domain::FileCoverage>,
     pub(crate) episodes: Vec<media::SeasonEpisode>,
 }
@@ -55,7 +55,7 @@ pub(crate) fn load_arrivals(
         let facts = if media.kind == domain::MediaKind::Tv {
             store.load_subscribe_facts(subscribe.id)?
         } else {
-            subscribe::SubscribeFacts::default()
+            domain::SubscribeFacts::default()
         };
         let rows = rows_by_media
             .get(&subscribe.media_id)

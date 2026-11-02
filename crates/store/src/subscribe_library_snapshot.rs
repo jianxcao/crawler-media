@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use domain::SubscribeFacts;
 use domain::{FileCoverage, LedgerId, MediaKind, Release, Subscribe};
-use subscribe::SubscribeFacts;
 
 use crate::library_ownership::LibraryOwnership;
 use crate::read_freshness::ReadFingerprint;

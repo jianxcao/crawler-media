@@ -3,7 +3,6 @@ mod add;
 mod choose;
 mod collect;
 pub mod collection_destinations;
-mod facts;
 pub mod file_identity;
 pub mod media_identity;
 mod pending;
@@ -22,7 +21,6 @@ pub use collect::{
     TransferRecorder, collect_completed, collect_completed_controlled, collect_completed_recorded,
     collect_completed_with_destinations,
 };
-pub use facts::{QualityFact, SubscribeFacts};
 pub use pending::{facts_with_pending, pending_slots};
 pub use run::{run, run_with_destinations, run_with_destinations_controlled, run_with_probe};
 pub use types::{RunInput, RunOutcome, SubscribeError};

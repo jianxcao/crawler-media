@@ -22,11 +22,11 @@ async fn wash_owning_locked_1080p(h: &Harness) -> (SubscribeId, std::path::PathB
     std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
     std::fs::write(&owned, probed_video(1080, "h264", false)).unwrap();
     let owned_path = owned.display().to_string();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 1,
             path: Some(owned_path.clone()),
         },

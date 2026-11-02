@@ -1,7 +1,7 @@
 use domain::{Coverage, Media, MediaKind, Release, Subscribe};
 use filter::ScoredTorrent;
 
-use crate::facts::SubscribeFacts;
+use domain::SubscribeFacts;
 
 pub fn choose(
     subscribe: &Subscribe,

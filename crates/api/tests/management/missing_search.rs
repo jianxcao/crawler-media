@@ -5,10 +5,10 @@ use std::sync::Arc;
 use api::{Store, router};
 use axum::http::StatusCode;
 use domain::SubscribeId;
+use domain::{QualityFact, SubscribeFacts};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use subscribe::{QualityFact, SubscribeFacts};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, create_api_subscribe, json_body, request, state};

@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::HttpFetcher;
+use domain::SubscribeFacts;
 use downloader::{QbitConfig, QbitDownloader};
 use indexer::{Indexer, ProfileSet};
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, run};
 use support::{choose, env, print_hits, site, subscribe_bundle};
 
 fn main() {

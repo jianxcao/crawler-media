@@ -104,7 +104,7 @@ pub(super) fn finish_search(
 }
 
 struct SearchContext {
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     wash_filter: Option<domain::Filter>,
     existing: Vec<(i32, crate::store::PendingDownload)>,
     library_id: String,
@@ -410,11 +410,11 @@ fn merge_added_pending<D: downloader::Downloader + ?Sized>(
 }
 
 fn facts_with_pending(
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     existing: &[(i32, crate::store::PendingDownload)],
     subscribe: &domain::Subscribe,
     media: &domain::Media,
-) -> subscribe::SubscribeFacts {
+) -> domain::SubscribeFacts {
     let releases = pending_releases(existing);
     subscribe::facts_with_pending(facts, &releases, subscribe, media)
 }

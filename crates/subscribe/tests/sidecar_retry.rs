@@ -1,7 +1,8 @@
+use domain::SubscribeFacts;
 use domain::{Media, MediaId, MediaKind, Torrent};
 use downloader::{Downloader, DownloaderError};
 use std::path::PathBuf;
-use subscribe::{Added, RunInput, SubscribeFacts, collect_completed_with_destinations};
+use subscribe::{Added, RunInput, collect_completed_with_destinations};
 
 struct MockDownloader {
     files: Vec<PathBuf>,

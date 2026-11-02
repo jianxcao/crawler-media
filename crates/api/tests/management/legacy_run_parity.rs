@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use api::{ApiState, Store, router};
 use axum::http::StatusCode;
+use domain::QualityFact;
 use domain::{AtomRule, Filter, FilterAtom, FilterId, SubscribeId};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::{create_site, json_body, request};
@@ -128,7 +128,7 @@ fn seed_owned_matrix(store: &Store, id: SubscribeId) {
         },
     )
     .unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,

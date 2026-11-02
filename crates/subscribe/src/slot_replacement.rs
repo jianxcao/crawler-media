@@ -1,4 +1,4 @@
-use crate::facts::SubscribeFacts;
+use domain::SubscribeFacts;
 use domain::{Filter, Subscribe};
 use filter::ScoredTorrent;
 
@@ -82,7 +82,7 @@ mod tests {
         facts.replace(
             Some(1),
             Some(1),
-            crate::QualityFact {
+            domain::QualityFact {
                 score: 100,
                 path: Some(owned.display().to_string()),
             },

@@ -1,7 +1,8 @@
 use domain::{Coverage, MediaKind};
+use domain::{QualityFact, SubscribeFacts};
 use library::TransferMode;
 use std::fs;
-use subscribe::{QualityFact, RunInput, SubscribeFacts};
+use subscribe::RunInput;
 
 fn mock_probed_file(path: &std::path::Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();

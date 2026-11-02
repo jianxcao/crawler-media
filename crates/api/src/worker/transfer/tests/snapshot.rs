@@ -50,11 +50,11 @@ fn changed_saved_facts_reject_transfer_reservation() {
     let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
     let lease = state.acquire_library_work(&plan.library_id).unwrap();
     let recorder = recorder(&state, &subscribe, &lease, &plan);
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some(plan.root.join("existing.mkv").display().to_string()),
         },

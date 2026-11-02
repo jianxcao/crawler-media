@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
@@ -8,7 +9,7 @@ use domain::{
 use downloader::MemoryDownloader;
 use filter::ScoredTorrent;
 use library::{Ffprobe, TransferMode};
-use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed};
+use subscribe::{Added, RunInput, RunOutcome, collect_completed};
 
 fn movie_filter() -> Filter {
     Filter {

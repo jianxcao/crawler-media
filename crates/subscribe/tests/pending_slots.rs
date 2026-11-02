@@ -1,7 +1,8 @@
 //! H4: one placeholder rule for in-flight pending releases.
 
 use domain::Coverage;
-use subscribe::{QualityFact, SubscribeFacts, facts_with_pending, pending_slots};
+use domain::{QualityFact, SubscribeFacts};
+use subscribe::{facts_with_pending, pending_slots};
 
 fn media() -> domain::Media {
     domain::Media {

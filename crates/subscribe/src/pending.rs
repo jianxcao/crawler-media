@@ -4,7 +4,7 @@
 use domain::{Coverage, Media, Release, Subscribe};
 
 use crate::choose::pending_matches_subscribe;
-use crate::{QualityFact, SubscribeFacts};
+use domain::{QualityFact, SubscribeFacts};
 
 /// Slots an in-flight `release` occupies for `subscribe`.
 ///

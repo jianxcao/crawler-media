@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
+use domain::QualityFact;
 use domain::{Confidence, LedgerId, QualitySource, SubscribeId};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::*;
@@ -71,7 +71,7 @@ async fn wash_cut_deletes_previous_library_file_and_ledger_row() {
             },
         )
         .unwrap();
-        let mut facts = subscribe::SubscribeFacts::default();
+        let mut facts = domain::SubscribeFacts::default();
         facts.upsert(
             None,
             None,
@@ -167,7 +167,7 @@ async fn wash_cut_drops_ledger_when_previous_file_is_already_gone() {
             },
         )
         .unwrap();
-        let mut facts = subscribe::SubscribeFacts::default();
+        let mut facts = domain::SubscribeFacts::default();
         facts.upsert(
             None,
             None,

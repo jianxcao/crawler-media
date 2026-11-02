@@ -1,6 +1,6 @@
+use domain::SubscribeFacts;
 use domain::{Confidence, FileCoverage, Release};
 use rusqlite::{OptionalExtension, params};
-use subscribe::SubscribeFacts;
 
 use super::{Store, StoreError};
 

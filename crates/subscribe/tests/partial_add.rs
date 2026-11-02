@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind,
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use downloader::{Downloader, DownloaderError};
-use subscribe::{RunInput, SubscribeFacts, admit_and_add};
+use subscribe::{RunInput, admit_and_add};
 
 struct FailsOne;
 

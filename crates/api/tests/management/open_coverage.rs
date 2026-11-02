@@ -38,11 +38,11 @@ async fn open_tv_coverage_tracks_observed_and_next_episode_without_completing() 
     let id = json_data(created).await["id"].as_str().unwrap().to_string();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let subscribe_id = id.parse().unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         Some(2),
         Some(1),
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 80,
             path: Some("/library/office-s02e01.mkv".into()),
         },

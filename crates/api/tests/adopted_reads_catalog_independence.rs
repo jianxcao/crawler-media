@@ -245,11 +245,11 @@ fn insert_subscription(
         })
         .unwrap();
     if library.is_some() {
-        let mut facts = subscribe::SubscribeFacts::default();
+        let mut facts = domain::SubscribeFacts::default();
         facts.upsert(
             Some(1),
             Some(1),
-            subscribe::QualityFact {
+            domain::QualityFact {
                 score: 10,
                 path: Some(
                     store.file_coverage_for_media(media).unwrap()[0]

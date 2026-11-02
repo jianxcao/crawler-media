@@ -69,7 +69,7 @@ pub(crate) fn wash_target(store: &crate::Store, subscribe: &Subscribe) -> (i32, 
 /// 一个单元的洗版状态：in_flight / missing / at_cutoff / not_comparable / upgradable。
 pub(crate) fn unit_wash_state(
     subscribe: &Subscribe,
-    fact: Option<&subscribe::QualityFact>,
+    fact: Option<&domain::QualityFact>,
     in_flight: bool,
     target_score: i32,
 ) -> &'static str {

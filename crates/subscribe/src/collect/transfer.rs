@@ -13,7 +13,7 @@ use library::{resolve_mode, scrape_beside, transfer_file_controlled};
 use super::TransferControl;
 use crate::SubscribeError;
 use crate::add::Added;
-use crate::facts::QualityFact;
+use domain::QualityFact;
 
 pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
     added: &Added<'_, D>,

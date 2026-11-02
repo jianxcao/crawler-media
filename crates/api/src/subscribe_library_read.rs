@@ -1,6 +1,6 @@
+use domain::SubscribeFacts;
 use domain::{MediaKind, Subscribe};
 use store::{StoreError, SubscribeLibrarySnapshot};
-use subscribe::SubscribeFacts;
 
 use crate::management::ApiState;
 

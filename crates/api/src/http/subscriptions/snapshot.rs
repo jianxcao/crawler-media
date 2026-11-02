@@ -6,7 +6,7 @@ use crate::Store;
 pub(crate) struct SubscriptionViewSnapshot {
     pub subscribe: Subscribe,
     pub media: Media,
-    pub facts: subscribe::SubscribeFacts,
+    pub facts: domain::SubscribeFacts,
     pub pending: Vec<(i32, crate::store::PendingDownload)>,
     pub created_at: String,
     pub updated_at: String,
@@ -130,7 +130,7 @@ pub(crate) fn load_single_subscription_view(
     store: &Store,
     sub: &Subscribe,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
 ) -> SubscriptionViewSnapshot {
     let pending = store.load_pending(sub.id).unwrap_or_default();
     let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();

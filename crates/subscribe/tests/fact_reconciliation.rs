@@ -1,8 +1,9 @@
 use domain::{Coverage, FetchMode, Media, MediaId, MediaKind, Torrent};
+use domain::{QualityFact, SubscribeFacts};
 use downloader::{Downloader, DownloaderError};
 use std::path::PathBuf;
 use subscribe::{
-    Added, QualityFact, RunInput, SubscribeFacts, collect_completed_with_destinations,
+    Added, RunInput, collect_completed_with_destinations,
     collection_destinations::DestinationMapping,
 };
 

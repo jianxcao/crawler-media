@@ -14,7 +14,7 @@ use super::{CollectionOutput, TransferControl, TransferRecorder};
 use crate::SubscribeError;
 use crate::add::Added;
 use crate::choose::covered_slots;
-use crate::facts::{QualityFact, SubscribeFacts};
+use domain::{QualityFact, SubscribeFacts};
 
 pub(super) fn collect_scored_torrent<D: Downloader + ?Sized>(
     added: &mut Added<'_, D>,

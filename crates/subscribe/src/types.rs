@@ -5,7 +5,7 @@ use downloader::Downloader;
 use hooks::{Bus, PluginError};
 use library::TransferMode;
 
-use crate::facts::SubscribeFacts;
+use domain::SubscribeFacts;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SubscribeError {

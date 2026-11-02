@@ -434,11 +434,11 @@ fn setup_ladder_and_old_ledger(tmp: &tempfile::TempDir, media_id: &str, sub_id: 
         },
     )
     .unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 200,
             path: Some(old.display().to_string()),
         },
