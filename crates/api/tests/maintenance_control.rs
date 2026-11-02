@@ -19,7 +19,7 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
     // 创建一个正式 def
     let def_id = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         guard
             .upsert_def(NewDef {
                 kind: JobKind::JobsRetention,
@@ -39,7 +39,7 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
     // 领取该任务作为属于 def_id 的 running job
     let job = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         let enqueued = guard.ensure_scheduled_for(0, def_id).unwrap().remove(0);
         let claimed = guard.claim(now, 1).unwrap();
         assert_eq!(claimed[0].id, enqueued.id);
@@ -70,7 +70,8 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
             if count < 10000 {
                 state_clone
                     .jobs()
-                    .lock()
+                    .acquire()
+                    .unwrap()
                     .set_def_enabled_by_id(def_id, false)
                     .unwrap();
                 break;

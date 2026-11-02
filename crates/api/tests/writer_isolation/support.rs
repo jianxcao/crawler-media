@@ -189,7 +189,8 @@ impl Fixture {
         // PATCH has a real Search JobDef to update; no fake Job-sync success.
         state
             .jobs()
-            .lock()
+            .acquire()
+            .unwrap()
             .ensure_def(jobs::NewDef {
                 kind: jobs::JobKind::SubscribeSearch,
                 name: "Writer isolation Subscribe".into(),

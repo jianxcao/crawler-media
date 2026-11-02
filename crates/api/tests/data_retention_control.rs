@@ -85,11 +85,17 @@ fn restart_does_not_overwrite_user_config() {
 
     {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         seed_maintenance_defs(&guard).unwrap();
     }
 
-    let after = state.jobs().lock().def(def.id).unwrap().unwrap();
+    let after = state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .def(def.id)
+        .unwrap()
+        .unwrap();
     assert!(after.enabled, "重启不得覆盖用户启用状态");
     assert_eq!(
         serde_json::from_str::<Value>(&after.payload).unwrap(),
@@ -144,7 +150,8 @@ fn disable_after_first_batch_stops_second() {
             if count < 10_000 {
                 state_clone
                     .jobs()
-                    .lock()
+                    .acquire()
+                    .unwrap()
                     .set_def_enabled_by_id(def.id, false)
                     .unwrap();
                 return;
@@ -203,7 +210,12 @@ fn two_hundred_thousand_qoe_history_reports_bounded_batches_and_resumes() {
     assert!(qoe["resume_after"].is_object(), "必须返回续跑游标: {qoe}");
     assert_eq!(metric_count(&state), 190_000);
 
-    state.jobs().lock().succeed_claimed(&first, now).unwrap();
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .succeed_claimed(&first, now)
+        .unwrap();
     let second = claim_for(&state, def.id, now);
     run(&state, &second).unwrap();
     let report = support::progress_of(&state, &second);

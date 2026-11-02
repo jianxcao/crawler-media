@@ -65,8 +65,12 @@ fn queue_missing_search(
             "订阅当前没有可搜索的缺失资源",
         );
     }
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return crate::http::jobs::jobs_acquire_response(error),
+    };
     if let Err(error) = crate::jobs_api::seed_subscribe_search(
-        &state.jobs.lock(),
+        &queue,
         &subscribe.id.to_string(),
         Some(&media.title),
     ) {
@@ -76,6 +80,7 @@ fn queue_missing_search(
             &error.to_string(),
         );
     }
+    drop(queue);
     let reset_count = match state
         .store
         .as_ref()

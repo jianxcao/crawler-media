@@ -128,7 +128,8 @@ impl Fixture {
     pub fn search_job_subscribes(&self) -> Vec<String> {
         self.state
             .jobs()
-            .lock()
+            .acquire()
+            .unwrap()
             .list_defs()
             .unwrap()
             .into_iter()

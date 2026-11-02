@@ -23,11 +23,7 @@ pub(super) const JOBS_READ_DEADLINE: Duration = Duration::from_secs(2);
 /// blocking 预算打满 / 等待超时：读端点用 503 + 重试表达。
 pub(super) fn jobs_budget_response(error: BlockingError) -> Response {
     match error {
-        BlockingError::Busy | BlockingError::Timeout => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "runtime.busy",
-            "任务信息繁忙，请稍后重试",
-        ),
+        BlockingError::Busy | BlockingError::Timeout => super::store_wait::busy_response(),
         error => {
             tracing::error!(%error, "任务读端点 blocking worker 失败");
             err(
@@ -93,7 +89,9 @@ pub(crate) async fn run_job(State(state): State<ApiState>, Path(id): Path<String
     let work_state = state.clone();
     match state
         .http_work
-        .run_to_completion(move || run_job_blocking(&work_state, id))
+        .run_to_completion(move || {
+            admitted_jobs_write(&work_state, || run_job_blocking(&work_state, id))
+        })
         .await
     {
         Ok(response) => response,
@@ -102,7 +100,10 @@ pub(crate) async fn run_job(State(state): State<ApiState>, Path(id): Path<String
 }
 
 fn run_job_blocking(state: &ApiState, id: JobDefId) -> Response {
-    let queue = state.jobs.lock();
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return jobs_acquire_response(error),
+    };
     let defs = match queue.list_defs() {
         Ok(defs) => defs,
         Err(error) => {
@@ -199,7 +200,11 @@ pub(crate) async fn toggle_job(
     let enabled = body.enabled;
     match state
         .http_work
-        .run_to_completion(move || toggle_job_blocking(&work_state, id, enabled))
+        .run_to_completion(move || {
+            admitted_jobs_write(&work_state, || {
+                toggle_job_blocking(&work_state, id, enabled)
+            })
+        })
         .await
     {
         Ok(response) => response,
@@ -208,7 +213,10 @@ pub(crate) async fn toggle_job(
 }
 
 fn toggle_job_blocking(state: &ApiState, id: JobDefId, enabled: bool) -> Response {
-    let queue = state.jobs.lock();
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return jobs_acquire_response(error),
+    };
     let defs = match queue.list_defs() {
         Ok(defs) => defs,
         Err(error) => {
@@ -254,7 +262,11 @@ pub(crate) async fn update_job_schedule(
     let interval_secs = body.interval_secs;
     match state
         .http_work
-        .run_to_completion(move || update_job_schedule_blocking(&work_state, id, interval_secs))
+        .run_to_completion(move || {
+            admitted_jobs_write(&work_state, || {
+                update_job_schedule_blocking(&work_state, id, interval_secs)
+            })
+        })
         .await
     {
         Ok(response) => response,
@@ -267,7 +279,10 @@ fn update_job_schedule_blocking(
     id: JobDefId,
     interval_secs: Option<u64>,
 ) -> Response {
-    let queue = state.jobs.lock();
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return jobs_acquire_response(error),
+    };
     let defs = match queue.list_defs() {
         Ok(defs) => defs,
         Err(error) => {
@@ -334,7 +349,9 @@ pub(crate) async fn cancel_job(State(state): State<ApiState>, Path(id): Path<Str
     let work_state = state.clone();
     match state
         .http_work
-        .run_to_completion(move || cancel_job_blocking(&work_state, id))
+        .run_to_completion(move || {
+            admitted_jobs_write(&work_state, || cancel_job_blocking(&work_state, id))
+        })
         .await
     {
         Ok(response) => response,
@@ -343,7 +360,10 @@ pub(crate) async fn cancel_job(State(state): State<ApiState>, Path(id): Path<Str
 }
 
 fn cancel_job_blocking(state: &ApiState, id: JobDefId) -> Response {
-    let queue = state.jobs.lock();
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return jobs_acquire_response(error),
+    };
     match queue.cancel_def_children(id) {
         Ok(count) => ok(json!({ "cancelled": count })).into_response(),
         Err(error) => err(
@@ -383,6 +403,9 @@ pub(crate) async fn tick_jobs(
             "skipped_maintenance": run.skipped_maintenance,
         }))
         .into_response(),
+        Ok(Err(crate::jobs_writer::JobsMutationError::Acquire(error))) => {
+            jobs_acquire_response(error)
+        }
         Ok(Err(error)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "job.tick_failed",
@@ -463,4 +486,28 @@ pub(crate) async fn job_stream(State(state): State<ApiState>) -> Response {
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+pub(crate) fn jobs_acquire_response(error: store::StoreError) -> Response {
+    match error {
+        store::StoreError::WriteBusy => super::store_wait::busy_response(),
+        error => {
+            tracing::error!(%error, "Jobs writer admission failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "job.writer_failed",
+                &error.to_string(),
+            )
+        }
+    }
+}
+
+pub(crate) fn admitted_jobs_write(state: &ApiState, work: impl FnOnce() -> Response) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
+    super::store_wait::with_write_admission(state, work).unwrap_or_else(|response| response)
 }

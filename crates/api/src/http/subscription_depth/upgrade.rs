@@ -111,11 +111,9 @@ fn upgrade_blocking(
     if evaluation.counts["upgradable"].as_i64().unwrap_or(0) > 0
         || evaluation.counts["missing"].as_i64().unwrap_or(0) > 0
     {
-        let Some(queue) = state
-            .jobs
-            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-        else {
-            return crate::http::store_wait::busy_response();
+        let queue = match state.jobs.acquire() {
+            Ok(queue) => queue,
+            Err(error) => return crate::http::jobs::jobs_acquire_response(error),
         };
         if let Err(response) = state
             .require_writable()

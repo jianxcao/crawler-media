@@ -270,7 +270,7 @@ pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
 /// 并持有数据目录租约；单条失败只告警并跳过——冻结的两个身份仍是可恢复的，一条
 /// 坏行不该停掉整轮后台工作。
 ///
-/// 本轮只要有操作成功推进，就把已退休 Media 的 job payload 引用收敛到存活方：
+/// 每轮把已退休 Media 的 job payload 引用收敛到存活方：
 /// 合并把 loser 的台账并进了 survivor，但队列里排着的 catalog 刷新等任务仍指着
 /// loser，不收敛就会在下一轮去刷一个已被退休的 Media。
 pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
@@ -302,7 +302,12 @@ pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
             }
         }
     }
-    if advanced {
+    let retry_due = state
+        .media_refs_retry_at
+        .lock()
+        .1
+        .is_some_and(|at| at <= std::time::Instant::now());
+    if advanced || retry_due {
         converge_retired_media_refs(state);
     }
 }
@@ -313,6 +318,13 @@ pub fn advance_media_merges(state: &ApiState, now_ms: i64) {
 /// 其余各对。锁序固定为「先 store（读完即释放）再 jobs」，绝不在持有 store 锁时
 /// 去取 jobs 锁——jobs 与 store 是两把独立的锁，同时持有会和其他路径的取锁顺序打架。
 pub fn converge_retired_media_refs(state: &ApiState) -> usize {
+    // Keep failures scheduled, but avoid scanning retired history on healthy ticks.
+    let generation = {
+        let mut retry = state.media_refs_retry_at.lock();
+        retry.0 += 1;
+        retry.1 = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        retry.0
+    };
     let pairs = {
         let store = state.store.as_ref();
         store.retired_media_survivors()
@@ -324,8 +336,15 @@ pub fn converge_retired_media_refs(state: &ApiState) -> usize {
             return 0;
         }
     };
-    let jobs = state.jobs.lock();
+    let jobs = match state.jobs.acquire() {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            tracing::warn!(%error, "Jobs Media reference convergence deferred to next round");
+            return 0;
+        }
+    };
     let mut rewritten = 0;
+    let mut failed = false;
     for (loser, survivor) in pairs {
         match jobs.rewrite_media_refs(&loser.to_string(), &survivor.to_string()) {
             Ok(0) => {}
@@ -338,11 +357,16 @@ pub fn converge_retired_media_refs(state: &ApiState) -> usize {
                     "media merge rewrote job payload references"
                 );
             }
-            Err(err) => tracing::warn!(
-                loser = %loser,
-                %err,
-                "media merge job reference convergence failed"
-            ),
+            Err(err) => {
+                failed = true;
+                tracing::warn!(loser = %loser, %err, "media merge job reference convergence failed");
+            }
+        }
+    }
+    if !failed {
+        let mut retry = state.media_refs_retry_at.lock();
+        if retry.0 == generation {
+            retry.1 = None;
         }
     }
     rewritten

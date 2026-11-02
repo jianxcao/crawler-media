@@ -180,6 +180,14 @@ fn persist_subscription(
                     &format!("同一媒体库中已有覆盖重叠的订阅（{other}），请合并或调整集数范围"),
                 );
             }
+            Err(crate::subscribe_create::CreateError::Store(store::StoreError::WriteBusy)) => {
+                return crate::http::store_wait::busy_response();
+            }
+            Err(crate::subscribe_create::CreateError::Admission(
+                crate::jobs_writer::JobsMutationError::Acquire(error),
+            )) => {
+                return crate::http::jobs::jobs_acquire_response(error);
+            }
             Err(error) => {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,

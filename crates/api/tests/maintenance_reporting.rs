@@ -79,7 +79,8 @@ async fn protected_count_in_preview_and_run_does_not_double_count_and_marks_trun
 
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()
@@ -127,7 +128,7 @@ async fn protected_count_in_preview_and_run_does_not_double_count_and_marks_trun
     // 然后执行任务（1200 条可删任务会分 3 批：500，500，200）
     let job = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         let _enqueued = guard.ensure_scheduled_for(0, def.id).unwrap().remove(0);
         let claimed = guard.claim(now, 1).unwrap();
         claimed.into_iter().next().unwrap()

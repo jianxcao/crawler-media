@@ -1,6 +1,11 @@
 //! Store operation and layout errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("writer lock order violation: held {held:?}, requested {requested:?}")]
+    LockOrder {
+        held: Vec<crate::WriterRank>,
+        requested: crate::WriterRank,
+    },
     #[error("reader pool is temporarily busy")]
     ReadBusy,
     #[error("reader pool is closed")]

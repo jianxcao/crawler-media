@@ -47,7 +47,7 @@ pub fn build_state(root: &Path, store: Store, executor: Arc<dyn DatabaseExecutor
     .with_maintenance_executor(executor);
     // 只留维护任务：实例默认 def 在注册时就会补一个 queued 子任务，会把 claim 抢走。
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     for def in guard.list_defs().unwrap() {
         if !def.kind.is_maintenance() {
             guard.set_def_enabled_by_id(def.id, false).unwrap();
@@ -122,7 +122,7 @@ pub fn seed_published_file(store: &Store, root: &Path, media: domain::MediaId) -
 /// 入队并领取，返回处于 running 的 Job（`maintenance::run` 需要它仍在库里）。
 pub fn enqueue_claim(state: &ApiState, kind: JobKind, payload: &str, now: i64) -> Job {
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     let job = guard.enqueue(kind, payload, 0).unwrap();
     let claimed = guard.claim(now, 1).unwrap();
     assert_eq!(
@@ -141,7 +141,8 @@ pub fn enqueue_claim(state: &ApiState, kind: JobKind, payload: &str, now: i64) -
 pub fn progress_of(state: &ApiState, job: &Job) -> Value {
     let raw = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .get(job.id)
         .unwrap()
         .unwrap()

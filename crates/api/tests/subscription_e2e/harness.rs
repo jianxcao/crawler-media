@@ -335,7 +335,8 @@ impl Harness {
             let payload = json!({ "subscribe_id": id.to_string() }).to_string();
             let job = state
                 .jobs()
-                .lock()
+                .acquire()
+                .unwrap()
                 .enqueue(jobs::JobKind::SubscribeSearch, &payload, 0)
                 .unwrap();
             api::worker::StateRunner {

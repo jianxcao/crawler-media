@@ -71,7 +71,7 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
                     .map_err(|error| error.to_string())?
                 } else {
                     queue
-                        .lock()
+                        .acquire()?
                         .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, false)
                         .map_err(|error| error.to_string())?
                 };
@@ -139,8 +139,8 @@ impl<'a> QueueGuard<'a> {
     }
 
     /// 取一次 Queue 短锁（批处理边界上释放）。
-    fn lock(&self) -> crate::JobsWriterGuard<'a> {
-        self.queue.lock()
+    fn acquire(&self) -> Result<crate::JobsWriterGuard<'a>, String> {
+        self.queue.acquire().map_err(|error| error.to_string())
     }
 }
 
@@ -220,7 +220,7 @@ fn write_progress(
     let json =
         serde_json::to_string(report).map_err(|error| format!("序列化维护报告失败: {error}"))?;
     queue
-        .lock()
+        .acquire()?
         .set_job_progress(job.id, &json)
         .map_err(|error| format!("写入维护报告失败: {error}"))
 }
@@ -344,11 +344,12 @@ fn execute_database_target(
         DatabaseName::Cache => store::Db::Cache,
         DatabaseName::Jobs => {
             return match state.jobs.try_lock_for(std::time::Duration::from_secs(1)) {
-                Some(queue) => queue.with_connection(execute),
-                None => Ok(DatabaseReport::skipped(
+                Ok(queue) => queue.with_connection(execute),
+                Err(store::StoreError::WriteBusy) => Ok(DatabaseReport::skipped(
                     target.name.as_str(),
                     "Jobs writer 繁忙，下轮再试",
                 )),
+                Err(error) => Err(error.to_string()),
             };
         }
     };

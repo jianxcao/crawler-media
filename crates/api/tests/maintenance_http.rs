@@ -16,6 +16,10 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+fn queue(state: &ApiState) -> api::JobsWriterGuard<'_> {
+    state.jobs.acquire().unwrap()
+}
+
 struct NoFetch;
 
 impl Fetcher for NoFetch {
@@ -97,9 +101,7 @@ fn list_jobs(app: &axum::Router) -> impl std::future::Future<Output = Value> + '
 }
 
 fn find_def(app_state: &ApiState, kind: jobs::JobKind) -> jobs::JobDef {
-    app_state
-        .jobs()
-        .lock()
+    queue(&app_state)
         .list_defs()
         .unwrap()
         .into_iter()
@@ -239,7 +241,7 @@ async fn admin_saves_config_and_reads_back_the_new_payload() {
     assert_eq!(saved["payload"]["vacuum_enabled"], false, "{saved}");
     assert!(saved["payload_token"].is_string(), "{saved}");
 
-    let def = state.jobs().lock().def(id).unwrap().unwrap();
+    let def = queue(&state).def(id).unwrap().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&def.payload).unwrap(),
         json!({ "version": 1, "vacuum_enabled": false })
@@ -311,9 +313,7 @@ async fn invalid_or_unrelated_configs_are_rejected_without_persisting() {
     }
 
     // 无关 kind（非维护 def）→ 400。
-    let unrelated = state
-        .jobs()
-        .lock()
+    let unrelated = queue(&state)
         .upsert_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
             name: "catalog".into(),
@@ -386,7 +386,7 @@ async fn maintenance_interval_is_validated_and_updates_the_schedule() {
         .await;
         assert_eq!(saved["schedule"]["interval_secs"], secs, "{saved}");
         assert_eq!(
-            state.jobs().lock().def(id).unwrap().unwrap().schedule,
+            queue(&state).def(id).unwrap().unwrap().schedule,
             Some(jobs::Schedule::Interval { secs })
         );
     }
@@ -418,9 +418,7 @@ async fn preview_is_read_only_and_reports_bounded_counts() {
     assert_eq!(preview["truncated"], false, "{preview}");
     assert_eq!(row_counts(tmp.path()), before, "preview 不得写 DB");
 
-    let unrelated = state
-        .jobs()
-        .lock()
+    let unrelated = queue(&state)
         .upsert_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
             name: "catalog".into(),
@@ -522,9 +520,7 @@ async fn run_is_refused_for_disabled_defs_and_queued_defs_report_existing() {
     assert_eq!(second["queued"], false, "重复触发不得误报新增: {second}");
     assert_eq!(second["status"], "already_queued", "{second}");
 
-    let queued = state
-        .jobs()
-        .lock()
+    let queued = queue(&state)
         .get_live_child(id)
         .unwrap()
         .expect("立即执行后应有排队中的维护任务");
@@ -551,8 +547,8 @@ async fn run_is_refused_for_disabled_defs_and_queued_defs_report_existing() {
         "{while_running}"
     );
     assert_eq!(while_running["queued"], false, "{while_running}");
-    state.jobs().lock().succeed(queued.id, 1_100).unwrap();
-    let follow_up = state.jobs().lock().get_live_child(id).unwrap();
+    queue(&state).succeed(queued.id, 1_100).unwrap();
+    let follow_up = queue(&state).get_live_child(id).unwrap();
     assert!(
         follow_up.as_ref().is_none_or(|job| job.run_after > 1_100),
         "运行中再点立即执行不得留下 run_after=0 的新任务: {follow_up:?}"
@@ -627,9 +623,7 @@ async fn jobs_list_exposes_maintenance_policy_report_and_keeps_other_defs_compat
     );
     assert!(maintenance["last_report"].is_null(), "{maintenance}");
 
-    let unrelated = state
-        .jobs()
-        .lock()
+    let unrelated = queue(&state)
         .upsert_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
             name: "catalog".into(),
@@ -680,7 +674,7 @@ async fn config_change_only_affects_the_next_run() {
     )
     .await;
     assert_eq!(queued["queued"], true, "{queued}");
-    let running = state.jobs().lock().claim(0, 50).unwrap();
+    let running = queue(&state).claim(0, 50).unwrap();
     let claimed = running
         .into_iter()
         .find(|job| job.def_id == Some(id))
@@ -698,13 +692,13 @@ async fn config_change_only_affects_the_next_run() {
     )
     .await;
 
-    let still_old = state.jobs().lock().get(claimed.id).unwrap().unwrap();
+    let still_old = queue(&state).get(claimed.id).unwrap().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&still_old.payload).unwrap(),
         retention_payload(90, false),
         "运行中的 job 必须保留自己那份策略快照"
     );
-    let def = state.jobs().lock().def(id).unwrap().unwrap();
+    let def = queue(&state).def(id).unwrap().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&def.payload).unwrap(),
         retention_payload(7, true)
@@ -728,11 +722,12 @@ async fn watcher_still_emits_when_terminal_count_drops() {
 
     // 清理（计数下降）：删除全部超龄终态、无 def 的历史。
     let batch = queue
-        .lock()
+        .acquire()
+        .unwrap()
         .prune_terminal_jobs(100_000, 500, false)
         .unwrap();
     assert!(batch.deleted > 0, "{batch:?}");
-    assert_eq!(queue.lock().count_finished_since(0).unwrap(), 0);
+    assert_eq!(queue.acquire().unwrap().count_finished_since(0).unwrap(), 0);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
     let mut observed = None;

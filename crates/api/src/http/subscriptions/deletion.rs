@@ -213,18 +213,7 @@ async fn finalize_subscription_deletion(
             ));
         }
     }
-    state
-        .jobs
-        .lock()
-        .delete_defs_for_payload(&format!("{{\"subscribe_id\":\"{id}\"}}"))
-        .map(|_| ())
-        .map_err(|error| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "subscription.job_cleanup_failed",
-                &error.to_string(),
-            )
-        })
+    Ok(())
 }
 
 fn begin_subscription_deletion(
@@ -424,5 +413,17 @@ fn finish_subscription_deletion(
             "store.error",
             &error.to_string(),
         )),
+    }?;
+    match store.subscribe_jobs_cleanup(id) {
+        Ok(Some(generation)) => {
+            if let Err(error) = crate::subscribe_job_sync::cleanup_deleted(state, id, &generation) {
+                tracing::warn!(subscribe_id=%id,%error,"Subscribe deleted; Jobs cleanup durably pending");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(subscribe_id=%id,%error,"Subscribe deleted; cleanup intent read deferred to recovery")
+        }
     }
+    Ok(())
 }

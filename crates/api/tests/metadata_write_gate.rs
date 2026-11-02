@@ -312,7 +312,8 @@ fn reads_and_readonly_post_computations_remain_available() {
     let def = fixture
         .state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()

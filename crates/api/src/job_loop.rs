@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 
+use crate::jobs_writer::JobsMutationError;
 use jobs::{Job, JobError, Runner};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -328,7 +329,8 @@ pub(crate) fn run_pending_jobs_with_clock(
     now: i64,
     completion_clock: impl Fn() -> i64,
     source: TickSource,
-) -> Result<TickRun, JobError> {
+) -> Result<TickRun, JobsMutationError> {
+    crate::subscribe_job_sync::reconcile_pending(state)?;
     let (claimed, skipped_maintenance) = claim_pending_jobs(state, now, source)?;
     let runner = StateRunner {
         state: state.clone(),
@@ -373,10 +375,10 @@ fn claim_pending_jobs(
     state: &ApiState,
     now: i64,
     source: TickSource,
-) -> Result<(Vec<Job>, Vec<String>), JobError> {
+) -> Result<(Vec<Job>, Vec<String>), JobsMutationError> {
+    let queue = state.jobs.acquire()?;
     let _coordinator = state.job_attempt_coordinator.lock();
     let active_attempts: Vec<_> = state.active_job_attempts.lock().values().cloned().collect();
-    let queue = state.jobs.lock();
     queue.recover_except(now, &active_attempts)?;
     let skipped_maintenance = schedule_due(&queue, now, source)?;
     let claimed = if source == TickSource::DevHttp {
@@ -449,29 +451,68 @@ fn persist_job_result(
     result: Result<(), String>,
     finished_at: i64,
     active_guard: &mut ActiveAttemptGuard,
-) -> Result<Option<Job>, JobError> {
-    // Serialize claim/recovery with finish/removal without nesting Queue and
-    // active-attempt locks. Runners execute outside this short coordinator.
-    let _coordinator = state.job_attempt_coordinator.lock();
-    let persisted = match result {
-        Ok(()) => {
-            tracing::info!(job_id = %job.id, kind = ?job.kind, "后台任务执行成功");
-            state.jobs.lock().succeed_claimed(job, finished_at)?
+) -> Result<Option<Job>, JobsMutationError> {
+    // Busy is an admission failure, not an executed Job failure. Preserve the
+    // result and active-attempt fence while retrying, without retaining the
+    // coordinator (claim/recovery must still inspect other attempts).
+    loop {
+        let queue = match state.jobs.acquire() {
+            Ok(queue) => queue,
+            Err(store::StoreError::WriteBusy) => {
+                tracing::warn!(job_id = %job.id, attempt = job.attempt,
+                    "Jobs completion writer busy; retaining result and attempt fence for retry");
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(JobsMutationError::Acquire(error)),
+        };
+        let coordinator = state.job_attempt_coordinator.lock();
+        let persisted = match &result {
+            Ok(()) => queue.succeed_claimed(job, finished_at),
+            Err(error) => queue.fail_claimed(job, finished_at, error),
+        };
+        match persisted {
+            Err(JobError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                drop(coordinator);
+                drop(queue);
+                tracing::warn!(job_id = %job.id, attempt = job.attempt, sqlite_code = ?code,
+                    "Jobs completion SQL busy; retaining result and attempt fence for retry");
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(job_id = %job.id, attempt = job.attempt, %error,
+                    "Jobs completion persistence failed after execution");
+                return Err(error.into());
+            }
+            Ok(persisted) => {
+                if persisted.is_some() {
+                    match &result {
+                        Ok(()) => {
+                            tracing::info!(job_id = %job.id, kind = ?job.kind, "后台任务执行成功")
+                        }
+                        Err(error) => {
+                            tracing::error!(job_id = %job.id, kind = ?job.kind, %error, "后台任务执行失败")
+                        }
+                    }
+                }
+                let mut active = state.active_job_attempts.lock();
+                if active
+                    .get(&job.id)
+                    .is_some_and(|attempt| same_attempt(attempt, job))
+                {
+                    active.remove(&job.id);
+                }
+                active_guard.disarm();
+                return Ok(persisted);
+            }
         }
-        Err(error) => {
-            tracing::error!(job_id = %job.id, kind = ?job.kind, error = %error, "后台任务执行失败");
-            state.jobs.lock().fail_claimed(job, finished_at, &error)?
-        }
-    };
-    let mut active = state.active_job_attempts.lock();
-    if active
-        .get(&job.id)
-        .is_some_and(|attempt| same_attempt(attempt, job))
-    {
-        active.remove(&job.id);
     }
-    active_guard.disarm();
-    Ok(persisted)
 }
 
 type ActiveJobMap = HashMap<domain::JobId, Job>;
@@ -547,3 +588,7 @@ pub fn unix_now() -> i64 {
 
 /// Seconds between background retries of user removals that are still pending or failed.
 const USER_REMOVAL_RETRY_SECS: i64 = 60;
+
+#[cfg(test)]
+#[path = "job_loop_result_tests.rs"]
+mod result_tests;

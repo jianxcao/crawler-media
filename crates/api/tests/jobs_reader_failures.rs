@@ -39,7 +39,8 @@ impl Fixture {
         .unwrap();
         let def = state
             .jobs()
-            .lock()
+            .acquire()
+            .unwrap()
             .list_defs()
             .unwrap()
             .into_iter()

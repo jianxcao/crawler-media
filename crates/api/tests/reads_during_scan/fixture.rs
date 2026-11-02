@@ -64,7 +64,8 @@ impl Fixture {
         .with_password_login(Arc::new(PasswordLogin::new(Arc::new(ImmediatePassword), 2)));
         let job = state
             .jobs
-            .lock()
+            .acquire()
+            .unwrap()
             .ensure_def(jobs::NewDef {
                 kind: jobs::JobKind::SubscribeSearch,
                 name: "search interactive series".into(),

@@ -81,6 +81,9 @@ pub struct ApiState {
     /// 进程内维护互斥：`concurrency_key` 只防同一 def 重叠，这里覆盖不同维护 def。
     pub(crate) maintenance_lock: Arc<Mutex<()>>,
     /// Job attempts still executing in this process; protects them from timeout recovery.
+    pub(crate) media_refs_retry_at: Arc<Mutex<(u64, Option<std::time::Instant>)>>,
+    pub(crate) subscribe_cleanup_cursor: Arc<Mutex<Option<domain::SubscribeId>>>,
+    pub(crate) subscribe_jobs_cursor: Arc<Mutex<Option<domain::SubscribeId>>>,
     pub(crate) active_job_attempts: Arc<Mutex<HashMap<domain::JobId, jobs::Job>>>,
     pub(crate) job_attempt_coordinator: Arc<Mutex<()>>,
     /// Serializes a Subscribe pause/update against a worker's final add step.
@@ -299,8 +302,7 @@ impl ApiState {
         let library_reads = store.reader_pool(store::Db::Library);
         let data_dir = store.data_dir().to_path_buf();
         let writers = store.writers();
-        // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
-        // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
+        // 有 Tokio runtime 时启动异步探测 worker；测试路径仅创建队列。
         let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
         let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone())?);
         probe.set_library_registry(library_work.clone());
@@ -351,6 +353,9 @@ impl ApiState {
             write_gate: Arc::new(crate::write_gate::WriteGate::new()),
             maintenance_executor: Arc::new(crate::maintenance::SqliteExecutor),
             maintenance_lock: Arc::new(Mutex::new(())),
+            media_refs_retry_at: Arc::new(Mutex::new((0, None))),
+            subscribe_cleanup_cursor: Arc::new(Mutex::new(None)),
+            subscribe_jobs_cursor: Arc::new(Mutex::new(None)),
             active_job_attempts: Arc::new(Mutex::new(HashMap::new())),
             job_attempt_coordinator: Arc::new(Mutex::new(())),
             subscribe_guards: Arc::new(Mutex::new(HashMap::new())),

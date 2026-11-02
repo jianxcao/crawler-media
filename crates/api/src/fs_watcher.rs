@@ -490,28 +490,25 @@ pub fn handle_fs_events(
         }
     }
 
-    // 目录有新入库/下载文件完成，主动提前调度任务，不必等待 30 秒
-    if has_intake_or_download_change {
-        tracing::info!("文件系统事件触发即时转移与入站入库");
-        let queue = state.jobs.lock();
-        if let Ok(defs) = queue.list_defs() {
-            for def in defs {
-                if def.kind == jobs::JobKind::Transfer || def.kind == jobs::JobKind::WatchIntake {
-                    let _ = queue.ensure_scheduled_for(0, def.id);
+    if has_intake_or_download_change || has_scrape_needed {
+        let result = (|| -> Result<(), crate::jobs_writer::JobsMutationError> {
+            let queue = state.jobs.acquire()?;
+            for def in queue.list_defs()? {
+                if (has_intake_or_download_change
+                    && matches!(
+                        def.kind,
+                        jobs::JobKind::Transfer | jobs::JobKind::WatchIntake
+                    ))
+                    || (has_scrape_needed && def.kind == jobs::JobKind::Scrape)
+                {
+                    queue.ensure_scheduled_for(0, def.id)?;
                 }
             }
-        }
-    }
-
-    if has_scrape_needed {
-        tracing::info!("文件系统事件触发即时元数据刮削");
-        let queue = state.jobs.lock();
-        if let Ok(defs) = queue.list_defs() {
-            for def in defs {
-                if def.kind == jobs::JobKind::Scrape {
-                    let _ = queue.ensure_scheduled_for(0, def.id);
-                }
-            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error, has_intake_or_download_change, has_scrape_needed,
+                "filesystem immediate Jobs scheduling deferred; periodic scheduling will retry");
         }
     }
 }

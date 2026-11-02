@@ -26,7 +26,7 @@ fn maintenance_stop_check_reads_while_the_jobs_writer_is_held() {
         support::unix_now(),
     );
     let jobs = state.jobs();
-    let writer = jobs.lock();
+    let writer = jobs.acquire().unwrap();
     let (result_tx, result_rx) = mpsc::channel();
     let check = std::thread::spawn(move || {
         let result = api::maintenance::check_maintenance_stop(&state, &job);
@@ -53,11 +53,12 @@ fn jobs_retention_dry_run_uses_readers_and_never_begins_a_writer_transaction() {
     );
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .succeed(terminal.id, now - 10 * support::DAY)
         .unwrap();
     let job = support::enqueue_claim(&state, jobs::JobKind::JobsRetention, support::PREVIEW, now);
-    state.jobs().lock().with_connection(|conn| {
+    state.jobs().acquire().unwrap().with_connection(|conn| {
         conn.authorizer(Some(|ctx: AuthContext<'_>| {
             if matches!(ctx.action, AuthAction::Transaction { .. }) {
                 Authorization::Deny
@@ -70,7 +71,8 @@ fn jobs_retention_dry_run_uses_readers_and_never_begins_a_writer_transaction() {
     let report = support::progress_of(&state, &job);
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .with_connection(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>));
     assert!(
         result.is_ok(),
@@ -78,7 +80,15 @@ fn jobs_retention_dry_run_uses_readers_and_never_begins_a_writer_transaction() {
     );
     assert_eq!(report["candidates"], 1, "{report}");
     assert_eq!(report["deleted"], 0, "{report}");
-    assert!(state.jobs().lock().get(terminal.id).unwrap().is_some());
+    assert!(
+        state
+            .jobs()
+            .acquire()
+            .unwrap()
+            .get(terminal.id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 struct ObservedExecutor(mpsc::Sender<DatabaseName>);
@@ -138,7 +148,8 @@ fn real_maintenance_obeys_policy_on_every_actual_writer_connection() {
     }
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .with_connection(|conn| conn.authorizer(Some(refuse_optimize)));
     let job = support::enqueue_claim(
         &state,
@@ -164,7 +175,8 @@ fn real_maintenance_obeys_policy_on_every_actual_writer_connection() {
     }
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .with_connection(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>));
     assert!(
         result.is_err(),
@@ -325,7 +337,7 @@ fn maintenance_holds_only_its_database_writer() {
         "App 维护期间读池继续可用"
     );
     assert!(
-        state.jobs().try_lock().is_some(),
+        state.jobs().try_lock_for(Duration::ZERO).is_ok(),
         "维护执行期间不得持有 Queue 锁"
     );
 

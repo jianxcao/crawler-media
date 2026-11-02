@@ -96,3 +96,9 @@ CREATE TRIGGER trg_jobs_change_ins AFTER INSERT ON jobs
          BEGIN
              UPDATE job_change_state SET revision = revision + 1 WHERE id = 1;
          END;
+
+-- Durable receipt fences replay after Subscribe publication committed but ack failed.
+CREATE TABLE subscribe_config_receipts (
+ subscribe_id TEXT NOT NULL, generation TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0),
+ PRIMARY KEY(subscribe_id,generation)
+);

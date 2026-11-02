@@ -205,6 +205,7 @@ impl Store {
     pub fn delete_subscribe(&self, id: SubscribeId) -> Result<bool, StoreError> {
         let deleted = self.with_writer(crate::Db::Subscribe, |subscribe| {
             let tx = crate::write_tx(subscribe)?;
+            tx.execute("INSERT OR REPLACE INTO subscribe_jobs_cleanup(id,generation) SELECT id,jobs_sync_generation FROM subscribes WHERE id=?1", [id.to_string()])?;
             let n = tx.execute(
                 "DELETE FROM subscribes WHERE id = ?1",
                 params![id.to_string()],
@@ -332,6 +333,12 @@ impl Store {
             self.with_writer(crate::Db::Library, |library| {
                 admission::insert_row(library, &tx, subscribe)
             })?;
+            if check_overlap {
+                tx.execute(
+                    "UPDATE subscribes SET jobs_sync_pending=1 WHERE id=?1",
+                    [subscribe.id.to_string()],
+                )?;
+            }
             tx.commit()?;
             Ok(())
         })

@@ -238,7 +238,8 @@ fn scheduled_search_releases_subscribe_guard_during_add_and_tracks_success_after
     let job = fixture
         .state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .enqueue(
             jobs::JobKind::SubscribeSearch,
             &json!({"subscribe_id": id}).to_string(),
@@ -372,7 +373,8 @@ fn assert_cancelled_library_stops_further_adds(manual: bool) {
             }
             let job = state
                 .jobs()
-                .lock()
+                .acquire()
+                .unwrap()
                 .enqueue(
                     jobs::JobKind::SubscribeSearch,
                     &json!({"subscribe_id": id}).to_string(),

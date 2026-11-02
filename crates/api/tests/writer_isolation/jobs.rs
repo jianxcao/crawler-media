@@ -6,7 +6,7 @@ use std::time::Duration;
 #[test]
 fn job_claim_and_job_list_do_not_serialize() {
     let fixture = Fixture::idle();
-    let baseline = fixture.state.jobs().lock().list_defs().unwrap();
+    let baseline = fixture.state.jobs().acquire().unwrap().list_defs().unwrap();
     assert!(!baseline.is_empty());
     let mut jobs = rusqlite::Connection::open(fixture.temp.path().join("data/jobs.db")).unwrap();
     let blocked = jobs
@@ -15,7 +15,7 @@ fn job_claim_and_job_list_do_not_serialize() {
     let shared = fixture.state.jobs();
     let (entered, wait) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
-        let queue = shared.lock();
+        let queue = shared.acquire().unwrap();
         entered.send(()).unwrap();
         queue.enqueue(
             jobs::JobKind::SubscribeSearch,
@@ -45,7 +45,8 @@ fn job_claim_and_job_list_do_not_serialize() {
         fixture
             .state
             .jobs()
-            .lock()
+            .acquire()
+            .unwrap()
             .get(enqueued.id)
             .unwrap()
             .unwrap()
@@ -90,4 +91,44 @@ fn jobs_readers_are_bounded_and_reject_writes_on_both_connections() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn jobs_http_mutation_is_bounded_while_committed_reads_remain_available() {
+    let fixture = Fixture::idle();
+    let def = fixture
+        .state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .list_defs()
+        .unwrap()
+        .remove(0);
+    let jobs = fixture.state.jobs();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = jobs.acquire().unwrap();
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    });
+    ready_rx.recv().unwrap();
+    let runtime = runtime();
+    let result = runtime.block_on(async {
+        let path = format!("/api/v1/jobs/{}/run", def.id);
+        let mutation = fixture.request("POST", &path, Value::Null);
+        let read = fixture.request("GET", "/api/v1/jobs", Value::Null);
+        let (write, read) = tokio::join!(
+            tokio::time::timeout(Duration::from_millis(1800), mutation),
+            tokio::time::timeout(SLO, read),
+        );
+        (write, read)
+    });
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let (status, body) = result
+        .0
+        .expect("Jobs mutation must finish within its writer budget");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(result.1.unwrap().0, StatusCode::OK);
 }

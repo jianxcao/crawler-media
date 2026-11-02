@@ -98,7 +98,8 @@ async fn queued_job_payload_is_refreshed_when_new_safer_policy_saved() {
     // 默认维护 def (例如 jobs_retention 策略为 retention_days = 90, dry_run = false)
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()
@@ -108,11 +109,18 @@ async fn queued_job_payload_is_refreshed_when_new_safer_policy_saved() {
     // 触发排队产生一个 queued child
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .ensure_scheduled_for(now + 1000, def.id)
         .unwrap();
 
-    let queued_before = state.jobs().lock().get_live_child(def.id).unwrap().unwrap();
+    let queued_before = state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .get_live_child(def.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(queued_before.status, jobs::JobStatus::Queued);
     assert!(queued_before.payload.contains(r#""retention_days":90"#));
 
@@ -138,7 +146,13 @@ async fn queued_job_payload_is_refreshed_when_new_safer_policy_saved() {
     assert_eq!(saved["kind"], "jobs_retention");
 
     // 校验：已经排队的 queued child 的 payload 必须被刷新为新策略！
-    let queued_after = state.jobs().lock().get_live_child(def.id).unwrap().unwrap();
+    let queued_after = state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .get_live_child(def.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(queued_after.status, jobs::JobStatus::Queued);
     assert!(
         queued_after.payload.contains(r#""retention_days":365"#),
@@ -159,7 +173,8 @@ async fn legacy_schedule_endpoint_is_rejected_for_maintenance_jobs() {
     let app = router(state.clone());
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()

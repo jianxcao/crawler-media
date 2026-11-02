@@ -108,7 +108,7 @@ async fn slow_io_and_maintenance_keep_auth_and_heartbeat_available() {
     // Slow maintenance: a claimed DatabaseMaintenance job parked inside its executor.
     let job = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         let job = guard
             .enqueue(
                 JobKind::DatabaseMaintenance,

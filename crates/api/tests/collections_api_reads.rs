@@ -321,7 +321,8 @@ fn add_title_job(fixture: &Fixture, n: u64, extra: Option<Value>) {
     fixture
         .state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .upsert_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
             name: format!("catalog {n}"),

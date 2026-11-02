@@ -25,7 +25,8 @@ fn seed_subscribe(f: &Fixture) -> domain::SubscribeId {
         .unwrap();
     f.state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .ensure_def(jobs::NewDef {
             kind: jobs::JobKind::SubscribeSearch,
             name: format!("search {id}"),

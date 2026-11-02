@@ -252,7 +252,8 @@ fn jobs_retention_does_not_loop_when_all_candidates_are_protected() {
     let now = unix_now();
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .upsert_def(NewDef {
             kind: JobKind::JobsRetention,
             name: "tied".into(),
@@ -517,7 +518,7 @@ async fn jobs_tick_http_never_executes_maintenance_and_says_so() {
     // 只留数据库维护一个 def，确保这轮 tick 的维护任务确实到期。
     {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         for def in guard.list_defs().unwrap() {
             guard
                 .set_def_enabled_by_id(def.id, def.kind == JobKind::DatabaseMaintenance)
@@ -558,7 +559,7 @@ async fn jobs_tick_http_never_executes_maintenance_and_says_so() {
         None
     );
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     let def = guard
         .list_defs()
         .unwrap()

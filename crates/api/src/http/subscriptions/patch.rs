@@ -112,6 +112,10 @@ fn persist_subscription(
     previous: &Subscribe,
     subscribe: &Subscribe,
 ) -> Result<(), Response> {
+    let reservation = state
+        .jobs
+        .reserve()
+        .map_err(crate::http::jobs::jobs_acquire_response)?;
     if let Err(error) = state
         .store
         .as_ref()
@@ -130,27 +134,78 @@ fn persist_subscription(
             &error.to_string(),
         ));
     }
+    let intent = state
+        .store
+        .subscribe_job_sync(subscribe.id)
+        .map_err(|error| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "subscription.job_sync_pending",
+                &error.to_string(),
+            )
+        })?;
     let subscribe_id = subscribe.id.to_string();
-    if let Err(error) = super::patch_jobs::sync_jobs(
-        state,
-        &subscribe_id,
-        subscribe.tracking_state == "paused",
-        subscribe.search_interval_secs,
-    ) {
-        rollback_subscription(state, &subscribe_id, previous);
-        tracing::error!(subscribe_id, error = %error, "订阅更新已回滚：搜索 Job 同步失败");
+    let sync = match intent.as_ref() {
+        Some(intent) => crate::subscribe_job_sync::publish(&reservation, intent, ""),
+        None => Ok(()),
+    };
+    if let Err(error) = sync {
+        let compensation = rollback_subscription(state, &reservation, &subscribe_id, previous);
+        tracing::error!(subscribe_id, error = %error, "Subscribe Jobs sync failed; compensation attempted and durable intent retained until convergence");
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "subscription.job_sync_failed",
-            &error.to_string(),
+            &format!("{error}; {compensation}"),
         ));
+    }
+    if let Some(intent) = intent {
+        state
+            .store
+            .acknowledge_subscribe_job_sync(subscribe.id, &intent.generation, intent.revision)
+            .map_err(|error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subscription.job_sync_pending",
+                    &error.to_string(),
+                )
+            })?;
     }
     Ok(())
 }
 
-fn rollback_subscription(state: &ApiState, id: &str, previous: &Subscribe) {
+fn rollback_subscription(
+    state: &ApiState,
+    reservation: &crate::JobsReservation<'_>,
+    id: &str,
+    previous: &Subscribe,
+) -> String {
     if let Err(error) = state.store.as_ref().update_subscribe(previous) {
-        tracing::error!(subscribe_id = id, error = %error, "队列同步失败后回滚订阅状态失败");
+        tracing::error!(subscribe_id = id, %error, "Subscribe compensation failed; durable current-config intent will retry");
+        // Jobs transaction rolled back, so leave durable current Subscribe state
+        // to recovery rather than publishing an uncommitted previous config.
+        return format!("Subscribe compensation failed; synchronization pending: {error}");
     }
-    super::patch_jobs::rollback_jobs(state, id, previous);
+    let intent = match state.store.subscribe_job_sync(previous.id) {
+        Ok(Some(intent)) => intent,
+        Ok(None) => return "Subscribe restored; no Jobs change pending".into(),
+        Err(error) => {
+            return format!("Subscribe restored; Jobs compensation intent read failed: {error}");
+        }
+    };
+    if let Err(error) = crate::subscribe_job_sync::publish(reservation, &intent, "") {
+        tracing::error!(subscribe_id = id, %error, "Jobs compensation failed; durable intent will retry");
+        return format!("Jobs compensation failed; synchronization pending: {error}");
+    }
+    match state.store.acknowledge_subscribe_job_sync(
+        previous.id,
+        &intent.generation,
+        intent.revision,
+    ) {
+        Ok(true) => "Subscribe and Jobs restored".into(),
+        Ok(false) => "Subscribe compensation changed; synchronization pending".into(),
+        Err(error) => {
+            tracing::error!(subscribe_id = id, %error, "Jobs compensation committed; receipt preserves it until acknowledgment retry");
+            format!("Jobs compensation committed; acknowledgment pending: {error}")
+        }
+    }
 }

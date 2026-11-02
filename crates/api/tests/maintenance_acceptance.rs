@@ -33,7 +33,8 @@ fn real_state(root: &Path) -> ApiState {
 fn maintenance_defs(state: &ApiState) -> Vec<jobs::JobDef> {
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()
@@ -116,9 +117,19 @@ fn state_runner_executes_a_jobs_retention_job_end_to_end() {
     let old = now - 30 * DAY;
 
     let stale = support::enqueue_claim(&state, JobKind::Scrape, "{}", old);
-    state.jobs().lock().succeed_claimed(&stale, old).unwrap();
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .succeed_claimed(&stale, old)
+        .unwrap();
     let fresh = support::enqueue_claim(&state, JobKind::Scrape, "{}", now);
-    state.jobs().lock().succeed_claimed(&fresh, now).unwrap();
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .succeed_claimed(&fresh, now)
+        .unwrap();
 
     // 真实分派：StateRunner -> maintenance::run -> Queue::prune_terminal_jobs。
     let job = support::enqueue_claim(&state, JobKind::JobsRetention, KEEP, now);
@@ -129,7 +140,7 @@ fn state_runner_executes_a_jobs_retention_job_end_to_end() {
     .expect("保留任务应成功");
 
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     assert!(
         guard.get(stale.id).unwrap().is_none(),
         "超过保留期的终止态任务应被删除"
@@ -156,7 +167,7 @@ fn user_changes_survive_a_restart() {
         .unwrap();
     {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         guard.set_def_enabled_by_id(target.id, false).unwrap();
         guard
             .set_def_schedule_by_id(target.id, Some(Schedule::Interval { secs: 7_200 }))
@@ -418,7 +429,8 @@ async fn real_job_loop_executes_maintenance_with_shutdown_and_updates() {
     let stale = support::enqueue_claim(&state, JobKind::Scrape, "{}", now - 100 * DAY);
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .succeed_claimed(&stale, now - 100 * DAY)
         .unwrap();
 
@@ -428,7 +440,12 @@ async fn real_job_loop_executes_maintenance_with_shutdown_and_updates() {
         .unwrap();
 
     // 立即排队并设置 run_after 为当前时间以保证在循环中被立刻 claim
-    state.jobs().lock().ensure_scheduled_for(0, def.id).unwrap();
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .ensure_scheduled_for(0, def.id)
+        .unwrap();
 
     // 启动真正的后台 job loop
     let clock = Arc::new(std::sync::atomic::AtomicI64::new(now));
@@ -448,7 +465,14 @@ async fn real_job_loop_executes_maintenance_with_shutdown_and_updates() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut cleaned = false;
     while std::time::Instant::now() < deadline {
-        if state.jobs().lock().get(stale.id).unwrap().is_none() {
+        if state
+            .jobs()
+            .acquire()
+            .unwrap()
+            .get(stale.id)
+            .unwrap()
+            .is_none()
+        {
             cleaned = true;
             break;
         }

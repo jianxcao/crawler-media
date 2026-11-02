@@ -18,7 +18,8 @@ pub(crate) fn data_dir(state: &ApiState) -> std::path::PathBuf {
 pub(crate) fn retention_def(state: &ApiState) -> jobs::JobDef {
     state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .list_defs()
         .unwrap()
         .into_iter()
@@ -28,7 +29,7 @@ pub(crate) fn retention_def(state: &ApiState) -> jobs::JobDef {
 
 pub(crate) fn enable_with_payload(state: &ApiState, def: &jobs::JobDef, payload: &Value) {
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     assert_eq!(
         guard
             .set_def_payload_cas(def.id, &def.payload, &payload.to_string())
@@ -90,7 +91,7 @@ pub(crate) fn cursor_settings(state: &ApiState) -> i64 {
 
 pub(crate) fn claim_for(state: &ApiState, def_id: domain::JobDefId, now: i64) -> jobs::Job {
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     // 首次调用会新建 child；后续调用会复用上一次成功时生成的 follow-up（run_after
     // 被 ensure_scheduled_for(0) 提前到 0）。两条路径都通过 claim 取 running job。
     let created = guard.ensure_scheduled_for(0, def_id).unwrap();

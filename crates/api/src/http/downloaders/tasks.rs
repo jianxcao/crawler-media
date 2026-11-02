@@ -436,11 +436,9 @@ pub(crate) async fn replace_task(
     match state
         .http_work
         .run_to_completion(move || {
-            let Some(queue) = worker
-                .jobs
-                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
-            else {
-                return crate::http::store_wait::busy_response();
+            let queue = match worker.jobs.acquire() {
+                Ok(queue) => queue,
+                Err(error) => return crate::http::jobs::jobs_acquire_response(error),
             };
             if let Err(response) = worker
                 .require_writable()

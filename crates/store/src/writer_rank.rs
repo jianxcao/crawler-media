@@ -20,24 +20,40 @@ thread_local! { static HELD:RefCell<Vec<WriterRank>>=const {RefCell::new(Vec::ne
 impl WriterRankGuard {
     /// Reserve the rank before waiting on its mutex, so inversions fail before
     /// they can deadlock. Same-database reentry is rejected as well.
-    pub fn enter(rank: WriterRank) -> Self {
+    /// Jobs admission may enclose Store SQL stages, so it cannot be reserved
+    /// while any actual database writer is held (including increasing ranks).
+    pub fn ensure_unheld(requested: WriterRank) -> Result<(), crate::StoreError> {
         HELD.with(|held| {
-            let mut held=held.borrow_mut();
-            debug_assert!(held.last().is_none_or(|previous|*previous<rank),
-                "writer acquisition must follow app → subscribe → library → cache → jobs; no same-db reentry");
+            let held = held.borrow();
+            if held.is_empty() { return Ok(()); }
+            tracing::error!(held = ?*held, ?requested, "writer admission acquired under database writer");
+            Err(crate::StoreError::LockOrder { held: held.clone(), requested })
+        })
+    }
+
+    pub fn enter(rank: WriterRank) -> Result<Self, crate::StoreError> {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            if held.last().is_some_and(|previous| *previous >= rank) {
+                tracing::error!(held = ?*held, requested = ?rank, "database writer lock order violation");
+                return Err(crate::StoreError::LockOrder { held: held.clone(), requested: rank });
+            }
             held.push(rank);
-        });
-        Self {
-            rank,
-            _thread: PhantomData,
-        }
+            Ok(Self { rank, _thread: PhantomData })
+        })
     }
 }
 impl Drop for WriterRankGuard {
     fn drop(&mut self) {
         HELD.with(|held| {
-            let released = held.borrow_mut().pop();
-            debug_assert_eq!(released, Some(self.rank));
+            let mut held = held.borrow_mut();
+            if held.last() != Some(&self.rank) {
+                tracing::error!(held = ?*held, released = ?self.rank, "database writer rank stack corrupted");
+                // An out-of-order guard release is a programming error. Do not
+                // pop somebody else's rank and conceal subsequent violations.
+                panic!("database writer rank guards released out of order");
+            }
+            held.pop();
         });
     }
 }

@@ -95,7 +95,12 @@ fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(
             .map_err(|e| e.to_string())?;
         let Some(subscribe) = maybe_sub else {
             // 订阅已被删除，自动清理残留孤儿 JobDef，避免循环调度与报警。
-            let _ = state.jobs.lock().delete_defs_for_payload(&job.payload);
+            let jobs = state
+                .jobs
+                .acquire()
+                .map_err(|error| format!("orphan Subscribe Job cleanup admission: {error}"))?;
+            jobs.delete_defs_for_payload(&job.payload)
+                .map_err(|error| format!("orphan Subscribe Job cleanup: {error}"))?;
             return Ok(());
         };
         let media = store

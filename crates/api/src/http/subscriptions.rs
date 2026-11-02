@@ -31,7 +31,6 @@ pub(crate) mod poster_view;
 pub(crate) mod snapshot;
 mod views;
 pub(crate) use views::{coverage_json, list_subscriptions};
-mod patch_jobs;
 
 /// 用户隔离：成员只能看到/操作自己的订阅；admin 可见全部。
 /// 非归属请求返回 404（不泄露其他用户的订阅是否存在）。
@@ -521,8 +520,12 @@ fn subscription_search_blocking(state: &ApiState, user_id: UserId, id: &str) -> 
             "订阅已暂停，无法搜索",
         );
     }
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return crate::http::jobs::jobs_acquire_response(error),
+    };
     match crate::jobs_api::seed_subscribe_search(
-        &state.jobs.lock(),
+        &queue,
         &subscribe.id.to_string(),
         Some(&media.title),
     ) {

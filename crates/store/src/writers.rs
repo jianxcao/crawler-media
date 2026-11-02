@@ -103,6 +103,30 @@ impl Writers {
         }
     }
 
+    /// Share an HTTP mutation scope's total deadline with external writers.
+    pub fn remaining_write_wait(wait: Duration) -> Duration {
+        ADMISSION.with(|scope| {
+            scope.borrow().as_ref().map_or(wait, |s| {
+                s.deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(wait)
+            })
+        })
+    }
+
+    pub fn check_write_admission() -> Result<(), StoreError> {
+        ADMISSION.with(|scope| {
+            let scope = scope.borrow();
+            if let Some(admission) = scope.as_ref() {
+                if let Err(error) = (admission.check)() {
+                    *admission.failure.borrow_mut() = Some(AdmissionFailure::Refused);
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn with_writer<T>(
         &self,
         db: Db,
@@ -137,7 +161,7 @@ impl Writers {
                     .saturating_duration_since(std::time::Instant::now()),
             );
         }
-        let _rank = WriterRankGuard::enter(db.rank());
+        let _rank = WriterRankGuard::enter(db.rank())?;
         let mutex = match db {
             Db::App => &self.app,
             Db::Subscribe => &self.subscribe,

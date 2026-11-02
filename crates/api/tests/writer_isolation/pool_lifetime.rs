@@ -29,19 +29,15 @@ fn resizing_the_shared_reader_pool_keeps_library_requests_available() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
 fn jobs_writer_rejects_reverse_database_acquisition() {
     let fixture = Fixture::idle();
     let jobs = fixture.state.jobs();
-    let _jobs = jobs.lock();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fixture
-            .state
-            .store()
-            .with_writer(store::Db::Cache, |_| Ok(()))
-    }));
+    let _jobs = jobs.acquire().unwrap();
+    let result = fixture
+        .state
+        .store()
+        .with_writer(store::Db::Cache, |_| Ok(()));
     assert!(
-        result.is_err(),
-        "jobs → cache violates the database writer order"
+        matches!(result, Err(store::StoreError::LockOrder { held, requested: store::WriterRank::Cache }) if held == [store::WriterRank::Jobs])
     );
 }

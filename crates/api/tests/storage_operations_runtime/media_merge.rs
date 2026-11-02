@@ -185,7 +185,8 @@ fn seed_catalog_refresh_def(state: &ApiState, media_id: &str) -> domain::JobDefI
     let payload = serde_json::json!({ "media_id": media_id }).to_string();
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .upsert_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
             name: format!("catalog {media_id}"),
@@ -202,7 +203,8 @@ fn seed_catalog_refresh_def(state: &ApiState, media_id: &str) -> domain::JobDefI
 fn payload_media_id(state: &ApiState, def_id: domain::JobDefId) -> String {
     let def = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .def(def_id)
         .unwrap()
         .expect("the seeded definition must still exist");
@@ -277,4 +279,136 @@ async fn media_merge_converges_queued_job_references_once() {
         survivor,
         "convergence must stay idempotent"
     );
+}
+
+#[tokio::test]
+async fn media_merge_busy_convergence_retries_without_another_merge_or_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = stage(&temp);
+    let (survivor, loser) = sample_media_ids();
+    media(state.store().as_ref(), survivor);
+    media(state.store().as_ref(), loser);
+    let def_id = seed_catalog_refresh_def(&state, loser);
+    let (status, _) = post_merge(
+        &router(state.clone()),
+        merge_body(MERGE_REQUEST_ID, survivor, loser),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    loop {
+        let status = state
+            .store()
+            .advance_media_merge(MERGE_REQUEST_ID, 10)
+            .unwrap();
+        if status.state == "succeeded" {
+            break;
+        }
+        assert_ne!(status.state, "failed");
+    }
+    let jobs = state.jobs();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _held = jobs.acquire().unwrap();
+        ready_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    ready_rx.recv().unwrap();
+    assert_eq!(
+        api::storage_operations::converge_retired_media_refs(&state),
+        0
+    );
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            api::storage_operations::advance_media_merges(&state, 11);
+            if payload_media_id(&state, def_id) == survivor {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("scheduled convergence retry must run after backoff");
+}
+
+#[tokio::test]
+async fn overlapping_convergence_success_cannot_clear_newer_failed_retry() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = stage(&temp);
+    let (survivor, loser) = sample_media_ids();
+    let second_survivor = "00000000-0000-0000-0000-0000000000b1";
+    let second_loser = "00000000-0000-0000-0000-0000000000b2";
+    for id in [survivor, loser, second_survivor, second_loser] {
+        media(state.store().as_ref(), id);
+    }
+    seed_catalog_refresh_def(&state, loser);
+    let second_def = seed_catalog_refresh_def(&state, second_loser);
+    let second_request = "00000000-0000-0000-0000-00000000b101";
+    let app = router(state.clone());
+    assert_eq!(
+        post_merge(&app, merge_body(MERGE_REQUEST_ID, survivor, loser))
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    while state
+        .store()
+        .advance_media_merge(MERGE_REQUEST_ID, 10)
+        .unwrap()
+        .state
+        != "succeeded"
+    {}
+    let db = rusqlite::Connection::open(temp.path().join("data/jobs.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let first_state = state.clone();
+    let first = std::thread::spawn(move || {
+        api::storage_operations::converge_retired_media_refs(&first_state)
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if state
+            .jobs()
+            .try_lock_for(std::time::Duration::ZERO)
+            .is_err()
+        {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        post_merge(
+            &app,
+            merge_body(second_request, second_survivor, second_loser)
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    while state
+        .store()
+        .advance_media_merge(second_request, 11)
+        .unwrap()
+        .state
+        != "succeeded"
+    {}
+    assert_eq!(
+        api::storage_operations::converge_retired_media_refs(&state),
+        0
+    );
+    db.execute_batch("COMMIT").unwrap();
+    assert!(first.join().unwrap() > 0);
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            api::storage_operations::advance_media_merges(&state, 12);
+            if payload_media_id(&state, second_def) == second_survivor {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("older successful snapshot must preserve newer failed retry");
 }

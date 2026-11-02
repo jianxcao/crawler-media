@@ -10,6 +10,7 @@ mod rows;
 mod schedule;
 pub mod schema;
 mod store;
+mod subscribe_config;
 mod types;
 
 pub use kinds::{JobKind, Schedule};

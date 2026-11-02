@@ -28,5 +28,8 @@ async fn independently_created_queue_reopens_through_api_and_retains_inflight_jo
         tmp.path().join("library"),
     )
     .unwrap();
-    assert_eq!(state.jobs.lock().get(job.id).unwrap(), Some(claimed));
+    assert_eq!(
+        state.jobs.acquire().unwrap().get(job.id).unwrap(),
+        Some(claimed)
+    );
 }

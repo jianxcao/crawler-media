@@ -327,7 +327,9 @@ impl crate::SubscribeConnection<'_> {
                 full_season_pack = ?5, downloader_id = ?6,
                 coverage_kind = ?7, season = ?8, episode_from = ?9, episode_to = ?10,
                 tracking_state = ?12, follow_future = ?13, search_interval_secs = ?14,
-                keep_old_versions = ?16, library_id = ?17, updated_at = ?15
+                keep_old_versions = ?16, library_id = ?17, updated_at = ?15,
+                jobs_sync_revision = jobs_sync_revision + CASE WHEN (tracking_state='paused')<>(?12='paused') OR search_interval_secs<>?14 THEN 1 ELSE 0 END,
+                jobs_sync_pending = CASE WHEN (tracking_state='paused')<>(?12='paused') OR search_interval_secs<>?14 THEN 1 ELSE jobs_sync_pending END
              WHERE id = ?11",
             params![
                 subscribe.fetch_mode.as_str(),

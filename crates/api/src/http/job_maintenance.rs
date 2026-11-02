@@ -115,23 +115,44 @@ pub(crate) async fn update_maintenance_config(
     let new_schedule = body
         .interval_secs
         .map(|secs| jobs::Schedule::Interval { secs });
-    let schedule_ref = new_schedule.as_ref();
-    let new_schedule_param = body.interval_secs.map(|_| schedule_ref);
-
-    let outcome = match state.jobs.lock().update_def_config_cas(
-        id,
-        &expected,
-        &new_payload,
-        new_schedule_param,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "job.payload_update_failed",
-                &error.to_string(),
-            );
-        }
+    let worker = state.clone();
+    let payload_for_write = new_payload.clone();
+    let outcome = state
+        .http_work
+        .run_to_completion(move || {
+            super::jobs::admitted_jobs_write(&worker, || {
+                let queue = match worker.jobs.acquire() {
+                    Ok(queue) => queue,
+                    Err(error) => return super::jobs::jobs_acquire_response(error),
+                };
+                match queue.update_def_config_cas(
+                    id,
+                    &expected,
+                    &payload_for_write,
+                    body.interval_secs.map(|_| new_schedule.as_ref()),
+                ) {
+                    Ok(jobs::PayloadUpdate::Updated) => ok(json!({"updated":true})).into_response(),
+                    Ok(jobs::PayloadUpdate::Missing) => {
+                        err(StatusCode::NOT_FOUND, "job.missing", "任务不存在")
+                    }
+                    Ok(jobs::PayloadUpdate::Conflict) => err(
+                        StatusCode::CONFLICT,
+                        "job.conflict",
+                        "维护配置已被其他请求修改，请刷新后重试",
+                    ),
+                    Err(error) => err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "job.payload_update_failed",
+                        &error.to_string(),
+                    ),
+                }
+            })
+        })
+        .await;
+    let outcome = match outcome {
+        Ok(response) if response.status().is_success() => jobs::PayloadUpdate::Updated,
+        Ok(response) => return response,
+        Err(error) => return super::jobs::jobs_budget_response(error),
     };
     match outcome {
         jobs::PayloadUpdate::Updated => {}
