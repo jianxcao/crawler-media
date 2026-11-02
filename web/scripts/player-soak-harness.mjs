@@ -1,5 +1,5 @@
 /**
- * 「真实用户猛拖进度条」的压力仿真——**装置本体**（docs/design/player-feel.md §16）。
+ * 「真实用户猛拖进度条」的压力仿真——**装置本体**。
  *
  * 用例在 `test/player-soak.test.mjs`（固定矩阵，每次改动都跑），大范围扫参数在
  * `scripts/player-soak-sweep.mjs`（几百场，手动跑）。两边共用这里的 `soak()`，

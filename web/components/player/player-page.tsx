@@ -26,7 +26,7 @@ import {
 } from "@/lib/player/episode-navigation";
 
 /**
- * 播放页的数据装配层（docs/design/web-player.md §6.10）。
+ * 播放页的数据装配层。
  *
  * 与 `VideoPlayer` 分开的理由：播放器只认「播放单元 + 展示文案」，不该知道
  * 媒体库、季集清单这些东西的存在。这一层负责把季集结构翻译成播放单元，

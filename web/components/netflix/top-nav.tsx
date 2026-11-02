@@ -17,7 +17,7 @@ import { taskActivityBadge, useTaskActivity, type TaskActivityBadge } from "@/li
 import { clearUiPrefsCache } from "@/lib/ui-prefs-cache";
 
 /**
- * Netflix 主题的桌面顶栏（≥768px，docs/design/web-themes.md §5.1）。
+ * Netflix 主题的桌面顶栏。
  *
  * - 高 68px、fixed，页面顶端透明（压一层向下渐隐的黑雾保证字标可读），
  *   任一滚动容器滚过阈值后过渡为 #141414 实底——Netflix 顶栏是实底不是毛玻璃，

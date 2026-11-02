@@ -224,7 +224,7 @@ export interface SearchResultsProps {
 const GrabContext = createContext<{ id: string; title: string } | null>(null);
 
 /**
- * 保存位置记忆上下文（docs/design/download-target-memory.md）。
+ * 保存位置记忆上下文。
  *
  * 整页只拉一次（最多 8 条），下载按钮按种子分类查表决定弹确认条还是完整弹窗。
  * 放 context 而不是每个按钮各拉一次：一页几十条结果，逐行请求毫无必要。

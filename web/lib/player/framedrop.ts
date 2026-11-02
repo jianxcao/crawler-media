@@ -1,5 +1,5 @@
 /**
- * 掉帧 watchdog（docs/design/web-player.md §6.3 / §12.15）。
+ * 掉帧 watchdog。
  *
  * 决策层已经不再预测流畅度（smooth 只作参考，§12.15 Jellyfin 对照），
  * 「这台设备到底放不放得动」由这里的**真实证据**回答：直通期间持续掉帧

@@ -10,7 +10,7 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | crate | 职责 |
 |---|---|
 | `domain` | 纯类型，无 IO |
-| `store` | SQLite system of record（ADR-0008），可依赖 `domain`、`library` |
+| `store` | SQLite system of record（ADR-0008），依赖 `domain`、`downloader`、`library`、`media` |
 | `indexer` | 站点索引/抓取（ADR-0006；CDP 浏览器 opt-in，ADR-0007） |
 | `media` | TMDB 等 catalog 客户端与缓存 |
 | `downloader` | qBittorrent 等下载器适配 |
@@ -23,14 +23,15 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | `cover-generator` | 库封面生成 |
 | `api` | axum HTTP 服务，组装以上所有 crate |
 
-依赖方向：其他 crate 只能依赖 `domain`/`store`，禁止依赖 `api`。
+依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
 
 ### 前端（`web/`）
 Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api`、`/posters` 代理到后端 :18765 —— 前端始终同源调用 `/api/v1`，不要写死后端地址。
 
 ### 关键位置
-- **单写者**：`Arc<Mutex<Store>>`，写入一律走 `store_mutate`（`crates/api/src/http/store_wait.rs`，等待预算 5s，`STORE_READ_WAIT`）。
-- **读池**：`StoreReaders`（`crates/api/src/store_readers.rs`，`STORE_READERS = 8`），读一律走 `store_read` / `store_read_handle`。
+- **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。跨库 writer 获取顺序为 app → subscribe → library → cache → jobs；跨库不承诺原子提交。
+- **统一读池**：`store::ReaderPool`（`crates/store/src/library_read/`），app/subscribe/library/cache 容量分别为 4/2/8/2（`crates/store/src/open.rs`）。API 读走 `store_read` / `store_read_handle`；`Store::with_read_snapshot`（`crates/store/src/read_scope.rs`）显式声明所读库，按 library → app → subscribe → cache 稳定顺序准入，同阶段每库复用一个 lease/快照，读不拿 writer 锁；各库快照不是跨库原子快照。
+- **Jobs 连接**：`jobs::Queue` 持有 jobs.db 唯一 writer；API 的 `jobs_readers`（`crates/api/src/jobs_readers.rs`）使用独立容量 2 的严格只读 `ReaderPool`，通过 `jobs::QueueRead` 查询。
 - **远程读闸门**：`marker::media_read::configure_remote_reads(REMOTE_READ_LIMIT, REMOTE_READ_COOLDOWN)`，在 `crates/api/src/probe_manager/worker.rs` 配置。
 - **图片代理**：`crates/api/src/http/image_proxy.rs`（+`runtime.rs`，`IMAGE_CONCURRENCY = 8`）。
 - **任务 SSE 流**：`crates/api/src/http/jobs.rs`（`Sse::new(ReceiverStream)`）。
@@ -99,7 +100,7 @@ pnpm build
 
 ## 调试提示
 
-- **卡住/超时先找根因**，不要加大超时或重试掩盖：查锁等待（writer 锁是否跨 await/IO 持有、`store_mutate` 5s 超时）、读池耗尽（8 个 reader 是否被长查询占满）、远程读闸门排队、任务未被取消。
+- **卡住/超时先找根因**，不要加大超时或重试掩盖：查锁等待（writer 锁是否跨 await/IO 持有、`store_write` 1s writer 准入超时）、读池耗尽（目标库 reader 是否被长查询占满，library 容量为 8）、远程读闸门排队、任务未被取消。
 - 日志：`.test-logs/backend.log`；`python3 scripts/e2e/logstats.py` 统计慢请求/5xx/探测阶段耗时。
 - E2E 前 `touch crates/api/build.rs` 刷新版本戳（`GIT_HASH`），再确认 `/api/v1/health` 的 commit 等于 `git rev-parse --short HEAD`。
 

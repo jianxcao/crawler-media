@@ -2,7 +2,7 @@
  * 媒体库首页的「行清单」：合并规则、排序预设与命名推荐。
  *
  * 首页 = 每个成员一份有序的行清单；每一行 = 来源 × 排序 × 名字
- * （docs/design/library-home-perspective.md）。清单存在 `ui.preferences.home.rows`
+ * 清单存在 `ui.preferences.home.rows`
  * （超管写全局配置域、成员写自己的 `member.ui_prefs`）。
  *
  * 与 lib/sidebar-nav.ts 同一条约定：**存下来的是提示，不是契约**。

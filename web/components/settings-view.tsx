@@ -322,7 +322,7 @@ function ProfileSection() {
   );
 }
 
-/** 清空自己全部观看记录（docs/design/library-access.md 2.6）：只删当前登录身份自己的行。 */
+/** 清空自己全部观看记录：只删当前登录身份自己的行。 */
 function WatchHistoryCard() {
   const confirm = useConfirm();
   const toast = useToast();

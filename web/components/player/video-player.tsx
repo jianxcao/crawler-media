@@ -129,7 +129,7 @@ import {
 } from "@/lib/player/timeline";
 
 /**
- * 网页播放器（docs/design/web-player.md §6）。
+ * 网页播放器。
  *
  * 本组件是**唯一的编排层**：决策、会话生命周期、降档回路、进度上报、字幕与
  * 快捷键都在这里接线，而每一段判断本身都在 `lib/player/` 的纯函数里（状态机、
@@ -384,7 +384,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
 
   /**
    * 把画面冻住，盖住接下来那段没有画面的空窗
-   * （docs/design/player-feel.md §2.G2，实现见 lib/player/freeze-frame.ts）。
+   *
    *
    * 该在哪些时刻调：**凡是会让 `<video>` 手里一帧都不剩的动作**——换会话
    * （seek 出界 / 换画质 / 换音轨 / 取流断了原地重开）、以及 hls.js 会清缓冲
@@ -555,7 +555,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     gone: null,
   });
   /**
-   * 横屏锁屏（docs/design/player-feel.md §2.B3）。
+   * 横屏锁屏。
    *
    * 横躺着看片时手掌、拇指常常压在屏幕上，一次误触就是暂停或跳走。锁上之后
    * 所有触摸手势与轻点全部作废，控制层也不再被唤出——只留一颗解锁键，点一下
@@ -1103,7 +1103,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
         if (disposed) return;
         // 缺粮且线路装不下当前码率：按带宽同档重开（服务端用 downlink_bps
         // 压码率），不走降档——降档降的是编码档，对带宽无能为力，只会白白
-        // 掉一级画质（docs/design/player-pipeline-optimization.md §C）。
+        // 掉一级画质。
         // 每会话只试一次：重开后仍缺粮说明估错了，再来就是无限循环。
         const stats = engine.stats();
         if (
@@ -1229,7 +1229,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   }, [state.session, clearPendingCommit]);
 
   /**
-   * 取流速度读数：每秒问一次引擎，格式化后进 state（docs/design/player-feel.md §2.G3）。
+   * 取流速度读数：每秒问一次引擎，格式化后进 state。
    *
    * 1Hz 的 setState 看着像是往热路径上加重渲染，但这个组件本来就吃着
    * `timeupdate` 的 4Hz 位置更新，多这一下可以忽略；真正要守住的是**读数没变
@@ -1976,7 +1976,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   );
 
   /**
-   * 连按快进/快退的累积落点（docs/design/player-feel.md §2.B4）。
+   * 连按快进/快退的累积落点。
    *
    * 转码会话里一次 seek 可能就是一次「杀 ffmpeg 换会话」，连按三次 ⟳10
    * 发三次 seek 就是黑三下才走到 +30 秒。所以按键只累积落点、立刻更新读数，
@@ -2209,7 +2209,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   }, [video]);
 
   /**
-   * 拖动进度条时的实时跟随（docs/design/player-feel.md §2.C2）。
+   * 拖动进度条时的实时跟随。
    *
    * 松手才提交是转码会话逼出来的规矩：拖动中每次 move 都跳会让服务端一路杀
    * ffmpeg 重启，画面永远追不上手指。但**跳转不要钱的时候没有理由不跟随**：
@@ -2790,7 +2790,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     if (!video) return;
 
-    // ---- 长按倍速（docs/design/player-feel.md §2.B2）----
+    // ---- 长按倍速----
     const hold = holdRef.current;
     const setRate = (rate: number) => {
       // 变速必须保音高，不然 2× 是鸭子叫。Safari 到现在仍只认带前缀的那个。
@@ -3283,7 +3283,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
               成员是按条件出现的（锁屏只在横屏、画中画看浏览器支持），谁排头
               不固定，挂在成员上就得每加一个东西给所有人的三元再添一个分支。 */}
           <div className="ml-auto flex shrink-0 items-center gap-4">
-            {/* 实测取流速度（docs/design/player-feel.md §2.G3）。放顶栏右上角
+            {/* 实测取流速度。放顶栏右上角
                 而不是控制条的时间旁边：它是**读数**不是控制项，和左上角的片名
                 同属「这次播放是什么」那一层，与下方那排「你能做什么」分开。
 

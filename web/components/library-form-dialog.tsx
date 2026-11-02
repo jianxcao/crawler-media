@@ -32,7 +32,7 @@ import type { LibraryKind } from "@/lib/media-types";
 
 /**
  * 媒体库表单弹窗（新建向导 / 编辑分区），从 library-view.tsx 拆出：
- * 首页只做浏览入口，建库与编辑落在管理页（docs/design/library-manage.md），
+ * 首页只做浏览入口，建库与编辑落在管理页，
  * 单库页头部的「编辑库」也用这里的 LibraryFormDialog。
  */
 /** 收藏范围可选项的模块级缓存：这是后端静态常量，但 useRoutingOptions 被
@@ -100,7 +100,7 @@ function regionLabels(regions: string[], options: RoutingOptions): string[] {
  * 新建只问必答题——类型、名称与目录、（影视库）收藏范围；四个扫描开关全有
  * 安全默认值，刮削偏好覆盖是少数人的精调，都放到编辑里。编辑按用途分区折叠，
  * 折叠态的摘要行先回答"这个库配成了什么样"，改哪项点哪项。
- * 设计稿：docs/design/library-other-kind.md 4.3 的表单节。 */
+ */
 
 const INPUT_CLASS =
   "w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-ui " +
@@ -766,7 +766,7 @@ function CreateLibraryDialog({
 type EditSectionId = "basic" | "scan" | "access" | "scope";
 
 /**
- * 可见范围编辑器（docs/design/library-access.md 2.1）：
+ * 可见范围编辑器：
  * 「所有成员」= 对全部成员自动开放（含以后新建的）；「指定成员」= 只对勾选的
  * 成员开放，名单第一项固定是「超管（我自己）」——超管不是成员，进不了白名单，
  * 单独一位存在 admin_visible 上，但对用户就是同一份名单。

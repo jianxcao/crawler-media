@@ -14,7 +14,7 @@ import { imageUrl, upgradedTmdbOriginalUrl, cardVariantFor } from "@/lib/image-p
 /**
  * Netflix 主题媒体库页（/library）顶部的全出血 Billboard——即原「内容首页」
  * 的首屏（2026-09 修订：首页概念退役、与媒体库合并成页，/ 在该主题下 replace
- * 到 /library，见 docs/design/web-themes.md §5.3）。
+ * 到 /library）。
  *
  * 选片规则不变（确定性两档）：「接下来继续」第一项（/playback/up-next）→
  * 否则「最近入库」第一项（跨可见库聚合）。只喂 Billboard 一张卡，每库取数

@@ -6,7 +6,7 @@ import { plainCueText } from "@/lib/player/subtitles";
 import type { SubtitleOption, SubtitleStyle } from "@/lib/player/subtitles";
 
 /**
- * 字幕渲染层（docs/design/web-player.md §6.2）。
+ * 字幕渲染层。
  *
  * 两条路径，都**旁挂**，绝不烧录（硬边界 1）：
  *
@@ -152,7 +152,7 @@ function shiftCues(track: TextTrack, delta: number): void {
 }
 
 /**
- * PGS：libbitsub 渲染器的生命周期（docs/design/web-player.md §6.2）。
+ * PGS：libbitsub 渲染器的生命周期。
  *
  * 蓝光位图轨没有任何浏览器原生渲染路径，Jellyfin 10.9+ 的解法是服务端把轨
  * 抽成 .sup、网页端 WASM 解码 + canvas 合成——我们用同一个库（libbitsub，

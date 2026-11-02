@@ -9,7 +9,7 @@ import type { QoeLiveStats } from "@/lib/player/qoe";
 import { languageLabel } from "@/lib/language-labels";
 
 /**
- * 诊断面板（docs/design/web-player.md §6.5，信息层次对标 Emby 的播放信息）。
+ * 诊断面板。
  *
  * 这一屏是**开源项目支持成本的直接节省**：用户报「放不出来 / 很卡」时，截这
  * 一张图，源规格、处理方式、有没有走显卡、掉帧、会话 id、判定理由全在里面，

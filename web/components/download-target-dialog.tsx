@@ -13,7 +13,7 @@
  *   3. 下载器默认目录兜底：不指定路径，由下载器自行决定。
  * 底部小字引导去「设置 → 下载器」配置路径映射。
  *
- * 保存位置记忆（docs/design/download-target-memory.md）：按种子分类
+ * 保存位置记忆：按种子分类
  * （TorrentCategory）记住选择，下次点该分类的「下载」先弹确认条
  * （本文件的 DownloadTargetConfirmBar），看得见落点再确认。
  *

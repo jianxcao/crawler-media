@@ -18,7 +18,7 @@ import { imageUrl } from "@/lib/image-proxy";
 import { formatClockTime, formatTimelineDayLabel, timelineDayKey } from "@/lib/time";
 
 /**
- * 活动页观看视角的「播放记录」切片（docs/design/activity.md「播放日志与统计」），
+ * 活动页观看视角的「播放记录」切片，
  * 以及与「观看统计」（watch-stats-panel.tsx）共用的小件。
  *
  * 数据来自 playback_log——每场播放一行，回答「最近谁在什么时候用什么看了多久」。

@@ -49,7 +49,7 @@ import { useSession } from "@/lib/session";
  *   /sessions/[id]       AI 会话
  *   /settings/[section]  设置各分区
  *
- * 外壳按主题分两副骨架（docs/design/web-themes.md）：
+ * 外壳按主题分两副骨架：
  *   - 银玻璃（默认）：左栏玻璃侧栏 + 右区（对齐 Codex / Claude Code 的两栏结构）
  *   - Netflix（结构级主题）：桌面 = 顶栏 + 全宽内容；移动 = 底部标签栏 + 全宽内容
  *

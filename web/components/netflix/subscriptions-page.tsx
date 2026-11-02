@@ -35,8 +35,7 @@ import { useScrollRestoration } from "@/lib/use-scroll-restoration";
 const COMING_CARD_W = "w-[224px] max-md:w-[168px]";
 
 /**
- * Netflix 主题的订阅页（/subscriptions，docs/design/web-themes.md §5.7 的
- * 2026-09-15 修订：从「token 换皮、信息架构不动」升级为结构级处理）。
+ * Netflix 主题的订阅页（/subscriptions），按主题组织信息架构。
  *
  * 构图 = Netflix「我的片单 × 新片热门」的合体，与发现 / 媒体库页同一语言：
  *

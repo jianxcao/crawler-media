@@ -2,11 +2,13 @@
 
 [返回数据库总览](README.md)
 
-结构核对记录：2026-10-24 修复工作树；当轮回归结果见历史执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`），现行存储问题见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不再定义 Jobs 布局，也不依赖 Jobs 生产代码。
+结构核对：2026-11-02 当前工作树；Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不再定义 Jobs 布局，也不依赖 Jobs 生产代码。
 
-共 **4 张业务表、29 字段、9 个显式命名索引、6 触发器**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。当前文件重开只校验，已填充的无头文件、旧/未知/未来布局或当前头却缺失/错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外旧索引也拒绝；未维护第二份表/索引清单。
+共 **4 张业务表、29 字段、9 个显式命名索引、6 触发器、1 个 CHECK、0 外键**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。当前文件重开只校验，已填充的无头文件、旧/未知/未来布局或当前头却缺失/错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外旧索引也拒绝；未维护第二份表/索引清单。
 
 Queue 连接明确设置 WAL、busy_timeout、FK 和 synchronous=FULL，并与 Store 四个库共用同一套连接调优（`cache_size=-16384`、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`，打开时 `PRAGMA optimize=0x10002`、关闭时 `PRAGMA optimize`）；建库路径同样在切 WAL 之前设 `auto_vacuum=INCREMENTAL`，因此维护任务可以对该库跑 `PRAGMA incremental_vacuum`。Jobs 是持久执行事实，拒绝时提示先备份；启动不会删除队列。初始化各阶段故障、独立 Queue→ApiState 重开、损坏布局零写拒绝已有回归，详见执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。
+
+Queue 持有 jobs.db 唯一 writer，由独立 Queue 锁保护；API 查询通过 [jobs_readers.rs](../../crates/api/src/jobs_readers.rs) 的容量 2 严格只读 `store::ReaderPool` 和 `jobs::QueueRead` 执行，不获取 Queue writer 锁。
 
 本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 
@@ -31,13 +33,12 @@ Job 更新流用的单例修订/终态计数，避免每次订阅更新都全表
 
 **键与约束**
 
-- 主键：`(id)`。
-- 表级/列级约束：`CHECK(id = 1)`。
-- 无显式外键声明；带 `_id` 的字段不因此自动获得引用完整性。
+- `id INTEGER PRIMARY KEY CHECK(id = 1)`。
+- 无显式外键。
 
-**索引**
+**显式命名索引**
 
-无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 **使用注意**：单例 id=1（CHECK）。新库事务写入 revision=0、finished_count=0；重开不重建计数。revision 同时由 jobs 和 job_defs 的 INSERT/UPDATE/DELETE 推进，即使 UPDATE 未改变业务值也会增加；finished_count 随删除回减。它不是按终态 status 聚合，也不等于历史累计完成次数。retention_cursors 变化不推进该修订号。
 
@@ -60,12 +61,12 @@ Job 定义：调度周期、启用状态、payload 与并发/超时策略；用�
 
 **键与约束**
 
-- 主键：`(id)`。
-- 无显式外键声明；带 `_id` 的字段不因此自动获得引用完整性。
+- `id TEXT PRIMARY KEY`。
+- 无显式外键。
 
-**索引**
+**显式命名索引**
 
-无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 **关联触发器**：`trg_job_defs_change_del`、`trg_job_defs_change_ins`、`trg_job_defs_change_upd`，每次对应行事件只推进 `job_change_state.revision`；不写浏览 journal，也不改变 finished_count。
 
@@ -95,10 +96,10 @@ Job 定义：调度周期、启用状态、payload 与并发/超时策略；用�
 
 **键与约束**
 
-- 主键：`(id)`。
-- 无显式外键声明；带 `_id` 的字段不因此自动获得引用完整性。
+- `id TEXT PRIMARY KEY`。
+- 无显式外键。
 
-**索引**
+**显式命名索引**
 
 ```sql
 CREATE INDEX jobs_finished_idx ON jobs(finished_at)
@@ -141,11 +142,11 @@ CREATE INDEX jobs_status_run_after_idx
 
 **键与约束**
 
-- 主键：`(def_id)`。
-- 无显式外键声明；带 `_id` 的字段不因此自动获得引用完整性。
+- `def_id TEXT PRIMARY KEY`。
+- 无显式外键。
 
-**索引**
+**显式命名索引**
 
-无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 **使用注意**：这里是 jobs.db 通用历史保留游标；data_retention 的分类清理断点还使用 app.db.settings 命名空间，不能假定所有清理游标都在本表。

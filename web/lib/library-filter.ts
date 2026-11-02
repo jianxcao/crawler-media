@@ -1,5 +1,5 @@
 /**
- * 海报墙筛选条件的纯逻辑（docs/design/library-filtering.md 3.1/3.4）。
+ * 海报墙筛选条件的纯逻辑。
  *
  * 单独成模块而不是塞进 lib/api/libraries.ts：那个文件带 `@/` 路径别名，
  * node --test 解析不了，逻辑就测不到。与 lib/discovery-filters.ts 同一惯例。
@@ -11,7 +11,7 @@
 export type WatchFilter = "unwatched" | "watching" | "played" | "favorite" | "seen";
 
 /**
- * 海报墙的筛选条件（docs/design/library-filtering.md 3.1）。
+ * 海报墙的筛选条件。
  *
  * 维内 OR、维间 AND。**筛选态的唯一事实源是 URL**，不进 localStorage——
  * 上次筛的条件在下次打开时还在，是本类产品最经典的困惑来源

@@ -11,7 +11,7 @@
 
 本实例的管理面是**自有 REST**。不做上游 MoviePilot / MovieClaw 的信封、DTO 字段名或数字哈希 ID。Jellyfin/Emby 播放协议（Infuse 直连）是另一套表面，见 ADR-0005，不是「上游兼容层」。
 
-当前实现的锁/性能和旧输入缺口见[共享锁复审与未实施方案](../audits/2026-10-28-storage-lock-review.md)。上轮已删除三个旧 Filter kind 及旧根合并路由，结果见修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）；仍接受旧 title_ref 是待修缺陷，不是兼容合同。
+当前存储边界、每库 writer 和统一读池见[数据库总览](../database/README.md)。历史审核与修复记录只说明对应版本；请求字段及拒绝规则以当前 handler 和公开 API 回归为准，不据旧记录新增兼容合同。
 
 ## 通用约定
 
@@ -53,11 +53,15 @@ Media 的权威身份与别名现存 `library.db.media` / `media_aliases`；别�
 
 暂停 / 续订窗口走 `PATCH /subscriptions/{id}`（`tracking_state` / `follow_future`），没有独立的 `/tracking-state`、`/follow-future` 端点。
 
+`POST /subscriptions` 不接受 `tracking_state`；传入该字段返回 400，创建后的初始状态由服务端决定。该限制不影响上述 PATCH 合同或响应中的状态字段。
+
 ### RuleSet（CONTEXT：**Filter** 组）
 
-`{id, name, is_default, atoms: [{kind, value?, priority, exclude?}]}`
+`{id, name, is_default, keep_old_versions, atoms: [{kind, value?, priority, exclude, unknown?}]}`
 
-`kind` 至少包括：`resolution` / `source` / `free` / `hr` / `title_match` / `hdr` / `size` / `min_seeders` / `subtitle_language` / `audio_language` / `site` / `wash_target` / `upgrade_ladder`。以 `domain::AtomRule` 为准。
+`kind` 至少包括：`resolution` / `source` / `video_codec` / `free` / `hr` / `title_match` / `platform` / `team` / `hdr` / `size` / `min_seeders` / `subtitle_language` / `audio_language` / `site` / `wash_target` / `upgrade_ladder`。以 `domain::AtomRule` 为准。
+
+`hr` 原子必须显式提供 `unknown: "exclude"|"allow"`。排除 H&R 时使用 `exclude: true`；`unknown: "exclude"` 同时排除状态未知的 Torrent，确认无 H&R 的 Torrent 不受此限制。搜索结果的 `hr` 为 `true|false|null`，`null` 表示未能确认。`platform` 与 `team` 是独立原子，不转换为标题子串条件；平台匹配发布标题中的完整标记，制作组匹配解析出的完整组名。前端直接保存 atoms；编辑过的偏好组保存新优先级，未编辑的组及隐藏条件保留原值。
 
 HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别名。
 

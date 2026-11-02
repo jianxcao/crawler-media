@@ -49,7 +49,7 @@ import { formatBytes } from "@/lib/format";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 /*
- * 页面信息架构（docs/design/site-protection-ratio-boost.md 之外的 UI 决策）：
+ * 页面信息架构：
  * 每站默认一行，按优先级从左到右排——
  *   P0 常驻：名称 + 验证状态（异常原因直接吃掉徽章位）；
  *   P1 条件徽章：保护中 / 刷流用量与近 24h 产出——开了才出现，不开不占版面；

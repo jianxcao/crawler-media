@@ -195,7 +195,7 @@ function sortOptions(
  *
  * **URL 是筛选态的唯一事实源**，筛选不进 localStorage——上次筛的条件在下次
  * 打开时还在，是本类产品最经典的困惑来源（"我的片怎么少了一半"）。
- * 排序是偏好该记，筛选是意图不该记（docs/design/library-filtering.md 3.4）。
+ * 排序是偏好该记，筛选是意图不该记。
  * 读 window.location 而不是 useSearchParams，与本文件既有惯例一致。
  */
 function readFilterFromUrl(): LibraryFilter {
@@ -1122,7 +1122,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const wideCards = false;
   // 其他库的主图两种形态并存：刮削器放好 -poster 的是 2:3 竖版海报，只有 -thumb /
   // 抓帧的是横版缩略图。竖横混在一个网格里对不齐，按主图比例切成两区，各自用
-  // 合适的列宽；只有一种形态时仍是普通的一面墙（docs/design/library-other-kind.md 4.3）
+  // 合适的列宽；只有一种形态时仍是普通的一面墙
   // 新契约无主图宽高比（primary_aspect 已删），无法做竖横分区，统一一面墙；
   // 其他库（video）的抓帧封面按横版列宽走，影视库用竖版海报列宽。
   // 刻意保留这个恒 false 的开关：它记着「按主图比例分区」为什么不存在，别按
@@ -1551,7 +1551,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
           {/* 筛选条：静止态只有一个「筛选」按钮，点开才有四个维度；
               条件一生效，条件本身就顶替控件出现在下面那行（且与面板开合无关）。
               图片库不给筛选——照片没有类型/评分/地区这些事实，摆上去就是
-              永远返回 0 的死控件（docs/design/library-filtering.md 3.5） */}
+              永远返回 0 的死控件 */}
           {/* 外面这层 div 只做滚动锚点：scroll-mt 让开顶栏那 52px（PageNav 是
               sticky 的无底浮层），不留这一截，scrollIntoView 会把筛选条正好
               塞到导航键底下，控件与文字糊成一团 */}

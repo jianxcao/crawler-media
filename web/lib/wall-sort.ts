@@ -13,7 +13,7 @@ import type { LibraryItemSort } from "@/lib/api/libraries";
  * 「按时间」，收藏页叫「最近收藏」，合集页叫「自定顺序」/ 合集自己的序）和
  * 偏好记在哪个键下（单库页全站一个键，收藏页一个键，合集按 id 各记各的）。
  *
- * 排序是偏好该记，筛选是意图不该记（docs/design/library-filtering.md 3.4）。
+ * 排序是偏好该记，筛选是意图不该记。
  */
 export type WallSortPref =
   | "default"

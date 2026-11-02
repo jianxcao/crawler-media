@@ -243,7 +243,7 @@ const AUDIO_LANG_OPTIONS: [string, string][] = [
 ];
 
 /**
- * 洗版目标片源档的三个选项就是全部预设（docs/design/quality-upgrade.md §8.2）
+ * 洗版目标片源档的三个选项就是全部预设
  * ——没有需要照抄的社区配置。目标分辨率缺省取分辨率偏好的第一位。
  */
 const UPGRADE_OPTIONS: [
@@ -452,7 +452,7 @@ export function RuleSetEditorDialog({
   const [sizeMax, setSizeMax] = useState(ruleAtomValue(atoms, "size")?.split("-")[1]?.toString() ?? "");
   const [groupsAllow, setGroupsAllow] = useState(ruleAtomValues(atoms, "team").join(", "));
   const [groupsBlock, setGroupsBlock] = useState(ruleAtomValues(atoms, "team", true).join(", "));
-  // 洗版目标：""=不洗版（唯一的洗版配置点，docs/design/quality-upgrade.md §8.2）
+  // 洗版目标：""=不洗版
   const [upgradeSource, setUpgradeSource] = useState<string>(ruleAtomValue(atoms, "wash_target")?.split(" ")[1] ?? "");
   const [upgradeKeepOld, setUpgradeKeepOld] = useState<boolean>(keepOldVersions);
   const [cutoffResolution, setCutoffResolution] = useState<string>(
@@ -1176,7 +1176,7 @@ export function RuleSetEditorDialog({
  * 洗版阶梯预览：把"洗到哪一档"从一句话摊成一条**看得见的路**。
  *
  * 一句"洗到 1080p 蓝光 · DV"读不出洗版真正的两个后果，而它们恰恰是用户
- * 最该在按下保存之前知道的（docs/design/quality-upgrade.md §2.1 / §14.6）：
+ * 最该在按下保存之前知道的：
  *
  * - **终点之下还有多少档**：每上一档就是一次重复下载，多加一维阶梯的代价
  *   在这里才具体；

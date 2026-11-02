@@ -134,7 +134,7 @@ export function libraryStatsSummary(libraries: MediaLibrary[] | null): string {
  * 每张卡是一个库：封面用库内作品的海报做「货架」展示（最多 4 张站立海报
  * 带底部倒影，纯前端 CSS 合成、零后端开销），叠库名/类型/统计；
  * 点击进入单库海报墙（/library/[id]）。库的增删改/设默认/扫描/排序全部在
- * 管理页（/library/manage）完成，见 docs/design/library-manage.md——卡片上只留
+ * 管理页（/library/manage）完成，卡片上只留
  * 预告"马上会看到新内容"的信息：扫描进度环与「入库中」徽标。
  *
  * 数据源是 library_file 台账的**真实库存**（L3 起）：入库管线与存量扫描

@@ -1,5 +1,5 @@
 /**
- * 控制条显隐规则（docs/design/web-player.md §6.8）。
+ * 控制条显隐规则。
  *
  * 抽成纯函数是被一个线上 bug 逼出来的：`pointerleave` 在**触屏上每次点击都会
  * 触发**（实测事件序列是 `pointerdown → pointerup → pointerleave → click`），

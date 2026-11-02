@@ -72,7 +72,7 @@ function dropPosition(e: React.DragEvent): "before" | "after" {
  * 两个视觉重心（库名、状态），其余信息是库名下的小字。
  *
  * 首页（/library）只做浏览入口；建库、编辑、扫描、整理、刷新、设默认、
- * 首页展示开关、排序、删除全部在这里完成。设计见 docs/design/library-manage.md。
+ * 首页展示开关、排序、删除全部在这里完成。
  *
  * 数据只用 listLibraries 一个接口（随库下发的统计快照与任务进度足够填满
  * 状态列），不逐库拉条目——首页为了封面拼图才要拉，这里的缩略图走服务端拼贴图。

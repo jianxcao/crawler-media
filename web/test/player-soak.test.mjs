@@ -1,5 +1,5 @@
 /**
- * 「真实用户猛拖进度条」的压力仿真：**固定矩阵**（docs/design/player-feel.md §16）。
+ * 「真实用户猛拖进度条」的压力仿真：**固定矩阵**。
  *
  * 仿真装置本体在 `scripts/player-soak-harness.mjs`——那里把真实模块
  * （timeline / scrub-follow / seek-batch / bandwidth / qoe）按 video-player.tsx

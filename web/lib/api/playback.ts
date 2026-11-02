@@ -450,7 +450,7 @@ export async function revokePlaybackDevice(userId: string, deviceId: string): Pr
 }
 
 // ---------------------------------------------------------------------------
-// 网页播放器（docs/design/web-player.md）
+// 网页播放器
 // ---------------------------------------------------------------------------
 
 /**
@@ -616,7 +616,7 @@ export interface PlaybackDiagnostics {
   cached_segments?: number;
 }
 
-/** 进度条上的章节刻度（docs/design/player-feel.md §2.C1）。合成章节不下发 */
+/** 进度条上的章节刻度。合成章节不下发 */
 export interface PlaybackChapterMark {
   start_ms: number;
   title: string | null;

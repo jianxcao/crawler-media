@@ -7,7 +7,7 @@ import { savePlaybackPolicy } from "@/lib/api/playback";
 import type { PlaybackDecision } from "@/lib/api/playback";
 
 /**
- * 软件转码同意弹窗（docs/design/web-player.md §3.6）。
+ * 软件转码同意弹窗。
  *
  * 软件转码默认关闭：低配 NAS 上一路 1080p 软转就能吃满 CPU，连带拖慢搜索、
  * 扫描、订阅——用户感知到的是「整个应用变卡了」，却完全不会联想到是自己点了

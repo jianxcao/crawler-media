@@ -17,7 +17,7 @@ import {
 import { imageUrl } from "@/lib/image-proxy";
 
 /**
- * 「更换图片」弹层（docs/design/metadata.md 6.3）——自动选图挑不中口味时的
+ * 「更换图片」弹层——自动选图挑不中口味时的
  * 人工通道。
  *
  * 两个 tab（海报 / 背景），网格铺候选缩略图，点选即落盘 + 覆盖媒体目录 +

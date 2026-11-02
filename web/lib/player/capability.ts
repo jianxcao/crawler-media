@@ -1,5 +1,5 @@
 /**
- * 客户端解码能力探测（docs/design/web-player.md §3.1）。
+ * 客户端解码能力探测。
  *
  * **不用 `canPlayType()`**：它只返回 ""/"maybe"/"probably"，分不清「能解码」
  * 和「能流畅解码」——4K HEVC 在没有硬解的老笔记本上它会说 probably，实际

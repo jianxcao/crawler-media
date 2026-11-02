@@ -2,9 +2,11 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-28，唯一生产 DDL [subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)。文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是源码字典，不是用户实例 schema。
+结构核对：2026-11-02 当前工作树；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是源码字典，不是用户实例 schema。
 
 `subscribes.created_at` / `updated_at` 没有空串默认值；写入必须显式提供非 NULL 时间戳。Store 对当前 DDL 的表/索引定义进行只读预检，不导入数据或改写已有不同定义。没有历史 schema fixture、迁移或字段兼容。
+
+共 **4 张业务表、47 字段、3 个显式命名索引、0 外键、0 CHECK、0 触发器**。
 
 ## 表目录
 
@@ -40,13 +42,16 @@ User 对一个 Media 的长期策略：覆盖范围、Fetch mode、Filter、Down
 | `updated_at` | `TEXT` | — | 是 | 无 | 配置更新时间文本；写入者显式提供，业务使用 RFC3339 UTC。 |
 | `library_id` | `TEXT` | — | 否 | 无 | 目标 Library，逻辑引用 `library.db.libraries.library_id`。 |
 
-**键与约束**：主键 `(id)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
+
+**显式命名索引**
 
 ```sql
-CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 CREATE INDEX subscribes_media_idx ON subscribes(media_id);
+CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 ```
 
 ### 用户删除时的所有权转交合同
@@ -55,7 +60,6 @@ CREATE INDEX subscribes_media_idx ON subscribes(media_id);
 - 其所有权字段 `user_id` 在独立事务中安全转交给系统默认管理员（`00000000-0000-0000-0000-000000000001`）；
 - 相关的定时任务定义（`jobs.db`）按 typed 引用与参数更新，不对 payload 进行全字符串替换；
 - 当 Subscribe 移除了显式 `library_id` 绑定时，策略评估读取新 coverage/units，但已保存的非目标库事实不会跳到默认库。
-
 
 ## subscribe_facts
 
@@ -69,9 +73,14 @@ CREATE INDEX subscribes_media_idx ON subscribes(media_id);
 | `score` | `INTEGER` | — | 是 | 无 | 已拥有文件的评分。 |
 | `path` | `TEXT` | — | 否 | 无 | 已拥有文件路径；没有指向 Library 文件的外键。 |
 
-**键与约束**：主键 `(subscribe_id, season, episode)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引；按 Subscribe 的前缀查询可使用复合主键索引，没有单独的 `subscribe_facts_sub_idx`。
+- `PRIMARY KEY(subscribe_id,season,episode)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 **使用注意**：电影通常使用 `(-1,-1)`，TV 使用季/集。路径关联不能替代 Library 文件身份，也不能将一个槽位直接 JOIN 同一 Media 的所有文件版本后求和。
 
@@ -91,9 +100,14 @@ CREATE INDEX subscribes_media_idx ON subscribes(media_id);
 | `grab_title` | `TEXT` | — | 否 | 无 | 已抓取 Torrent 的显示标题。 |
 | `last_reject_reason` | `TEXT` | — | 否 | 无 | 最近候选拒绝说明。 |
 
-**键与约束**：主键 `(subscribe_id, season, episode)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引；按 Subscribe 的前缀查询可使用复合主键索引，没有单独的 `subscribe_wanted_sub_idx`。
+- `PRIMARY KEY(subscribe_id,season,episode)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## pending_downloads
 
@@ -115,9 +129,12 @@ CREATE INDEX subscribes_media_idx ON subscribes(media_id);
 | `probe_wait_attempts` | `INTEGER` | — | 否 | 无 | 无法 probe 源文件的等待轮数；首次记录由写入者从 0 增加。 |
 | `probe_wait_since` | `INTEGER` | — | 否 | 无 | 首次记录 probe 等待的时间，Unix 秒。 |
 
-**键与约束**：主键 `(subscribe_id, enclosure)`；没有额外 UNIQUE、CHECK 或外键。`info_hash` 没有唯一约束。
+**键与约束**
 
-**索引**：
+- `PRIMARY KEY(subscribe_id,enclosure)`。
+- 无显式外键。
+
+**显式命名索引**
 
 ```sql
 CREATE INDEX pending_downloads_sub_state_idx ON pending_downloads(subscribe_id,state);

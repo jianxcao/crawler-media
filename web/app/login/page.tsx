@@ -40,7 +40,7 @@ function isAddingAccount(): boolean {
  * 2. 已持有效会话 → 直接回 next 目标（默认首页），不重复登录。
  * 安全性完全由后端保证，这里的跳转只是导航体验。
  *
- * "添加账号"形态（?add=1，docs/design/account-switching.md §4）：已登录也不跳走，
+ * "添加账号"形态：已登录也不跳走，
  * 登录成功后后端自动把新账号并入本浏览器的账号列表，前端不需要传任何额外参数。
  */
 export default function LoginPage() {

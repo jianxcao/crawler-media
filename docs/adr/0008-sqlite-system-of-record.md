@@ -20,11 +20,11 @@
 
 ## 同库边界与代价
 
-Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、倒排与 Playback 放在同一 `library.db`，使事实和受影响摘要可以同事务更新。Media 可以没有任何文件；删除最后文件不删除身份、用户观看或 Collection 事实。
+Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、倒排与 Playback 放在同一 `library.db`，使事实和受影响摘要可以同事务更新。Media 可以没有文件；最后一个 Library 文件删除后，若没有 Collection 或 Subscribe 保留该 Media，则清理孤儿 Media 及其 favorites、观看状态和进度。仍被其他文件或上述业务引用保留的 Media 按 [ADR-0012](0012-library-removal.md) 处理。
 
 文件显式持有 `library_id/root_id/path_key`，归属在写入时确定并重验当前最深根，普通读消费登记事实。原始 Playback 单元与物理源绑定恢复包区分；文件版本 CAS 阻止旧工作发布。冷轨道/章节不复制到完整浏览投影；卡片、协议 genre/person 成员、静态分类边际计数与稀疏用户摘要是必要冗余，写路径负责同事务差量维护，Integrity 操作负责从原始事实修复。
 
-同库提高原子性，但单写者和外层 Store Mutex 仍会争用；SQL 分批 COMMIT 不自动释放 Mutex。磁盘/网络观察须锁外进行，根迁移、删除与修复需要持久游标、公平调度和有界窗口。精确 count、已筛选 facets、genre 大命中和深 offset 不承诺常量成本；当前验收记录见10-25 报告（`git show 5e44f101:docs/benchmarks/2026-10-25-large-hit-query-read-model.md`），旧实现数据保留于10-24 报告（`git show 5e44f101:docs/benchmarks/2026-10-24-storage-query-rereview.md`）。
+每库只有一个 writer 连接及其独立 Mutex，SQL 分批 COMMIT 不自动释放该锁；读请求通过统一只读池借出连接，同阶段每库复用一个 lease 和快照，不取得 writer 锁。磁盘/网络观察须锁外进行，根迁移、删除与修复需要持久游标、公平调度和有界窗口。静态分类计数、协议实体与用户摘要通过投影维护，列表使用 keyset 分页；过滤组合的实际成本仍须以规模测试和性能闸门验证。历史测量只代表对应版本，不能据此推断当前行为或性能。
 
 ## 初始化与连接
 

@@ -8,7 +8,7 @@
 
 export type MediaType = "movie" | "tv";
 /** 媒体库的内容形态：发现/订阅只认 movie/tv，库还多两种本地形态——「其他」
- *  （video，无结构假设的本地视频，见 docs/design/library-other-kind.md）与
+ *  与
  */
 export type LibraryKind = MediaType | "video";
 /** 库内条目的身份来源：tmdb=有外部档案；local=本地内容或影视库里尚未识别的文件。 */

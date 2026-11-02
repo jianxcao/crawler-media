@@ -2,9 +2,9 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-24 修复工作树。字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不代表所有运行时调用者已经完成切换。
+结构核对：2026-11-02 当前工作树；字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是生产DDL字段字典，并经新建隔离SQLite空库及 `.schema` 核对，不是用户实例schema，不替代运行时行为验收。
 
-共 **9 张业务表、48 个字段、2 个显式命名索引**，没有声明外键或触发器。`app.db` 保存实例配置、User 身份与凭证；**不保存 Media、Library 或 Playback 事实**。`playback_device_credentials` 仅是设备凭证关联，不是播放会话、进度或历史；这些事实的存储边界见 [library.db](library.md)。不能将本库整体当缓存清空。
+共 **9 张业务表、48 个字段、2 个显式命名索引**，2 组外键、2 个 CHECK、0 触发器。`app.db` 保存实例配置、User 身份与凭证；**不保存 Media、Library 或 Playback 事实**。`playback_device_credentials` 仅是设备凭证关联，不是播放会话、进度或历史；这些事实的存储边界见 [library.db](library.md)。不能将本库整体当缓存清空。
 
 下表的 NOT NULL 指 DDL 是否显式声明；`INTEGER PRIMARY KEY` 自带 rowid 主键语义，即使未另写 NOT NULL。除逐表列出的约束外，不把业务枚举、JSON 形状或 0/1 约定误写为数据库 CHECK。自动主键/UNIQUE 索引不计入命名索引。
 
@@ -22,7 +22,7 @@
 
 ## instance_lock
 
-数据目录的单实例租约；持有者刷新心跳，其他实例可按 TTL 判断租约是否过期。行为实现：[instance_lock.rs](../../crates/store/src/instance_lock.rs)。心跳与租约行由专用 app.db 连接（`AppHeartbeat`）刷新，不经过进程级 `Store` 锁。
+数据目录的单实例租约；持有者刷新心跳，其他实例可按 TTL 判断租约是否过期。行为实现：[instance_lock.rs](../../crates/store/src/instance_lock.rs)。`AppHeartbeat` 共享 `Arc<Writers>` 的唯一 app.db writer 刷新心跳与租约，不再另外打开写连接；Library writer 不阻塞 app writer。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
@@ -30,9 +30,14 @@
 | `owner` | `TEXT` | — | 是 | 无 | 当前租约持有者标识。 |
 | `heartbeat_at` | `INTEGER` | — | 是 | 无 | 最近心跳时间，Unix **毫秒**；按秒传参的 `try_acquire_instance_lock` / `heartbeat_instance_lock` 会换算成毫秒写入。 |
 
-**键与约束**：主键 `(id)`；`CHECK(id=1)`。没有额外 UNIQUE 或外键。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `id INTEGER PRIMARY KEY CHECK(id=1)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## users
 
@@ -46,9 +51,15 @@ User 登录身份、启用状态、角色和密码资料，不保存观看事实
 | `role` | `TEXT` | — | 是 | `'member'` | 角色文本，业务解释 admin/member；DDL 未限制枚举。 |
 | `password` | `TEXT` | — | 是 | `''` | User 密码资料，正常密码写入路径保存散列；不是 Downloader 连接密码。 |
 
-**键与约束**：主键 `(id)`；UNIQUE `(login)`；没有 CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引；登录唯一性由 UNIQUE 自动索引提供。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- `login TEXT NOT NULL UNIQUE`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ### 用户生命周期与跨库删除合同
 用户删除通过 `DELETE /api/v1/users/{id}` 发起，采用分阶段幂等与故障可续模型：
@@ -61,7 +72,6 @@ User 登录身份、启用状态、角色和密码资料，不保存观看事实
    - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items`）被一并清理，不产生孤儿稀疏摘要。
    - 跨库清理完成后，删除 `users` 记录并清除 `settings` 中的 `user_removal.<id>` 操作项。
 4. **故障恢复**：开机启动时扫描 `user_removal.` 前缀的在途操作，沿用 lease 模式继续完成未决阶段。
-
 
 ## sites
 
@@ -83,9 +93,13 @@ Site 实例配置、认证资料、Indexer profile 与网络/Downloader 选择�
 | `enabled` | `INTEGER` | — | 是 | `1` | 启用标记，业务使用 0/1。 |
 | `maintenance_via` | `TEXT` | — | 是 | `'http'` | 登录/Check-in 的维护方式；不改变搜索/RSS 始终使用 HTTP 的边界。 |
 
-**键与约束**：主键 `(id)`；`CHECK(maintenance_via IN ('http','browser'))`；没有额外 UNIQUE 或外键。
+**键与约束**
 
-**索引**：
+- `id TEXT PRIMARY KEY NOT NULL`。
+- `maintenance_via TEXT NOT NULL DEFAULT 'http' CHECK(maintenance_via IN ('http','browser'))`。
+- 无显式外键。
+
+**显式命名索引**
 
 ```sql
 CREATE INDEX sites_enabled_idx ON sites(enabled);
@@ -102,9 +116,14 @@ CREATE INDEX sites_enabled_idx ON sites(enabled);
 | `atoms_json` | `TEXT` | — | 是 | 无 | 原子条件的 JSON 文本；DDL 没有 `json_valid` CHECK。 |
 | `keep_old_versions` | `INTEGER` | — | 是 | `0` | 保留旧文件版本的策略标记。 |
 
-**键与约束**：主键 `(id)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## user_tokens
 
@@ -113,12 +132,15 @@ CREATE INDEX sites_enabled_idx ON sites(enabled);
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
 | `token` | `TEXT` | 1 | 是 | 无 | 认证 token；敏感字段。 |
-| `user_id` | `TEXT` | — | 是 | 无 | 逻辑引用本库 `users.id`。 |
+| `user_id` | `TEXT` | — | 是 | 无 | 外键引用本库 `users.id`，删除 User 时级联清除。 |
 | `created_at` | `INTEGER` | — | 是 | `0` | 签发时间，Unix 秒；默认 0 本身不证明 token 有效。 |
 
-**键与约束**：主键 `(token)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：
+- `token TEXT PRIMARY KEY NOT NULL`。
+- `user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE`。
+
+**显式命名索引**
 
 ```sql
 CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
@@ -126,17 +148,22 @@ CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
 
 ## playback_device_credentials
 
-将 User/设备与已签发 token 关联，用于设备凭证撤销。不是 Playback 事实表。
+将 User/设备与已签发 token 关联，用于设备凭证撤销。不是 Playback 事实表。一个设备可关联多个 token；DDL 不保证 token 在该表全局唯一。token 外键级联响应凭据撤销。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
 | `user_id` | `TEXT` | 1 | 是 | 无 | 逻辑引用本库 `users.id`。 |
 | `device_id` | `TEXT` | 2 | 是 | 无 | 客户端设备标识。 |
-| `token` | `TEXT` | 3 | 是 | 无 | 该设备关联的认证 token；敏感字段。 |
+| `token` | `TEXT` | 3 | 是 | 无 | 该设备关联的认证 token；外键引用 `user_tokens.token`，敏感字段。 |
 
-**键与约束**：主键 `(user_id, device_id, token)`；没有额外 UNIQUE、CHECK 或外键。一个设备可关联多个 token；DDL 不保证 token 在该表全局唯一。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `token TEXT NOT NULL REFERENCES user_tokens(token) ON DELETE CASCADE`。
+- `PRIMARY KEY(user_id,device_id,token)`。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## settings
 
@@ -147,9 +174,14 @@ CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
 | `key` | `TEXT` | 1 | 是 | 无 | 配置键，由写入模块定义命名空间。 |
 | `value` | `TEXT` | — | 是 | 无 | 配置值文本；可能是标量、JSON 或凭证，按具体键解释。 |
 
-**键与约束**：主键 `(key)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `key TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## search_snapshots
 
@@ -163,9 +195,14 @@ CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
 | `payload` | `TEXT` | — | 是 | 无 | 序列化搜索结果。 |
 | `created_at` | `INTEGER` | — | 是 | 无 | 创建时间，由调用者传入；常规路径使用 Unix 秒。 |
 
-**键与约束**：主键 `(id)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## downloaders
 
@@ -184,10 +221,14 @@ Downloader 连接、启用开关、默认选择和路径映射配置。
 | `path_maps` | `TEXT` | — | 否 | 无 | 外部路径到本机路径的序列化映射。 |
 | `enabled` | `INTEGER` | — | 是 | `1` | 启用标记，业务使用 0/1。 |
 
-**键与约束**：主键 `(id)`；没有额外 UNIQUE、CHECK 或外键。
+**键与约束**
 
-**索引**：无额外命名索引。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 实例 Transfer/Watch 设置保存在 `settings['transfer.settings']` 的严格 revisioned DTO；PATCH 在 app 单事务比较 expected_revision，仅改目标字段。Naming template 只保存在当前 Scrape 设置 `metadata.scrape` 的四个分段字段；已删除重复 naming_templates 表及旧组合字符串反拆。Downloader 只从当前 downloaders 行和受支持环境覆盖选择，旧 settings['downloader'] 不再读取。
 

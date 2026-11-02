@@ -4,7 +4,7 @@ import { PlayerPage } from "@/components/player/player-page";
 import { parseUnitSegment } from "@/lib/player/play-links";
 
 /**
- * 网页播放页（docs/design/web-player.md §6.10）。
+ * 网页播放页。
  *
  * 地址就是分享凭证，形态按「短、稳、可读」设计：
  *

@@ -12,7 +12,7 @@ const TABS = [
  *
  * **形态照抄发现页的 TMDB / 豆瓣 分段控件**（`discover-view.tsx` 的 `SourceSwitcher`），
  * 一个像素都没改：全站的「视角切换」只有这一副长相，不新造交互词汇
- * （docs/design/activity.md 把这条写成了规矩）。
+ *
  *
  * **窄屏位置也照搬发现页**：媒体库首页与合集总览都是分区级的页面、没有 PageNav，
  * 切换器若在窄屏自己占一行，就会和全局顶栏摞成两排 header。所以移动端由调用方

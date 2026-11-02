@@ -2,7 +2,7 @@ import type { RuleSetAtom } from "@/lib/api/subscriptions";
 import { ruleAtomValues, ruleAtomValue } from "./rule-set-edit.ts";
 
 /**
- * 洗版阶梯预览（docs/design/quality-upgrade.md §2.1 / §14.3）：把规则组的洗版
+ * 洗版阶梯预览：把规则组的洗版
  * 配置翻译成一条**从终点往下数**的档位清单。
  *
  * 为什么需要它：开了洗版之后，规则组就不再是一个"筛子"而是一条**有序阶梯**

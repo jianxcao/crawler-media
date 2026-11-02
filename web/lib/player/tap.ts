@@ -1,5 +1,5 @@
 /**
- * 触屏轻点的单/双击判定（docs/design/player-feel.md §2.B1）。
+ * 触屏轻点的单/双击判定。
  *
  * **不用 `dblclick` 事件**：触屏上它的触发条件各家浏览器不一，两指、轻扫、
  * 点得稍慢都可能不发；ArtPlayer / jellyfin-web 也都是自己按时间窗数 tap。

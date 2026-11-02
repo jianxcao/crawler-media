@@ -669,7 +669,7 @@ export function MediaTrackRows({
 }
 
 /**
- * 只读的音轨 / 字幕两行（影片分享页用，docs/design/media-share.md §5.2）。
+ * 只读的音轨 / 字幕两行。
  *
  * 与 MediaTrackRows 同一套分组、标签与折叠交互，只是没有版本选择、字幕预览、
  * 删除与生成入口——访客没有账号，这些动作对他不存在；也因此不依赖会话 /

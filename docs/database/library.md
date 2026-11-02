@@ -1,12 +1,12 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
-> 当前锁/查询/归约缺口见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。上轮修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）仅负责当时范围；历史审查保留固定版本反例。
+> 历史锁/查询/归约审查见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。上轮修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）仅负责当时范围；历史审查保留固定版本反例。
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-28。唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=1`。不可按缓存清空。代码没有历史布局或升级步骤。
+结构核对：2026-11-02 当前工作树；唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=1`。不可按缓存清空。代码没有历史布局或升级步骤。
 
-结构为 **53张业务表、596字段、83个显式命名索引、37组FK、0生产触发器**，不计SQLite自动索引。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
+结构为 **58张业务表（含1张FTS5虚拟表）、634字段、106个显式命名索引、40组FK、115个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；634字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为62、物理声明字段644。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
 
 `library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
 
@@ -24,7 +24,7 @@
 
 类型、主键顺位、NOT NULL 与 DEFAULT 均为 SQLite 声明；正文约束使用原 DDL 表达，包含 DEFERRABLE 细节。无 FK 时明确列出，不因字段名带 `_id` 推断约束。JSON 是各消费者的版本化结构，json_valid 只验证 JSON 语法，不保证业务字段完整。
 
-用户/设置在 app、Subscribe 在 subscribe、通用 Job 在 jobs，跨库 ID 无 FK。playback 恢复包不引用 library_files 的 FK，以保留删除后的观看事实。秒/ms/ns 混用，以实际读写入口为准；`played_changed_at_ms` 与 watch/favorite 时钟不能互换。
+用户/设置在 app、Subscribe 在 subscribe、通用 Job 在 jobs，跨库 ID 无 FK。playback 恢复包不引用 library_files 的 FK；仍有同一 Media 的其他文件时可保留观看事实，但最后文件删除必须按 ADR-0012 清理孤儿 Media、favorites 与播放进度。秒/ms/ns 混用，以实际读写入口为准；`played_changed_at_ms` 与 watch/favorite 时钟不能互换。
 
 ## 表目录
 
@@ -32,12 +32,12 @@
 - [library_query_count_rebuild](#library_query_count_rebuild) — 5 字段；当前查询投影/成员/计数模型。
 - [library_query_config](#library_query_config) — 3 字段；当前查询投影/成员/计数模型。
 - [library_protocol_terms](#library_protocol_terms) — 4 字段；当前查询投影/成员/计数模型。
-- [library_protocol_people](#library_protocol_people) — 6 字段；当前查询投影/成员/计数模型。
+- [library_protocol_people](#library_protocol_people) — 9 字段；当前查询投影/成员/计数模型。
 - [pending_root_reassignments](#pending_root_reassignments) — 6 个字段
 - [pending_file_renames](#pending_file_renames) — 28 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
 
 - [chapter_frame_tasks](#chapter_frame_tasks) — 10 字段；章节帧生成的源版本、目标与持久执行状态。
-- [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序，不随单库文件删除而删除 Media 事实。
+- [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序；删除部分文件不改变仍有文件的 Media，最后文件删除时随孤儿 Media 清理。
 - [collections](#collections) — 6 字段；公共系列或用户私有 Collection 定义；可见性与 owner 组合有 CHECK。
 - [file_details](#file_details) — 11 字段；同源版本的冷探测详情；随文件级联删除，不等于可随意清空的浏览缓存。
 - [file_probe_obligations](#file_probe_obligations) — 3 字段；随文件登记的持久探测义务；文件删除级联移除。
@@ -48,22 +48,22 @@
 - [fingerprint_season_models](#fingerprint_season_models) — 9 字段；季级指纹模型、成员/政策版本与模型体。
 - [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；操作状态需结合正式operation验收。
 - [library_file_units](#library_file_units) — 5 字段；文件到逻辑单元的覆盖事实；一文件可覆盖多集，同集可有多版本。
-- [library_files](#library_files) — 34 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
+- [library_files](#library_files) — 35 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
 - [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；v4 起主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
-- [library_items](#library_items) — 38 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
+- [library_items](#library_items) — 39 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
 - [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 输入及导出来源；alias/登记身份和按批迁移原反例已修，完整守恒及 export 故障验收见当前方案。
 - [library_operations](#library_operations) — 11 字段；roots/locale/default_locale/integrity/scrape 持久操作载体。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
-- [library_removals](#library_removals) — 11 个字段
+- [library_removals](#library_removals) — 10 个字段
 - [library_roots](#library_roots) — 6字段；path_key 唯一；根替换使用持久重配置，新增嵌套根队列有恢复驱动；当轮实现见执行记录 S02（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）。
-- [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
+- [library_units](#library_units) — 8 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
 - [media_aliases](#media_aliases) — 5 字段；来源别名归属及每来源唯一刷新目标；不把来源 ID 当内部身份。
 - [media_episodes](#media_episodes) — 13 字段；已采用分集详情；拥有事实来自文件覆盖。
 - [media_markers](#media_markers) — 10 字段；Media/单元的片头片尾标记及人工锁；不是观看或文件覆盖事实。
 - [media_metadata](#media_metadata) — 17 字段；work 级已采用元数据；effective/compose 已实现来源合成并维护字段 provenance，当前缺口按具体入口/验收记录，不再沿用旧“未接线”结论。
 - [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
-- [media_metadata_sources](#media_metadata_sources) — 14 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
+- [media_metadata_sources](#media_metadata_sources) — 13 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
 - [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
 - [pending_file_deletions](#pending_file_deletions) — 10 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
 - [playback_logs](#playback_logs) — 23 字段；终态会话历史；按稳定会话/generation 去重，不依赖文件仍存在。
@@ -79,9 +79,19 @@
 - [scan_seen](#scan_seen) — 6 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
 - [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
 - [unidentified](#unidentified) — 7 个字段
-- [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护，批量发布已合并当前用户摘要写入；当前风险以本轮具体反例为准，不引用旧 R03/R12/R20 为现状。
+- [user_library_items](#user_library_items) — 23字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护，批量发布已合并当前用户摘要写入；当前风险以本轮具体反例为准，不引用旧 R03/R12/R20 为现状。
 - [library_removal_files](#library_removal_files) — 9 个字段
 - [root_reassignment_state](#root_reassignment_state) — 9 个字段
+
+- [library_protocol_entities](#library_protocol_entities) — 7 字段；协议实体投影/重建状态。
+
+- [library_search_fts](#library_search_fts) — 2 字段；协议实体投影/重建状态。
+
+- [protocol_entity_overlap_counts](#protocol_entity_overlap_counts) — 4 字段；协议实体投影/重建状态。
+
+- [protocol_entity_overlap_rebuild](#protocol_entity_overlap_rebuild) — 5 字段；协议实体投影/重建状态。
+
+- [user_library_continue_units](#user_library_continue_units) — 7 字段；协议实体投影/重建状态。
 
 ## chapter_frame_tasks
 
@@ -102,9 +112,9 @@
 
 **键与约束**
 
-- 主键：`(id)`。
+- `id TEXT PRIMARY KEY NOT NULL`。
 - `UNIQUE(file_id,source_version,targets_hash)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -114,7 +124,7 @@ CREATE INDEX chapter_dispatch ON chapter_frame_tasks(status,created_at_ms,id);
 
 ## collection_items
 
-以 canonical MediaId 保存成员关系与排序，不随单库文件删除而删除 Media 事实。
+以 canonical MediaId 保存成员关系与排序；删除部分文件不改变仍有文件的 Media，最后文件删除时随孤儿 Media 清理。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -125,14 +135,14 @@ CREATE INDEX chapter_dispatch ON chapter_frame_tasks(status,created_at_ms,id);
 
 **键与约束**
 
-- 主键：`(collection_id, media_id)`。
-- `collection_id: NOT NULL REFERENCES collections(id) ON DELETE CASCADE`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
+- `collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
 - `PRIMARY KEY(collection_id,media_id)`。
 
 **显式命名索引**
 
 ```sql
+CREATE INDEX collection_items_order ON collection_items(collection_id,sort_order,added_at,media_id);
 CREATE INDEX collection_media ON collection_items(media_id,collection_id);
 ```
 
@@ -151,10 +161,10 @@ CREATE INDEX collection_media ON collection_items(media_id,collection_id);
 
 **键与约束**
 
-- 主键：`(id)`。
-- `visibility: NOT NULL CHECK(visibility IN ('private','public'))`。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- `visibility TEXT NOT NULL CHECK(visibility IN ('private','public'))`。
 - `CHECK((visibility='private' AND user_id IS NOT NULL) OR (visibility='public' AND user_id IS NULL))`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -182,8 +192,7 @@ CREATE INDEX collections_owner ON collections(user_id,sort_order,id);
 
 **键与约束**
 
-- 主键：`(file_id)`。
-- `file_id: PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
+- `file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
 - `CHECK(json_valid(audio_json))`。
 - `CHECK(json_valid(subtitle_json))`。
 - `CHECK(video_json IS NULL OR json_valid(video_json))`。
@@ -191,7 +200,7 @@ CREATE INDEX collections_owner ON collections(user_id,sort_order,id);
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## file_probe_obligations
 
@@ -205,8 +214,7 @@ CREATE INDEX collections_owner ON collections(user_id,sort_order,id);
 
 **键与约束**
 
-- 主键：`(file_id)`。
-- `file_id: PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
+- `file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
 
 **显式命名索引**
 
@@ -235,8 +243,8 @@ CREATE INDEX probe_obligation_dispatch ON file_probe_obligations(created_at_ms,f
 
 **键与约束**
 
-- 主键：`(attempt_id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `attempt_id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -262,12 +270,12 @@ CREATE INDEX attempts_file ON fingerprint_attempts(file_id);
 
 **键与约束**
 
-- 主键：`(file_id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `file_id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## fingerprint_model_members
 
@@ -282,8 +290,7 @@ CREATE INDEX attempts_file ON fingerprint_attempts(file_id);
 
 **键与约束**
 
-- 主键：`(model_id, sample_id)`。
-- `model_id: NOT NULL REFERENCES fingerprint_season_models(model_id) ON DELETE CASCADE`。
+- `model_id TEXT NOT NULL REFERENCES fingerprint_season_models(model_id) ON DELETE CASCADE`。
 - `PRIMARY KEY(model_id,sample_id)`。
 
 **显式命名索引**
@@ -313,9 +320,9 @@ CREATE INDEX model_file ON fingerprint_model_members(file_id);
 
 **键与约束**
 
-- 主键：`(sample_id)`。
+- `sample_id TEXT PRIMARY KEY NOT NULL`。
 - `UNIQUE(file_id,source_version,capture_profile_key,kind,window_start_ms,window_end_ms)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -342,8 +349,8 @@ CREATE INDEX sample_lookup ON fingerprint_samples(file_id,kind,source_version,ca
 
 **键与约束**
 
-- 主键：`(model_id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `model_id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -383,15 +390,15 @@ Library 配置、显示语言、访问范围、生命周期与完整性状态；
 
 **键与约束**
 
-- 主键：`(library_id)`。
-- `kind: NOT NULL CHECK(kind IN ('movie','tv','video'))`。
-- `lifecycle_state: NOT NULL DEFAULT 'ready' CHECK(lifecycle_state IN ('ready','frozen','draining','reindexing','failed'))`。
-- `integrity_state: NOT NULL DEFAULT 'unknown' CHECK(integrity_state IN ('unknown','clean','failed'))`。
-- `is_default: NOT NULL DEFAULT 0 CHECK(is_default IN (0,1))`。
-- `member_ids_json: NOT NULL DEFAULT '[]' CHECK(json_valid(member_ids_json))`。
-- `match_rules_json: NOT NULL DEFAULT '[]' CHECK(json_valid(match_rules_json))`。
+- `library_id TEXT PRIMARY KEY NOT NULL`。
+- `kind TEXT NOT NULL CHECK(kind IN ('movie','tv','video'))`。
+- `lifecycle_state TEXT NOT NULL DEFAULT 'ready' CHECK(lifecycle_state IN ('ready','frozen','draining','reindexing','failed'))`。
+- `integrity_state TEXT NOT NULL DEFAULT 'unknown' CHECK(integrity_state IN ('unknown','clean','failed'))`。
+- `is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1))`。
+- `member_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(member_ids_json))`。
+- `match_rules_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(match_rules_json))`。
 - `UNIQUE(library_id,kind)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -413,8 +420,6 @@ CREATE UNIQUE INDEX library_default ON libraries(kind) WHERE is_default=1;
 
 **键与约束**
 
-- 主键：`(file_id, season, episode)`。
-- 存储：`WITHOUT ROWID`（主键为 NOT NULL 复合键，行内只有两个 UUID 外键列，约 110B；`coverage_media` 已含全部主键列所以不随转换变宽，省掉的是与表等大的主键自动索引）。计划证据见 [`crates/store/tests/library_query_plans.rs`](../../crates/store/tests/library_query_plans.rs)。
 - `PRIMARY KEY(file_id,season,episode)`。
 - `UNIQUE(library_id,media_id,season,episode,file_id)`。
 - `FOREIGN KEY(file_id,library_id,media_id) REFERENCES library_files(file_id,library_id,media_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED`。
@@ -470,16 +475,17 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 
 **键与约束**
 
-- 主键：`(file_id)`。
-- `path_key: NOT NULL UNIQUE`。
-- `presence_state: NOT NULL CHECK(presence_state IN ('present','missing','unknown'))`。
-- `publication_state: NOT NULL CHECK(publication_state IN ('pending','published'))`。
-- `file_revision: NOT NULL CHECK(file_revision>0)`。
-- `size_bytes: CHECK(size_bytes IS NULL OR size_bytes>=0)`。
-- `transfer_mode: CHECK(transfer_mode IS NULL OR transfer_mode IN ('hardlink','copy','move'))`。
-- `quality_source: NOT NULL CHECK(quality_source IN ('probe','release'))`。
-- `confidence: NOT NULL CHECK(confidence IN ('high','low'))`。
-- `duration_ms: CHECK(duration_ms IS NULL OR duration_ms>=0)`。
+- `file_id TEXT PRIMARY KEY NOT NULL`。
+- `path_key TEXT NOT NULL UNIQUE CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/'))`。
+- `presence_state TEXT NOT NULL CHECK(presence_state IN ('present','missing','unknown'))`。
+- `publication_state TEXT NOT NULL CHECK(publication_state IN ('pending','published'))`。
+- `file_revision INTEGER NOT NULL CHECK(file_revision>0)`。
+- `size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes>=0)`。
+- `transfer_mode TEXT CHECK(transfer_mode IS NULL OR transfer_mode IN ('hardlink','copy','move'))`。
+- `hdr_observed INTEGER NOT NULL DEFAULT 0 CHECK(hdr_observed IN (0,1))`。
+- `quality_source TEXT NOT NULL CHECK(quality_source IN ('probe','release'))`。
+- `confidence TEXT NOT NULL CHECK(confidence IN ('high','low'))`。
+- `duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0)`。
 - `UNIQUE(file_id,library_id,media_id)`。
 - `FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id)`。
 - `FOREIGN KEY(library_id,kind) REFERENCES libraries(library_id,kind)`。
@@ -489,8 +495,10 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 
 ```sql
 CREATE INDEX files_kind_path ON library_files(kind,path_key);
+CREATE INDEX files_library_file ON library_files(library_id,file_id);
 CREATE INDEX files_library_media ON library_files(library_id,media_id,file_id);
 CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
+CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE missing_at IS NOT NULL;
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 ```
@@ -508,15 +516,13 @@ CREATE INDEX files_library_file ON library_files(library_id,file_id);
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
 | `library_id` | `TEXT` | 1 | 是 | 无 |
-| `media_id` | `TEXT` | 2 | 是 | 无 |
 | `term_kind` | `TEXT` | 3 | 是 | 无 |
 | `term_value` | `TEXT` | 4 | 是 | 无 |
+| `media_id` | `TEXT` | 2 | 是 | 无 |
 
 **键与约束**
 
-- 主键：`(library_id, media_id, term_kind, term_value)`。v4 把 `media_id` 提到第二列：旧序列下 `WHERE library_id=? AND media_id=?`（每卡读取、term 删除、`library_items` 的 FK 子查询）无法 seek，只能再建一棵等宽索引 `terms_media`——表因此被存了三份（键树 + `terms_media` + `terms_value`）。新序列让这些读全部变成键前缀，`terms_media` 删除，计划不变、少一棵 B 树（合成夹具 180k 行：−6.8 MB）。证据见审计文档 R1 与 `crates/store/tests/library_schema_audit.rs` 的 facet 预算断言。
-- 存储：`WITHOUT ROWID`（主键为 NOT NULL 复合键且整行就是主键，约 38B/行 ×3 棵树 → ×2 棵树）。计划证据见 [`crates/store/tests/library_query_plans.rs`](../../crates/store/tests/library_query_plans.rs)。
-- `term_kind: NOT NULL CHECK(term_kind IN ('genre','country','resolution','decade','runtime','language','rating','hdr','stock','collection','studio'))`。协议 genre/person 使用独立成员表。
+- `term_kind TEXT NOT NULL CHECK(term_kind IN ('genre','country','resolution','decade','runtime','language','rating','hdr','stock','collection','studio'))`。
 - `PRIMARY KEY(library_id,media_id,term_kind,term_value)`。
 - `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
 
@@ -534,8 +540,9 @@ Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
-| `library_id` | `TEXT` | 1 | 是 | 无 |
-| `media_id` | `TEXT` | 2 | 是 | 无 |
+| `search_rowid` | `INTEGER` | 1 | 否 | 无 |
+| `library_id` | `TEXT` | — | 是 | 无 |
+| `media_id` | `TEXT` | — | 是 | 无 |
 | `kind` | `TEXT` | — | 是 | 无 |
 | `title` | `TEXT` | — | 是 | 无 |
 | `title_sort` | `TEXT` | — | 是 | 无 |
@@ -544,6 +551,7 @@ Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组
 | `metadata_revision` | `INTEGER` | — | 是 | 无 |
 | `item_revision` | `INTEGER` | — | 是 | 无 |
 | `protocol_title_key` | `TEXT` | — | 是 | `''` |
+| `protocol_original_title_key` | `TEXT` | — | 是 | `''` |
 | `query_projection_revision` | `INTEGER` | — | 是 | `0` |
 | `query_config_revision` | `INTEGER` | — | 是 | `0` |
 | `release_date_sort` | `TEXT` | — | 是 | `''` |
@@ -569,14 +577,16 @@ Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组
 | `backdrop_ref` | `TEXT` | — | 否 | 无 |
 | `has_still` | `INTEGER` | — | 是 | `0` |
 | `search_text` | `TEXT` | — | 是 | `''` |
+| `first_owned_season` | `INTEGER` | — | 否 | 无 |
+| `first_owned_episode` | `INTEGER` | — | 否 | 无 |
 
 **键与约束**
 
-- 主键：`(library_id, media_id)`。
-- `library_id: NOT NULL REFERENCES libraries(library_id)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `file_count: NOT NULL CHECK(file_count>0)`。
-- `PRIMARY KEY(library_id,media_id)`。
+- `search_rowid INTEGER PRIMARY KEY`。
+- `library_id TEXT NOT NULL REFERENCES libraries(library_id)`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `file_count INTEGER NOT NULL CHECK(file_count>0)`。
+- `UNIQUE(library_id,media_id)`。
 - `FOREIGN KEY(preferred_file_id,library_id,media_id) REFERENCES library_files(file_id,library_id,media_id) DEFERRABLE INITIALLY DEFERRED`。
 - `CHECK(available_file_count>=0 AND missing_file_count>=0 AND unknown_file_count>=0)`。
 - `CHECK(available_file_count+missing_file_count+unknown_file_count=file_count)`。
@@ -596,6 +606,8 @@ CREATE INDEX items_rating ON library_items(library_id,rating_sort,media_id);
 CREATE INDEX items_release ON library_items(library_id,release_date_sort,media_id);
 CREATE INDEX items_resolution ON library_items(library_id,resolution_rank,media_id);
 CREATE INDEX items_runtime ON library_items(library_id,runtime_sort,media_id);
+CREATE INDEX items_search_prefix ON library_items(library_id,protocol_title_key,title_sort,media_id);
+CREATE INDEX items_search_title ON library_items(title_sort,media_id,library_id,search_rowid);
 CREATE INDEX items_shuffle ON library_items(library_id,stable_shuffle_key,media_id);
 CREATE INDEX items_size ON library_items(library_id,size_sort,media_id);
 CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
@@ -613,6 +625,9 @@ CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
 | `name_key` | `TEXT` | 4 | 是 | 无 |
 | `tmdb_id` | `TEXT` | 5 | 是 | 无 |
 | `wire_id` | `TEXT` | — | 是 | 无 |
+| `display_name` | `TEXT` | — | 是 | 无 |
+| `character` | `TEXT` | — | 否 | 无 |
+| `image_url` | `TEXT` | — | 否 | 无 |
 
 **唯一生产 DDL 中的约束**
 
@@ -621,19 +636,28 @@ CREATE TABLE library_protocol_people (
  library_id TEXT NOT NULL, media_id TEXT NOT NULL,
  role TEXT NOT NULL CHECK(role IN ('Actor','Director','Writer')),
  name_key TEXT NOT NULL, tmdb_id TEXT NOT NULL, wire_id TEXT NOT NULL,
+ display_name TEXT NOT NULL, character TEXT, image_url TEXT,
  PRIMARY KEY(library_id,media_id,role,name_key,tmdb_id),
  FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE
 ) WITHOUT ROWID;
 ```
 
-存储：`WITHOUT ROWID`（复合 NOT NULL 主键 + 一个窄 `wire_id`），主键前缀读取（`query_projection/people.rs`）直接用表 b-tree 而不再「先走自动索引再回表」。计划证据见 [`crates/store/tests/library_query_plans.rs`](../../crates/store/tests/library_query_plans.rs)。
+存储：`WITHOUT ROWID`（复合 NOT NULL 主键与协议字段），主键前缀读取（`query_projection/people.rs`）直接用表 b-tree 而不再「先走自动索引再回表」。计划证据见 [`crates/store/tests/library_query_plans.rs`](../../crates/store/tests/library_query_plans.rs)。
 
 **显式命名索引**
 
 ```sql
+CREATE INDEX protocol_people_image_tmdb ON library_protocol_people(tmdb_id,image_url DESC,library_id,media_id);
+CREATE INDEX protocol_people_name ON library_protocol_people(name_key,image_url DESC,library_id,media_id,role,tmdb_id);
 CREATE INDEX protocol_people_tmdb ON library_protocol_people(tmdb_id,role,library_id,media_id);
-CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,library_id,media_id,role,name_key,tmdb_id);
+CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,image_url DESC,library_id,media_id,role,name_key,tmdb_id);
 ```
+
+**键与约束**
+
+- `role TEXT NOT NULL CHECK(role IN ('Actor','Director','Writer'))`。
+- `PRIMARY KEY(library_id,media_id,role,name_key,tmdb_id)`。
+- `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
 
 ## library_protocol_terms
 
@@ -665,6 +689,12 @@ CREATE TABLE library_protocol_terms (
 CREATE INDEX protocol_terms_media ON library_protocol_terms(library_id,media_id,term_kind,term_value);
 ```
 
+**键与约束**
+
+- `term_kind TEXT NOT NULL CHECK(term_kind IN ('genre','studio'))`。
+- `PRIMARY KEY(library_id,term_kind,term_value,media_id)`。
+- `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
+
 ## library_query_config
 
 查询默认语言及配置版本单例。
@@ -682,6 +712,15 @@ CREATE TABLE library_query_config (
  id INTEGER PRIMARY KEY CHECK(id=1), default_locale TEXT, revision INTEGER NOT NULL DEFAULT 0
 );
 ```
+
+**键与约束**
+
+- `id INTEGER PRIMARY KEY CHECK(id=1)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## library_query_count_rebuild
 
@@ -706,6 +745,15 @@ CREATE TABLE library_query_count_rebuild (
 );
 ```
 
+**键与约束**
+
+- `operation_id TEXT NOT NULL REFERENCES library_operations(operation_id) ON DELETE CASCADE`。
+- `member_count INTEGER NOT NULL CHECK(member_count>=0)`。
+- `PRIMARY KEY(operation_id,surface,dimension,value)`。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 ## library_query_counts
 
 按 Library、查询表面、维度、值保存非负精确边际计数。
@@ -723,12 +771,22 @@ CREATE TABLE library_query_count_rebuild (
 ```sql
 CREATE TABLE library_query_counts (
  library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE,
- surface TEXT NOT NULL CHECK(surface IN ('browse','protocol_work')),
+ surface TEXT NOT NULL CHECK(surface IN ('browse','protocol_work','protocol_entity')),
  dimension TEXT NOT NULL, value TEXT NOT NULL, member_count INTEGER NOT NULL CHECK(member_count>=0),
  PRIMARY KEY(library_id,surface,dimension,value)
 );
 ```
 
+**键与约束**
+
+- `library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE`。
+- `surface TEXT NOT NULL CHECK(surface IN ('browse','protocol_work','protocol_entity'))`。
+- `member_count INTEGER NOT NULL CHECK(member_count>=0)`。
+- `PRIMARY KEY(library_id,surface,dimension,value)`。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
 ## library_metadata_inputs
 
 Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持久意图/版本校验、路径独占与执行 lease；不可重放失败退出和重启恢复已修，见修复对账（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`），不继续沿用旧 A12/R2 缺陷状态。
@@ -765,13 +823,13 @@ Library 独立 NFO 输入、解析状态与导出来源字段。导出已有持�
 
 **键与约束**
 
-- 主键：`(library_id, media_id, entity_scope, season, episode, locale, input_key)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `parse_state: NOT NULL CHECK(parse_state IN ('valid','invalid','unknown','missing'))`。
-- `fields_json: NOT NULL CHECK(json_valid(fields_json))`。
-- `present_fields_json: NOT NULL CHECK(json_valid(present_fields_json))`。
-- `provenance_json: NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json))`。
-- `export_fields_json: CHECK(export_fields_json IS NULL OR json_valid(export_fields_json))`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `path_key TEXT NOT NULL CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/'))`。
+- `parse_state TEXT NOT NULL CHECK(parse_state IN ('valid','invalid','unknown','missing'))`。
+- `fields_json TEXT NOT NULL CHECK(json_valid(fields_json))`。
+- `present_fields_json TEXT NOT NULL CHECK(json_valid(present_fields_json))`。
+- `provenance_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json))`。
+- `export_fields_json TEXT CHECK(export_fields_json IS NULL OR json_valid(export_fields_json))`。
 - `PRIMARY KEY(library_id,media_id,entity_scope,season,episode,locale,input_key)`。
 - `FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id)`。
 - `CHECK((entity_scope='work' AND season=-1 AND episode=-1) OR (entity_scope='season' AND season>=0 AND episode=-1) OR (entity_scope='episode' AND season>=0 AND episode>=0))`。
@@ -805,21 +863,25 @@ roots/locale/integrity/scrape 操作载体。当前已有运行驱动与恢复�
 
 **键与约束**
 
-- 主键：`(operation_id)`。
-- Scrape 的 `resource_key` 为非空规范 sidecar 路径，活跃操作按路径唯一。
-- `kind: NOT NULL CHECK(kind IN ('roots','locale','default_locale','integrity','scrape'))`。
-- `state: NOT NULL CHECK(state IN ('planned','frozen','draining','applying','checking','succeeded','failed'))`。
-- `plan_json: NOT NULL CHECK(json_valid(plan_json))`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `operation_id TEXT PRIMARY KEY NOT NULL`。
+- `kind TEXT NOT NULL CHECK(kind IN ('roots','locale','default_locale','integrity','scrape'))`。
+- `state TEXT NOT NULL CHECK(state IN ('planned','frozen','draining','applying','checking','succeeded','failed'))`。
+- `plan_json TEXT NOT NULL CHECK(json_valid(plan_json))`。
+- `resource_key TEXT CHECK(kind<>'scrape' OR (resource_key IS NOT NULL AND length(resource_key)>0))`。
+- 无显式外键。
 
 **显式命名索引**
 
 ```sql
-CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key) WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
-CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id) WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
-CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms,operation_id) WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
+CREATE INDEX library_integrity_owner ON library_operations(library_id)
+ WHERE kind='integrity' AND state<>'succeeded';
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
-CREATE INDEX library_integrity_owner ON library_operations(library_id) WHERE kind='integrity' AND state<>'succeeded';
+CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms,operation_id)
+ WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
+CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key)
+ WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
+CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id)
+ WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
 CREATE INDEX operations_library_kind ON library_operations(library_id,kind,updated_at_ms DESC);
 ```
 
@@ -836,17 +898,16 @@ CREATE INDEX operations_library_kind ON library_operations(library_id,kind,updat
 
 **键与约束**
 
-- 主键：`(operation_id, path)`。
-- `operation_id: NOT NULL REFERENCES library_removals(operation_id)`。
+- `operation_id TEXT NOT NULL REFERENCES library_removals(operation_id)`。
 - `PRIMARY KEY(operation_id,path)`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## library_removals
 
-Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 100 行捕获快照；snapshot_cursor/snapshot_done 记录进度。API 在快照和清理窗口之间真正释放 Store。原始 Media/Playback/Collection 与磁盘字节保留。
+Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 100 行捕获快照；snapshot_cursor/snapshot_done 记录进度。API 在快照和清理窗口之间真正释放 Store。立即取消该库所有任务后推进删除；最后文件消失时清理孤儿 Media、Collection 成员、favorites 与播放进度。Library 删除本身保留磁盘字节。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -857,19 +918,19 @@ Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 10
 | `snapshot_cursor` | `TEXT` | — | 是 | `''` |
 | `snapshot_done` | `INTEGER` | — | 是 | `0` |
 | `total_files` | `INTEGER` | — | 是 | `0` |
-| `removed_ledger_count` | `INTEGER` | — | 是 | `0` |
 | `error` | `TEXT` | — | 否 | 无 |
 | `created_at_ms` | `INTEGER` | — | 是 | 无 |
 | `updated_at_ms` | `INTEGER` | — | 是 | 无 |
 
 **键与约束**
 
-- 主键：`(operation_id)`。
-- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+- `operation_id TEXT PRIMARY KEY NOT NULL`。
+- `library_id TEXT NOT NULL UNIQUE`。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## library_roots
 
@@ -886,9 +947,9 @@ Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 10
 
 **键与约束**
 
-- 主键：`(root_id)`。
-- `library_id: NOT NULL REFERENCES libraries(library_id)`。
-- `path_key: NOT NULL UNIQUE`。
+- `root_id TEXT PRIMARY KEY NOT NULL`。
+- `library_id TEXT NOT NULL REFERENCES libraries(library_id)`。
+- `path_key TEXT NOT NULL UNIQUE CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/'))`。
 - `UNIQUE(root_id,library_id)`。
 
 **显式命名索引**
@@ -914,9 +975,8 @@ Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 �
 
 **键与约束**
 
-- 主键：`(library_id, media_id, season, episode)`。
-- `file_count: NOT NULL CHECK(file_count>0)`。
-- `available_file_count: NOT NULL CHECK(available_file_count BETWEEN 0 AND file_count)`。
+- `file_count INTEGER NOT NULL CHECK(file_count>0)`。
+- `available_file_count INTEGER NOT NULL CHECK(available_file_count BETWEEN 0 AND file_count)`。
 - `PRIMARY KEY(library_id,media_id,season,episode)`。
 - `FOREIGN KEY(library_id) REFERENCES libraries(library_id)`。
 - `FOREIGN KEY(media_id) REFERENCES media(media_id)`。
@@ -949,12 +1009,12 @@ CREATE INDEX units_protocol_order ON library_units(library_id,season ASC,episode
 
 **键与约束**
 
-- 主键：`(media_id)`。
-- `kind: NOT NULL CHECK(kind IN ('movie','tv','video'))`。
-- `year: CHECK(year IS NULL OR year BETWEEN 0 AND 9999)`。
-- `identity_state: NOT NULL CHECK(identity_state IN ('provisional','confirmed','merging','retired'))`。
-- `aliases_display_json: NOT NULL DEFAULT '[]' CHECK(json_valid(aliases_display_json))`。
-- `survivor_id: REFERENCES media(media_id)`。
+- `media_id TEXT PRIMARY KEY NOT NULL`。
+- `kind TEXT NOT NULL CHECK(kind IN ('movie','tv','video'))`。
+- `year INTEGER CHECK(year IS NULL OR year BETWEEN 0 AND 9999)`。
+- `identity_state TEXT NOT NULL CHECK(identity_state IN ('provisional','confirmed','merging','retired'))`。
+- `aliases_display_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(aliases_display_json))`。
+- `survivor_id TEXT REFERENCES media(media_id)`。
 - `UNIQUE(media_id,kind)`。
 - `CHECK((identity_state='retired')=(survivor_id IS NOT NULL))`。
 - `CHECK(survivor_id IS NULL OR survivor_id<>media_id)`。
@@ -980,9 +1040,8 @@ CREATE INDEX media_title ON media(kind,title,year,media_id);
 
 **键与约束**
 
-- 主键：`(source, kind, external_id)`。
-- `source: NOT NULL CHECK(source IN ('tmdb','douban','tvdb','bangumi','anilist'))`。
-- `is_refresh_target: NOT NULL DEFAULT 0 CHECK(is_refresh_target IN (0,1))`。
+- `source TEXT NOT NULL CHECK(source IN ('tmdb','douban','tvdb','bangumi','anilist'))`。
+- `is_refresh_target INTEGER NOT NULL DEFAULT 0 CHECK(is_refresh_target IN (0,1))`。
 - `PRIMARY KEY(source,kind,external_id)`。
 - `FOREIGN KEY(media_id,kind) REFERENCES media(media_id,kind)`。
 
@@ -1015,17 +1074,16 @@ CREATE UNIQUE INDEX alias_target ON media_aliases(media_id,source,kind) WHERE is
 
 **键与约束**
 
-- 主键：`(media_id, season, episode, locale)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `season: NOT NULL CHECK(season>=0)`。
-- `episode: NOT NULL CHECK(episode>=0)`。
-- `details_json: NOT NULL DEFAULT '{}' CHECK(json_valid(details_json))`。
-- `field_origins_json: NOT NULL DEFAULT '{}' CHECK(json_valid(field_origins_json))`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `season INTEGER NOT NULL CHECK(season>=0)`。
+- `episode INTEGER NOT NULL CHECK(episode>=0)`。
+- `details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json))`。
+- `field_origins_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(field_origins_json))`。
 - `PRIMARY KEY(media_id,season,episode,locale)`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## media_markers
 
@@ -1046,13 +1104,12 @@ Media/单元的片头片尾标记及人工锁；不是观看或文件覆盖事�
 
 **键与约束**
 
-- 主键：`(media_id, season, episode)`。
 - `PRIMARY KEY(media_id,season,episode)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## media_metadata
 
@@ -1080,20 +1137,19 @@ work 级已采用元数据；effective/compose 已实现来源合成并维护字
 
 **键与约束**
 
-- 主键：`(media_id, locale)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `rating: CHECK(rating IS NULL OR rating BETWEEN 0 AND 10)`。
-- `runtime_minutes: CHECK(runtime_minutes IS NULL OR runtime_minutes>=0)`。
-- `genres_json: NOT NULL DEFAULT '[]' CHECK(json_valid(genres_json))`。
-- `countries_json: NOT NULL DEFAULT '[]' CHECK(json_valid(countries_json))`。
-- `details_json: NOT NULL DEFAULT '{}' CHECK(json_valid(details_json))`。
-- `field_origins_json: NOT NULL DEFAULT '{}' CHECK(json_valid(field_origins_json))`。
-- `revision: NOT NULL CHECK(revision>=0)`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `rating REAL CHECK(rating IS NULL OR rating BETWEEN 0 AND 10)`。
+- `runtime_minutes INTEGER CHECK(runtime_minutes IS NULL OR runtime_minutes>=0)`。
+- `genres_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(genres_json))`。
+- `countries_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(countries_json))`。
+- `details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json))`。
+- `field_origins_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(field_origins_json))`。
+- `revision INTEGER NOT NULL CHECK(revision>=0)`。
 - `PRIMARY KEY(media_id,locale)`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## media_metadata_overrides
 
@@ -1111,15 +1167,14 @@ work 级已采用元数据；effective/compose 已实现来源合成并维护字
 
 **键与约束**
 
-- 主键：`(media_id, entity_scope, season, episode, locale)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `fields_json: NOT NULL CHECK(json_valid(fields_json))`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `fields_json TEXT NOT NULL CHECK(json_valid(fields_json))`。
 - `PRIMARY KEY(media_id,entity_scope,season,episode,locale)`。
 - `CHECK((entity_scope='work' AND season=-1 AND episode=-1) OR (entity_scope='season' AND season>=0 AND episode=-1) OR (entity_scope='episode' AND season>=0 AND episode>=0))`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## media_metadata_sources
 
@@ -1137,27 +1192,24 @@ work 级已采用元数据；effective/compose 已实现来源合成并维护字
 | `provider_work_id` | `TEXT` | — | 是 | 无 |
 | `normalized_json` | `TEXT` | — | 是 | 无 |
 | `present_fields_json` | `TEXT` | — | 是 | 无 |
-| `preferences_json` | `TEXT` | — | 是 | 无 |
 | `selection_origins_json` | `TEXT` | — | 是 | 无 |
 | `fetched_at` | `INTEGER` | — | 是 | 无 |
 | `source_revision` | `INTEGER` | — | 是 | 无 |
 
 **键与约束**
 
-- 主键：`(media_id, entity_scope, season, episode, source, locale)`。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `source: NOT NULL CHECK(source IN ('tmdb','douban','tvdb','bangumi','anilist','fanart'))`。
-- `normalized_json: NOT NULL CHECK(json_valid(normalized_json))`。
-- `present_fields_json: NOT NULL CHECK(json_valid(present_fields_json))`。
-- `preferences_json: NOT NULL CHECK(json_valid(preferences_json))`。
-- `selection_origins_json: NOT NULL CHECK(json_valid(selection_origins_json))`。
-- `source_revision: NOT NULL CHECK(source_revision>=0)`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `source TEXT NOT NULL CHECK(source IN ('tmdb','douban','tvdb','bangumi','anilist','fanart'))`。
+- `normalized_json TEXT NOT NULL CHECK(json_valid(normalized_json))`。
+- `present_fields_json TEXT NOT NULL CHECK(json_valid(present_fields_json))`。
+- `selection_origins_json TEXT NOT NULL CHECK(json_valid(selection_origins_json))`。
+- `source_revision INTEGER NOT NULL CHECK(source_revision>=0)`。
 - `PRIMARY KEY(media_id,entity_scope,season,episode,source,locale)`。
 - `CHECK((entity_scope='work' AND season=-1 AND episode=-1) OR (entity_scope='season' AND season>=0 AND episode=-1) OR (entity_scope='episode' AND season>=0 AND episode>=0))`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## media_operations
 
@@ -1178,16 +1230,17 @@ Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HT
 
 **键与约束**
 
-- 主键：`(operation_id)`。
-- `kind: NOT NULL CHECK(kind IN ('merge','reassign'))`。
-- `state: NOT NULL CHECK(state IN ('planned','frozen','draining','applying','checking','succeeded','failed'))`。
-- `plan_json: NOT NULL CHECK(json_valid(plan_json))`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `operation_id TEXT PRIMARY KEY NOT NULL`。
+- `kind TEXT NOT NULL CHECK(kind IN ('merge','reassign'))`。
+- `state TEXT NOT NULL CHECK(state IN ('planned','frozen','draining','applying','checking','succeeded','failed'))`。
+- `plan_json TEXT NOT NULL CHECK(json_valid(plan_json))`。
+- 无显式外键。
 
 **显式命名索引**
 
 ```sql
-CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,operation_id) WHERE state = 'succeeded';
+CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,operation_id)
+ WHERE state = 'succeeded';
 ```
 
 ## pending_file_deletions
@@ -1209,8 +1262,8 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 
 **键与约束**
 
-- 主键：`(path)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `path TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1253,9 +1306,9 @@ CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_ke
 
 **键与约束**
 
-- 主键：`(id)`。
+- `id TEXT PRIMARY KEY NOT NULL`。
 - `UNIQUE(user_id,device_id,play_session_id,generation)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1287,8 +1340,8 @@ Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次�
 
 **键与约束**
 
-- 主键：`(id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1296,7 +1349,7 @@ Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次�
 CREATE INDEX metrics_recorded ON playback_metrics(recorded_at,id);
 ```
 
-v3 曾为 `playback_sessions`/`playback_logs`/`playback_metrics` 各建一个 `media_id` 索引，理由是 `Store::delete_playback_for_media` 在播放写锁内按 `media_id` 删除。该 helper 已移入 `src/test_support.rs`，生产没有任何按 `media_id` 删除播放行的路径（Media 是退役而不是删除；生产删除按 `file_id`/`user_id`/`id`），所以 **v5 删除了这三个索引**：它们只是每次播放写入都要维护、却无人读取的写放大。
+播放历史的显式索引以本节当前 DDL 为准；孤儿 Media 清理由生产删除路径负责，不能以历史退役策略推断用户事实永久保留。
 
 ## playback_session_ids
 
@@ -1323,18 +1376,18 @@ v3 曾为 `playback_sessions`/`playback_logs`/`playback_metrics` 各建一个 `m
 
 **键与约束**
 
-- 主键：`(user_id, device_id, play_session_id)`。
-- `file_revision: NOT NULL CHECK(file_revision>0)`。
-- `config_revision: NOT NULL CHECK(config_revision>=0)`。
-- `timeline_mode: NOT NULL CHECK(timeline_mode='full_file')`。
-- `generation: NOT NULL CHECK(generation>=0)`。
-- `state: NOT NULL CHECK(state IN ('pending','active','closed'))`。
+- `file_revision INTEGER NOT NULL CHECK(file_revision>0)`。
+- `config_revision INTEGER NOT NULL CHECK(config_revision>=0)`。
+- `timeline_mode TEXT NOT NULL CHECK(timeline_mode='full_file')`。
+- `generation INTEGER NOT NULL CHECK(generation>=0)`。
+- `state TEXT NOT NULL CHECK(state IN ('pending','active','closed'))`。
 - `PRIMARY KEY(user_id,device_id,play_session_id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
 ```sql
+CREATE INDEX playback_session_ids_media ON playback_session_ids(media_id);
 CREATE INDEX session_generation ON playback_session_ids(user_id,device_id,generation DESC);
 CREATE INDEX session_id_expiry ON playback_session_ids(issued_at);
 CREATE INDEX session_ids_live_file ON playback_session_ids(file_id) WHERE state <> 'closed';
@@ -1380,17 +1433,19 @@ CREATE INDEX session_ids_live_file ON playback_session_ids(file_id) WHERE state 
 
 **键与约束**
 
-- 主键：`(user_id, device_id)`。
-- `file_revision: NOT NULL CHECK(file_revision>0)`。
-- `config_revision: NOT NULL CHECK(config_revision>=0)`。
-- `timeline_mode: NOT NULL CHECK(timeline_mode='full_file')`。
-- `generation: NOT NULL CHECK(generation>=0)`。
+- `file_revision INTEGER NOT NULL CHECK(file_revision>0)`。
+- `config_revision INTEGER NOT NULL CHECK(config_revision>=0)`。
+- `timeline_mode TEXT NOT NULL CHECK(timeline_mode='full_file')`。
+- `generation INTEGER NOT NULL CHECK(generation>=0)`。
 - `PRIMARY KEY(user_id,device_id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+```sql
+CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
+CREATE INDEX playback_sessions_media ON playback_sessions(media_id);
+```
 
 新增索引：
 
@@ -1427,16 +1482,14 @@ CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_i
 
 **键与约束**
 
-- 主键：`(user_id, media_id, season, episode)`。
-- 存储：保留 rowid 表。主键虽是 NOT NULL 复合键，但行内带恢复包（`resume_file_id`、`resume_source_version`、`audio_track`、`subtitle_track`），实测每行 287B（`WITHOUT ROWID`）对 257B（rowid 表），超出窄行预算，转换只会削掉主键自动索引却把每行摊厚，因此不改。
-- `media_id: NOT NULL REFERENCES media(media_id)`。
-- `played: NOT NULL DEFAULT 0 CHECK(played IN (0,1))`。
-- `has_played_assertion: NOT NULL DEFAULT 0 CHECK(has_played_assertion IN (0,1))`。
-- `favorite: NOT NULL DEFAULT 0 CHECK(favorite IN (0,1))`。
-- `play_count: NOT NULL DEFAULT 0 CHECK(play_count>=0)`。
-- `position_ms: NOT NULL DEFAULT 0 CHECK(position_ms>=0)`。
-- `duration_ms: CHECK(duration_ms IS NULL OR duration_ms>=0)`。
-- `timeline_mode: CHECK(timeline_mode IS NULL OR timeline_mode='full_file')`。
+- `media_id TEXT NOT NULL REFERENCES media(media_id)`。
+- `played INTEGER NOT NULL DEFAULT 0 CHECK(played IN (0,1))`。
+- `has_played_assertion INTEGER NOT NULL DEFAULT 0 CHECK(has_played_assertion IN (0,1))`。
+- `favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1))`。
+- `play_count INTEGER NOT NULL DEFAULT 0 CHECK(play_count>=0)`。
+- `position_ms INTEGER NOT NULL DEFAULT 0 CHECK(position_ms>=0)`。
+- `duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0)`。
+- `timeline_mode TEXT CHECK(timeline_mode IS NULL OR timeline_mode='full_file')`。
 - `PRIMARY KEY(user_id,media_id,season,episode)`。
 - `CHECK((season=-1 AND episode=-1) OR (season>=0 AND episode>=-1))`。
 - `CHECK((has_played_assertion=0 AND played=0 AND played_changed_at_ms IS NULL) OR (has_played_assertion=1 AND played_changed_at_ms IS NOT NULL))`。
@@ -1447,6 +1500,9 @@ CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_i
 
 ```sql
 CREATE INDEX playback_activity ON playback_units(user_id,media_id,watch_activity_at DESC,season,episode);
+CREATE INDEX playback_favorite_order ON playback_units(user_id,favorite_at DESC,media_id ASC,season DESC,episode DESC) WHERE favorite=1;
+CREATE INDEX playback_favorite_winner ON playback_units(user_id,media_id,favorite_at DESC,season DESC,episode DESC) WHERE favorite=1;
+CREATE INDEX playback_played_episodes ON playback_units(user_id,media_id,season,episode) WHERE played<>0 AND season>=0 AND episode>=0;
 CREATE INDEX playback_unit_media ON playback_units(media_id,user_id,season,episode);
 ```
 
@@ -1471,8 +1527,7 @@ Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗�
 
 **键与约束**
 
-- 主键：`(job_id, file_id)`。
-- `job_id: NOT NULL REFERENCES probe_jobs(id) ON DELETE CASCADE`。
+- `job_id TEXT NOT NULL REFERENCES probe_jobs(id) ON DELETE CASCADE`。
 - `PRIMARY KEY(job_id,file_id)`。
 
 **显式命名索引**
@@ -1480,6 +1535,7 @@ Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗�
 ```sql
 CREATE UNIQUE INDEX probe_unit_active ON probe_job_units(file_id) WHERE status IN ('queued','running');
 CREATE INDEX probe_unit_dispatch ON probe_job_units(stage,status,job_id) WHERE status='queued';
+CREATE INDEX probe_unit_file ON probe_job_units(file_id,job_id);
 CREATE INDEX probe_unit_status ON probe_job_units(job_id,status);
 ```
 
@@ -1509,8 +1565,8 @@ CREATE INDEX probe_unit_status ON probe_job_units(job_id,status);
 
 **键与约束**
 
-- 主键：`(id)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1534,13 +1590,12 @@ CREATE INDEX probe_terminal ON probe_jobs(finished_at_ms,id) WHERE status IN ('s
 
 **键与约束**
 
-- 主键：`(media_id, season)`。
 - `PRIMARY KEY(media_id,season)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## probe_stage_state
 
@@ -1562,9 +1617,8 @@ CREATE INDEX probe_terminal ON probe_jobs(finished_at_ms,id) WHERE status IN ('s
 
 **键与约束**
 
-- 主键：`(file_id, context_key, stage)`。
 - `PRIMARY KEY(file_id,context_key,stage)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1593,15 +1647,16 @@ CREATE INDEX probe_stage_active_job ON probe_stage_state(active_job_id) WHERE ac
 
 **键与约束**
 
-- 主键：`(id)`。
-- `scope_kind: NOT NULL DEFAULT 'full' CHECK(scope_kind IN ('full','targeted'))`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- `id TEXT PRIMARY KEY NOT NULL`。
+- `scope_kind TEXT NOT NULL DEFAULT 'full' CHECK(scope_kind IN ('full','targeted'))`。
+- 无显式外键。
 
 **显式命名索引**
 
 ```sql
 CREATE INDEX scan_library_status ON scan_operations(library_id,status);
-CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id) WHERE status IN ('completed','partial','cancelled','failed');
+CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id)
+ WHERE status IN ('completed','partial','cancelled','failed');
 ```
 
 ## scan_seen
@@ -1619,13 +1674,12 @@ CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id) W
 
 **键与约束**
 
-- 主键：`(operation_id, path_key)`。
 - `PRIMARY KEY(operation_id,path_key)`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 无显式外键。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## scrape_sidecars
 
@@ -1639,13 +1693,12 @@ CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id) W
 
 **键与约束**
 
-- 主键：`(file_id, kind)`。
-- `file_id: NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
+- `file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE`。
 - `PRIMARY KEY(file_id,kind)`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## unidentified
 
@@ -1663,8 +1716,8 @@ CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id) W
 
 **键与约束**
 
-- 主键：`(library_id, path_key)`。
-- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+- `PRIMARY KEY(library_id,path_key)`。
+- `FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id)`。
 
 **显式命名索引**
 
@@ -1695,11 +1748,18 @@ CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
 | `resume_season` | `INTEGER` | — | 否 | 无 |
 | `resume_episode` | `INTEGER` | — | 否 | 无 |
 | `summary_revision` | `INTEGER` | — | 是 | 无 |
+| `activity_next_season` | `INTEGER` | — | 否 | 无 |
+| `activity_next_episode` | `INTEGER` | — | 否 | 无 |
+| `activity_season` | `INTEGER` | — | 否 | 无 |
+| `activity_episode` | `INTEGER` | — | 否 | 无 |
+| `activity_at` | `INTEGER` | — | 是 | `0` |
+| `activity_present` | `INTEGER` | — | 是 | `0` |
+| `all_watch_at` | `INTEGER` | — | 是 | `0` |
+| `resume_activity_at` | `INTEGER` | — | 是 | `0` |
 
 **键与约束**
 
-- 主键：`(user_id, library_id, media_id)`。
-- 存储：`WITHOUT ROWID`（主键为 NOT NULL 复合键，行内是十来个窄计数/坐标列，约 130B；`user_items_media` 与 `user_items_activity` 都已含全部主键列，因此不随转换变宽，省掉的是与表等大的主键自动索引）。计划证据见 [`crates/store/tests/library_query_plans.rs`](../../crates/store/tests/library_query_plans.rs)。
+- `activity_present INTEGER NOT NULL DEFAULT 0 CHECK(activity_present IN(0,1))`。
 - `PRIMARY KEY(user_id,library_id,media_id)`。
 - `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
 - `CHECK(completed_episode_count BETWEEN 0 AND owned_episode_count)`。
@@ -1707,8 +1767,12 @@ CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
 **显式命名索引**
 
 ```sql
-CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id);
+CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id DESC);
+CREATE INDEX user_items_home ON user_library_items(user_id,activity_at DESC,media_id,library_id)
+ WHERE activity_present=1 AND (activity_next_season IS NOT NULL OR resume_season IS NOT NULL);
 CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id);
+CREATE INDEX user_items_next ON user_library_items(user_id,activity_at DESC,media_id,library_id) WHERE next_season IS NOT NULL;
+CREATE INDEX user_items_resume ON user_library_items(user_id,resume_activity_at DESC,media_id,library_id) WHERE resume_season IS NOT NULL;
 ```
 
 ## pending_file_renames
@@ -1748,10 +1812,12 @@ CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id)
 
 **键与约束**
 
-- 主键：`(rename_id)`。
-- 无显式FK；引用与生命周期由业务阶段维护。
-- `sidecars_json`必须为合法JSON；`phase`限定为planned/disk_applied/library_published/references_applied/failed，`last_completed_phase`不含failed；目标device/inode必须同时为空或非空。
-- `created_at_ms/updated_at_ms`为毫秒，`next_retry_at`为秒，不能混比。
+- `rename_id TEXT PRIMARY KEY NOT NULL`。
+- `sidecars_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(sidecars_json))`。
+- `phase TEXT NOT NULL CHECK(phase IN ('planned','disk_applied','library_published','references_applied','failed'))`。
+- `last_completed_phase TEXT CHECK(last_completed_phase IN ('planned','disk_applied','library_published','references_applied'))`。
+- `CHECK((dest_device IS NULL) = (dest_inode IS NULL))`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1775,8 +1841,8 @@ CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 
 **键与约束**
 
-- 主键：`(kind, root_key)`。
-- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+- `PRIMARY KEY(kind, root_key)`。
+- 无显式外键。
 
 **显式命名索引**
 
@@ -1802,12 +1868,13 @@ CREATE INDEX root_reassignment_dispatch ON pending_root_reassignments(dispatch_o
 
 **键与约束**
 
-- 主键：`(operation_id, file_id)`。
-- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+- `operation_id TEXT NOT NULL REFERENCES library_removals(operation_id)`。
+- `units_json TEXT NOT NULL CHECK(json_valid(units_json))`。
+- `PRIMARY KEY(operation_id,file_id)`。
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+无额外命名索引；不计主键/UNIQUE 自动索引。
 
 ## root_reassignment_state
 
@@ -1827,11 +1894,134 @@ CREATE INDEX root_reassignment_dispatch ON pending_root_reassignments(dispatch_o
 
 **键与约束**
 
-- 主键：`(kind, root_key)`。
-- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+- `operation_id TEXT NOT NULL UNIQUE`。
+- `library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE`。
+- `PRIMARY KEY(kind,root_key)`。
 
 **显式命名索引**
 
 ```sql
 CREATE INDEX root_reassignment_library ON root_reassignment_state(library_id,root_key);
+```
+
+## library_protocol_entities
+
+按 Library/Media 保存 genre/studio 协议实体投影。`name_key` 用于排序，`wire_id` 用于协议身份匹配，`poster_file_id` 保存页内选图候选；随 library_items 级联删除。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `library_id` | `TEXT` | 1 | 是 | 无 |
+| `media_id` | `TEXT` | 2 | 是 | 无 |
+| `entity_kind` | `TEXT` | 3 | 是 | 无 |
+| `name` | `TEXT` | 4 | 是 | 无 |
+| `name_key` | `TEXT` | — | 是 | 无 |
+| `wire_id` | `TEXT` | — | 是 | 无 |
+| `poster_file_id` | `TEXT` | — | 否 | 无 |
+
+**键与约束**
+
+- `entity_kind TEXT NOT NULL CHECK(entity_kind IN ('genre','studio'))`。
+- `PRIMARY KEY(library_id,media_id,entity_kind,name)`。
+- `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
+
+**显式命名索引**
+
+```sql
+CREATE INDEX protocol_entities_media ON library_protocol_entities(media_id,entity_kind,name,library_id);
+CREATE INDEX protocol_entities_name ON library_protocol_entities(entity_kind,name_key,poster_file_id DESC,library_id,media_id,name);
+CREATE INDEX protocol_entities_wire ON library_protocol_entities(entity_kind,wire_id,poster_file_id DESC,library_id,media_id,name);
+```
+
+## library_search_fts
+
+Library 搜索的 contentless FTS5 虚拟表，`search_text` 与 `people` 为两个无显式类型的搜索字段；采用 trigram tokenizer、`content=''`、`contentless_delete=1`。SQLite 自动维护 `_data`、`_idx`、`_docsize`、`_config` 四张影子表，不作为业务表或独立命名索引统计；隐藏列不计入字段总数。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `search_text` | 未声明 | — | 否 | 无 |
+| `people` | 未声明 | — | 否 | 无 |
+
+**键与约束**
+
+无额外键或约束声明。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
+
+## protocol_entity_overlap_counts
+
+按实体种类、名称和所属 Library 集合分组的去重成员计数。`owner_libraries_json` 是归约后的 Library 集合，查询据此避免跨库重叠重复计数；member_count 必须为正。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `entity_kind` | `TEXT` | 1 | 是 | 无 |
+| `name` | `TEXT` | 2 | 是 | 无 |
+| `owner_libraries_json` | `TEXT` | 3 | 是 | 无 |
+| `member_count` | `INTEGER` | — | 是 | 无 |
+
+**键与约束**
+
+- `owner_libraries_json TEXT NOT NULL CHECK(json_valid(owner_libraries_json))`。
+- `member_count INTEGER NOT NULL CHECK(member_count>0)`。
+- `PRIMARY KEY(entity_kind,name,owner_libraries_json)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
+
+## protocol_entity_overlap_rebuild
+
+协议实体重叠计数的重建暂存事实；在相同分组键前增加 operation_id 隔离重建操作，完成后用于替换正式计数。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `operation_id` | `TEXT` | 1 | 是 | 无 |
+| `entity_kind` | `TEXT` | 2 | 是 | 无 |
+| `name` | `TEXT` | 3 | 是 | 无 |
+| `owner_libraries_json` | `TEXT` | 4 | 是 | 无 |
+| `member_count` | `INTEGER` | — | 是 | 无 |
+
+**键与约束**
+
+- `owner_libraries_json TEXT NOT NULL CHECK(json_valid(owner_libraries_json))`。
+- `member_count INTEGER NOT NULL CHECK(member_count>0)`。
+- `PRIMARY KEY(operation_id,entity_kind,name,owner_libraries_json)`。
+- 无显式外键。
+
+**显式命名索引**
+
+无额外命名索引；不计主键/UNIQUE 自动索引。
+
+## user_library_continue_units
+
+每用户/Library/Media/逻辑单元的继续观看投影。`position_ms` 是恢复位置，`watch_activity_at` 是观看活动排序时钟；通过双重外键随用户卡片或 Library 单元级联清理，resume 索引只包含 position_ms>0 的行。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `user_id` | `TEXT` | 1 | 是 | 无 |
+| `library_id` | `TEXT` | 2 | 是 | 无 |
+| `media_id` | `TEXT` | 3 | 是 | 无 |
+| `season` | `INTEGER` | 4 | 是 | 无 |
+| `episode` | `INTEGER` | 5 | 是 | 无 |
+| `position_ms` | `INTEGER` | — | 是 | 无 |
+| `watch_activity_at` | `INTEGER` | — | 是 | 无 |
+
+**键与约束**
+
+- `position_ms INTEGER NOT NULL CHECK(position_ms>=0)`。
+- `PRIMARY KEY(user_id,library_id,media_id,season,episode)`。
+- `FOREIGN KEY(user_id,library_id,media_id) REFERENCES user_library_items(user_id,library_id,media_id) ON DELETE CASCADE`。
+- `FOREIGN KEY(library_id,media_id,season,episode) REFERENCES library_units(library_id,media_id,season,episode) ON DELETE CASCADE`。
+
+**显式命名索引**
+
+```sql
+CREATE INDEX user_continue_media ON user_library_continue_units(media_id,library_id,season,episode);
+CREATE INDEX user_continue_owner_resume ON user_library_continue_units(user_id,library_id,media_id,watch_activity_at DESC,season DESC,episode DESC) WHERE position_ms>0;
+CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(user_id,library_id,media_id,season,watch_activity_at DESC,episode DESC) WHERE position_ms>0;
+CREATE INDEX user_continue_resume ON user_library_continue_units(user_id,watch_activity_at DESC,media_id,library_id,season,episode) WHERE position_ms>0;
+CREATE INDEX user_continue_scope ON user_library_continue_units(user_id,media_id,season,episode,library_id);
 ```

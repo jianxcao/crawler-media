@@ -22,7 +22,7 @@ export type TaskCenterViewName = (typeof TASK_CENTER_VIEWS)[number];
 /**
  * 观看视角下的切片：此刻在播 / 每场一行的播放记录 / 一段时间的观看统计。
  * 三者时间语义与刷新节奏都不同，摞在一页里读不出重点，所以和任务一样分片
- * （docs/design/activity.md「观看视角的三个切片」）。值与任务切片共用同一个
+ * 值与任务切片共用同一个
  * `view` 查询参数，不能撞名（任务已占 history）。
  */
 export const WATCH_VIEWS = ["playing", "plays", "stats"] as const;

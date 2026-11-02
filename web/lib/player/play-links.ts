@@ -1,5 +1,5 @@
 /**
- * 播放页地址与「退出回到哪」的约定（docs/design/web-player.md §6.10）。
+ * 播放页地址与「退出回到哪」的约定。
  *
  * 地址只带 canonical Media UUID + sXXeYY 季集段 + 可选 `?t=` 秒。
  * **导航状态（returnTo）永不进
