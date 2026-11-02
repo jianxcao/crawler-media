@@ -74,8 +74,34 @@ struct GatedCatalog {
 }
 
 impl Catalog for GatedCatalog {
+    fn source_name(&self) -> &'static str {
+        "tmdb"
+    }
+
+    fn source(&self, name: &str) -> Option<&dyn Catalog> {
+        (name == "tmdb").then_some(self)
+    }
+
     fn search_movie(&self, _query: &str) -> Result<Vec<CatalogHit>, String> {
-        Ok(Vec::new())
+        Ok(vec![CatalogHit {
+            media: Media {
+                id: MediaId::new(),
+                kind: MediaKind::Movie,
+                title: "Ready title".into(),
+                year: Some(2026),
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: Some("812345".into()),
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            },
+            poster_path: None,
+            backdrop_path: None,
+            rating: None,
+            overview: None,
+        }])
     }
     fn search_tv(&self, _query: &str) -> Result<Vec<CatalogHit>, String> {
         Ok(Vec::new())
@@ -299,6 +325,99 @@ async fn blocked_metadata_does_not_delay_local_up_next() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["data"]["items"][0]["media_item_id"], tv_id.to_string());
 }
+
+/// Background season IO must leave foreground title-search capacity available.
+#[tokio::test]
+async fn blocked_season_enrichment_does_not_starve_title_search() {
+    std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let root = tmp.path().join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    let gate = Arc::new(Gate::default());
+    let _release = ReleaseOnDrop(gate.clone());
+    let state = make_state(
+        &root,
+        Arc::new(GatedCatalog {
+            gate: Some(gate.clone()),
+            season_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+    );
+    // Model three concurrent foreground searches; the fourth slot must remain
+    // usable even while a season-details origin request is blocked.
+    let _foreground = (0..3)
+        .map(|_| state.search_work.try_reserve().unwrap())
+        .collect::<Vec<_>>();
+    let tv_id = {
+        let store = state.store();
+        let tv_id = seed_media(
+            store.as_ref(),
+            &root,
+            MediaKind::Tv,
+            "Search isolation",
+            "812346",
+            Some(1),
+            Some(1),
+        );
+        let user = store.as_ref().admin_user_id().unwrap();
+        store
+            .as_ref()
+            .upsert_unit(
+                user,
+                tv_id,
+                1,
+                1,
+                50,
+                Some(false),
+                None,
+                Some(100),
+                None,
+                None,
+                false,
+                1,
+            )
+            .unwrap();
+        tv_id
+    };
+    let app = router(state);
+    let pending_up_next = tokio::spawn(request_up_next(app.clone()));
+    tokio::task::spawn_blocking({
+        let gate = gate.clone();
+        move || gate.wait_until_entered()
+    })
+    .await
+    .unwrap();
+    let response = tokio::time::timeout(Duration::from_millis(250), pending_up_next)
+        .await
+        .expect("local up-next must respond while season details are blocked")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["data"]["items"][0]["media_item_id"], tv_id.to_string());
+    let response = tokio::time::timeout(
+        Duration::from_millis(250),
+        app.oneshot(
+            Request::builder()
+                .uri("/api/v1/search/titles?keyword=ready&provider=tmdb")
+                .header("authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("immediate title search must respond while season details are blocked")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        !*gate.released.lock(),
+        "assert search behavior before releasing origin IO"
+    );
+    assert_eq!(body["data"]["providers"][0]["ok"], true, "{body}");
+    assert_eq!(body["data"]["titles"][0]["title"], "Ready title", "{body}");
+    gate.release();
+}
 /// 集名回落必须读该集自己的 `.nfo`（视频同名的兄弟文件），而不是视频文件本身。
 #[tokio::test]
 async fn tv_episode_nfo_title_is_served_locally() {
@@ -356,7 +475,7 @@ async fn tv_episode_nfo_title_is_served_locally() {
     assert_eq!(body["data"]["items"][0]["episode_title"], "Pilot From Nfo");
 }
 
-/// 解析不出的季不得在每个请求上重新排补全（每次补全占满一个共享 search permit）。
+/// 解析不出的季不得在每个请求上重新排补全（每次补全占用一个后台 permit）。
 #[tokio::test]
 async fn unresolvable_season_is_enriched_at_most_once() {
     let tmp = tempfile::tempdir().unwrap();

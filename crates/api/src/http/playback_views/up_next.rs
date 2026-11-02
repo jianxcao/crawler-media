@@ -34,8 +34,8 @@ impl Drop for SeasonFlightLease {
 /// 后台季名补全的尝试时间：键为 `(tmdb_id, season)`。
 ///
 /// 单飞集合只能去重**并发**请求；没有冷却时，一个 TMDB 解析不出的季会在每个
-/// up-next 请求上重新排一次补全，而每次补全都会占用一个共享 `search_work`
-/// permit 直到整个 TMDB 抓取结束，把交互式搜索挤成 503 `search.busy`。
+/// up-next 请求上重新排一次补全，而每次补全都会占用独立季详情预算的
+/// permit 直到整个 TMDB 抓取结束，浪费后台容量并重复访问远端。
 static TITLE_ENRICH_ATTEMPTS: LazyLock<Mutex<HashMap<(String, u32), std::time::Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -322,11 +322,11 @@ fn schedule_season_enrichment(state: &ApiState, tmdb_id: &str, season: u32) {
         }
     }
     let catalog = state.catalog.clone();
-    let search_work = state.search_work.clone();
+    let season_enrichment_work = state.season_enrichment_work.clone();
     tokio::spawn(async move {
         let worker_key = key.clone();
         let lease = SeasonFlightLease(key);
-        let result = search_work
+        let result = season_enrichment_work
             .run_to_completion(move || {
                 let _lease = lease;
                 let result = catalog.season_details(&worker_key.1, worker_key.2);

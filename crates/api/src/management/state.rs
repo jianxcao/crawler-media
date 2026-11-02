@@ -38,6 +38,8 @@ pub struct ApiState {
     pub(crate) discover_work: Arc<crate::http::discover::Executor>,
     /// 搜索有界 blocking 预算（默认 4）。
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// 后台季详情网络补全独立准入，不占用前台标题搜索容量（默认 2）。
+    pub(crate) season_enrichment_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// 文件目录浏览有界 blocking 预算（默认 2）。
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// Cached native artwork reads cannot queue behind maintenance filesystem IO.
@@ -324,6 +326,7 @@ impl ApiState {
             chapter_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             discover_work: Arc::new(Default::default()),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
+            season_enrichment_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             artwork_reads: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             browser_reconcile: Default::default(),
