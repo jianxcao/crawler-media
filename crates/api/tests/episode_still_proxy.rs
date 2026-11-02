@@ -2,8 +2,8 @@
 #[path = "episode_still_proxy/support.rs"]
 mod support;
 use axum::{body::to_bytes, http::StatusCode};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use support::*;
 
 #[test]

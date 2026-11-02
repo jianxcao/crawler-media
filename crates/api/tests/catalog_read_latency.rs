@@ -1,7 +1,7 @@
 //! Complete catalog results must not monopolize Tokio workers or serialize a wall.
-use api::{catalog::Catalog, ApiState, Store};
+use api::{ApiState, Store, catalog::Catalog};
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use domain::{Media, MediaId, MediaKind};
@@ -10,8 +10,8 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::{CatalogHit, CountryRow, PersonDetails};
 use serde_json::Value;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
@@ -214,9 +214,11 @@ fn catalog_title_search_preserves_results_without_blocking_async_worker() {
     let titles = response.1["data"]["titles"].as_array().unwrap();
     assert!(titles.iter().any(|row| row["title"] == "movie title"));
     assert!(titles.iter().any(|row| row["title"] == "TV title"));
-    assert!(titles
-        .iter()
-        .all(|row| row["poster_url"].as_str().is_some()));
+    assert!(
+        titles
+            .iter()
+            .all(|row| row["poster_url"].as_str().is_some())
+    );
 }
 #[test]
 fn discover_sections_have_bounded_parallelism_and_complete_results() {
@@ -271,15 +273,19 @@ fn cold_person_and_routing_results_keep_existing_fields() {
     });
     assert_eq!(person.0, StatusCode::OK);
     assert_eq!(person.1["data"]["name"], "Jane Roe");
-    assert!(person.1["data"]["avatar_url"]
-        .as_str()
-        .is_some_and(|url| url.ends_with("/jane.jpg")));
+    assert!(
+        person.1["data"]["avatar_url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/jane.jpg"))
+    );
     assert_eq!(routing.0, StatusCode::OK);
     assert_eq!(routing.1["data"]["movie_genres"][0]["label"], "Movie Drama");
     assert_eq!(routing.1["data"]["tv_genres"][0]["label"], "TV Drama");
-    assert!(routing.1["data"]["region_presets"]
-        .as_array()
-        .is_some_and(|rows| !rows.is_empty()));
+    assert!(
+        routing.1["data"]["region_presets"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
 }
 
 struct FailedConfiguration;

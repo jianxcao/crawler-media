@@ -7,8 +7,8 @@ use axum::{
 use domain::{EntityScope, FieldValue, LibraryFile, Media, MediaId, MediaKind, MetadataFields};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
 const TOKEN: &str = "episode-still-fixture";
