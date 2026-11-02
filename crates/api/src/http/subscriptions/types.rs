@@ -27,9 +27,6 @@ pub(crate) struct CreateSubscriptionInput {
     pub(super) downloader_id: Option<String>,
     #[serde(default)]
     pub(super) library_id: Option<String>,
-    #[serde(default = "default_active")]
-    #[allow(dead_code)]
-    pub(super) tracking_state: String,
     #[serde(default)]
     pub(super) follow_future: bool,
     /// G-M3: create the next season's subscription once this one completes.
@@ -40,10 +37,6 @@ pub(crate) struct CreateSubscriptionInput {
     pub(super) pack_fallback_after_days: Option<u32>,
     #[serde(default)]
     pub(super) search_interval_secs: Option<u32>,
-}
-
-fn default_active() -> String {
-    "active".into()
 }
 
 fn default_fetch() -> String {

@@ -596,9 +596,7 @@ function favoriteItemToMediaItem(item: FavoriteItem): MediaItem {
     item.favorite_episode_number,
   );
   return {
-    // FavoriteItem 的 library_id 在 lib/api/playback 里仍按旧 number 声明，
-    // 与新 LibraryItem 的 string 不一致——这里只借用库存字段，断言到 LibraryItem
-    ...libraryItemToMediaItem(item as unknown as LibraryItem),
+    ...libraryItemToMediaItem(item),
     overlayDetails: level ? { primary: level } : undefined,
   };
 }

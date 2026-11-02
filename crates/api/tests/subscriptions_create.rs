@@ -7,6 +7,25 @@ use serde_json::json;
 use support::{Fixture, runtime};
 
 #[test]
+fn create_subscribe_rejects_tracking_state_field() {
+    let fixture = Fixture::new();
+    runtime().block_on(async {
+        let mut body = fixture.body(1, 5);
+        body["tracking_state"] = json!("paused");
+        let (status, response) = fixture.call("POST", "/api/v1/subscriptions", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert!(
+            fixture
+                .state
+                .store()
+                .list_all_subscribes()
+                .unwrap()
+                .is_empty()
+        );
+    });
+}
+
+#[test]
 fn hr_unknown_policy_survives_create_reload_and_patch() {
     let fixture = Fixture::new();
     runtime().block_on(async {
