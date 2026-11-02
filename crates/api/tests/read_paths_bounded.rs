@@ -4,7 +4,7 @@ mod support;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
-async fn visible_scope_loads_strictly_owned_media_ids() {
+async fn visible_scope_loads_libraries_owning_media() {
     let fix = PresenceFixture::new();
 
     let (m1, _) = fix.insert_media_and_ledger("vis1.mkv");
@@ -19,9 +19,12 @@ async fn visible_scope_loads_strictly_owned_media_ids() {
     let scope = {
         let store_arc = fix.state.store();
         let guard = store_arc.as_ref();
-        api::visible_scope::VisibleScope::load(guard, admin_id).unwrap()
+        api::visible_scope::visible_library_ids(guard, admin_id).unwrap()
     };
 
-    assert!(scope.media_ids().contains(&m1));
-    assert!(scope.media_ids().contains(&m2));
+    let store = fix.state.store();
+    for media in [m1, m2] {
+        let coverage = store.file_coverage_for_media(media).unwrap();
+        assert!(scope.contains(&coverage[0].file.library_id));
+    }
 }

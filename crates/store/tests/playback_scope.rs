@@ -3,8 +3,56 @@
 
 mod support;
 
-use domain::{LedgerId, MediaId, UserId};
+use domain::{LedgerId, LibraryId, MediaId, UserId};
 use store::{PlayLogRow, PlaybackLogScope, SessionRow, Store};
+
+#[test]
+fn large_visible_scope_keeps_history_query_bounded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let user = UserId::new();
+    let (seed, _) = support::seed_published_file(&store, &tmp.path().join("library"), "scale");
+    let library = library_for(&store, seed);
+    let mut db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let tx = db.transaction().unwrap();
+    for index in 0..10_000 {
+        let media = MediaId::new().to_string();
+        tx.execute(
+            "INSERT INTO media (media_id,kind,title,identity_state) VALUES (?1,'movie','title','confirmed')",
+            [&media],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO library_items (library_id,media_id,kind,title,title_sort,identity_state,metadata_revision,item_revision,added_at_sort,stable_shuffle_key,file_count,available_file_count,unknown_file_count) VALUES (?1,?2,'movie','title','title','identified',1,1,1,?2,1,0,1)", rusqlite::params![library.to_string(), media]).unwrap();
+        if index < 2000 {
+            tx.execute("INSERT INTO playback_logs (id,user_id,media_id,device_id,started_at,ended_at,play_session_id,generation,file_id,file_revision,source_version,timeline_mode) VALUES (?1,?2,?3,?1,1,2,?1,1,'file',1,'source','normal')", rusqlite::params![index.to_string(), user.to_string(), media]).unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let (page, work) = store.with_stats(store::stats::StatsScope::Library, || {
+        store
+            .playback_log_page(&scope(user, Some(vec![library]), None), 30)
+            .unwrap()
+    });
+    assert_eq!(page.hidden_count, 0);
+    assert_eq!(page.entries.len(), 30);
+    assert!(
+        work.vm_steps < 1_000_000,
+        "history VM steps: {}",
+        work.vm_steps
+    );
+    let (report, work) = store.with_stats(store::stats::StatsScope::Library, || {
+        store
+            .playback_watch_report(Some(user), Some(&[library]), 2, 1, 0)
+            .unwrap()
+    });
+    assert_eq!(report.current.totals.plays, 2000);
+    assert_eq!(report.hidden_titles, 0);
+    assert!(
+        work.vm_steps < 10_000_000,
+        "watch VM steps: {}",
+        work.vm_steps
+    );
+}
 
 /// 没有公开 insert_log：用 issue_play_session 绑定 + upsert_session + close_session
 /// 造一条 playback_logs。
@@ -85,13 +133,19 @@ fn page_all(store: &Store, scope: &PlaybackLogScope, limit: usize) -> Vec<PlayLo
     out
 }
 
-fn scope(user: UserId, visible: Option<Vec<MediaId>>, since: Option<i64>) -> PlaybackLogScope {
+fn library_for(store: &Store, media: MediaId) -> LibraryId {
+    store.file_coverage_for_media(media).unwrap()[0]
+        .file
+        .library_id
+}
+
+fn scope(user: UserId, visible: Option<Vec<LibraryId>>, since: Option<i64>) -> PlaybackLogScope {
     PlaybackLogScope {
         before: None,
         before_id: None,
         since,
         user_id: Some(user),
-        visible_media: visible,
+        visible_libraries: visible,
     }
 }
 
@@ -103,7 +157,7 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "cursor");
     let (hidden, hidden_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "cursor-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "cursor-other");
     let base = 1_700_000_000i64;
     let mut created = Vec::new();
     // 三组：每组一条可见、一条不可见，且组内 started_at 完全相同。
@@ -133,7 +187,7 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
             .filter(|row| row.media_id == visible)
             .collect(),
     );
-    let scoped = scope(user, Some(vec![visible]), None);
+    let scoped = scope(user, Some(vec![library_for(&store, visible)]), None);
 
     // limit=1 强制在 started_at 相同的行上走 id 次序，limit=2 走常规翻页。
     for limit in [1usize, 2, 3, 200] {
@@ -159,7 +213,7 @@ fn hidden_count_counts_rows_not_distinct_media() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "hidden");
     let (hidden, hidden_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "hidden-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "hidden-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v0", base, 10);
     // 同一不可见 Media 的两行：hidden_count 应为 2（行数），不是 1（distinct）。
@@ -167,7 +221,10 @@ fn hidden_count_counts_rows_not_distinct_media() {
     log_fixture(&store, user, hidden, hidden_file, "h1", base - 10, 10);
 
     let page = store
-        .playback_log_page(&scope(user, Some(vec![visible]), None), 10)
+        .playback_log_page(
+            &scope(user, Some(vec![library_for(&store, visible)]), None),
+            10,
+        )
         .unwrap();
     assert_eq!(page.entries.len(), 1);
     assert!(!page.has_more);
@@ -181,7 +238,7 @@ fn empty_visible_scope_returns_empty_page() {
     let user = UserId::new();
     let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "empty");
     let (second, second_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "empty-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "empty-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
     log_fixture(&store, user, second, second_file, "b", base - 10, 10);
@@ -201,8 +258,11 @@ fn none_visible_scope_is_unrestricted() {
     let user = UserId::new();
     let (first, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted");
-    let (second, second_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted-other");
+    let (second, second_file) = support::seed_published_file(
+        &store,
+        &tmp.path().join("library-other"),
+        "unrestricted-other",
+    );
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
     log_fixture(&store, user, second, second_file, "b", base - 10, 10);
@@ -223,7 +283,7 @@ fn since_filters_both_page_and_hidden_count() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "since");
     let (hidden, hidden_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "since-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "since-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v-new", base, 10);
     log_fixture(&store, user, hidden, hidden_file, "h-new", base - 10, 10);
@@ -231,7 +291,14 @@ fn since_filters_both_page_and_hidden_count() {
     log_fixture(&store, user, hidden, hidden_file, "h-old", base - 200, 10);
 
     let page = store
-        .playback_log_page(&scope(user, Some(vec![visible]), Some(base - 50)), 10)
+        .playback_log_page(
+            &scope(
+                user,
+                Some(vec![library_for(&store, visible)]),
+                Some(base - 50),
+            ),
+            10,
+        )
         .unwrap();
     assert_eq!(ids(&page.entries), ids(&[log_id(&store, "v-new")]));
     assert_eq!(page.hidden_count, 1, "hidden count must honor since");
@@ -256,7 +323,7 @@ fn limit_bounds_and_ambiguous_cursor_are_errors() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "limit");
     log_fixture(&store, user, visible, file, "v", 1_700_000_000, 10);
-    let scoped = scope(user, Some(vec![visible]), None);
+    let scoped = scope(user, Some(vec![library_for(&store, visible)]), None);
 
     assert!(store.playback_log_page(&scoped, 0).is_err());
     assert!(store.playback_log_page(&scoped, 201).is_err());
@@ -282,14 +349,17 @@ fn scope_does_not_leak_between_calls() {
     let user = UserId::new();
     let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "leak");
     let (second, second_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "leak-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "leak-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", base, 10);
     log_fixture(&store, user, second, second_file, "b", base - 10, 10);
 
     // 第一次填满大可见集合。
     let filled = store
-        .playback_log_page(&scope(user, Some(vec![first]), None), 10)
+        .playback_log_page(
+            &scope(user, Some(vec![library_for(&store, first)]), None),
+            10,
+        )
         .unwrap();
     assert_eq!(filled.entries.len(), 1);
     assert_eq!(filled.hidden_count, 1);
@@ -307,7 +377,10 @@ fn scope_does_not_leak_between_calls() {
 
     // 第三次换成另一个可见集合，仍只看到它自己的行。
     let swapped = store
-        .playback_log_page(&scope(user, Some(vec![second]), None), 10)
+        .playback_log_page(
+            &scope(user, Some(vec![library_for(&store, second)]), None),
+            10,
+        )
         .unwrap();
     assert_eq!(ids(&swapped.entries), ids(&[log_id(&store, "b")]));
     assert_eq!(swapped.hidden_count, 1);
@@ -322,14 +395,17 @@ fn user_scope_filters_page_and_hidden() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "users");
     let (hidden, hidden_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "users-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "users-other");
     let base = 1_700_000_000i64;
     log_fixture(&store, alice, visible, file, "alice-v", base, 10);
     log_fixture(&store, alice, hidden, hidden_file, "alice-h", base - 10, 10);
     log_fixture(&store, bob, visible, file, "bob-v", base - 20, 10);
 
     let page = store
-        .playback_log_page(&scope(alice, Some(vec![visible]), None), 10)
+        .playback_log_page(
+            &scope(alice, Some(vec![library_for(&store, visible)]), None),
+            10,
+        )
         .unwrap();
     assert_eq!(ids(&page.entries), ids(&[log_id(&store, "alice-v")]));
     assert_eq!(page.hidden_count, 1, "bob's rows must not count for alice");

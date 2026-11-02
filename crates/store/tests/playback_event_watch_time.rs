@@ -295,7 +295,7 @@ fn new_session_on_same_device_starts_fresh_and_logs_the_old_once() {
                 before_id: None,
                 since: None,
                 user_id: Some(user),
-                visible_media: None,
+                visible_libraries: None,
             },
             100,
         )

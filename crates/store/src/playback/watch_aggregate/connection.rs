@@ -5,7 +5,7 @@ impl crate::LibraryConnection<'_> {
     pub fn playback_watch_report(
         &self,
         user: Option<UserId>,
-        visible: Option<&[MediaId]>,
+        visible: Option<&[LibraryId]>,
         now: i64,
         days: u16,
         tz_minutes: i16,
@@ -31,7 +31,7 @@ impl crate::LibraryConnection<'_> {
     pub(super) fn watch_report_inner(
         &self,
         user: &Option<String>,
-        visible: Option<&[MediaId]>,
+        visible: Option<&[LibraryId]>,
         now: i64,
         days: u16,
         tz_secs: i64,
@@ -68,7 +68,7 @@ impl crate::LibraryConnection<'_> {
         let hidden_titles = if visible.is_some() {
             let sql = format!(
                 "{} SELECT COUNT(DISTINCT media_id) FROM scoped",
-                scoped_cte(HIDDEN_CLAUSE)
+                scoped_cte(HIDDEN_CLAUSE, user.is_some())
             );
             let mut stmt = self.library.prepare(&sql)?;
             let count: i64 = stmt.query_row(
@@ -98,7 +98,7 @@ impl crate::LibraryConnection<'_> {
         visibility: &str,
         visible_json: &str,
     ) -> Result<WatchWindow, StoreError> {
-        let cte = scoped_cte(visibility);
+        let cte = scoped_cte(visibility, user.is_some());
         Ok(WatchWindow {
             totals: self.window_totals(&cte, user, start, end, tz_secs, visible_json)?,
             days: self.window_days(

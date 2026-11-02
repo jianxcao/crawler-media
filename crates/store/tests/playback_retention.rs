@@ -159,7 +159,7 @@ fn scope(user: UserId) -> PlaybackLogScope {
         before_id: None,
         since: None,
         user_id: Some(user),
-        visible_media: None,
+        visible_libraries: None,
     }
 }
 

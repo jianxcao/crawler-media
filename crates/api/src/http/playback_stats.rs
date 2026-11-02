@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use crate::http::playback::media_target_json;
-use crate::http::playback_logs::{member_filter, member_name, visible_media_ids};
+use crate::http::playback_logs::{member_filter, member_name, visible_library_ids};
 use crate::http::store_wait::store_read;
 use crate::http::{err, ok};
 use crate::management::ApiState;
@@ -66,9 +66,9 @@ pub(crate) async fn watch_stats(
             } else {
                 "visible"
             };
-            let visible: Option<Vec<domain::MediaId>> =
-                match visible_media_ids(&store, user_id, scope) {
-                    Ok(v) => v.map(|ids| ids.into_iter().collect()),
+            let visible: Option<Vec<domain::LibraryId>> =
+                match visible_library_ids(&store, user_id, scope) {
+                    Ok(v) => v,
                     Err(error) => {
                         tracing::error!(%error, "加载观看统计可见范围失败");
                         return err(

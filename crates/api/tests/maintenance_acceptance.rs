@@ -306,7 +306,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
         before_id: None,
         since: None,
         user_id: Some(user),
-        visible_media: None,
+        visible_libraries: None,
     };
     let page = store.playback_log_page(&scope, 100).unwrap();
     assert_eq!(

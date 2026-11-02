@@ -17,25 +17,26 @@ impl crate::LibraryConnection<'_> {
                 "playback log cursor requires before when before_id is set".into(),
             ));
         }
-        let visible = scope.visible_media.as_deref();
+        let visible = scope.visible_libraries.as_deref();
         self.scoped_log_page(scope, visible, limit)
     }
 
     pub(super) fn scoped_log_page(
         &self,
         scope: &PlaybackLogScope,
-        visible: Option<&[MediaId]>,
+        visible: Option<&[LibraryId]>,
         limit: usize,
     ) -> Result<PlaybackLogPage, StoreError> {
         let (filter, mut args) = scope_filter(scope);
-        args.insert(
-            0,
-            rusqlite::types::Value::Text(serde_json::to_string(&visible.unwrap_or_default())?),
-        );
         let mut page_args = args.clone();
+        if let Some(visible) = visible {
+            page_args.push(rusqlite::types::Value::Text(serde_json::to_string(
+                visible,
+            )?));
+        }
         page_args.push(rusqlite::types::Value::Integer((limit + 1) as i64));
         let page_sql = format!(
-            "WITH request_visible_media AS (SELECT value AS id FROM json_each(?)) SELECT {LOG_COLS}{filter}{} ORDER BY l.started_at DESC, l.id DESC LIMIT ?",
+            "SELECT {LOG_COLS}{filter}{} ORDER BY l.started_at DESC, l.id DESC LIMIT ?",
             visible_clause(visible)
         );
         let mut stmt = self.library.prepare(&page_sql)?;
@@ -45,10 +46,13 @@ impl crate::LibraryConnection<'_> {
         entries.truncate(limit);
         let hidden_count = match visible {
             None => 0,
-            Some(_) => {
+            Some(visible) => {
+                args.push(rusqlite::types::Value::Text(serde_json::to_string(
+                    visible,
+                )?));
                 let count_sql = format!(
-                    "WITH request_visible_media AS (SELECT value AS id FROM json_each(?)) SELECT COUNT(*){filter}{}",
-                    " AND NOT EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)"
+                    "SELECT COUNT(*){filter}{}",
+                    " AND NOT EXISTS (SELECT 1 FROM library_items i WHERE i.media_id = l.media_id AND i.library_id IN (SELECT value FROM json_each(?)))"
                 );
                 let mut stmt = self.library.prepare(&count_sql)?;
                 let count: i64 =

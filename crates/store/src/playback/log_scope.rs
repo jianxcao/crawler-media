@@ -1,8 +1,8 @@
 //! Request-scoped playback history paging: composite keyset cursor plus a
-//! visible-Media set resolved in SQL on the library connection, so callers
+//! visible Libraries resolved in SQL on the library connection, so callers
 //! never load the whole `playback_logs` table to filter it in memory.
 
-use domain::{MediaId, UserId};
+use domain::{LibraryId, UserId};
 
 use super::{PlayLogRow, Store, StoreError, media_id_from, user_id_from};
 
@@ -23,8 +23,8 @@ pub struct PlaybackLogScope {
     /// 只保留 `started_at >= since` 的行（unix 秒）。
     pub since: Option<i64>,
     pub user_id: Option<UserId>,
-    /// `None` = 不限制；`Some(vec![])` = 无任何可见 Media（结果必为空）。
-    pub visible_media: Option<Vec<MediaId>>,
+    /// `None` = 不限制；`Some(vec![])` = 无任何可见 Library（结果必为空）。
+    pub visible_libraries: Option<Vec<LibraryId>>,
 }
 
 #[derive(Debug)]
@@ -71,10 +71,10 @@ fn scope_filter(scope: &PlaybackLogScope) -> (String, Vec<rusqlite::types::Value
     (sql, args)
 }
 
-/// `None` = 不限制（不加子句）；`Some`（含空集合）= 只保留 TEMP 表内的 Media。
-fn visible_clause(visible: Option<&[MediaId]>) -> &'static str {
+/// `None` = 不限制；`Some`（含空集合）= 只保留可见 Library 中的 Media。
+fn visible_clause(visible: Option<&[LibraryId]>) -> &'static str {
     if visible.is_some() {
-        " AND EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)"
+        " AND EXISTS (SELECT 1 FROM library_items i WHERE i.media_id = l.media_id AND i.library_id IN (SELECT value FROM json_each(?)))"
     } else {
         ""
     }

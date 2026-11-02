@@ -2,10 +2,16 @@
 
 mod support;
 
-use domain::{LedgerId, MediaId, UserId};
+use domain::{LedgerId, LibraryId, MediaId, UserId};
 use store::{SessionRow, Store, WatchReport};
 
 const DAY: i64 = 86_400;
+
+fn library_for(store: &Store, media: MediaId) -> LibraryId {
+    store.file_coverage_for_media(media).unwrap()[0]
+        .file
+        .library_id
+}
 
 fn log_fixture(
     store: &Store,
@@ -132,7 +138,7 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "hidden");
     let (hidden, hidden_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "hidden-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "hidden-other");
     let now = 1_700_000_000i64;
     log_fixture(&store, user, visible, file, "v0", now - 10, 1_000);
     // 同一不可见 Media 三条 → hidden_titles 仍是 1（distinct），但计数是行数。
@@ -150,7 +156,7 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
         500,
     );
 
-    let scope = [visible];
+    let scope = [library_for(&store, visible)];
     let report = store
         .playback_watch_report(None, Some(&scope), now, 7, 0)
         .unwrap();
@@ -334,12 +340,12 @@ fn scope_rows_do_not_leak_between_calls() {
     let user = UserId::new();
     let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "scope");
     let (second, second_file) =
-        support::seed_published_file(&store, &tmp.path().join("library"), "scope-other");
+        support::seed_published_file(&store, &tmp.path().join("library-other"), "scope-other");
     let now = 1_700_000_000i64;
     log_fixture(&store, user, first, file, "a", now - 10, 1_000);
     log_fixture(&store, user, second, second_file, "b", now - 20, 1_000);
 
-    let scoped = [first];
+    let scoped = [library_for(&store, first)];
     let report = store
         .playback_watch_report(None, Some(&scoped), now, 7, 0)
         .unwrap();
@@ -354,7 +360,7 @@ fn scope_rows_do_not_leak_between_calls() {
     assert_eq!(report.hidden_titles, 2, "上一次的可见集合不得残留");
 
     // 第三次换成另一个集合。
-    let scoped = [second];
+    let scoped = [library_for(&store, second)];
     let report = store
         .playback_watch_report(None, Some(&scoped), now, 7, 0)
         .unwrap();

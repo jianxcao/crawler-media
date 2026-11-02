@@ -2,11 +2,11 @@
 //!
 //! Replaces the two full `list_logs(200_000, ..)` scans plus in-Rust grouping
 //! with one windowed aggregation on the library connection. Visibility reuses
-//! the TEMP visible-set pattern from `playback::log_scope`.
+//! Library visibility filtering from `playback::log_scope`.
 
 use std::collections::HashMap;
 
-use domain::{MediaId, UserId};
+use domain::{LibraryId, MediaId, UserId};
 use rusqlite::named_params;
 
 use super::{Store, StoreError, media_id_from, user_id_from};
@@ -15,10 +15,8 @@ use super::{Store, StoreError, media_id_from, user_id_from};
 const MAX_DAYS: u16 = 365;
 const MAX_TZ_MINUTES: i16 = 24 * 60;
 
-const VISIBLE_CLAUSE: &str =
-    " AND EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)";
-const HIDDEN_CLAUSE: &str =
-    " AND NOT EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)";
+const VISIBLE_CLAUSE: &str = " AND EXISTS (SELECT 1 FROM library_items i WHERE i.media_id = l.media_id AND i.library_id IN (SELECT value FROM json_each(:visible)))";
+const HIDDEN_CLAUSE: &str = " AND NOT EXISTS (SELECT 1 FROM library_items i WHERE i.media_id = l.media_id AND i.library_id IN (SELECT value FROM json_each(:visible)))";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WatchTotals {
@@ -80,9 +78,10 @@ pub struct WatchReport {
 /// SQL 的 `/` 对负数是向零截断，所以 `div_euclid(86400)` 必须写成 CASE：
 /// 非负直接除，负值用 `-(((-x)+86399)/86400)` 取 floor。
 /// `rem_euclid` 用 `((x % n) + n) % n`。
-fn scoped_cte(visibility: &str) -> String {
+fn scoped_cte(visibility: &str, user: bool) -> String {
+    let user_filter = if user { " AND l.user_id = :user" } else { "" };
     format!(
-        "WITH request_visible_media AS (SELECT value AS id FROM json_each(:visible)), scoped AS (
+        "WITH params AS (SELECT :user, :visible), scoped AS (
             SELECT l.user_id, l.client, l.media_id, l.watched_ms, l.completed,
                    CASE WHEN l.started_at + :tz >= 0
                         THEN (l.started_at + :tz) / 86400
@@ -91,7 +90,7 @@ fn scoped_cte(visibility: &str) -> String {
             FROM playback_logs l
             WHERE l.started_at >= :start
               AND l.started_at < :end
-              AND (:user IS NULL OR l.user_id = :user){visibility}
+              {user_filter}{visibility}
         )"
     )
 }
@@ -100,13 +99,13 @@ impl Store {
     /// 当前窗口 + 上一窗口的播放统计（SQL 聚合，不把日志读进内存）。
     ///
     /// - `user`: `None` = 全部成员，`Some` = 只统计该成员。
-    /// - `visible`: `None` = 不限制；`Some` = 只统计集合内的 Media（空集合 → 全隐藏）。
+    /// - `visible`: `None` = 不限制；`Some` = 只统计可见 Library 内的 Media（空集合 → 全隐藏）。
     /// - 当前窗口 `started_at >= now - days*86400`（无上界，保持既有语义）；
     ///   上一窗口 `[now - 2*days*86400, now - days*86400)`。
     pub fn playback_watch_report(
         &self,
         user: Option<UserId>,
-        visible: Option<&[MediaId]>,
+        visible: Option<&[LibraryId]>,
         now: i64,
         days: u16,
         tz_minutes: i16,

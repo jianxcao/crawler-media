@@ -86,16 +86,17 @@ pub(super) fn member_filter(raw: Option<&str>) -> Result<Option<domain::UserId>,
     .transpose()
 }
 
-pub(super) fn visible_media_ids(
+pub(super) fn visible_library_ids(
     store: &crate::Store,
     user_id: domain::UserId,
     scope: &str,
-) -> Result<Option<std::collections::HashSet<domain::MediaId>>, store::StoreError> {
+) -> Result<Option<Vec<domain::LibraryId>>, store::StoreError> {
     if scope == "all" {
         return Ok(None);
     }
-    let vs = crate::visible_scope::VisibleScope::load(store, user_id)?;
-    Ok(Some(vs.media_ids.into_iter().collect()))
+    Ok(Some(crate::visible_scope::visible_library_ids(
+        store, user_id,
+    )?))
 }
 
 /// GET /playback/history?limit&before&days&member_id&scope — cursor-paginated.
@@ -305,7 +306,7 @@ fn history_page(
     } else {
         "visible"
     };
-    let visible_media = match visible_media_ids(store, user_id, scope) {
+    let visible_libraries = match visible_library_ids(store, user_id, scope) {
         Ok(v) => v,
         Err(error) => {
             tracing::error!(%error, "加载播放历史可见范围失败");
@@ -327,7 +328,7 @@ fn history_page(
         },
         since,
         user_id: target_user,
-        visible_media: visible_media.map(|ids| ids.into_iter().collect()),
+        visible_libraries,
     };
     let page = match store.playback_log_page(&log_scope, limit) {
         Ok(page) => page,
