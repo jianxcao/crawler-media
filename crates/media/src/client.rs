@@ -456,6 +456,35 @@ impl<H: CatalogGet> Tmdb<H> {
         self.fetch(&path, |body| parse::search_results(kind, body))
     }
 
+    /// Return only a fresh persisted similar response, including typed NotFound.
+    /// An unfetched or expired key is None; no catalog origin is contacted.
+    pub fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<parse::CatalogHit>>, TmdbError> {
+        let segment = match kind {
+            MediaKind::Movie | MediaKind::Video => "movie",
+            MediaKind::Tv => "tv",
+        };
+        let key = format!("/{segment}/{tmdb_id}/similar?language={}", self.language);
+        let Some(body) = self.cache.get_fresh(&key)? else {
+            return Ok(None);
+        };
+        let decoded =
+            crate::contracts::json(&body).and_then(|_| parse::search_results(kind, &body));
+        match decoded {
+            Ok(hits) => Ok(Some(hits)),
+            Err(error @ TmdbError::NotFound(_)) => Err(error),
+            Err(error) => {
+                // Match get_or_fetch: invalid durable bytes need a refresh;
+                // storage failures above and real origin failures stay errors.
+                tracing::warn!(path = %key, %error, "Malformed cached recommendations; refresh required");
+                Ok(None)
+            }
+        }
+    }
+
     /// Whole-season episode details (names/overviews/stills) — one request
     /// instead of per-episode.
     pub fn season_details(

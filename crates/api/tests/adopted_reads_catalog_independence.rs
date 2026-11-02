@@ -390,15 +390,22 @@ async fn local_artwork_and_subscription_facts_survive_optional_catalog_miss() {
 async fn similar_preserves_transient_catalog_errors() {
     let fx = fixture();
     fx.gate.release();
-    let response = request(
-        api::router(fx.state.clone()),
-        "GET",
-        &format!(
-            "/api/v1/libraries/{}/items/{}/similar",
-            fx.library, fx.media
-        ),
-    )
-    .await;
+    let app = api::router(fx.state.clone());
+    let uri = format!(
+        "/api/v1/libraries/{}/items/{}/similar",
+        fx.library, fx.media
+    );
+    let response = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = request(app.clone(), "GET", &uri).await;
+            if response.0 != StatusCode::ACCEPTED {
+                return response;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         response.0,
         StatusCode::BAD_GATEWAY,
@@ -464,3 +471,6 @@ async fn bound_subscription_uses_episode_only_adopted_schedule() {
         store::now_rfc3339()[..10]
     );
 }
+
+#[path = "adopted_reads_catalog_independence/similar_pending.rs"]
+mod similar_pending;

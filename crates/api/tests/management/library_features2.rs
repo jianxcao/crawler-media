@@ -181,7 +181,8 @@ async fn similar_and_gallery_and_forecast_respond() {
     )
     .await;
     assert!(
-        similar["data"].as_array().unwrap().is_empty(),
+        similar["data"]["state"] == "ready"
+            && similar["data"]["items"].as_array().unwrap().is_empty(),
         "no catalog → empty"
     );
 

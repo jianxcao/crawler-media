@@ -165,6 +165,23 @@ R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的
 
 Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入数字或其他无效值返回 400，不再按用户顺序映射。Library/Filter/Media ID 在 Web adapter 中始终保留 UUID 字符串，不作 `Number(...)` 转换。
 
+### Similar 推荐就绪状态
+
+`GET /libraries/{id}/items/{media_item_id}/similar` 返回带状态的 `data`：
+
+- HTTP 202：`{state: "pending", retry_after_ms: 250}`，不含 `items`。客户端按提示重取同一 URL。
+- HTTP 200：`{state: "ready", items: [...]}`，包含完整推荐字段。来源明确返回 NotFound 或未配置来源时可以为空数组。
+- 来源或缓存读取失败返回 HTTP 502 错误 envelope；队列满返回 HTTP 503。失败不转换为空推荐。
+
+Web 详情展示等待状态，只在 `pending` 时轮询；离开当前条目时取消轮询，失败展示错误。旧数组响应不再接受。
+每次请求均检查当前 Library 可见性、Media 所属和发布状态。来源查询按 Media kind/TMDB ID 合并，
+每个服务实例最多保留 64 个待处理或近期完成状态、最多 4 个来源查询并行；成功结果只保留在持久 catalog 缓存。
+
+此合同调整源于真实来源等待：此前 busy 实测 similar 完整响应 p50/p95 为约 819.853/983.696ms，
+超过原完整响应的 300ms 预算，而同键持久缓存命中约 0.6ms。perfgate 分别记录首次 `pending`/`ready`
+和获取完整 `ready.items` 的耗时、终态；首次 202 耗时不能当作旧合同完整响应的性能提升。
+完整结果超时或来源失败仍使验证失败，不通过预热或空成功掩盖来源等待。
+
 ### LibraryFacets
 
 `GET /libraries/{id}/facets`（筛选面板的唯一数据源；前端 `web/lib/api/libraries.ts` 的 `LibraryFacets`）：

@@ -20,6 +20,7 @@ import urllib.parse
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from perf_support import ApiError, Client, login
+from perf_similar import measure_similar, similar_payload, similar_response, summarize_similar
 
 # Milliseconds: idle p95 and p99.
 SLO = {'W': (50, 150), 'D': (100, 250), 'L': (150, 400), 'S': (200, 500),
@@ -101,6 +102,8 @@ def validate_baseline(report, mode, selected):
 
 
 def response_matches(case, payload):
+    if case.get('response_contract') == 'similar':
+        return similar_payload(payload) is not None
     if 'expected_items' not in case:
         return True
     response = json.loads(payload)
@@ -245,7 +248,7 @@ def page_request(client, request, fields):
     return code, elapsed, payload
 
 
-def run_case(case, fields, self_client, jf_client, admin, executor):
+def run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=None):
     client = jf_client if case['surface'] == 'jellyfin' else self_client
     if case.get('admin'):
         client = admin
@@ -254,12 +257,25 @@ def run_case(case, fields, self_client, jf_client, admin, executor):
         futures = [executor.submit(page_request, admin if request.get('admin') else client, request, fields)
                    for request in case['requests']]
         results = [future.result() for future in futures]
+        elapsed = (time.perf_counter() - started) * 1000
+        matches = True
+        for request, result in zip(case['requests'], results):
+            if request.get('response_contract') == 'similar':
+                matches = matches and similar_response(result[0], result[2]) is not None
+                if similar_requests is not None:
+                    source = admin if request.get('admin') else client
+                    similar_requests.append((source, interpolate(request['url'], fields), result, started))
         code = next((result[0] for result in results if not 200 <= result[0] < 300), 200)
-        return code, (time.perf_counter() - started) * 1000, True
+        return code, elapsed, matches
     url = interpolate(case['url'], fields)
+    started = time.perf_counter()
     code, elapsed, payload = client.raw(url, case.get('method', 'GET'),
                                       interpolate(case.get('body'), fields), case.get('auth', True))
     matches = not 200 <= code < 300 or response_matches(case, payload)
+    if case.get('response_contract') == 'similar':
+        matches = similar_response(code, payload) is not None
+        if similar_requests is not None:
+            similar_requests.append((client, url, (code, elapsed, payload), started))
     return code, elapsed, matches
 
 
@@ -310,6 +326,7 @@ def main():
             samples, codes, outside_busy, errors = [], Counter(), 0, []
             writes_verified = []
             responses_verified = []
+            similar_observations = []
             precondition_codes = Counter()
             count = 1 if args.mode == 'cold' else args.n
             sampler = BusySamples(count) if busy else None
@@ -337,6 +354,7 @@ def main():
                 fields['position'] = 120000 + index + len(results) * args.n
                 matches = False
                 measured = False
+                deferred_similar = []
                 try:
                     if case.get('prepare') == 'heartbeat' or case['id'] == 'self-playback-chapters':
                         prepare_heartbeat(self_client, fields)
@@ -348,7 +366,7 @@ def main():
                                        stdout=subprocess.DEVNULL)
                     if busy:
                         busy.ensure()
-                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor)
+                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=deferred_similar)
                     measured = True
                 except KeyError as error:
                     code, elapsed = 0, 0
@@ -368,6 +386,12 @@ def main():
                         in_window = False
                         precondition_codes[failure_code(error)] += 1
                         errors.append(str(error))
+                # Busy eligibility belongs to the initial response window. Poll
+                # full recommendations afterwards, with a separate wall clock.
+                for source, url, initial, started in deferred_similar:
+                    observed = measure_similar(source, url, initial=initial, started_at=started)
+                    similar_observations.append(observed)
+                    matches = matches and observed['passed']
                 if case.get('prepare') == 'heartbeat':
                     try:
                         verified = 200 <= code < 300 and verify_heartbeat(self_client, fields)
@@ -394,6 +418,8 @@ def main():
                            'precondition_codes': dict(precondition_codes),
                            'response_verified': all(responses_verified),
                            'write_verified': all(writes_verified) if writes_verified else None})
+            if similar_observations:
+                result['recommendations'] = summarize_similar(similar_observations, percentile)
             if (sampler and sampler.failed) or errors or not all(responses_verified) or (writes_verified and not all(writes_verified)):
                 result['passed'] = False
             results[case['id']] = result

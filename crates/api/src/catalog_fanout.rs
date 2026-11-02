@@ -407,6 +407,16 @@ impl Catalog for FanoutCatalog {
         }
         Ok(Vec::new())
     }
+    fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        match self.source("tmdb") {
+            Some(tmdb) => tmdb.cached_similar(kind, tmdb_id),
+            None => Ok(Some(Vec::new())),
+        }
+    }
     fn similar(&self, kind: MediaKind, tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
         if let Some(tmdb) = self.source("tmdb") {
             return tmdb.similar(kind, tmdb_id);

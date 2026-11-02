@@ -11,10 +11,8 @@ use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 
 use crate::blocking_budget::BlockingError;
-use crate::http::library::{
-    coverages_in_library, library_for_file, preferred_coverage, require_visible_library,
-};
-use crate::http::{err, ok, ok_list};
+use crate::http::library::{coverages_in_library, preferred_coverage, require_visible_library};
+use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 
@@ -398,45 +396,55 @@ fn similar_inner(
     item_id: &str,
     user_id: Option<domain::UserId>,
 ) -> Response {
-    let store = state.store.as_ref();
-    let library = match require_visible_library(&store, id, user_id) {
-        Ok(library) => library,
+    let target = match similar_target(state, id, item_id, user_id) {
+        Ok(target) => target,
         Err(response) => return response,
     };
-    let media_id = match domain::MediaId::from_str(item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
+    let selected = match &target {
+        Some((kind, tmdb_id)) => {
+            state
+                .similar_reads
+                .read(state.catalog.clone(), *kind, tmdb_id.clone())
+        }
+        None => crate::similar_reads::SimilarRead::Ready(Vec::new()),
     };
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-    };
-    let rows = match store.file_coverage_for_media(media_id) {
-        Ok(rows) => rows,
-        Err(error) => {
+    // Local cache reads may block on their own DB; authorize the actual target
+    // again after that work, outside both read snapshots and registry locks.
+    match similar_target(state, id, item_id, user_id) {
+        Ok(current) if current == target => {}
+        Ok(_) => {
             return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
+                StatusCode::CONFLICT,
+                "similar.changed",
+                "推荐来源已变化，请刷新",
             );
         }
-    };
-    let belongs_to_library = rows.iter().any(|row| {
-        library_for_file(&store, &row.file, &media).is_some_and(|owner| owner.id == library.id)
-    });
-    if !belongs_to_library {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
+        Err(response) => return response,
     }
-    let Some(tmdb_id) = media.tmdb_id.clone() else {
-        return ok_list(Vec::new()).into_response();
-    };
-    let hits = match state.catalog.similar(media.kind, &tmdb_id) {
-        Ok(hits) => hits,
-        Err(error) => {
-            tracing::warn!(%error, %media_id, %tmdb_id, "similar catalog request failed");
+    let hits = match selected {
+        crate::similar_reads::SimilarRead::Ready(hits) => hits,
+        crate::similar_reads::SimilarRead::Pending => {
+            let mut response = ok(json!({"state":"pending", "retry_after_ms":250})).into_response();
+            *response.status_mut() = StatusCode::ACCEPTED;
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+            return response;
+        }
+        crate::similar_reads::SimilarRead::Failed(error) => {
+            tracing::warn!(%error, %item_id, "similar catalog request failed");
             return err(
                 StatusCode::BAD_GATEWAY,
                 "catalog.unavailable",
                 "相似推荐数据源暂不可用",
+            );
+        }
+        crate::similar_reads::SimilarRead::Busy => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "similar.busy",
+                "相似推荐刷新繁忙，请稍后重试",
             );
         }
     };
@@ -454,5 +462,46 @@ fn similar_inner(
             })
         })
         .collect();
-    ok_list(items).into_response()
+    ok(json!({"state":"ready", "items":items})).into_response()
+}
+
+fn similar_target(
+    state: &ApiState,
+    id: &str,
+    item_id: &str,
+    user_id: Option<domain::UserId>,
+) -> Result<Option<(domain::MediaKind, String)>, Response> {
+    crate::http::store_wait::with_store_read(state, |store| {
+        let library = require_visible_library(store, id, user_id)?;
+        let media_id = domain::MediaId::from_str(item_id)
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"))?;
+        let media = store
+            .get_media(media_id)
+            .map_err(|error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                )
+            })?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"))?;
+        let rows = store.file_coverage_for_media(media_id).map_err(|error| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            )
+        })?;
+        if !rows.iter().any(|row| {
+            row.file.library_id.to_string() == library.id
+                && row.file.publication == domain::FilePublication::Published
+        }) {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "library.item_missing",
+                "条目不存在",
+            ));
+        }
+        Ok(media.tmdb_id.map(|id| (media.kind, id)))
+    })?
 }

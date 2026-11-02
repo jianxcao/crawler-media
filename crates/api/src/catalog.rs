@@ -231,6 +231,15 @@ pub trait Catalog: Send + Sync {
     ) -> Result<Vec<media::EpisodeMeta>, String> {
         Ok(Vec::new())
     }
+    /// Fresh persisted recommendations. None means not fetched/expired, while
+    /// typed source NotFound is a known ready-empty result in this API seam.
+    fn cached_similar(
+        &self,
+        _kind: MediaKind,
+        _tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        Ok(None)
+    }
     /// Similar titles. Default: none.
     fn similar(&self, _kind: MediaKind, _tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
         Ok(Vec::new())
@@ -271,6 +280,13 @@ pub trait Catalog: Send + Sync {
 pub struct EmptyCatalog;
 
 impl Catalog for EmptyCatalog {
+    fn cached_similar(
+        &self,
+        _: MediaKind,
+        _: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        Ok(Some(Vec::new()))
+    }
     fn search_movie(&self, _query: &str) -> Result<Vec<CatalogHit>, String> {
         Ok(Vec::new())
     }
@@ -504,6 +520,17 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
         self.inner
             .season_details_lang(tmdb_id, season, Some(lang))
             .map_err(|err| err.to_string())
+    }
+    fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        match self.inner.cached_similar(kind, tmdb_id) {
+            Ok(hits) => Ok(hits),
+            Err(media::TmdbError::NotFound(_)) => Ok(Some(Vec::new())),
+            Err(error) => Err(error.to_string()),
+        }
     }
     fn similar(&self, kind: MediaKind, tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
         match self.inner.similar(kind, tmdb_id) {

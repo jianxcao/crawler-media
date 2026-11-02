@@ -7,6 +7,7 @@ use crate::media_posters::MediaPosterSource;
 impl ApiState {
     pub fn with_catalog(mut self, catalog: Arc<dyn Catalog>) -> Self {
         self.catalog = catalog.clone();
+        self.similar_reads = Arc::default();
         self.configuration_memory =
             Arc::new(crate::configuration_memory::ConfigurationMemory::default());
         self.media_posters = Arc::new(crate::media_posters::service::MediaPosterService::new(

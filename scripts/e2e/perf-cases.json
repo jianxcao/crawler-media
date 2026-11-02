@@ -549,7 +549,8 @@
       "surface": "self",
       "route": "/libraries/{id}/items/{item_id}/similar",
       "class": "L",
-      "url": "/api/v1/libraries/{movie_library}/items/{movie}/similar"
+      "url": "/api/v1/libraries/{movie_library}/items/{movie}/similar",
+      "response_contract": "similar"
     },
     {
       "id": "self-libraries-id-missing",
@@ -1256,7 +1257,8 @@
           "url": "/api/v1/playback/resume?media_item_id={series}&season_number=1&episode_number=1"
         },
         {
-          "url": "/api/v1/libraries/{tv_library}/items/{series}/similar"
+          "url": "/api/v1/libraries/{tv_library}/items/{series}/similar",
+          "response_contract": "similar"
         },
         {
           "url": "/api/v1/libraries/{tv_library}/items/{series}/probe-status?season=1",

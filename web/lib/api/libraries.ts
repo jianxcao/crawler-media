@@ -1902,14 +1902,22 @@ export interface SimilarHit {
   poster_url: string | null;
 }
 
-/** 相似推荐（GET /libraries/{id}/items/{itemId}/similar，TMDB similar）。 */
+export type SimilarRead =
+  | { state: "pending"; retry_after_ms: number }
+  | { state: "ready"; items: SimilarHit[] };
+
+/** Explicit pending means origin work is still running; ready always has full results. */
 export async function fetchItemSimilar(
   libraryId: string,
   mediaItemId: string,
-): Promise<SimilarHit[]> {
-  return unwrap(
-    request<ApiEnvelope<SimilarHit[]>>(`/libraries/${libraryId}/items/${mediaItemId}/similar`),
+  signal?: AbortSignal,
+): Promise<SimilarRead> {
+  const result = await unwrap(
+    request<ApiEnvelope<SimilarRead>>(`/libraries/${libraryId}/items/${mediaItemId}/similar`, { signal }),
   );
+  if (result?.state === "ready" && Array.isArray(result.items)) return result;
+  if (result?.state === "pending" && Number.isFinite(result.retry_after_ms) && result.retry_after_ms > 0) return result;
+  throw new Error("相似推荐响应格式错误");
 }
 
 // ---------------------------------------------------------------------------

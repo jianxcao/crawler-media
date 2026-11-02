@@ -1,5 +1,7 @@
 "use client";
 
+import { waitForSimilar } from "@/lib/similar-read";
+
 import { ArtworkImage } from "@/components/artwork-image";
 import { playLinkFileId } from "@/lib/player/active-target";
 import type { ReactNode } from "react";
@@ -158,6 +160,8 @@ export function LibraryItemDetailView({
   const chapterRefreshTimer = useRef<number | null>(null);
   const chapterRefreshToken = useRef(0);
   const [similar, setSimilar] = useState<MediaItem[]>([]);
+  const [similarPending, setSimilarPending] = useState(false);
+  const [similarError, setSimilarError] = useState<string | null>(null);
   const [reidentifyDirty, setReidentifyDirty] = useState(false);
   // 元数据刷新的失败提示（原先与重识别共用一条横幅）
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -499,15 +503,22 @@ export function LibraryItemDetailView({
     };
   }, [libraryId, detail?.media_item_id, selectedSeriesEpisode?.seasonNumber, selectedSeriesEpisode?.episode.episode_number]);
 
-  // 相似推荐：仅依赖 tmdb_id 和 media_item_id，一次加载终身缓存，绝不随详情轮询重复请求导致页面闪跳
+  // Explicit pending is polled independently of the Library detail refresh.
   const mediaTmdbId = detail?.tmdb_id;
   const mediaItemIdKey = detail?.media_item_id;
   useEffect(() => {
+    setSimilar([]);
+    setSimilarPending(false);
+    setSimilarError(null);
     if (!mediaTmdbId || !mediaItemIdKey) return;
-    let cancelled = false;
-    void fetchItemSimilar(libraryId, mediaItemIdKey)
+    const controller = new AbortController();
+    void waitForSimilar(
+      (signal) => fetchItemSimilar(libraryId, mediaItemIdKey, signal),
+      { signal: controller.signal, onPending: () => setSimilarPending(true) },
+    )
       .then((hits) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        setSimilarPending(false);
         setSimilar(
           hits.map((hit) => ({
             id: hit.tmdb_id ?? "",
@@ -521,10 +532,12 @@ export function LibraryItemDetailView({
           }) as unknown as MediaItem),
         );
       })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setSimilarPending(false);
+        setSimilarError(error instanceof Error ? error.message : "相似推荐暂时不可用");
+      });
+    return () => controller.abort();
   }, [libraryId, mediaTmdbId, mediaItemIdKey]);
 
   if (failed) {
@@ -1115,6 +1128,16 @@ export function LibraryItemDetailView({
         );
       })()}
 
+      {similarPending && (
+        <p role="status" className="mt-8 px-12 text-sm text-[var(--text-muted)] max-md:px-4">
+          正在加载相似推荐…
+        </p>
+      )}
+      {similarError && (
+        <p role="alert" className="mt-8 px-12 text-sm text-[var(--text-muted)] max-md:px-4">
+          相似推荐暂时不可用：{similarError}
+        </p>
+      )}
       {similar.length > 0 && (
         <div className="mt-8">
           <MediaRow
