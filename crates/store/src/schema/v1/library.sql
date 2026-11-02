@@ -540,3 +540,12 @@ CREATE TABLE protocol_entity_overlap_rebuild (
 
 CREATE INDEX playback_favorite_order ON playback_units(user_id,favorite_at DESC,media_id ASC,season DESC,episode DESC) WHERE favorite=1;
 CREATE INDEX playback_favorite_winner ON playback_units(user_id,media_id,favorite_at DESC,season DESC,episode DESC) WHERE favorite=1;
+
+-- Transfer publication validates these authorities in its own transaction.
+CREATE TABLE transfer_settings (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL CHECK(json_valid(value))
+);
+CREATE TABLE scrape_settings (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0), value TEXT
+);
+INSERT INTO scrape_settings(singleton, revision, value) VALUES (1, 0, NULL);

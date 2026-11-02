@@ -45,7 +45,7 @@ fn check(method: &str) {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
         store
-            .with_writer(store::Db::App, |_| {
+            .with_writer(store::Db::Library, |_| {
                 ready_tx.send(()).unwrap();
                 let _ = release_rx.recv_timeout(Duration::from_secs(3));
                 Ok(())

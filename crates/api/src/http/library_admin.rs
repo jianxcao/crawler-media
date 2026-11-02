@@ -13,17 +13,12 @@ use crate::management::ApiState;
 
 /// GET /ledger — every ledger row (management view).
 pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
-    let (mut items, pending, global_transfer_mode) = match super::store_wait::store_read(
-        &state,
-        &[store::Db::Library, store::Db::App],
-        capture_ledger,
-    )
-    .await
-    {
-        Ok(Ok(facts)) => facts,
-        Ok(Err(response)) => return response,
-        Err(error) => return error.response(),
-    };
+    let (mut items, pending, global_transfer_mode) =
+        match super::store_wait::store_read(&state, &[store::Db::Library], capture_ledger).await {
+            Ok(Ok(facts)) => facts,
+            Ok(Err(response)) => return response,
+            Err(error) => return error.response(),
+        };
     let files = state.file_stats.clone();
     match super::fs::read_work(&state, move || {
         let rows = items.len();

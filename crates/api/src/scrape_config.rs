@@ -1,8 +1,5 @@
-//! Scrape & organize configuration, aligned with the upstream
-//! scrape-customization design (metadata.scrape namespace). Stored as JSON in
-//! the settings KV; **empty fields mean "follow default"** — effective values
-//! merge at read time, so the defaults always equal the pre-config behavior
-//! (zero-migration promise).
+//! Scrape configuration is raw JSON in library.db; empty fields follow defaults.
+//! API composes effective values without rewriting the stored input.
 
 use serde::{Deserialize, Serialize};
 

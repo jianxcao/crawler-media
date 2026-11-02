@@ -109,26 +109,30 @@ pub(crate) async fn get_scrape_settings(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
-        let is_admin = store
-            .user_role(user_id)
-            .map(|role| role == "admin")
-            .unwrap_or(false);
-        match store.get_scrape_config() {
-            Ok(mut config) => {
-                if !is_admin {
-                    config.setting.theintrodb_api_key = None;
-                    config.setting.fanart_api_key = None;
+    super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let is_admin = store
+                .user_role(user_id)
+                .map(|role| role == "admin")
+                .unwrap_or(false);
+            match store.get_scrape_config() {
+                Ok(mut config) => {
+                    if !is_admin {
+                        config.setting.theintrodb_api_key = None;
+                        config.setting.fanart_api_key = None;
+                    }
+                    ok(scrape_json(&config)).into_response()
                 }
-                ok(scrape_json(&config)).into_response()
+                Err(error) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                ),
             }
-            Err(error) => err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            ),
-        }
-    })
+        },
+    )
     .await
     .unwrap_or_else(|error| error.response())
 }
@@ -162,7 +166,7 @@ pub(crate) async fn put_scrape_settings(
 /// POST /settings/scrape/preview-naming — render both composed patterns with a
 /// sample movie + sample episode so the UI can preview before saving.
 pub(crate) async fn preview_naming(State(state): State<ApiState>) -> Response {
-    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
+    super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         let config = match store.get_scrape_config() {
             Ok(config) => config,
             Err(error) => {

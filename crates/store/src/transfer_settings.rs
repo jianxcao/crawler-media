@@ -1,9 +1,9 @@
-//! One revisioned app.db configuration for Transfer and Watch directories.
+//! One revisioned library.db configuration for Transfer and Watch directories.
 use serde::{Deserialize, Serialize};
 
 use crate::{Store, StoreError};
 
-const KEY: &str = "transfer.settings";
+use rusqlite::OptionalExtension;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,10 +37,7 @@ pub struct TransferSettingsPatch {
 
 impl Store {
     pub fn transfer_settings(&self) -> Result<TransferSettings, StoreError> {
-        match self.get_setting(KEY)? {
-            Some(raw) => Ok(serde_json::from_str(&raw)?),
-            None => Ok(TransferSettings::default()),
-        }
+        self.with_library_read(|db| db.transfer_settings())
     }
 
     pub fn patch_transfer_settings(
@@ -48,7 +45,7 @@ impl Store {
         expected_revision: i64,
         patch: TransferSettingsPatch,
     ) -> Result<TransferSettings, StoreError> {
-        self.app_write(|store| {
+        self.library_write(|store| {
             let mut settings = store.transfer_settings()?;
             if expected_revision < 0 || settings.revision != expected_revision {
                 return Err(StoreError::Conflict(
@@ -74,7 +71,10 @@ impl Store {
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Invalid("Transfer settings revision overflow".into()))?;
-            store.put_setting(KEY, &serde_json::to_string(&settings)?)?;
+            store.library.execute(
+                "INSERT INTO transfer_settings (singleton, value) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET value=excluded.value",
+                [serde_json::to_string(&settings)?],
+            )?;
             tracing::info!(
                 revision = settings.revision,
                 transfer_mode = settings.transfer_mode,
@@ -145,9 +145,17 @@ fn normalize_path(path: Option<String>) -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
-impl crate::App<'_> {
+impl crate::LibraryConnection<'_> {
     pub fn transfer_settings(&self) -> Result<TransferSettings, StoreError> {
-        match self.get_setting(KEY)? {
+        match self
+            .library
+            .query_row(
+                "SELECT value FROM transfer_settings WHERE singleton=1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
             Some(raw) => Ok(serde_json::from_str(&raw)?),
             None => Ok(TransferSettings::default()),
         }

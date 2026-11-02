@@ -423,9 +423,12 @@ mod policy_tests {
 
 impl crate::writers::App<'_> {
     pub fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
-        if key == "metadata.language" {
+        if matches!(
+            key,
+            "metadata.language" | "transfer.settings" | "metadata.scrape"
+        ) {
             return Err(StoreError::Invalid(
-                "use metadata language configuration".into(),
+                "use dedicated Library configuration".into(),
             ));
         }
         self.app.execute(
@@ -436,9 +439,12 @@ impl crate::writers::App<'_> {
     }
 
     pub fn delete_setting(&self, key: &str) -> Result<bool, StoreError> {
-        if key == "metadata.language" {
+        if matches!(
+            key,
+            "metadata.language" | "transfer.settings" | "metadata.scrape"
+        ) {
             return Err(StoreError::Invalid(
-                "use metadata language configuration".into(),
+                "use dedicated Library configuration".into(),
             ));
         }
         let changed = self

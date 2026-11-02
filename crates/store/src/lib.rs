@@ -9,7 +9,9 @@
 )]
 
 mod app_write;
+mod scrape_settings;
 mod transfer_settings;
+pub use scrape_settings::RawScrapeSettings;
 pub use transfer_settings::{TransferSettings, TransferSettingsPatch};
 mod catalog;
 mod chapter_frame_tasks;

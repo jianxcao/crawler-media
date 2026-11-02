@@ -13,7 +13,7 @@ pub trait ScrapeStoreExt {
 
 impl ScrapeStoreExt for Store {
     fn get_scrape_config(&self) -> Result<ScrapeConfig, StoreError> {
-        let setting = match self.get_setting(KEY)? {
+        let setting = match self.raw_scrape_settings()?.value {
             None => ScrapeConfigSetting::default(),
             Some(raw) => match serde_json::from_str::<ScrapeConfigSetting>(&raw) {
                 Ok(setting) => setting,
@@ -37,7 +37,7 @@ impl ScrapeStoreExt for Store {
         &self,
         setting: &ScrapeConfigSetting,
     ) -> Result<ScrapeConfig, StoreError> {
-        self.put_setting(KEY, &serde_json::to_string(setting)?)?;
+        self.save_raw_scrape_settings(&serde_json::to_string(setting)?)?;
         Ok(compose_config(setting.clone()))
     }
 

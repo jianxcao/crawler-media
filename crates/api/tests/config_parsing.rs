@@ -46,9 +46,7 @@ fn corrupt_scrape_config_logs_error_and_preserves_raw_value() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let raw = r#"{"naming_entry_dir":"Movies","naming_customized":tru"#;
-    store
-        .put_setting(settings_keys::METADATA_SCRAPE, raw)
-        .unwrap();
+    store.save_raw_scrape_settings(raw).unwrap();
 
     let logs = capture_logs(|| {
         let config = store
@@ -66,10 +64,7 @@ fn corrupt_scrape_config_logs_error_and_preserves_raw_value() {
     );
     assert!(logs.contains("ERROR"), "必须是 error 级别: {logs}");
     assert_eq!(
-        store
-            .get_setting(settings_keys::METADATA_SCRAPE)
-            .unwrap()
-            .as_deref(),
+        store.raw_scrape_settings().unwrap().value.as_deref(),
         Some(raw),
         "坏原文不得被覆盖"
     );

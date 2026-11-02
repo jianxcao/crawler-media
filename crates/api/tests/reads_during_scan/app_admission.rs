@@ -266,7 +266,7 @@ async fn queued_transfer_settings(maintenance: bool) {
             ))
             .unwrap()
     };
-    let held = HeldAppWriter::acquire(&fixture.state);
+    let held = HeldAppWriter::acquire_db(&fixture.state, store::Db::Library);
     let mut request = Box::pin(app.clone().oneshot(input()));
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut request)
@@ -293,11 +293,11 @@ async fn queued_transfer_settings(maintenance: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_app_transfer_settings_rechecks_maintenance_after_acquiring_its_writer() {
+async fn queued_library_transfer_settings_rechecks_maintenance_after_acquiring_its_writer() {
     queued_transfer_settings(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_app_transfer_settings_rechecks_instance_after_acquiring_its_writer() {
+async fn queued_library_transfer_settings_rechecks_instance_after_acquiring_its_writer() {
     queued_transfer_settings(false).await;
 }

@@ -7,7 +7,7 @@ pub(crate) struct TransferPlan {
     pub(crate) library_id: String,
     library: store::Library,
     transfer_settings: store::TransferSettings,
-    scrape_setting: Option<String>,
+    scrape_setting: store::RawScrapeSettings,
     pub(crate) fingerprint: store::ReadFingerprint,
     pub(crate) root: std::path::PathBuf,
     /// Root of `library_id` that owns `root`: the destination identity every
@@ -83,7 +83,17 @@ pub(crate) fn resolve_transfer_plan(
     media: &Media,
     subscribe: &Subscribe,
 ) -> Result<TransferPlan, String> {
-    let store = state.store.as_ref();
+    state
+        .store
+        .library_read_snapshot(|db| resolve_library_plan(db, media, subscribe))
+        .map_err(|error| error.to_string())?
+}
+
+fn resolve_library_plan(
+    store: &store::LibraryConnection<'_>,
+    media: &Media,
+    subscribe: &Subscribe,
+) -> Result<TransferPlan, String> {
     let library = match subscribe.library_id {
         Some(id) => store.get_library(&id.to_string()),
         None => store.default_library(media.kind),
@@ -101,9 +111,7 @@ pub(crate) fn resolve_transfer_plan(
         .first()
         .cloned()
         .ok_or("目标 Library 没有根目录")?;
-    let root_id = store
-        .library_read_snapshot(|db| destination_root_id(db, &library.id, &root))
-        .map_err(|error| error.to_string())??;
+    let root_id = destination_root_id(store, &library.id, &root)?;
     let config_revision = store
         .library_config_revision(&library.id)
         .map_err(|error| error.to_string())?;
@@ -113,9 +121,9 @@ pub(crate) fn resolve_transfer_plan(
     let mode = crate::directory::parse_transfer_mode(&transfer_settings.transfer_mode);
     let scrape = transfer_settings.scrape;
     let scrape_setting = store
-        .get_setting(crate::scrape_config::KEY)
+        .raw_scrape_settings()
         .map_err(|error| error.to_string())?;
-    let setting = match scrape_setting.as_deref() {
+    let setting = match scrape_setting.value.as_deref() {
         Some(raw) => serde_json::from_str::<ScrapeConfigSetting>(raw).unwrap_or_else(|error| {
             tracing::error!(%error, "Transfer scrape configuration is corrupt; using defaults");
             ScrapeConfigSetting::default()
@@ -217,7 +225,6 @@ pub(super) fn validate_transfer_plan_at(
     ignored_files: &std::collections::HashSet<String>,
     plan: &TransferPlan,
 ) -> Result<(), String> {
-    validate_app_plan(store, plan)?;
     if store
         .get_subscribe(subscribe.id)
         .map_err(|error| error.to_string())?
@@ -233,13 +240,16 @@ pub(super) fn validate_transfer_plan_at(
         .map_err(|error| error.to_string())?
 }
 
-fn validate_app_plan(store: &store::Store, plan: &TransferPlan) -> Result<(), String> {
+fn validate_config_plan(
+    store: &store::LibraryConnection<'_>,
+    plan: &TransferPlan,
+) -> Result<(), String> {
     if store
         .transfer_settings()
         .map_err(|error| error.to_string())?
         != plan.transfer_settings
         || store
-            .get_setting(crate::scrape_config::KEY)
+            .raw_scrape_settings()
             .map_err(|error| error.to_string())?
             != plan.scrape_setting
     {
@@ -248,8 +258,7 @@ fn validate_app_plan(store: &store::Store, plan: &TransferPlan) -> Result<(), St
     Ok(())
 }
 
-/// App configuration cannot change between admission and the Library write.
-/// Both writers are held only for SQL and acquired in App → Library order.
+/// Configuration and publication share the same Library transaction.
 pub(crate) fn with_plan_write<T>(
     store: &store::Store,
     lease: &crate::library_lifecycle::LibraryWorkLease,
@@ -258,23 +267,13 @@ pub(crate) fn with_plan_write<T>(
     plan: &TransferPlan,
     work: impl FnOnce(&store::LibraryConnection<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    store
-        .writers()
-        .with_app(|app| {
-            if app.transfer_settings()? != plan.transfer_settings
-                || app.get_setting(crate::scrape_config::KEY)? != plan.scrape_setting
-            {
-                return Err(store::StoreError::Protected(
-                    "Transfer configuration changed".into(),
-                ));
-            }
-            store.library_write_with_error(std::convert::identity, |db| {
-                validate_library_plan(db, lease, fingerprint, ignored_files, plan)
-                    .map_err(store::StoreError::Protected)?;
-                work(db).map_err(store::StoreError::Protected)
-            })
-        })
-        .map_err(|error| error.to_string())
+    store.library_write_with_error(
+        |error| error.to_string(),
+        |db| {
+            validate_library_plan(db, lease, fingerprint, ignored_files, plan)?;
+            work(db)
+        },
+    )
 }
 
 fn validate_library_plan(
@@ -284,6 +283,7 @@ fn validate_library_plan(
     ignored_files: &std::collections::HashSet<String>,
     plan: &TransferPlan,
 ) -> Result<(), String> {
+    validate_config_plan(store, plan)?;
     lease.control().check().map_err(|e| e.to_string())?;
     if !store
         .library_accepts_work(lease.library_id())

@@ -56,3 +56,65 @@ fn retired_scalar_keys_cannot_configure_transfer_or_watch() {
     }
     assert_eq!(store.transfer_settings().unwrap(), Default::default());
 }
+
+#[test]
+fn library_configuration_persists_and_app_cannot_bypass_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.set_transfer_mode("move").unwrap();
+    store
+        .save_raw_scrape_settings("broken json retained")
+        .unwrap();
+    let scrape = store.raw_scrape_settings().unwrap();
+    for key in ["transfer.settings", "metadata.scrape"] {
+        assert!(matches!(
+            store.put_setting(key, "{}"),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.delete_setting(key),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    drop(store);
+    let reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.transfer_mode().unwrap(), "move");
+    assert_eq!(reopened.raw_scrape_settings().unwrap(), scrape);
+    reopened.save_raw_scrape_settings("{}").unwrap();
+    reopened
+        .save_raw_scrape_settings("broken json retained")
+        .unwrap();
+    assert_eq!(
+        reopened.raw_scrape_settings().unwrap().revision,
+        scrape.revision + 2
+    );
+}
+
+#[test]
+fn library_snapshot_keeps_transfer_and_scrape_configuration_coherent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.save_raw_scrape_settings("before").unwrap();
+    let initial = store.raw_scrape_settings().unwrap();
+    store
+        .library_read_snapshot(|db| {
+            assert_eq!(db.transfer_settings().unwrap().revision, 0);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        store.set_transfer_mode("copy").unwrap();
+                        store.save_raw_scrape_settings("after").unwrap();
+                    })
+                    .join()
+                    .unwrap();
+            });
+            assert_eq!(db.transfer_settings().unwrap().revision, 0);
+            assert_eq!(db.raw_scrape_settings().unwrap(), initial);
+        })
+        .unwrap();
+    assert_eq!(store.transfer_mode().unwrap(), "copy");
+    assert_eq!(
+        store.raw_scrape_settings().unwrap().value.as_deref(),
+        Some("after")
+    );
+}

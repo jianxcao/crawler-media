@@ -39,7 +39,7 @@ fn nullable_path<'de, D: serde::Deserializer<'de>>(
 }
 
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
-    match super::store_wait::store_read(&state, &[store::Db::App], |store| {
+    match super::store_wait::store_read(&state, &[store::Db::Library], |store| {
         store.transfer_settings()
     })
     .await
