@@ -336,6 +336,13 @@ pub fn converge_retired_media_refs(state: &ApiState) -> usize {
             return 0;
         }
     };
+    let pairs = match canonical_media_pairs(&pairs) {
+        Ok(pairs) => pairs,
+        Err(error) => {
+            tracing::error!(%error,"Retired Media chain cannot converge; retry remains pending");
+            return 0;
+        }
+    };
     let jobs = match state.jobs.acquire() {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -370,6 +377,46 @@ pub fn converge_retired_media_refs(state: &ApiState) -> usize {
         }
     }
     rewritten
+}
+
+/// Resolve each retired chain once, before Jobs writes, independently of row order.
+fn canonical_media_pairs(
+    pairs: &[(domain::MediaId, domain::MediaId)],
+) -> Result<Vec<(domain::MediaId, domain::MediaId)>, String> {
+    use std::collections::{HashMap, HashSet};
+    let next = pairs.iter().copied().collect::<HashMap<_, _>>();
+    let mut resolved = HashMap::new();
+    for &(from, _) in pairs {
+        let mut current = from;
+        let mut path = Vec::new();
+        let mut seen = HashSet::new();
+        let target = loop {
+            if let Some(&target) = resolved.get(&current) {
+                break target;
+            }
+            let Some(&target) = next.get(&current) else {
+                break current;
+            };
+            if !seen.insert(current) {
+                return Err(format!("retired Media cycle at {current}"));
+            }
+            path.push(current);
+            current = target;
+        };
+        for id in path {
+            resolved.insert(id, target);
+        }
+    }
+    pairs
+        .iter()
+        .map(|&(from, _)| {
+            resolved
+                .get(&from)
+                .copied()
+                .map(|to| (from, to))
+                .ok_or_else(|| format!("missing canonical Media for {from}"))
+        })
+        .collect()
 }
 
 pub fn begin_library_integrity(

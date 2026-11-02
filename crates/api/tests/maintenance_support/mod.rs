@@ -123,7 +123,9 @@ pub fn seed_published_file(store: &Store, root: &Path, media: domain::MediaId) -
 pub fn enqueue_claim(state: &ApiState, kind: JobKind, payload: &str, now: i64) -> Job {
     let queue = state.jobs();
     let guard = queue.acquire().unwrap();
-    let job = guard.enqueue(kind, payload, 0).unwrap();
+    let job = guard
+        .enqueue(jobs::JobIdentity::global(kind), payload, 0)
+        .unwrap();
     let claimed = guard.claim(now, 1).unwrap();
     assert_eq!(
         claimed.len(),

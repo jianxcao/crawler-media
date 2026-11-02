@@ -69,11 +69,9 @@ fn queue_missing_search(
         Ok(queue) => queue,
         Err(error) => return crate::http::jobs::jobs_acquire_response(error),
     };
-    if let Err(error) = crate::jobs_api::seed_subscribe_search(
-        &queue,
-        &subscribe.id.to_string(),
-        Some(&media.title),
-    ) {
+    if let Err(error) =
+        crate::jobs_api::seed_subscribe_search(&queue, subscribe.id, Some(&media.title))
+    {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "job.seed_failed",

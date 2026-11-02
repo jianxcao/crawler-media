@@ -159,9 +159,9 @@ fn failed_jobs_sql_and_failed_subscribe_compensation_recover_from_durable_dirty_
         .jobs()
         .acquire()
         .unwrap()
-        .defs_for_payload(&payload)
+        .def_for_identity(subscribe_identity(&payload))
         .unwrap()
-        .remove(0);
+        .unwrap();
     assert!(
         def.enabled,
         "atomic Queue sync must roll back the earlier enabled update"
@@ -213,7 +213,10 @@ fn failed_jobs_sql_and_failed_subscribe_compensation_recover_from_durable_dirty_
     );
     let queue = reopened.jobs();
     let queue = queue.acquire().unwrap();
-    let def = queue.defs_for_payload(&payload).unwrap().remove(0);
+    let def = queue
+        .def_for_identity(subscribe_identity(&payload))
+        .unwrap()
+        .unwrap();
     assert!(!def.enabled);
     assert_eq!(def.schedule, Some(jobs::Schedule::Interval { secs: 900 }));
 }
@@ -232,9 +235,14 @@ fn healthy_jobs_manual_config_survives_unrelated_subscribe_updates_and_tick() {
         let jobs = fixture.state.jobs();
         let queue = jobs.acquire().unwrap();
         queue
-            .set_def_schedule(&payload, jobs::Schedule::Interval { secs: 700 })
+            .set_def_schedule(
+                subscribe_identity(&payload),
+                jobs::Schedule::Interval { secs: 700 },
+            )
             .unwrap();
-        queue.set_def_enabled(&payload, false).unwrap();
+        queue
+            .set_def_enabled(subscribe_identity(&payload), false)
+            .unwrap();
     }
     subscribe.follow_future = true;
     subscribe.tracking_state = "completed".into();
@@ -255,9 +263,9 @@ fn healthy_jobs_manual_config_survives_unrelated_subscribe_updates_and_tick() {
         .jobs()
         .acquire()
         .unwrap()
-        .defs_for_payload(&payload)
+        .def_for_identity(subscribe_identity(&payload))
         .unwrap()
-        .remove(0);
+        .unwrap();
     assert!(!def.enabled);
     assert_eq!(def.schedule, Some(jobs::Schedule::Interval { secs: 700 }));
 }
@@ -290,9 +298,9 @@ fn committed_sync_receipt_preserves_later_manual_job_edit_after_ack_failure_and_
         .jobs()
         .acquire()
         .unwrap()
-        .defs_for_payload(&payload)
+        .def_for_identity(subscribe_identity(&payload))
         .unwrap()
-        .remove(0);
+        .unwrap();
     assert!(!def.enabled);
     assert_eq!(
         runtime()
@@ -351,9 +359,9 @@ fn committed_sync_receipt_preserves_later_manual_job_edit_after_ack_failure_and_
         .jobs()
         .acquire()
         .unwrap()
-        .defs_for_payload(&payload)
+        .def_for_identity(subscribe_identity(&payload))
         .unwrap()
-        .remove(0);
+        .unwrap();
     assert!(
         current.enabled,
         "receipt must acknowledge, not replay over manual enabled change"
@@ -448,16 +456,18 @@ fn failed_create_compensation_keeps_a_recoverable_subscribe_and_atomic_jobs_seed
     let queue = queue.acquire().unwrap();
     assert_eq!(
         queue
-            .defs_for_payload(&json!({"subscribe_id":pending[0]}).to_string())
+            .def_for_identity(jobs::JobIdentity::subscribe_search(pending[0]))
             .unwrap()
-            .len(),
+            .is_some() as usize,
         1
     );
     assert_eq!(
         queue
-            .defs_for_payload(&json!({"media_id":intent.subscribe.media_id}).to_string())
+            .def_for_identity(jobs::JobIdentity::catalog_refresh(
+                intent.subscribe.media_id
+            ))
             .unwrap()
-            .len(),
+            .is_some() as usize,
         1
     );
 }
@@ -599,13 +609,21 @@ fn deletion_jobs_busy_reports_external_cleanup_and_recovers_disabled_definition(
     let fixture = Fixture::new(downloader.clone());
     fixture.pending();
     let payload = json!({"subscribe_id":fixture.subscribe.to_string()}).to_string();
+    fixture
+        .state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .delete_def(jobs::JobIdentity::subscribe_search(fixture.subscribe))
+        .unwrap();
     let def = fixture
         .state
         .jobs()
         .acquire()
         .unwrap()
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(fixture.subscribe),
             name: "disabled deletion fixture".into(),
             enabled: false,
             schedule: None,
@@ -692,5 +710,43 @@ fn deletion_jobs_busy_reports_external_cleanup_and_recovers_disabled_definition(
             .def(def.id)
             .unwrap()
             .is_none()
+    );
+}
+
+fn subscribe_identity(payload: &str) -> jobs::JobIdentity {
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+    jobs::JobIdentity::subscribe_search(value["subscribe_id"].as_str().unwrap().parse().unwrap())
+}
+
+#[test]
+fn subscribe_activity_includes_defless_search_with_extra_arguments() {
+    let fixture = Fixture::idle();
+    let payload =
+        json!({"exclude_enclosure":"replacement","subscribe_id":fixture.subscribe,"extra":true})
+            .to_string();
+    let job = fixture
+        .state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .enqueue(
+            jobs::JobIdentity::subscribe_search(fixture.subscribe),
+            &payload,
+            0,
+        )
+        .unwrap();
+    let (status, body) = runtime().block_on(fixture.request(
+        "GET",
+        &format!("/api/v1/subscriptions/{}/activities", fixture.subscribe),
+        Value::Null,
+    ));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == job.id.to_string()),
+        "{body}"
     );
 }

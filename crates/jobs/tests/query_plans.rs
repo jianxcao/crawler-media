@@ -80,9 +80,9 @@ fn seed_dataset(conn: &Connection, jobs: i64) {
     {
         let mut stmt = tx
             .prepare(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after,
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after,
                     started_at, finished_at, error, progress, concurrency_key, timeout_secs)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, NULL, NULL, ?9, NULL)",
+                 VALUES ('global', ?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, NULL, NULL, ?9, NULL)",
             )
             .unwrap();
         // JOBS_DENSE_RUNNING=1 是敏感性检查：把 running 从 200 提到 10_000，
@@ -324,10 +324,10 @@ fn measure_jobs_query_plans() {
     seed_dataset(&conn, 200_000);
     // 同一 def 同时有 queued + running 的混合子任务（get_live_child 的排序场景）。
     conn.execute_batch(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, concurrency_key)
-         VALUES ('job-mixed-queued', 'def-mixed', 'catalog_refresh', 'p0', 'queued', 0, 5, 'sub-1');
-         INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, concurrency_key)
-         VALUES ('job-mixed-running', 'def-mixed', 'catalog_refresh', 'p0', 'running', 0, 9, 'sub-2');",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, concurrency_key)
+         VALUES ('global', 'job-mixed-queued', 'def-mixed', 'catalog_refresh', 'p0', 'queued', 0, 5, 'sub-1');
+         INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, concurrency_key)
+         VALUES ('global', 'job-mixed-running', 'def-mixed', 'catalog_refresh', 'p0', 'running', 0, 9, 'sub-2');",
     )
     .unwrap();
     println!("sqlite version: {}", sqlite_version(&conn));
@@ -358,12 +358,14 @@ fn measure_jobs_query_plans() {
 // ---------------------------------------------------------------------------
 
 fn def(name: &str) -> NewDef {
+    let media_id = domain::MediaId::new();
     NewDef {
         kind: JobKind::CatalogRefresh,
+        scope: jobs::JobScope::Media(media_id),
         name: name.into(),
         enabled: true,
         schedule: Some(Schedule::Interval { secs: 3_600 }),
-        payload: name.into(),
+        payload: format!(r#"{{"media_id":"{media_id}"}}"#),
         timeout_secs: None,
         concurrency_key: None,
     }
@@ -380,9 +382,9 @@ fn insert_job(
 ) -> String {
     let id = domain::JobId::new().to_string();
     conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after,
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after,
             started_at, finished_at, concurrency_key)
-         VALUES (?1, ?2, 'catalog_refresh', 'p', ?3, 0, ?4, ?5, ?6, ?7)",
+         VALUES ('global', ?1, ?2, 'catalog_refresh', 'p', ?3, 0, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             id,
             def_id,
@@ -408,7 +410,7 @@ fn setup() -> (tempfile::TempDir, Queue, Connection) {
 #[test]
 fn live_child_prefers_queued_over_running() {
     let (_tmp, queue, conn) = setup();
-    let d = queue.upsert_def(def("live")).unwrap();
+    let d = queue.create_def(def("live")).unwrap();
     let def_id = d.id.to_string();
     // running 的 run_after 更新，queued 更旧：状态优先级必须压过 run_after。
     insert_job(&conn, Some(&def_id), "running", 900, None, None);
@@ -422,7 +424,7 @@ fn live_child_prefers_queued_over_running() {
 #[test]
 fn live_child_orders_same_status_by_run_after_desc() {
     let (_tmp, queue, conn) = setup();
-    let d = queue.upsert_def(def("live-order")).unwrap();
+    let d = queue.create_def(def("live-order")).unwrap();
     let def_id = d.id.to_string();
     // 生产约束保证同一 def 不会有两条同状态 live child（见 queued_child_is_unique_per_def），
     // 这里临时去掉 running 的部分唯一索引，单独验证 ORDER BY 的 run_after DESC 兜底键。
@@ -437,7 +439,7 @@ fn live_child_orders_same_status_by_run_after_desc() {
 #[test]
 fn last_child_orders_by_finished_at_then_run_after() {
     let (_tmp, queue, conn) = setup();
-    let d = queue.upsert_def(def("last")).unwrap();
+    let d = queue.create_def(def("last")).unwrap();
     let def_id = d.id.to_string();
     insert_job(&conn, Some(&def_id), "succeeded", 10, None, Some(500));
     insert_job(&conn, Some(&def_id), "failed", 10, None, Some(600));
@@ -494,12 +496,12 @@ fn new_def_id() -> String {
 #[test]
 fn queued_child_is_unique_per_def() {
     let (_tmp, queue, conn) = setup();
-    let d = queue.upsert_def(def("unique-queued")).unwrap();
+    let d = queue.create_def(def("unique-queued")).unwrap();
     let def_id = d.id.to_string();
     insert_job(&conn, Some(&def_id), "queued", 0, None, None);
     let duplicate = conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after)
-         VALUES (?1, ?2, 'catalog_refresh', 'p', 'queued', 0, 0)",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after)
+         VALUES ('global', ?1, ?2, 'catalog_refresh', 'p', 'queued', 0, 0)",
         rusqlite::params![domain::JobId::new().to_string(), def_id],
     );
     assert!(duplicate.is_err(), "同一 def 只能有一个 queued");
@@ -507,8 +509,8 @@ fn queued_child_is_unique_per_def() {
     // running 部分唯一索引同样保留：同一 def 不能有两个 running。
     insert_job(&conn, Some(&def_id), "running", 0, None, None);
     let duplicate_running = conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after)
-         VALUES (?1, ?2, 'catalog_refresh', 'p', 'running', 0, 0)",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after)
+         VALUES ('global', ?1, ?2, 'catalog_refresh', 'p', 'running', 0, 0)",
         rusqlite::params![domain::JobId::new().to_string(), def_id],
     );
     assert!(duplicate_running.is_err(), "同一 def 只能有一个 running");

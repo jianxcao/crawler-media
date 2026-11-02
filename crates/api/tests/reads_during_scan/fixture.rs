@@ -68,6 +68,7 @@ impl Fixture {
             .unwrap()
             .ensure_def(jobs::NewDef {
                 kind: jobs::JobKind::SubscribeSearch,
+                scope: jobs::JobScope::Subscribe(subscribe),
                 name: "search interactive series".into(),
                 enabled: true,
                 schedule: None,

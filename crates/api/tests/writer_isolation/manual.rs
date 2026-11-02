@@ -241,7 +241,7 @@ fn scheduled_search_releases_subscribe_guard_during_add_and_tracks_success_after
         .acquire()
         .unwrap()
         .enqueue(
-            jobs::JobKind::SubscribeSearch,
+            jobs::JobIdentity::subscribe_search(id),
             &json!({"subscribe_id": id}).to_string(),
             0,
         )
@@ -376,7 +376,7 @@ fn assert_cancelled_library_stops_further_adds(manual: bool) {
                 .acquire()
                 .unwrap()
                 .enqueue(
-                    jobs::JobKind::SubscribeSearch,
+                    jobs::JobIdentity::subscribe_search(id),
                     &json!({"subscribe_id": id}).to_string(),
                     0,
                 )

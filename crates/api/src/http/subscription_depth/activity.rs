@@ -43,7 +43,7 @@ fn activities_blocking(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
     let jobs = match crate::jobs_readers::read(&state.jobs_readers, |queue| {
-        queue.jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit)
+        queue.jobs_for_identity(jobs::JobIdentity::subscribe_search(subscribe.id), limit)
     }) {
         Ok(jobs) => jobs,
         Err(error) => {

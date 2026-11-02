@@ -447,7 +447,7 @@ pub(crate) async fn replace_task(
                 return response;
             }
             let job = match queue.enqueue_with_key(
-                jobs::JobKind::SubscribeSearch,
+                jobs::JobIdentity::subscribe_search(subscribe_id),
                 &payload,
                 crate::job_loop::unix_now(),
                 Some(&format!("subscribe:{subscribe_id}")),

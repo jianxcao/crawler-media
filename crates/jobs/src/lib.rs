@@ -1,6 +1,8 @@
 pub mod change_state;
+mod identity;
 mod kinds;
 pub use change_state::JobChangeState;
+pub use identity::{JobIdentity, JobScope};
 mod media_refs;
 mod queue;
 mod queue_read;

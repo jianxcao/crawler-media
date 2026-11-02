@@ -38,10 +38,11 @@ fn assert_completed_result_retries(sql_busy: bool) {
         queue
             .with_connection(|db| db.execute("UPDATE job_defs SET enabled=0", []))
             .unwrap();
+        let subscribe_id = domain::SubscribeId::new();
         queue
             .enqueue(
-                jobs::JobKind::SubscribeSearch,
-                &format!(r#"{{"subscribe_id":"{}"}}"#, domain::SubscribeId::new()),
+                jobs::JobIdentity::subscribe_search(subscribe_id),
+                &format!(r#"{{"subscribe_id":"{}"}}"#, subscribe_id),
                 1,
             )
             .unwrap()

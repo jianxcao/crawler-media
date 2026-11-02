@@ -59,8 +59,9 @@ fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, d
 
     let queue = jobs::Queue::open(dir.join("jobs.db")).unwrap();
     queue
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::DataRetention,
+            scope: jobs::JobScope::Global,
             name: "retention".into(),
             enabled: true,
             schedule: None,

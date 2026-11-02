@@ -6,7 +6,7 @@ use crate::kinds::{JobKind, Schedule};
 use crate::types::{Job, JobDef, JobStatus};
 
 pub const JOB_COLS: &str = "id, def_id, kind, payload, status, attempt, run_after, \
-     started_at, finished_at, error, progress, concurrency_key, timeout_secs";
+     started_at, finished_at, error, progress, concurrency_key, timeout_secs, scope_key";
 
 pub fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     let kind = JobKind::from_str(&row.get::<_, String>(2)?).map_err(|e| col_err(2, e))?;
@@ -15,6 +15,7 @@ pub fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         id: parse_id(row, 0, JobId::from_str)?,
         def_id: optional_id(row, 1, JobDefId::from_str)?,
         kind,
+        scope: parse_id(row, 13, crate::JobScope::from_str)?,
         payload: row.get(3)?,
         status,
         attempt: row.get::<_, i64>(5)? as u32,
@@ -37,6 +38,7 @@ pub fn map_def(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobDef> {
     Ok(JobDef {
         id: parse_id(row, 0, JobDefId::from_str)?,
         kind,
+        scope: parse_id(row, 8, crate::JobScope::from_str)?,
         name: row.get(2)?,
         enabled: row.get::<_, i64>(3)? != 0,
         schedule,

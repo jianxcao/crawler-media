@@ -21,29 +21,6 @@ use crate::http::{err, ok, ok_list};
 use crate::maintenance::MaintenancePolicy;
 use crate::management::ApiState;
 
-fn job_media_title(payload_val: &Value, store: &crate::Store) -> Option<String> {
-    if let Some(sub_id_str) = payload_val.get("subscribe_id").and_then(|v| v.as_str()) {
-        if let Ok(sub_id) = domain::SubscribeId::from_str(sub_id_str) {
-            store
-                .get_subscribe(sub_id)
-                .ok()
-                .flatten()
-                .and_then(|sub| store.get_media(sub.media_id).ok().flatten())
-                .map(|m| m.title)
-        } else {
-            None
-        }
-    } else if let Some(med_id_str) = payload_val.get("media_id").and_then(|v| v.as_str()) {
-        if let Ok(med_id) = domain::MediaId::from_str(med_id_str) {
-            store.get_media(med_id).ok().flatten().map(|m| m.title)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
 fn job_friendly_name(name: &str, media_title: Option<&str>) -> String {
     if name.starts_with("search ") || name.starts_with("catalog ") {
         if let Some(title) = media_title {
@@ -81,10 +58,18 @@ fn job_last_status<'a>(
     }
 }
 
-/// 渲染 def 需要的 media title（payload → subscribe/media → store）。
+/// 渲染 def 需要的 media title（scope → Subscribe/Media → Store）。
 fn def_media_title(def: &jobs::JobDef, store: &crate::Store) -> Option<String> {
-    let payload_val: Value = serde_json::from_str(&def.payload).unwrap_or_else(|_| json!({}));
-    job_media_title(&payload_val, store)
+    match def.scope {
+        jobs::JobScope::Subscribe(id) => store
+            .get_subscribe(id)
+            .ok()
+            .flatten()
+            .and_then(|subscribe| store.get_media(subscribe.media_id).ok().flatten())
+            .map(|media| media.title),
+        jobs::JobScope::Media(id) => store.get_media(id).ok().flatten().map(|media| media.title),
+        jobs::JobScope::Global => None,
+    }
 }
 
 /// 维护 def 的策略摘要（typed，供前端参数抽屉直接渲染）。
@@ -160,6 +145,7 @@ fn def_json(
     let mut rendered = json!({
         "id": def.id.to_string(),
         "kind": def.kind.as_str(),
+        "scope_key": def.scope.to_string(),
         "name": def.name,
         "friendly_name": friendly_name,
         "enabled": def.enabled,
@@ -222,18 +208,7 @@ fn def_visible_to_user(
     if admin || def.kind != JobKind::SubscribeSearch {
         return true;
     }
-    let Some(raw_id) = serde_json::from_str::<Value>(&def.payload)
-        .ok()
-        .and_then(|payload| {
-            payload
-                .get("subscribe_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-    else {
-        return false;
-    };
-    let Ok(subscribe_id) = domain::SubscribeId::from_str(&raw_id) else {
+    let jobs::JobScope::Subscribe(subscribe_id) = def.scope else {
         return false;
     };
     store
@@ -330,16 +305,7 @@ fn visible_defs(
         .filter(|def| {
             let visible = admin
                 || def.kind != JobKind::SubscribeSearch
-                || serde_json::from_str::<Value>(&def.payload)
-                    .ok()
-                    .and_then(|payload| {
-                        payload
-                            .get("subscribe_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .and_then(|id| domain::SubscribeId::from_str(&id).ok())
-                    .is_some_and(|id| owned.contains(&id));
+                || matches!(def.scope,jobs::JobScope::Subscribe(id) if owned.contains(&id));
             if !visible {
                 return false;
             }

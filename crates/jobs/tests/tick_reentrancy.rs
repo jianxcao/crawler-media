@@ -35,7 +35,10 @@ impl Runner for ReentrantRunner {
 fn tick_runner_can_lock_queue() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Arc::new(Mutex::new(Queue::open(dir.path().join("jobs.db")).unwrap()));
-    queue.lock().enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    queue
+        .lock()
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     let (done_tx, done_rx) = mpsc::channel();
     let runner = ReentrantRunner {
         queue: Arc::clone(&queue),
@@ -64,7 +67,10 @@ fn tick_runner_can_lock_queue() {
 fn tick_persists_outcome_after_releasing_the_lock() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Arc::new(Mutex::new(Queue::open(dir.path().join("jobs.db")).unwrap()));
-    let job = queue.lock().enqueue(JobKind::Scrape, "{}", 0).unwrap();
+    let job = queue
+        .lock()
+        .enqueue(jobs::JobIdentity::global(JobKind::Scrape), "{}", 0)
+        .unwrap();
     let report = Queue::tick(&queue, &Failing, 0);
     assert!(report.error.is_none(), "{:?}", report.error);
     let stored = queue.lock().get(job.id).unwrap().unwrap();

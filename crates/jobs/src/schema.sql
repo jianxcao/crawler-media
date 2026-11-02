@@ -2,6 +2,7 @@
         CREATE TABLE job_defs (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
             name TEXT NOT NULL,
             enabled INTEGER NOT NULL,
             schedule TEXT,
@@ -9,10 +10,12 @@
             timeout_secs INTEGER,
             concurrency_key TEXT
         );
+        CREATE UNIQUE INDEX job_defs_identity ON job_defs(kind, scope_key);
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
             def_id TEXT,
             kind TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
             payload TEXT NOT NULL,
             status TEXT NOT NULL,
             attempt INTEGER NOT NULL DEFAULT 0,
@@ -30,7 +33,8 @@
             ON jobs(def_id) WHERE def_id IS NOT NULL AND status = 'queued';
         CREATE INDEX jobs_status_run_after_idx
             ON jobs(status, run_after) WHERE status = 'queued';
-        CREATE INDEX jobs_payload_idx ON jobs(payload);
+        CREATE INDEX jobs_identity_idx ON jobs(kind, scope_key, run_after DESC);
+        CREATE INDEX jobs_live_identity_idx ON jobs(kind, scope_key) WHERE status IN ('queued','running');
         CREATE INDEX jobs_finished_idx ON jobs(finished_at)
             WHERE finished_at IS NOT NULL;
         -- DB5：热查询索引。20 万行合成数据 + ANALYZE 的 before/after EQP 与耗时见

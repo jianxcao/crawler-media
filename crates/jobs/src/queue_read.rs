@@ -31,12 +31,19 @@ impl<'a> QueueRead<'a> {
         crate::store::get_job(self.conn, id)
     }
 
-    pub fn defs_for_payload(&self, payload: &str) -> Result<Vec<JobDef>, JobError> {
-        crate::schedule::defs_for_payload(self.conn, payload)
+    pub fn def_for_identity(
+        &self,
+        identity: crate::JobIdentity,
+    ) -> Result<Option<JobDef>, JobError> {
+        crate::schedule::def_for_identity(self.conn, identity)
     }
 
-    pub fn jobs_for_payload(&self, payload: &str, limit: usize) -> Result<Vec<Job>, JobError> {
-        crate::store::jobs_for_payload(self.conn, payload, limit)
+    pub fn jobs_for_identity(
+        &self,
+        identity: crate::JobIdentity,
+        limit: usize,
+    ) -> Result<Vec<Job>, JobError> {
+        crate::store::jobs_for_identity(self.conn, identity, limit)
     }
 
     pub fn change_state(&self) -> Result<crate::JobChangeState, JobError> {

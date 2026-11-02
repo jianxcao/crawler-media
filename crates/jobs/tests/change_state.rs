@@ -9,7 +9,9 @@ fn job_change_state_tracks_revisions_and_finished_counts() {
     assert_eq!(initial.finished_count, 0);
 
     // Enqueue job (unfinished)
-    let _job = queue.enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    let _job = queue
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     let after_enqueue = queue.change_state().unwrap();
     assert!(after_enqueue.revision > initial.revision);
     assert_eq!(after_enqueue.finished_count, 0);

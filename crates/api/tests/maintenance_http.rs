@@ -114,8 +114,8 @@ fn seed_terminal_job(root: &Path, def_id: domain::JobDefId, finished_at: i64) ->
     let conn = Connection::open(root.join("data/jobs.db")).unwrap();
     let id = domain::JobId::new().to_string();
     conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, finished_at)
-         VALUES (?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3)",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, finished_at)
+         VALUES ('global', ?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3)",
         rusqlite::params![id, def_id.to_string(), finished_at],
     )
     .unwrap();
@@ -132,8 +132,8 @@ fn seed_terminal_job_with_report(
     let conn = Connection::open(root.join("data/jobs.db")).unwrap();
     let id = domain::JobId::new().to_string();
     conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, finished_at, progress)
-         VALUES (?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3, ?4)",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, finished_at, progress)
+         VALUES ('global', ?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3, ?4)",
         rusqlite::params![id, def_id.to_string(), finished_at, progress],
     )
     .unwrap();
@@ -145,8 +145,8 @@ fn seed_orphan_terminal(root: &Path, finished_at: i64) -> String {
     let conn = Connection::open(root.join("data/jobs.db")).unwrap();
     let id = domain::JobId::new().to_string();
     conn.execute(
-        "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, finished_at)
-         VALUES (?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2)",
+        "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, finished_at)
+         VALUES ('global', ?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2)",
         rusqlite::params![id, finished_at],
     )
     .unwrap();
@@ -314,12 +314,13 @@ async fn invalid_or_unrelated_configs_are_rejected_without_persisting() {
 
     // 无关 kind（非维护 def）→ 400。
     let unrelated = queue(&state)
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media("00000000-0000-0000-0000-000000000001".parse().unwrap()),
             name: "catalog".into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: r#"{"media_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: None,
             concurrency_key: None,
         })
@@ -419,12 +420,13 @@ async fn preview_is_read_only_and_reports_bounded_counts() {
     assert_eq!(row_counts(tmp.path()), before, "preview 不得写 DB");
 
     let unrelated = queue(&state)
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media("00000000-0000-0000-0000-000000000001".parse().unwrap()),
             name: "catalog".into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: r#"{"media_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: None,
             concurrency_key: None,
         })
@@ -624,12 +626,13 @@ async fn jobs_list_exposes_maintenance_policy_report_and_keeps_other_defs_compat
     assert!(maintenance["last_report"].is_null(), "{maintenance}");
 
     let unrelated = queue(&state)
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media("00000000-0000-0000-0000-000000000001".parse().unwrap()),
             name: "catalog".into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: r#"{"media_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: None,
             concurrency_key: None,
         })
@@ -649,7 +652,10 @@ async fn jobs_list_exposes_maintenance_policy_report_and_keeps_other_defs_compat
     assert_eq!(plain["kind"], "catalog_refresh");
     assert_eq!(plain["name"], "catalog");
     assert_eq!(plain["enabled"], true);
-    assert_eq!(plain["payload"], json!({}));
+    assert_eq!(
+        plain["payload"],
+        json!({"media_id":"00000000-0000-0000-0000-000000000001"})
+    );
     assert_eq!(plain["schedule"], Value::Null);
     assert_eq!(plain["concurrency_key"], Value::Null);
     assert_eq!(plain["last_status"], Value::Null);

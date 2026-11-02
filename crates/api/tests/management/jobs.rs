@@ -596,3 +596,6 @@ async fn create_rss_subscribes(app: &axum::Router) -> Vec<SubscribeId> {
     }
     ids
 }
+
+#[path = "jobs_identity.rs"]
+mod identity;

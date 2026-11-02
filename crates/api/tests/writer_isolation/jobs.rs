@@ -18,7 +18,7 @@ fn job_claim_and_job_list_do_not_serialize() {
         let queue = shared.acquire().unwrap();
         entered.send(()).unwrap();
         queue.enqueue(
-            jobs::JobKind::SubscribeSearch,
+            jobs::JobIdentity::global(jobs::JobKind::Transfer),
             r#"{"writer_isolation":true}"#,
             0,
         )

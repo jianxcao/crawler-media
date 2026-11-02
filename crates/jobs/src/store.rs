@@ -1,7 +1,7 @@
 use domain::{JobDefId, JobId};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::kinds::{JobKind, Schedule};
+use crate::kinds::Schedule;
 use crate::queue::NewDef;
 use crate::rows::{JOB_COLS, map_job};
 use crate::types::{Job, JobDef, JobError, JobStatus};
@@ -11,16 +11,18 @@ pub use lifecycle::{fail, fail_claimed, finish_claimed, recover, recover_except}
 pub fn insert_job(
     conn: &Connection,
     def_id: Option<JobDefId>,
-    kind: JobKind,
+    identity: crate::JobIdentity,
     payload: &str,
     run_after: i64,
     concurrency_key: Option<&str>,
     timeout_secs: Option<u32>,
 ) -> Result<Job, JobError> {
+    identity.validate_payload(payload)?;
     let job = Job {
         id: JobId::new(),
         def_id,
-        kind,
+        kind: identity.kind,
+        scope: identity.scope,
         payload: payload.to_string(),
         status: JobStatus::Queued,
         attempt: 0,
@@ -35,8 +37,8 @@ pub fn insert_job(
     conn.execute(
         "INSERT INTO jobs (
             id, def_id, kind, payload, status, attempt, run_after,
-            started_at, finished_at, error, progress, concurrency_key, timeout_secs
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL, NULL, NULL, NULL, ?7, ?8)",
+            started_at, finished_at, error, progress, concurrency_key, timeout_secs, scope_key
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL, NULL, NULL, NULL, ?7, ?8, ?9)",
         params![
             job.id.to_string(),
             job.def_id.map(|id| id.to_string()),
@@ -46,15 +48,22 @@ pub fn insert_job(
             job.run_after,
             job.concurrency_key,
             job.timeout_secs,
+            job.scope.to_string(),
         ],
     )?;
     Ok(job)
 }
 
-pub fn upsert_def(conn: &Connection, def: NewDef) -> Result<JobDef, JobError> {
+pub fn create_def(conn: &Connection, def: NewDef) -> Result<JobDef, JobError> {
+    crate::JobIdentity {
+        kind: def.kind,
+        scope: def.scope,
+    }
+    .validate_payload(&def.payload)?;
     let stored = JobDef {
         id: JobDefId::new(),
         kind: def.kind,
+        scope: def.scope,
         name: def.name,
         enabled: def.enabled,
         schedule: def.schedule,
@@ -64,8 +73,8 @@ pub fn upsert_def(conn: &Connection, def: NewDef) -> Result<JobDef, JobError> {
     };
     conn.execute(
         "INSERT INTO job_defs (
-            id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key, scope_key
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             stored.id.to_string(),
             stored.kind.as_str(),
@@ -75,21 +84,35 @@ pub fn upsert_def(conn: &Connection, def: NewDef) -> Result<JobDef, JobError> {
             stored.payload,
             stored.timeout_secs,
             stored.concurrency_key,
+            stored.scope.to_string(),
         ],
     )?;
     Ok(stored)
 }
 
 pub fn ensure_def(conn: &Connection, def: NewDef) -> Result<JobDef, JobError> {
-    let key = def.concurrency_key.clone();
-    let kind = def.kind.as_str().to_string();
-    let existing = crate::schedule::list_defs(conn)?
-        .into_iter()
-        .find(|row| row.kind.as_str() == kind && row.concurrency_key == key);
-    if let Some(existing) = existing {
-        return Ok(existing);
+    let identity = crate::JobIdentity {
+        kind: def.kind,
+        scope: def.scope,
+    };
+    identity.validate_payload(&def.payload)?;
+    let tx = if conn.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    let existing = crate::schedule::def_for_identity(conn, identity)?;
+    let result = match existing {
+        Some(existing) => existing,
+        None => create_def(conn, def)?,
+    };
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
-    upsert_def(conn, def)
+    Ok(result)
 }
 
 pub fn claim(conn: &Connection, now: i64, limit: usize) -> Result<Vec<Job>, JobError> {
@@ -201,30 +224,51 @@ pub fn get_job(conn: &Connection, id: JobId) -> Result<Option<Job>, JobError> {
     .map_err(Into::into)
 }
 
-/// Delete job defs whose payload matches exactly, and their child jobs.
-pub fn delete_defs_for_payload(conn: &Connection, payload: &str) -> Result<usize, JobError> {
-    let ids: Vec<String> = conn
-        .prepare("SELECT id FROM job_defs WHERE payload = ?1")?
-        .query_map(params![payload], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut removed = 0;
-    for id in &ids {
-        conn.execute("DELETE FROM jobs WHERE def_id = ?1", params![id])?;
-        removed += conn.execute("DELETE FROM job_defs WHERE id = ?1", params![id])?;
+pub fn delete_def(conn: &Connection, identity: crate::JobIdentity) -> Result<usize, JobError> {
+    identity.validate()?;
+    let tx = if conn.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    conn.execute(
+        "DELETE FROM jobs WHERE kind=?1 AND scope_key=?2",
+        params![identity.kind.as_str(), identity.scope.to_string()],
+    )?;
+    let removed = conn.execute(
+        "DELETE FROM job_defs WHERE kind=?1 AND scope_key=?2",
+        params![identity.kind.as_str(), identity.scope.to_string()],
+    )?;
+    if let crate::JobScope::Subscribe(id) = identity.scope {
+        conn.execute(
+            "DELETE FROM subscribe_config_receipts WHERE subscribe_id=?1",
+            [id.to_string()],
+        )?;
+    }
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
     Ok(removed)
 }
 
-/// Recent child jobs (any status) whose payload matches, newest first.
-pub fn jobs_for_payload(
+pub fn jobs_for_identity(
     conn: &Connection,
-    payload: &str,
+    identity: crate::JobIdentity,
     limit: usize,
 ) -> Result<Vec<Job>, JobError> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {JOB_COLS} FROM jobs WHERE payload = ?1 ORDER BY run_after DESC LIMIT ?2"
-    ))?;
-    let rows = stmt.query_map(params![payload, limit as i64], map_job)?;
+    identity.validate()?;
+    let mut stmt = conn.prepare(&format!("SELECT {JOB_COLS} FROM jobs WHERE kind=?1 AND scope_key=?2 ORDER BY run_after DESC LIMIT ?3"))?;
+    let rows = stmt.query_map(
+        params![
+            identity.kind.as_str(),
+            identity.scope.to_string(),
+            limit as i64
+        ],
+        map_job,
+    )?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -264,6 +308,12 @@ pub fn update_def_config_cas(
     if !same_payload(&current, expected_payload) {
         return Ok(PayloadUpdate::Conflict);
     }
+    let def = crate::schedule::get_def(&tx, def_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    crate::JobIdentity {
+        kind: def.kind,
+        scope: def.scope,
+    }
+    .validate_payload(new_payload)?;
     tx.execute(
         "UPDATE job_defs SET payload = ?1 WHERE id = ?2",
         params![new_payload, def_id.to_string()],
@@ -317,6 +367,14 @@ pub fn set_def_enabled_by_id(
     def_id: JobDefId,
     enabled: bool,
 ) -> Result<usize, JobError> {
+    let tx = if conn.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
     let changed = conn.execute(
         "UPDATE job_defs SET enabled = ?1 WHERE id = ?2",
         params![enabled as i64, def_id.to_string()],
@@ -324,42 +382,47 @@ pub fn set_def_enabled_by_id(
     if !enabled {
         cancel_def_children(conn, def_id)?;
     }
-    Ok(changed)
-}
-
-/// Enable or disable every def whose payload matches exactly.
-/// Disabled defs are skipped by `ensure_scheduled`, do not spawn follow-ups,
-/// and cancel any queued children.
-pub fn set_def_enabled(conn: &Connection, payload: &str, enabled: bool) -> Result<usize, JobError> {
-    let changed = conn.execute(
-        "UPDATE job_defs SET enabled = ?1 WHERE payload = ?2",
-        params![enabled as i64, payload],
-    )?;
-    if !enabled {
-        cancel_queued_children_for_payload(conn, payload)?;
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
     Ok(changed)
 }
 
-fn cancel_queued_children_for_payload(conn: &Connection, payload: &str) -> Result<(), JobError> {
-    conn.execute(
-        "UPDATE jobs SET status = 'cancelled', finished_at = strftime('%s','now')
-         WHERE status = 'queued' AND def_id IN (
-             SELECT id FROM job_defs WHERE payload = ?1
-         )",
-        params![payload],
-    )?;
-    Ok(())
+pub fn set_def_enabled(
+    conn: &Connection,
+    identity: crate::JobIdentity,
+    enabled: bool,
+) -> Result<usize, JobError> {
+    let Some(def) = crate::schedule::def_for_identity(conn, identity)? else {
+        return Ok(0);
+    };
+    let tx = if conn.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    let changed = set_def_enabled_by_id(conn, def.id, enabled)?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(changed)
 }
-
 pub fn set_def_schedule(
     conn: &Connection,
-    payload: &str,
+    identity: crate::JobIdentity,
     schedule: &Schedule,
 ) -> Result<usize, JobError> {
+    identity.validate()?;
     conn.execute(
-        "UPDATE job_defs SET schedule = ?1 WHERE payload = ?2",
-        params![schedule.as_str(), payload],
+        "UPDATE job_defs SET schedule=?1 WHERE kind=?2 AND scope_key=?3",
+        params![
+            schedule.as_str(),
+            identity.kind.as_str(),
+            identity.scope.to_string()
+        ],
     )
     .map_err(Into::into)
 }

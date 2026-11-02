@@ -111,7 +111,7 @@ async fn slow_io_and_maintenance_keep_auth_and_heartbeat_available() {
         let guard = queue.acquire().unwrap();
         let job = guard
             .enqueue(
-                JobKind::DatabaseMaintenance,
+                jobs::JobIdentity::global(JobKind::DatabaseMaintenance),
                 r#"{"version":1,"vacuum_enabled":false}"#,
                 0,
             )
@@ -258,7 +258,11 @@ async fn cancel_and_restart_do_not_expand_worker_budgets_or_lose_jobs() {
         let ids: Vec<_> = (0..5)
             .map(|_| {
                 queue
-                    .enqueue(JobKind::DatabaseMaintenance, "{}", 0)
+                    .enqueue(
+                        jobs::JobIdentity::global(JobKind::DatabaseMaintenance),
+                        "{}",
+                        0,
+                    )
                     .unwrap()
                     .id
             })
@@ -342,7 +346,11 @@ fn r3_r4_durable_queue_capacity_and_drain_are_behaviorally_red() {
     let mut ids: Vec<_> = (0..23)
         .map(|_| {
             queue
-                .enqueue(JobKind::DatabaseMaintenance, "{}", 0)
+                .enqueue(
+                    jobs::JobIdentity::global(JobKind::DatabaseMaintenance),
+                    "{}",
+                    0,
+                )
                 .unwrap()
                 .id
         })

@@ -317,14 +317,16 @@ async fn collection_keyset_filters_hidden_members_before_count_and_page() {
 
 fn add_title_job(fixture: &Fixture, n: u64, extra: Option<Value>) {
     let id = fixture.add(n);
-    let payload = extra.unwrap_or_else(|| serde_json::json!({ "media_id": id }));
+    let mut payload = extra.unwrap_or_else(|| serde_json::json!({ "media_id": id }));
+    payload["media_id"] = serde_json::json!(id);
     fixture
         .state
         .jobs()
         .acquire()
         .unwrap()
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(id),
             name: format!("catalog {n}"),
             enabled: true,
             schedule: None,
@@ -371,7 +373,7 @@ async fn actual_jobs_selected_title_statement_count_is_constant_for_five_and_fif
 }
 
 #[tokio::test]
-async fn jobs_invalid_subscribe_reference_does_not_fall_back_to_direct_media_title() {
+async fn jobs_catalog_identity_ignores_unrelated_subscribe_argument() {
     let fixture = Fixture::new();
     let media = fixture.add(1);
     add_title_job(
@@ -388,11 +390,11 @@ async fn jobs_invalid_subscribe_reference_does_not_fall_back_to_direct_media_tit
         .iter()
         .find(|row| row["name"] == "catalog 2")
         .unwrap();
-    assert_eq!(row["friendly_name"], "catalog 2");
+    assert_eq!(row["friendly_name"], "刷新元数据《Movie 2》");
 }
 
 #[tokio::test]
-async fn jobs_subscription_title_wins_over_payload_media_and_missing_subscription_stays_raw() {
+async fn jobs_catalog_titles_follow_scope_despite_subscribe_arguments() {
     let fixture = Fixture::new();
     let subscribed_media = fixture.add(1);
     let direct_media = fixture.add(2);
@@ -440,8 +442,8 @@ async fn jobs_subscription_title_wins_over_payload_media_and_missing_subscriptio
             .as_str()
             .unwrap()
     };
-    assert_eq!(name(3), "刷新元数据《Movie 1》");
-    assert_eq!(name(4), "catalog 4");
+    assert_eq!(name(3), "刷新元数据《Movie 3》");
+    assert_eq!(name(4), "刷新元数据《Movie 4》");
 }
 
 fn add_missing_file(fixture: &Fixture, n: u64) {

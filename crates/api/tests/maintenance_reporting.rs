@@ -56,12 +56,12 @@ async fn protected_count_in_preview_and_run_does_not_double_count_and_marks_trun
             let def_id = domain::JobDefId::new().to_string();
             let job_id = domain::JobId::new().to_string();
             conn.execute(
-                "INSERT INTO job_defs (id, kind, name, enabled, payload) VALUES (?1, 'scrape', 'test', 1, '{}')",
+                "INSERT INTO job_defs (scope_key, id, kind, name, enabled, payload) VALUES ('media:'||?1, ?1, 'catalog_refresh', 'test', 1, json_object('media_id',?1))",
                 rusqlite::params![def_id],
             ).unwrap();
             conn.execute(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-                 VALUES (?1, ?2, 'scrape', '{}', 'succeeded', 0, ?3, ?3, ?3)",
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+                 VALUES ('media:'||?2, ?1, ?2, 'catalog_refresh', json_object('media_id',?2), 'succeeded', 0, ?3, ?3, ?3)",
                 rusqlite::params![job_id, def_id, now - 100 * DAY],
             ).unwrap();
         }
@@ -69,8 +69,8 @@ async fn protected_count_in_preview_and_run_does_not_double_count_and_marks_trun
         for _i in 0..1200 {
             let job_id = domain::JobId::new().to_string();
             conn.execute(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-                 VALUES (?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+                 VALUES ('global', ?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
                 rusqlite::params![job_id, now - 100 * DAY],
             ).unwrap();
         }

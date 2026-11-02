@@ -21,8 +21,12 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
         let queue = state.jobs();
         let guard = queue.acquire().unwrap();
         guard
-            .upsert_def(NewDef {
+            .delete_def(jobs::JobIdentity::global(JobKind::JobsRetention))
+            .unwrap();
+        guard
+            .create_def(NewDef {
                 kind: JobKind::JobsRetention,
+                scope: jobs::JobScope::Global,
                 name: "jobs_retention_test".into(),
                 enabled: true,
                 schedule: Some(jobs::Schedule::Interval { secs: 86400 }),
@@ -148,8 +152,8 @@ fn seed_expired_jobs(state: &api::management::ApiState, now: i64) {
         {
             let mut stmt = conn
                 .prepare(
-                    "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
-                     VALUES (?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
+                    "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
+                     VALUES ('global', ?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
                 )
                 .unwrap();
             for i in 0..10000 {

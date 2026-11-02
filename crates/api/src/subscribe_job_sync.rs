@@ -68,37 +68,34 @@ pub(crate) fn publish(
 ) -> Result<(), JobsMutationError> {
     let queue = reservation.acquire()?;
     let subscribe = &intent.subscribe;
-    let id = subscribe.id.to_string();
     queue.apply_subscribe_config(subscribe.id, &intent.generation, intent.revision, |queue| {
-        let payload = crate::http::subscribe_schedule::search_payload(&id);
-        if queue.defs_for_payload(&payload)?.is_empty() {
+        if queue
+            .def_for_identity(jobs::JobIdentity::subscribe_search(subscribe.id))?
+            .is_none()
+        {
             crate::jobs_api::seed_subscribe_search_every(
                 &queue,
-                &id,
+                subscribe.id,
                 subscribe.search_interval_secs,
                 Some(title),
             )?;
         }
         crate::http::subscribe_schedule::sync_search_job(
             &queue,
-            &id,
+            subscribe.id,
             subscribe.tracking_state == "paused",
         )?;
         crate::http::subscribe_schedule::set_search_interval(
             &queue,
-            &id,
+            subscribe.id,
             subscribe.search_interval_secs,
         )?;
-        if intent.create {
-            let catalog_payload =
-                serde_json::json!({"media_id":subscribe.media_id.to_string()}).to_string();
-            if queue.defs_for_payload(&catalog_payload)?.is_empty() {
-                crate::jobs_api::seed_catalog_refresh(
-                    &queue,
-                    &subscribe.media_id.to_string(),
-                    Some(title),
-                )?;
-            }
+        if intent.create
+            && queue
+                .def_for_identity(jobs::JobIdentity::catalog_refresh(subscribe.media_id))?
+                .is_none()
+        {
+            crate::jobs_api::seed_catalog_refresh(&queue, subscribe.media_id, Some(title))?;
         }
         Ok(())
     })?;
@@ -141,9 +138,9 @@ pub(crate) fn cleanup_deleted(
         return Ok(());
     }
     if state.store.get_subscribe(id)?.is_none() {
-        reservation.acquire()?.delete_defs_for_payload(
-            &serde_json::json!({"subscribe_id":id.to_string()}).to_string(),
-        )?;
+        reservation
+            .acquire()?
+            .delete_def(jobs::JobIdentity::subscribe_search(id))?;
     }
     // A new parent owns its definitions; acknowledge only the old tombstone.
     state

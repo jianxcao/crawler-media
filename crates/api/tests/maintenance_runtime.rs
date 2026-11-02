@@ -198,9 +198,9 @@ fn raw_terminal_jobs(data: &Path, def_id: Option<&str>, count: usize, finished_a
         let mut stmt = conn
             .prepare(
                 "INSERT INTO jobs
-                    (id, def_id, kind, payload, status, attempt, run_after, started_at,
+                    (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at,
                      finished_at, error, progress, concurrency_key, timeout_secs)
-                 VALUES (?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3, ?3, NULL, NULL, NULL, NULL)",
+                 VALUES ('global', ?1, ?2, 'jobs_retention', '{}', 'succeeded', 0, ?3, ?3, ?3, NULL, NULL, NULL, NULL)",
             )
             .unwrap();
         for index in 0..count {
@@ -250,12 +250,19 @@ fn jobs_retention_does_not_loop_when_all_candidates_are_protected() {
     let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
     let data = data_dir(&state);
     let now = unix_now();
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .delete_def(jobs::JobIdentity::global(JobKind::JobsRetention))
+        .unwrap();
     let def = state
         .jobs()
         .acquire()
         .unwrap()
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::JobsRetention,
+            scope: jobs::JobScope::Global,
             name: "tied".into(),
             enabled: false,
             schedule: None,

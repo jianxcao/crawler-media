@@ -6,7 +6,9 @@ fn independent_queue_creation_stamps_complete_layout_and_preserves_jobs_on_reope
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("jobs.db");
     let queue = Queue::open(&path).unwrap();
-    let job = queue.enqueue(JobKind::Transfer, "keep", 10).unwrap();
+    let job = queue
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "keep", 10)
+        .unwrap();
     drop(queue);
     let conn = Connection::open(&path).unwrap();
     let identity: (i64, i64) = (

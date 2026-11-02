@@ -11,6 +11,7 @@ use crate::types::{Job, JobDef, JobError, JobStatus};
 
 pub struct NewDef {
     pub kind: JobKind,
+    pub scope: crate::JobScope,
     pub name: String,
     pub enabled: bool,
     pub schedule: Option<Schedule>,
@@ -55,22 +56,32 @@ impl Queue {
         work(&self.conn)
     }
 
-    pub fn enqueue(&self, kind: JobKind, payload: &str, run_after: i64) -> Result<Job, JobError> {
-        self.enqueue_with_key(kind, payload, run_after, None)
+    pub fn enqueue(
+        &self,
+        identity: crate::JobIdentity,
+        payload: &str,
+        run_after: i64,
+    ) -> Result<Job, JobError> {
+        self.enqueue_with_key(identity, payload, run_after, None)
     }
 
     pub fn enqueue_with_key(
         &self,
-        kind: JobKind,
+        identity: crate::JobIdentity,
         payload: &str,
         run_after: i64,
         concurrency_key: Option<&str>,
     ) -> Result<Job, JobError> {
-        tracing::debug!(kind = kind.as_str(), run_after, concurrency_key, "任务入队");
+        tracing::debug!(
+            kind = identity.kind.as_str(),
+            run_after,
+            concurrency_key,
+            "任务入队"
+        );
         store::insert_job(
             &self.conn,
             None,
-            kind,
+            identity,
             payload,
             run_after,
             concurrency_key,
@@ -78,10 +89,12 @@ impl Queue {
         )
     }
 
-    pub fn upsert_def(&self, def: NewDef) -> Result<JobDef, JobError> {
-        store::upsert_def(&self.conn, def)
+    /// Create one definition; duplicate (kind, scope) returns a uniqueness error.
+    pub fn create_def(&self, def: NewDef) -> Result<JobDef, JobError> {
+        store::create_def(&self.conn, def)
     }
 
+    /// Atomically create or return the existing identity without changing its settings.
     pub fn ensure_def(&self, def: NewDef) -> Result<JobDef, JobError> {
         store::ensure_def(&self.conn, def)
     }
@@ -178,28 +191,24 @@ impl Queue {
         crate::schedule::ensure_scheduled_def(&self.conn, now, &def)
     }
 
-    /// 只调度/提前 payload 匹配的 def（订阅搜索 / 目录刷新种子用）。
-    pub fn ensure_scheduled_for_payload(
+    pub fn ensure_scheduled_identity(
         &self,
         now: i64,
-        payload: &str,
+        identity: crate::JobIdentity,
     ) -> Result<Vec<Job>, JobError> {
-        let mut created = Vec::new();
-        for def in crate::schedule::defs_for_payload(&self.conn, payload)? {
-            created.extend(crate::schedule::ensure_scheduled_def(
-                &self.conn, now, &def,
-            )?);
-        }
-        Ok(created)
+        let Some(def) = crate::schedule::def_for_identity(&self.conn, identity)? else {
+            return Ok(Vec::new());
+        };
+        crate::schedule::ensure_scheduled_def(&self.conn, now, &def)
     }
 
     pub fn get(&self, id: JobId) -> Result<Option<Job>, JobError> {
         store::get_job(&self.conn, id)
     }
 
-    /// Delete defs whose payload exactly matches, plus their child jobs.
-    pub fn delete_defs_for_payload(&self, payload: &str) -> Result<usize, JobError> {
-        store::delete_defs_for_payload(&self.conn, payload)
+    /// Delete one identity, its runs (including defless runs), and Subscribe receipts.
+    pub fn delete_def(&self, identity: crate::JobIdentity) -> Result<usize, JobError> {
+        store::delete_def(&self.conn, identity)
     }
 
     pub fn set_def_enabled_by_id(
@@ -253,14 +262,22 @@ impl Queue {
     pub fn change_state(&self) -> Result<crate::change_state::JobChangeState, JobError> {
         crate::change_state::get_job_change_state(&self.conn)
     }
-    /// Enable or disable defs whose payload matches. Disabled defs are not scheduled,
+    /// Enable or disable one structured identity. Disabled defs are not scheduled,
     /// and queued children are cancelled by the store layer.
-    pub fn set_def_enabled(&self, payload: &str, enabled: bool) -> Result<usize, JobError> {
-        store::set_def_enabled(&self.conn, payload, enabled)
+    pub fn set_def_enabled(
+        &self,
+        identity: crate::JobIdentity,
+        enabled: bool,
+    ) -> Result<usize, JobError> {
+        store::set_def_enabled(&self.conn, identity, enabled)
     }
 
-    pub fn set_def_schedule(&self, payload: &str, schedule: Schedule) -> Result<usize, JobError> {
-        store::set_def_schedule(&self.conn, payload, &schedule)
+    pub fn set_def_schedule(
+        &self,
+        identity: crate::JobIdentity,
+        schedule: Schedule,
+    ) -> Result<usize, JobError> {
+        store::set_def_schedule(&self.conn, identity, &schedule)
     }
 
     pub fn set_def_schedule_by_id(
@@ -271,13 +288,18 @@ impl Queue {
         store::set_def_schedule_by_id(&self.conn, def_id, schedule.as_ref())
     }
 
-    pub fn defs_for_payload(&self, payload: &str) -> Result<Vec<JobDef>, JobError> {
-        crate::schedule::defs_for_payload(&self.conn, payload)
+    pub fn def_for_identity(
+        &self,
+        identity: crate::JobIdentity,
+    ) -> Result<Option<JobDef>, JobError> {
+        crate::schedule::def_for_identity(&self.conn, identity)
     }
-
-    /// Recent child jobs (any status) whose payload matches, newest first.
-    pub fn jobs_for_payload(&self, payload: &str, limit: usize) -> Vec<Job> {
-        store::jobs_for_payload(&self.conn, payload, limit).unwrap_or_default()
+    pub fn jobs_for_identity(
+        &self,
+        identity: crate::JobIdentity,
+        limit: usize,
+    ) -> Result<Vec<Job>, JobError> {
+        store::jobs_for_identity(&self.conn, identity, limit)
     }
 
     /// Cancel queued children of a def; running external work is allowed to finish.

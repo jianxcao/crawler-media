@@ -29,6 +29,7 @@ fn seed_subscribe(f: &Fixture) -> domain::SubscribeId {
         .unwrap()
         .ensure_def(jobs::NewDef {
             kind: jobs::JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(id),
             name: format!("search {id}"),
             enabled: true,
             schedule: Some(jobs::Schedule::Interval { secs: 1800 }),

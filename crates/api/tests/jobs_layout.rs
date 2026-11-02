@@ -15,7 +15,13 @@ async fn independently_created_queue_reopens_through_api_and_retains_inflight_jo
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     let queue = jobs::Queue::open(data.join("jobs.db")).unwrap();
-    let job = queue.enqueue(jobs::JobKind::Transfer, "keep", 10).unwrap();
+    let job = queue
+        .enqueue(
+            jobs::JobIdentity::global(jobs::JobKind::Transfer),
+            "keep",
+            10,
+        )
+        .unwrap();
     let claimed = queue.claim(10, 1).unwrap().pop().unwrap();
     assert_eq!(claimed.id, job.id);
     drop(queue);

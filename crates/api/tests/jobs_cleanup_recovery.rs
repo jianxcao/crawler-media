@@ -33,13 +33,21 @@ fn cleanup_intent_is_atomic_and_old_generation_cannot_delete_recreated_parent_jo
         Some(old)
     );
     store.insert_subscribe(&template).unwrap();
+    fixture
+        .state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .delete_def(jobs::JobIdentity::subscribe_search(fixture.subscribe))
+        .unwrap();
     let def = fixture
         .state
         .jobs()
         .acquire()
         .unwrap()
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(fixture.subscribe),
             name: "new parent".into(),
             enabled: false,
             schedule: None,
@@ -121,11 +129,16 @@ fn postcommit_cleanup_reader_busy_reports_success_then_recovers() {
     fixture.pending();
     let store = fixture.state.store();
     let jobs = fixture.state.jobs();
+    jobs.acquire()
+        .unwrap()
+        .delete_def(jobs::JobIdentity::subscribe_search(fixture.subscribe))
+        .unwrap();
     let def = jobs
         .acquire()
         .unwrap()
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(fixture.subscribe),
             name: "postcommit cleanup".into(),
             enabled: false,
             schedule: None,

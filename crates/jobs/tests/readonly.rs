@@ -6,8 +6,9 @@ fn queue_reader_serves_committed_jobs_while_the_writer_has_an_open_transaction()
     let path = temporary.path().join("jobs.db");
     let writer = Queue::open(&path).unwrap();
     let def = writer
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "Transfer".into(),
             enabled: true,
             schedule: None,
@@ -57,7 +58,9 @@ fn queue_reader_previews_retention_without_acquiring_a_writer_transaction() {
     let temporary = tempfile::tempdir_in("/tmp").unwrap();
     let path = temporary.path().join("jobs.db");
     let writer = Queue::open(&path).unwrap();
-    let job = writer.enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    let job = writer
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     writer.claim(1, 1).unwrap();
     writer.succeed(job.id, 2).unwrap();
     let connection =

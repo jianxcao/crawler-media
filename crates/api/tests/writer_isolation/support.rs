@@ -193,6 +193,7 @@ impl Fixture {
             .unwrap()
             .ensure_def(jobs::NewDef {
                 kind: jobs::JobKind::SubscribeSearch,
+                scope: jobs::JobScope::Subscribe(subscribe.id),
                 name: "Writer isolation Subscribe".into(),
                 enabled: true,
                 schedule: Some(jobs::Schedule::Interval { secs: 1800 }),

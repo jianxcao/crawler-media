@@ -56,16 +56,18 @@ async fn get_json(app: &axum::Router, uri: &str) -> Value {
 }
 
 fn add_finished_child(state: &ApiState, name: &str) -> jobs::JobDef {
+    let media_id = domain::MediaId::new();
     let queue = state.jobs();
     let def = queue
         .acquire()
         .unwrap()
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(media_id),
             name: name.into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: serde_json::json!({"media_id":media_id}).to_string(),
             timeout_secs: None,
             concurrency_key: None,
         })
@@ -190,12 +192,13 @@ async fn jobs_list_reports_live_child_while_job_runs() {
     let def = queue
         .acquire()
         .unwrap()
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media("00000000-0000-0000-0000-000000000001".parse().unwrap()),
             name: "running-def".into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: r#"{"media_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: None,
             concurrency_key: None,
         })

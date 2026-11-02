@@ -1,31 +1,9 @@
 //! Resolve only the selected Jobs' titles through two bounded SQL batches.
-use domain::{MediaId, SubscribeId};
-use serde_json::Value;
+use jobs::JobScope as Source;
 use std::collections::HashSet;
-use std::str::FromStr;
-
-#[derive(Clone, Copy)]
-enum Source {
-    Subscribe(SubscribeId),
-    Media(MediaId),
-    None,
-}
 
 fn source(def: &jobs::JobDef) -> Source {
-    let Ok(payload) = serde_json::from_str::<Value>(&def.payload) else {
-        return Source::None;
-    };
-    if let Some(raw) = payload.get("subscribe_id").and_then(Value::as_str) {
-        return SubscribeId::from_str(raw)
-            .map(Source::Subscribe)
-            .unwrap_or(Source::None);
-    }
-    payload
-        .get("media_id")
-        .and_then(Value::as_str)
-        .and_then(|raw| MediaId::from_str(raw).ok())
-        .map(Source::Media)
-        .unwrap_or(Source::None)
+    def.scope
 }
 
 pub(super) fn selected_titles(
@@ -51,7 +29,7 @@ pub(super) fn selected_titles(
         .filter_map(|source| match source {
             Source::Subscribe(id) => subscribed_media.get(id).copied(),
             Source::Media(id) => Some(*id),
-            Source::None => None,
+            Source::Global => None,
         })
         .collect::<HashSet<_>>()
         .into_iter()
@@ -63,7 +41,7 @@ pub(super) fn selected_titles(
             let id = match source {
                 Source::Subscribe(id) => subscribed_media.get(id)?,
                 Source::Media(id) => id,
-                Source::None => return None,
+                Source::Global => return None,
             };
             media.get(id).map(|row| row.title.clone())
         })

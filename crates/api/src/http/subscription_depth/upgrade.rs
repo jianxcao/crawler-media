@@ -123,7 +123,7 @@ fn upgrade_blocking(
         }
         if let Err(error) = crate::jobs_api::seed_subscribe_search(
             &queue,
-            &snapshot.subscribe.id.to_string(),
+            snapshot.subscribe.id,
             Some(&snapshot.media.title),
         ) {
             tracing::error!(%error, subscribe_id=%snapshot.subscribe.id, "Subscribe upgrade queue failed");

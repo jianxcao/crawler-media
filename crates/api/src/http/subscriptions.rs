@@ -524,11 +524,7 @@ fn subscription_search_blocking(state: &ApiState, user_id: UserId, id: &str) -> 
         Ok(queue) => queue,
         Err(error) => return crate::http::jobs::jobs_acquire_response(error),
     };
-    match crate::jobs_api::seed_subscribe_search(
-        &queue,
-        &subscribe.id.to_string(),
-        Some(&media.title),
-    ) {
+    match crate::jobs_api::seed_subscribe_search(&queue, subscribe.id, Some(&media.title)) {
         Ok(_) => ok(json!({ "queued": true })).into_response(),
         Err(error) => err(
             StatusCode::INTERNAL_SERVER_ERROR,

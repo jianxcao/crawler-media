@@ -187,8 +187,9 @@ fn seed_catalog_refresh_def(state: &ApiState, media_id: &str) -> domain::JobDefI
         .jobs()
         .acquire()
         .unwrap()
-        .upsert_def(jobs::NewDef {
+        .create_def(jobs::NewDef {
             kind: jobs::JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(media_id.parse().unwrap()),
             name: format!("catalog {media_id}"),
             enabled: false,
             schedule: None,
@@ -411,4 +412,157 @@ async fn overlapping_convergence_success_cannot_clear_newer_failed_retry() {
     })
     .await
     .expect("older successful snapshot must preserve newer failed retry");
+}
+
+#[test]
+fn chained_retired_media_converges_directly_to_final_survivor_and_reopens() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = stage(&temp);
+    let a = "00000000-0000-0000-0000-000000000002";
+    let b = "00000000-0000-0000-0000-000000000001";
+    let c = "00000000-0000-0000-0000-000000000000";
+    // Insert B before A: retired-map iteration must not become an ordering dependency.
+    for id in [b, a, c] {
+        media(state.store().as_ref(), id);
+    }
+    let def = seed_catalog_refresh_def(&state, a);
+    let db = rusqlite::Connection::open(temp.path().join("data/library.db")).unwrap();
+    for (from, to) in [(b, c), (a, b)] {
+        db.execute(
+            "UPDATE media SET identity_state='retired',survivor_id=?2 WHERE media_id=?1",
+            rusqlite::params![from, to],
+        )
+        .unwrap();
+    }
+    drop(db);
+    assert!(api::storage_operations::converge_retired_media_refs(&state) > 0);
+    assert_eq!(payload_media_id(&state, def), c);
+    drop(state);
+    for _ in 0..2 {
+        let state = stage(&temp);
+        assert_eq!(
+            api::storage_operations::converge_retired_media_refs(&state),
+            0
+        );
+        assert_eq!(payload_media_id(&state, def), c);
+    }
+}
+
+#[tokio::test]
+async fn running_catalog_collision_retries_automatically_after_receipt_and_reopens() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = stage(&temp);
+    let (survivor, loser) = sample_media_ids();
+    for id in [survivor, loser] {
+        media(state.store().as_ref(), id);
+    }
+    let source = seed_catalog_refresh_def(&state, loser);
+    let target = seed_catalog_refresh_def(&state, survivor);
+    let claimed = {
+        let queue = state.jobs();
+        let q = queue.acquire().unwrap();
+        q.set_def_enabled_by_id(source, true).unwrap();
+        q.ensure_scheduled_for(0, source).unwrap();
+        let claimed = q
+            .claim(0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|j| j.def_id == Some(source))
+            .unwrap();
+        q.set_job_progress(claimed.id, "receipt").unwrap();
+        q.ensure_scheduled_for(0, source).unwrap();
+        claimed
+    };
+    let db = rusqlite::Connection::open(temp.path().join("data/library.db")).unwrap();
+    db.execute(
+        "UPDATE media SET identity_state='retired',survivor_id=?2 WHERE media_id=?1",
+        rusqlite::params![loser, survivor],
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(
+        api::storage_operations::converge_retired_media_refs(&state),
+        0
+    );
+    state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .succeed_claimed(&claimed, 1)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            api::storage_operations::advance_media_merges(&state, 2);
+            if state
+                .jobs()
+                .acquire()
+                .unwrap()
+                .def(source)
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("running collision must automatically converge after completion");
+    let receipt = state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .get(claimed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, jobs::JobStatus::Succeeded);
+    assert_eq!(receipt.progress.as_deref(), Some("receipt"));
+    assert!(
+        !state
+            .jobs()
+            .acquire()
+            .unwrap()
+            .def(target)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        state
+            .jobs()
+            .acquire()
+            .unwrap()
+            .get_live_child(target)
+            .unwrap()
+            .is_some()
+    );
+    drop(state);
+    for _ in 0..2 {
+        let state = stage(&temp);
+        assert_eq!(
+            api::storage_operations::converge_retired_media_refs(&state),
+            0
+        );
+        assert!(
+            state
+                .jobs()
+                .acquire()
+                .unwrap()
+                .get_live_child(target)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .acquire()
+                .unwrap()
+                .get(claimed.id)
+                .unwrap()
+                .unwrap()
+                .progress
+                .as_deref(),
+            Some("receipt")
+        );
+    }
 }

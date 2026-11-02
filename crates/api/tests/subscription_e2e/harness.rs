@@ -337,7 +337,7 @@ impl Harness {
                 .jobs()
                 .acquire()
                 .unwrap()
-                .enqueue(jobs::JobKind::SubscribeSearch, &payload, 0)
+                .enqueue(jobs::JobIdentity::subscribe_search(id), &payload, 0)
                 .unwrap();
             api::worker::StateRunner {
                 state: state.clone(),

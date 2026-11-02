@@ -107,6 +107,7 @@ pub fn seed_maintenance_defs(queue: &Queue) -> Result<(), jobs::JobError> {
         };
         queue.ensure_def(NewDef {
             kind: spec.kind,
+            scope: jobs::JobScope::Global,
             name: spec.name.to_string(),
             enabled: spec.enabled,
             // 关闭的任务也保留非空 schedule：现有定时任务页只显示 schedule 非空的 def。

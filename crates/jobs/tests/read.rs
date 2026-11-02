@@ -4,13 +4,15 @@ use domain::JobDefId;
 use jobs::{JobKind, NewDef, Queue};
 
 fn new_def(queue: &Queue, name: &str) -> JobDefId {
+    let media_id = domain::MediaId::new();
     queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(media_id),
             name: name.into(),
             enabled: true,
             schedule: None,
-            payload: format!(r#"{{"name":"{name}"}}"#),
+            payload: format!(r#"{{"media_id":"{media_id}","name":"{name}"}}"#),
             timeout_secs: None,
             concurrency_key: None,
         })

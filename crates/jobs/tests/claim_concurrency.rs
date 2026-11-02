@@ -9,10 +9,20 @@ fn claim_atomic_across_queue_instances() {
 
     // Enqueue 2 jobs with the same concurrency key
     let job1 = queue1
-        .enqueue_with_key(JobKind::CatalogRefresh, "{}", 0, Some("exclusive_key"))
+        .enqueue_with_key(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "{}",
+            0,
+            Some("exclusive_key"),
+        )
         .unwrap();
     let _job2 = queue1
-        .enqueue_with_key(JobKind::CatalogRefresh, "{}", 0, Some("exclusive_key"))
+        .enqueue_with_key(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "{}",
+            0,
+            Some("exclusive_key"),
+        )
         .unwrap();
 
     // queue1 claims 1 job
