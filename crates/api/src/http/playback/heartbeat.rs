@@ -59,61 +59,13 @@ pub(crate) async fn progress(
     // delays every other request on the runtime.
     let body_for_read = body.clone();
     let device_id_for_read = device_id.clone();
-    let (file, media, season, episode, duration_ms, source) =
-        match store_read(&state, &[store::Db::Library, store::Db::App], move |store| -> Result<_, Response> {
-            let body = &body_for_read;
-            let device_id = device_id_for_read.as_str();
-            match store.is_device_revoked(user_id, device_id) {
-                Ok(true) => {
-                    return Err(err(
-                        StatusCode::FORBIDDEN,
-                        "playback.revoked",
-                        "该设备已被注销",
-                    ));
-                }
-                Ok(false) => {}
-                Err(error) => return Err(persistence_error(&error, user_id, device_id)),
-            }
-            let session_id = body["play_session_id"].as_str().unwrap_or_default();
-            match store.play_session_binding(user_id, device_id, session_id) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    tracing::warn!(%user_id, device_id, "Playback heartbeat rejected: unissued session identity");
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "playback.invalid",
-                        "play_session_id 未由此用户和设备签发",
-                    ));
-                }
-                Err(error) => return Err(persistence_error(&error, user_id, device_id)),
-            }
-            let (file, media, season, episode) = match row_for(store, body, Some(user_id)) {
-                Ok(row) => row,
-                Err(error) => return Err(error.response()),
-            };
-            let Some(source) = store.visible_file(user_id, file.file_id).ok().flatten() else {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "playback.item_missing",
-                    "条目不存在",
-                ));
-            };
-            let duration = match unit_duration(store, user_id, &file, season, episode) {
-                Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
-                Err(error) => return Err(persistence_error(&error, user_id, device_id)),
-            };
-            Ok((
-                file,
-                media,
-                season,
-                episode,
-                duration,
-                domain::PhysicalSourceId {
-                    file_id: source.file_id,
-                    revision: source.version.revision,
-                },
-            ))
-        })
+    let (file, media, season, episode, duration_ms, source) = match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| -> Result<_, Response> {
+            read_heartbeat_target(store, user_id, &body_for_read, &device_id_for_read)
+        },
+    )
     .await
     {
         Ok(Ok(value)) => value,
@@ -463,4 +415,72 @@ mod tests {
         );
         assert!(store.get_session(user_id, "race").unwrap().is_none());
     }
+}
+
+fn read_heartbeat_target(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    body: &Value,
+    device_id: &str,
+) -> Result<
+    (
+        domain::LibraryFile,
+        domain::Media,
+        i32,
+        i32,
+        Option<i64>,
+        domain::PhysicalSourceId,
+    ),
+    Response,
+> {
+    match store.is_device_revoked(user_id, device_id) {
+        Ok(true) => {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "playback.revoked",
+                "该设备已被注销",
+            ));
+        }
+        Ok(false) => {}
+        Err(error) => return Err(persistence_error(&error, user_id, device_id)),
+    }
+    let session_id = body["play_session_id"].as_str().unwrap_or_default();
+    match store.play_session_binding(user_id, device_id, session_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::warn!(%user_id, device_id, "Playback heartbeat rejected: unissued session identity");
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "play_session_id 未由此用户和设备签发",
+            ));
+        }
+        Err(error) => return Err(persistence_error(&error, user_id, device_id)),
+    }
+    let (file, media, season, episode) = match row_for(store, body, Some(user_id)) {
+        Ok(row) => row,
+        Err(error) => return Err(error.response()),
+    };
+    let Some(source) = store.visible_file(user_id, file.file_id).ok().flatten() else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "playback.item_missing",
+            "条目不存在",
+        ));
+    };
+    let duration = match unit_duration(store, user_id, &file, season, episode) {
+        Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
+        Err(error) => return Err(persistence_error(&error, user_id, device_id)),
+    };
+    Ok((
+        file,
+        media,
+        season,
+        episode,
+        duration,
+        domain::PhysicalSourceId {
+            file_id: source.file_id,
+            revision: source.version.revision,
+        },
+    ))
 }

@@ -316,68 +316,7 @@ async fn primary_image_returns_poster_jpeg_and_items_tag() {
 async fn static_artwork_is_public_but_respects_authenticated_library_visibility() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let private_root = tmp.path().join("private");
-    std::fs::create_dir_all(&private_root).unwrap();
-    let private = store
-        .create_library(
-            MediaKind::Movie,
-            "Private",
-            &[private_root.to_str().unwrap()],
-            "selected",
-            true,
-            &[],
-        )
-        .unwrap();
-    let media = Media {
-        id: MediaId::new(),
-        kind: MediaKind::Movie,
-        title: "Private Movie".into(),
-        year: None,
-        original_title: None,
-        aliases: Vec::new(),
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    store.insert_media(&media).unwrap();
-    let file = private_root.join("secret.mkv");
-    std::fs::write(&file, b"video").unwrap();
-    let poster = private_root.join("poster.jpg");
-    std::fs::write(&poster, b"private poster").unwrap();
-    store
-        .set_library_cover_path(&private.id, Some(&poster.display().to_string()))
-        .unwrap();
-    let file_id = domain::LedgerId::new();
-    let spec = FixtureFile {
-        media_id: media.id,
-        path: file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-        transfer_mode: None,
-        source_path: None,
-        file_id: Some(file_id),
-    };
-    let published = publish_fixture_file(&store, &spec).unwrap();
-    let compact = published.file_id.to_string().replace('-', "");
-    let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
-    let member_id = UserId::new();
-    store
-        .insert_user(&User {
-            id: member_id,
-            login: "not-allowed".into(),
-            enabled: true,
-            role: UserRole::Member,
-        })
-        .unwrap();
-    store.set_user_token(member_id, "member-token").unwrap();
+    let (private, compact, item_id) = seed_private_artwork(tmp.path(), &store);
     let router = router(
         ApiState::new(
             store,
@@ -546,4 +485,70 @@ async fn artwork_content_type_matches_png_and_webp_bytes() {
             "Jellyfin {name}"
         );
     }
+}
+
+fn seed_private_artwork(tmp: &std::path::Path, store: &Store) -> (store::Library, String, String) {
+    let private_root = tmp.join("private");
+    std::fs::create_dir_all(&private_root).unwrap();
+    let private = store
+        .create_library(
+            MediaKind::Movie,
+            "Private",
+            &[private_root.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Private Movie".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let file = private_root.join("secret.mkv");
+    std::fs::write(&file, b"video").unwrap();
+    let poster = private_root.join("poster.jpg");
+    std::fs::write(&poster, b"private poster").unwrap();
+    store
+        .set_library_cover_path(&private.id, Some(&poster.display().to_string()))
+        .unwrap();
+    let file_id = domain::LedgerId::new();
+    let spec = FixtureFile {
+        media_id: media.id,
+        path: file.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: Some(file_id),
+    };
+    let published = publish_fixture_file(store, &spec).unwrap();
+    let compact = published.file_id.to_string().replace('-', "");
+    let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
+    let member_id = UserId::new();
+    store
+        .insert_user(&User {
+            id: member_id,
+            login: "not-allowed".into(),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
+    store.set_user_token(member_id, "member-token").unwrap();
+    (private, compact, item_id)
 }

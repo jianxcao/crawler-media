@@ -194,19 +194,7 @@ async fn transfer_started_first_is_finished_before_delete_snapshot() {
     let delete_resp = delete_handle.await.unwrap();
     assert_eq!(delete_resp.status(), StatusCode::OK);
 
-    // Verify deletion cleaned up everything (no orphan facts, ledger, or subscribe)
-    let store_arc = api_state.store();
-    let store = store_arc.as_ref();
-    assert!(store.get_subscribe(sub_id).unwrap().is_none());
-    assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
-    assert!(
-        store
-            .load_subscribe_facts(sub_id)
-            .unwrap()
-            .entries()
-            .next()
-            .is_none()
-    );
+    assert_transfer_deleted(&api_state, sub_id, media_id);
 }
 
 #[tokio::test]
@@ -359,4 +347,24 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
             assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
         }
     }
+}
+
+fn assert_transfer_deleted(
+    api_state: &api::management::ApiState,
+    sub_id: domain::SubscribeId,
+    media_id: domain::MediaId,
+) {
+    // Verify deletion cleaned up everything (no orphan facts, ledger, or subscribe)
+    let store_arc = api_state.store();
+    let store = store_arc.as_ref();
+    assert!(store.get_subscribe(sub_id).unwrap().is_none());
+    assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
+    assert!(
+        store
+            .load_subscribe_facts(sub_id)
+            .unwrap()
+            .entries()
+            .next()
+            .is_none()
+    );
 }

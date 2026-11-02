@@ -29,58 +29,7 @@ async fn force_refresh_item_chapters_keeps_old_result_until_background_replaceme
     let tmp = tempfile::tempdir().unwrap();
     let (app, store) = app(&tmp);
 
-    let tv_dir = tmp.path().join("data/library/tv/Frieren");
-    std::fs::create_dir_all(&tv_dir).unwrap();
-
-    let strm_file = tv_dir.join("Frieren.S01E01.strm");
-    std::fs::write(&strm_file, "https://cdn.example.com/frieren/ep01.mkv\n").unwrap();
-
-    let media = domain::Media {
-        id: domain::MediaId::new(),
-        kind: domain::MediaKind::Tv,
-        title: "葬送的芙莉莲".into(),
-        year: Some(2023),
-        original_title: None,
-        aliases: Vec::new(),
-        tmdb_id: Some("12345".into()),
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    let media = store.ensure_media(media).unwrap();
-
-    let file_id = domain::LedgerId::new();
-    let strm_path = strm_file.display().to_string();
-    publish_fixture_file(
-        &store,
-        &FixtureFile {
-            file_id: Some(file_id),
-            media_id: media.id,
-            path: strm_path,
-            season: Some(1),
-            episode: Some(1),
-            resolution: Some("1080p".into()),
-            codec: Some("hevc".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    // 1. Manually populate cached marker with old/wrong timestamp
-    let old_marker = api::store::StoredMediaMarker {
-        media_id: media.id,
-        season: 1,
-        episode: 1,
-        intro_start_ms: Some(111_000),
-        intro_end_ms: Some(222_000),
-        outro_start_ms: None,
-        outro_end_ms: None,
-        source: "old_cache".into(),
-        locked: false,
-        updated_at: 0,
-    };
-    store.put_media_marker(&old_marker).unwrap();
+    let (tv_dir, media, file_id) = seed_chapter_refresh(tmp.path(), &store);
 
     // 2. Fetch default library id
     let libs = json_body(
@@ -180,45 +129,7 @@ async fn force_refresh_item_chapters_keeps_old_result_until_background_replaceme
     assert_eq!(marker.intro_start_ms, Some(111_000));
     assert_eq!(marker.intro_end_ms, Some(222_000));
 
-    let second_path = tv_dir.join("Frieren.S01E02.strm");
-    std::fs::write(&second_path, "https://cdn.example.com/frieren/ep02.mkv\n").unwrap();
-    let second_id = domain::LedgerId::new();
-    publish_fixture_file(
-        &store,
-        &FixtureFile {
-            file_id: Some(second_id),
-            media_id: media.id,
-            path: second_path.display().to_string(),
-            season: Some(1),
-            episode: Some(2),
-            resolution: Some("1080p".into()),
-            codec: Some("hevc".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    std::fs::write(tv_dir.join("Frieren.S01E01-chapter_0.jpg"), b"episode one").unwrap();
-    std::fs::write(tv_dir.join("Frieren.S01E02-chapter_0.jpg"), b"episode two").unwrap();
-    for (file_id, expected) in [
-        (&file_id, b"episode one".as_slice()),
-        (&second_id, b"episode two".as_slice()),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(request(
-                "GET",
-                &format!("/api/v1/chapters/{}/0", file_id),
-                None,
-                Value::Null,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(bytes.as_ref(), expected);
-    }
+    assert_episode_chapter_images(&app, &store, &tv_dir, media.id, file_id).await;
 }
 
 async fn multiunit_fixture(
@@ -318,5 +229,113 @@ async fn multiunit_refresh_reports_unsupported_without_clearing_any_markers() {
                 .unwrap()
                 .is_some()
         );
+    }
+}
+
+fn seed_chapter_refresh(
+    tmp: &std::path::Path,
+    store: &api::Store,
+) -> (std::path::PathBuf, domain::Media, domain::LedgerId) {
+    let tv_dir = tmp.join("data/library/tv/Frieren");
+    std::fs::create_dir_all(&tv_dir).unwrap();
+
+    let strm_file = tv_dir.join("Frieren.S01E01.strm");
+    std::fs::write(&strm_file, "https://cdn.example.com/frieren/ep01.mkv\n").unwrap();
+
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "葬送的芙莉莲".into(),
+        year: Some(2023),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: Some("12345".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let media = store.ensure_media(media).unwrap();
+
+    let file_id = domain::LedgerId::new();
+    let strm_path = strm_file.display().to_string();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: strm_path,
+            season: Some(1),
+            episode: Some(1),
+            resolution: Some("1080p".into()),
+            codec: Some("hevc".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // 1. Manually populate cached marker with old/wrong timestamp
+    let old_marker = api::store::StoredMediaMarker {
+        media_id: media.id,
+        season: 1,
+        episode: 1,
+        intro_start_ms: Some(111_000),
+        intro_end_ms: Some(222_000),
+        outro_start_ms: None,
+        outro_end_ms: None,
+        source: "old_cache".into(),
+        locked: false,
+        updated_at: 0,
+    };
+    store.put_media_marker(&old_marker).unwrap();
+
+    (tv_dir, media, file_id)
+}
+
+async fn assert_episode_chapter_images(
+    app: &axum::Router,
+    store: &api::Store,
+    tv_dir: &std::path::Path,
+    media_id: domain::MediaId,
+    file_id: domain::LedgerId,
+) {
+    let second_path = tv_dir.join("Frieren.S01E02.strm");
+    std::fs::write(&second_path, "https://cdn.example.com/frieren/ep02.mkv\n").unwrap();
+    let second_id = domain::LedgerId::new();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(second_id),
+            media_id,
+            path: second_path.display().to_string(),
+            season: Some(1),
+            episode: Some(2),
+            resolution: Some("1080p".into()),
+            codec: Some("hevc".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(tv_dir.join("Frieren.S01E01-chapter_0.jpg"), b"episode one").unwrap();
+    std::fs::write(tv_dir.join("Frieren.S01E02-chapter_0.jpg"), b"episode two").unwrap();
+    for (file_id, expected) in [
+        (&file_id, b"episode one".as_slice()),
+        (&second_id, b"episode two".as_slice()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/chapters/{}/0", file_id),
+                None,
+                Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), expected);
     }
 }

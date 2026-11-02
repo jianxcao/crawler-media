@@ -305,119 +305,6 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
 #[test]
 fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     let tmp = tempfile::tempdir().unwrap();
-    struct NoStillCatalog;
-    impl api::catalog::Catalog for NoStillCatalog {
-        fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn search_tv_year(
-            &self,
-            _query: &str,
-            _year: Option<u16>,
-        ) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(vec![media::CatalogHit {
-                media: domain::Media {
-                    id: domain::MediaId::new(),
-                    kind: domain::MediaKind::Tv,
-                    title: "Spirit Rangers".into(),
-                    year: Some(2022),
-                    original_title: Some("Spirit Rangers".into()),
-                    aliases: Vec::new(),
-                    tmdb_id: Some("207890".into()),
-                    douban_id: None,
-                    tvdb_id: None,
-                    bangumi_id: None,
-                    anilist_id: None,
-                },
-                poster_path: None,
-                backdrop_path: None,
-                rating: None,
-                overview: None,
-            }])
-        }
-        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn top_rated_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn top_rated_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn now_playing_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn details(
-            &self,
-            _kind: domain::MediaKind,
-            _id: &str,
-        ) -> Result<Option<domain::Media>, String> {
-            Ok(None)
-        }
-        fn metadata_with_preferences(
-            &self,
-            _kind: domain::MediaKind,
-            _id: &str,
-            _lang_pref: &[String],
-            _country_pref: &[String],
-        ) -> Result<Option<media::ItemMeta>, String> {
-            Ok(Some(media::ItemMeta {
-                overview: Some("Spirit Rangers overview".into()),
-                rating: Some("8.5".into()),
-                runtime_minutes: Some("25".into()),
-                tagline: None,
-                release_date: Some("2022-10-10".into()),
-                last_air_date: None,
-                content_rating: None,
-                vote_count: Some(100),
-                origin_countries: vec!["US".into()],
-                original_language: Some("en".into()),
-                studios: vec!["Netflix".into()],
-                studio_logo: None,
-                status: Some("Ended".into()),
-                number_of_seasons: Some(1),
-                number_of_episodes: Some(10),
-                directors: Vec::new(),
-                creators: Vec::new(),
-                genres: vec!["Animation".into()],
-                genre_ids: vec![16],
-                episode_run_time: vec![25],
-                cast: Vec::new(),
-            }))
-        }
-        fn season_details(
-            &self,
-            _id: &str,
-            _season: u32,
-        ) -> Result<Vec<media::EpisodeMeta>, String> {
-            Ok(vec![media::EpisodeMeta {
-                episode_number: 1,
-                name: Some("Thunder Mountain".into()),
-                overview: Some("Episode 1 overview".into()),
-                air_date: Some("2022-10-10".into()),
-                rating: Some("8.0".into()),
-                vote_count: Some(50),
-                runtime_minutes: Some(25),
-                still_path: None,
-            }])
-        }
-        fn tv_seasons(&self, _id: &str) -> Result<Vec<media::TvSeason>, String> {
-            Ok(vec![media::TvSeason {
-                season_number: 1,
-                name: "第 1 季".into(),
-                episode_count: Some(1),
-                air_date: Some("2022-10-10".into()),
-                overview: Some("第一季简介".into()),
-                poster_path: Some("/season-1.jpg".into()),
-            }])
-        }
-    }
 
     let state = state(
         tmp.path(),
@@ -717,3 +604,113 @@ async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
 
 #[path = "auto_resolve_identity.rs"]
 mod identity;
+
+struct NoStillCatalog;
+impl api::catalog::Catalog for NoStillCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv_year(
+        &self,
+        _query: &str,
+        _year: Option<u16>,
+    ) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![media::CatalogHit {
+            media: domain::Media {
+                id: domain::MediaId::new(),
+                kind: domain::MediaKind::Tv,
+                title: "Spirit Rangers".into(),
+                year: Some(2022),
+                original_title: Some("Spirit Rangers".into()),
+                aliases: Vec::new(),
+                tmdb_id: Some("207890".into()),
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            },
+            poster_path: None,
+            backdrop_path: None,
+            rating: None,
+            overview: None,
+        }])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn top_rated_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn top_rated_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn now_playing_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
+    fn metadata_with_preferences(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+        _lang_pref: &[String],
+        _country_pref: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        Ok(Some(media::ItemMeta {
+            overview: Some("Spirit Rangers overview".into()),
+            rating: Some("8.5".into()),
+            runtime_minutes: Some("25".into()),
+            tagline: None,
+            release_date: Some("2022-10-10".into()),
+            last_air_date: None,
+            content_rating: None,
+            vote_count: Some(100),
+            origin_countries: vec!["US".into()],
+            original_language: Some("en".into()),
+            studios: vec!["Netflix".into()],
+            studio_logo: None,
+            status: Some("Ended".into()),
+            number_of_seasons: Some(1),
+            number_of_episodes: Some(10),
+            directors: Vec::new(),
+            creators: Vec::new(),
+            genres: vec!["Animation".into()],
+            genre_ids: vec![16],
+            episode_run_time: vec![25],
+            cast: Vec::new(),
+        }))
+    }
+    fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        Ok(vec![media::EpisodeMeta {
+            episode_number: 1,
+            name: Some("Thunder Mountain".into()),
+            overview: Some("Episode 1 overview".into()),
+            air_date: Some("2022-10-10".into()),
+            rating: Some("8.0".into()),
+            vote_count: Some(50),
+            runtime_minutes: Some(25),
+            still_path: None,
+        }])
+    }
+    fn tv_seasons(&self, _id: &str) -> Result<Vec<media::TvSeason>, String> {
+        Ok(vec![media::TvSeason {
+            season_number: 1,
+            name: "第 1 季".into(),
+            episode_count: Some(1),
+            air_date: Some("2022-10-10".into()),
+            overview: Some("第一季简介".into()),
+            poster_path: Some("/season-1.jpg".into()),
+        }])
+    }
+}

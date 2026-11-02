@@ -40,31 +40,15 @@ pub async fn capture_or_reuse_fingerprints(
             && entry.sample_duration_secs == sample_duration_secs
             && !entry.intro.is_empty()
     });
-    let (intro, intro_cache_hit, intro_elapsed_ms) = match cached.as_ref() {
-        Some(entry) => (entry.intro.clone(), true, 0),
-        None => {
-            let started = Instant::now();
-            tracing::info!(
-                path = %path.display(),
-                sample_start_secs = 0,
-                sample_duration_secs,
-                source_version,
-                "【声纹】片头声纹缓存未命中，开始采集"
-            );
-            let intro = extract(
-                engine.clone(),
-                path.to_path_buf(),
-                0,
-                sample_duration_secs,
-                control,
-            )
-            .await?;
-            if intro.is_empty() {
-                return Err("empty intro fingerprint".into());
-            }
-            (intro, false, started.elapsed().as_millis() as u64)
-        }
-    };
+    let (intro, intro_cache_hit, intro_elapsed_ms) = capture_intro(
+        path,
+        source_version,
+        sample_duration_secs,
+        cached.as_ref(),
+        &engine,
+        control,
+    )
+    .await?;
 
     let mut outro_error = None;
     let outro_expected = media_duration_ms
@@ -179,4 +163,39 @@ async fn extract(
     })
     .await
     .map_err(|error| format!("fingerprint worker failed: {error}"))?
+}
+
+async fn capture_intro(
+    path: &Path,
+    source_version: &str,
+    sample_duration_secs: u32,
+    cached: Option<&FingerprintCacheEntry>,
+    engine: &Arc<dyn FingerprintEngine>,
+    control: &marker::WorkControl,
+) -> Result<(Vec<u32>, bool, u64), String> {
+    match cached {
+        Some(entry) => Ok((entry.intro.clone(), true, 0)),
+        None => {
+            let started = Instant::now();
+            tracing::info!(
+                path = %path.display(),
+                sample_start_secs = 0,
+                sample_duration_secs,
+                source_version,
+                "【声纹】片头声纹缓存未命中，开始采集"
+            );
+            let intro = extract(
+                engine.clone(),
+                path.to_path_buf(),
+                0,
+                sample_duration_secs,
+                control,
+            )
+            .await?;
+            if intro.is_empty() {
+                return Err("empty intro fingerprint".into());
+            }
+            Ok((intro, false, started.elapsed().as_millis() as u64))
+        }
+    }
 }

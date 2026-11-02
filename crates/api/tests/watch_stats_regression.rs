@@ -163,53 +163,7 @@ async fn watch_stats_dto_matches_existing_semantics() {
     let (app, state) = app(&tmp);
     let f = seed(&state, &tmp);
 
-    insert_log(
-        tmp.path(),
-        f.user,
-        f.media_a.id,
-        f.now - 60,
-        1_000,
-        Some("web"),
-        true,
-    );
-    insert_log(
-        tmp.path(),
-        f.user,
-        f.media_a.id,
-        f.now - 120,
-        2_000,
-        Some("web"),
-        false,
-    );
-    insert_log(
-        tmp.path(),
-        f.user,
-        f.media_b.id,
-        f.now - 180,
-        4_000,
-        None,
-        true,
-    );
-    // 上一窗口 [now-14d, now-7d)。
-    insert_log(
-        tmp.path(),
-        f.user,
-        f.media_a.id,
-        f.now - 8 * DAY,
-        5_000,
-        Some("web"),
-        true,
-    );
-    // 当前窗口内没有台账的 Media → hidden。
-    insert_log(
-        tmp.path(),
-        f.user,
-        f.media_hidden.id,
-        f.now - 240,
-        8_000,
-        None,
-        false,
-    );
+    seed_stats_logs(tmp.path(), &f);
 
     let stats = common::json_data(
         app.oneshot(common::request(
@@ -381,4 +335,46 @@ async fn out_of_range_tz_offset_is_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let error = common::json_error(response).await;
     assert_eq!(error["code"], "playback.invalid");
+}
+
+fn seed_stats_logs(path: &std::path::Path, f: &Fixture) {
+    insert_log(
+        path,
+        f.user,
+        f.media_a.id,
+        f.now - 60,
+        1_000,
+        Some("web"),
+        true,
+    );
+    insert_log(
+        path,
+        f.user,
+        f.media_a.id,
+        f.now - 120,
+        2_000,
+        Some("web"),
+        false,
+    );
+    insert_log(path, f.user, f.media_b.id, f.now - 180, 4_000, None, true);
+    // 上一窗口 [now-14d, now-7d)。
+    insert_log(
+        path,
+        f.user,
+        f.media_a.id,
+        f.now - 8 * DAY,
+        5_000,
+        Some("web"),
+        true,
+    );
+    // 当前窗口内没有台账的 Media → hidden。
+    insert_log(
+        path,
+        f.user,
+        f.media_hidden.id,
+        f.now - 240,
+        8_000,
+        None,
+        false,
+    );
 }

@@ -38,46 +38,7 @@ async fn open_tv_coverage_tracks_observed_and_next_episode_without_completing() 
     let id = json_data(created).await["id"].as_str().unwrap().to_string();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let subscribe_id = id.parse().unwrap();
-    let mut facts = domain::SubscribeFacts::default();
-    facts.upsert(
-        Some(2),
-        Some(1),
-        domain::QualityFact {
-            score: 80,
-            path: Some("/library/office-s02e01.mkv".into()),
-        },
-    );
-    store.save_subscribe_facts(subscribe_id, &facts).unwrap();
-    store
-        .merge_pending(
-            subscribe_id,
-            &[(
-                80,
-                api::store::PendingDownload {
-                    torrent: domain::Torrent {
-                        site_id: domain::SiteId::new(),
-                        title: "The.Office.S02E04.1080p".into(),
-                        enclosure: "https://pt.example/office-4".into(),
-                        size_bytes: None,
-                        seeders: None,
-                        free: false,
-                        hr: false,
-                        imdb_id: None,
-                        id: None,
-                        leechers: None,
-                        snatched: None,
-                        upload_time: None,
-                        detail_url: None,
-                        category: None,
-                        poster_url: None,
-                    },
-                    release_override: None,
-                    downloader_id: None,
-                    submitted_at: None,
-                },
-            )],
-        )
-        .unwrap();
+    seed_open_tv_progress(&store, subscribe_id);
     let mut searched = false;
     for now in [1, 31, 61, 91, 121, 151, 181, 211, 241, 271] {
         let response = app
@@ -181,4 +142,47 @@ async fn open_tv_coverage_progress_total_is_at_least_one() {
         "open TV coverage must not report total=0: {detail}"
     );
     assert!(missing >= 0, "missing must be non-negative: {detail}");
+}
+
+fn seed_open_tv_progress(store: &Store, subscribe_id: domain::SubscribeId) {
+    let mut facts = domain::SubscribeFacts::default();
+    facts.upsert(
+        Some(2),
+        Some(1),
+        domain::QualityFact {
+            score: 80,
+            path: Some("/library/office-s02e01.mkv".into()),
+        },
+    );
+    store.save_subscribe_facts(subscribe_id, &facts).unwrap();
+    store
+        .merge_pending(
+            subscribe_id,
+            &[(
+                80,
+                api::store::PendingDownload {
+                    torrent: domain::Torrent {
+                        site_id: domain::SiteId::new(),
+                        title: "The.Office.S02E04.1080p".into(),
+                        enclosure: "https://pt.example/office-4".into(),
+                        size_bytes: None,
+                        seeders: None,
+                        free: false,
+                        hr: false,
+                        imdb_id: None,
+                        id: None,
+                        leechers: None,
+                        snatched: None,
+                        upload_time: None,
+                        detail_url: None,
+                        category: None,
+                        poster_url: None,
+                    },
+                    release_override: None,
+                    downloader_id: None,
+                    submitted_at: None,
+                },
+            )],
+        )
+        .unwrap();
 }

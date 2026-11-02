@@ -123,19 +123,7 @@ fn setup_fixture() -> (
             .unwrap();
         let root_path = root.path.display().to_string();
 
-        let m = Media {
-            id: MediaId::new(),
-            kind: MediaKind::Movie,
-            title: "Original Media".into(),
-            year: Some(2020),
-            original_title: None,
-            aliases: vec![],
-            tmdb_id: Some("1001".into()),
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        };
+        let m = original_media();
         store.insert_media(&m).unwrap();
 
         let scope = WriteScope {
@@ -739,4 +727,20 @@ async fn reidentify_rejects_non_strict_title_ref_without_writes() {
             .media_id,
         media.id
     );
+}
+
+fn original_media() -> Media {
+    Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Original Media".into(),
+        year: Some(2020),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("1001".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    }
 }

@@ -18,7 +18,7 @@ fn loose_matchers_are_only_used_by_display_code() {
     // Display-only call sites, plus the definitions themselves.
     let allowed = [
         "api/src/http/subscription_depth/removal_preview.rs",
-        "downloader/src/lib.rs",
+        "downloader/src/name_matching.rs",
         "downloader/src/identity.rs",
     ];
     let mut files = Vec::new();

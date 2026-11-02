@@ -97,19 +97,7 @@ fn resolve_media(
         "成功匹配 TMDB 媒体"
     );
 
-    let mut updated = media.clone();
-    if updated.tmdb_id.is_none() {
-        updated.tmdb_id = best_hit.media.tmdb_id.clone();
-    }
-    if updated.douban_id.is_none() {
-        updated.douban_id = best_hit.media.douban_id.clone();
-    }
-    if updated.year.is_none() {
-        updated.year = best_hit.media.year;
-    }
-    if updated.original_title.is_none() {
-        updated.original_title = best_hit.media.original_title.clone();
-    }
+    let updated = matched_media(media, &best_hit.media);
 
     // External IDs are aliases: an online match may already have a canonical
     // Media with Playback history. The scan caller rebinds only its new rows.
@@ -456,4 +444,22 @@ pub(crate) fn rebind_scan_rows(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn matched_media(media: &Media, matched: &Media) -> Media {
+    let mut updated = media.clone();
+    if updated.tmdb_id.is_none() {
+        updated.tmdb_id = matched.tmdb_id.clone();
+    }
+    if updated.douban_id.is_none() {
+        updated.douban_id = matched.douban_id.clone();
+    }
+    if updated.year.is_none() {
+        updated.year = matched.year;
+    }
+    if updated.original_title.is_none() {
+        updated.original_title = matched.original_title.clone();
+    }
+
+    updated
 }

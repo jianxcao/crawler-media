@@ -666,21 +666,7 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
         .unwrap();
     }
 
-    // 在 Episode 1 写入完整的片头和片尾标记
-    store
-        .put_media_marker(&store::StoredMediaMarker {
-            media_id: media.id,
-            season: 1,
-            episode: 1,
-            intro_start_ms: Some(10_000),
-            intro_end_ms: Some(100_000),
-            outro_start_ms: Some(1_300_000),
-            outro_end_ms: Some(1_400_000),
-            source: "theintrodb".into(),
-            locked: false,
-            updated_at: 1000,
-        })
-        .unwrap();
+    seed_episode_one_marker(&store, media.id);
     // Episode 2 写入仅包含空 intro_start_ms 的初始缓存 (is_only_intro 状态)
     store
         .put_cached_chapters(
@@ -778,4 +764,22 @@ fn seed_movie(tmp: &tempfile::TempDir) -> (api::Store, Media, LedgerId) {
     )
     .unwrap();
     (store, media, file_id)
+}
+
+fn seed_episode_one_marker(store: &api::Store, media_id: MediaId) {
+    // 在 Episode 1 写入完整的片头和片尾标记
+    store
+        .put_media_marker(&store::StoredMediaMarker {
+            media_id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(10_000),
+            intro_end_ms: Some(100_000),
+            outro_start_ms: Some(1_300_000),
+            outro_end_ms: Some(1_400_000),
+            source: "theintrodb".into(),
+            locked: false,
+            updated_at: 1000,
+        })
+        .unwrap();
 }

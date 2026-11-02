@@ -183,19 +183,8 @@ pub(crate) fn write_series_nfos(
         .map(|(season, _)| season)
         .collect::<std::collections::BTreeSet<_>>();
     for season in seasons {
-        let episodes = match catalog.season_details_lang(tmdb_id, season, language) {
-            Ok(episodes) if !episodes.is_empty() => episodes,
-            Ok(_) => match catalog.season_details(tmdb_id, season) {
-                Ok(episodes) => episodes,
-                Err(error) => {
-                    tracing::warn!(%error, tmdb_id, season, "failed to scrape TV season episode metadata");
-                    continue;
-                }
-            },
-            Err(error) => {
-                tracing::warn!(%error, tmdb_id, season, "failed to scrape TV season episode metadata");
-                continue;
-            }
+        let Some(episodes) = season_episodes(catalog, tmdb_id, season, language) else {
+            continue;
         };
         for row in &rows {
             for unit in &row.units {
@@ -504,34 +493,7 @@ fn scrape_tv_episodes_and_nfos(
         }
         ep_matches
     } else {
-        let mut ep_matches = Vec::new();
-        for season in &owned_seasons {
-            let episodes = state
-                .catalog
-                .season_details(tmdb_id, *season)
-                .unwrap_or_default();
-            for row in rows.iter() {
-                for unit in &row.units {
-                    let Some((unit_season, ep_num)) = unit.episode_coordinates() else {
-                        continue;
-                    };
-                    if unit_season != *season {
-                        continue;
-                    }
-                    let mut still_path = episodes
-                        .iter()
-                        .find(|e| e.episode_number == ep_num)
-                        .and_then(|ep| ep.still_path.clone());
-                    if still_path.is_none()
-                        && let Ok(stills) = state.catalog.episode_stills(tmdb_id, *season, ep_num)
-                    {
-                        still_path = stills.into_iter().next();
-                    }
-                    ep_matches.push((row.file.path.clone(), still_path));
-                }
-            }
-        }
-        ep_matches
+        scrape_tv_episode_stills(state, tmdb_id, rows, &owned_seasons)
     }
 }
 
@@ -720,4 +682,63 @@ fn scrape_tv_fanart(
             tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
         }
     }
+}
+
+fn season_episodes(
+    catalog: &dyn crate::catalog::Catalog,
+    tmdb_id: &str,
+    season: u32,
+    language: &str,
+) -> Option<Vec<media::EpisodeMeta>> {
+    let episodes = match catalog.season_details_lang(tmdb_id, season, language) {
+        Ok(episodes) if !episodes.is_empty() => episodes,
+        Ok(_) => match catalog.season_details(tmdb_id, season) {
+            Ok(episodes) => episodes,
+            Err(error) => {
+                tracing::warn!(%error, tmdb_id, season, "failed to scrape TV season episode metadata");
+                return None;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, tmdb_id, season, "failed to scrape TV season episode metadata");
+            return None;
+        }
+    };
+    Some(episodes)
+}
+
+fn scrape_tv_episode_stills(
+    state: &crate::management::ApiState,
+    tmdb_id: &str,
+    rows: &[domain::FileCoverage],
+    owned_seasons: &std::collections::HashSet<u32>,
+) -> Vec<(PathBuf, Option<String>)> {
+    let mut ep_matches = Vec::new();
+    for season in owned_seasons {
+        let episodes = state
+            .catalog
+            .season_details(tmdb_id, *season)
+            .unwrap_or_default();
+        for row in rows.iter() {
+            for unit in &row.units {
+                let Some((unit_season, ep_num)) = unit.episode_coordinates() else {
+                    continue;
+                };
+                if unit_season != *season {
+                    continue;
+                }
+                let mut still_path = episodes
+                    .iter()
+                    .find(|e| e.episode_number == ep_num)
+                    .and_then(|ep| ep.still_path.clone());
+                if still_path.is_none()
+                    && let Ok(stills) = state.catalog.episode_stills(tmdb_id, *season, ep_num)
+                {
+                    still_path = stills.into_iter().next();
+                }
+                ep_matches.push((row.file.path.clone(), still_path));
+            }
+        }
+    }
+    ep_matches
 }

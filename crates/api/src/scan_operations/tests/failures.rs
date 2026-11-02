@@ -117,26 +117,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
         .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .unwrap();
-    // 写入派生事实（file_details）
-    let tracks = library::Tracks {
-        video: Some(library::VideoTrack {
-            duration_secs: Some(100.0),
-            ..library::VideoTrack::default()
-        }),
-        audio: Vec::new(),
-        subtitles: Vec::new(),
-    };
-    fix.state
-        .store()
-        .put_file_meta(&row.file.file_id.to_string(), &tracks)
-        .unwrap();
-    assert!(
-        fix.state
-            .store()
-            .get_file_meta(&row.file.file_id.to_string())
-            .unwrap()
-            .is_some()
-    );
+    seed_file_details(&fix, &row);
 
     // 修改文件内容和 mtime
     std::fs::write(&file, b"modified-content").unwrap();
@@ -230,5 +211,28 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     assert!(
         obs.iter().any(|o| o.ledger_id == row.file.file_id),
         "探测义务必须挂上"
+    );
+}
+
+fn seed_file_details(fix: &Fixture, row: &domain::FileCoverage) {
+    // 写入派生事实（file_details）
+    let tracks = library::Tracks {
+        video: Some(library::VideoTrack {
+            duration_secs: Some(100.0),
+            ..library::VideoTrack::default()
+        }),
+        audio: Vec::new(),
+        subtitles: Vec::new(),
+    };
+    fix.state
+        .store()
+        .put_file_meta(&row.file.file_id.to_string(), &tracks)
+        .unwrap();
+    assert!(
+        fix.state
+            .store()
+            .get_file_meta(&row.file.file_id.to_string())
+            .unwrap()
+            .is_some()
     );
 }

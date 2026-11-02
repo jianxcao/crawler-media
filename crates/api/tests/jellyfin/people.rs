@@ -22,61 +22,7 @@ async fn nfo_people_are_clickable_and_filter_related_items() {
     });
 
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let ledger_key = store
-        .list_file_coverage()
-        .unwrap()
-        .into_iter()
-        .find(|row| row.file.media_id == media_id)
-        .expect("matrix ledger row")
-        .file
-        .file_id
-        .to_string();
-    store
-        .put_file_meta(
-            &ledger_key,
-            &library::Tracks {
-                video: Some(library::VideoTrack {
-                    stream_index: Some(0),
-                    codec: Some("hevc".into()),
-                    profile: Some("Main 10".into()),
-                    width: Some(3840),
-                    height: Some(1600),
-                    frame_rate: Some(23.976),
-                    average_frame_rate: Some(23.976),
-                    bit_rate: Some(18_000_000),
-                    duration_secs: Some(7200.0),
-                    aspect_ratio: Some("12:5".into()),
-                    pixel_format: Some("yuv420p10le".into()),
-                    bit_depth: Some(10),
-                    color_space: Some("bt2020nc".into()),
-                    color_transfer: Some("smpte2084".into()),
-                    ..Default::default()
-                }),
-                audio: vec![library::AudioTrack {
-                    stream_index: Some(1),
-                    codec: Some("eac3".into()),
-                    profile: Some("Dolby Digital Plus".into()),
-                    channels: Some(6),
-                    channel_layout: Some("5.1(side)".into()),
-                    language: Some("ja".into()),
-                    title: Some("Japanese 5.1".into()),
-                    sample_rate: Some("48000".into()),
-                    bit_rate: Some(768_000),
-                    is_default: true,
-                    ..Default::default()
-                }],
-                subtitles: vec![library::SubtitleTrack {
-                    stream_index: Some(2),
-                    codec: Some("ass".into()),
-                    language: Some("zh".into()),
-                    title: Some("简体中文".into()),
-                    is_default: false,
-                    forced: true,
-                    ..Default::default()
-                }],
-            },
-        )
-        .unwrap();
+    seed_matrix_tracks(&store, media_id);
     std::fs::write(tmp.path().join("matrix.en.forced.srt"), "subtitle").unwrap();
 
     let item = get(&app, &format!("/Items/{item_id}")).await;
@@ -159,4 +105,62 @@ async fn get(app: &axum::Router, uri: &str) -> Value {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "{uri}");
     json(response).await
+}
+
+fn seed_matrix_tracks(store: &Store, media_id: MediaId) {
+    let ledger_key = store
+        .list_file_coverage()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.file.media_id == media_id)
+        .expect("matrix ledger row")
+        .file
+        .file_id
+        .to_string();
+    store
+        .put_file_meta(
+            &ledger_key,
+            &library::Tracks {
+                video: Some(library::VideoTrack {
+                    stream_index: Some(0),
+                    codec: Some("hevc".into()),
+                    profile: Some("Main 10".into()),
+                    width: Some(3840),
+                    height: Some(1600),
+                    frame_rate: Some(23.976),
+                    average_frame_rate: Some(23.976),
+                    bit_rate: Some(18_000_000),
+                    duration_secs: Some(7200.0),
+                    aspect_ratio: Some("12:5".into()),
+                    pixel_format: Some("yuv420p10le".into()),
+                    bit_depth: Some(10),
+                    color_space: Some("bt2020nc".into()),
+                    color_transfer: Some("smpte2084".into()),
+                    ..Default::default()
+                }),
+                audio: vec![library::AudioTrack {
+                    stream_index: Some(1),
+                    codec: Some("eac3".into()),
+                    profile: Some("Dolby Digital Plus".into()),
+                    channels: Some(6),
+                    channel_layout: Some("5.1(side)".into()),
+                    language: Some("ja".into()),
+                    title: Some("Japanese 5.1".into()),
+                    sample_rate: Some("48000".into()),
+                    bit_rate: Some(768_000),
+                    is_default: true,
+                    ..Default::default()
+                }],
+                subtitles: vec![library::SubtitleTrack {
+                    stream_index: Some(2),
+                    codec: Some("ass".into()),
+                    language: Some("zh".into()),
+                    title: Some("简体中文".into()),
+                    is_default: false,
+                    forced: true,
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
 }

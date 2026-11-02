@@ -469,19 +469,7 @@ fn resume_scale(in_progress: usize, played: usize) -> ScaleResume {
             )
             .unwrap();
         for index in 0..(in_progress + played) {
-            let media = Media {
-                id: MediaId::new(),
-                kind: MediaKind::Movie,
-                title: format!("Resume {index:02}"),
-                year: Some(2024),
-                original_title: None,
-                aliases: Vec::new(),
-                tmdb_id: None,
-                douban_id: None,
-                tvdb_id: None,
-                bangumi_id: None,
-                anilist_id: None,
-            };
+            let media = resume_media(index);
             store.insert_media(&media).unwrap();
             let path = root.join(format!("resume-{index:02}.mkv"));
             std::fs::write(&path, b"payload").unwrap();
@@ -602,4 +590,20 @@ async fn resume_hydrates_only_the_requested_page() {
         "非零 offset 的页内水合应只覆盖返回页：heavy={}",
         fx.heavy.load(Ordering::SeqCst)
     );
+}
+
+fn resume_media(index: usize) -> Media {
+    Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: format!("Resume {index:02}"),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    }
 }

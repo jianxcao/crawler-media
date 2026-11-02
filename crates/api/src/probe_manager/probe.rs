@@ -203,48 +203,7 @@ pub(super) async fn probe_fingerprint_detailed(
         };
     }
 
-    match &outcome {
-        super::stages::FingerprintRunOutcome::Complete => {
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.file.media_id,
-                ledger_id = %unit.row.file.file_id,
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "【声纹】低优先级声纹处理完成"
-            );
-        }
-        super::stages::FingerprintRunOutcome::Partial { .. } => {
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.file.media_id,
-                ledger_id = %unit.row.file.file_id,
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "【声纹】低优先级声纹部分处理完成（片头就绪，片尾待重试）"
-            );
-        }
-        super::stages::FingerprintRunOutcome::Failed { error, .. } => {
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.file.media_id,
-                ledger_id = %unit.row.file.file_id,
-                error = %error,
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
-            );
-        }
-        super::stages::FingerprintRunOutcome::Retry => {
-            tracing::warn!(job_id = ?job_id, "声纹写入繁忙，保留持久单元等待重试");
-        }
-        super::stages::FingerprintRunOutcome::Cancelled { reason } => {
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.file.media_id,
-                ledger_id = %unit.row.file.file_id,
-                reason = %reason,
-                "【声纹】声纹处理已取消"
-            );
-        }
-    }
+    log_fingerprint_outcome(unit, started_at, &outcome);
     outcome
 }
 
@@ -571,4 +530,54 @@ pub(super) fn publish_probe_tracks(
         details: Some(&details),
     };
     store.publish_probe_result(unit.row.file.file_id, &publication, now_ms())
+}
+
+fn log_fingerprint_outcome(
+    unit: &ProbeUnit,
+    started_at: Instant,
+    outcome: &super::stages::FingerprintRunOutcome,
+) {
+    let job_id = unit.job_id.clone();
+    match outcome {
+        super::stages::FingerprintRunOutcome::Complete => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.file.media_id,
+                ledger_id = %unit.row.file.file_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】低优先级声纹处理完成"
+            );
+        }
+        super::stages::FingerprintRunOutcome::Partial { .. } => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.file.media_id,
+                ledger_id = %unit.row.file.file_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】低优先级声纹部分处理完成（片头就绪，片尾待重试）"
+            );
+        }
+        super::stages::FingerprintRunOutcome::Failed { error, .. } => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.file.media_id,
+                ledger_id = %unit.row.file.file_id,
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
+            );
+        }
+        super::stages::FingerprintRunOutcome::Retry => {
+            tracing::warn!(job_id = ?job_id, "声纹写入繁忙，保留持久单元等待重试");
+        }
+        super::stages::FingerprintRunOutcome::Cancelled { reason } => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.file.media_id,
+                ledger_id = %unit.row.file.file_id,
+                reason = %reason,
+                "【声纹】声纹处理已取消"
+            );
+        }
+    }
 }

@@ -229,6 +229,23 @@ pub fn run_data_retention(
         }
     }
 
+    report_unstarted_classes(report, policy, now, finished_classes)?;
+
+    report.incomplete = report.classes.iter().any(|entry| entry.incomplete);
+    report.remaining = report.incomplete;
+    report.budget_exhausted = budget_exhausted;
+    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    log_retention_remaining(job, report);
+    Ok(())
+}
+
+fn report_unstarted_classes(
+    report: &mut MaintenanceReport,
+    policy: &DataRetentionPolicy,
+    now: i64,
+    finished_classes: usize,
+) -> Result<(), String> {
     // 预算/停止导致尚未开始的类别：显式报告 incomplete，而不是假装已经检查过。
     if finished_classes < DATA_RETENTION_CLASSES.len() {
         for class in &DATA_RETENTION_CLASSES[finished_classes..] {
@@ -245,11 +262,10 @@ pub fn run_data_retention(
         }
     }
 
-    report.incomplete = report.classes.iter().any(|entry| entry.incomplete);
-    report.remaining = report.incomplete;
-    report.budget_exhausted = budget_exhausted;
-    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(())
+}
 
+fn log_retention_remaining(job: &Job, report: &MaintenanceReport) {
     if report.incomplete {
         tracing::warn!(
             job_id = %job.id,
@@ -259,5 +275,4 @@ pub fn run_data_retention(
             "分类历史保留仍有剩余候选，留到下一轮"
         );
     }
-    Ok(())
 }

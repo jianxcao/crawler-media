@@ -175,7 +175,28 @@ pub(crate) fn scan_library_leased_resumable(
             error: "library.root_unavailable".to_string(),
         }));
     }
-    if full_scope || targets.is_empty() {
+    finish_scan_library(state, id, lease, full_scope || targets.is_empty());
+    let total_errors: usize = run.root_reports.iter().map(|r| r.error_count).sum();
+    let scan_report = library::ScanReport {
+        roots: run.root_reports,
+        scanned: run.totals.scanned,
+        inserted: run.totals.inserted,
+        restored: 0,
+        probe_pending: run.totals.inserted,
+        error_count: total_errors,
+        errors_truncated: false,
+    };
+    let report_data = format_scan_report(&scan_report);
+    Ok((scan_report, json!(report_data)))
+}
+
+fn finish_scan_library(
+    state: &ApiState,
+    id: &str,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+    purge_vanished: bool,
+) {
+    if purge_vanished {
         // 整库扫描确认源已消失：直接清理（行、孤立 Media、附属文件），不留 missing 行。
         match crate::library_presence::purge_vanished(state, id, lease) {
             Ok(result) if result.deleted > 0 => {
@@ -207,16 +228,4 @@ pub(crate) fn scan_library_leased_resumable(
             clear_library_cover_checked(&store, &lib.id);
         }
     }
-    let total_errors: usize = run.root_reports.iter().map(|r| r.error_count).sum();
-    let scan_report = library::ScanReport {
-        roots: run.root_reports,
-        scanned: run.totals.scanned,
-        inserted: run.totals.inserted,
-        restored: 0,
-        probe_pending: run.totals.inserted,
-        error_count: total_errors,
-        errors_truncated: false,
-    };
-    let report_data = format_scan_report(&scan_report);
-    Ok((scan_report, json!(report_data)))
 }

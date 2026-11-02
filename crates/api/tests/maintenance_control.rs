@@ -34,26 +34,7 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
             .id
     };
 
-    // 塞入 10000 条超龄终态（每批 500，总共 20 批）
-    {
-        let data = support::data_dir(&state);
-        let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
-        conn.execute_batch("BEGIN").unwrap();
-        {
-            let mut stmt = conn
-                .prepare(
-                    "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
-                     VALUES (?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
-                )
-                .unwrap();
-            for i in 0..10000 {
-                let ts = now - 10 * DAY;
-                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts])
-                    .unwrap();
-            }
-        }
-        conn.execute_batch("COMMIT").unwrap();
-    }
+    seed_expired_jobs(&state, now);
 
     // 领取该任务作为属于 def_id 的 running job
     let job = {
@@ -155,4 +136,27 @@ async fn shutdown_stops_claims_and_drains_real_blocking_work() {
         .await
         .expect("shutdown 必须正常返回并退出")
         .expect("shutdown 执行无错误");
+}
+
+fn seed_expired_jobs(state: &api::management::ApiState, now: i64) {
+    // 塞入 10000 条超龄终态（每批 500，总共 20 批）
+    {
+        let data = support::data_dir(state);
+        let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
+                     VALUES (?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
+                )
+                .unwrap();
+            for i in 0..10000 {
+                let ts = now - 10 * DAY;
+                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts])
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+    }
 }

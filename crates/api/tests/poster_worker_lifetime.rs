@@ -714,6 +714,10 @@ async fn worker_panic_releases_resources_and_replays_failure() {
         fetcher.fetch_calls.load(Ordering::SeqCst),
         fetch_calls_before + 1
     );
+    assert_successful_entry_retires(catalog.clone()).await;
+}
+
+async fn assert_successful_entry_retires(catalog: Arc<MockCatalog>) {
     // Retirement assertion using a fresh service and successful media:
     // after the entry retires, removing the disk cache entry forces a new fetch.
     let gate3 = Arc::new(TestGate::new());

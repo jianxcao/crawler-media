@@ -179,190 +179,22 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
                 preinstalled_archive.clone()
             }
             InstallPolicy::Download => {
-                let download_url = format!("{}/{}", self.base_url, asset_name);
-                tracing::info!(url = %download_url, "Downloading Obscura browser daemon");
-
-                let agent = ureq::Agent::config_builder()
-                    .timeout_connect(Some(Duration::from_secs(10)))
-                    .timeout_global(Some(Duration::from_secs(300)))
-                    .build()
-                    .new_agent();
-
-                let response = agent
-                    .get(&download_url)
-                    .call()
-                    .map_err(|e| InstallError::Download(e.to_string()))?;
-
-                if let Some(len_header) = response.headers().get("content-length")
-                    && let Ok(len_str) = len_header.to_str()
-                    && let Ok(content_len) = len_str.parse::<u64>()
-                    && (content_len > self.max_archive_bytes || content_len != expected_size)
-                {
-                    return Err(InstallError::InvalidArchive(format!(
-                        "Content-Length mismatch: expected {expected_size}, got {content_len}"
-                    )));
-                }
-
-                let nonce = uuid::Uuid::new_v4().simple().to_string();
-                let part_path = bin_dir.join(format!(".obscura-{nonce}.tar.gz.part"));
-                let mut reader = response.into_body().into_reader();
-                let mut part_file = File::create(&part_path)?;
-
-                let mut hasher = Sha256::new();
-                let mut buf = [0u8; 8192];
-                let mut total_read = 0u64;
-
-                loop {
-                    let n = reader.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    total_read += n as u64;
-                    if total_read > self.max_archive_bytes {
-                        let _ = fs::remove_file(&part_path);
-                        return Err(InstallError::InvalidArchive(
-                            "Archive exceeds maximum allowed size".into(),
-                        ));
-                    }
-                    hasher.update(&buf[..n]);
-                    part_file.write_all(&buf[..n])?;
-                }
-                part_file.flush()?;
-                drop(part_file);
-
-                let actual_hash = format!("{:x}", hasher.finalize());
-                if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-                    let _ = fs::remove_file(&part_path);
-                    return Err(InstallError::HashMismatch {
-                        expected: expected_hash.to_string(),
-                        actual: actual_hash,
-                    });
-                }
-                part_path
+                self.download_archive(bin_dir, asset_name, expected_hash, expected_size)?
             }
         };
 
-        // 3. Verify and unpack archive
-        let file = File::open(&archive_source_path).map_err(|e| {
-            InstallError::Io(std::io::Error::new(
-                e.kind(),
-                format!("open archive_source_path: {e}"),
-            ))
-        })?;
-        let mut hasher = Sha256::new();
-        let mut buf_reader = BufReader::new(file);
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = buf_reader.read(&mut buf).map_err(|e| {
-                InstallError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("buf_reader.read: {e}"),
-                ))
-            })?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let actual_hash = format!("{:x}", hasher.finalize());
-        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-            if archive_source_path != preinstalled_archive {
-                let _ = fs::remove_file(&archive_source_path);
-            }
-            return Err(InstallError::HashMismatch {
-                expected: expected_hash.to_string(),
-                actual: actual_hash,
-            });
-        }
+        let _archive_reader =
+            verify_archive(&archive_source_path, &preinstalled_archive, expected_hash)?;
 
-        // Unpack into temporary staging directory
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        let temp_unpack_dir = bin_dir.join(format!(".obscura-unpack-{nonce}"));
-        fs::create_dir_all(&temp_unpack_dir).map_err(|e| {
-            InstallError::Io(std::io::Error::new(
-                e.kind(),
-                format!("create temp_unpack_dir: {e}"),
-            ))
-        })?;
+        let (temp_unpack_dir, _archive) =
+            unpack_archive(bin_dir, &archive_source_path, &preinstalled_archive)?;
 
-        let tar_gz = File::open(&archive_source_path).map_err(|e| {
-            InstallError::Io(std::io::Error::new(e.kind(), format!("open tar_gz: {e}")))
-        })?;
-        let tar = GzDecoder::new(BufReader::new(tar_gz));
-        let mut archive = Archive::new(tar);
-
-        let entries = archive.entries().map_err(|e| {
-            InstallError::Io(std::io::Error::new(
-                e.kind(),
-                format!("archive.entries: {e}"),
-            ))
-        })?;
-        for entry in entries {
-            let mut entry = entry.map_err(|e| {
-                InstallError::Io(std::io::Error::new(e.kind(), format!("entry item: {e}")))
-            })?;
-            let path = entry
-                .path()
-                .map_err(|e| {
-                    InstallError::Io(std::io::Error::new(e.kind(), format!("entry.path: {e}")))
-                })?
-                .to_path_buf();
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| InstallError::InvalidArchive("invalid entry filename".into()))?;
-            // Full-path match: only top-level `obscura` / `obscura-worker` (an
-            // optional leading `./` is tolerated); `x/obscura` is rejected.
-            let top_level = path
-                .components()
-                .filter(|c| !matches!(c, std::path::Component::CurDir))
-                .count()
-                == 1;
-
-            if !top_level
-                || !EXPECTED_ENTRIES.contains(&file_name)
-                || !entry.header().entry_type().is_file()
-            {
-                let _ = fs::remove_dir_all(&temp_unpack_dir);
-                if archive_source_path != preinstalled_archive {
-                    let _ = fs::remove_file(&archive_source_path);
-                }
-                return Err(InstallError::InvalidArchive(format!(
-                    "unexpected or non-regular archive entry: {file_name}"
-                )));
-            }
-            entry.unpack_in(&temp_unpack_dir).map_err(|e| {
-                InstallError::InvalidArchive(format!("unpack_in '{file_name}': {e}"))
-            })?;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for entry_name in EXPECTED_ENTRIES {
-                let staged = temp_unpack_dir.join(entry_name);
-                if staged.exists() {
-                    let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755));
-                }
-            }
-        }
-
-        // Move to final destination
-        for entry_name in EXPECTED_ENTRIES {
-            let staged = temp_unpack_dir.join(entry_name);
-            let target = bin_dir.join(entry_name);
-            fs::rename(&staged, &target).map_err(|e| {
-                InstallError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("rename {:?} to {:?}: {e}", staged, target),
-                ))
-            })?;
-        }
-        let _ = fs::remove_dir_all(&temp_unpack_dir);
-
-        if archive_source_path != preinstalled_archive {
-            let _ = fs::remove_file(&archive_source_path);
-        }
+        publish_staged_archive(
+            bin_dir,
+            &temp_unpack_dir,
+            &archive_source_path,
+            &preinstalled_archive,
+        )?;
 
         let marker = format!(
             "archive={}\nobscura={}\nobscura-worker={}\n",
@@ -679,4 +511,222 @@ mod spawn_thread_tests {
         assert!(status.success(), "cp failed sealing {}", path.display());
         std::fs::rename(&sealed, path).expect("rename sealed test executable");
     }
+}
+
+impl ReleaseInstaller {
+    fn download_archive(
+        &self,
+        bin_dir: &Path,
+        asset_name: &str,
+        expected_hash: &str,
+        expected_size: u64,
+    ) -> Result<PathBuf, InstallError> {
+        let download_url = format!("{}/{}", self.base_url, asset_name);
+        tracing::info!(url = %download_url, "Downloading Obscura browser daemon");
+
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(300)))
+            .build()
+            .new_agent();
+
+        let response = agent
+            .get(&download_url)
+            .call()
+            .map_err(|e| InstallError::Download(e.to_string()))?;
+
+        if let Some(len_header) = response.headers().get("content-length")
+            && let Ok(len_str) = len_header.to_str()
+            && let Ok(content_len) = len_str.parse::<u64>()
+            && (content_len > self.max_archive_bytes || content_len != expected_size)
+        {
+            return Err(InstallError::InvalidArchive(format!(
+                "Content-Length mismatch: expected {expected_size}, got {content_len}"
+            )));
+        }
+
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let part_path = bin_dir.join(format!(".obscura-{nonce}.tar.gz.part"));
+        let mut reader = response.into_body().into_reader();
+        let mut part_file = File::create(&part_path)?;
+
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 8192];
+        let mut total_read = 0u64;
+
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            total_read += n as u64;
+            if total_read > self.max_archive_bytes {
+                let _ = fs::remove_file(&part_path);
+                return Err(InstallError::InvalidArchive(
+                    "Archive exceeds maximum allowed size".into(),
+                ));
+            }
+            hasher.update(&buf[..n]);
+            part_file.write_all(&buf[..n])?;
+        }
+        part_file.flush()?;
+        drop(part_file);
+
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+            let _ = fs::remove_file(&part_path);
+            return Err(InstallError::HashMismatch {
+                expected: expected_hash.to_string(),
+                actual: actual_hash,
+            });
+        }
+        Ok(part_path)
+    }
+}
+
+fn verify_archive(
+    archive_source_path: &Path,
+    preinstalled_archive: &Path,
+    expected_hash: &str,
+) -> Result<BufReader<File>, InstallError> {
+    // 3. Verify and unpack archive
+    let file = File::open(archive_source_path).map_err(|e| {
+        InstallError::Io(std::io::Error::new(
+            e.kind(),
+            format!("open archive_source_path: {e}"),
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buf_reader = BufReader::new(file);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = buf_reader.read(&mut buf).map_err(|e| {
+            InstallError::Io(std::io::Error::new(
+                e.kind(),
+                format!("buf_reader.read: {e}"),
+            ))
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        if archive_source_path != preinstalled_archive {
+            let _ = fs::remove_file(archive_source_path);
+        }
+        return Err(InstallError::HashMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash,
+        });
+    }
+
+    Ok(buf_reader)
+}
+
+fn unpack_archive(
+    bin_dir: &Path,
+    archive_source_path: &Path,
+    preinstalled_archive: &Path,
+) -> Result<(PathBuf, Archive<GzDecoder<BufReader<File>>>), InstallError> {
+    // Unpack into temporary staging directory
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let temp_unpack_dir = bin_dir.join(format!(".obscura-unpack-{nonce}"));
+    fs::create_dir_all(&temp_unpack_dir).map_err(|e| {
+        InstallError::Io(std::io::Error::new(
+            e.kind(),
+            format!("create temp_unpack_dir: {e}"),
+        ))
+    })?;
+
+    let tar_gz = File::open(archive_source_path).map_err(|e| {
+        InstallError::Io(std::io::Error::new(e.kind(), format!("open tar_gz: {e}")))
+    })?;
+    let tar = GzDecoder::new(BufReader::new(tar_gz));
+    let mut archive = Archive::new(tar);
+
+    let entries = archive.entries().map_err(|e| {
+        InstallError::Io(std::io::Error::new(
+            e.kind(),
+            format!("archive.entries: {e}"),
+        ))
+    })?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| {
+            InstallError::Io(std::io::Error::new(e.kind(), format!("entry item: {e}")))
+        })?;
+        let path = entry
+            .path()
+            .map_err(|e| {
+                InstallError::Io(std::io::Error::new(e.kind(), format!("entry.path: {e}")))
+            })?
+            .to_path_buf();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| InstallError::InvalidArchive("invalid entry filename".into()))?;
+        // Full-path match: only top-level `obscura` / `obscura-worker` (an
+        // optional leading `./` is tolerated); `x/obscura` is rejected.
+        let top_level = path
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .count()
+            == 1;
+
+        if !top_level
+            || !EXPECTED_ENTRIES.contains(&file_name)
+            || !entry.header().entry_type().is_file()
+        {
+            let _ = fs::remove_dir_all(&temp_unpack_dir);
+            if archive_source_path != preinstalled_archive {
+                let _ = fs::remove_file(archive_source_path);
+            }
+            return Err(InstallError::InvalidArchive(format!(
+                "unexpected or non-regular archive entry: {file_name}"
+            )));
+        }
+        entry
+            .unpack_in(&temp_unpack_dir)
+            .map_err(|e| InstallError::InvalidArchive(format!("unpack_in '{file_name}': {e}")))?;
+    }
+
+    Ok((temp_unpack_dir, archive))
+}
+
+fn publish_staged_archive(
+    bin_dir: &Path,
+    temp_unpack_dir: &Path,
+    archive_source_path: &Path,
+    preinstalled_archive: &Path,
+) -> Result<(), InstallError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry_name in EXPECTED_ENTRIES {
+            let staged = temp_unpack_dir.join(entry_name);
+            if staged.exists() {
+                let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    // Move to final destination
+    for entry_name in EXPECTED_ENTRIES {
+        let staged = temp_unpack_dir.join(entry_name);
+        let target = bin_dir.join(entry_name);
+        fs::rename(&staged, &target).map_err(|e| {
+            InstallError::Io(std::io::Error::new(
+                e.kind(),
+                format!("rename {:?} to {:?}: {e}", staged, target),
+            ))
+        })?;
+    }
+    let _ = fs::remove_dir_all(temp_unpack_dir);
+
+    if archive_source_path != preinstalled_archive {
+        let _ = fs::remove_file(archive_source_path);
+    }
+
+    Ok(())
 }
