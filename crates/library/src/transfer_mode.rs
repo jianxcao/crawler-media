@@ -1,6 +1,23 @@
+//! Transfer mode selection from configuration and filesystem placement.
 use std::path::Path;
 
-use crate::TransferMode;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferMode {
+    Hardlink,
+    Copy,
+    Move,
+}
+
+impl TransferMode {
+    /// Storage form used by the Library ledger's `transfer_mode` column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+}
 
 pub fn resolve_mode(src: &Path, dest_dir: &Path, configured: Option<TransferMode>) -> TransferMode {
     if let Some(mode) = configured {
