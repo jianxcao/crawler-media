@@ -57,8 +57,8 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 ### 用户删除时的所有权转交合同
 当一个用户被删除时（见 [app.db 用户生命周期](../database/app.md)）：
 - 该用户创建的所有 `subscribes` 记录不会被物理级联删除（避免静默丢失已建立的长期下载策略）；
-- 其所有权字段 `user_id` 在独立事务中安全转交给系统默认管理员（`00000000-0000-0000-0000-000000000001`）；
-- 相关的定时任务定义（`jobs.db`）按 typed 引用与参数更新，不对 payload 进行全字符串替换；
+- 其所有权字段 `user_id` 在独立事务中安全转交给当前 `role=admin` 且 id 排序最小的管理员（`Store::admin_user_id`）；
+- 当前用户删除流程未改写 `jobs.db` 的定义参数；定时任务按 Subscribe 身份重新读取现行所有权，不能据本段推断存在跨库原子更新；
 - 当 Subscribe 移除了显式 `library_id` 绑定时，策略评估读取新 coverage/units，但已保存的非目标库事实不会跳到默认库。
 
 ## subscribe_facts
@@ -121,7 +121,7 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 | `score` | `INTEGER` | — | 是 | 无 | 提交时评分。 |
 | `torrent_json` | `TEXT` | — | 是 | 无 | 已提交 Torrent 的序列化事实，可包含 Site、实际 Downloader、Release override 等；DDL 不验证 JSON。 |
 | `submitted_at` | `INTEGER` | — | 是 | `0` | 提交时间，Unix 秒；0 表示没有有效提交时间记录。 |
-| `state` | `TEXT` | — | 是 | `'active'` | 状态文本；业务使用 active、imported、stalled，DDL 无枚举 CHECK。 |
+| `state` | `TEXT` | — | 是 | `'active'` | 状态文本；业务使用 active、imported、stalled、rejected，DDL 无枚举 CHECK。 |
 | `last_progress` | `REAL` | — | 否 | 无 | 最近记录的增长进度，调用者约定范围 0..=1；DDL 不限制数值。 |
 | `last_progress_at` | `INTEGER` | — | 否 | 无 | 最近检测到进度增长的时间，Unix 秒；并非每次轮询都更新。 |
 | `info_hash` | `TEXT` | — | 否 | 无 | Downloader 分配的 Torrent info hash；写入者转为小写。 |

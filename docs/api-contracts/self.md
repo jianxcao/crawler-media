@@ -140,7 +140,7 @@ R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的
 - 因此一次 A-Z 跳转 = **一次** `GET /libraries/{id}/items?cursor=<该档游标>`，返回
   的正是这一档的第一页（9.5k 部的库实测 1 次请求；「回到上次位置」同一条路）。
   跳转后窗口起点不为 0，向上滚动不做 prepend（与 cursor-only 分页同一取舍）。
-- Library/排序/筛选/方向任一改变，客户端必须重新取 `item-index`。卡片游标已有服务端 scope 校验；item-index 走独立 reader，但准备/最终校验仍依赖共享 Store，边界见[当前复审 L1](../audits/2026-10-28-storage-lock-review.md)。索引生成需遍历排序集合，不承诺一页的常量工作量。
+- Library/排序/筛选/方向任一改变，客户端必须重新取 `item-index`。卡片游标已有服务端 scope 校验；item-index 通过 Library 读取流程使用统一只读池，准备与最终校验不获取 writer 锁；多库快照与发布校验边界见 [ADR-0008](../adr/0008-sqlite-system-of-record.md)。索引生成需遍历排序集合，不承诺一页的常量工作量。
 
 ### LibraryItemFile 与文件续页
 
@@ -148,7 +148,7 @@ R6/R7 修复后，metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的
 续页 `GET /libraries/{id}/items/{media_item_id}/files?after=&limit=`（`limit` 为 `1..=100`，默认 50）
 返回 `{files, next_cursor}`。`cursor` 绑定 Library/Media/`file_id ASC` 顺序，越界或跨 scope 一律 400。
 
-当前 Web adapter 会收齐全部文件页才 resolve 详情，并在 Probe 未结束时定期重拉；这是[复审 L5](../audits/2026-10-28-storage-lock-review.md)的性能缺口，不代表后端已实现的文件分页本身仍读取全部覆盖。首屏与按需加载的新消费者合同尚未实施。
+当前 Web adapter 会收齐全部文件页才 resolve 详情，并在 Probe 未结束时定期重拉；这是历史共享锁复审 L5 记录的前端工作量缺口，不代表后端已实现的文件分页本身仍读取全部覆盖。首屏与按需加载的新消费者合同尚未实施。
 
 单个文件行（`web/lib/api/libraries.ts` 的 `LibraryItemFile`）：
 

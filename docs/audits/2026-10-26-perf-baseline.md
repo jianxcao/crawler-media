@@ -1,6 +1,6 @@
 # 性能基线 + 确定性回归门禁（Task 17）
 
-> 历史证据：本文数字仅适用其记录的版本/规模；当前状态与剩余方案见2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。
+> 历史证据：本文原始数字只适用其记录的版本/规模；当前问题见 [11-02 审核](2026-11-02-storage-redesign-review.md)，验收见 [最终清单](../superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md)。当前生产布局身份为 v1；下面的 v4 测量是历史记录。当前 `fixture.rs::Scale::WRITE_PROBE` 预留发布位为 2400；`gate.rs` 的 Playback progress 业务语句预算为 28（加上独立计量的 reader 开销）。原始表格不改写成当前运行结果。
 
 日期：2026-10-26。分支：`feat/storage-redesign`。任务：计划
 `2026-10-26-storage-redesign-review-fixes.md`（历史原文：`git show 5730b032:docs/superpowers/plans/2026-10-26-storage-redesign-review-fixes.md`） 的 Task 17。
@@ -32,7 +32,7 @@ DDL 一改，键就变，绝不会量到旧布局；跑门禁时打印 `fixture:
 然后 `seed cache hit …`——只播种一次。
 
 ```bash
-# 默认目标里的廉价版本（同一夹具形状，1/144 的行数，预算完全相同）。约 5 秒。
+# 默认目标里的廉价版本（同一夹具形状，较小规模，精确行数见当前 `fixture.rs::Scale::SMALL`，预算完全相同）。约 5 秒。
 cargo test -p store --test perf_baseline
 ```
 
@@ -369,7 +369,7 @@ thread-local 借用、不读时钟）。逐段测量 400 集、每 chunk 100 文
    静默退化成全表扫描，而是因为 `INDEXED BY`（计划勘误 E4）直接报 `no such index` —— 记录这条硬契约。
 5. 附带发现（第 6 节测量时撞到的）：删掉**任意**一个 `LIBRARY_INDEXES` 里的索引后，读租约路径会以
    `StoreError::LayoutMismatch("library database schema is missing required index …")` 拒绝服务，而不是降级。
-   即“索引名”是硬契约：DDL 与 `objects.rs` 不同步时是先炸开，不会静静地变慢。
+   当前结构校验由唯一生产 DDL 和 `schema/definitions.rs` 生成清单；旧 `objects.rs` 已删除。索引缺失或定义不同会拒绝，不能沿用历史错误文本推断当前行为。
 
 实际输出（2026-10-26）：
 

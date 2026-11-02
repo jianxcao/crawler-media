@@ -65,12 +65,12 @@ User 登录身份、启用状态、角色和密码资料，不保存观看事实
 用户删除通过 `DELETE /api/v1/users/{id}` 发起，采用分阶段幂等与故障可续模型：
 1. **202 异步合同**：删除请求立即返回 `202 Accepted` 与 `operation_id`，不使用 200 掩盖尚未完成的跨库清理。
 2. **凭据立即失效与阶段持久化**：
-   - 首先在 `settings` 持久化操作状态：键为 `user_removal.<id>`，版本为 `version: 1`，包含 `operation_id`、`phase`（如 `disabling` -> `cleaning`）、`cursor`、`error` 与 `updated_at`。
+   - 首先在 `settings` 持久化操作状态：键为 `user_removal.<id>`，版本为 `version: 1`，包含 `operation_id`、`phase`（`disabling` → `cleaning` → `finalizing`）、`cursor`、`error` 与 `updated_at`。
    - 立即将用户设置为禁用（`enabled = 0`）并物理撤销 `user_tokens` 中该用户的全部会话 token。在整个删除执行与可能的故障恢复期间，被删除用户的 token 访问必须保证立即 401（Unauthorized）。
 3. **资源所有权与清理边界**：
    - 保留现行产品行为：被删除用户的 Subscribe 所有权转移至系统管理员（`admin`），私有 Collection 亦转移至管理员，不静默删除用户创建的长期订阅与合集。
    - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items`）被一并清理，不产生孤儿稀疏摘要。
-   - 跨库清理完成后，删除 `users` 记录并清除 `settings` 中的 `user_removal.<id>` 操作项。
+   - 跨库清理完成后，删除 `users` 记录；先在 `user_removal.result.<operation_id>` 保存终态结果、在 `user_removal.done.<user_id>` 保存操作 id，再清除 `user_removal.<id>` 在途项。重启可幂等重做 `finalizing`，终态回执继续可查。
 4. **故障恢复**：开机启动时扫描 `user_removal.` 前缀的在途操作，沿用 lease 模式继续完成未决阶段。
 
 ## sites
@@ -230,6 +230,6 @@ Downloader 连接、启用开关、默认选择和路径映射配置。
 
 无额外命名索引；不计主键/UNIQUE 自动索引。
 
-实例 Transfer/Watch 设置保存在 `settings['transfer.settings']` 的严格 revisioned DTO；PATCH 在 app 单事务比较 expected_revision，仅改目标字段。Naming template 只保存在当前 Scrape 设置 `metadata.scrape` 的四个分段字段；已删除重复 naming_templates 表及旧组合字符串反拆。Downloader 只从当前 downloaders 行和受支持环境覆盖选择，旧 settings['downloader'] 不再读取。
+Transfer/Watch 配置与 Naming template 所属的原始 Scrape 配置由 [library.db 的专用单例表](library.md#transfer_settings) 保存，以便配置校验和文件发布同事务完成。app 的通用 settings 不再接受 `transfer.settings` 或 `metadata.scrape`，没有旧键回退。Downloader 从当前 downloaders 行和受支持环境覆盖选择。
 
 app 的只读布局预检比较当前表集合；保留额外退役表的文件被拒绝，不删除该表、不读取旧命名、不认领旧布局。

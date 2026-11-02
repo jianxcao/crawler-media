@@ -1,5 +1,7 @@
 # 存储重构复审：共享锁、工作量与修复方案
 
+> 历史快照：本文只描述下列 2026-10-28/29 基线，包含已删除的 Store Mutex、StoreReaders、store_mutate 与提案。现行架构以 [ADR-0008](../adr/0008-sqlite-system-of-record.md) 为准，当前问题见 [2026-11-02 审核](2026-11-02-storage-redesign-review.md)，验收见 [最终清单](../superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md)。下文状态和数字不代表当前分支。
+
 日期：2026-10-28。代码基线 `feat/storage-redesign@7e3bd653081c49220325e88b37997960966f5daa`，比较 `main/origin/main@756444f76bef53f5fabed6d0ef53e9f280e005e9`。审查期间分支从 `f569c3c7` 更新到本基线；下文已重新核对新增修复，不将旧缺陷原样延续。用户要求只 review、提出方案并整理文档，本轮不实施 Rust、Web、DDL 或正式测试修改。
 
 **结论：暂不建议合并。共享 Store 互斥锁把不必要的读写串行化，锁内的重复归约又放大等待；两者均需处理。** 五文件生命周期划分和 Media/Library/Playback 同库事务可以保留。当前没有指数增长或永久死锁的证据，已确认存在二次与三次方工作量。
@@ -37,17 +39,17 @@
 
 - `f569c3c7` 的实际扫描中，TV Media 详情约 1.4–2.6 秒，一次达到 7.2 秒；部分 Library 请求接近 12 秒。列表 5 并发、20 次中 8 次 503，采样 CPU 集中于 SQLite 单元重建。491 个 STRM 分散于多个 Media，不能等同于一个 Media 有 491 个文件。
 - 测试会话核对 `7e3bd653` 后未启动新一轮完整扫描：详情已 offload，但共享锁、重建算法及先登记文件后抓图的顺序未根治。旧现场耗时不能冒充新版复测结果。
-- 本轮仅使用离线 fake、临时 SQLite 和公开 Store/Router seam。最新 Probe 与协议筛选的 bundled SQLite 3.50.2 复现见[持久测量记录](../benchmarks/2026-10-28-storage-lock-work.md)。没有访问用户实例、真实 Metadata source、Downloader、Browser、NAS 或 STRM。
+- 本轮仅使用离线 fake、临时 SQLite 和公开 Store/Router seam。最新 Probe 与协议筛选的 bundled SQLite 3.50.2 复现见历史测量记录（`git show ec731268:docs/benchmarks/2026-10-28-storage-lock-work.md`）。没有访问用户实例、真实 Metadata source、Downloader、Browser、NAS 或 STRM。
 
 ## L1 · P1：共享锁仍把读取排在扫描后面
 
 [ApiState](../../crates/api/src/management/state.rs#L24) 为四个 Store 数据库共享一个 `Arc<Mutex<Store>>`。[详情](../../crates/api/src/http/library.rs#L306)、[图片](../../crates/api/src/http/library_artwork/images.rs#L107)、[Library 统计](../../crates/api/src/library_statistics.rs#L40) 经 `store_read` 等待同一把锁。offload 改变了等待线程，读取仍需等待扫描/Probe 的独占临界区；[store_wait](../../crates/api/src/http/store_wait.rs) 的五秒等待预算不是读写隔离。
 
-已使用 reader 的 items/facets/gallery/item-index/协议查询也未完全隔离：[visibility、prepare 和 validate](../../crates/api/src/library_read_work.rs#L240) 都回到共享 Store。reader 有空闲且 WAL 允许读取已提交快照时，请求仍可能卡在应用锁之前或返回前。认证已有独立 [AppReader](../../crates/store/src/app_reader.rs)，但 prepare/validate 再次使用 Store 读取身份与 Library roster。
+已使用 reader 的 items/facets/gallery/item-index/协议查询也未完全隔离：[visibility、prepare 和 validate](../../crates/api/src/library_read_work.rs#L240) 都回到共享 Store。reader 有空闲且 WAL 允许读取已提交快照时，请求仍可能卡在应用锁之前或返回前。认证已有独立 `AppReader`（历史源码：`git show ffe3e379^:crates/store/src/app_reader.rs`，该文件在当前树已删除），但 prepare/validate 再次使用 Store 读取身份与 Library roster。
 
 此外，[生产 reader 数量为 2](../../crates/api/src/management/state.rs#L284)，[池满立即 Busy](../../crates/store/src/library_read/pool.rs#L103)，[HTTP lease 阶段](../../crates/api/src/library_read_work.rs#L177) 没有等待空闲连接的队列。保护容量是合理的；普通页面并发请求也直接失败，不能作为用户可用性的验收结果。仅增加池容量会保留全局锁瓶颈。
 
-当前 Router 离线实测：独立线程持 Store 锁 600ms，detail/libraries/episodes/items 仍需约 610–620ms，而 50ms 定时器约 52ms 唤醒，确认执行器已解除阻塞、请求仍排队。单独在 prepare 或 validate 前制造争用，各产生约 605ms 锁等待；后者的实际选页 SQL 仅约 0.21ms。两个 lease 均占用时，facets 约 0.99ms 即返回 503，归还后 200。该夹具隔离的是应用锁，不是一个真实扫描事务，完整源码与结果见[测量记录](../benchmarks/2026-10-28-storage-lock-work.md)。
+当前 Router 离线实测：独立线程持 Store 锁 600ms，detail/libraries/episodes/items 仍需约 610–620ms，而 50ms 定时器约 52ms 唤醒，确认执行器已解除阻塞、请求仍排队。单独在 prepare 或 validate 前制造争用，各产生约 605ms 锁等待；后者的实际选页 SQL 仅约 0.21ms。两个 lease 均占用时，facets 约 0.99ms 即返回 503，归还后 200。该夹具隔离的是应用锁，不是一个真实扫描事务，完整源码与结果见历史测量记录（`git show ec731268:docs/benchmarks/2026-10-28-storage-lock-work.md`）。
 
 **来源：** main 已有全局 Store 锁；本次重构新增了独立读池，但准备/校验和许多实际消费者保留该串行点。不是所有现存锁问题都由本次新引入。
 

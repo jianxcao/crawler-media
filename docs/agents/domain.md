@@ -8,7 +8,7 @@
 - [ADR](<../adr>) —— 仅阅读与你将工作的区域相关的决策
 - roadmap（`git show 5e44f101:docs/agents/roadmap.md`） —— 阶段历史归档，不是当前状态或 API 规范；仅当用户请求引用时读取
 - [AGENTS.md](<../../AGENTS.md>) —— 工作范围、测试 seam、Rust 体积限制
-- 当前存储复审与修复方案：2026-10-28 复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）；10-23 执行记录（`git show 5e44f101:docs/superpowers/plans/2026-10-23-storage-review-remediation.md`）是历史记录。2026-10-13 的 review（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`）、follow-up（`git show 5e44f101:docs/superpowers/plans/2026-10-13-database-api-followup.md`） 是历史发现与整改依据，不是今天所有缺陷仍存在或已经关闭的证明；未覆盖发现仍需逐 ID 对账。
+- 当前存储架构：[ADR-0008](../adr/0008-sqlite-system-of-record.md)；审计与验收：[2026-11-02 审核](../audits/2026-11-02-storage-redesign-review.md)、[最终验收清单](../superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md)。历史审核仅记录对应基线，不代表当前缺陷或通过结果。
 
 若这些文件中有任何不存在，**静默继续**。不要标记其缺失；不要主动建议创建它们。`/domain-modeling` skill（经 `/grill-with-docs` 与 `/improve-codebase-architecture` 触达）在术语或决策实际被解析时才惰性创建它们。
 

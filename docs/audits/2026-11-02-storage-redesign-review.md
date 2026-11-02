@@ -1,15 +1,24 @@
-# feat/storage-redesign 合并审核（对比 `git diff main...HEAD`）
+# feat/storage-redesign 合并审核（固定基线 `a28249a3`）
 
 - 审核日期：2026-11-02；HEAD `a28249a3`；范围 123 commits / 2122 files / +257k −84k
 - 方式：只读审核，未改动任何源码/文档、未运行 cargo。SQL 结论用 `sqlite3` 对 `crates/store/src/schema/v1/*.sql`、`crates/jobs/src/schema.sql` 建临时库跑 `EXPLAIN QUERY PLAN`（EQP），并用合成数据（10 万 items / 25k logs / 20 万 jobs 历史）计时；耗时绝对值仅供参考，复杂度阶数可靠。
 - 按约定不计为问题：probe 并发 = 1、远程读冷却 500ms、ADR-0012 删库清理孤儿 Media 及其收藏/进度、library 读池容量 8。
-- 本文件位于 `docs/test-reports/`（已 gitignore，不应提交）。
+- 本文件是受版本控制的审核基线，位于 `docs/audits/`；后续修复状态见下方记录，原始运行产物另存未提交的 `.e2e/` 或 `docs/test-reports/`。
+
+## 修复状态（2026-11-02）
+
+- B1/B2：`18bad154` 改为按可见 Library 的索引查询，观看统计使用用户等值条件；Store/API 回归和 10k Media 工作量回归已通过。
+- B3：`2e378ca2` 将 Transfer/Watch 与原始 Scrape 配置的唯一权威移至 Library；同库快照观察、单调 revision 和发布事务内校验关闭配置变化窗口。Store 943、API 2109 项通过（各 10 项忽略），独立审查通过；旧布局按零兼容规则拒绝，未重建用户实例。
+- B4：ADR-0008、数据库字典及当前入口已按现有 ReaderPool/每库 writer 更新；10-28 锁审计明确为历史快照。
+- §2 建议项和最终运行验收继续按计划执行；本文的基线数值与旧结论保留原提交语境，不代表新一轮性能结果。
 
 ---
 
-## 结论
+## 基线结论
 
-**暂不可合并。** 阻塞项 4 个（B1–B4），全部修完即可合并；"建议修复"可在合并后紧随处理。
+以下结论描述 `a28249a3`，不代表修复后的分支状态。
+
+**基线暂不可合并。** 阻塞项 4 个（B1–B4），全部修完即可合并；"建议修复"可在合并后紧随处理。
 
 | # | 阻塞项 | 一句话 |
 |---|---|---|

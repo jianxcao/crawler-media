@@ -1,5 +1,7 @@
 # feat/storage-redesign 审核修复 Implementation Plan
 
+> 历史实施计划：本页记录 10-29 的接口名、步骤与复选框。Task 0–20 的已实施提交及仍缺的报告逐项见 [11-02 最终验收清单](2026-11-02-storage-redesign-final-acceptance.md)，当前新增问题见 [11-02 审核](../../audits/2026-11-02-storage-redesign-review.md)。旧 unchecked 不是重新实施理由，也不表示验收通过。StoreReaders、app_reader、Store Mutex 等旧名称只保留为历史步骤；当前架构见 [ADR-0008](../../adr/0008-sqlite-system-of-record.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 修掉审核发现的 3 个合并阻塞项（B1/B2/B3），再按优先级处理锁、索引、性能、零兼容和文档的建议修复项。

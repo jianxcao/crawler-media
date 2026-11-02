@@ -1,8 +1,8 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 当前修复状态见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)：请求读已与写者分离（L1），Probe 归约与协议观看筛选的超线性问题已修（L2/L3）；剩余为 L7 与 prepare/validate 余量。
+> 固定审核基线及后续修复状态见[2026-11-02 存储审核](../audits/2026-11-02-storage-redesign-review.md)，运行验收见[最终验收清单](../superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md)。历史缺陷与测量只描述其记录版本。
 
-状态：接受；五文件边界保留。未合并的开发中间布局已收敛为唯一生产定义，五文件当前身份版本均为 1；这是当前结构标识，不是旧库迁移支持。字段/索引见[数据库字典](../database/README.md)。读写分离已落地（见「读写分离」一节）；按库写连接调度仍为提案。
+状态：接受；五文件边界保留。未合并的开发中间布局已收敛为唯一生产定义，五文件当前身份版本均为 1；这是当前结构标识，不是旧库迁移支持。字段/索引见[数据库字典](../database/README.md)。每库单 writer 与统一只读池已落地（见「读写分离」一节）。
 
 ## 决策
 
@@ -10,8 +10,8 @@
 
 | 文件 | 现行职责 | 可清空 |
 |---|---|---|
-| `app.db` | User/token/凭证、Site、Downloader、Filter、Naming template、设置、搜索快照、实例锁 | 否 |
-| `library.db` | Media/别名/采用元数据、Library/根、文件/覆盖/浏览摘要、Collection、Playback、Probe/Scan、持久文件和库操作 | 否 |
+| `app.db` | User/token/凭证、Site、Downloader、Filter、通用设置、搜索快照、实例锁 | 否 |
+| `library.db` | Media/别名/采用元数据、Library/根、文件/覆盖/浏览摘要、Collection、Playback、Probe/Scan、Transfer/Watch 与 Scrape 配置、持久文件和库操作 | 否 |
 | `subscribe.db` | Subscribe 策略、逐槽事实、待下载记录 | 否 |
 | `jobs.db` | Job 定义/调度配置、执行/重试、终态历史及保留游标 | 否；仅按规则清理终态历史 |
 | `cache.db` | 六个 Metadata source 的原始 HTTP 响应，按来源分表 | 是；连接内受控清理或停写关连接后重建 |
@@ -38,19 +38,19 @@ Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务�
 
 旧 `/directory` 聚合/roots 写、组合 Naming 拆解、Downloader JSON 回退和自有无签发会话 Playback 已删除；前端与 CLI 同批迁移。Transfer/Watch 设置独立 revision CAS，根替换只走 Library operation，Claim/Unidentified 消费登记归属。Jellyfin 按协议建立有效绑定，静态图片保持 public。
 
-## 读写分离（2026-10-29）
+## 读写分离（2026-11-02）
 
-- **请求读**：`StoreReaders`（`crates/api/src/store_readers.rs`，`STORE_READERS = 8`）是一组由 `Store::open_reader` 打开的只读 Store，请求读经 `store_read` / `store_read_handle` 借用，不锁进程级 writer Store；checkout 为异步可取消（`29fbceae`）。每个只读 Store 打开四个数据库文件。
-- **写**：经 `store_mutate`（5s 等锁上限）获取 writer Store。详情、文件列表与 `probe-status` 不取写锁（`1c0cfdef`）；Scrape 按 64 文件批量写、目录级 ledger 读取在写锁外（`3876d72c`）。
-- **Library/Jellyfin 覆盖查询**另有下节的 `LIBRARY_READERS = 2` 只读 library.db lease 池（`crates/api/src/management/state.rs`），与 `StoreReaders` 相互独立。
+`Store` 共享 `Arc<Writers>`，app/subscribe/library/cache 每库只有一个 writer 连接和独立 Mutex；没有进程级 Store Mutex。读写连接各自拥有 SQLite 连接，普通读不获取 writer 锁。锁纪律要求文件与网络观察在写锁外执行，writer 闭包只做本次写入所需的 SQL（包括事务内约束及 CAS 校验）。Transfer/Watch 与原始 Scrape 配置以 library.db 为唯一权威，配置观察、根和文件快照在同一 Library 读快照中完成；发布事务在同一数据库比较配置版本和文件证据，避免跨库配置 fence。
 
-## 有界 Library 读连接
+- **请求读**：`store_read` / `store_read_handle` 在 blocking worker 上调用 `Store::with_read_snapshot`，声明本阶段需要的数据库。`ReaderPool` 容量为 app 4、subscribe 2、library 8、cache 2（`crates/store/src/open.rs`）；Library/Jellyfin 共用 library 池。每个连接严格只读且 `query_only`，在 deferred 事务中读取快照。
+- **快照准入**：按 library → app → subscribe → cache 稳定顺序获取；同阶段每库复用一个 lease/快照。普通 `store_read` / `with_store_read` 使用 `STORE_READ_WAIT=5s`；`store_read_handle` 使用调用方预算，Library/Jellyfin 多阶段读取使用请求剩余的绝对 deadline（请求预算 30s）。独立数据库的快照不构成跨库原子快照。认证、ACL/config/lifecycle 与选中文件的发布校验仍需明确处理观察间变化。
+- **写准入**：`store_write` 获取 `http_work` permit，并以 `STORE_WRITE_WAIT=1s` 设置写作用域的绝对 deadline。在实际目标库 writer 获取后复查实例可写性与维护 WriteGate；该预算由作用域内获取共享，闭包计算及前一次获取会消耗余量。未获得 writer 返回 503 + `Retry-After`；worker 超时可能已写入，不能当作未执行。
+- **writer 顺序**：现有 rank 为 app → subscribe → library → cache → jobs。跨库提交分开完成，不承诺原子性。禁止在 writer 闭包内获取另一库 writer 是当前审核的修复要求；存量 Subscribe 保留引用 fence 与 release 检查的具体缺口见审计 B3/L3，不能据 rank 合法就认可嵌套。
+- **Jobs**：`jobs::Queue` 拥有 jobs.db 的唯一 writer；API `jobs_readers` 另有容量 2 的严格只读 `ReaderPool`，通过 `jobs::QueueRead` 查询。它独立于 Store 四库读池；Jobs writer 无界等待问题见审计 L2。
 
-实例为覆盖的 Library/Jellyfin 查询持有最多两个（`LIBRARY_READERS = 2`）独占只读 lease，连接只打开已验证的当前 `library.db`，不初始化布局、不获取 writer 租约、不 ATTACH app.db。短 Store 阶段持原请求 token 形成 owned 上下文；单库快照重验 Library roster 后执行；快照关闭并归池后，短 Store 阶段重验原凭据、角色、ACL/config/lifecycle、当前 roster 与选中文件引用。Latest 的多个片段统一发布，最多重试一次；最终重验是现有授权发布检查点，不表示 app/library 两文件具有原子授权快照。完整解除共享锁的提案及跨文件竞态边界见当前复审 T1。
+请求快照按绝对 deadline 与取消标志执行，SQLite progress handler 检查执行预算。超时不提前归还 lease/permit，实际 worker 清理并退出后才释放；物理 IO 不承诺即时中止。关闭或确认文件身份/布局变化后拒绝新租用并排空，数据库替换须关闭全部连接。
 
-Store Mutex 和 reader lease 不同时持有；writer 不等待读池。认证前的 30 秒预算贯穿所有阶段，busy 不超过剩余预算与 5000ms 较小值，progress 每 1000 VM 检查取消/截止。超时不提前归还 lease/permit，实际 worker 清理后才释放；物理 IO 不承诺即时中止。关闭或确认身份/布局变化后拒绝新租用并排空，保留只读实例现有读写合同。
-
-普通读不安装 SQL trace；诊断观察复用真实 sqlite3_stmt 状态，并按连接和请求归属，覆盖初始布局、BEGIN、roster、选页/水合、ROLLBACK、末次布局。连接池改善锁边界，单条 SQL 继续受原查询预算（`git show 5e44f101:docs/superpowers/specs/2026-10-25-large-hit-query-read-model.md`）约束。实测、WAL/取消边界及未跑现场项见隔离记录（`git show 5e44f101:docs/benchmarks/2026-10-25-library-read-isolation.md`）。
+普通读不安装 SQL trace；诊断观察复用真实 sqlite3_stmt 状态，按连接和请求归属记录。连接池解除 writer 互斥锁对读取的阻塞，单条 SQL 的工作量仍须用[性能 SLO](../testing/performance-slo.md)与规模测试检验；池容量、取消或锁边界不构成性能通过证据。
 
 ## 运维边界
 

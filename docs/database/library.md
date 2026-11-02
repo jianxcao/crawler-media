@@ -1,12 +1,12 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
-> 历史锁/查询/归约审查见[共享锁复审](../audits/2026-10-28-storage-lock-review.md)及[工作量证据](../benchmarks/2026-10-28-storage-lock-work.md)。上轮修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）仅负责当时范围；历史审查保留固定版本反例。
+> 现行读写架构见 [ADR-0008](../adr/0008-sqlite-system-of-record.md)，当前问题见 [2026-11-02 存储审核](../audits/2026-11-02-storage-redesign-review.md)。工作量回归源码见 `crates/store/tests/storage_lock_work.rs`；历史测量仅代表其固定版本。
 
 [返回数据库总览](README.md)
 
 结构核对：2026-11-02 当前工作树；唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=1`。不可按缓存清空。代码没有历史布局或升级步骤。
 
-结构为 **58张业务表（含1张FTS5虚拟表）、634字段、106个显式命名索引、40组FK、115个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；634字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为62、物理声明字段644。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
+结构为 **60张业务表（含1张FTS5虚拟表）、639字段、106个显式命名索引、40组FK、119个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；639字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为64、物理声明字段649。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
 
 `library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
 
@@ -14,7 +14,7 @@
 
 ## 实现边界
 
-- Media/Library/Collection/Playback同库；旧ledger/file_meta/browse持久表及domain::LedgerRow已移除，没有旧布局导入器或兼容视图。
+- Media/Library/Collection/Playback同库；旧 ledger/file_meta/browse 持久表已移除；`store::LedgerRow` 仍是文件事实的读取 DTO，没有旧布局导入器或兼容视图。
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
 - 根迁移每窗口≤100文件/Unidentified 候选，持久游标、公平轮转和状态可查询；API driver 批间放锁并在解冻后自动继续。关联 NFO 与文件同批迁移。Unidentified 的索引 seek 不重扫游标前记录。
@@ -24,9 +24,12 @@
 
 类型、主键顺位、NOT NULL 与 DEFAULT 均为 SQLite 声明；正文约束使用原 DDL 表达，包含 DEFERRABLE 细节。无 FK 时明确列出，不因字段名带 `_id` 推断约束。JSON 是各消费者的版本化结构，json_valid 只验证 JSON 语法，不保证业务字段完整。
 
-用户/设置在 app、Subscribe 在 subscribe、通用 Job 在 jobs，跨库 ID 无 FK。playback 恢复包不引用 library_files 的 FK；仍有同一 Media 的其他文件时可保留观看事实，但最后文件删除必须按 ADR-0012 清理孤儿 Media、favorites 与播放进度。秒/ms/ns 混用，以实际读写入口为准；`played_changed_at_ms` 与 watch/favorite 时钟不能互换。
+用户和通用设置在 app；Transfer/Watch 与 Scrape 配置在本库；Subscribe 在 subscribe、通用 Job 在 jobs，跨库 ID 无 FK。playback 恢复包不引用 library_files 的 FK；仍有同一 Media 的其他文件时可保留观看事实，但最后文件删除必须按 ADR-0012 清理孤儿 Media、favorites 与播放进度。秒/ms/ns 混用，以实际读写入口为准；`played_changed_at_ms` 与 watch/favorite 时钟不能互换。
 
 ## 表目录
+
+- [transfer_settings](#transfer_settings) — 2 字段；Transfer/Watch 的 revisioned 配置单例。
+- [scrape_settings](#scrape_settings) — 3 字段；原始 Scrape 配置与单调 revision。
 
 - [library_query_counts](#library_query_counts) — 5 字段；当前查询投影/成员/计数模型。
 - [library_query_count_rebuild](#library_query_count_rebuild) — 5 字段；当前查询投影/成员/计数模型。
@@ -37,7 +40,7 @@
 - [pending_file_renames](#pending_file_renames) — 28 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
 
 - [chapter_frame_tasks](#chapter_frame_tasks) — 10 字段；章节帧生成的源版本、目标与持久执行状态。
-- [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序；删除部分文件不改变仍有文件的 Media，最后文件删除时随孤儿 Media 清理。
+- [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序；Collection 成员保留无文件 Media；最后文件删除仅清理无 Collection/Subscribe 保留的孤儿 Media。
 - [collections](#collections) — 6 字段；公共系列或用户私有 Collection 定义；可见性与 owner 组合有 CHECK。
 - [file_details](#file_details) — 11 字段；同源版本的冷探测详情；随文件级联删除，不等于可随意清空的浏览缓存。
 - [file_probe_obligations](#file_probe_obligations) — 3 字段；随文件登记的持久探测义务；文件删除级联移除。
@@ -49,7 +52,7 @@
 - [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；操作状态需结合正式operation验收。
 - [library_file_units](#library_file_units) — 5 字段；文件到逻辑单元的覆盖事实；一文件可覆盖多集，同集可有多版本。
 - [library_files](#library_files) — 35 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
-- [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；v4 起主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
+- [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；当前 v1 主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
 - [library_items](#library_items) — 39 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
 - [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 输入及导出来源；alias/登记身份和按批迁移原反例已修，完整守恒及 export 故障验收见当前方案。
 - [library_operations](#library_operations) — 11 字段；roots/locale/default_locale/integrity/scrape 持久操作载体。
@@ -124,7 +127,7 @@ CREATE INDEX chapter_dispatch ON chapter_frame_tasks(status,created_at_ms,id);
 
 ## collection_items
 
-以 canonical MediaId 保存成员关系与排序；删除部分文件不改变仍有文件的 Media，最后文件删除时随孤儿 Media 清理。
+以 canonical MediaId 保存成员关系与排序；Collection 成员保留无文件 Media；最后文件删除仅清理无 Collection/Subscribe 保留的孤儿 Media。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -532,7 +535,7 @@ CREATE INDEX files_library_file ON library_files(library_id,file_id);
 CREATE INDEX terms_value ON library_item_terms(term_kind,term_value,library_id,media_id);
 ```
 
-`terms_media` 已于 v4 删除（理由见上）。
+当前 v1 不定义 `terms_media`（理由见上）。
 
 ## library_items
 
@@ -907,7 +910,7 @@ CREATE INDEX operations_library_kind ON library_operations(library_id,kind,updat
 
 ## library_removals
 
-Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 100 行捕获快照；snapshot_cursor/snapshot_done 记录进度。API 在快照和清理窗口之间真正释放 Store。立即取消该库所有任务后推进删除；最后文件消失时清理孤儿 Media、Collection 成员、favorites 与播放进度。Library 删除本身保留磁盘字节。
+Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 100 行捕获快照；snapshot_cursor/snapshot_done 记录进度。API 在快照和清理窗口之间真正释放 Store。立即取消该库所有任务后推进删除；最后文件消失时，仅在无其他文件、Collection 或 Subscribe 保留引用时清理孤儿 Media 及其 favorites、观看状态与播放进度。Library 删除本身保留磁盘字节。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -2025,3 +2028,26 @@ CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(us
 CREATE INDEX user_continue_resume ON user_library_continue_units(user_id,watch_activity_at DESC,media_id,library_id,season,episode) WHERE position_ms>0;
 CREATE INDEX user_continue_scope ON user_library_continue_units(user_id,media_id,season,episode,library_id);
 ```
+
+## transfer_settings
+
+Transfer/Watch 配置的唯一权威；配置保存与发布共享 Library writer。PATCH 在单事务内比较 expected_revision，只更新目标字段并递增 DTO 内的 revision。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `singleton` | `INTEGER` | 1 | 否 | 无 |
+| `value` | `TEXT` | — | 是 | 无 |
+
+`singleton=1`，`value` 必须是合法 JSON；业务解码使用严格 `TransferSettings` DTO。尚未保存时读取 revision=0 的默认配置。没有额外命名索引或 FK。
+
+## scrape_settings
+
+原始 Scrape 配置单例。API 负责配置合成；Naming template 保存在四个分段字段，不再保存另一份组合模板。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `singleton` | `INTEGER` | 1 | 否 | 无 |
+| `revision` | `INTEGER` | — | 是 | 无 |
+| `value` | `TEXT` | — | 否 | 无 |
+
+`singleton=1` 且 `revision>=0`；初始行为 `(1,0,NULL)`。每次保存递增 revision，配置内容改回原值也不会恢复旧 revision，避免旧 Transfer plan 通过 ABA 校验。发布在同一 Library 事务内比较 revision 与配置内容，变化则拒绝旧 plan。没有额外命名索引或 FK。

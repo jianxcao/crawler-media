@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-> 当前只读审查与未实施方案见[共享锁复审](../../audits/2026-10-28-storage-lock-review.md)。上轮 H1–H6 已有修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`）；当前剩余包含全局 Store 读写串行、Probe 全量归约、协议观看筛选和旧引用输入，不重报已修执行器/文件页/scalar 问题。
+> 当前架构见 [ADR-0008](../../adr/0008-sqlite-system-of-record.md)，当前审计见 [2026-11-02 存储审核](../../audits/2026-11-02-storage-redesign-review.md)，运行验收见 [最终清单](../plans/2026-11-02-storage-redesign-final-acceptance.md)。全局 Store Mutex 已移除；下文保留设计时期的证据和目标，不把历史缺陷重新视为当前问题。
 
 状态（2026-10-28）：本页第3–10节定义目标合同。原 NFO 失败退出、Integrity 热点索引、分集范围读取及游标作用域已修；后续 R6–R9 补齐写门禁、Playback 身份屏障、异步执行边界及旧值清理，实施与验收见再次复审（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）。独立容量/设备门仍按实际证据验收。
 
@@ -19,7 +19,7 @@
 
 ## 2. 重设计前的问题证据（历史）
 
-下表是2026-10-18设计时的旧架构定位，不是现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产缺口与历史证据分别见[数据库文档](../../database/README.md)、[当前审查与方案](../../audits/2026-10-28-storage-lock-review.md)和证据记录（`git show 5e44f101:docs/benchmarks/2026-10-18-library-storage.md`）。
+下表是2026-10-18设计时的旧架构定位，不是现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产缺口与历史证据分别见[数据库文档](../../database/README.md)、[当前审计](../../audits/2026-11-02-storage-redesign-review.md)和证据记录（`git show 5e44f101:docs/benchmarks/2026-10-18-library-storage.md`）。
 
 | 设计时的代码 | 当时已观察到的行为 | 本设计对应变化 |
 |---|---|---|

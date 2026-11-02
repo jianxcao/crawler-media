@@ -63,7 +63,7 @@ CRAWLER_MEDIA_DATA=/absolute/path/to/new-data cargo run -p api --bin crawler-med
 
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
-**安装策略**（`obscura.install`，启动默认值 `CRAWLER_MEDIA_OBSCURA_INSTALL`）：
+**安装策略**（持久设置项 `obscura.install`，默认 `preinstalled`）：
 
 - `preinstalled`（默认）：不联网。推荐把 v0.2.3 对应平台原始发布归档（如 `obscura-x86_64-linux.tar.gz`）放为 `<data>/bin/obscura.tar.gz`，应用按代码固定 SHA-256 与大小校验后解包。实现也接受 `obscura`、`obscura-worker` 加同目录部署者提供的 `obscura.sha256sums`；该方式只能校验与部署者清单一致，不能提供代码固定归档哈希的信任保证，须保证整个目录来源可信。
 - `download`：首次需要时从 GitHub Releases 下载对应平台归档，按写死的 SHA-256 与大小校验，上限 200 MiB，通过后原子落盘。
@@ -76,7 +76,7 @@ CRAWLER_MEDIA_DATA=/absolute/path/to/new-data cargo run -p api --bin crawler-med
 
 ## 下载器
 
-qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQLite）；进程也接受 `CRAWLER_MEDIA_QB_URL/USER/PASS` 环境变量覆盖。live 环境用 `docker-compose.yml` 起 qB（8080）/ TR（19091）容器。
+qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQLite）；进程也接受 `CRAWLER_MEDIA_QB_URL/USER/PASS` 环境变量覆盖。`docker-compose.yml` 只启动 crawler-media；qBittorrent / Transmission 需单独部署，文件中保留了可选 qBittorrent 配置示例。
 
 下载器可停用（`enabled = false`）：停用后不再被自动投递选中，手动提交仍可用。
 
@@ -92,8 +92,7 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | `CRAWLER_MEDIA_LISTEN` | `127.0.0.1:18765` | 监听地址 |
 | `CRAWLER_MEDIA_UI` | 空 | 前端静态产物目录 |
 | `CRAWLER_MEDIA_CORS_ORIGINS` | 空 | CORS 白名单（逗号分隔） |
-| `CRAWLER_MEDIA_BROWSER` | 关 | 启动期 Browser 开关默认值（`1`/`true`/`yes`/`on`），仅在未保存过开关时生效。**只控制开关**：受管浏览器还需预置二进制或 `CRAWLER_MEDIA_OBSCURA_INSTALL=download`，且至少一个选择浏览器登录/签到的 Site，否则不会启动（设置页显示原因） |
-| `CRAWLER_MEDIA_OBSCURA_INSTALL` | `preinstalled` | 受管 Obscura 安装策略启动默认值：`preinstalled`（不联网）或 `download`（按写死哈希校验后下载） |
+| `CRAWLER_MEDIA_BROWSER` | 关 | 启动期 Browser 开关默认值（`1`/`true`/`yes`/`on`），仅在未保存过开关时生效。**只控制开关**：受管浏览器还需预置二进制或将设置项 `obscura.install` 改为 `download`，且至少一个选择浏览器登录/签到的 Site，否则不会启动（设置页显示原因） |
 | `CRAWLER_MEDIA_TMDB_KEY` | 空 | 非空 env／_FILE 固定 TMDB API Key 时，UI PUT 返回409；清除env pin后才可由UI修改 |
 | `CRAWLER_MEDIA_TVDB_KEY` | 空 | TVDB API Key |
 | `CRAWLER_MEDIA_QB_URL` / `_USER` / `_PASS` / `_CATEGORY` | 空 | qBittorrent 覆盖 |
@@ -102,6 +101,12 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | `CRAWLER_MEDIA_METADATA_PROXY` | 空 | 元数据代理 URL (如 `socks5://127.0.0.1:1080`) |
 | `CRAWLER_MEDIA_METADATA_PROXY_USER` | 空 | 元数据代理认证用户名 |
 | `CRAWLER_MEDIA_METADATA_PROXY_PASS` | 空 | 元数据代理认证密码 (支持 `_FILE`) |
+| `CRAWLER_MEDIA_SLOW_REQUEST_MS` | `1000` | 慢请求日志阈值（毫秒），0 禁用 |
+| `CRAWLER_MEDIA_FFMPEG_LOG_LEVEL` | `warning` | ffmpeg 日志等级：error / warning / info / verbose / debug |
+| `CRAWLER_MEDIA_LEASE_HEARTBEAT_MS` | `20000` | 实例租约心跳间隔（毫秒） |
+| `CRAWLER_MEDIA_LEASE_TTL_MS` | `60000` | 实例租约失效窗口（正整数毫秒） |
+| `CRAWLER_MEDIA_LEASE_RETRY_MS` | TTL 的一半 | 只读实例重试获取租约的间隔（毫秒） |
+| `CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE` | 关闭 | 显式绕过单实例租约，仅用于有意配置的隔离环境 |
 
 ### 密钥文件模式
 
@@ -129,19 +134,19 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
 
-维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 历史复核（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`）；上轮实现见修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`），当前锁/性能缺口与未实施方案见[共享锁复审](audits/2026-10-28-storage-lock-review.md)。这些文档不授权部署或删库。
+维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 历史复核（`git show 5e44f101:docs/audits/2026-10-13-database-api-review.md`）；上轮实现见修复记录（`git show 5e44f101:docs/audits/2026-10-28-storage-remediation-verification.md`），当前锁/性能缺口见[2026-11-02 存储审核](audits/2026-11-02-storage-redesign-review.md)。这些文档不授权部署或删库。
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 
-Library items/gallery/facets 与覆盖的 Jellyfin Items/Latest/Episodes 查询使用实例内两个只读连接：短 Store 锁准备授权，释放后执行单库快照，归还连接后重验原凭据、角色、ACL 与 Library roster。Latest 的全部片段属于同一次授权尝试；配置变化最多重试一次。认证前创建的 30 秒绝对预算覆盖设备凭据绑定、准入、锁等待、SQL、冷详情和最终重验。池满或预算耗尽返回 503；只读实例仍可提供合法读取，写入继续按原合同拒绝。
+Library items/gallery/facets 与覆盖的 Jellyfin Items/Latest/Episodes 查询使用统一 `ReaderPool`：app/subscribe/library/cache 容量为 4/2/8/2。API `store_read` / `store_read_handle` 按声明的库获取快照，顺序为 library → app → subscribe → cache，同阶段每库复用一个 lease；读不取得 writer 锁。Jobs 查询另用容量 2 的严格只读池。各库快照不是跨库原子授权快照，响应发布前仍需重验原凭据、角色、ACL 与 Library roster。`store_write` 在实际目标 writer 获取后复查实例和维护准入，写作用域预算 1s；普通 `store_read` 读阶段预算 5s，Library/Jellyfin 多阶段读取使用 30s 请求预算的剩余时间。池满或预算耗尽返回 503；只读实例仍可提供合法读取，写入按合同拒绝。实现入口和边界见 [ADR-0008](adr/0008-sqlite-system-of-record.md)。
 
 R6 修复后，metadata/discovery/Playback 和 Jellyfin/Emby 的 mutation 统一经过实例只读与维护门禁，受保护的 ledger 删除拒绝且保留数据库事实和视频字节；安全读与显式只读预览保持可用。当前复审 R6（`git show 5e44f101:docs/audits/2026-10-28-storage-main-rereview.md`）记录公开 HTTP 回归。门禁是准入检查，不能代替停写、等待在途 worker 完成及关闭连接。
 
-HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 Library 读取隔离记录（`git show 5e44f101:docs/benchmarks/2026-10-25-library-read-isolation.md`）。读池减少查询执行期间的 Store 锁占用，不承诺消除认证/准备/重验与 writer 的锁争用，也不提升单条 SQL 自身速度。
+HTTP 超时不代表 SQLite worker 已停止；连接与 blocking permit 在实际退出、rollback 和回调清理前继续占用。活跃快照可能限制 checkpoint，不能据 WAL 文件长度判断活跃 frame 数，也不能删除 WAL/SHM“释放”读者。停机或文件身份变化会停止新租用并排空；数据库替换须在所有连接关闭后进行。每个覆盖请求记录独立阶段耗时、最终结果数量、重试和超时阶段；普通请求不安装 SQL trace。局部 release 并发测量、SQL 观察范围与现场限制见 Library 读取隔离记录（`git show 5e44f101:docs/benchmarks/2026-10-25-library-read-isolation.md`）。认证、准备与重验同样走只读连接；每库单 writer 仍会串行化该库的写入。读池不提升单条 SQL 自身速度。
 
 
 ### Obscura 受管浏览器补充（r9）
-- **预置方式**（`CRAWLER_MEDIA_OBSCURA_INSTALL=preinstalled`，默认值）：归档与部署者清单方式及其不同信任边界见上文「安装策略」，不要求同时准备两套输入。安装器会核对已有安装标记与二进制 hash，不能把同目录手写清单视为防篡改证据。
+- **预置方式**（设置项 `obscura.install=preinstalled`，默认值）：归档与部署者清单方式及其不同信任边界见上文「安装策略」，不要求同时准备两套输入。安装器会核对已有安装标记与二进制 hash，不能把同目录手写清单视为防篡改证据。
 - **局域网或内网站点**：Obscura 默认禁止访问私网地址。如果确实需要，设置 `CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK=1`（默认关闭，注意 SSRF 风险）。
 - **版本核对**用 `obscura --version`；不符时显示在状态的 `last_error` 里。
 - **进程回收**：daemon 以独立进程组运行，停止时整组回收。应用崩溃后，由下次启动时的 pidfile 回收。

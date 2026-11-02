@@ -42,7 +42,9 @@ jobs (
 )
 ```
 
-WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。
+API 查询通过 `jobs_readers` 的容量 2 严格只读 `ReaderPool` 和 `jobs::QueueRead` 执行，不获取 Queue writer。
+
+WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。
 
 ## 运行时
 
