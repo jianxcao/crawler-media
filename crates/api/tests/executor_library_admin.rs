@@ -17,6 +17,8 @@ use tower::ServiceExt;
 
 #[path = "executor_library_admin/artwork_writes.rs"]
 mod artwork_writes;
+#[path = "executor_library_admin/chapter_capacity.rs"]
+mod chapter_capacity;
 #[path = "executor_library_admin/images.rs"]
 mod images;
 #[path = "executor_library_admin/read_queue.rs"]

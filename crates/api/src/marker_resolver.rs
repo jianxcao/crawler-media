@@ -175,7 +175,7 @@ pub async fn resolve_item_chapters(
     theintrodb: Option<TheIntroDbClient>,
 ) -> Vec<ChapterMarker> {
     let reservation = match state
-        .http_work
+        .chapter_work
         .reserve(std::time::Duration::from_secs(5))
         .await
     {

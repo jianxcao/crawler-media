@@ -33,6 +33,8 @@ pub struct ApiState {
     pub(crate) password_login: Arc<crate::password_login::PasswordLogin>,
     /// 有界 blocking 预算：owned 快照上的 stat/catalog 计算准入（生产默认 8）。
     pub http_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Background chapter IO must not consume foreground playback write capacity.
+    pub(crate) chapter_work: Arc<crate::blocking_budget::BlockingBudget>,
     pub(crate) discover_work: Arc<crate::http::discover::Executor>,
     /// 搜索有界 blocking 预算（默认 4）。
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
@@ -319,6 +321,7 @@ impl ApiState {
                 2,
             )),
             http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
+            chapter_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             discover_work: Arc::new(Default::default()),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
