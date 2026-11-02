@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.parse
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('perfgate', Path(__file__).with_name('perfgate.py'))
@@ -27,6 +28,50 @@ class CacheScopeTests(unittest.TestCase):
                      'self-posters-ledger-id', 'self-fanart-ledger-id', 'self-stills-ledger-id']:
             self.assertFalse(by_id[name].get('cache_read'), name)
         self.assertFalse(perfgate.evaluate([1200] * 40, {200: 40}, 'A', 'idle')['passed'])
+
+    def test_cached_title_search_targets_prepared_tmdb_query(self):
+        cases = json.loads(Path(__file__).with_name('perf-cases.json').read_text())['cases']
+        case = next(case for case in cases if case['id'] == 'self-search-titles')
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(case['url']).query)
+        self.assertEqual(query, {'keyword': ['Toy Story'], 'provider': ['tmdb']})
+        self.assertEqual(case.get('response_contract'), 'title_search')
+        for case in cases:
+            if case.get('route') == '/search/titles' and case.get('cache_read'):
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(case['url']).query)
+                self.assertEqual(query.get('provider'), ['tmdb'])
+
+    def test_title_search_contract_rejects_degraded_or_empty_results(self):
+        case = {'response_contract': 'title_search'}
+        healthy = {'provider': 'tmdb', 'providers': [{'provider': 'tmdb', 'ok': True}],
+                   'titles': [{'provider': 'tmdb', 'title': 'Toy Story'}]}
+        self.assertTrue(perfgate.response_matches(case, json.dumps({'data': healthy})))
+        invalid = [
+            {}, {'providers': []}, {'providers': None}, {'providers': [{}]},
+            {'providers': [{'provider': 'tmdb', 'ok': False}]},
+            {'providers': [{'provider': 'tmdb', 'ok': 'true'}]},
+            {'providers': [{'provider': 'douban', 'ok': True}]},
+            {'providers': [{'provider': 'tmdb', 'ok': True},
+                           {'provider': 'douban', 'ok': False}]},
+            {'providers': [{'provider': 'tmdb', 'ok': True},
+                           {'provider': 'douban', 'ok': True}]},
+            {'provider': 'all'}, {'titles': []}, {'titles': None},
+        ]
+        for changes in invalid:
+            data = dict(healthy, **changes)
+            if changes == {}:
+                del data['providers']
+            with self.subTest(changes=changes):
+                self.assertFalse(perfgate.response_matches(case, json.dumps({'data': data})))
+        data = dict(healthy)
+        del data['titles']
+        self.assertFalse(perfgate.response_matches(case, json.dumps({'data': data})))
+
+    def test_title_search_population_failure_is_not_a_fast_cache_success(self):
+        failure = b'{"data":{"provider":"tmdb","providers":[{"provider":"tmdb","ok":false}],"titles":[]}}'
+        status, result, _ = self.run_fixture('idle', 200, failure, 'title_search')
+        self.assertEqual(status, 1)
+        self.assertFalse(result['cache_preparation']['response_verified'])
+        self.assertFalse(result['passed'])
 
     def test_cache_population_is_recorded_without_latency_gating(self):
         observation = {'code': 200, 'elapsed_ms': 1400, 'response_verified': True}

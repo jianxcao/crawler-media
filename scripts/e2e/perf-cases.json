@@ -836,7 +836,8 @@
       "surface": "self",
       "route": "/search/titles",
       "class": "S",
-      "url": "/api/v1/search/titles?keyword=压测电影",
+      "url": "/api/v1/search/titles?keyword=Toy%20Story&provider=tmdb",
+      "response_contract": "title_search",
       "cache_read": true
     },
     {

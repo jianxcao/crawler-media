@@ -108,6 +108,15 @@ def validate_baseline(report, mode, selected):
 def response_matches(case, payload):
     if case.get('response_contract') == 'similar':
         return similar_payload(payload) is not None
+    if case.get('response_contract') == 'title_search':
+        data = json.loads(payload).get('data', {})
+        providers, titles = data.get('providers'), data.get('titles')
+        return (data.get('provider') == 'tmdb'
+                and isinstance(providers, list) and len(providers) == 1
+                and isinstance(providers[0], dict)
+                and providers[0].get('provider') == 'tmdb'
+                and providers[0].get('ok') is True
+                and isinstance(titles, list) and bool(titles))
     if case.get('response_contract') == 'discover':
         response = json.loads(payload)
         sections = response.get('data', {}).get('sections')
