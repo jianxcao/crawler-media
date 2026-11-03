@@ -48,6 +48,8 @@
 
 Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89ecc311`；marker `f39aaca1`；cover-generator `4c8d8bd8`；media-server `65d14859`；jobs `a5b44c3e`；domain `0f81938b`；store `09a9a5a4`；api `b8bb316c`。
 
+2026-11-03 审核修复另见[固定基线后的修复记录](../../audits/2026-11-02-storage-redesign-review.md)：`18bad154`、`2e378ca2`、`64432d3e`、`4d681e8f`、`b89769d3`、`c476b43a`、`fa0f8e05`、`df1f473d`、`cf012c99`、`2b3c160d`。Task9 五 crate 与 Task10 四 crate、Web 和 clippy 的局部结果各按对应版本记录；最终 workspace 与下方运行门仍待执行，不拼接为单轮通过。
+
 ## 3. 必须保留的未完成项
 
 - [ ] 取得 `docs/superpowers/specs/2026-10-29-storage-redesign-review.md` 后核对 S-DB5 逐列 CHECK、Z4 六个函数、Z3 image-proxy 精确行为、报告 5.2 及 D1–D13 的未知细项/桩文件。收尾已执行 `git pull --ff-only`，报告仍缺失；不猜清单、不标全完成。可选优化与必须完成项分别按报告原要求判定。
@@ -77,7 +79,7 @@ Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89e
 
 ## 6. 资源、报告与交付
 
-- 单 cargo/test/build，`-j4`、`-- --test-threads=4`；用 `/tmp/cm-cargo.lock` 的 mkdir 锁串行协调。先定向，稳定功能树 workspace 全套仅一次；仅改本清单/文档/构建并发参数不重建全套 debug 缓存。
+- 单 cargo/test/build，`TMPDIR=/tmp`、`-j8`、`-- --test-threads=8`；用 `/tmp/cm-cargo.lock` 的 mkdir 锁串行协调。先定向，稳定功能树 workspace 全套仅一次；仅改本清单/文档/构建并发参数不重建全套 debug 缓存。
 - 独立临时目录 `/tmp/crawler-storage-fixes`。使用非默认夹具根时，给 perfgate 的临时 cases 配置同步替换 `fs/browse` 的固定目录，避免把旧 `/tmp/e2e-stress/media` 的 404 当功能失败。不修改 SLO 或历史报告。
 - `stress-up.sh` 启动前先完成受锁保护的 release 构建；启动时设 `PERF_SKIP_BUILD=1`，避免脚本再构建。远程读并发 1、冷却 500ms、Library readers 8 不改。
 - 所有原始结果留 `.e2e/perf/` 或 `docs/test-reports/`，均不提交；密钥只内部传递，不打印，也不放命令行参数或报告。用例结果必须区分 Pass / Fail / Not run。

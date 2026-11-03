@@ -2,7 +2,7 @@
 
 > 历史锁复审与测量只说明对应版本；当前连接与读写入口以本文和源码为准。
 
-结构核对：2026-11-02，当前分支的唯一生产 DDL。各文件只声明当前定义，初始化空库并重开相同定义；没有历史布局、迁移阶梯或兼容分支。
+结构核对：2026-11-03，当前分支的唯一生产 DDL。各文件只声明当前定义，初始化空库并重开相同定义；没有历史布局、迁移阶梯或兼容分支。
 
 ## 权威来源
 
@@ -16,12 +16,12 @@
 | 文件 | application_id / user_version | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
 | [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | 1129139249 / 1 | 60 | 639 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
-| [subscribe.db](subscribe.md) | 1129139250 / 1 | 4 | 47 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
+| [library.db](library.md) | 1129139249 / 1 | 65 | 651 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
+| [subscribe.db](subscribe.md) | 1129139250 / 1 | 9 | 67 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
 | [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应 | 是，受控清理 |
-| [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 4 | 29 | Job定义/执行/重试、更新计数、保留游标 | 否 |
+| [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 6 | 39 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 
-合计83张业务表、793字段（含Library的1张FTS5虚拟表，不计其4张影子表及隐藏列、cache的sqlite_sequence）。Store四文件123个显式命名索引（library106、app2、subscribe3、cache12）、45组FK（library40、app2、subscribe3）、121个CHECK（library119、app2）、0触发器；Jobs另9命名索引、1个CHECK、0外键、6触发器。app/library/subscribe/Jobs统计来自生产DDL；cache统计与其生产建表声明对账。没有跨文件FK或原子提交。
+合计95张业务表、835字段，含Library的FTS5虚拟表，不计4张影子表、隐藏列及 sqlite_sequence。Store四库132个命名索引、47组FK、131个CHECK、0触发器；Jobs另11个命名索引、0 FK、3个CHECK、6触发器。SQLite自动索引不计入命名索引；跨文件没有FK或原子提交。
 
 `Store::open_at`只允许app另选路径；Jobs由Queue打开。启动只检查和初始化当前定义；无自动清库或数据导入。连接显式WAL、5000ms busy_timeout、foreign_keys=ON；建库路径在切 WAL **之前**设 `auto_vacuum=INCREMENTAL`（文件头属性，只能在建表前改；WAL 库或事务内设置是静默 no-op）；Store各库writer与独立Jobs Queue writer走同一套连接策略：`cache_size=-16384`（每连接16MiB）、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`（每连接地址空间上限，不是常驻内存），打开时`PRAGMA optimize=0x10002`、关闭时`PRAGMA optimize`；`synchronous`按库区分——cache.db用NORMAL（可重建，容忍掉电丢最近提交），app/library/subscribe与Jobs Queue保持FULL（权威库绝不牺牲已提交事务）；实例租约心跳复用唯一app writer及其FULL/5000ms策略；各库读池均以只读方式打开，使用相同的cache/mmap/temp_store且`query_only=ON`。Jobs已有OFF→实际policy→FULL的连接级回归。独立media ResponseCache连接未显式设置synchronous，保留其构建默认。Store 用唯一生产 DDL 生成表、索引、视图的定义清单，比较 sqlite_schema 中的定义（包括表内约束），并拒绝额外对象；运行时诊断/故障注入触发器不纳入这份结构清单。Jobs 由其唯一 DDL 验证对象定义及单例。
 
@@ -56,7 +56,9 @@ flowchart TD
 
 本轮将指纹模型的 Media/成员校验和发布放入同一 IMMEDIATE 事务；Series 断言使用三个精确坐标 seek；重复文件复用单次 coverage 捕获，多单元候选共享每份 coverage。接口同步 SQL 在 blocking worker 捕获 owned 事实，文件/网络观察释放 Store 后执行。公开定向回归与最终门禁分别记录，不能由局部通过推断所有设备/规模已验收。
 
-Store 共享 `Arc<Writers>`，app/subscribe/library/cache 每库一个唯一 writer 连接及独立 Mutex；API 写入口 `store_write` 在实际 writer 获取后复查准入。writer 获取顺序为 app → subscribe → library → cache → jobs。读池容量为 app4、subscribe2、library8、cache2；`Store::with_read_snapshot` 显式声明数据库，按 library → app → subscribe → cache 顺序获取，并在阶段内为每库复用一个 lease/快照，嵌套阶段只可收窄声明；读不拿 writer 锁。Jobs Queue 拥有独立 writer，API 查询使用容量2的只读池与 `jobs::QueueRead`。各库快照只保证单库一致性，不构成跨库原子快照。
+Store 共享 `Arc<Writers>`，四库各有唯一 writer；任何实际 writer 不允许嵌套，debug/release 均检查。`store_write` 共享整个作用域的1秒期限，实际 writer 获取后复查准入。Jobs reservation 是有界准入门，不占实际 writer。读池 app/subscribe/library/cache 容量4/2/8/2，读快照按 library → app → subscribe → cache 获取，同阶段每库复用 lease；Jobs 另有容量2的只读池。各库快照不是跨库原子快照；Subscribe 引用、Jobs 意图和 Media 合并通过持久阶段与 generation 恢复。
+
+`sql_result_value_bytes` 是 SQLite 结果值逻辑字节：TEXT UTF-8、BLOB 实际字节，INTEGER/FLOAT 各8，NULL 为0；不是网络、SQLite 页、解码对象或 native heap。writer wait/hold 是准入和 mutex 持有墙钟时间；`covered_owned_write_tx_*` 仅覆盖 `write_tx` 自行拥有的事务，排除 raw rusqlite 事务、失败 BEGIN 和读事务。观测是同步线程局部作用域，不能推断全部事务耗时。
 
 待删除路径持久保存规范键和意图 generation；入队前在锁外观察磁盘身份，入队后阻止对应路径被发布/换源/改名。后台按持久身份重验和重试，完成磁盘动作后再清除对应文件事实。重命名附属文件的删除入队失败会保留可恢复阶段。
 

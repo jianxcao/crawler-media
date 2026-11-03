@@ -29,7 +29,7 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api`、`/posters` 代理到后端 :18765 —— 前端始终同源调用 `/api/v1`，不要写死后端地址。
 
 ### 关键位置
-- **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。跨库 writer 获取顺序为 app → subscribe → library → cache → jobs；跨库不承诺原子提交。
+- **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。实际数据库 writer 不允许嵌套（debug/release 均检查）；跨库不承诺原子提交。Jobs reservation 是有界准入门，不占实际 writer。
 - **统一读池**：`store::ReaderPool`（`crates/store/src/library_read/`），app/subscribe/library/cache 容量分别为 4/2/8/2（`crates/store/src/open.rs`）。API 读走 `store_read` / `store_read_handle`；`Store::with_read_snapshot`（`crates/store/src/read_scope.rs`）显式声明所读库，按 library → app → subscribe → cache 稳定顺序准入，同阶段每库复用一个 lease/快照，读不拿 writer 锁；各库快照不是跨库原子快照。
 - **Jobs 连接**：`jobs::Queue` 持有 jobs.db 唯一 writer；API 的 `jobs_readers`（`crates/api/src/jobs_readers.rs`）使用独立容量 2 的严格只读 `ReaderPool`，通过 `jobs::QueueRead` 查询。
 - **远程读闸门**：`marker::media_read::configure_remote_reads(REMOTE_READ_LIMIT, REMOTE_READ_COOLDOWN)`，在 `crates/api/src/probe_manager/worker.rs` 配置。
@@ -54,8 +54,8 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 
 ## 资源规则（Mac mini，磁盘/CPU 紧张）
 
-- 同一时间只允许**一个** cargo / test / build 进程。
-- cargo 一律 `-j4`，测试一律 `-- --test-threads=4`。
+- 同一时间只允许**一个** cargo / test / build 进程，使用 `/tmp/cm-cargo.lock` 协调；test/build 设置 `TMPDIR=/tmp`。
+- cargo 一律 `-j8`，测试一律 `-- --test-threads=8`。
 - subagent 可以并行改代码，但 build/test 必须串行。
 - 优先跑定向测试（`-p <crate>`、`--test <name>`、测试名过滤）；全量套件只在最后跑一次，带 `--no-fail-fast`。
 - 临时文件放 `/tmp`，用完删除。
@@ -65,10 +65,10 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 ```sh
 # Rust
 cargo fmt --all -- --check
-cargo clippy -j4 --all-targets -- -D warnings
-cargo test -j4 -p <crate> -- --test-threads=4                 # 每个改动的 crate
-cargo test -j4 -p api --test <file> <name> -- --test-threads=4 # 定向
-cargo test -j4 --workspace --no-fail-fast -- --test-threads=4  # 收尾全量，仅一次
+TMPDIR=/tmp cargo clippy -j8 --all-targets -- -D warnings
+TMPDIR=/tmp cargo test -j8 -p <crate> -- --test-threads=8                 # 每个改动的 crate
+TMPDIR=/tmp cargo test -j8 -p api --test <file> <name> -- --test-threads=8 # 定向
+TMPDIR=/tmp cargo test -j8 --workspace --no-fail-fast -- --test-threads=8  # 收尾全量，仅一次
 
 # Web（cd web）
 pnpm lint

@@ -17,6 +17,7 @@ job_defs (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,            -- subscribe_search | subscribe_rss | transfer
                                  -- | scrape | check_in | catalog_refresh | watch_intake
+  scope_key TEXT NOT NULL,       -- 与 kind 构成唯一结构化身份
   name TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   schedule TEXT,                 -- null = 仅按需；现行仅 interval:<secs>，未实现 cron
@@ -29,6 +30,7 @@ jobs (
   id TEXT PRIMARY KEY,
   def_id TEXT,                   -- null 表示一次性（手动搜索）
   kind TEXT NOT NULL,
+  scope_key TEXT NOT NULL,       -- 继承任务身份；payload 仅保存参数
   payload TEXT NOT NULL,
   status TEXT NOT NULL,          -- queued | running | succeeded | failed | cancelled
   attempt INTEGER NOT NULL DEFAULT 0,
@@ -44,11 +46,11 @@ jobs (
 
 API 查询通过 `jobs_readers` 的容量 2 严格只读 `ReaderPool` 和 `jobs::QueueRead` 执行，不获取 Queue writer。
 
-WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。
+WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。Jobs mutation 有界准入，前台共享写期限。执行结果遇 writer 或 SQLite Busy/Locked 时保留原 attempt 和进程内活动 fence，离锁退避重试结果落库，不重新执行工作。进程崩溃或非 Busy 持久化错误仍可能触发恢复；这不是持久结果 spool 或跨进程 exactly-once 保证。
 
 ## 运行时
 
-每秒一次循环：`SELECT … FROM jobs WHERE status='queued' AND run_after<=now ORDER BY run_after LIMIT N`。用 `UPDATE … SET status='running' WHERE status='queued'` 认领，崩溃不会双跑同一行。进程启动时，超过 `timeout_secs` 的 `running` 变为 `queued` 且 `attempt+1`。`attempt` 达到 5 后置为 `failed` 并停止。
+每秒一次循环：`SELECT … FROM jobs WHERE status='queued' AND run_after<=now ORDER BY run_after LIMIT N`。条件更新使同一 queued 状态不能被同时成功认领；超时或崩溃恢复可能重新执行 attempt，不保证 exactly-once。进程启动时，超过 `timeout_secs` 的 `running` 变为 `queued` 且 `attempt+1`。`attempt` 达到 5 后置为 `failed` 并停止。
 
 带schedule的def在完成时spawn follow-up（run_after=完成时间＋interval）；缺live child时ensure_scheduled也可立即补首个子任务。这里只是Interval循环，不是已支持cron表达式。UI 列出 `job_defs`（能跑什么）与近期 `jobs`（跑了什么）。手动搜索 POST 一个 `def_id` 为 null 的一次性 `jobs` 行。
 
@@ -78,7 +80,7 @@ WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单�
 - 每个启用 **Site** 一个 `check_in`，间隔 12 小时，`concurrency_key=site:<id>`。
 - 每个被 **Subscribe** 指向的 **Media** 一个 `catalog_refresh`，间隔 24 小时。
 
-创建 **Subscribe** 会插入其 `job_defs` 行。删除它会取消 queued 子行并禁用该 def。
+Subscribe 创建及影响搜索策略的更新在 subscribe.db 保存 generation、lifecycle epoch、revision 和待同步意图；jobs.db 在自身事务应用配置及 receipt，再按 generation/revision 确认。已应用 revision 的重放不覆盖后续手动 Jobs 编辑。删除在 Subscribe 事务记录清理意图，按 incarnation 关闭 lifecycle fence，删除该身份定义及子任务，包括 defless 历史；恢复按窗口重试。旧 epoch 或已关闭 incarnation 的迟到投递不能覆盖新 incarnation。新 incarnation 投递前可短暂看到旧配置；runner 重读当前 Subscribe，Library 引用安全不依赖 Jobs 投影。孤儿 definition-backed Search 禁用定义并允许正在运行的 Job 完成。跨库提交不是原子事务。
 
 ## 维护任务（2026-10-20 源码状态）
 

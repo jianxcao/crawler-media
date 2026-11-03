@@ -2,7 +2,7 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-11-02 当前工作树；唯一建表定义为 [media::response_cache::CACHE_SCHEMA_SQL](../../crates/media/src/response_cache/mod.rs)；[Store layout](../../crates/store/src/schema/layout.rs) 直接复用该常量及身份/校验函数。此前两份 SQL 附本已删除，不存在 Store 与 media 各维护一套索引的现行合同。
+结构核对：2026-11-03 当前生产 DDL；唯一建表定义为 [media::response_cache::CACHE_SCHEMA_SQL](../../crates/media/src/response_cache/mod.rs)；[Store layout](../../crates/store/src/schema/layout.rs) 直接复用该常量及身份/校验函数。此前两份 SQL 附本已删除，不存在 Store 与 media 各维护一套索引的现行合同。
 
 文件身份：`application_id=1129139251`，`user_version=1`。共 **6 张业务表、30 个字段、12 个显式命名索引**；AUTOINCREMENT 的 `sqlite_sequence` 不计业务表。以下是源码 DDL 字典，不把历史初始化结果当成本轮应用验收。
 

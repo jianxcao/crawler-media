@@ -45,8 +45,8 @@ Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务�
 - **请求读**：`store_read` / `store_read_handle` 在 blocking worker 上调用 `Store::with_read_snapshot`，声明本阶段需要的数据库。`ReaderPool` 容量为 app 4、subscribe 2、library 8、cache 2（`crates/store/src/open.rs`）；Library/Jellyfin 共用 library 池。每个连接严格只读且 `query_only`，在 deferred 事务中读取快照。
 - **快照准入**：按 library → app → subscribe → cache 稳定顺序获取；同阶段每库复用一个 lease/快照。普通 `store_read` / `with_store_read` 使用 `STORE_READ_WAIT=5s`；`store_read_handle` 使用调用方预算，Library/Jellyfin 多阶段读取使用请求剩余的绝对 deadline（请求预算 30s）。独立数据库的快照不构成跨库原子快照。认证、ACL/config/lifecycle 与选中文件的发布校验仍需明确处理观察间变化。
 - **写准入**：`store_write` 获取 `http_work` permit，并以 `STORE_WRITE_WAIT=1s` 设置写作用域的绝对 deadline。在实际目标库 writer 获取后复查实例可写性与维护 WriteGate；该预算由作用域内获取共享，闭包计算及前一次获取会消耗余量。未获得 writer 返回 503 + `Retry-After`；worker 超时可能已写入，不能当作未执行。
-- **writer 顺序**：现有 rank 为 app → subscribe → library → cache → jobs。跨库提交分开完成，不承诺原子性。禁止在 writer 闭包内获取另一库 writer 是当前审核的修复要求；存量 Subscribe 保留引用 fence 与 release 检查的具体缺口见审计 B3/L3，不能据 rank 合法就认可嵌套。
-- **Jobs**：`jobs::Queue` 拥有 jobs.db 的唯一 writer；API `jobs_readers` 另有容量 2 的严格只读 `ReaderPool`，通过 `jobs::QueueRead` 查询。它独立于 Store 四库读池；Jobs writer 无界等待问题见审计 L2。
+- **writer 纪律**：实际数据库 writer 不允许嵌套，包括递增 rank 的第二个 writer；debug 和 release 均检查并返回 `StoreError::LockOrder`。跨库提交分别完成，不构成原子事务。
+- **Jobs**：`jobs::Queue` 拥有 jobs.db 唯一 writer；API `jobs_readers` 使用容量 2 的严格只读池和 `jobs::QueueRead`。Jobs reservation 是有界准入门，不占数据库 writer；前台共享写期限，繁忙返回 503 和 `Retry-After: 1`。reservation 不构成跨库事务。
 
 请求快照按绝对 deadline 与取消标志执行，SQLite progress handler 检查执行预算。超时不提前归还 lease/permit，实际 worker 清理并退出后才释放；物理 IO 不承诺即时中止。关闭或确认文件身份/布局变化后拒绝新租用并排空，数据库替换须关闭全部连接。
 

@@ -12,6 +12,15 @@
 - B4：ADR-0008、数据库字典及当前入口已按现有 ReaderPool/每库 writer 更新；10-28 锁审计明确为历史快照。
 - §2 建议项和最终运行验收继续按计划执行；本文的基线数值与旧结论保留原提交语境，不代表新一轮性能结果。
 
+### 后续修复与证据（2026-11-03）
+
+- `4d681e8f`：Subscribe 子表 FK 级联及 Collection 排序错误传播；`b89769d3`：Jobs 有界准入和待同步意图；`c476b43a`：结构化 Jobs 身份；`fa0f8e05`：引用保留、合并及清理 generation fence；`df1f473d`：毫秒时间、严格 cursor 与 token 索引。各库分别提交，持久意图恢复不构成跨库原子性。已关闭 fence、终态 epoch 和 tombstone 可累积，尚无压缩上限保证。
+- `cf012c99`：结果值逻辑字节和实际 writer 诊断、P1 覆盖索引、P4 批量及精确 TMDB 键、P5 每定义索引 top-1。P1 精确聚合仍随目标库数据线性增长；P2/P3/P6–P10 的排序、扫描、OFFSET、精确计数或短子串规模依赖未整体消除。P8 无过滤样本工作量稳定，带残差过滤仍线性。
+- Task9 本地 Mac debug、进程内 Axum 合成测量：每协议4阶段，每阶段20次100文件扫描/发布与20次重叠进度请求；native 与 protocol 各80次持久进度、0个503。native 后索引 writer hold p95 在扫描分散/单Media为73.627/39.274ms，发布为78.512/52.521ms；对应 HTTP p95 为73.043/38.764/77.437/51.145ms。protocol provider 的 writer timing 未传播，不记为0；raw Playback 事务不在 owned `write_tx` 覆盖内。单次本地合成测量不是实际设备或最终 SLO 验收。
+- `2b3c160d`：退订预览和清理、Downloader/Playback 字段、严格 User removal version 与构造副作用清理。Task10 四 crate 测试退出0，448个结果组、3225 passed、22 ignored（含子进程汇总，非去重数）；Web 935 passed，lint 0 errors/81既有 warnings，typecheck/build、workspace all-target clippy 与 fmt 通过。Task9 五 crate 测试退出0，481个结果组、3351 passed、23 ignored（同样含子进程汇总）。这些是各自版本局部证据，不是最终 workspace 或现场验收。
+- 真实 STRM/pan、浏览器、perfgate、容量和设备门仍待实际执行。缺失的10-29 review spec 细项仍未知；不能由旧 unchecked 反推未实现，也不能据局部通过宣称最终验收通过。
+- §3 除本记录具体指出的测量与文档修正外，索引合并、checkpoint、reader identity 缓存、offset 替换和逐项死代码等可选优化未在本轮统一测量或实施，保留后续评估；不将整节标为已修复。
+
 ---
 
 ## 基线结论

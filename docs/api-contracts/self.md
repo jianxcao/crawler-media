@@ -305,6 +305,14 @@ Web 详情展示等待状态，只在 `pending` 时轮询；离开当前条目�
 
 历史上的上游兼容层（`webapi/` 信封、`numeric_id`）已删除，不要加回来。
 
+### 退订与用户删除
+
+退订预览 `GET /subscriptions/{id}/removal-preview` 返回且仅返回 `library_file_count`、`library_bytes`、`torrent_count`、`torrent_count_inferred`、`torrent_titles`；文件数量为整个 Media，Torrent 数可能标记为推断，不支持按季预览。`season-cleanup` 在请求期间同步执行，回执 `queued` 不表示后台 Job；跨季共享物理文件可能整文件删除。
+
+持久 User removal 记录的 `version` 必填且仅支持 1；恢复在驱动 pending 操作或修剪结果前验证全部 pending 记录。无效终态结果保留并记录。Subscribe 时间输出为固定24字符 UTC 毫秒字符串；非法时间返回错误。
+
+`ApiState` 构造不再接收旧单根目录参数，也不创建该旧目录；实际 Library roots 仍由 Library 配置管理。Playback 不提供不存在的 diagnostics/upload 字段，现有 session/browser 诊断保留。
+
 ### Downloader task snapshots
 
 `GET /api/v1/downloaders/tasks` returns `{items}`. Each task contains `id`, `info_hash`, `name`, `downloader_id`, `downloader_name`, `progress`, `size_bytes`, `dlspeed_bytes`, `upspeed_bytes`, `uploaded_bytes`, `completed_bytes`, `state`, `site_id`, `media_item_id`, `media_title`, `media_kind`, `score`, and `subscriptions`. A subscription reference contains only `id`, `media_item_id`, `media_title`, and `media_kind`. No placeholder error, Site name, resolution, source-health list, episode progress or wash-cut purpose is returned. The Web uses actual task state and a readable generic error explanation.

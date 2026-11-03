@@ -1,5 +1,5 @@
 //! Delete one Library item's files through the durable, version-checked queue.
-//! Media, Playback, Collection and Subscribe facts survive the last file.
+//! An unreferenced Media and its Playback facts are purged after its last file.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
