@@ -310,6 +310,9 @@ pub(crate) async fn list_unidentified(
             Ok(Err(response)) => return response,
             Err(error) => return error.response(),
         };
+    if items.is_empty() {
+        return ok_list(items).into_response();
+    }
     let files = state.file_stats.clone();
     match super::fs::read_work(&state, move || {
         // Unidentified rows have no persisted size; stat them after releasing the store lock.
