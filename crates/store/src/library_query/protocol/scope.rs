@@ -63,11 +63,17 @@ impl Scope {
         let blocked = blocked_libraries(conn)?;
         let mut library_ids = visible_libraries(conn, authorized, request, &blocked)?;
         if let Some(media) = pinned_media(request) {
-            let mut owners = conn.prepare("SELECT library_id FROM library_files WHERE media_id=?1 UNION SELECT library_id FROM library_items WHERE media_id=?1")?;
-            let owners = owners
-                .query_map([media.to_string()], |r| r.get::<_, String>(0))?
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            library_ids.retain(|id| owners.contains(id));
+            let mut owner = conn.prepare(
+                "SELECT EXISTS(SELECT 1 FROM library_files WHERE library_id=?1 AND media_id=?2) \
+                   OR EXISTS(SELECT 1 FROM library_items WHERE library_id=?1 AND media_id=?2)",
+            )?;
+            let mut owners = Vec::new();
+            for id in library_ids {
+                if owner.query_row([&id, &media.to_string()], |r| r.get::<_, bool>(0))? {
+                    owners.push(id);
+                }
+            }
+            library_ids = owners;
         }
         if let ProtocolParent::Folder { root_id } = &request.parent {
             let owner: Option<String> = conn

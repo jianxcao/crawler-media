@@ -96,6 +96,24 @@ pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> Pr
             (Granularity::Work, []) | (Granularity::Unit, []) => true,
             (Granularity::Work, [sort]) if sort.key == ProtocolSortKey::Name => true,
             (Granularity::Work, [date, name]) if explicit_work_default(date, name) => true,
+            (Granularity::Unit, [episode])
+                if scope.pinned_media
+                    && q.season.is_some()
+                    && episode.key == ProtocolSortKey::EpisodeNumber
+                    && !episode.descending =>
+            {
+                true
+            }
+            (Granularity::Unit, [season, episode])
+                if scope.pinned_media
+                    && q.season.is_some()
+                    && season.key == ProtocolSortKey::SeasonNumber
+                    && !season.descending
+                    && episode.key == ProtocolSortKey::EpisodeNumber
+                    && !episode.descending =>
+            {
+                true
+            }
             _ => false,
         };
     ProtocolReadPlan {

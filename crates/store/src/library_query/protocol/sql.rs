@@ -128,7 +128,7 @@ pub(super) fn rows_ctes(
 /// 因此两支并存时必须限定 `season = -1`，免得给某个具体分集配上别的集的文件。
 ///
 /// 状态列前的一元 `+` 让规划器放弃 `files_presence(library_id, presence_state)`：
-/// 那条索引每行要扫整库文件（50k 库每页 ~13s），这里必须走 `files_library_media`。
+/// 那条索引会扫同库在位文件；分集从完整覆盖坐标取候选，作品从 Library/Media 取候选。
 /// 页内一行 → 协议条目引用；`preferred_source` 缺席时保留 `None`（不可播放）。
 ///
 /// 粒度直接读行里的季号：`season >= 0` 是分集单元，`-1` 是整个作品。混合页两支持
