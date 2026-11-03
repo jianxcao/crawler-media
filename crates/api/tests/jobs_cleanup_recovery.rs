@@ -20,6 +20,12 @@ fn cleanup_intent_is_atomic_and_old_generation_cannot_delete_recreated_parent_jo
             .is_none()
     );
     db.execute_batch("DROP TRIGGER reject_delete").unwrap();
+    let keep = store
+        .create_collection(fixture.user, "same-ID recreation fixture")
+        .unwrap();
+    store
+        .add_collection_item(&keep, &fixture.media.to_string())
+        .unwrap();
     store.delete_subscribe(fixture.subscribe).unwrap();
     let old = store
         .subscribe_jobs_cleanup(fixture.subscribe)
@@ -30,9 +36,16 @@ fn cleanup_intent_is_atomic_and_old_generation_cannot_delete_recreated_parent_jo
         .unwrap();
     assert_eq!(
         store.subscribe_jobs_cleanup(fixture.subscribe).unwrap(),
-        Some(old)
+        Some(old.clone())
     );
     store.insert_subscribe(&template).unwrap();
+    // The newer epoch must be delivered before manual Jobs edits are protected.
+    assert_eq!(
+        runtime()
+            .block_on(fixture.request("POST", "/api/v1/jobs/tick?now=1", Value::Null))
+            .0,
+        StatusCode::OK
+    );
     fixture
         .state
         .jobs()
@@ -56,6 +69,18 @@ fn cleanup_intent_is_atomic_and_old_generation_cannot_delete_recreated_parent_jo
             concurrency_key: None,
         })
         .unwrap();
+    let epoch = store
+        .subscribe_lifecycle_epoch(fixture.subscribe, &old)
+        .unwrap();
+    assert!(
+        !fixture
+            .state
+            .jobs()
+            .acquire()
+            .unwrap()
+            .close_subscribe_epoch(fixture.subscribe, &old, epoch)
+            .unwrap()
+    );
     assert_eq!(
         runtime()
             .block_on(fixture.request("POST", "/api/v1/jobs/tick?now=1", Value::Null))

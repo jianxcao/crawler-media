@@ -24,19 +24,6 @@ pub(crate) struct Readers {
     pub(crate) cache: Arc<ReaderPool>,
 }
 impl Store {
-    pub(crate) fn with_reference_write<T>(
-        &self,
-        work: impl FnOnce(&LibraryConnection<'_>, &SubscribeConnection<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        self.with_writer(Db::Subscribe, |subscribe| {
-            self.with_writer(Db::Library, |library| {
-                work(
-                    &self.library_connection(library),
-                    &SubscribeConnection { subscribe },
-                )
-            })
-        })
-    }
     pub fn reader_pool(&self, db: Db) -> Arc<ReaderPool> {
         Arc::clone(match db {
             Db::App => &self.readers.app,

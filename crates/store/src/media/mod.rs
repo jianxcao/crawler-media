@@ -192,9 +192,8 @@ impl Store {
         media_id: MediaId,
         expected: &Media,
     ) -> Result<bool, StoreError> {
-        self.with_reference_write(|library, subscribe| {
-            library
-                .undo_ensured_media_if_unreferenced_with_references(subscribe, media_id, expected)
+        self.with_library_write(|library| {
+            library.undo_ensured_media_if_unreferenced_with_references(media_id, expected)
         })
     }
 
@@ -298,3 +297,66 @@ mod identity_no_op_tests;
 
 #[path = "connection.rs"]
 mod connection;
+
+/// Restore only the exact ensured identity; child facts stay attached in place.
+pub(crate) fn restore_compensation_in_tx(
+    tx: &rusqlite::Connection,
+    snapshot: &crate::subscribe_compensation::Compensation,
+) -> Result<bool, StoreError> {
+    if compensation_media_changed(tx, snapshot)? {
+        tracing::debug!(media_id=%snapshot.expected.id, "Subscribe compensation preserves concurrently changed Media");
+        return Ok(true);
+    }
+    let Some(previous) = &snapshot.previous else {
+        return Ok(false);
+    };
+    crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, previous.id)?;
+    let state: String = tx.query_row(
+        "SELECT identity_state FROM media WHERE media_id=?1",
+        [previous.id.to_string()],
+        |r| r.get(0),
+    )?;
+    if matches!(state.as_str(), "merging" | "retired") {
+        tracing::debug!(media_id=%previous.id,%state,"Subscribe compensation preserves fenced Media");
+        return Ok(true);
+    }
+    // Only remove the provider tuple introduced by this ensure. Preserve all
+    // preexisting and concurrent nonrefresh aliases owned by the same Media.
+    for ((source, ensured), (_, original)) in media_alias_ids(&snapshot.expected)
+        .into_iter()
+        .zip(media_alias_ids(previous))
+    {
+        if let Some(ensured) = ensured.filter(|ensured| Some(*ensured) != original) {
+            tx.execute("DELETE FROM media_aliases WHERE media_id=?1 AND kind=?2 AND source=?3 AND external_id=?4",params![previous.id.to_string(),snapshot.expected.kind.as_str(),source,ensured])?;
+        }
+    }
+    if !write_media_is_noop(tx, previous)? {
+        write_media(tx, previous)?;
+        crate::library_write::reduce::reduce_media_everywhere(tx, previous.id)?;
+    }
+    Ok(true)
+}
+
+/// A new Media has exactly its initial primary aliases. An extra nonrefresh
+/// alias is also a concurrent identity change, even when the flat row matches.
+pub(crate) fn compensation_media_changed(
+    tx: &rusqlite::Connection,
+    snapshot: &crate::subscribe_compensation::Compensation,
+) -> Result<bool, StoreError> {
+    if media_row(tx, snapshot.expected.id)?.as_ref() != Some(&snapshot.expected) {
+        return Ok(true);
+    }
+    if snapshot.previous.is_some() {
+        return Ok(false);
+    }
+    let count: usize = tx.query_row(
+        "SELECT COUNT(*) FROM media_aliases WHERE media_id=?1",
+        [snapshot.expected.id.to_string()],
+        |r| r.get(0),
+    )?;
+    let expected_count = media_alias_ids(&snapshot.expected)
+        .into_iter()
+        .filter(|(_, id)| id.is_some())
+        .count();
+    Ok(count != expected_count)
+}

@@ -224,6 +224,12 @@ fn failed_jobs_sql_and_failed_subscribe_compensation_recover_from_durable_dirty_
 #[test]
 fn healthy_jobs_manual_config_survives_unrelated_subscribe_updates_and_tick() {
     let fixture = Fixture::idle();
+    assert_eq!(
+        runtime()
+            .block_on(fixture.request("POST", "/api/v1/jobs/tick?now=0", Value::Null))
+            .0,
+        StatusCode::OK
+    );
     let mut subscribe = fixture
         .state
         .store()
@@ -384,6 +390,12 @@ fn committed_sync_receipt_preserves_later_manual_job_edit_after_ack_failure_and_
 #[test]
 fn failed_create_compensation_keeps_a_recoverable_subscribe_and_atomic_jobs_seed() {
     let fixture = Fixture::idle();
+    assert_eq!(
+        runtime()
+            .block_on(fixture.request("POST", "/api/v1/jobs/tick?now=0", Value::Null))
+            .0,
+        StatusCode::OK
+    );
     let jobs_db = rusqlite::Connection::open(fixture.temp.path().join("data/jobs.db")).unwrap();
     jobs_db.execute_batch("CREATE TRIGGER reject_catalog BEFORE INSERT ON job_defs WHEN NEW.kind='catalog_refresh' BEGIN SELECT RAISE(FAIL,'fixture catalog failure'); END;").unwrap();
     let subscribe_db =

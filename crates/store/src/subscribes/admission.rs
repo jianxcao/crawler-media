@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
 
-pub(super) fn ensure_nonoverlapping(
+pub(crate) fn ensure_nonoverlapping(
     conn: &Connection,
     candidate: &Subscribe,
 ) -> Result<(), StoreError> {
@@ -50,29 +50,12 @@ pub(super) fn ensure_nonoverlapping(
     Ok(())
 }
 
-pub(super) fn insert_row(
-    library: &Connection,
+pub(crate) fn insert_row(
     subscribe_conn: &Connection,
     subscribe: &Subscribe,
+    generation: &str,
+    epoch: i64,
 ) -> Result<(), StoreError> {
-    let state: Option<String> = library
-        .query_row(
-            "SELECT identity_state FROM media WHERE media_id = ?1",
-            params![subscribe.media_id.to_string()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if state.is_none() {
-        return Err(StoreError::Missing(format!("Media {}", subscribe.media_id)));
-    }
-    if let Some(state) = state.as_deref()
-        && (state == "merging" || state == "retired")
-    {
-        return Err(StoreError::Protected(format!(
-            "media {} identity is frozen ({state})",
-            subscribe.media_id
-        )));
-    }
     let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
         Coverage::Movie => ("movie", None, None, None),
         Coverage::Tv {
@@ -90,8 +73,8 @@ pub(super) fn insert_row(
             "INSERT INTO subscribes (
                 id, user_id, media_id, coverage_kind, season, episode_from, episode_to,
                 fetch_mode, filter_id, wash_cut, wash_cut_filter_id, full_season_pack, downloader_id,
-                tracking_state, follow_future, search_interval_secs, keep_old_versions, library_id, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                tracking_state, follow_future, search_interval_secs, keep_old_versions, library_id, created_at, updated_at, jobs_sync_generation, lifecycle_epoch
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 subscribe.id.to_string(),
                 subscribe.user_id.to_string(),
@@ -113,6 +96,7 @@ pub(super) fn insert_row(
                 subscribe.library_id.map(|id| id.to_string()),
                 crate::now_rfc3339(),
                 crate::now_rfc3339(),
+                generation, epoch,
             ],
         )?;
     Ok(())

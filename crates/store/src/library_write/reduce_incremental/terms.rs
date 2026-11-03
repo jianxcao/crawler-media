@@ -65,7 +65,7 @@ pub(super) fn sync_terms_delta(
     let mut stmt = tx.prepare(
         "SELECT c.id FROM collections c
          JOIN collection_items ci ON ci.collection_id = c.id
-         WHERE ci.media_id = ?1 AND c.visibility = 'public' AND c.user_id IS NULL",
+         WHERE ci.media_id = ?1 AND c.deleting=0 AND c.visibility = 'public' AND c.user_id IS NULL",
     )?;
     let collections = stmt
         .query_map(params![media], |r| r.get::<_, String>(0))?

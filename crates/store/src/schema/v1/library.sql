@@ -262,7 +262,7 @@ CREATE TABLE library_query_config (
 INSERT INTO library_query_config(id) VALUES (1);
 CREATE TABLE collections (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT, visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
- name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+ name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, deleting INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0,1)),
  CHECK((visibility='private' AND user_id IS NOT NULL) OR (visibility='public' AND user_id IS NULL))
 );
 CREATE INDEX collections_owner ON collections(user_id,sort_order,id);
@@ -549,3 +549,16 @@ CREATE TABLE scrape_settings (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0), value TEXT
 );
 INSERT INTO scrape_settings(singleton, revision, value) VALUES (1, 0, NULL);
+
+CREATE TABLE subscribe_retention_fences(subscribe_id TEXT NOT NULL,generation TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('open','closed')),PRIMARY KEY(subscribe_id,generation));
+CREATE TABLE subscribe_retention(subscribe_id TEXT NOT NULL,generation TEXT NOT NULL,media_id TEXT NOT NULL REFERENCES media(media_id),PRIMARY KEY(subscribe_id,generation,media_id));
+CREATE INDEX subscribe_retention_media ON subscribe_retention(media_id,subscribe_id,generation);
+CREATE TABLE pending_orphan_media(media_id TEXT PRIMARY KEY REFERENCES media(media_id) ON DELETE CASCADE);
+
+CREATE INDEX collections_deleting ON collections(id) WHERE deleting=1;
+CREATE TABLE reference_recovery_cursors(kind TEXT PRIMARY KEY,cursor TEXT NOT NULL);
+INSERT INTO reference_recovery_cursors VALUES('collection','');
+
+INSERT INTO reference_recovery_cursors VALUES('orphan','');
+
+CREATE TABLE subscribe_compensation_receipts(generation TEXT PRIMARY KEY NOT NULL,protected INTEGER NOT NULL CHECK(protected IN (0,1)));

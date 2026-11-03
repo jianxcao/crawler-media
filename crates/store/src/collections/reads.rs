@@ -34,7 +34,7 @@ const OWNER: &str = "(SELECT MIN(f.library_id) FROM library_files f WHERE f.medi
 
 fn own(conn: &Connection, user: UserId, collection: &str) -> Result<(), StoreError> {
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1 AND user_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM collections WHERE deleting=0 AND id=?1 AND user_id=?2)",
         params![collection, user.to_string()],
         |row| row.get(0),
     )?;
@@ -82,7 +82,7 @@ fn member_query(collection: bool, after: bool) -> String {
         format!(
             "SELECT ci.collection_id,ci.media_id,{OWNER},ci.sort_order,ci.added_at
              FROM collections c JOIN collection_items ci ON ci.collection_id=c.id
-             WHERE c.user_id=?1 AND {VISIBLE} {seek}
+             WHERE c.deleting=0 AND c.user_id=?1 AND {VISIBLE} {seek}
              ORDER BY c.sort_order,c.id,ci.sort_order,ci.added_at,ci.media_id LIMIT ?7"
         )
     }
@@ -235,7 +235,7 @@ impl Store {
         let libraries = scope_json(libraries)?;
         self.with_read(crate::Db::Library, |conn| {
             let libraries = visible_scope(conn, &libraries)?;
-            let mut statement = conn.prepare_cached("SELECT id,name,sort_order FROM collections WHERE user_id=?1 ORDER BY sort_order,created_at,id")?;
+            let mut statement = conn.prepare_cached("SELECT id,name,sort_order FROM collections WHERE deleting=0 AND user_id=?1 ORDER BY sort_order,created_at,id")?;
             let collections = statement.query_map([user.to_string()], |row| Ok(UserCollection {id:row.get(0)?,name:row.get(1)?,sort_order:row.get(2)?}))?.collect::<Result<Vec<_>,_>>()?;
             let members = members(conn, user, None, &libraries, None, None)?;
             let hydrated = facts::hydrate(conn, user, &members)?;

@@ -215,7 +215,6 @@ impl crate::LibraryConnection<'_> {
 impl crate::LibraryConnection<'_> {
     pub fn complete_file_deletion_with_references(
         &self,
-        subscribes: &crate::SubscribeConnection<'_>,
         entry: &QueuedFileDeletion,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
@@ -244,12 +243,7 @@ impl crate::LibraryConnection<'_> {
                 library_id.parse()?,
                 &[file_id.parse()?],
             )?;
-            let subscribed = subscribes.subscribed_media(&affected)?;
-            crate::library_write::orphan_media::purge_orphan_media_in_tx(
-                &tx,
-                &affected,
-                &subscribed,
-            )?;
+            crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &affected)?;
         }
         tx.execute(
             "DELETE FROM pending_file_deletions WHERE path_key=?1 AND deletion_id=?2",

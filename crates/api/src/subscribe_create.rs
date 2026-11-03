@@ -31,20 +31,30 @@ pub(crate) fn create(
         .jobs
         .reserve()
         .map_err(crate::jobs_writer::JobsMutationError::Acquire)?;
-    let (media, previous) = {
+    let (media, creation) = {
         let store = state.store.as_ref();
         let (media, previous) = store.ensure_media_with_previous(incoming)?;
         subscribe.media_id = media.id;
+        let creation = match store.begin_compensatable_subscribe_creation(
+            &subscribe,
+            &media,
+            previous.as_ref(),
+        ) {
+            Ok(creation) => creation,
+            Err(error) => {
+                store.undo_ensured_media(&media, previous.as_ref())?;
+                return Err(error.into());
+            }
+        };
         let inserted = (|| -> Result<(), StoreError> {
             if let Some(filter) = filter {
                 store.insert_filter(filter)?;
             }
-            store.insert_nonoverlapping_subscribe(&subscribe)
+            store.retain_subscribe_creation(&creation)?;
+            store.commit_subscribe_creation(&creation, &subscribe, true)
         })();
         if let Err(error) = inserted {
-            if let Err(rollback) =
-                rollback_store(&store, &media, previous.as_ref(), &subscribe, filter)
-            {
+            if let Err(rollback) = rollback_store(&store, &creation, &subscribe, filter) {
                 return Err(CreateError::Compensation(format!(
                     "{error}; compensation incomplete: {rollback}"
                 )));
@@ -54,19 +64,14 @@ pub(crate) fn create(
                 error => error.into(),
             });
         }
-        (media, previous)
+        (media, creation)
     };
 
     let intent = state.store.subscribe_job_sync(subscribe.id)?;
     if let Err(error) = seed_jobs(&reservation, &media, &subscribe, intent.as_ref()) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "创建订阅任务失败");
-        if let Err(rollback) = rollback_store(
-            &state.store.as_ref(),
-            &media,
-            previous.as_ref(),
-            &subscribe,
-            filter,
-        ) {
+        if let Err(rollback) = rollback_store(&state.store.as_ref(), &creation, &subscribe, filter)
+        {
             return Err(CreateError::Compensation(format!(
                 "{error}; compensation incomplete; Jobs sync intent retained if Subscribe exists: {rollback}"
             )));
@@ -83,6 +88,14 @@ pub(crate) fn create(
                 ))
             })?;
     }
+    state
+        .store
+        .finalize_subscribe_creation(&creation)
+        .map_err(|error| {
+            CreateError::Compensation(format!(
+                "Subscribe and Jobs created; finalization pending: {error}"
+            ))
+        })?;
     tracing::info!(subscribe_id = %subscribe.id, media = %media.title, "已创建新订阅");
     Ok((media, subscribe))
 }
@@ -100,13 +113,12 @@ fn seed_jobs(
 
 fn rollback_store(
     store: &crate::Store,
-    media: &Media,
-    previous: Option<&Media>,
+    creation: &store::SubscribeCreation,
     subscribe: &Subscribe,
     filter: Option<&Filter>,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
-    if let Err(error) = store.delete_subscribe(subscribe.id) {
+    if let Err(error) = store.rollback_subscribe_creation(creation) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "回滚订阅失败");
         return Err(error.to_string());
     }
@@ -115,21 +127,6 @@ fn rollback_store(
     {
         tracing::error!(filter_id = %filter.id, error = %error, "回滚规则组失败");
         failures.push(error.to_string());
-    }
-    match store.undo_ensured_media(media, previous) {
-        Ok(true) => {}
-        Ok(false) => {
-            // `false` 有两种含义，都不能盲目回滚：
-            // (a) 这行仍被 Subscribe/ledger 引用；(b) 身份已被并发请求改写（CAS 拒绝）。
-            tracing::warn!(
-                media_id = %media.id,
-                "回滚 Media 被拒绝（仍被引用或身份已被并发改写），保留当前内容"
-            );
-        }
-        Err(error) => {
-            tracing::error!(media_id = %media.id, error = %error, "回滚 Media 失败");
-            failures.push(error.to_string());
-        }
     }
     if failures.is_empty() {
         Ok(())

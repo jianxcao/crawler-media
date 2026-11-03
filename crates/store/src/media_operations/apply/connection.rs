@@ -81,7 +81,7 @@ impl crate::LibraryConnection<'_> {
         self.library.execute(
             "UPDATE media_operations
              SET state = 'failed', error = ?2, updated_at_ms = ?3
-             WHERE operation_id = ?1",
+             WHERE operation_id = ?1 AND state<>'succeeded'",
             params![operation_id, err.to_string(), now_ms],
         )?;
         Ok(())
@@ -96,6 +96,18 @@ impl crate::LibraryConnection<'_> {
         now_ms: i64,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
+        if !phase_owned(&tx, operation_id, PHASE_INIT)? {
+            return Ok(());
+        }
+        let copied=tx.execute("INSERT OR IGNORE INTO subscribe_retention(subscribe_id,generation,media_id)
+            SELECT r.subscribe_id,r.generation,?1 FROM subscribe_retention r JOIN subscribe_retention_fences f USING(subscribe_id,generation)
+            WHERE r.media_id=?2 AND f.state='open' AND NOT EXISTS(SELECT 1 FROM subscribe_retention s WHERE s.subscribe_id=r.subscribe_id AND s.generation=r.generation AND s.media_id=?1)
+            ORDER BY r.subscribe_id,r.generation LIMIT 64",params![survivor.to_string(),loser.to_string()])?;
+        if copied > 0 {
+            tx.commit()?;
+            return Ok(());
+        }
+
         crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, survivor)?;
         crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, loser)?;
         let survivor_kind = media_kind(&tx, survivor)?;
@@ -124,7 +136,7 @@ impl crate::LibraryConnection<'_> {
         tx.execute(
             "UPDATE media_operations
              SET state = 'applying', phase_cursor = ?2, error = NULL, updated_at_ms = ?3
-             WHERE operation_id = ?1",
+             WHERE operation_id = ?1 AND phase_cursor='init'",
             params![operation_id, PHASE_SUBSCRIBES, now_ms],
         )?;
         tx.commit()?;
@@ -147,6 +159,15 @@ impl crate::LibraryConnection<'_> {
         now_ms: i64,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
+        if !phase_owned(&tx, operation_id, PHASE_RETIRE)? {
+            return Ok(());
+        }
+        let removed=tx.execute("DELETE FROM subscribe_retention WHERE rowid IN (SELECT rowid FROM subscribe_retention WHERE media_id=?1 LIMIT 64)",[loser.to_string()])?;
+        if removed > 0 {
+            tx.commit()?;
+            return Ok(());
+        }
+
         ensure_loser_has_no_references(&tx, loser)?;
         tx.execute(
             "UPDATE media SET identity_state = 'retired', survivor_id = ?1
@@ -172,12 +193,16 @@ impl crate::LibraryConnection<'_> {
         )?;
         tx.execute(
             "UPDATE media_operations
-             SET state = 'succeeded', phase_cursor = ?2, error = NULL, updated_at_ms = ?3
-             WHERE operation_id = ?1",
-            params![operation_id, PHASE_COMPLETE, now_ms],
+             SET state = 'applying', phase_cursor = ?2, error = NULL, updated_at_ms = ?3
+             WHERE operation_id = ?1 AND phase_cursor='retire'",
+            params![operation_id, PHASE_CLEANUP, now_ms],
         )?;
         tx.commit()?;
         tracing::info!(operation_id, %survivor, %loser, "Media merge: loser retired");
         Ok(())
     }
+}
+
+fn phase_owned(conn: &Connection, op: &str, phase: &str) -> Result<bool, StoreError> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM media_operations WHERE operation_id=?1 AND phase_cursor=?2 AND state<>'succeeded')",params![op,phase],|r|r.get(0))?)
 }

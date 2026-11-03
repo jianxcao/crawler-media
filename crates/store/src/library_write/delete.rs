@@ -22,8 +22,8 @@ impl super::super::Store {
         library_id: LibraryId,
         file_ids: &[LedgerId],
     ) -> Result<usize, StoreError> {
-        self.with_reference_write(|library, subscribe| {
-            library.delete_files_with_references(subscribe, library_id, file_ids)
+        self.with_library_write(|library| {
+            library.delete_files_with_references(library_id, file_ids)
         })
     }
 }

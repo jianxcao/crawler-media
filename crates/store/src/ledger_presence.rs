@@ -97,8 +97,8 @@ impl crate::Store {
         mode: LedgerPresenceMode,
         now: i64,
     ) -> Result<LedgerPresenceResult, StoreError> {
-        self.with_reference_write(|library, subscribe| {
-            library.apply_ledger_presence_with_references(subscribe, observations, mode, now)
+        self.with_library_write(|library| {
+            library.apply_ledger_presence_with_references(observations, mode, now)
         })
     }
 }

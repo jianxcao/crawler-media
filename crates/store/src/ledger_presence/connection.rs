@@ -3,7 +3,6 @@ use super::*;
 impl crate::LibraryConnection<'_> {
     pub fn apply_ledger_presence_with_references(
         &self,
-        subscribes: &crate::SubscribeConnection<'_>,
         observations: &[LedgerPresenceObservation],
         mode: LedgerPresenceMode,
         now: i64,
@@ -26,12 +25,7 @@ impl crate::LibraryConnection<'_> {
                 .iter()
                 .map(|obs| obs.file.file.media_id)
                 .collect();
-            let subscribed = subscribes.subscribed_media(&candidates)?;
-            crate::library_write::orphan_media::purge_orphan_media_in_tx(
-                &tx,
-                &candidates,
-                &subscribed,
-            )?;
+            crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &candidates)?;
         }
 
         tx.commit()?;

@@ -68,37 +68,43 @@ pub(crate) fn publish(
 ) -> Result<(), JobsMutationError> {
     let queue = reservation.acquire()?;
     let subscribe = &intent.subscribe;
-    queue.apply_subscribe_config(subscribe.id, &intent.generation, intent.revision, |queue| {
-        if queue
-            .def_for_identity(jobs::JobIdentity::subscribe_search(subscribe.id))?
-            .is_none()
-        {
-            crate::jobs_api::seed_subscribe_search_every(
+    queue.apply_subscribe_config(
+        subscribe.id,
+        &intent.generation,
+        intent.epoch,
+        intent.revision,
+        |queue| {
+            if queue
+                .def_for_identity(jobs::JobIdentity::subscribe_search(subscribe.id))?
+                .is_none()
+            {
+                crate::jobs_api::seed_subscribe_search_every(
+                    &queue,
+                    subscribe.id,
+                    subscribe.search_interval_secs,
+                    Some(title),
+                )?;
+            }
+            crate::http::subscribe_schedule::sync_search_job(
+                &queue,
+                subscribe.id,
+                subscribe.tracking_state == "paused",
+            )?;
+            crate::http::subscribe_schedule::set_search_interval(
                 &queue,
                 subscribe.id,
                 subscribe.search_interval_secs,
-                Some(title),
             )?;
-        }
-        crate::http::subscribe_schedule::sync_search_job(
-            &queue,
-            subscribe.id,
-            subscribe.tracking_state == "paused",
-        )?;
-        crate::http::subscribe_schedule::set_search_interval(
-            &queue,
-            subscribe.id,
-            subscribe.search_interval_secs,
-        )?;
-        if intent.create
-            && queue
-                .def_for_identity(jobs::JobIdentity::catalog_refresh(subscribe.media_id))?
-                .is_none()
-        {
-            crate::jobs_api::seed_catalog_refresh(&queue, subscribe.media_id, Some(title))?;
-        }
-        Ok(())
-    })?;
+            if intent.create
+                && queue
+                    .def_for_identity(jobs::JobIdentity::catalog_refresh(subscribe.media_id))?
+                    .is_none()
+            {
+                crate::jobs_api::seed_catalog_refresh(&queue, subscribe.media_id, Some(title))?;
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -137,11 +143,10 @@ pub(crate) fn cleanup_deleted(
     if state.store.subscribe_jobs_cleanup(id)?.as_deref() != Some(generation) {
         return Ok(());
     }
-    if state.store.get_subscribe(id)?.is_none() {
-        reservation
-            .acquire()?
-            .delete_def(jobs::JobIdentity::subscribe_search(id))?;
-    }
+    let epoch = state.store.subscribe_lifecycle_epoch(id, generation)?;
+    reservation
+        .acquire()?
+        .close_subscribe_epoch(id, generation, epoch)?;
     // A new parent owns its definitions; acknowledge only the old tombstone.
     state
         .store

@@ -203,25 +203,35 @@ impl Store {
     }
 
     pub fn delete_subscribe(&self, id: SubscribeId) -> Result<bool, StoreError> {
-        let deleted = self.with_writer(crate::Db::Subscribe, |subscribe| {
+        let (deleted,release) = self.with_writer(crate::Db::Subscribe, |subscribe| {
             let tx = crate::write_tx(subscribe)?;
+            let release=tx.query_row("SELECT jobs_sync_generation,lifecycle_epoch,media_id FROM subscribes WHERE id=?1",[id.to_string()],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?))).optional()?.map(|(generation,epoch,media)|Ok::<_,StoreError>(crate::SubscribeCreation{id,generation,epoch,media_id:media.parse()?})).transpose()?;
+
+            tx.execute("UPDATE subscribe_reference_ops SET state='releasing',release_mode='ordinary',compensation_json=NULL WHERE generation IN (SELECT jobs_sync_generation FROM subscribes WHERE id=?1) AND state='committed'",[id.to_string()])?;
             tx.execute("INSERT OR REPLACE INTO subscribe_jobs_cleanup(id,generation) SELECT id,jobs_sync_generation FROM subscribes WHERE id=?1", [id.to_string()])?;
             let n = tx.execute(
                 "DELETE FROM subscribes WHERE id = ?1",
                 params![id.to_string()],
             )?;
             tx.commit()?;
-            Ok(n > 0)
+            Ok((n > 0,release))
         })?;
+        if let Some(release) = release {
+            if let Err(error) = self.close_subscribe_retention(&release) {
+                tracing::warn!(subscribe_id=%id,%error,"Subscribe release remains durably pending");
+            }
+        }
         // L4: per-subscription settings (`subscribe.<name>:<id>`, e.g. the
         // completion notice marker) live in the app database; drop them too.
-        self.with_app(|app| {
+        if let Err(error) = self.with_app(|app| {
             app.app.execute(
                 "DELETE FROM settings WHERE key LIKE 'subscribe.%:' || ?1",
                 params![id.to_string()],
             )?;
             Ok(())
-        })?;
+        }) {
+            tracing::warn!(subscribe_id=%id,%error,"Subscribe deleted; App setting cleanup failed");
+        }
         Ok(deleted)
     }
 
@@ -325,23 +335,17 @@ impl Store {
         subscribe: &Subscribe,
         check_overlap: bool,
     ) -> Result<(), StoreError> {
-        self.with_writer(crate::Db::Subscribe, |subscribe_conn| {
-            let tx = crate::write_tx(subscribe_conn)?;
-            if check_overlap {
-                admission::ensure_nonoverlapping(&tx, subscribe)?;
+        let creation = self.begin_subscribe_creation(subscribe)?;
+        let result = self
+            .retain_subscribe_creation(&creation)
+            .and_then(|()| self.commit_subscribe_creation(&creation, subscribe, check_overlap));
+        if let Err(error) = result {
+            if let Err(cleanup) = self.abort_subscribe_creation(&creation) {
+                tracing::error!(subscribe_id=%subscribe.id,%cleanup,"Subscribe creation abort remains pending");
             }
-            self.with_writer(crate::Db::Library, |library| {
-                admission::insert_row(library, &tx, subscribe)
-            })?;
-            if check_overlap {
-                tx.execute(
-                    "UPDATE subscribes SET jobs_sync_pending=1 WHERE id=?1",
-                    [subscribe.id.to_string()],
-                )?;
-            }
-            tx.commit()?;
-            Ok(())
-        })
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn get_subscribe(&self, id: SubscribeId) -> Result<Option<Subscribe>, StoreError> {
@@ -466,5 +470,5 @@ impl Store {
 #[path = "subscribes/connection.rs"]
 mod connection;
 
-mod admission;
+pub(crate) mod admission;
 mod media_batch;

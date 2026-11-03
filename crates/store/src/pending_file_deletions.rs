@@ -157,9 +157,7 @@ impl Store {
     /// Complete only this generation, atomically removing its file facts and intent.
     /// The persisted key keeps recovery independent of the current root registry.
     pub fn complete_file_deletion(&self, entry: &QueuedFileDeletion) -> Result<(), StoreError> {
-        self.with_reference_write(|library, subscribe| {
-            library.complete_file_deletion_with_references(subscribe, entry)
-        })
+        self.with_library_write(|library| library.complete_file_deletion_with_references(entry))
     }
 }
 

@@ -20,3 +20,5 @@ pub(crate) const SUCCEEDED_STATE: &str = "succeeded";
 pub(crate) fn terminal_operation_predicate() -> String {
     format!("state = '{SUCCEEDED_STATE}'")
 }
+
+mod subscribe_fence;

@@ -30,6 +30,7 @@ use crate::{Store, StoreError};
 const PHASE_INIT: &str = "init";
 const PHASE_SUBSCRIBES: &str = "subscribes";
 const PHASE_RETIRE: &str = "retire";
+const PHASE_CLEANUP: &str = "cleanup";
 const PHASE_COMPLETE: &str = "complete";
 
 impl Store {
@@ -105,7 +106,15 @@ impl Store {
                     self.merge_subscribe_phase(operation_id, survivor, loser, now_ms)
                 }
                 PHASE_RETIRE => {
-                    break self.merge_retire_phase(operation_id, survivor, loser, &frozen, now_ms);
+                    self.merge_retire_phase(operation_id, survivor, loser, &frozen, now_ms)
+                }
+                PHASE_CLEANUP => {
+                    self.finish_subscribe_merge_fence(operation_id)?;
+                    self.with_writer(crate::Db::Library,|conn| {
+                        let tx=crate::write_tx(conn)?;
+                        tx.execute("UPDATE media_operations SET state='succeeded',phase_cursor='complete' WHERE operation_id=?1 AND phase_cursor='cleanup'",[operation_id])?;
+                        tx.commit()?;Ok(())
+                    })
                 }
                 PHASE_COMPLETE => break Ok(()),
                 other => {
@@ -188,6 +197,7 @@ impl Store {
         request: &MediaMergeRequest,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        self.install_subscribe_merge_fence(operation_id, survivor, loser)?;
         self.with_library_write(|db| {
             db.merge_library_phase(operation_id, survivor, loser, request, now_ms)
         })
@@ -203,32 +213,25 @@ impl Store {
         loser: MediaId,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let moved = self.with_writer(crate::Db::Subscribe, |subscribe| {
-            let tx = crate::write_tx(subscribe)?;
-            let moved = tx.execute(
-                "UPDATE subscribes SET media_id = ?1 WHERE media_id = ?2",
-                params![survivor.to_string(), loser.to_string()],
-            )?;
-            tx.commit()?;
-            Ok(moved)
+        let remains = self.with_writer(crate::Db::Subscribe, |conn| {
+            let tx=crate::write_tx(conn)?;
+            let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribe_merge_controls WHERE operation_id=?1 AND state='active')",[operation_id],|r|r.get(0))?;
+            if !active {return Ok(false);}
+            let mut stmt=tx.prepare("SELECT id,jobs_sync_generation FROM subscribes WHERE media_id=?1 ORDER BY id LIMIT 64")?;
+            let rows=stmt.query_map([loser.to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+            drop(stmt);
+            for (id,generation) in rows {
+                tx.execute("UPDATE subscribes SET media_id=?1 WHERE id=?2 AND jobs_sync_generation=?3 AND media_id=?4",params![survivor.to_string(),id,generation,loser.to_string()])?;
+            }
+            let remains=tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribes WHERE media_id=?1)",[loser.to_string()],|r|r.get::<_,bool>(0))?;
+            tx.commit()?;Ok(remains)
         })?;
-        tracing::info!(
-            operation_id,
-            %survivor,
-            %loser,
-            moved,
-            "Media merge: subscribe references re-pointed"
-        );
-
-        self.with_writer(crate::Db::Library, |library| {
-            library.execute(
-                "UPDATE media_operations
-             SET phase_cursor = ?2, state = 'applying', error = NULL, updated_at_ms = ?3
-             WHERE operation_id = ?1",
-                params![operation_id, PHASE_RETIRE, now_ms],
-            )?;
-            Ok(())
-        })
+        if !remains {
+            self.with_writer(crate::Db::Library, |conn| {
+                conn.execute("UPDATE media_operations SET phase_cursor=?2,state='applying',error=NULL,updated_at_ms=?3 WHERE operation_id=?1 AND phase_cursor='subscribes'",params![operation_id,PHASE_RETIRE,now_ms])?;Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// Phase 3: close the operation with the loser's tombstone. The loser must
@@ -251,7 +254,13 @@ impl Store {
 /// The phases this writer persists, in order. A merge row may only carry one of
 /// them: `init` is written by the preflight that freezes both identities, and each
 /// phase persists its successor before returning.
-const MERGE_PHASES: [&str; 4] = [PHASE_INIT, PHASE_SUBSCRIBES, PHASE_RETIRE, PHASE_COMPLETE];
+const MERGE_PHASES: [&str; 5] = [
+    PHASE_INIT,
+    PHASE_SUBSCRIBES,
+    PHASE_RETIRE,
+    PHASE_CLEANUP,
+    PHASE_COMPLETE,
+];
 
 /// Validate the persisted phase cursor before any fact moves.
 ///

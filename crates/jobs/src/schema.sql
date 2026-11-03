@@ -106,3 +106,4 @@ CREATE TABLE subscribe_config_receipts (
  subscribe_id TEXT NOT NULL, generation TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0),
  PRIMARY KEY(subscribe_id,generation)
 );
+CREATE TABLE subscribe_lifecycle_fences(subscribe_id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,generation TEXT NOT NULL,revision INTEGER NOT NULL,closed INTEGER NOT NULL CHECK(closed IN (0,1)));

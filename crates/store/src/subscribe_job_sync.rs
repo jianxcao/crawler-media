@@ -6,6 +6,7 @@ use rusqlite::OptionalExtension;
 pub struct SubscribeJobSync {
     pub subscribe: Subscribe,
     pub generation: String,
+    pub epoch: i64,
     pub revision: i64,
     pub create: bool,
 }
@@ -32,11 +33,11 @@ impl Store {
             let tx = crate::read_tx(db.subscribe)?;
             let connection = crate::SubscribeConnection { subscribe: &tx };
             let status = tx.query_row(
-                "SELECT jobs_sync_generation,jobs_sync_revision,jobs_sync_create FROM subscribes WHERE id=?1 AND jobs_sync_pending=1",
-                [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?))).optional()?;
+                "SELECT jobs_sync_generation,jobs_sync_revision,jobs_sync_create,lifecycle_epoch FROM subscribes WHERE id=?1 AND jobs_sync_pending=1",
+                [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?, row.get::<_, i64>(3)?))).optional()?;
             let value = match status {
-                Some((generation, revision, create)) => connection.get_subscribe(id)?.map(|subscribe|
-                    SubscribeJobSync { subscribe, generation, revision, create }),
+                Some((generation, revision, create, epoch)) => connection.get_subscribe(id)?.map(|subscribe|
+                    SubscribeJobSync { subscribe, generation, epoch, revision, create }),
                 None => None,
             };
             tx.commit()?;
@@ -104,6 +105,22 @@ impl Store {
                 rusqlite::params![id.to_string(), generation],
             )?;
             Ok(())
+        })
+    }
+}
+
+impl Store {
+    pub fn subscribe_lifecycle_epoch(
+        &self,
+        id: SubscribeId,
+        generation: &str,
+    ) -> Result<i64, StoreError> {
+        self.with_read(crate::Db::Subscribe, |conn| {
+            Ok(conn.query_row(
+                "SELECT epoch FROM subscribe_reference_ops WHERE subscribe_id=?1 AND generation=?2",
+                rusqlite::params![id.to_string(), generation],
+                |r| r.get(0),
+            )?)
         })
     }
 }

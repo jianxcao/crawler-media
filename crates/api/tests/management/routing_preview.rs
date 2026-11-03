@@ -36,12 +36,10 @@ impl Catalog for StoreLockingCatalog {
         if tmdb_id != "603" {
             return Ok(None);
         }
-        // Catalog IO cannot inherit the Library writer. Probe the actual writer
-        // and release it before reading configuration through the read pool.
-        self.store
-            .writers()
-            .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
-            .map_err(|error| format!("Library writer held while fetching metadata: {error}"))?;
+        // Detect a writer inherited on this thread. Background writers on
+        // other threads are legitimate and do not prevent catalog IO.
+        store::WriterRankGuard::ensure_unheld(store::WriterRank::Library)
+            .map_err(|error| format!("Writer inherited while fetching metadata: {error}"))?;
         let _config = self.store.get_scrape_config().ok();
         Ok(Some(media::ItemMeta {
             genre_ids: vec![16],
@@ -130,4 +128,45 @@ async fn tmdb_routing_preview_does_not_deadlock_on_store_lock() {
         "matched library should be named in the reason: {}",
         body["data"]["route_reason"]
     );
+}
+
+#[test]
+fn catalog_metadata_accepts_an_independent_library_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    let catalog = StoreLockingCatalog {
+        store: store.clone(),
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer_store = store.clone();
+    let writer = std::thread::spawn(move || {
+        writer_store
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv().unwrap();
+    let result = catalog.metadata(MediaKind::Movie, "603");
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    assert_eq!(result.unwrap().unwrap().genre_ids, vec![16]);
+}
+
+#[test]
+fn catalog_metadata_rejects_an_inherited_library_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    let catalog = StoreLockingCatalog {
+        store: store.clone(),
+    };
+    store
+        .with_writer(store::Db::Library, |_| {
+            assert!(catalog.metadata(MediaKind::Movie, "603").is_err());
+            Ok(())
+        })
+        .unwrap();
 }

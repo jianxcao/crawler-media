@@ -13,9 +13,7 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
     if operation.state != "cleaning" {
         return Err(StoreError::Protected("Library 工作尚未排空".into()));
     }
-    let ready = store.with_reference_write(|library, subscribe| {
-        clean_window(library, subscribe, id, &operation)
-    })?;
+    let ready = store.with_library_write(|library| clean_window(library, id, &operation))?;
     if !ready {
         return store
             .library_removal(id)?
@@ -44,7 +42,6 @@ pub(super) fn advance(store: &Store, id: &str) -> Result<LibraryRemoval, StoreEr
 
 fn clean_window(
     library: &crate::LibraryConnection<'_>,
-    subscribe: &crate::SubscribeConnection<'_>,
     id: &str,
     operation: &LibraryRemoval,
 ) -> Result<bool, StoreError> {
@@ -72,8 +69,7 @@ fn clean_window(
         )?;
         // Same orphan purge as single-file delete: Media that lost its last file
         // (and is not kept by a collection/subscription) must leave with the Library.
-        let subscribed = subscribe.subscribed_media(&affected)?;
-        crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &affected, &subscribed)?;
+        crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &affected)?;
         clean_unit_facts(&tx, rows.iter())?;
         for row in &rows {
             tx.execute(

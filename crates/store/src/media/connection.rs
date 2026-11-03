@@ -407,41 +407,24 @@ impl crate::LibraryConnection<'_> {
 impl crate::LibraryConnection<'_> {
     pub fn undo_ensured_media_if_unreferenced_with_references(
         &self,
-        subscribes: &crate::SubscribeConnection<'_>,
         media_id: MediaId,
         expected: &Media,
     ) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
 
-        let id_str = media_id.to_string();
         let current = media_row(&tx, media_id)?;
         if current.as_ref() != Some(expected) {
             tracing::debug!(%media_id, "Media changed since it was inserted; skipping delete");
             return Ok(false);
         }
 
-        let has_sub: bool = subscribes.subscribe.query_row(
-            "SELECT EXISTS(SELECT 1 FROM subscribes WHERE media_id = ?1)",
-            [&id_str],
-            |r| r.get(0),
-        )?;
-        if has_sub {
-            return Ok(false);
-        }
-
-        let has_files: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_files WHERE media_id = ?1)",
-            [&id_str],
-            |r| r.get(0),
-        )?;
-        if has_files {
-            return Ok(false);
-        }
-
         crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
-        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", [&id_str])?;
-        let changed = tx.execute("DELETE FROM media WHERE media_id = ?1", [&id_str])?;
+        let changed = crate::library_write::orphan_media::purge_orphan_media_in_tx(
+            &tx,
+            &std::collections::HashSet::from([media_id]),
+        )?
+        .contains(&media_id);
         tx.commit()?;
-        Ok(changed > 0)
+        Ok(changed)
     }
 }

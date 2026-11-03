@@ -21,11 +21,12 @@ fn inversion_and_reentry_are_errors_and_leave_the_writer_stack_healthy() {
         outcome.unwrap().unwrap();
         store.with_writer(Db::App, |_| Ok(())).unwrap();
     }
-    store
-        .with_writer(Db::Subscribe, |_| {
+    assert!(matches!(
+        store.with_writer(Db::Subscribe, |_| {
             store.with_writer(Db::Library, |_| Ok(()))
-        })
-        .unwrap();
+        }),
+        Err(store::StoreError::LockOrder { .. })
+    ));
 }
 
 #[test]
@@ -44,4 +45,21 @@ fn jobs_rank_rejects_store_writer_and_unwind_cleans_up_held_stack() {
     }));
     assert!(panic.is_err());
     store.with_writer(Db::App, |_| Ok(())).unwrap();
+}
+#[test]
+fn increasing_second_writer_is_rejected_before_waiting() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    store
+        .with_writer(Db::Subscribe, |_| {
+            assert!(
+                matches!(
+                    store.with_writer(Db::Library, |_| Ok(())),
+                    Err(store::StoreError::LockOrder { .. })
+                ),
+                "any second actual writer must be rejected"
+            );
+            Ok(())
+        })
+        .unwrap();
 }

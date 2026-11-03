@@ -34,7 +34,7 @@ impl WriterRankGuard {
     pub fn enter(rank: WriterRank) -> Result<Self, crate::StoreError> {
         HELD.with(|held| {
             let mut held = held.borrow_mut();
-            if held.last().is_some_and(|previous| *previous >= rank) {
+            if !held.is_empty() {
                 tracing::error!(held = ?*held, requested = ?rank, "database writer lock order violation");
                 return Err(crate::StoreError::LockOrder { held: held.clone(), requested: rank });
             }

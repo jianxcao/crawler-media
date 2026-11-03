@@ -178,25 +178,29 @@ fn identity_mutations_share_subscribe_receipt_atomicity_and_cleanup_ownership() 
         Ok(())
     };
     assert!(
-        q.apply_subscribe_config(id, "generation", 1, |q| {
+        q.apply_subscribe_config(id, "generation", 1, 1, |q| {
             work(q)?;
             Err(jobs::JobError::Identity("rollback".into()))
         })
         .is_err()
     );
     assert!(q.def_for_identity(identity).unwrap().is_none());
-    assert!(q.apply_subscribe_config(id, "generation", 1, work).unwrap());
+    assert!(
+        q.apply_subscribe_config(id, "generation", 1, 1, work)
+            .unwrap()
+    );
     q.set_def_enabled(identity, true).unwrap();
     assert!(
-        !q.apply_subscribe_config(id, "generation", 1, |_| panic!("receipt replay"))
+        !q.apply_subscribe_config(id, "generation", 1, 1, |_| panic!("receipt replay"))
             .unwrap()
     );
     let orphan = q.enqueue(identity, &payload, 0).unwrap();
     q.delete_def(identity).unwrap();
     assert!(q.get(orphan.id).unwrap().is_none());
     assert!(
-        q.apply_subscribe_config(id, "generation", 1, work).unwrap(),
-        "owned receipt removed with identity"
+        q.apply_subscribe_config(id, "generation", 1, 1, work)
+            .unwrap(),
+        "owned receipt removed with identity; open epoch may republish"
     );
 }
 

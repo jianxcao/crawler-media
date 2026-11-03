@@ -239,7 +239,7 @@ pub(crate) fn raw_terms(
         ),
         (
             "collection",
-            "SELECT c.id FROM collections c JOIN collection_items ci ON ci.collection_id=c.id WHERE ci.media_id=?2 AND c.visibility='public' AND c.user_id IS NULL AND ?1 IS NOT NULL",
+            "SELECT c.id FROM collections c JOIN collection_items ci ON ci.collection_id=c.id WHERE ci.media_id=?2 AND c.deleting=0 AND c.visibility='public' AND c.user_id IS NULL AND ?1 IS NOT NULL",
         ),
     ] {
         for value in tx

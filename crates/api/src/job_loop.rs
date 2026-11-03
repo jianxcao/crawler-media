@@ -202,6 +202,26 @@ async fn lease_loop(
 
 /// 上个进程留下的分阶段工作，拿到租约后先补到终态（只有持租约者会驱动）。
 async fn recover_startup_work(state: &ApiState) {
+    let reference_state = state.clone();
+    off_executor("recover_reference_work", move || {
+        for (stage, result) in [
+            (
+                "Subscribe references",
+                reference_state.store.recover_subscribe_references(64),
+            ),
+            (
+                "Collection deletion",
+                reference_state.store.recover_collection_deletions(),
+            ),
+            ("orphan Media", reference_state.store.recover_orphan_media()),
+        ] {
+            if let Err(error) = result {
+                tracing::warn!(stage,%error,"Startup reference recovery deferred");
+            }
+        }
+    })
+    .await;
+
     // 未完成的 Library 重配置：只有这里（和启动路径）会把它们推进到终态。
     let resume_state = state.clone();
     if let Some(Err(error)) = off_executor("resume_library_reconfigurations", move || {
@@ -330,6 +350,21 @@ pub(crate) fn run_pending_jobs_with_clock(
     completion_clock: impl Fn() -> i64,
     source: TickSource,
 ) -> Result<TickRun, JobsMutationError> {
+    for (stage, result) in [
+        (
+            "Subscribe references",
+            state.store.recover_subscribe_references(64),
+        ),
+        (
+            "Collection deletion",
+            state.store.recover_collection_deletions(),
+        ),
+        ("orphan Media", state.store.recover_orphan_media()),
+    ] {
+        if let Err(error) = result {
+            tracing::warn!(stage,%error,"Durable reference recovery deferred");
+        }
+    }
     crate::subscribe_job_sync::reconcile_pending(state)?;
     let (claimed, skipped_maintenance) = claim_pending_jobs(state, now, source)?;
     let runner = StateRunner {

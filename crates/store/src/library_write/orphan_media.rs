@@ -40,19 +40,29 @@ impl crate::Store {}
 pub(crate) fn purge_orphan_media_in_tx(
     tx: &Connection,
     candidates: &HashSet<MediaId>,
-    subscribed: &HashSet<MediaId>,
 ) -> Result<Vec<MediaId>, StoreError> {
     let mut purged = Vec::new();
     for media in candidates {
-        if subscribed.contains(media) {
+        let id = media.to_string();
+        let frozen: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media WHERE media_id=?1 AND identity_state='merging')",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if frozen {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_orphan_media VALUES(?1)",
+                [&id],
+            )?;
             continue;
         }
-        let id = media.to_string();
         let referenced: Option<i64> = tx
             .query_row(
                 "SELECT 1 WHERE EXISTS(SELECT 1 FROM library_files WHERE media_id=?1)
                     OR EXISTS(SELECT 1 FROM collection_items WHERE media_id=?1)
+                    OR EXISTS(SELECT 1 FROM subscribe_retention WHERE media_id=?1)
                     OR EXISTS(SELECT 1 FROM media WHERE survivor_id=?1)
+                    OR EXISTS(SELECT 1 FROM media WHERE media_id=?1 AND identity_state='retired')
                     OR NOT EXISTS(SELECT 1 FROM media WHERE media_id=?1)",
                 [&id],
                 |row| row.get(0),
@@ -80,5 +90,46 @@ pub(crate) fn purge_orphan_media_in_tx(
     Ok(purged)
 }
 
-#[path = "orphan_media/connection.rs"]
-mod connection;
+impl crate::Store {
+    pub fn recover_orphan_media(&self) -> Result<usize, StoreError> {
+        let ids=self.with_writer(crate::Db::Library,|conn| {
+            let tx=crate::write_tx(conn)?;
+            let mut after:String=tx.query_row("SELECT cursor FROM reference_recovery_cursors WHERE kind='orphan'",[],|r|r.get(0))?;
+            let more:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pending_orphan_media p JOIN media m USING(media_id) WHERE m.identity_state<>'merging' AND p.media_id>?1)",[&after],|r|r.get(0))?;
+            if !more {after.clear();}
+            let mut stmt=tx.prepare("SELECT p.media_id FROM pending_orphan_media p JOIN media m USING(media_id) WHERE m.identity_state<>'merging' AND p.media_id>?1 ORDER BY p.media_id LIMIT 64")?;
+            let ids=stmt.query_map([after],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            drop(stmt);
+            tx.execute("UPDATE reference_recovery_cursors SET cursor=?1 WHERE kind='orphan'",[ids.last().map_or("",String::as_str)])?;
+            tx.commit()?;Ok(ids)
+        })?;
+        let mut failure = None;
+        for raw_id in &ids {
+            let result = raw_id
+                .parse::<MediaId>()
+                .map_err(StoreError::from)
+                .and_then(|id| {
+                    self.with_writer(crate::Db::Library, |conn| {
+                        let tx = crate::write_tx(conn)?;
+                        // Candidate removal and purge commit together, independently
+                        // of any other poisoned candidate in the selected window.
+                        tx.execute(
+                            "DELETE FROM pending_orphan_media WHERE media_id=?1",
+                            [raw_id],
+                        )?;
+                        purge_orphan_media_in_tx(&tx, &HashSet::from([id]))?;
+                        tx.commit()?;
+                        Ok(())
+                    })
+                });
+            if let Err(error) = result {
+                tracing::error!(media_id=%raw_id,%error,"Orphan Media recovery deferred; raw cursor advanced");
+                failure = Some(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(ids.len())
+    }
+}

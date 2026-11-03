@@ -6,6 +6,7 @@ use super::Store;
 use super::StoreError;
 
 mod cursor;
+mod deletion;
 mod facts;
 mod reads;
 pub use reads::{CollectionItemFacts, CollectionItemPage, CollectionRead};
@@ -49,7 +50,14 @@ impl Store {
     }
 
     pub fn delete_collection(&self, id: &str) -> Result<bool, StoreError> {
-        self.with_library_write(|db| db.delete_collection(id))
+        let exists = self.with_writer(crate::Db::Library, |conn| {
+            Ok(conn.execute("UPDATE collections SET deleting=1 WHERE id=?1", [id])? > 0)
+        })?;
+        if !exists {
+            return Ok(false);
+        }
+        while !self.advance_collection_deletion(id)? {}
+        Ok(true)
     }
 
     pub fn collection_item_ids(&self, collection_id: &str) -> Result<Vec<String>, StoreError> {

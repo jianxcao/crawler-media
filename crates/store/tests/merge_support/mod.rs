@@ -532,21 +532,26 @@ fn seed_merge_relations(library_db: &Connection) {
 fn seed_merge_subscribe(data_dir: &std::path::Path) {
     let loser_id = "00000000-0000-0000-0000-0000000000a2";
     let user_a = "00000000-0000-0000-0002-000000000001";
-    let subscribe_db = Connection::open(data_dir.join("subscribe.db")).unwrap();
-    subscribe_db
-        .execute(
-            "INSERT INTO subscribes
-                (id, user_id, media_id, coverage_kind, fetch_mode, filter_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'movie', 'search', ?4, '2024-01-01', '2024-01-01')",
-            params![
-                "00000000-0000-0000-0003-000000000001",
-                user_a,
-                loser_id,
-                "00000000-0000-0000-0004-000000000001",
-            ],
-        )
+    let store = Store::open(data_dir).unwrap();
+    store
+        .insert_subscribe(&domain::Subscribe {
+            id: "00000000-0000-0000-0003-000000000001".parse().unwrap(),
+            user_id: user_a.parse().unwrap(),
+            media_id: loser_id.parse().unwrap(),
+            coverage: domain::Coverage::Movie,
+            fetch_mode: domain::FetchMode::Search,
+            filter_id: "00000000-0000-0000-0004-000000000001".parse().unwrap(),
+            wash_cut: false,
+            wash_cut_filter_id: None,
+            keep_old_versions: false,
+            full_season_pack: false,
+            downloader_id: None,
+            library_id: None,
+            tracking_state: "active".into(),
+            follow_future: false,
+            search_interval_secs: 1800,
+        })
         .unwrap();
-    drop(subscribe_db);
 }
 
 pub type SummaryRow = (

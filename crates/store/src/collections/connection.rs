@@ -7,7 +7,7 @@ impl crate::LibraryConnection<'_> {
         user_id: domain::UserId,
     ) -> Result<Vec<UserCollection>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT id, name, sort_order FROM collections WHERE user_id = ?1
+            "SELECT id, name, sort_order FROM collections WHERE deleting=0 AND user_id = ?1
              ORDER BY sort_order, created_at",
         )?;
         let rows = stmt.query_map(params![user_id.to_string()], |row| {
@@ -27,7 +27,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<bool, StoreError> {
         self.library
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM collections WHERE id = ?1 AND user_id = ?2)",
+                "SELECT EXISTS(SELECT 1 FROM collections WHERE deleting=0 AND id = ?1 AND user_id = ?2)",
                 params![collection_id, user_id.to_string()],
                 |row| row.get(0),
             )
@@ -41,7 +41,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<String, StoreError> {
         let id = domain::CollectionId::new().to_string();
         let max: i64 = self.library.query_row(
-            "SELECT COALESCE(MAX(sort_order), 0) FROM collections WHERE user_id = ?1",
+            "SELECT COALESCE(MAX(sort_order), 0) FROM collections WHERE deleting=0 AND user_id = ?1",
             params![user_id.to_string()],
             |row| row.get(0),
         )?;
@@ -55,6 +55,7 @@ impl crate::LibraryConnection<'_> {
 
     pub fn rename_collection(&self, id: &str, name: &str) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
+        super::deletion::ensure_mutable(&tx, id)?;
         let affected = collection_media(&tx, id)?;
         for media in &affected {
             crate::library_operations::integrity_guard::ensure_media_integrity_writable(
@@ -65,28 +66,8 @@ impl crate::LibraryConnection<'_> {
             "UPDATE collections SET name = ?2 WHERE id = ?1",
             params![id, name],
         )?;
-        for media in affected {
-            crate::library_write::reduce::reduce_media_everywhere(&tx, media)?;
-        }
-        tx.commit()?;
-        Ok(n > 0)
-    }
-
-    pub fn delete_collection(&self, id: &str) -> Result<bool, StoreError> {
-        let tx = crate::write_tx(self.library)?;
-        let affected = collection_media(&tx, id)?;
         for media in &affected {
-            crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                &tx, *media,
-            )?;
-        }
-        tx.execute(
-            "DELETE FROM collection_items WHERE collection_id = ?1",
-            params![id],
-        )?;
-        let n = tx.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
-        for media in affected {
-            crate::library_write::reduce::reduce_media_everywhere(&tx, media)?;
+            crate::library_write::reduce::reduce_media_everywhere(&tx, *media)?;
         }
         tx.commit()?;
         Ok(n > 0)
@@ -94,7 +75,7 @@ impl crate::LibraryConnection<'_> {
 
     pub fn collection_item_ids(&self, collection_id: &str) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT media_id FROM collection_items WHERE collection_id = ?1
+            "SELECT media_id FROM collection_items WHERE collection_id = ?1 AND EXISTS(SELECT 1 FROM collections c WHERE c.id=?1 AND c.deleting=0)
              ORDER BY sort_order, added_at",
         )?;
         let rows = stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?;
@@ -107,6 +88,7 @@ impl crate::LibraryConnection<'_> {
         media_item_id: &str,
     ) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
+        super::deletion::ensure_mutable(&tx, collection_id)?;
         let affected = vec![media_item_id.parse::<domain::MediaId>()?];
         for media in &affected {
             crate::library_operations::integrity_guard::ensure_media_integrity_writable(
@@ -123,8 +105,8 @@ impl crate::LibraryConnection<'_> {
              VALUES (?1, ?2, ?3, ?4)",
             params![collection_id, media_item_id, max + 1, now()],
         )?;
-        for media in affected {
-            crate::library_write::reduce::reduce_media_everywhere(&tx, media)?;
+        for media in &affected {
+            crate::library_write::reduce::reduce_media_everywhere(&tx, *media)?;
         }
         tx.commit()?;
         Ok(n > 0)
@@ -136,6 +118,7 @@ impl crate::LibraryConnection<'_> {
         media_item_id: &str,
     ) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
+        super::deletion::ensure_mutable(&tx, collection_id)?;
         let affected = vec![media_item_id.parse::<domain::MediaId>()?];
         for media in &affected {
             crate::library_operations::integrity_guard::ensure_media_integrity_writable(
@@ -146,9 +129,13 @@ impl crate::LibraryConnection<'_> {
             "DELETE FROM collection_items WHERE collection_id = ?1 AND media_id = ?2",
             params![collection_id, media_item_id],
         )?;
-        for media in affected {
-            crate::library_write::reduce::reduce_media_everywhere(&tx, media)?;
+        for media in &affected {
+            crate::library_write::reduce::reduce_media_everywhere(&tx, *media)?;
         }
+        crate::library_write::orphan_media::purge_orphan_media_in_tx(
+            &tx,
+            &affected.into_iter().collect(),
+        )?;
         tx.commit()?;
         Ok(n > 0)
     }
@@ -159,6 +146,7 @@ impl crate::LibraryConnection<'_> {
         media_item_ids: &[String],
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
+        super::deletion::ensure_mutable(&tx, collection_id)?;
         let affected = collection_media(&tx, collection_id)?;
         for media in &affected {
             crate::library_operations::integrity_guard::ensure_media_integrity_writable(
