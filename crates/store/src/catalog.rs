@@ -61,3 +61,6 @@ impl Store {
 
 #[path = "catalog/connection.rs"]
 mod connection;
+
+#[path = "catalog/batch.rs"]
+mod batch;

@@ -10,6 +10,9 @@ pub enum StatsScope {
     Library,
     App,
     Both,
+    Subscribe,
+    Cache,
+    All,
 }
 struct Frame {
     scope: StatsScope,
@@ -36,10 +39,33 @@ pub(crate) fn record_reader_checkout(database: &str) {
 fn selected(scope: StatsScope, db: Db) -> bool {
     matches!(
         (scope, db),
-        (StatsScope::Both, Db::App | Db::Library)
+        (StatsScope::All, _)
+            | (StatsScope::Subscribe, Db::Subscribe)
+            | (StatsScope::Cache, Db::Cache)
+            | (StatsScope::Both, Db::App | Db::Library)
             | (StatsScope::App, Db::App)
             | (StatsScope::Library, Db::Library)
     )
+}
+
+pub(crate) fn record_writer(sample: &crate::writers::WriterSample) {
+    FRAMES.with(|frames| {
+        for frame in frames
+            .borrow()
+            .iter()
+            .filter(|frame| selected(frame.scope, sample.database))
+        {
+            let mut total = frame.totals.borrow_mut();
+            total.writer_wait_ns = total.writer_wait_ns.saturating_add(sample.writer_wait_ns);
+            total.writer_hold_ns = total.writer_hold_ns.saturating_add(sample.writer_hold_ns);
+            total.covered_owned_write_tx_count = total
+                .covered_owned_write_tx_count
+                .saturating_add(sample.covered_owned_write_tx_count);
+            total.covered_owned_write_tx_ns = total
+                .covered_owned_write_tx_ns
+                .saturating_add(sample.covered_owned_write_tx_ns);
+        }
+    });
 }
 
 pub(crate) struct LeaseStats<'a> {
@@ -90,6 +116,9 @@ fn add(to: &mut QueryWorkStats, value: QueryWorkStats) {
     to.vm_steps += value.vm_steps;
     to.sort_operations += value.sort_operations;
     to.sql_rows += value.sql_rows;
+    to.sql_result_value_bytes = to
+        .sql_result_value_bytes
+        .saturating_add(value.sql_result_value_bytes);
     to.sql_duration_ns += value.sql_duration_ns;
     to.rows_returned += value.rows_returned;
     to.hydrated_rows += value.hydrated_rows;

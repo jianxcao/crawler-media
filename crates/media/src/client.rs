@@ -215,7 +215,7 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Option<String>, TmdbError> {
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
-            MediaKind::Tv => format!("/tv/{tmdb_id}"),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
         };
         self.fetch(&path, |body| {
             crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
@@ -231,7 +231,7 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Option<String>, TmdbError> {
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
-            MediaKind::Tv => format!("/tv/{tmdb_id}"),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
         };
         self.cached_fetch(&path, &self.language, |body| {
             crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
@@ -249,16 +249,19 @@ impl<H: CatalogGet> Tmdb<H> {
     }
 
     pub fn tv_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
-        let path = format!("/tv/{tmdb_id}?append_to_response=translations,alternative_titles");
+        let path = crate::tmdb_keys::tv_details_paths(tmdb_id)[0].clone();
         match self.cached_details(MediaKind::Tv, &path) {
             Ok(media) => Ok(media),
-            Err(_) => self.cached_details(MediaKind::Tv, &format!("/tv/{tmdb_id}")),
+            Err(_) => self.cached_details(
+                MediaKind::Tv,
+                &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+            ),
         }
     }
 
     /// Season overviews from the `/tv/{id}` details body (shares its cache key).
     pub fn tv_seasons(&self, tmdb_id: &str) -> Result<Vec<parse::TvSeason>, TmdbError> {
-        let path1 = format!("/tv/{tmdb_id}?append_to_response=translations,alternative_titles");
+        let path1 = crate::tmdb_keys::tv_details_paths(tmdb_id)[0].clone();
         let decode = |body: &str| {
             crate::contracts::object(body, &["seasons", "id", "name"])?;
             parse::tv_seasons(body)
@@ -267,7 +270,10 @@ impl<H: CatalogGet> Tmdb<H> {
             Ok(seasons) if !seasons.is_empty() => Ok(seasons as Vec<parse::TvSeason>),
             result => {
                 tracing::warn!(tmdb_id, error = ?result.err(), "TMDB seasons unavailable; trying basic details");
-                self.fetch(&format!("/tv/{tmdb_id}"), decode)
+                self.fetch(
+                    &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+                    decode,
+                )
             }
         }
     }
@@ -356,9 +362,7 @@ impl<H: CatalogGet> Tmdb<H> {
             // `credits` on TV details only returns the principal cast. The
             // aggregate endpoint includes cast credited across the series. Ratings and
             // translations are subresources, so they must be appended explicitly.
-            MediaKind::Tv => format!(
-                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
-            ),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };
         self.fetch_with_language(&path, request_language, |body| {
             crate::contracts::metadata(body)?;
@@ -394,9 +398,7 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => {
                 format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
             }
-            MediaKind::Tv => format!(
-                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
-            ),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };
         self.cached_fetch(&path, language, |body| {
             crate::contracts::metadata(body)?;
@@ -423,9 +425,7 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => {
                 format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
             }
-            MediaKind::Tv => format!(
-                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
-            ),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };
         self.fetch_with_language(&path, request_language, |body| {
             crate::contracts::metadata(body)?;
@@ -579,12 +579,7 @@ impl<H: CatalogGet> Tmdb<H> {
         language: &str,
         decode: impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<Option<T>, TmdbError> {
-        let join = if path.contains('?') { '&' } else { '?' };
-        let key = if language.is_empty() {
-            path.to_string()
-        } else {
-            format!("{path}{join}language={language}")
-        };
+        let key = crate::tmdb_keys::request_key(path, language);
         self.cache
             .get_stale(&key)?
             .map(|body| {
@@ -624,12 +619,7 @@ impl<H: CatalogGet> Tmdb<H> {
         language: &str,
         decode: impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<T, TmdbError> {
-        let join = if path.contains('?') { '&' } else { '?' };
-        let full = if language.is_empty() {
-            path.to_string()
-        } else {
-            format!("{path}{join}language={language}")
-        };
+        let full = crate::tmdb_keys::request_key(path, language);
         self.cache.get_or_fetch(&self.http, &full, |body| {
             crate::contracts::json(body)?;
             decode(body)

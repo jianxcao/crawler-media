@@ -92,17 +92,37 @@ pub(crate) fn load_visible_subscription_views(
     // Two batched reads, independent of the number of subscriptions.
     let target_libraries = load_target_libraries(store)?;
     let mut snapshots = Vec::with_capacity(subscribes.len());
+    let media = store.media_for_ids(&media_ids)?;
+    let ids: Vec<_> = subscribes.iter().map(|sub| sub.id).collect();
+    let mut inputs = store.subscribe_view_inputs(&ids)?;
+    let counts = super::progress::load(
+        store,
+        subscribes
+            .iter()
+            .filter(|sub| {
+                matches!(
+                    sub.coverage,
+                    domain::Coverage::Tv {
+                        episode_to: None,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|sub| media.get(&sub.media_id)),
+    )?;
 
     for sub in subscribes {
-        let Some(media) = store.get_media(sub.media_id).ok().flatten() else {
+        let Some(media) = media.get(&sub.media_id).cloned() else {
             continue;
         };
-
-        let facts = store.load_subscribe_facts(sub.id).unwrap_or_default();
-        let pending = store.load_pending(sub.id).unwrap_or_default();
-        let (created_at, updated_at) = super::timestamps::load(store, sub.id)?;
-
-        let (total, imported) = super::views::progress(store, &sub, &media, &facts);
+        let input = inputs.remove(&sub.id).ok_or_else(|| {
+            crate::store::StoreError::Missing(format!("Subscribe {} timestamps", sub.id))
+        })?;
+        let facts = input.facts;
+        let pending = input.pending;
+        let created_at = super::timestamps::format(input.created_at_ms)?;
+        let updated_at = super::timestamps::format(input.updated_at_ms)?;
+        let (total, imported) = super::progress::calculate(&sub, &media, &facts, &counts);
 
         let library_poster_candidate = posters.get(&media.id).cloned().flatten();
 
@@ -134,7 +154,8 @@ pub(crate) fn load_single_subscription_view(
 ) -> Result<SubscriptionViewSnapshot, crate::store::StoreError> {
     let pending = store.load_pending(sub.id).unwrap_or_default();
     let (created_at, updated_at) = super::timestamps::load(store, sub.id)?;
-    let (total, imported) = super::views::progress(store, sub, media, facts);
+    let counts = super::progress::load(store, std::iter::once(media))?;
+    let (total, imported) = super::progress::calculate(sub, media, facts, &counts);
 
     let rows: Vec<FileCoverage> = store
         .file_coverage_for_media(media.id)

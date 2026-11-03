@@ -34,6 +34,14 @@ pub struct QueryMetricsSnapshot {
     pub statements: Option<u64>,
     pub reader_checkouts: Option<u64>,
     pub sqlite_profile_ms: Option<f64>,
+    pub sql_rows: Option<u64>,
+    /// Logical UTF8 TEXT/BLOB lengths +8 per numeric, 0 NULL; excludes heap/transport.
+    pub sql_result_value_bytes: Option<u64>,
+    pub writer_wait_ns: Option<u64>,
+    pub writer_hold_ns: Option<u64>,
+    /// Only transactions owned by Store write_tx; not raw rusqlite transactions.
+    pub covered_owned_write_tx_count: Option<u64>,
+    pub covered_owned_write_tx_ns: Option<u64>,
     pub pool_rejections: u64,
     pub timeouts: u64,
     pub timeout_stage: Option<&'static str>,

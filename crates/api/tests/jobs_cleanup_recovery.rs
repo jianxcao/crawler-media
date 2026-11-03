@@ -147,9 +147,7 @@ fn postcommit_cleanup_reader_busy_reports_success_then_recovers() {
     };
     use tower::ServiceExt;
     let stage = tempfile::tempdir_in("/tmp").unwrap();
-    let downloader = Arc::new(downloader::MemoryDownloader::new(
-        stage.path().to_path_buf(),
-    ));
+    let downloader = Arc::new(downloader::MemoryDownloader::new(stage.path()));
     let fixture = Fixture::new(downloader.clone());
     fixture.pending();
     let store = fixture.state.store();

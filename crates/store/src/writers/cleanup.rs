@@ -2,17 +2,20 @@
 use crate::library_read::WriterQueryPolicy;
 use crate::{QueryBudget, StoreError};
 use rusqlite::Connection;
+use std::{cell::RefCell, rc::Rc};
 
 pub(super) struct WriterScope<'a> {
     connection: &'a Connection,
     policy: Option<WriterQueryPolicy<'a>>,
     entered_autocommit: bool,
+    deferred_errors: Rc<RefCell<Vec<StoreError>>>,
 }
 
 impl<'a> WriterScope<'a> {
     pub(super) fn new(
         connection: &'a Connection,
         budget: Option<&QueryBudget>,
+        deferred_errors: Rc<RefCell<Vec<StoreError>>>,
     ) -> Result<Self, StoreError> {
         let entered_autocommit = connection.is_autocommit();
         let policy = budget
@@ -22,6 +25,7 @@ impl<'a> WriterScope<'a> {
             connection,
             policy,
             entered_autocommit,
+            deferred_errors,
         })
     }
 
@@ -39,7 +43,7 @@ impl<'a> WriterScope<'a> {
 impl Drop for WriterScope<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.finish() {
-            tracing::error!(%error, "failed to clean up Store writer transaction");
+            self.deferred_errors.borrow_mut().push(error);
         }
     }
 }

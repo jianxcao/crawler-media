@@ -12,6 +12,7 @@ mod parse;
 pub use normalized::normalize_metadata;
 mod person;
 pub mod response_cache;
+pub mod tmdb_keys;
 mod tvdb;
 pub use alias::{Source, attach, merge};
 pub use anilist::Anilist;

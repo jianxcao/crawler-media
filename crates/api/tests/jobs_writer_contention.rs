@@ -615,9 +615,7 @@ fn poisoned_first_recovery_window_does_not_starve_a_later_dirty_subscribe() {
 #[test]
 fn deletion_jobs_busy_reports_external_cleanup_and_recovers_disabled_definition() {
     let stage = tempfile::tempdir_in("/tmp").unwrap();
-    let downloader = std::sync::Arc::new(downloader::MemoryDownloader::new(
-        stage.path().to_path_buf(),
-    ));
+    let downloader = std::sync::Arc::new(downloader::MemoryDownloader::new(stage.path()));
     let fixture = Fixture::new(downloader.clone());
     fixture.pending();
     let payload = json!({"subscribe_id":fixture.subscribe.to_string()}).to_string();

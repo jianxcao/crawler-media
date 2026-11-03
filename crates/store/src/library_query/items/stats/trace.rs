@@ -47,6 +47,24 @@ fn status(stmt: *mut ffi::sqlite3_stmt) -> (u64, u64, u64) {
     }
 }
 
+fn result_value_bytes(stmt: *mut ffi::sqlite3_stmt) -> u64 {
+    // SQLITE_TRACE_ROW supplies a live statement positioned at a result row.
+    // Read type before any conversion, and retain no SQLite pointer or value.
+    // sqlite3_column_bytes uses UTF-8 for TEXT and the unchanged BLOB byte length.
+    unsafe {
+        (0..ffi::sqlite3_column_count(stmt)).fold(0u64, |total, column| {
+            let bytes = match ffi::sqlite3_column_type(stmt, column) {
+                ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => {
+                    u64::try_from(ffi::sqlite3_column_bytes(stmt, column)).unwrap_or_default()
+                }
+                ffi::SQLITE_INTEGER | ffi::SQLITE_FLOAT => 8,
+                _ => 0,
+            };
+            total.saturating_add(bytes)
+        })
+    }
+}
+
 fn observe(connection: usize, event: c_uint, p: *mut c_void, x: *mut c_void) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -78,6 +96,9 @@ fn observe(connection: usize, event: c_uint, p: *mut c_void, x: *mut c_void) {
             ffi::SQLITE_TRACE_ROW => {
                 let total = state.totals.entry(connection).or_default();
                 total.sql_rows = total.sql_rows.saturating_add(1);
+                total.sql_result_value_bytes = total
+                    .sql_result_value_bytes
+                    .saturating_add(result_value_bytes(stmt));
             }
             _ => {}
         }
@@ -160,6 +181,10 @@ impl<'a> QueryWorkScope<'a> {
                 result.sql_duration_ns +=
                     now.sql_duration_ns.saturating_sub(before.sql_duration_ns);
                 result.sql_rows += now.sql_rows.saturating_sub(before.sql_rows);
+                result.sql_result_value_bytes = result.sql_result_value_bytes.saturating_add(
+                    now.sql_result_value_bytes
+                        .saturating_sub(before.sql_result_value_bytes),
+                );
             }
             result
         })

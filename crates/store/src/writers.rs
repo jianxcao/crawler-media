@@ -9,10 +9,14 @@ use crate::library_read::{active_query_budget, check_writer_budget};
 use crate::{Store, StoreError, WriterRank, WriterRankGuard};
 
 mod cleanup;
+mod diagnostics;
 use cleanup::WriterScope;
+#[doc(hidden)]
+pub use diagnostics::WriterSample;
+pub(crate) use diagnostics::{OwnedWriteTimer, flush_pending};
 
 /// Database selected by the shared writer handle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Db {
     App,
     Subscribe,
@@ -161,44 +165,63 @@ impl Writers {
                     .saturating_duration_since(std::time::Instant::now()),
             );
         }
-        let _rank = WriterRankGuard::enter(db.rank())?;
-        let mutex = match db {
-            Db::App => &self.app,
-            Db::Subscribe => &self.subscribe,
-            Db::Library => &self.library,
-            Db::Cache => &self.cache,
-        };
-        let conn = mutex.try_lock_for(wait);
-        let Some(conn) = conn else {
+        let mut measured = diagnostics::Measurement::new(db);
+        let cleanup_errors = Rc::new(RefCell::new(Vec::new()));
+        // Unwind the SQL scope, capture, MutexGuard and rank before telemetry.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _rank = WriterRankGuard::enter(db.rank())?;
+            let mutex = match db {
+                Db::App => &self.app,
+                Db::Subscribe => &self.subscribe,
+                Db::Library => &self.library,
+                Db::Cache => &self.cache,
+            };
+            // Declared before the guard so its timestamp follows the actual unlock.
+            let _hold_end = measured.hold_end();
+            let Some(conn) = mutex.try_lock_for(wait) else {
+                if let Some(budget) = &budget {
+                    check_writer_budget(budget)?;
+                }
+                if let Some((_, _, failure)) = &admission {
+                    *failure.borrow_mut() = Some(AdmissionFailure::Busy);
+                }
+                return Err(StoreError::WriteBusy);
+            };
+            measured.acquired();
             if let Some(budget) = &budget {
                 check_writer_budget(budget)?;
             }
-            if let Some((_, _, failure)) = &admission {
-                *failure.borrow_mut() = Some(AdmissionFailure::Busy);
+            if let Some((_, check, failure)) = admission
+                && let Err(error) = check()
+            {
+                *failure.borrow_mut() = Some(AdmissionFailure::Refused);
+                return Err(error);
             }
-            return Err(StoreError::WriteBusy);
-        };
-        if let Some(budget) = &budget {
-            check_writer_budget(budget)?;
-        }
-        if let Some((_, check, failure)) = admission
-            && let Err(error) = check()
-        {
-            *failure.borrow_mut() = Some(AdmissionFailure::Refused);
-            return Err(error);
-        }
-        let mut scope = WriterScope::new(&conn, budget.as_ref())?;
-        let _capture = crate::stats::LeaseStats::new(db, &conn);
-        let result = work(&conn);
-        let cleanup = scope.finish();
-        match result {
-            Ok(value) => cleanup.map(|()| value),
-            Err(error) => {
-                if let Err(cleanup_error) = cleanup {
-                    tracing::error!(%cleanup_error, "failed to clean up rejected Store writer transaction");
+            let mut scope = WriterScope::new(&conn, budget.as_ref(), cleanup_errors.clone())?;
+            let _capture = crate::stats::LeaseStats::new(db, &conn);
+            let result = work(&conn);
+            let cleanup = scope.finish();
+            match result {
+                Ok(value) => cleanup.map(|()| value),
+                Err(error) => {
+                    if let Err(cleanup_error) = cleanup {
+                        cleanup_errors.borrow_mut().push(cleanup_error);
+                    }
+                    Err(error)
                 }
-                Err(error)
             }
+        }));
+        let outcome = match &result {
+            Ok(Ok(_)) => "ok",
+            Ok(Err(StoreError::WriteBusy)) => "busy",
+            Ok(Err(_)) => "error",
+            Err(_) => "panic",
+        };
+        measured.released(outcome);
+        measured.emit(std::mem::take(&mut *cleanup_errors.borrow_mut()));
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
     }
 

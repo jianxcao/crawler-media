@@ -12,6 +12,7 @@ CREATE TABLE subscribe_jobs_cleanup(id TEXT PRIMARY KEY NOT NULL,generation TEXT
 
 CREATE TABLE subscribe_reference_ops(epoch INTEGER PRIMARY KEY AUTOINCREMENT,subscribe_id TEXT NOT NULL,generation TEXT NOT NULL UNIQUE,media_id TEXT NOT NULL,release_mode TEXT NOT NULL CHECK(release_mode IN ('ordinary','compensate')),compensation_json TEXT,state TEXT NOT NULL CHECK(state IN ('creating','retained','committed','aborting','releasing','done')));
 CREATE INDEX subscribe_reference_pending ON subscribe_reference_ops(state,epoch);
+CREATE INDEX subscribe_reference_media_pending ON subscribe_reference_ops(media_id,epoch) WHERE state IN ('creating','retained');
 CREATE UNIQUE INDEX subscribe_creating_id ON subscribe_reference_ops(subscribe_id) WHERE state IN ('creating','retained');
 CREATE TABLE subscribe_merge_fences(media_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL);
 

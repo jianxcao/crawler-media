@@ -28,6 +28,7 @@ pub(crate) use readiness::automation_readiness;
 mod removal;
 
 pub(crate) mod poster_view;
+mod progress;
 pub(crate) mod snapshot;
 pub(crate) mod timestamps;
 mod views;

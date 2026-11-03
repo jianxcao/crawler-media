@@ -174,7 +174,7 @@ pub use probe_tasks::{ProbeJob, ProbeJobUnit, ProbeJobUnitSpec};
 pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use roots::LibraryRoot;
 pub use subscribe_wanted::WantedHistory;
-pub use subscribes::PendingDownload;
+pub use subscribes::{PendingDownload, SubscribeViewInput};
 
 mod error;
 mod handle;

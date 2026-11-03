@@ -2,6 +2,7 @@ use domain::{Media, MediaId};
 use rusqlite::{OptionalExtension, params};
 
 pub(crate) mod alias;
+mod batch;
 mod retired;
 pub use alias::MEDIA_SELECT;
 

@@ -224,6 +224,32 @@ pub(crate) async fn run_lease_stage(
                 if let Some(m) = &request_metrics {
                     m.update(|s| {
                         s.vm_steps = Some(s.vm_steps.unwrap_or(0) + stats.vm_steps);
+                        s.sql_rows = Some(s.sql_rows.unwrap_or(0).saturating_add(stats.sql_rows));
+                        s.sql_result_value_bytes = Some(
+                            s.sql_result_value_bytes
+                                .unwrap_or(0)
+                                .saturating_add(stats.sql_result_value_bytes),
+                        );
+                        s.writer_wait_ns = Some(
+                            s.writer_wait_ns
+                                .unwrap_or(0)
+                                .saturating_add(stats.writer_wait_ns),
+                        );
+                        s.writer_hold_ns = Some(
+                            s.writer_hold_ns
+                                .unwrap_or(0)
+                                .saturating_add(stats.writer_hold_ns),
+                        );
+                        s.covered_owned_write_tx_count = Some(
+                            s.covered_owned_write_tx_count
+                                .unwrap_or(0)
+                                .saturating_add(stats.covered_owned_write_tx_count),
+                        );
+                        s.covered_owned_write_tx_ns = Some(
+                            s.covered_owned_write_tx_ns
+                                .unwrap_or(0)
+                                .saturating_add(stats.covered_owned_write_tx_ns),
+                        );
                         s.sort_operations =
                             Some(s.sort_operations.unwrap_or(0) + stats.sort_operations);
                         s.fullscan_steps =

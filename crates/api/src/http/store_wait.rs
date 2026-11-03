@@ -14,10 +14,10 @@ use crate::management::ApiState;
 
 use super::err;
 
-/// 读路径的等锁预算。
-///
-/// 健康读是几十微秒；整整 5 s 只会在长批持锁时用掉（扫描一批 ≈1.3 s，其中约
-/// 950 ms 是发布成本）。读没有副作用：晚到的答案仍然是对的答案，所以宁可等。
+/// Reader-pool admission and execution budget. Reads use independent pooled
+/// connections; Library writer hold durations do not describe reader lock waits.
+/// Actual scan/publication writer and Playback latency are measured separately
+/// in `tests/playback_writer_latency.rs`.
 pub(crate) const STORE_READ_WAIT: Duration = Duration::from_secs(5);
 
 /// 写路径的等锁预算，刻意比读短。
@@ -212,9 +212,45 @@ pub(super) fn observe_store_work<T>(
     let Some(metrics) = metrics else {
         return work(store);
     };
-    let (value, stats) = store.with_stats(store::stats::StatsScope::Both, || work(store));
+    let (value, stats) = store.with_stats(store::stats::StatsScope::All, || work(store));
     metrics.update(|snapshot| {
         snapshot.statements = Some(snapshot.statements.unwrap_or(0) + stats.statements);
+        snapshot.sql_rows = Some(
+            snapshot
+                .sql_rows
+                .unwrap_or(0)
+                .saturating_add(stats.sql_rows),
+        );
+        snapshot.sql_result_value_bytes = Some(
+            snapshot
+                .sql_result_value_bytes
+                .unwrap_or(0)
+                .saturating_add(stats.sql_result_value_bytes),
+        );
+        snapshot.writer_wait_ns = Some(
+            snapshot
+                .writer_wait_ns
+                .unwrap_or(0)
+                .saturating_add(stats.writer_wait_ns),
+        );
+        snapshot.writer_hold_ns = Some(
+            snapshot
+                .writer_hold_ns
+                .unwrap_or(0)
+                .saturating_add(stats.writer_hold_ns),
+        );
+        snapshot.covered_owned_write_tx_count = Some(
+            snapshot
+                .covered_owned_write_tx_count
+                .unwrap_or(0)
+                .saturating_add(stats.covered_owned_write_tx_count),
+        );
+        snapshot.covered_owned_write_tx_ns = Some(
+            snapshot
+                .covered_owned_write_tx_ns
+                .unwrap_or(0)
+                .saturating_add(stats.covered_owned_write_tx_ns),
+        );
         snapshot.reader_checkouts =
             Some(snapshot.reader_checkouts.unwrap_or(0) + stats.reader_checkouts);
         snapshot.vm_steps = Some(snapshot.vm_steps.unwrap_or(0) + stats.vm_steps);

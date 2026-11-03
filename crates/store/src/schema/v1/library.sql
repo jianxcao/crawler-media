@@ -109,6 +109,7 @@ CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
+CREATE INDEX files_roster_stats ON library_files(library_id,presence_state,publication_state,path_key);
 CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE missing_at IS NOT NULL;
 CREATE TABLE file_details (
  file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,
@@ -191,6 +192,7 @@ CREATE INDEX items_release ON library_items(library_id,release_date_sort,media_i
 CREATE INDEX items_rating ON library_items(library_id,rating_sort,media_id);
 CREATE INDEX items_runtime ON library_items(library_id,runtime_sort,media_id);
 CREATE INDEX items_size ON library_items(library_id,size_sort,media_id);
+CREATE INDEX items_roster_stats ON library_items(library_id,size_bytes);
 CREATE INDEX items_resolution ON library_items(library_id,resolution_rank,media_id);
 CREATE INDEX items_shuffle ON library_items(library_id,stable_shuffle_key,media_id);
 CREATE INDEX items_protocol_name_asc ON library_items(library_id,protocol_title_key ASC,title ASC,media_id ASC);

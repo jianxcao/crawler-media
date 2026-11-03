@@ -44,7 +44,7 @@ fn hold_write_lock(db: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
     })
 }
 
-/// Step 2 diagnostic for the store side: prints per-window transaction durations,
+/// Step 2 diagnostic for the store side: prints per-window public-call wall durations,
 /// throughput and storage growth for a mixed scan workload (20 windows, 2,000 files).
 /// The printed numbers are measurements of this machine and this run, not promises;
 /// only the committed facts are asserted.
@@ -121,7 +121,7 @@ fn scan_window_cost_measurement() {
         files as f64 / (total / 1000.0)
     );
     println!(
-        "scan_window_cost_measurement: longest_transaction_ms={:.2} library_db_bytes={db_before}\
+        "scan_window_cost_measurement: longest_call_wall_ms={:.2} library_db_bytes={db_before}\
          ->{db_after} (delta {}) wal_bytes={wal_before}->{wal_after} (delta {}) rss_kb={:?}",
         window_ms[windows - 1],
         db_after as i64 - db_before as i64,

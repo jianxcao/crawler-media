@@ -20,7 +20,11 @@ impl QueryMetrics {
                     elapsed_ms=s.elapsed_ms, retry_count=s.retry_count, returned=?s.returned, total=?s.total,
                     vm_steps=?s.vm_steps, sort_operations=?s.sort_operations,
                     fullscan_steps=?s.fullscan_steps, statements=?s.statements, reader_checkouts=?s.reader_checkouts,
-                    sqlite_profile_ms=?s.sqlite_profile_ms,
+                    sqlite_profile_ms=?s.sqlite_profile_ms, sql_rows=?s.sql_rows,
+                    sql_result_value_bytes=?s.sql_result_value_bytes,
+                    writer_wait_ns=?s.writer_wait_ns, writer_hold_ns=?s.writer_hold_ns,
+                    covered_owned_write_tx_count=?s.covered_owned_write_tx_count,
+                    covered_owned_write_tx_ns=?s.covered_owned_write_tx_ns,
                     timeout_stage=?s.timeout_stage, remaining_budget_ms=?s.remaining_budget_ms,
                     worker_stop_delay_ms=?s.worker_stop_delay_ms,
                     pool_rejections=s.pool_rejections, timeouts=s.timeouts, $message);

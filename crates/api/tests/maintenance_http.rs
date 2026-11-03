@@ -101,7 +101,7 @@ fn list_jobs(app: &axum::Router) -> impl std::future::Future<Output = Value> + '
 }
 
 fn find_def(app_state: &ApiState, kind: jobs::JobKind) -> jobs::JobDef {
-    queue(&app_state)
+    queue(app_state)
         .list_defs()
         .unwrap()
         .into_iter()

@@ -472,3 +472,7 @@ mod connection;
 
 pub(crate) mod admission;
 mod media_batch;
+
+#[path = "subscribes/view_batch.rs"]
+mod view_batch;
+pub use view_batch::SubscribeViewInput;

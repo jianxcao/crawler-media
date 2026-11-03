@@ -475,7 +475,7 @@ pub(crate) fn print_step_two(
         report.batch_ms.len()
     );
     println!(
-        "单批提交（含等待持锁）: p50={} ms, p95={} ms, max={} ms（最长事务看这里的 max）",
+        "单批 public 调用墙钟（含等待）: p50={} ms, p95={} ms, max={} ms（不代表独立事务或 mutex 持有时长）",
         percentile(&batch_ms, 50),
         percentile(&batch_ms, 95),
         percentile(&batch_ms, 100)
@@ -506,7 +506,5 @@ pub(crate) fn print_step_two(
         }
         _ => println!("进程 RSS: 未测得（`ps -o rss= -p <pid>` 不可用）"),
     }
-    println!(
-        "锁等待: 未测得（无公开计数器）；上面的 max 是「事务时长 + 排队」的上界，不是纯锁等待"
-    );
+    println!("锁等待: 未测得（无公开计数器）；上面的 max 是整个 public 调用的墙钟，不是纯锁等待");
 }

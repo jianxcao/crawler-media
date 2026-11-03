@@ -18,6 +18,10 @@ pub struct WriterRankGuard {
 }
 thread_local! { static HELD:RefCell<Vec<WriterRank>>=const {RefCell::new(Vec::new())}; }
 impl WriterRankGuard {
+    pub(crate) fn is_held() -> bool {
+        HELD.with(|held| !held.borrow().is_empty())
+    }
+
     /// Reserve the rank before waiting on its mutex, so inversions fail before
     /// they can deadlock. Same-database reentry is rejected as well.
     /// Jobs admission may enclose Store SQL stages, so it cannot be reserved
@@ -55,5 +59,8 @@ impl Drop for WriterRankGuard {
             }
             held.pop();
         });
+        // Actual mutexes drop before this guard. Release HELD's RefCell borrow
+        // before allowing diagnostic sinks to reenter another writer.
+        crate::writers::flush_pending();
     }
 }
