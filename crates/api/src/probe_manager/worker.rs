@@ -237,7 +237,7 @@ async fn process_metadata(
         move |manager| work_lease(manager, &unit, unit.marker_refresh_id.is_some())
     })
     .await;
-    let _lease = match leased {
+    let lease = match leased {
         Ok(Ok(lease)) => lease,
         Ok(Err(reason)) => {
             if !is_temporary_busy(&reason) {
@@ -289,7 +289,11 @@ async fn process_metadata(
     } else {
         Vec::new()
     };
-    let outcome = probe::probe_metadata(&manager, &unit).await;
+    let control = lease
+        .as_ref()
+        .map(|lease| lease.control().clone())
+        .unwrap_or_default();
+    let outcome = probe::probe_metadata(&manager, &unit, &control).await;
     let still_ready = step(&manager, {
         let unit = unit.clone();
         move |manager| source_ready(manager, &unit)

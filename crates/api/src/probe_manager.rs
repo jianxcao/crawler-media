@@ -51,6 +51,8 @@ pub use store_access::ProbeStoreAccess;
 pub use tracks::TracksProbe;
 
 #[cfg(test)]
+mod library_removal_worker_tests;
+#[cfg(test)]
 mod locking_tests;
 #[cfg(test)]
 mod publish_version_tests;

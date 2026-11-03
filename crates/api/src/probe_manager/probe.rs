@@ -32,7 +32,11 @@ pub(super) enum MetadataOutcome {
 }
 
 /// Finish mandatory media information before scheduling optional fingerprint work.
-pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
+pub(super) async fn probe_metadata(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    control: &library::WorkControl,
+) -> MetadataOutcome {
     let started_at = Instant::now();
     let job_id = unit.job_id.clone();
     tracing::info!(
@@ -44,7 +48,7 @@ pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> Meta
         path = %unit.row.file.path.display(),
         "【媒体信息】高优先级探测开始"
     );
-    let outcome = probe_metadata_inner(mgr, unit).await;
+    let outcome = probe_metadata_inner(mgr, unit, control).await;
     tracing::info!(
         job_id = ?job_id,
         media_id = %unit.row.file.media_id,
@@ -64,7 +68,11 @@ pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> Meta
     outcome
 }
 
-async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
+async fn probe_metadata_inner(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    control: &library::WorkControl,
+) -> MetadataOutcome {
     let path = PathBuf::from(&unit.row.file.path);
     let source_path = path.clone();
     let source_version = match mgr
@@ -79,7 +87,7 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
         }
     };
     let media_duration_ms =
-        match super::tracks::probe_tracks_and_store(mgr, unit, &source_version).await {
+        match super::tracks::probe_tracks_and_store(mgr, unit, &source_version, control).await {
             Ok(duration_ms) => duration_ms,
             Err(super::tracks::TrackProbeError::Failed) => return MetadataOutcome::Failed,
             Err(super::tracks::TrackProbeError::Retry) => return MetadataOutcome::Retry,
@@ -126,6 +134,7 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
 pub(super) async fn probe_fingerprint_detailed(
     mgr: &ProbeManager,
     work: &FingerprintWork,
+    control: &marker::WorkControl,
 ) -> super::stages::FingerprintRunOutcome {
     let unit = &work.unit;
     let started_at = Instant::now();
@@ -174,6 +183,7 @@ pub(super) async fn probe_fingerprint_detailed(
         mgr.fingerprint_engine.clone(),
         unit.marker_refresh_id.is_some(),
         unit.reuse_fingerprint_cache,
+        control,
     )
     .await;
 
@@ -371,6 +381,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     fingerprint_engine: Arc<dyn FingerprintEngine>,
     require_complete_markers: bool,
     allow_cache_reuse: bool,
+    control: &marker::WorkControl,
 ) -> super::stages::FingerprintRunOutcome {
     let ledger_id = unit.row.file.file_id.to_string();
     let started = Instant::now();
@@ -384,9 +395,6 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
             None
         }
     };
-    let control = super::tracks::probe_control(mgr, unit, super::tracks::optional_work_kind(unit))
-        .signal()
-        .clone();
     let outcome = match crate::fingerprint_job::capture_or_reuse_fingerprints(
         &fp_path,
         &source_version,
@@ -395,7 +403,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         cached,
         allow_cache_reuse,
         fingerprint_engine,
-        &control,
+        control,
     )
     .await
     {

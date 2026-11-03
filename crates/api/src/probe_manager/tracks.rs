@@ -99,6 +99,7 @@ pub(super) async fn probe_tracks_and_store(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
     source_version: &str,
+    control: &library::WorkControl,
 ) -> Result<Option<i64>, TrackProbeError> {
     let ledger_id = unit.row.file.file_id.to_string();
     let path = PathBuf::from(&unit.row.file.path);
@@ -117,7 +118,7 @@ pub(super) async fn probe_tracks_and_store(
     {
         return Ok(Some(cached));
     }
-    let tracks = read_tracks(mgr, unit, started_at)
+    let tracks = read_tracks(mgr, unit, started_at, control)
         .await
         .map_err(|()| TrackProbeError::Failed)?;
     let (tracks, duration_ms) = tracks;
@@ -218,16 +219,12 @@ async fn read_tracks(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
     started_at: Instant,
+    control: &library::WorkControl,
 ) -> Result<(library::Tracks, Option<i64>), ()> {
     let ledger_id = unit.row.file.file_id.to_string();
     let path = &unit.row.file.path;
     let probe_unit = unit.clone();
-    let kind = if unit.marker_refresh_id.is_some() {
-        optional_work_kind(unit)
-    } else {
-        crate::library_lifecycle::LibraryWorkKind::Ordinary
-    };
-    let control = probe_control(mgr, unit, kind);
+    let control = control.clone();
     let engine = mgr.tracks_probe.clone();
     let tracks_result = tokio::task::spawn_blocking(move || {
         read_tracks_with_nfo(&probe_unit, started_at, &control, engine.as_ref())
@@ -273,23 +270,6 @@ pub(super) fn optional_work_kind(unit: &ProbeUnit) -> crate::library_lifecycle::
     } else {
         crate::library_lifecycle::LibraryWorkKind::AutomaticDetection
     }
-}
-
-pub(super) fn probe_control(
-    mgr: &ProbeManager,
-    unit: &ProbeUnit,
-    kind: crate::library_lifecycle::LibraryWorkKind,
-) -> library::WorkControl {
-    let owner = unit.row.file.library_id.to_string();
-    let registry = mgr.library_work.lock().clone();
-    let Some(registry) = registry else {
-        return library::WorkControl::default();
-    };
-    registry.active_control(&owner, kind).unwrap_or_else(|| {
-        let cancelled = library::WorkControl::default();
-        cancelled.cancel();
-        cancelled
-    })
 }
 
 fn read_tracks_with_nfo(

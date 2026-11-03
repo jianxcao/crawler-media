@@ -171,6 +171,10 @@ mod tests {
         assert!(unleased.work_control(&units[0].row).is_cancelled());
         let (gate, leases) = MetadataPriorityGate::for_rows(&manager, &units).unwrap();
         assert_eq!(leases.len(), 2);
+        assert!(
+            unleased.work_control(&units[0].row).is_cancelled(),
+            "an unleased pipeline cannot borrow another pipeline's active control"
+        );
         assert!(!gate.work_control(&units[1].row).is_cancelled());
         registry.cancel(&libraries[1].id);
         assert!(gate.work_control(&units[1].row).is_cancelled());
@@ -204,12 +208,6 @@ impl CaptureGate for MetadataPriorityGate {
             {
                 return control.clone();
             }
-        } else if let Some(control) = owner.and_then(|owner| {
-            self.registry
-                .as_ref()
-                .and_then(|registry| registry.active_control(&owner, self.kind))
-        }) {
-            return control.signal().clone();
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();

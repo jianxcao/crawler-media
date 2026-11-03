@@ -285,6 +285,7 @@ async fn check_restored_presence() {
             &manager,
             &units[0],
             &units[0].row.file.version.source_version,
+            &library::WorkControl::default(),
         )
         .await
         .is_err()
@@ -305,6 +306,7 @@ async fn check_restored_presence() {
             &manager,
             &units[1],
             &units[1].row.file.version.source_version,
+            &library::WorkControl::default(),
         )
         .await
         .is_ok()
@@ -330,6 +332,7 @@ async fn check_restored_presence() {
         Arc::new(PresenceRaceFingerprint),
         false,
         false,
+        &marker::WorkControl::default(),
     )
     .await;
     assert!(matches!(

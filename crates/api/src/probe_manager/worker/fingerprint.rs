@@ -162,12 +162,24 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         }
         Err(_) => return owns_running,
     };
+    let owner = unit.row.file.library_id.to_string();
+    let control = _refresh_leases
+        .iter()
+        .find(|lease| lease.library_id() == owner)
+        .map(|lease| lease.control().signal().clone())
+        .unwrap_or_else(|| {
+            let control = marker::WorkControl::default();
+            if manager.library_work.lock().is_some() {
+                control.cancel();
+            }
+            control
+        });
     // The full-window and adaptive pipelines include synchronous source reads
     // and SQL between awaits. Drive the whole future on one bounded worker;
     // the permit stays with it until its final publication has really finished.
     let runtime = tokio::runtime::Handle::current();
     let outcome = match step(manager, move |manager| {
-        runtime.block_on(probe::probe_fingerprint_detailed(manager, &work))
+        runtime.block_on(probe::probe_fingerprint_detailed(manager, &work, &control))
     })
     .await
     {

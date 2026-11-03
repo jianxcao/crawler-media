@@ -547,20 +547,6 @@ impl LibraryWorkRegistry {
         self.drivers.lock().remove(operation_id);
     }
 
-    pub(crate) fn active_control(
-        &self,
-        library_id: &str,
-        kind: LibraryWorkKind,
-    ) -> Option<library::WorkControl> {
-        self.entries.lock().get(library_id).and_then(|entry| {
-            entry
-                .controls
-                .values()
-                .find(|(active_kind, control)| *active_kind == kind && !control.is_cancelled())
-                .map(|(_, control)| control.clone())
-        })
-    }
-
     /// 是否有任何 Library 工作正在进行（维护任务据此跳过重型操作）。
     ///
     /// 这只是**降低冲突**：返回 false 不代表之后不会被新扫描抢到锁，SQLite

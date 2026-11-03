@@ -15,15 +15,7 @@ fn cancellation_before_control_registration_prevents_scan() {
     let controls = fix.state.scan_coordinator.active_controls.lock();
     fix.state.scan_coordinator.trigger_next(&fix.state);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while fix
-        .state
-        .library_work
-        .active_control(
-            &fix.library_id,
-            crate::library_lifecycle::LibraryWorkKind::Ordinary,
-        )
-        .is_none()
-    {
+    while !fix.state.library_work.has_active_work() {
         assert!(Instant::now() < deadline, "scan did not acquire its lease");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -31,15 +23,7 @@ fn cancellation_before_control_registration_prevents_scan() {
     drop(controls);
     fix.state.scan_coordinator.cancel_operation(&op.id);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while fix
-        .state
-        .library_work
-        .active_control(
-            &fix.library_id,
-            crate::library_lifecycle::LibraryWorkKind::Ordinary,
-        )
-        .is_some()
-    {
+    while fix.state.library_work.has_active_work() {
         assert!(Instant::now() < deadline, "scan did not release its lease");
         std::thread::sleep(Duration::from_millis(10));
     }
