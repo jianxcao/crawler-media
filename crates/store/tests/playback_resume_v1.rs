@@ -178,7 +178,7 @@ fn commit_progress(
                     revision: file.version.revision,
                 },
                 source_version: file.version.source_version.clone(),
-                position_ms,
+                position_ms: Some(position_ms),
                 duration_ms: Some(duration_ms),
                 audio_track: audio.map(Into::into),
                 subtitle_track: subtitle.map(Into::into),

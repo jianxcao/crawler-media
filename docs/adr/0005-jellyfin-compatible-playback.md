@@ -47,6 +47,8 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 PlaybackInfo签发持久PlaySessionId，取流使用版本化来源和User/Device/逻辑Media-unit/Library配置绑定。不要恢复历史裸file_id取流或忽略会话绑定；协议参数与真实客户端验收以当前handler/集成回归为准。
 
 - 客户端在 `/Sessions/Playing`、`/Sessions/Playing/Progress` 和 `/Sessions/Playing/Stopped` 中回传可选的 `PlaySessionId` 和 `EventSequence`。
-- 迟到的旧会话 Progress / Stop 事件（generation 低于当前会话）不会影响或关闭正在播放的新会话。
+- 回传 PlaySessionId 的旧会话 Progress / Stop 事件（generation 低于当前会话）不会影响或关闭正在播放的新会话。
 - 无 PlaySessionId 客户端是合法协议入口；适配层按逻辑单元和物理源复用有效绑定，新的 Playing 可签发绑定，Progress/Stop 不凭空绑定。所有提交都使用实际会话绑定；只比较 LedgerId 会混写同文件的不同集（R07）。
+- 无 PlaySessionId 时，事件关联当前设备、逻辑单元和物理源；同一目标的迟到事件与当前事件、重复 Playing 与新一次播放可能具有完全相同的报文，无法保证跨代去重。跨代迟到保护需要客户端回传 PlaySessionId；有无位置使用相同的绑定规则。
+- PositionTicks 缺失或为 null 时仍处理合法会话的开始、暂停及结束，但不覆盖单元的恢复位置、已看状态或播放次数。会话保留最后已知位置（全程未知时内部以0占位），观看时长采样在未知位置处断开，下一次有效位置不补算未知区间；无位置的 Stop 按最后已知会话位置计算归档日志的完成状态，不因缺失位置推断完成或更新单元已看状态及播放次数。
 - 观看时长累计严格按墙钟推进与播放倍率限制，超过正常播放速率与容差的快进跳转（Seek）不虚增观看时长。

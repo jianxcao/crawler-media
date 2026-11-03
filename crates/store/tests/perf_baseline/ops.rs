@@ -524,7 +524,7 @@ impl ProgressSession {
                 revision: self.source.file.version.revision,
             },
             source_version: self.source.file.version.source_version.clone(),
-            position_ms: sequence * 1_000,
+            position_ms: Some(sequence * 1_000),
             duration_ms: self.source.file.duration_ms,
             audio_track: None,
             subtitle_track: None,

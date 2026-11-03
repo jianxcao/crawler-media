@@ -307,7 +307,7 @@ impl MediaServerProvider for FakeProvider {
         &self,
         _user_id: UserId,
         _id: &str,
-        _position_ms: i64,
+        _position_ms: Option<i64>,
         _paused: bool,
         _client: PlaybackClientInfo,
         _event: PlaybackEvent,

@@ -45,11 +45,10 @@ async fn report_session_event(
         play_session_id: body.play_session_id,
         event_sequence: body.event_sequence,
     };
-    let (Some(item_id), Some(position_ticks)) = (body.item_id.as_deref(), body.position_ticks)
-    else {
+    let Some(item_id) = body.item_id.as_deref() else {
         return StatusCode::NO_CONTENT;
     };
-    let position_ms = (position_ticks / 10_000).max(0);
+    let position_ms = body.position_ticks.map(|ticks| (ticks / 10_000).max(0));
     let client = user.playback_client(&headers);
     match state
         .provider

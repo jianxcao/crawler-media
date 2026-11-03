@@ -85,7 +85,7 @@ pub struct BoundPlaybackEvent {
     pub item: TypedItemId,
     pub source_id: PhysicalSourceId,
     pub source_version: String,
-    pub position_ms: i64,
+    pub position_ms: Option<i64>,
     pub duration_ms: Option<i64>,
     pub audio_track: Option<String>,
     pub subtitle_track: Option<String>,

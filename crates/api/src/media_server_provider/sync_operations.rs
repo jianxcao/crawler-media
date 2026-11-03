@@ -275,7 +275,7 @@ impl ApiServerProvider {
         &self,
         user_id: UserId,
         id: &str,
-        position_ms: i64,
+        position_ms: Option<i64>,
         paused: bool,
         client: PlaybackClientInfo,
         event: PlaybackEvent,

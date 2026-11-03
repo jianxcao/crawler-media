@@ -69,7 +69,7 @@ pub(super) fn report_event(
     provider: &ApiServerProvider,
     user_id: UserId,
     id: &str,
-    position_ms: i64,
+    position_ms: Option<i64>,
     paused: bool,
     client: PlaybackClientInfo,
     event: PlaybackEvent,
@@ -220,7 +220,7 @@ impl ProtocolEvent<'_> {
         &self,
         id: String,
         binding: store::PlaySessionBinding,
-        position_ms: i64,
+        position_ms: Option<i64>,
         paused: bool,
     ) -> Option<store::playback::BoundPlaybackEvent> {
         let (Some(revision), Some(source_version)) =
@@ -253,7 +253,7 @@ impl ProtocolEvent<'_> {
                 revision,
             },
             source_version,
-            position_ms: position_ms.max(0),
+            position_ms: position_ms.map(|value| value.max(0)),
             duration_ms: self.target.duration_ms,
             audio_track: None,
             subtitle_track: None,

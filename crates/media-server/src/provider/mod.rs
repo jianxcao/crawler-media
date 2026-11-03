@@ -581,7 +581,7 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         &self,
         user_id: UserId,
         id: &str,
-        position_ms: i64,
+        position_ms: Option<i64>,
         paused: bool,
         _client: PlaybackClientInfo,
         _event: PlaybackEvent,

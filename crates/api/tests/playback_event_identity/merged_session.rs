@@ -211,7 +211,7 @@ async fn merged_e02_open_episode_sessions(
                         revision: 1,
                     },
                     source_version: "v1".into(),
-                    position_ms: 2000,
+                    position_ms: Some(2000),
                     duration_ms: Some(2_700_000),
                     audio_track: None,
                     subtitle_track: None,

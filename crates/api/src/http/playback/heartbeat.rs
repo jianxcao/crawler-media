@@ -263,7 +263,7 @@ fn bound_event(
             revision,
         },
         source_version,
-        position_ms,
+        position_ms: Some(position_ms),
         duration_ms: heartbeat
             .duration_ms
             .or(same_source.then_some(resolved.duration_ms).flatten()),

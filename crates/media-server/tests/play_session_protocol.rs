@@ -155,7 +155,7 @@ impl MediaServerProvider for TestProvider {
         &self,
         _user: UserId,
         _id: &str,
-        _pos: i64,
+        _pos: Option<i64>,
         _paused: bool,
         _client: PlaybackClientInfo,
         _event: PlaybackEvent,

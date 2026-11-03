@@ -244,7 +244,7 @@ fn commit_progress_event(
             revision: 1,
         },
         source_version: "v1".into(),
-        position_ms: 1_200_000,
+        position_ms: Some(1_200_000),
         duration_ms: Some(8_160_000),
         audio_track: None,
         subtitle_track: None,

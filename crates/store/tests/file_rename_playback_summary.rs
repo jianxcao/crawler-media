@@ -229,7 +229,7 @@ fn report(fx: &Fx, session_id: String, position_ms: i64) -> store::playback::Eve
             revision: file.version.revision,
         },
         source_version: file.version.source_version.clone(),
-        position_ms,
+        position_ms: Some(position_ms),
         duration_ms: Some(3_600_000),
         audio_track: Some("eng".into()),
         subtitle_track: None,

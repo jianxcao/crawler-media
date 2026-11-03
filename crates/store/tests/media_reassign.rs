@@ -430,7 +430,7 @@ fn assert_reassigned_session_event_is_stale(
                     revision: moved_file.version.revision,
                 },
                 source_version: moved_file.version.source_version.clone(),
-                position_ms: 90_000,
+                position_ms: Some(90_000),
                 duration_ms: Some(120_000),
                 audio_track: None,
                 subtitle_track: None,

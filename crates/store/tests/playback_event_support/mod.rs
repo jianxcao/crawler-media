@@ -198,7 +198,7 @@ pub fn event_on(
             revision: file.version.revision,
         },
         source_version: file.version.source_version.clone(),
-        position_ms,
+        position_ms: Some(position_ms),
         duration_ms: Some(2_400_000),
         audio_track: None,
         subtitle_track: None,

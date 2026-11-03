@@ -125,9 +125,10 @@ fn bump_play_count_for_completed_stop(
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
+    position_ms: i64,
     duration: Option<i64>,
 ) -> Result<(), StoreError> {
-    if UnitState::playback_completed(event.position_ms, duration) {
+    if UnitState::playback_completed(position_ms, duration) {
         tx.execute(
             "UPDATE playback_units SET play_count = play_count + 1 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
             params![event.user_id.to_string(), media_id.to_string(), unit.season, unit.episode],
@@ -272,12 +273,13 @@ fn write_unit_facts(
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
+    position_ms: i64,
     duration: Option<i64>,
     now_ms: i64,
 ) -> Result<(), StoreError> {
     let tracks_version = store.file_tracks_version(event.source_id.file_id)?;
     // One duration decides both the stored package and completion (C06).
-    let reached_played = UnitState::playback_completed(event.position_ms, duration);
+    let reached_played = UnitState::playback_completed(position_ms, duration);
 
     tx.execute(
         "INSERT INTO playback_units
@@ -311,7 +313,7 @@ fn write_unit_facts(
             unit.episode,
             if reached_played { 1 } else { 0 },
             now_ms,
-            event.position_ms,
+            position_ms,
             duration,
             event.source_id.file_id.to_string(),
             event.source_id.revision,
@@ -525,7 +527,7 @@ fn advance_session_state(
                 params![
                     event.user_id.to_string(),
                     event.device_id,
-                    event.position_ms,
+                    event.position_ms.unwrap_or(session.position_ms),
                     watched_ms,
                     now_ms
                 ],
@@ -565,10 +567,14 @@ fn upsert_live_session(
         .as_ref()
         .map(|session| session.started_at)
         .unwrap_or(now_ms / 1000);
+    let position_ms = event
+        .position_ms
+        .or_else(|| previous.as_ref().map(|s| s.position_ms))
+        .unwrap_or(0);
     let start_position_ms = previous
         .as_ref()
         .map(|session| session.start_position_ms)
-        .unwrap_or(event.position_ms);
+        .unwrap_or(position_ms);
     let watched_ms = previous
         .as_ref()
         .map(|session| session.watched_ms)
@@ -616,7 +622,7 @@ fn upsert_live_session(
             event.device_name,
             event.client_version,
             play_method,
-            event.position_ms,
+            position_ms,
             start_position_ms,
             event.duration_ms,
             i64::from(event.paused),
@@ -632,7 +638,8 @@ fn upsert_live_session(
             "full_file",
             event.session_id,
             event.generation,
-            now_ms,
+            // This clock tracks valid position samples; last_report_at tracks activity.
+            if event.position_ms.is_some() { now_ms } else { 0 },
             event.event_sequence
         ],
     )?;
@@ -649,7 +656,7 @@ fn watch_increment(
     event: &BoundPlaybackEvent,
     now_ms: i64,
 ) -> i64 {
-    let Some(previous) = previous else {
+    let (Some(previous), Some(position_ms)) = (previous, event.position_ms) else {
         return 0;
     };
     if previous.paused
@@ -662,7 +669,7 @@ fn watch_increment(
     if elapsed == 0 {
         return 0;
     }
-    let advance = (event.position_ms - previous.position_ms).max(0);
+    let advance = (position_ms - previous.position_ms).max(0);
     let rate = if (0.25..=4.0).contains(&(event.rate_bps as f64)) {
         event.rate_bps as f64
     } else {

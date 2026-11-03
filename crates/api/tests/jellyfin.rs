@@ -287,6 +287,8 @@ mod user_marks_routes;
 mod catalog;
 #[path = "jellyfin/playback.rs"]
 mod playback;
+#[path = "jellyfin/playback_null_position.rs"]
+mod playback_null_position;
 #[path = "jellyfin/protocol.rs"]
 mod protocol;
 #[path = "jellyfin/visibility.rs"]
