@@ -11,6 +11,7 @@
 5. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
 6. **测试：** [e2e runbook](testing/e2e-runbook.md)、[system regression](testing/system-regression-cases.md)、[性能 SLO](testing/performance-slo.md)（合同与场景清单，不是已运行证明）。
 7. Agent 领域导航：[domain](agents/domain.md)。
+8. **待实现的插件系统：** [方案入口](plugins/README.md)，包含宿主实现逻辑、插件编写/WIT、CDP搜索与签到、刷流、界面/API及实施计划；以 `52522549` 为代码基线，不代表已交付功能。
 
 ## 规则
 
@@ -33,3 +34,4 @@
 | [0010 Password](adr/0010-password-hashing.md) | Argon2id；旧明文fallback已移除，历史兼容描述不作当前合同 |
 | [0011 Probe retry](adr/0011-probe-stage-retry.md) | 持久阶段/退避，不以NFO代替Probe成功 |
 | [0012 Library removal](adr/0012-library-removal.md) | 删库即取消该库工作；清除无其他库引用的孤儿 Media；磁盘字节保留 |
+| [0013 Plugin runtime（提议）](adr/0013-wasm-plugin-runtime.md) | WASM、全流程Hook、受控CDP、签到/刷流插件；待实施验收 |
