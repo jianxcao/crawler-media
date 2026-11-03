@@ -11,6 +11,9 @@ use domain::{LibraryId, MediaId, MediaKind};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "page/diagnostic.rs"]
+mod diagnostic;
 #[path = "page/last_played.rs"]
 mod last_played;
 
