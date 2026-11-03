@@ -160,3 +160,158 @@ async fn progress_and_removal_preview_count_pending_torrents() {
 
     assert_progress_and_preview(&app, &id).await;
 }
+
+#[tokio::test]
+async fn subscription_timestamp_milliseconds_are_exact_and_errors_are_explicit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = authed_app(&tmp);
+    let created = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                json!({"media":{"kind":"movie","title":"Clock"},"coverage":{"kind":"movie"}}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = created["data"]["id"].as_str().unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    db.execute(
+        "INSERT INTO subscribe_facts(subscribe_id,season,episode,score,path) VALUES(?1,-1,-1,1,'/fixture.mkv')",
+        [id],
+    )
+    .unwrap();
+    for (ms, expected) in [
+        (-1_i64, "1969-12-31T23:59:59.999Z"),
+        (-62_167_219_200_000, "0000-01-01T00:00:00.000Z"),
+        (253_402_300_799_999, "9999-12-31T23:59:59.999Z"),
+        (1_800_000_000_123, "2027-01-15T08:00:00.123Z"),
+    ] {
+        db.execute(
+            "UPDATE subscribes SET created_at=?2,updated_at=?2 WHERE id=?1",
+            rusqlite::params![id, ms],
+        )
+        .unwrap();
+        for path in [
+            format!("/api/v1/subscriptions/{id}"),
+            "/api/v1/subscriptions".into(),
+            format!("/api/v1/subscriptions/{id}/activities"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &path,
+                    Some("management-secret"),
+                    Value::Null,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            if path.ends_with("activities") {
+                assert_eq!(
+                    body["data"]["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["kind"] == "subscribe_facts")
+                        .unwrap()["started_at"],
+                    expected
+                );
+            } else if path.ends_with(id) {
+                assert_eq!(body["data"]["created_at"], expected);
+                assert_eq!(body["data"]["updated_at"], expected);
+            } else {
+                assert_eq!(body["data"][0]["created_at"], expected, "{body}");
+            }
+        }
+    }
+    for value in [
+        serde_json::json!(i64::MAX),
+        serde_json::json!(-62_167_219_200_001_i64),
+        serde_json::json!(253_402_300_800_000_i64),
+        serde_json::json!("broken"),
+    ] {
+        let value = match value {
+            Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+            Value::String(s) => rusqlite::types::Value::Text(s),
+            _ => unreachable!(),
+        };
+        db.execute(
+            "UPDATE subscribes SET created_at=?2 WHERE id=?1",
+            rusqlite::params![id, value],
+        )
+        .unwrap();
+        for path in [
+            format!("/api/v1/subscriptions/{id}"),
+            "/api/v1/subscriptions".into(),
+            format!("/api/v1/subscriptions/{id}/activities"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &path,
+                    Some("management-secret"),
+                    Value::Null,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn create_and_patch_report_timestamp_read_errors_after_business_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = authed_app(&tmp);
+    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER corrupt_creation_time AFTER INSERT ON subscribes BEGIN UPDATE subscribes SET created_at='broken' WHERE id=NEW.id; END;").unwrap();
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some("management-secret"),
+            json!({"media":{"kind":"movie","title":"Invalid clock"},"coverage":{"kind":"movie"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let id: String = db
+        .query_row("SELECT id FROM subscribes", [], |r| r.get(0))
+        .unwrap();
+    db.execute_batch("DROP TRIGGER corrupt_creation_time;")
+        .unwrap();
+    let patched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/subscriptions/{id}"),
+            Some("management-secret"),
+            json!({"tracking_state":"paused"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let state: String = db
+        .query_row(
+            "SELECT tracking_state FROM subscribes WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "paused",
+        "render errors do not roll back committed business writes"
+    );
+}

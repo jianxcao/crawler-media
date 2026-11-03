@@ -55,3 +55,15 @@ pub fn rfc3339_from_secs(secs: i64) -> String {
         day = day + 1
     )
 }
+
+/// Checked wall-clock timestamp in Unix milliseconds.
+pub(crate) fn unix_now_ms() -> Result<i64, crate::StoreError> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            crate::StoreError::Invalid(format!("wall clock before Unix epoch: {error}"))
+        })?;
+    i64::try_from(elapsed.as_millis()).map_err(|error| {
+        crate::StoreError::Invalid(format!("wall clock outside millisecond range: {error}"))
+    })
+}

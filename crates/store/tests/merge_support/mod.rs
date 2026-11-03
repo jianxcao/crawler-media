@@ -259,7 +259,7 @@ pub fn insert_collection_item(
     collection: &str,
     media: &str,
     sort: i64,
-    added: &str,
+    added: i64,
 ) {
     conn.execute(
         "INSERT INTO collection_items (collection_id, media_id, sort_order, added_at)
@@ -519,14 +519,14 @@ fn seed_merge_relations(library_db: &Connection) {
         library_db
             .execute(
                 "INSERT INTO collections (id, user_id, visibility, name, sort_order, created_at)
-                 VALUES (?1, ?2, 'private', ?1, 0, '2024-01-01')",
+                 VALUES (?1, ?2, 'private', ?1, 0, 1704067200000)",
                 params![collection, user_a],
             )
             .unwrap();
     }
-    insert_collection_item(library_db, "col1", survivor_id, 5, "2024-01-02");
-    insert_collection_item(library_db, "col1", loser_id, 2, "2024-01-01");
-    insert_collection_item(library_db, "col2", loser_id, 1, "2024-01-03");
+    insert_collection_item(library_db, "col1", survivor_id, 5, 1704153600000);
+    insert_collection_item(library_db, "col1", loser_id, 2, 1704067200000);
+    insert_collection_item(library_db, "col2", loser_id, 1, 1704240000000);
 }
 
 fn seed_merge_subscribe(data_dir: &std::path::Path) {

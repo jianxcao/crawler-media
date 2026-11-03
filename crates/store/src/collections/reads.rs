@@ -105,7 +105,7 @@ fn member_values(
         Value::Text(libraries.to_owned()),
         Value::from(collection.map(str::to_owned)),
         Value::from(after.map(|cursor| cursor.order)),
-        Value::from(after.map(|cursor| cursor.added.clone())),
+        Value::from(after.map(|cursor| cursor.added)),
         Value::from(after.map(|cursor| cursor.media.clone())),
         Value::Integer(limit),
     ])
@@ -207,12 +207,7 @@ impl Store {
                 members
                     .last()
                     .map(|member| {
-                        cursor::encode(
-                            scope,
-                            member.order,
-                            member.added.clone(),
-                            member.media.to_string(),
-                        )
+                        cursor::encode(scope, member.order, member.added, member.media.to_string())
                     })
                     .transpose()?
             } else {

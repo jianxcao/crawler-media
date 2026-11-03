@@ -48,7 +48,7 @@ impl crate::LibraryConnection<'_> {
         self.library.execute(
             "INSERT INTO collections (id, user_id, visibility, name, sort_order, created_at)
              VALUES (?1, ?2, 'private', ?3, ?4, ?5)",
-            params![id, user_id.to_string(), name, max + 1, now()],
+            params![id, user_id.to_string(), name, max + 1, now()?],
         )?;
         Ok(id)
     }
@@ -76,7 +76,7 @@ impl crate::LibraryConnection<'_> {
     pub fn collection_item_ids(&self, collection_id: &str) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT media_id FROM collection_items WHERE collection_id = ?1 AND EXISTS(SELECT 1 FROM collections c WHERE c.id=?1 AND c.deleting=0)
-             ORDER BY sort_order, added_at",
+             ORDER BY sort_order, added_at, media_id",
         )?;
         let rows = stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -103,7 +103,7 @@ impl crate::LibraryConnection<'_> {
         let n = tx.execute(
             "INSERT OR IGNORE INTO collection_items (collection_id, media_id, sort_order, added_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![collection_id, media_item_id, max + 1, now()],
+            params![collection_id, media_item_id, max + 1, now()?],
         )?;
         for media in &affected {
             crate::library_write::reduce::reduce_media_everywhere(&tx, *media)?;

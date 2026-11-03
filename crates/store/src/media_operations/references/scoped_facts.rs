@@ -108,7 +108,7 @@ pub(in crate::media_operations) fn merge_collection_items(
     survivor: MediaId,
     loser: MediaId,
 ) -> Result<(), StoreError> {
-    let rows: Vec<(String, i64, String)> = {
+    let rows: Vec<(String, i64, i64)> = {
         let mut stmt = tx.prepare(
             "SELECT collection_id, sort_order, added_at FROM collection_items
              WHERE media_id = ?1",
@@ -119,7 +119,7 @@ pub(in crate::media_operations) fn merge_collection_items(
         .collect::<Result<Vec<_>, _>>()?
     };
     for (collection_id, sort_order, added_at) in rows {
-        let existing: Option<(i64, String)> = tx
+        let existing: Option<(i64, i64)> = tx
             .query_row(
                 "SELECT sort_order, added_at FROM collection_items
                  WHERE collection_id = ?1 AND media_id = ?2",

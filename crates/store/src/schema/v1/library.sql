@@ -262,13 +262,13 @@ CREATE TABLE library_query_config (
 INSERT INTO library_query_config(id) VALUES (1);
 CREATE TABLE collections (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT, visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
- name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, deleting INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0,1)),
+ name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0,1)),
  CHECK((visibility='private' AND user_id IS NOT NULL) OR (visibility='public' AND user_id IS NULL))
 );
 CREATE INDEX collections_owner ON collections(user_id,sort_order,id);
 CREATE TABLE collection_items (
  collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE, media_id TEXT NOT NULL REFERENCES media(media_id),
- sort_order INTEGER NOT NULL DEFAULT 0, added_at TEXT NOT NULL, PRIMARY KEY(collection_id,media_id)
+ sort_order INTEGER NOT NULL DEFAULT 0, added_at INTEGER NOT NULL, PRIMARY KEY(collection_id,media_id)
 );
 CREATE INDEX collection_media ON collection_items(media_id,collection_id);
 CREATE INDEX collection_items_order ON collection_items(collection_id,sort_order,added_at,media_id);

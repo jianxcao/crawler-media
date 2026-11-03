@@ -9,15 +9,15 @@ fn subscribe_insert_requires_both_timestamps() {
     let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
     for (columns, values) in [
         ("", ""),
-        (", created_at", ", '2026-10-27T00:00:00Z'"),
-        (", updated_at", ", '2026-10-27T00:00:00Z'"),
+        (", created_at", ", 1793059200000"),
+        (", updated_at", ", 1793059200000"),
     ] {
         let error = db
             .execute(
                 &format!(
                     "INSERT INTO subscribes
-                     (id, user_id, media_id, coverage_kind, fetch_mode, filter_id{columns})
-                     VALUES ('missing', 'user', 'media', 'movie', 'search', 'filter'{values})"
+                     (id, user_id, media_id, coverage_kind, fetch_mode, filter_id, jobs_sync_generation, lifecycle_epoch{columns})
+                     VALUES ('missing', 'user', 'media', 'movie', 'search', 'filter', 'generation', 1{values})"
                 ),
                 [],
             )
@@ -82,13 +82,12 @@ fn subscribe_timestamps_survive_reopen_and_update_preserves_creation_time() {
     let store = Store::open(tmp.path()).unwrap();
     let mut subscribe = insert_subscribe(&store);
     let inserted = store.subscribe_times(subscribe.id).unwrap();
-    let before = "2000-01-01T00:00:00Z";
+    let before = 946_684_800_000_i64;
     for timestamp in [&inserted.0, &inserted.1] {
         assert!(
-            timestamp.as_str() > before,
+            *timestamp > before,
             "timestamp must be populated: {timestamp}"
         );
-        assert!(timestamp.ends_with('Z'), "timestamp must use RFC3339 UTC");
     }
     drop(store);
 
@@ -105,6 +104,34 @@ fn subscribe_timestamps_survive_reopen_and_update_preserves_creation_time() {
     store.update_subscribe(&subscribe).unwrap();
     let updated = store.subscribe_times(subscribe.id).unwrap();
     assert_eq!(updated.0, inserted.0, "creation time must be preserved");
-    assert!(updated.1.as_str() > before);
+    assert!(updated.1 > before);
     assert_eq!(store.get_subscribe(subscribe.id).unwrap(), Some(subscribe));
+}
+
+#[test]
+fn subscribe_creation_persists_one_integer_millisecond_clock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
+    let before = clock();
+    let subscribe = insert_subscribe(&store);
+    let after = clock();
+    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
+    let pair: (rusqlite::types::Value, rusqlite::types::Value) = db
+        .query_row(
+            "SELECT created_at,updated_at FROM subscribes WHERE id=?1",
+            [subscribe.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        matches!(pair.0, rusqlite::types::Value::Integer(value) if (before..=after).contains(&value)),
+        "{pair:?}"
+    );
+    assert_eq!(pair.0, pair.1);
 }

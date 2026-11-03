@@ -10,7 +10,7 @@ use crate::StoreError;
 pub(super) struct Cursor {
     scope: String,
     pub order: i64,
-    pub added: String,
+    pub added: i64,
     pub media: String,
 }
 
@@ -46,7 +46,7 @@ pub(super) fn decode(raw: Option<&str>, scope: &str) -> Result<Option<Cursor>, S
 pub(super) fn encode(
     scope: String,
     order: i64,
-    added: String,
+    added: i64,
     media: String,
 ) -> Result<String, StoreError> {
     Ok(serde_json::to_string(&Cursor {

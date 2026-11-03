@@ -346,7 +346,7 @@ impl crate::SubscribeConnection<'_> {
                 subscribe.tracking_state,
                 subscribe.follow_future as i64,
                 subscribe.search_interval_secs as i64,
-                super::super::now_rfc3339(),
+                crate::time::unix_now_ms()?,
                 subscribe.keep_old_versions as i64,
                 subscribe.library_id.map(|id| id.to_string()),
             ],
@@ -354,12 +354,12 @@ impl crate::SubscribeConnection<'_> {
         Ok(())
     }
 
-    pub fn subscribe_times(&self, id: SubscribeId) -> Result<(String, String), StoreError> {
+    pub fn subscribe_times(&self, id: SubscribeId) -> Result<(i64, i64), StoreError> {
         self.subscribe
             .query_row(
                 "SELECT created_at, updated_at FROM subscribes WHERE id = ?1",
                 params![id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .map_err(Into::into)
     }

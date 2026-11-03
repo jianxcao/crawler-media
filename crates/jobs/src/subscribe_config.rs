@@ -13,9 +13,8 @@ impl Queue {
         self.with_connection(|conn| {
             let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
             let fence=read_fence(&tx,id)?;
-            if let Some((known,incarnation,applied,closed))=fence.as_ref() {
-                if *known>epoch || (*known==epoch && (incarnation!=generation || *closed || *applied>revision)) {return Ok(false);}
-            }
+            if let Some((known,incarnation,applied,closed))=fence.as_ref()
+                && (*known>epoch || (*known==epoch && (incarnation!=generation || *closed || *applied>revision))) {return Ok(false);}
             let receipt=tx.query_row("SELECT revision FROM subscribe_config_receipts WHERE subscribe_id=?1 AND generation=?2",params![id.to_string(),generation],|r|r.get::<_,i64>(0)).optional()?;
             if receipt.is_some_and(|applied|applied>=revision) {return Ok(false);}
             if fence.as_ref().is_none_or(|(known,_,_,_)|*known<epoch) {
@@ -35,9 +34,8 @@ impl Queue {
     ) -> Result<bool, JobError> {
         self.with_connection(|conn| {
             let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
-            if let Some((known,incarnation,_,_))=read_fence(&tx,id)? {
-                if known>epoch || (known==epoch && incarnation!=generation) {return Ok(false);}
-            }
+            if let Some((known,incarnation,_,_))=read_fence(&tx,id)?
+                && (known>epoch || (known==epoch && incarnation!=generation)) {return Ok(false);}
             self.delete_def(crate::JobIdentity::subscribe_search(id))?;
             tx.execute("INSERT INTO subscribe_lifecycle_fences VALUES(?1,?2,?3,0,1) ON CONFLICT(subscribe_id) DO UPDATE SET epoch=excluded.epoch,generation=excluded.generation,revision=CASE WHEN subscribe_lifecycle_fences.epoch=excluded.epoch THEN subscribe_lifecycle_fences.revision ELSE 0 END,closed=1",params![id.to_string(),epoch,generation])?;
             tx.commit()?;Ok(true)

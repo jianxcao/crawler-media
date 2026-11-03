@@ -17,8 +17,8 @@ pub struct UserCollection {
     pub sort_order: i64,
 }
 
-fn now() -> String {
-    super::now_rfc3339()
+fn now() -> Result<i64, StoreError> {
+    crate::time::unix_now_ms()
 }
 
 impl Store {

@@ -29,6 +29,7 @@ mod removal;
 
 pub(crate) mod poster_view;
 pub(crate) mod snapshot;
+pub(crate) mod timestamps;
 mod views;
 pub(crate) use views::{coverage_json, list_subscriptions};
 
@@ -372,7 +373,7 @@ pub(crate) async fn get_subscription(
             .map_err(|error| { tracing::error!(%error, subscribe_id=%subscribe.id, "Subscribe detail capture failed");
                 err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()) })?;
         Ok((
-            snapshot::load_single_subscription_view(store, &subscribe, &media, &facts),
+            snapshot::load_single_subscription_view(store, &subscribe, &media, &facts).map_err(|error| { tracing::error!(%error, "Subscribe timestamp read failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()) })?,
             wanted,
         ))
     })

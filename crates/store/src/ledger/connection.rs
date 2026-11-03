@@ -239,6 +239,7 @@ impl crate::LibraryConnection<'_> {
         Ok(collected)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn file_ids_of_media(
         &self,
         media_id: MediaId,

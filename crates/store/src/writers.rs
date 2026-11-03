@@ -117,11 +117,11 @@ impl Writers {
     pub fn check_write_admission() -> Result<(), StoreError> {
         ADMISSION.with(|scope| {
             let scope = scope.borrow();
-            if let Some(admission) = scope.as_ref() {
-                if let Err(error) = (admission.check)() {
-                    *admission.failure.borrow_mut() = Some(AdmissionFailure::Refused);
-                    return Err(error);
-                }
+            if let Some(admission) = scope.as_ref()
+                && let Err(error) = (admission.check)()
+            {
+                *admission.failure.borrow_mut() = Some(AdmissionFailure::Refused);
+                return Err(error);
             }
             Ok(())
         })

@@ -64,3 +64,4 @@ roxmltree = "0.21"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 tracing-appender = "0.2"
 sha2 = "0.10"
+time = "0.3.55"

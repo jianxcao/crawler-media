@@ -57,10 +57,20 @@ fn activities_blocking(
         .unwrap_or_default()
         .entries()
         .count();
-    let created = store
+    let created = match store
         .subscribe_times(subscribe.id)
-        .map(|(created, _)| created)
-        .unwrap_or_default();
+        .and_then(|(created, _)| crate::http::subscriptions::timestamps::format(created))
+    {
+        Ok(created) => created,
+        Err(error) => {
+            tracing::error!(%error, subscribe_id=%subscribe.id, "Subscribe activity timestamp read failed");
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
     drop(store);
     let fmt = crate::store::rfc3339_from_secs;
     let mut items: Vec<Value> = jobs

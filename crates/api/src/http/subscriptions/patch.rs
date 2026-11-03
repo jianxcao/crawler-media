@@ -66,6 +66,17 @@ fn patch_blocking(
         let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
         super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
     };
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, "Subscribe timestamp read failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
     let body = super::views::render_subscription_snapshot(&snapshot, state.file_stats.as_ref());
     ok(body).into_response()
 }

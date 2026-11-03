@@ -69,6 +69,7 @@ pub(crate) fn insert_row(
             episode_to.map(|v| v as i64),
         ),
     };
+    let timestamp = crate::time::unix_now_ms()?;
     subscribe_conn.execute(
             "INSERT INTO subscribes (
                 id, user_id, media_id, coverage_kind, season, episode_from, episode_to,
@@ -94,8 +95,8 @@ pub(crate) fn insert_row(
                 subscribe.search_interval_secs as i64,
                 subscribe.keep_old_versions as i64,
                 subscribe.library_id.map(|id| id.to_string()),
-                crate::now_rfc3339(),
-                crate::now_rfc3339(),
+                timestamp,
+                timestamp,
                 generation, epoch,
             ],
         )?;

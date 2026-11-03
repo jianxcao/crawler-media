@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+time = { workspace = true }
 async-trait = "0.1"
 axum = "0.8"
 domain.workspace = true

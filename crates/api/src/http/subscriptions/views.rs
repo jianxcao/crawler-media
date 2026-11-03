@@ -54,16 +54,8 @@ pub(crate) fn render_subscription_snapshot(
     let grabbing = count_pipeline_units(subscribe, pending, facts);
     let downloaded = (imported + grabbing).min(total);
 
-    let created_at = if snapshot.created_at.is_empty() {
-        "1970-01-01T00:00:00Z"
-    } else {
-        &snapshot.created_at
-    };
-    let updated_at = if snapshot.updated_at.is_empty() {
-        "1970-01-01T00:00:00Z"
-    } else {
-        &snapshot.updated_at
-    };
+    let created_at = &snapshot.created_at;
+    let updated_at = &snapshot.updated_at;
 
     let poster_choice = super::poster_view::determine_poster_from_candidate(
         media,

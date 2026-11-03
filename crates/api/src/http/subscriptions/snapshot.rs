@@ -100,7 +100,7 @@ pub(crate) fn load_visible_subscription_views(
 
         let facts = store.load_subscribe_facts(sub.id).unwrap_or_default();
         let pending = store.load_pending(sub.id).unwrap_or_default();
-        let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();
+        let (created_at, updated_at) = super::timestamps::load(store, sub.id)?;
 
         let (total, imported) = super::views::progress(store, &sub, &media, &facts);
 
@@ -131,9 +131,9 @@ pub(crate) fn load_single_subscription_view(
     sub: &Subscribe,
     media: &Media,
     facts: &domain::SubscribeFacts,
-) -> SubscriptionViewSnapshot {
+) -> Result<SubscriptionViewSnapshot, crate::store::StoreError> {
     let pending = store.load_pending(sub.id).unwrap_or_default();
-    let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();
+    let (created_at, updated_at) = super::timestamps::load(store, sub.id)?;
     let (total, imported) = super::views::progress(store, sub, media, facts);
 
     let rows: Vec<FileCoverage> = store
@@ -155,7 +155,7 @@ pub(crate) fn load_single_subscription_view(
         }
     };
 
-    SubscriptionViewSnapshot {
+    Ok(SubscriptionViewSnapshot {
         target_library_status,
         target_library_error,
         subscribe: sub.clone(),
@@ -167,7 +167,7 @@ pub(crate) fn load_single_subscription_view(
         library_poster_candidate,
         total,
         imported,
-    }
+    })
 }
 
 /// 旧键 `(season.unwrap_or(0), episode.unwrap_or(0), path)` 是在 (file × unit) 的一行一行

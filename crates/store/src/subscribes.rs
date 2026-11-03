@@ -216,10 +216,10 @@ impl Store {
             tx.commit()?;
             Ok((n > 0,release))
         })?;
-        if let Some(release) = release {
-            if let Err(error) = self.close_subscribe_retention(&release) {
-                tracing::warn!(subscribe_id=%id,%error,"Subscribe release remains durably pending");
-            }
+        if let Some(release) = release
+            && let Err(error) = self.close_subscribe_retention(&release)
+        {
+            tracing::warn!(subscribe_id=%id,%error,"Subscribe release remains durably pending");
         }
         // L4: per-subscription settings (`subscribe.<name>:<id>`, e.g. the
         // completion notice marker) live in the app database; drop them too.
@@ -374,8 +374,8 @@ impl Store {
         })
     }
 
-    /// `(created_at, updated_at)` RFC3339 for an existing Subscribe.
-    pub fn subscribe_times(&self, id: SubscribeId) -> Result<(String, String), StoreError> {
+    /// `(created_at, updated_at)` Unix milliseconds for an existing Subscribe.
+    pub fn subscribe_times(&self, id: SubscribeId) -> Result<(i64, i64), StoreError> {
         self.with_subscribe_read(|db| db.subscribe_times(id))
     }
 

@@ -15,7 +15,7 @@ pub(super) struct Member {
     pub media: MediaId,
     pub library: LibraryId,
     pub order: i64,
-    pub added: String,
+    pub added: i64,
 }
 
 pub(super) fn hydrate(
