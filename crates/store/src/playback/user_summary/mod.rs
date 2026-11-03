@@ -16,13 +16,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::{Store, StoreError, UNIT_WHOLE};
 
 mod continuation;
+mod integrity;
 mod rows;
 mod units;
+pub(crate) use integrity::IntegrityUser;
 const SUMMARY_COLUMNS: &str = "summary_revision,seen,played,favorite,last_played_at,favorite_at,owned_episode_count,completed_episode_count,next_season,next_episode,resume_season,resume_episode,activity_next_season,activity_next_episode,activity_season,activity_episode,activity_at,activity_present,all_watch_at,resume_activity_at";
 
 /// One reduced row of `user_library_items`, compared field by field so an
 /// unchanged write does not bump `summary_revision`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Summary {
     seen: bool,
     played: bool,
@@ -46,6 +48,7 @@ struct Summary {
 }
 
 /// One `playback_units` row of the current user and media.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PlaybackFact {
     season: i32,
     episode: i32,
@@ -162,55 +165,6 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
-    }
-
-    pub(crate) fn expected_user_rows(
-        tx: &Connection,
-        library: &str,
-        media_id: MediaId,
-        owned: &[(i32, i32)],
-        available: &[(i32, i32)],
-        is_tv: bool,
-    ) -> Result<Vec<crate::query_projection::expected::OwnedRow>, StoreError> {
-        let users = query_ids(
-            tx,
-            "SELECT DISTINCT user_id FROM playback_units WHERE media_id=?1 ORDER BY user_id",
-            media_id,
-        )?;
-        let mut rows = Vec::new();
-        for user in users {
-            let facts = Self::summary_facts(tx, user.parse()?, media_id)?;
-            if facts.is_empty() {
-                continue;
-            }
-            let summary = summarize(is_tv, owned, available, &facts);
-            rows.push(rows::owned(&summary, &user, library, media_id));
-        }
-        Ok(rows)
-    }
-
-    pub(crate) fn expected_continue_rows(
-        tx: &Connection,
-        library: &str,
-        media_id: MediaId,
-        available: &[(i32, i32)],
-        is_tv: bool,
-    ) -> Result<Vec<crate::query_projection::expected::OwnedRow>, StoreError> {
-        let users = query_ids(
-            tx,
-            "SELECT DISTINCT user_id FROM playback_units WHERE media_id=?1 ORDER BY user_id",
-            media_id,
-        )?;
-        let mut rows = Vec::new();
-        for user in users {
-            let facts = Self::summary_facts(tx, user.parse()?, media_id)?;
-            if !facts.is_empty() {
-                rows.extend(units::expected(
-                    &user, library, media_id, is_tv, available, &facts,
-                ));
-            }
-        }
-        Ok(rows)
     }
 
     pub(crate) fn write_library_summary(

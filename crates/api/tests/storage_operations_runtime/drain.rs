@@ -100,7 +100,17 @@ async fn an_in_flight_lease_is_cancelled_and_drained_before_the_first_batch() {
     );
 
     drop(lease);
-    let done = poll_operation(&app, &seeded.library_id, &operation_id).await;
+    let done = tokio::time::timeout(Duration::from_secs(10), async {
+        let done = poll_operation(&app, &seeded.library_id, &operation_id).await;
+        // The durable success is visible before the async driver releases its
+        // registry entry. Observe that release within the same deadline.
+        while state.library_work().has_active_work() {
+            tokio::task::yield_now().await;
+        }
+        done
+    })
+    .await
+    .expect("operation success and registry release must complete");
     assert_eq!(done["data"]["state"], "succeeded");
     assert!(
         !state.library_work().has_active_work(),

@@ -165,6 +165,36 @@ impl Store {
         now_ms: i64,
         max_media: usize,
     ) -> Result<OperationStatus, StoreError> {
+        if !(1..=100).contains(&max_media) {
+            return Err(StoreError::Invalid(format!(
+                "max_media {max_media} is outside the interface range 1..=100"
+            )));
+        }
+        let prepared = self
+            .with_read_snapshot(
+                &[crate::Db::Library],
+                std::time::Duration::from_secs(30),
+                || {
+                    self.with_read(crate::Db::Library, |conn| {
+                        integrity::paging::prepare(conn, operation_id)
+                    })
+                },
+            )
+            .and_then(|prepared| prepared);
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.with_writer(crate::Db::Library, |conn| {
+                    integrity::paging::record_failure(conn, operation_id, now_ms, &error)
+                })?;
+                return Err(error);
+            }
+        };
+        if let Some(prepared) = prepared {
+            return self.with_writer(crate::Db::Library, |conn| {
+                integrity::paging::commit(conn, operation_id, now_ms, prepared)
+            });
+        }
         self.with_library_write(|library| {
             library.advance_library_operation(operation_id, now_ms, max_media)
         })

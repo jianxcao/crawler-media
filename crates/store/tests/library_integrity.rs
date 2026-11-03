@@ -78,6 +78,18 @@ fn make_file(library_id: LibraryId, root_id: String, media: &Media, rel_path: &s
     }
 }
 
+fn finish(store: &Store, operation: &str, now: i64) -> store::playback::OperationStatus {
+    for step in 0..10_000 {
+        let status = store
+            .advance_library_operation(operation, now + step, 100)
+            .unwrap();
+        if status.state != "applying" {
+            return status;
+        }
+    }
+    panic!("Integrity did not finish");
+}
+
 #[test]
 fn integrity_check_and_repair_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
@@ -163,7 +175,7 @@ fn integrity_check_and_repair_lifecycle() {
         .unwrap();
     assert_eq!(status.state, "planned");
 
-    let res = store.advance_library_operation(op_id, 1000, 100).unwrap();
+    let res = finish(&store, op_id, 1000);
     assert_eq!(res.state, "succeeded");
 
     let report = store.library_integrity_report(op_id).unwrap();
@@ -181,9 +193,7 @@ fn integrity_check_and_repair_lifecycle() {
         .unwrap();
     assert_eq!(r_status.state, "planned");
 
-    let r_res = store
-        .advance_library_operation(repair_op_id, 2000, 100)
-        .unwrap();
+    let r_res = finish(&store, repair_op_id, 2000);
     assert_eq!(r_res.state, "succeeded");
 
     let after_repair_page = store.library_item_page(&query).unwrap();
@@ -262,7 +272,7 @@ fn integrity_batching_and_crash_recovery_preserves_progress() {
     let reopened = Store::open(&data_dir).unwrap();
 
     // Step 2: Continue from reopened store
-    let step2 = reopened.advance_library_operation(op_id, 2000, 2).unwrap();
+    let step2 = finish(&reopened, op_id, 2000);
     assert_eq!(step2.state, "succeeded");
 
     // Verify all 4 items exist and match original count

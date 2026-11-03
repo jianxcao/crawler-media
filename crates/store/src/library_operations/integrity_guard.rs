@@ -1,7 +1,20 @@
 //! A durable Integrity owner can only be issued by validating its frozen revision.
 use crate::StoreError;
-use domain::{LibraryId, MediaId};
+use domain::{LibraryId, MediaId, UserId};
 use rusqlite::{Connection, OptionalExtension, params};
+
+pub(super) const MEDIA_OWNERSHIP_TABLES: [&str; 10] = [
+    "library_files",
+    "library_items",
+    "library_units",
+    "library_metadata_inputs",
+    "library_item_terms",
+    "library_protocol_terms",
+    "library_protocol_entities",
+    "library_protocol_people",
+    "user_library_items",
+    "user_library_continue_units",
+];
 
 pub(crate) struct IntegrityOwner {
     operation_id: String,
@@ -56,17 +69,84 @@ pub(crate) fn ensure_media_integrity_writable(
     tx: &Connection,
     media: MediaId,
 ) -> Result<(), StoreError> {
-    let owner: Option<String> = tx.query_row(
-        "SELECT o.library_id FROM library_operations o
-         WHERE o.kind='integrity' AND o.state<>'succeeded' AND (
-           EXISTS(SELECT 1 FROM library_files f WHERE f.library_id=o.library_id AND f.media_id=?1)
-           OR EXISTS(SELECT 1 FROM library_items i WHERE i.library_id=o.library_id AND i.media_id=?1)
-           OR EXISTS(SELECT 1 FROM library_metadata_inputs n WHERE n.library_id=o.library_id AND n.media_id=?1))
-         LIMIT 1", [media.to_string()], |r| r.get(0)).optional()?;
+    let owned = MEDIA_OWNERSHIP_TABLES
+        .iter()
+        .map(|table| {
+            format!(
+                "EXISTS(SELECT 1 FROM {table} f WHERE f.library_id=o.library_id AND f.media_id=?1)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let owner: Option<String> = tx.query_row(&format!(
+        "SELECT o.library_id FROM library_operations o WHERE o.kind='integrity' AND o.state<>'succeeded' AND ({owned}) LIMIT 1"
+    ), [media.to_string()], |r| r.get(0)).optional()?;
     if let Some(owner) = owner {
         tracing::warn!(library_id=%owner, media_id=%media, "write rejected by Integrity owner");
         return Err(StoreError::Protected(format!(
             "library {owner} has an Integrity owner"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_user_integrity_writable(
+    tx: &Connection,
+    user: UserId,
+) -> Result<(), StoreError> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT o.library_id FROM library_operations o
+         WHERE o.kind='integrity' AND o.state<>'succeeded' AND (
+           EXISTS(SELECT 1 FROM user_library_items u
+             WHERE u.library_id=o.library_id AND u.user_id=?1)
+           OR EXISTS(SELECT 1 FROM user_library_continue_units u
+             WHERE u.library_id=o.library_id AND u.user_id=?1)
+           OR EXISTS(SELECT 1 FROM playback_units p WHERE p.user_id=?1 AND (
+             EXISTS(SELECT 1 FROM library_files f
+               WHERE f.library_id=o.library_id AND f.media_id=p.media_id)
+             OR EXISTS(SELECT 1 FROM library_items i
+               WHERE i.library_id=o.library_id AND i.media_id=p.media_id)
+             OR EXISTS(SELECT 1 FROM library_metadata_inputs n
+               WHERE n.library_id=o.library_id AND n.media_id=p.media_id))))
+         LIMIT 1",
+            [user.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(owner) = owner {
+        tracing::warn!(library_id=%owner,user_id=%user,"User cleanup rejected by Integrity owner");
+        return Err(StoreError::Protected(format!(
+            "library {owner} has an Integrity owner over User {user} facts"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_collection_integrity_writable(
+    tx: &Connection,
+    collection: &str,
+) -> Result<(), StoreError> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT o.library_id FROM library_operations o
+         WHERE o.kind='integrity' AND o.state<>'succeeded'
+           AND EXISTS(SELECT 1 FROM collection_items c WHERE c.collection_id=?1 AND (
+             EXISTS(SELECT 1 FROM library_files f
+               WHERE f.library_id=o.library_id AND f.media_id=c.media_id)
+             OR EXISTS(SELECT 1 FROM library_items i
+               WHERE i.library_id=o.library_id AND i.media_id=c.media_id)
+             OR EXISTS(SELECT 1 FROM library_metadata_inputs n
+               WHERE n.library_id=o.library_id AND n.media_id=c.media_id)))
+         LIMIT 1",
+            [collection],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(owner) = owner {
+        tracing::warn!(library_id=%owner,collection_id=%collection,"Collection deletion rejected by Integrity owner");
+        return Err(StoreError::Protected(format!(
+            "library {owner} has an Integrity owner over Collection {collection}"
         )));
     }
     Ok(())
@@ -104,17 +184,7 @@ pub(crate) fn ensure_no_shared_integrity(
     tx: &Connection,
     library: LibraryId,
 ) -> Result<(), StoreError> {
-    let tables = [
-        "library_files",
-        "library_items",
-        "library_units",
-        "library_metadata_inputs",
-        "library_item_terms",
-        "library_protocol_terms",
-        "library_protocol_people",
-        "library_protocol_entities",
-        "user_library_items",
-    ];
+    let tables = MEDIA_OWNERSHIP_TABLES;
     let target = tables
         .iter()
         .map(|table| format!("SELECT media_id FROM {table} WHERE library_id=?1"))

@@ -59,9 +59,3 @@ fn counts(
         .query_map([id], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?)))?
         .collect::<Result<_, _>>()?)
 }
-pub(super) fn expected(
-    tx: &Connection,
-    key: ProjectionKey,
-) -> Result<ExpectedProjection, StoreError> {
-    crate::query_projection::expected_projection(tx, key)
-}

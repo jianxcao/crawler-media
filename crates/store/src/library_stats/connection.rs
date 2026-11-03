@@ -3,6 +3,7 @@ use super::*;
 
 impl crate::LibraryConnection<'_> {
     pub fn library_roster_stats(&self, library_id: &str) -> Result<LibraryRosterStats, StoreError> {
+        self.ensure_library_query_ready(library_id.parse()?)?;
         let (item_count, total_size): (i64, Option<i64>) = self.library.query_row(
             "SELECT COUNT(*), SUM(size_bytes) FROM library_items WHERE library_id = ?1",
             params![library_id],

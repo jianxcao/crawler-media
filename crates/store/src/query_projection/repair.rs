@@ -2,91 +2,7 @@ use super::{ExpectedProjection, ProjectionKey, expected::OwnedRow};
 use crate::{StoreError, library_operations::integrity_guard::IntegrityOwner};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 
-pub(crate) fn repair_projection(
-    tx: &Connection,
-    owner: &IntegrityOwner,
-    key: ProjectionKey,
-    expected: &ExpectedProjection,
-) -> Result<(), StoreError> {
-    owner.validate(tx, key.library_id)?;
-    let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
-    let old_search_rowid = super::search::rowid(tx, key)?;
-    super::search::remove(tx, old_search_rowid)?;
-    let old_entities = super::entities::ownership(tx, &media)?;
-    // Counters are intentionally untouched: corrupt undercounts cannot prevent repair.
-    for table in [
-        "library_item_terms",
-        "library_protocol_terms",
-        "library_protocol_people",
-    ] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE library_id=?1 AND media_id=?2"),
-            params![lib, media],
-        )?;
-    }
-    super::entities::sync(tx, &lib, &media, &Default::default(), &old_entities)?;
-    let Some(card) = &expected.card else {
-        tx.execute(
-            "DELETE FROM library_units WHERE library_id=?1 AND media_id=?2",
-            params![lib, media],
-        )?;
-        tx.execute(
-            "DELETE FROM library_items WHERE library_id=?1 AND media_id=?2",
-            params![lib, media],
-        )?;
-        super::search_integrity::refresh(tx, key, old_search_rowid, expected)?;
-        return Ok(());
-    };
-    write_row(tx, "library_items", card)?;
-    sync_rows(
-        tx,
-        "library_units",
-        &lib,
-        &media,
-        &expected.units,
-        &["season", "episode"],
-    )?;
-    sync_rows(
-        tx,
-        "user_library_items",
-        &lib,
-        &media,
-        &expected.users,
-        &["user_id"],
-    )?;
-    sync_rows(
-        tx,
-        "user_library_continue_units",
-        &lib,
-        &media,
-        &expected.continue_units,
-        &["user_id", "season", "episode"],
-    )?;
-    super::browse::sync_terms(
-        tx,
-        "library_item_terms",
-        &lib,
-        &media,
-        &Default::default(),
-        &expected.web,
-    )?;
-    super::browse::sync_terms(
-        tx,
-        "library_protocol_terms",
-        &lib,
-        &media,
-        &Default::default(),
-        &expected.protocol,
-    )?;
-    super::people::sync(tx, &lib, &media, &expected.people)?;
-    let before = super::entities::ownership(tx, &media)?;
-    super::entities::sync(tx, &lib, &media, &expected.entities, &before)?;
-    super::mark_current(tx, &lib, &media)?;
-    super::search::sync(tx, key, &expected.people)?;
-    super::search_integrity::refresh(tx, key, old_search_rowid, expected)?;
-    Ok(())
-}
-fn write_row(tx: &Connection, table: &str, row: &OwnedRow) -> Result<(), StoreError> {
+pub(crate) fn write_row(tx: &Connection, table: &str, row: &OwnedRow) -> Result<(), StoreError> {
     let mut row = row.clone();
     let revision = match table {
         "library_items" => Some("item_revision"),
@@ -162,29 +78,18 @@ pub(crate) fn actual_rows(
         })?
         .collect::<Result<_, _>>()?)
 }
-pub(crate) fn projection_matches(
+pub(crate) fn header_matches(
     tx: &Connection,
     key: ProjectionKey,
     expected: &ExpectedProjection,
 ) -> Result<bool, StoreError> {
     let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
-    for (table, rows) in [
-        ("library_items", expected.card.clone().into_iter().collect()),
-        ("library_units", expected.units.clone()),
-        ("user_library_items", expected.users.clone()),
-        (
-            "user_library_continue_units",
-            expected.continue_units.clone(),
-        ),
-    ] {
-        let actual = actual_rows(tx, table, &lib, &media)?;
-        if actual.len() != rows.len() || actual.iter().any(|row| !rows.contains(row)) {
-            return Ok(false);
-        }
+    let actual = actual_rows(tx, "library_items", &lib, &media)?;
+    if actual != expected.card.clone().into_iter().collect::<Vec<_>>() {
+        return Ok(false);
     }
     let current:bool=tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM library_items WHERE library_id=?1 AND media_id=?2 AND query_projection_revision<>item_revision)",params![lib,media],|r|r.get(0))?;
     Ok(current
-        && super::browse::read_terms(tx, "library_item_terms", &lib, &media)? == expected.web
         && super::browse::read_terms(tx, "library_protocol_terms", &lib, &media)?
             == expected.protocol
         && super::people::read(tx, &lib, &media)? == expected.people
@@ -193,34 +98,46 @@ pub(crate) fn projection_matches(
         && super::search_integrity::matches(tx, key, expected)?)
 }
 
-fn sync_rows(
+pub(crate) fn repair_header(
     tx: &Connection,
-    table: &str,
-    lib: &str,
-    media: &str,
-    expected: &[OwnedRow],
-    keys: &[&str],
+    owner: &IntegrityOwner,
+    key: ProjectionKey,
+    expected: &ExpectedProjection,
 ) -> Result<(), StoreError> {
-    for actual in actual_rows(tx, table, lib, media)? {
-        if !expected
-            .iter()
-            .any(|row| keys.iter().all(|key| row.get(*key) == actual.get(*key)))
-        {
-            let predicate = keys
-                .iter()
-                .map(|key| format!("{key}=?"))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            let mut values = vec![Value::from(lib.to_string()), Value::from(media.to_string())];
-            values.extend(keys.iter().map(|key| actual[*key].clone()));
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE library_id=? AND media_id=? AND {predicate}"),
-                params_from_iter(values),
-            )?;
-        }
+    owner.validate(tx, key.library_id)?;
+    let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
+    let old_search_rowid = super::search::rowid(tx, key)?;
+    super::search::remove(tx, old_search_rowid)?;
+    let old_entities = super::entities::ownership(tx, &media)?;
+    for table in ["library_protocol_terms", "library_protocol_people"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE library_id=?1 AND media_id=?2"),
+            params![lib, media],
+        )?;
     }
-    for row in expected {
-        write_row(tx, table, row)?;
+    super::entities::sync(tx, &lib, &media, &Default::default(), &old_entities)?;
+    if let Some(card) = &expected.card {
+        write_row(tx, "library_items", card)?;
+        super::browse::sync_terms(
+            tx,
+            "library_protocol_terms",
+            &lib,
+            &media,
+            &Default::default(),
+            &expected.protocol,
+        )?;
+        super::people::sync(tx, &lib, &media, &expected.people)?;
+        let before = super::entities::ownership(tx, &media)?;
+        super::entities::sync(tx, &lib, &media, &expected.entities, &before)?;
+        // The first available coordinate was already reduced from bounded raw
+        // coverage pages. Publishing it must not rescan all unavailable units.
+        tx.execute("UPDATE library_items SET query_projection_revision=item_revision WHERE library_id=?1 AND media_id=?2",params![lib,media])?;
+        super::search::sync(tx, key, &expected.people)?;
+    } else {
+        tx.execute(
+            "DELETE FROM library_items WHERE library_id=?1 AND media_id=?2",
+            params![lib, media],
+        )?;
     }
-    Ok(())
+    super::search_integrity::refresh(tx, key, old_search_rowid, expected)
 }

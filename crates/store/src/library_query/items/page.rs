@@ -342,15 +342,22 @@ pub(crate) fn ensure_library_query_ready_on(
     conn: &Connection,
     library_id: LibraryId,
 ) -> Result<(), StoreError> {
-    let state: Option<String> = conn
-        .query_row(
-            "SELECT lifecycle_state FROM libraries WHERE library_id=?1",
-            [library_id.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if state.as_deref() == Some("reindexing") {
-        return Err(StoreError::QueryUnavailable { library_id });
+    let state: Option<(String,String,Option<String>)> = conn.query_row(
+        "SELECT l.lifecycle_state,l.integrity_state,
+          (SELECT operation_id FROM library_operations WHERE library_id=l.library_id
+           AND kind='integrity' AND state IN ('failed','succeeded') ORDER BY updated_at_ms DESC LIMIT 1)
+          FROM libraries l WHERE l.library_id=?1",[library_id.to_string()],
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+    if let Some((lifecycle, integrity, operation)) = state {
+        if lifecycle == "reindexing" {
+            return Err(StoreError::QueryUnavailable { library_id });
+        }
+        if integrity == "failed" {
+            return Err(StoreError::Protected(format!(
+                "library.integrity: library {library_id} integrity check failed ({})",
+                operation.unwrap_or_default()
+            )));
+        }
     }
     Ok(())
 }
@@ -360,18 +367,6 @@ pub(crate) fn library_item_page_on(
     query: &LibraryQuery,
 ) -> Result<(ItemPage, super::stats::QueryWorkStats), StoreError> {
     ensure_library_query_ready_on(conn, query.library_id)?;
-    let (integrity, op_id): (String, Option<String>) = conn.query_row(
-        "SELECT l.integrity_state,
-         (SELECT operation_id FROM library_operations WHERE library_id=l.library_id AND kind='integrity' AND state IN ('failed','succeeded') ORDER BY updated_at_ms DESC LIMIT 1)
-         FROM libraries l WHERE l.library_id=?1", [query.library_id.to_string()],
-        |r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or_else(|| ("unknown".into(),None));
-    if integrity == "failed" {
-        return Err(StoreError::Protected(format!(
-            "library.integrity: library {} integrity check failed ({})",
-            query.library_id,
-            op_id.unwrap_or_default()
-        )));
-    }
     let base = ItemQuerySql::build_for_order(
         query.library_id,
         &query.filter,

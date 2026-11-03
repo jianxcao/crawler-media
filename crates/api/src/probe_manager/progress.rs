@@ -202,12 +202,11 @@ impl CaptureGate for MetadataPriorityGate {
             .map(|()| row.file.library_id.to_string());
         // A registry-backed capture without an active original lease fails closed.
         // Never switch an old pipeline to a new Library at the same path.
-        if let Some(owners) = &self.owners {
-            if let Some((original, control)) = owners.get(&row.file.file_id.to_string())
-                && owner.as_ref().is_some_and(|owner| owner == original)
-            {
-                return control.clone();
-            }
+        if let Some(owners) = &self.owners
+            && let Some((original, control)) = owners.get(&row.file.file_id.to_string())
+            && owner.as_ref().is_some_and(|owner| owner == original)
+        {
+            return control.clone();
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();

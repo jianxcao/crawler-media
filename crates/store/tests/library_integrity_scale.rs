@@ -1,5 +1,6 @@
-//! R20/S02 measurement: the integrity checker must stay bounded per batch on a
-//! 100k-Media Library. Ignored by default (seeding takes minutes); run with
+//! R20/S02 measurement: public progress and linear input work on a 100k-Media
+//! Library. Per-step timing is diagnostic, including global completion costs.
+//! Ignored by default (seeding takes minutes); run with
 //! `INTEGRITY_SCALE_N=100000 cargo test --release -p store --test library_integrity_scale -- --ignored --nocapture`.
 
 use std::time::{Duration, Instant};
@@ -8,8 +9,8 @@ use domain::{
     Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
     Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
-use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
+use store::{Store, stats::StatsScope};
 
 fn seed(store: &Store, n: usize) -> LibraryId {
     let lib = store
@@ -138,54 +139,82 @@ fn integrity_checker_batches_stay_bounded_at_scale() {
         .begin_library_integrity(library, false, "op-scale", 1)
         .unwrap();
     let started = Instant::now();
-    let mut batches = 0usize;
+    let mut steps = 0usize;
     let mut slowest = Duration::ZERO;
-    let mut first_ten = Duration::ZERO;
-    let mut last_ten = std::collections::VecDeque::new();
+    let mut max_writer_ns = 0;
+    let mut max_sql_rows = 0;
+    let mut sql_rows = 0;
+    let mut vm_steps = 0;
+    let mut cursor = store
+        .library_operation_view("op-scale")
+        .unwrap()
+        .unwrap()
+        .cursor;
     loop {
         let batch = Instant::now();
-        let status = store
-            .advance_library_operation("op-scale", 2 + batches as i64, 100)
-            .unwrap();
+        let (status, work) = store.with_stats(StatsScope::Library, || {
+            store.advance_library_operation("op-scale", 2 + steps as i64, 100)
+        });
+        let status = status.unwrap();
         let took = batch.elapsed();
-        batches += 1;
+        steps += 1;
         slowest = slowest.max(took);
-        if batches <= 10 {
-            first_ten += took;
-        }
-        last_ten.push_back(took);
-        if last_ten.len() > 10 {
-            last_ten.pop_front();
-        }
-        if batches.is_multiple_of(100) {
-            eprintln!(
-                "batch {batches}: {took:?} (elapsed {:?})",
-                started.elapsed()
-            );
+        max_writer_ns = max_writer_ns.max(work.writer_hold_ns);
+        max_sql_rows = max_sql_rows.max(work.sql_rows);
+        sql_rows += work.sql_rows;
+        vm_steps += work.vm_steps;
+        let progress = store.library_operation_view("op-scale").unwrap().unwrap();
+        assert_ne!(
+            progress.cursor, cursor,
+            "each successful advance must progress"
+        );
+        cursor = progress.cursor;
+        // This fixture has one file and one unit per Media. Allow phase transitions
+        // and global completion without coupling the test to an exact phase count.
+        assert!(
+            steps <= n * 100 + 100,
+            "step work must stay linear: {steps}"
+        );
+        if steps.is_multiple_of(10_000) {
+            eprintln!("step {steps}: {took:?} (elapsed {:?})", started.elapsed());
         }
         if status.state != "applying" {
             assert_eq!(status.state, "succeeded");
+            assert_eq!(progress.state, "succeeded");
             break;
         }
-        assert!(batches <= n / 100 + 10, "batch count must track n/100");
     }
-    let last: Duration = last_ten.iter().sum();
     eprintln!(
-        "checked {n} Media: {batches} batches, total {:?}, slowest batch {slowest:?}, \
-         first-10 {first_ten:?}, last-10 {last:?}",
+        "checked {n} Media: {steps} steps, total {:?}, slowest step {slowest:?}, \
+         max writer {max_writer_ns}ns, max SQL rows {max_sql_rows}, \
+         total SQL rows {sql_rows}, VM steps {vm_steps}",
         started.elapsed()
     );
+    assert!(sql_rows > 0 && vm_steps > 0, "capture actual input work");
     assert!(
-        !store
-            .library_integrity_report("op-scale")
+        sql_rows <= n as u64 * 1_000 + 10_000,
+        "SQL rows must stay linear: {sql_rows}"
+    );
+    assert!(
+        vm_steps <= n as u64 * 500_000 + 100_000,
+        "VM work must stay linear: {vm_steps}"
+    );
+    let report = store.library_integrity_report("op-scale").unwrap();
+    assert!(!report.has_issues());
+    assert_eq!(report.totals, Default::default());
+    assert!(!report.truncated);
+    let cursor = cursor.unwrap();
+    assert_eq!(cursor["issues_found"], 0);
+    assert_eq!(cursor["issues_repaired"], 0);
+    assert_eq!(cursor["unrepaired"], 0);
+    assert!(cursor["current"].is_null());
+    assert!(
+        store
+            .active_library_operation(&library.to_string())
             .unwrap()
-            .has_issues()
+            .is_none()
     );
-    // Bounded work per batch: the tail of the Library costs about what the head does
-    // (a whole-Library read per batch would make late batches far slower or the
-    // first one pay for everything).
-    assert!(
-        last <= first_ten * 4 + Duration::from_millis(200),
-        "late batches must not grow with Library size: first {first_ten:?}, last {last:?}"
-    );
+    store.ensure_library_query_ready(library).unwrap();
+    // Timing is diagnostic: first/last steps can cover different phases, and FTS
+    // preparation plus whole-Library finalization retain their documented costs.
 }

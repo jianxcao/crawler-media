@@ -7,14 +7,13 @@ pub(crate) mod entity_integrity;
 pub(crate) mod expected;
 mod people;
 mod protocol;
-mod repair;
+pub(crate) mod repair;
 pub(crate) mod search;
 pub(crate) mod search_integrity;
 mod types;
 use crate::StoreError;
 pub(crate) use browse::sync_terms;
-pub(crate) use expected::{ExpectedProjection, expected_projection};
-pub(crate) use repair::{projection_matches, repair_projection};
+pub(crate) use expected::ExpectedProjection;
 use rusqlite::{Connection, OptionalExtension, params};
 pub(crate) use types::{ProjectionBefore, ProjectionDelta, ProjectionKey};
 

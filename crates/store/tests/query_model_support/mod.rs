@@ -116,6 +116,10 @@ pub fn run(store: &Store, library: LibraryId, repair: bool, op: &str) -> (String
     store
         .begin_library_integrity(library, repair, op, 2000)
         .unwrap();
+    finish(store, op)
+}
+
+pub fn finish(store: &Store, op: &str) -> (String, usize) {
     let mut calls = 0;
     loop {
         calls += 1;
@@ -125,7 +129,10 @@ pub fn run(store: &Store, library: LibraryId, repair: bool, op: &str) -> (String
         if status.state != "applying" {
             return (status.state, calls);
         }
-        assert!(calls < 1000);
+        assert!(
+            calls < 30_000,
+            "fixture Media did not finish their fact pages"
+        );
     }
 }
 

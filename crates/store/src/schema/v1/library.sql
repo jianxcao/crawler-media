@@ -319,6 +319,7 @@ CREATE TABLE user_library_continue_units (
 ) WITHOUT ROWID;
 CREATE INDEX user_continue_scope ON user_library_continue_units(user_id,media_id,season,episode,library_id);
 CREATE INDEX user_continue_media ON user_library_continue_units(media_id,library_id,season,episode);
+CREATE INDEX user_continue_integrity ON user_library_continue_units(library_id,media_id,user_id,season,episode);
 CREATE INDEX user_continue_resume ON user_library_continue_units(user_id,watch_activity_at DESC,media_id,library_id,season,episode) WHERE position_ms>0;
 CREATE INDEX user_continue_owner_resume ON user_library_continue_units(user_id,library_id,media_id,watch_activity_at DESC,season DESC,episode DESC) WHERE position_ms>0;
 CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(user_id,library_id,media_id,season,watch_activity_at DESC,episode DESC) WHERE position_ms>0;
@@ -395,6 +396,20 @@ CREATE TABLE library_query_count_rebuild (
  member_count INTEGER NOT NULL CHECK(member_count>=0),
  PRIMARY KEY(operation_id,surface,dimension,value)
 );
+CREATE TABLE library_integrity_rows (
+ operation_id TEXT NOT NULL REFERENCES library_operations(operation_id) ON DELETE CASCADE,
+ media_id TEXT NOT NULL REFERENCES media(media_id),
+ surface TEXT NOT NULL CHECK(surface IN ('card','unit','user','continue','web_term','protocol_term','person','entity','member')),
+ user_id TEXT NOT NULL DEFAULT '', season INTEGER NOT NULL DEFAULT -1, episode INTEGER NOT NULL DEFAULT -1,
+ key_a TEXT NOT NULL DEFAULT '', key_b TEXT NOT NULL DEFAULT '', key_c TEXT NOT NULL DEFAULT '',
+ row_json TEXT NOT NULL CHECK(json_valid(row_json) AND json_type(row_json)='object'),
+ PRIMARY KEY(operation_id,media_id,surface,user_id,season,episode,key_a,key_b,key_c),
+ CHECK((surface IN ('user','continue') AND user_id<>'') OR (surface NOT IN ('user','continue') AND user_id='')),
+ CHECK((surface IN ('unit','continue') AND ((season=-1 AND episode=-1) OR (season>=0 AND episode>=0))) OR (surface NOT IN ('unit','continue') AND season=-1 AND episode=-1)),
+ CHECK(surface NOT IN ('card','unit','user','continue') OR (key_a='' AND key_b='' AND key_c='')),
+ CHECK(surface NOT IN ('web_term','protocol_term','entity') OR key_c='')
+) WITHOUT ROWID;
+CREATE INDEX integrity_rows_media ON library_integrity_rows(media_id);
 CREATE TABLE library_removals (
  operation_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
  config_revision INTEGER NOT NULL, snapshot_cursor TEXT NOT NULL DEFAULT '', snapshot_done INTEGER NOT NULL DEFAULT 0, total_files INTEGER NOT NULL DEFAULT 0,

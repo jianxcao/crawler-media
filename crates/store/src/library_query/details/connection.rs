@@ -28,26 +28,6 @@ impl crate::LibraryConnection<'_> {
         locale: &str,
     ) -> Result<Option<LibraryItemDetail>, StoreError> {
         self.ensure_library_query_ready(library_id)?;
-        let (integrity, op_id): (String, Option<String>) = self
-            .library
-            .query_row(
-                "SELECT l.integrity_state,
-                        (SELECT operation_id FROM library_operations WHERE library_id = l.library_id AND kind = 'integrity' AND state IN ('failed', 'succeeded') ORDER BY updated_at_ms DESC LIMIT 1)
-                 FROM libraries l WHERE l.library_id = ?1",
-                params![library_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .unwrap_or_else(|| ("unknown".into(), None));
-
-        if integrity == "failed" {
-            let op_str = op_id.unwrap_or_default();
-            return Err(StoreError::Protected(format!(
-                "library.integrity: library {} integrity check failed ({op_str})",
-                library_id
-            )));
-        }
-
         let Some(item) = self.library_item_row(library_id, media_id)? else {
             return Ok(None);
         };

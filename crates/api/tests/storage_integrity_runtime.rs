@@ -56,7 +56,7 @@ async fn integrity_check_and_repair_http_endpoints() {
     let status = {
         let shared = state.store();
         let store = shared.as_ref();
-        store.advance_library_operation(&op_id, 1000, 100).unwrap()
+        finish_integrity(store, &op_id, 1000)
     };
     assert_eq!(status.state, "succeeded");
 
@@ -85,9 +85,7 @@ async fn integrity_check_and_repair_http_endpoints() {
     let r_status = {
         let shared = state.store();
         let store = shared.as_ref();
-        store
-            .advance_library_operation(&repair_op_id, 2000, 100)
-            .unwrap()
+        finish_integrity(store, &repair_op_id, 2000)
     };
     assert_eq!(r_status.state, "succeeded");
 
@@ -100,6 +98,22 @@ async fn integrity_check_and_repair_http_endpoints() {
     );
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+fn finish_integrity(
+    store: &store::Store,
+    operation: &str,
+    now: i64,
+) -> store::playback::OperationStatus {
+    for step in 0..1_000 {
+        let status = store
+            .advance_library_operation(operation, now + step, 100)
+            .unwrap();
+        if status.state != "applying" {
+            return status;
+        }
+    }
+    panic!("Integrity did not finish");
 }
 
 fn seed_integrity_movie(state: &api::ApiState) -> (LibraryId, MediaId) {

@@ -1,4 +1,3 @@
-use axum::http::StatusCode;
 use axum::response::Response;
 use domain::UserId;
 use std::collections::HashMap;
@@ -45,11 +44,7 @@ pub(crate) async fn collect_statistics_for_roster(
                     .map(|stats| (library.id, stats))
                     .map_err(|error| {
                         tracing::error!(%error, "Library roster statistics failed");
-                        crate::http::err(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "store.error",
-                            &error.to_string(),
-                        )
+                        crate::http::library::browse_store_error(error)
                     })
             })
             .collect()

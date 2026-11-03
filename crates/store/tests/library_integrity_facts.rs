@@ -114,7 +114,10 @@ fn run(store: &Store, library: LibraryId, repair: bool, op: &str) -> (String, us
         if status.state != "applying" {
             return (status.state, calls);
         }
-        assert!(calls < 50);
+        assert!(
+            calls < 1_000,
+            "all three Media must finish their fact pages"
+        );
     }
 }
 

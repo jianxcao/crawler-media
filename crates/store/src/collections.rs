@@ -51,7 +51,13 @@ impl Store {
 
     pub fn delete_collection(&self, id: &str) -> Result<bool, StoreError> {
         let exists = self.with_writer(crate::Db::Library, |conn| {
-            Ok(conn.execute("UPDATE collections SET deleting=1 WHERE id=?1", [id])? > 0)
+            let tx = crate::write_tx(conn)?;
+            crate::library_operations::integrity_guard::ensure_collection_integrity_writable(
+                &tx, id,
+            )?;
+            let exists = tx.execute("UPDATE collections SET deleting=1 WHERE id=?1", [id])? > 0;
+            tx.commit()?;
+            Ok(exists)
         })?;
         if !exists {
             return Ok(false);

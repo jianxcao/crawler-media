@@ -70,6 +70,12 @@ pub(super) fn invalid(message: &str) -> Response {
 pub(super) fn store_error(error: StoreError) -> Response {
     match error {
         StoreError::Invalid(message) => invalid(&message),
+        error @ StoreError::QueryUnavailable { .. } => {
+            crate::http::library::browse_store_error(error)
+        }
+        StoreError::Protected(message) if message.starts_with("library.integrity:") => {
+            crate::http::library::browse_store_error(StoreError::Protected(message))
+        }
         error => {
             tracing::error!(%error, "Favorite selection failed");
             err(
@@ -146,6 +152,9 @@ pub(super) fn validate(
     let libraries = crate::visible_scope::VisibleLibraries::load(store, Some(user))?.ids();
     if libraries != snapshot.libraries {
         return Ok(false);
+    }
+    for library in &libraries {
+        store.ensure_library_query_ready(*library)?;
     }
     let files = store
         .file_coverage_for_media_batch(&snapshot.media)?

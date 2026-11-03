@@ -58,7 +58,7 @@ pub(crate) struct Facts {
 }
 
 /// File counts and unit facts derived from the published files of one media.
-#[derive(Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Counts {
     pub(crate) file: i64,
     pub(crate) available: i64,

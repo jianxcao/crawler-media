@@ -115,7 +115,7 @@ mod retention;
 mod sessions;
 mod unit_resume;
 mod units;
-mod user_summary;
+pub(crate) mod user_summary;
 mod watch_aggregate;
 
 pub use assertions::{EffectiveAssertion, PlayedAssertionScope};

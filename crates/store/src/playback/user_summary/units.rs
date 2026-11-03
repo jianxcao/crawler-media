@@ -1,6 +1,5 @@
 //! Sparse available effective-unplayed coordinates; unchanged heartbeats write no rows.
 use super::*;
-use crate::query_projection::expected::OwnedRow;
 use std::collections::BTreeMap;
 
 type Coordinates = BTreeMap<(i32, i32), (i64, i64)>;
@@ -33,32 +32,6 @@ fn derive(
                 .map(|fact| (fact.position_ms, fact.watch_activity_at))
                 .unwrap_or_default();
             (unit, state)
-        })
-        .collect()
-}
-pub(super) fn expected(
-    user: &str,
-    library: &str,
-    media: MediaId,
-    is_tv: bool,
-    available: &[(i32, i32)],
-    facts: &HashMap<(i32, i32), PlaybackFact>,
-) -> Vec<OwnedRow> {
-    derive(is_tv, available, facts)
-        .into_iter()
-        .map(|((season, episode), (position, clock))| {
-            [
-                ("user_id", rusqlite::types::Value::from(user.to_string())),
-                ("library_id", library.to_string().into()),
-                ("media_id", media.to_string().into()),
-                ("season", season.into()),
-                ("episode", episode.into()),
-                ("position_ms", position.into()),
-                ("watch_activity_at", clock.into()),
-            ]
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect()
         })
         .collect()
 }

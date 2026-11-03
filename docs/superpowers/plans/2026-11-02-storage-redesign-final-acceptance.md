@@ -48,7 +48,9 @@
 
 Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89ecc311`；marker `f39aaca1`；cover-generator `4c8d8bd8`；media-server `65d14859`；jobs `a5b44c3e`；domain `0f81938b`；store `09a9a5a4`；api `b8bb316c`。
 
-2026-11-03 审核修复另见[固定基线后的修复记录](../../audits/2026-11-02-storage-redesign-review.md)：`18bad154`、`2e378ca2`、`64432d3e`、`4d681e8f`、`b89769d3`、`c476b43a`、`fa0f8e05`、`df1f473d`、`cf012c99`、`2b3c160d`。Task9 五 crate 与 Task10 四 crate、Web 和 clippy 的局部结果各按对应版本记录；最终 workspace 与下方运行门仍待执行，不拼接为单轮通过。
+2026-11-03 审核修复另见[固定基线后的修复记录](../../audits/2026-11-02-storage-redesign-review.md)：`18bad154`、`2e378ca2`、`64432d3e`、`4d681e8f`、`b89769d3`、`c476b43a`、`fa0f8e05`、`df1f473d`、`cf012c99`、`2b3c160d`、`938a9b89`、`9a9dcbbb`。Task9 五 crate 与 Task10 四 crate、Web 和 clippy 的局部结果各按对应版本记录。workspace 全套已执行一次，开始于 `2b3c160d`、仅文档/注释变化后结束于 `938a9b89`：退出0、588个结果组、3842 passed、0 failed、26 ignored（含子进程汇总，非去重数）；后续 Rust 修改另跑受影响测试，不改写该次版本。
+
+早期候选 `938a9b89809e` 的491个真实 STRM/pan 来源副本功能轮与独立 Transfer 轮已执行；Transfer 使用真实视频和 fake qB。删除并发用例发现成功后约441ms仍补写一个 NFO，当前仍需修复版回归。普通轮次已清理独立数据库/STRM副本并核对原始清单。页面、当前候选 perfgate、完整容量和多批内存归属尚未闭合；早期候选局部结果不代替最终版本验收。
 
 ## 3. 必须保留的未完成项
 

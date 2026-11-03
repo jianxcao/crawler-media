@@ -32,6 +32,9 @@ impl crate::LibraryConnection<'_> {
         &self,
         q: &PlaybackViewQuery,
     ) -> Result<PlaybackViewPage, StoreError> {
+        for library in &q.libraries {
+            self.ensure_library_query_ready(*library)?;
+        }
         let after = q
             .after
             .as_deref()
@@ -88,6 +91,9 @@ impl crate::LibraryConnection<'_> {
         q: &PlaybackViewQuery,
         start: usize,
     ) -> Result<Option<String>, StoreError> {
+        for library in &q.libraries {
+            self.ensure_library_query_ready(*library)?;
+        }
         if q.after.is_some() {
             return Err(StoreError::Invalid(
                 "favorite position does not accept after".into(),

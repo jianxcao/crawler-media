@@ -447,7 +447,7 @@ fn overlapping_nfo_and_adopted_people_have_one_consistent_projection() {
     f.store
         .begin_library_integrity(library, false, op, 1)
         .unwrap();
-    f.store.advance_library_operation(op, 2, 100).unwrap();
+    finish_integrity(&f.store, op);
     let report = f.store.library_integrity_report(op).unwrap();
     assert!(!report.has_issues(), "{report:?}");
 }
@@ -469,7 +469,7 @@ fn integrity_repairs_entity_memberships_and_aggregated_overlap_counts() {
     drop(db);
     let op = "entity-overlap-repair";
     f.store.begin_library_integrity(a, true, op, 1).unwrap();
-    f.store.advance_library_operation(op, 2, 100).unwrap();
+    finish_integrity(&f.store, op);
     let entities = f
         .store
         .protocol_entities(&f.query(ProtocolEntityKind::Genre))
@@ -576,18 +576,12 @@ fn integrity_excludes_shared_media_owners_but_allows_independent_libraries() {
         matches!(blocked, Err(store::StoreError::Protected(_))),
         "shared owner must not change membership during staged aggregate repair: {blocked:?}"
     );
-    f.store
-        .advance_library_operation("shared-first", 5, 100)
-        .unwrap();
-    f.store
-        .advance_library_operation("independent", 6, 100)
-        .unwrap();
+    finish_integrity(&f.store, "shared-first");
+    finish_integrity(&f.store, "independent");
     f.store
         .begin_library_integrity(b, true, "shared-second", 7)
         .unwrap();
-    f.store
-        .advance_library_operation("shared-second", 8, 100)
-        .unwrap();
+    finish_integrity(&f.store, "shared-second");
     let genres = f
         .store
         .protocol_entities(&f.query(ProtocolEntityKind::Genre))
@@ -610,9 +604,7 @@ fn integrity_excludes_shared_media_owners_but_allows_independent_libraries() {
             .begin_library_integrity(a, true, "reverse-first", 10),
         Err(store::StoreError::Protected(_))
     ));
-    f.store
-        .advance_library_operation("reverse-second", 11, 100)
-        .unwrap();
+    finish_integrity(&f.store, "reverse-second");
 }
 
 #[test]
@@ -664,7 +656,18 @@ fn staged_integrity_blocks_shared_locale_rebuild_but_allows_independent_rebuild(
         matches!(shared_rebuild, Err(store::StoreError::Protected(_))),
         "a shared locale rebuild must not settle ownership during staged integrity: {shared_rebuild:?}"
     );
-    f.store
-        .advance_library_operation("staged-before-locale", 6, 100)
-        .unwrap();
+    finish_integrity(&f.store, "staged-before-locale");
+}
+
+fn finish_integrity(store: &Store, operation: &str) {
+    for step in 0..10_000 {
+        let status = store
+            .advance_library_operation(operation, step, 100)
+            .unwrap();
+        if status.state != "applying" {
+            assert_eq!(status.state, "succeeded");
+            return;
+        }
+    }
+    panic!("Integrity did not finish");
 }

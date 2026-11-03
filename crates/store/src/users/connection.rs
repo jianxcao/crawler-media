@@ -37,6 +37,7 @@ impl crate::LibraryConnection<'_> {
         admin_id: UserId,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
+        crate::library_operations::integrity_guard::ensure_user_integrity_writable(&tx, user_id)?;
         tx.execute(
             "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
             params![admin_id.to_string(), user_id.to_string()],

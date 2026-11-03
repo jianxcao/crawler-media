@@ -1,15 +1,12 @@
 //! Owned expectations built only from identity, files, metadata and Playback facts.
 use super::types::{CounterMember, Person, ProjectionKey, Terms};
+use crate::StoreError;
 use crate::library_write::reduce as raw;
-use crate::{Store, StoreError};
 use rusqlite::{Connection, params, types::Value};
 use std::collections::{BTreeMap, BTreeSet};
 pub(crate) type OwnedRow = BTreeMap<String, Value>;
 pub(crate) struct ExpectedProjection {
     pub card: Option<OwnedRow>,
-    pub units: Vec<OwnedRow>,
-    pub users: Vec<OwnedRow>,
-    pub continue_units: Vec<OwnedRow>,
     pub web: Terms,
     pub protocol: Terms,
     pub people: BTreeSet<Person>,
@@ -20,9 +17,6 @@ impl ExpectedProjection {
     fn empty() -> Self {
         Self {
             card: None,
-            units: vec![],
-            users: vec![],
-            continue_units: vec![],
             web: Terms::new(),
             protocol: Terms::new(),
             people: BTreeSet::new(),
@@ -31,51 +25,25 @@ impl ExpectedProjection {
         }
     }
 }
-pub(crate) fn expected_projection(
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn expected_header(
     tx: &Connection,
     key: ProjectionKey,
+    counts: &raw::Counts,
+    preferred: Option<String>,
+    seasons: i64,
+    episodes: i64,
+    first: Option<(i32, i32)>,
 ) -> Result<ExpectedProjection, StoreError> {
-    let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
-    let files = raw::published_files(tx, &lib, &media)?;
-    if files.is_empty() {
+    if counts.file == 0 {
         return Ok(ExpectedProjection::empty());
     }
-    let counts = raw::counts_of(&files);
-    let preferred = raw::preferred_file(&files);
+    let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
     let facts = raw::facts_for(tx, &lib, &media, preferred.as_deref())?;
-    let units = unit_rows(tx, &lib, &media)?;
-    let owned: Vec<(i32, i32)> = units
-        .iter()
-        .map(|r| (integer(r, "season") as i32, integer(r, "episode") as i32))
-        .collect();
-    let seasons = owned
-        .iter()
-        .filter(|(s, _)| *s >= 0)
-        .map(|(s, _)| *s)
-        .collect::<BTreeSet<_>>()
-        .len() as i64;
-    let episodes = owned.iter().filter(|(s, e)| *s >= 0 && *e >= 0).count() as i64;
     let (kind, identity) = raw::media_identity(tx, &media)?;
-    let available: Vec<(i32, i32)> = units
-        .iter()
-        .filter(|row| integer(row, "available_file_count") > 0)
-        .map(|row| {
-            (
-                integer(row, "season") as i32,
-                integer(row, "episode") as i32,
-            )
-        })
-        .collect();
-    let first = (kind == "tv")
-        .then(|| {
-            available
-                .iter()
-                .copied()
-                .filter(|&(season, episode)| season >= 0 && episode >= 0)
-                .min()
-        })
-        .flatten();
-    let mut web = raw_terms(tx, &lib, &media, &facts)?;
+    let first = if kind == "tv" { first } else { None };
+    let mut web = selected_terms(tx, &lib, &media, &facts, false)?;
     web.extend(super::browse::buckets(
         facts.year,
         facts.runtime,
@@ -85,19 +53,17 @@ pub(crate) fn expected_projection(
         counts.missing > 0,
         facts.adopted,
     ));
-    let search = crate::protocol_index::expected_search(tx, &lib, &media, &facts.title)?;
     let (protocol, people) = super::protocol::derive(tx, &lib, &media, &web)?;
     let entities = super::entities::derive(tx, &lib, &media, &web)?;
     let mut members = super::counts::members(&kind, &web, &protocol);
     members.extend(super::entities::members(&entities));
-    let users =
-        Store::expected_user_rows(tx, &lib, key.media_id, &owned, &available, kind == "tv")?;
-    let continue_units =
-        Store::expected_continue_rows(tx, &lib, key.media_id, &available, kind == "tv")?;
     let mut card = card_row(
-        tx, &lib, &media, &counts, &facts, preferred, seasons, episodes, kind, identity,
+        tx, &lib, &media, counts, &facts, preferred, seasons, episodes, kind, identity,
     )?;
-    card.insert("search_text".into(), search.into());
+    card.insert(
+        "search_text".into(),
+        crate::protocol_index::expected_search(tx, &lib, &media, &facts.title)?.into(),
+    );
     card.insert("first_owned_season".into(), first.map(|unit| unit.0).into());
     card.insert(
         "first_owned_episode".into(),
@@ -109,9 +75,6 @@ pub(crate) fn expected_projection(
     );
     Ok(ExpectedProjection {
         card: Some(card),
-        units,
-        users,
-        continue_units,
         web,
         protocol,
         people,
@@ -119,7 +82,7 @@ pub(crate) fn expected_projection(
         members,
     })
 }
-pub(super) fn integer(row: &OwnedRow, key: &str) -> i64 {
+pub(crate) fn integer(row: &OwnedRow, key: &str) -> i64 {
     match row.get(key) {
         Some(Value::Integer(n)) => *n,
         _ => 0,
@@ -186,40 +149,21 @@ fn card_row(
     row.insert("query_config_revision".into(), revision.into());
     Ok(row)
 }
-fn unit_rows(tx: &Connection, lib: &str, media: &str) -> Result<Vec<OwnedRow>, StoreError> {
-    let sql="SELECT u.season,u.episode,COUNT(DISTINCT u.file_id),COUNT(DISTINCT CASE WHEN f.presence_state='present' THEN u.file_id END),
-        (SELECT u2.file_id FROM library_file_units u2 JOIN library_files f2 ON f2.file_id=u2.file_id
-        WHERE f2.library_id=?1 AND f2.media_id=?2 AND f2.publication_state='published' AND +f2.presence_state='present'
-        AND u2.season=u.season AND u2.episode=u.episode ORDER BY f2.file_revision DESC,f2.file_id ASC LIMIT 1)
-        FROM library_file_units u JOIN library_files f ON f.file_id=u.file_id
-        WHERE f.library_id=?1 AND f.media_id=?2 AND f.publication_state='published' GROUP BY u.season,u.episode";
-    Ok(tx
-        .prepare_cached(sql)?
-        .query_map(params![lib, media], |r| {
-            let mut row = OwnedRow::new();
-            for (i, k) in [
-                "season",
-                "episode",
-                "file_count",
-                "available_file_count",
-                "preferred_file_id",
-            ]
-            .iter()
-            .enumerate()
-            {
-                row.insert(k.to_string(), r.get(i)?);
-            }
-            row.insert("library_id".into(), lib.to_string().into());
-            row.insert("media_id".into(), media.to_string().into());
-            Ok(row)
-        })?
-        .collect::<Result<_, _>>()?)
-}
 pub(crate) fn raw_terms(
     tx: &Connection,
     lib: &str,
     media: &str,
+    facts: &raw::Facts,
+) -> Result<Terms, StoreError> {
+    selected_terms(tx, lib, media, facts, true)
+}
+
+fn selected_terms(
+    tx: &Connection,
+    lib: &str,
+    media: &str,
     f: &raw::Facts,
+    include_resolution: bool,
 ) -> Result<Terms, StoreError> {
     let mut terms = Terms::new();
     for genre in &f.genres {
@@ -242,6 +186,9 @@ pub(crate) fn raw_terms(
             "SELECT c.id FROM collections c JOIN collection_items ci ON ci.collection_id=c.id WHERE ci.media_id=?2 AND c.deleting=0 AND c.visibility='public' AND c.user_id IS NULL AND ?1 IS NOT NULL",
         ),
     ] {
+        if kind == "resolution" && !include_resolution {
+            continue;
+        }
         for value in tx
             .prepare_cached(sql)?
             .query_map(params![lib, media], |r| r.get::<_, String>(0))?

@@ -126,20 +126,6 @@ pub(super) fn refresh(
     Ok(())
 }
 
-/// Rebuild even clean documents during an explicit repair operation.
-pub(crate) fn rewrite_document(
-    tx: &Connection,
-    owner: &crate::library_operations::integrity_guard::IntegrityOwner,
-    key: ProjectionKey,
-    expected: &ExpectedProjection,
-) -> Result<(), StoreError> {
-    owner.validate(tx, key.library_id)?;
-    let old = search::rowid(tx, key)?;
-    search::remove(tx, old)?;
-    search::sync(tx, key, &expected.people)?;
-    refresh(tx, key, old, expected)
-}
-
 /// Orphan postings have no Library owner. Explicit maintenance may remove a
 /// bounded page globally; ordinary writes cannot publish such a half-state.
 pub(crate) fn finish(

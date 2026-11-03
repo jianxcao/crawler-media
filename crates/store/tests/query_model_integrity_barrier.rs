@@ -141,12 +141,28 @@ fn snapshot(db: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> 
 
 #[test]
 fn final_count_swap_failure_retains_owner_and_resumes_after_reopen() {
-    let (tmp, store, lib, _) = setup();
+    let (tmp, store, lib, ids) = setup();
     let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     db.execute("UPDATE library_query_counts SET member_count=0", [])
         .unwrap();
     store.begin_library_integrity(lib, true, "swap", 0).unwrap();
-    store.advance_library_operation("swap", 1, 3).unwrap();
+    let mut reached_finish = false;
+    for step in 1..1_000 {
+        store.advance_library_operation("swap", step, 3).unwrap();
+        let cursor = store
+            .library_operation_view("swap")
+            .unwrap()
+            .unwrap()
+            .cursor
+            .unwrap();
+        if cursor["current"].is_null()
+            && cursor["last_media_id"].as_str() == ids.last().map(String::as_str)
+        {
+            reached_finish = true;
+            break;
+        }
+    }
+    assert!(reached_finish);
     let before = snapshot(&db);
     db.execute_batch("CREATE TRIGGER reject_swap BEFORE DELETE ON library_query_counts BEGIN SELECT RAISE(ABORT, 'swap fault'); END;").unwrap();
     assert!(store.advance_library_operation("swap", 2, 3).is_err());
@@ -180,10 +196,7 @@ fn final_count_swap_failure_retains_owner_and_resumes_after_reopen() {
     db.execute_batch("DROP TRIGGER reject_swap").unwrap();
     drop(store);
     let store = store::Store::open(tmp.path()).unwrap();
-    assert_eq!(
-        store.advance_library_operation("swap", 4, 3).unwrap().state,
-        "succeeded"
-    );
+    assert_eq!(finish(&store, "swap").0, "succeeded");
     store.ensure_library_query_ready(lib).unwrap();
     run(&store, lib, false, "verify-swap");
     assert!(

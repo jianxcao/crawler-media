@@ -95,31 +95,6 @@ impl crate::LibraryConnection<'_> {
         })
     }
 
-    pub(super) fn advance_integrity_operation(
-        &self,
-        tx: crate::write_tx::SqlTransaction<'_>,
-        library: &str,
-        operation_id: &str,
-        plan_json: &str,
-        batch: usize,
-        now_ms: i64,
-    ) -> Result<OperationStatus, StoreError> {
-        let plan: integrity::IntegrityPlan = serde_json::from_str(plan_json)
-            .map_err(|e| StoreError::Invalid(format!("integrity plan: {e}")))?;
-        match integrity::apply_integrity_batch(&tx, library, &plan, operation_id, batch, now_ms) {
-            Ok(status) => {
-                tx.commit()?;
-                Ok(status)
-            }
-            Err(error) => {
-                tx.rollback()?;
-                self.library.execute("UPDATE library_operations SET state='failed',error=?2,updated_at_ms=?3 WHERE operation_id=?1",params![operation_id,error.to_string(),now_ms])?;
-                tracing::error!(operation_id,%error,"Integrity batch failed; owner retained");
-                Err(error)
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn finish_library_batch(
         &self,
@@ -329,16 +304,6 @@ impl crate::LibraryConnection<'_> {
         if state == SUCCEEDED_STATE || (state == FAILED_STATE && !retryable) {
             tx.commit()?;
             return Store::read_library_operation(self.library, operation_id);
-        }
-        if kind == "integrity" {
-            return self.advance_integrity_operation(
-                tx,
-                &library,
-                operation_id,
-                &plan_json,
-                batch,
-                now_ms,
-            );
         }
         let plan: ReconfigurationPlan = serde_json::from_str(&plan_json)
             .map_err(|error| StoreError::Invalid(format!("operation plan: {error}")))?;

@@ -4,13 +4,13 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-11-03 当前生产 DDL；唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=1`。不可按缓存清空。代码没有历史布局或升级步骤。
+结构核对：2026-11-03 当前生产 DDL；唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=2`。不可按缓存清空。代码没有历史布局或升级步骤。
 
-结构为 **65张业务表（含1张FTS5虚拟表）、651字段、110个显式命名索引、42组FK、122个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；651字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为69、物理声明字段661。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
+结构为 **66张业务表（含1张FTS5虚拟表）、661字段、112个显式命名索引、44组FK、128个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；661字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为70、物理声明字段671。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准；[历史结构审计](../audits/2026-10-26-library-schema-audit.md)仅解释当时裁决，不是初始化步骤。
 
 Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和合并通过 generation fence 及持久阶段跨库恢复，Collection 删除及 orphan 候选按窗口处理。关闭的 fence 和终态记录可能累积。`collections.created_at` 和 `collection_items.added_at` 为 INTEGER 毫秒；集合 cursor 按 `(sort_order, added_at, media_id)` 排序并严格使用数值时间。`items_roster_stats` / `files_roster_stats` 覆盖索引减少回表，精确聚合仍随目标库大小线性增长。
 
-`library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
+`library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。Library 当前布局版本为2，旧布局直接拒绝，不迁移。Integrity 在 reader 中准备有限输入，释放读租约后用短 writer 事务校验 owner revision 与游标并提交；一次 advance 可只推进当前 Media 的一页。失败保留游标和冻结，显式重试恢复。卡片、收藏和用户统计读取沿用完整性屏障。FTS 准备、最终计数/重叠核对及单 Media 已采用元数据的成本仍取决于输入规模，不把整个 operation 描述为恒定工作量。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
 
 删除意图保存 `path_key` 和 `deletion_id`，分别标识固定规范路径与本次删除；`pending_deletions_path_key` 保证每个路径最多一个意图，`pending_file_renames_file` 支持检查文件已有改名工作。它们属于当前 DDL，不需要经过结构升级。
 
@@ -55,7 +55,8 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；操作状态需结合正式operation验收。
 - [library_file_units](#library_file_units) — 5 字段；文件到逻辑单元的覆盖事实；一文件可覆盖多集，同集可有多版本。
 - [library_files](#library_files) — 35 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
-- [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；当前 v1 主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
+- [library_integrity_rows](#library_integrity_rows) — 10字段；Integrity 当前 Media 的分页归约临时事实，仅服务持久操作，完成后分批清理。
+- [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；当前主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
 - [library_items](#library_items) — 39 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
 - [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 输入及导出来源；alias/登记身份和按批迁移原反例已修，完整守恒及 export 故障验收见当前方案。
 - [library_operations](#library_operations) — 11 字段；roots/locale/default_locale/integrity/scrape 持久操作载体。
@@ -546,6 +547,47 @@ CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 CREATE INDEX files_roster_stats ON library_files(library_id,presence_state,publication_state,path_key);
+```
+
+## library_integrity_rows
+
+Integrity 当前 Media 的持久中间结果，按 surface 和类型化稳定键分页；不作为业务事实来源或普通浏览入口。游标保存阶段和固定大小累加器，不保存整个文件、单元或用户列表。当前 Media 完成核对后按页清理，再推进到下一个 Media。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `operation_id` | `TEXT` | 1 | 是 | 无 | 拥有这些中间结果的持久 Integrity 操作；删除操作时级联清理。 |
+| `media_id` | `TEXT` | 2 | 是 | 无 | 当前正在分页检查的 Media；引用检查使用 media_id 前缀索引。 |
+| `surface` | `TEXT` | 3 | 是 | 无 | 本行对应的卡片、单元、用户、继续观看或术语成员投影类别。 |
+| `user_id` | `TEXT` | 4 | 是 | `''` | 用户或继续观看行的用户身份；其他类别为空串。 |
+| `season` | `INTEGER` | 5 | 是 | `-1` | 单元坐标；whole 或不适用时为 -1。 |
+| `episode` | `INTEGER` | 6 | 是 | `-1` | 单元坐标；whole 或不适用时为 -1。 |
+| `key_a` | `TEXT` | 7 | 是 | `''` | 术语、人物或实体的稳定复合键第一部分；卡片和用户单元行为空串。 |
+| `key_b` | `TEXT` | 8 | 是 | `''` | 稳定复合键第二部分；不适用时为空串。 |
+| `key_c` | `TEXT` | 9 | 是 | `''` | 人物等稳定复合键第三部分；不适用时为空串。 |
+| `row_json` | `TEXT` | — | 是 | 无 | 期望投影行的 JSON 对象；解码保留 SQLite 值类型。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE library_integrity_rows (
+ operation_id TEXT NOT NULL REFERENCES library_operations(operation_id) ON DELETE CASCADE,
+ media_id TEXT NOT NULL REFERENCES media(media_id),
+ surface TEXT NOT NULL CHECK(surface IN ('card','unit','user','continue','web_term','protocol_term','person','entity','member')),
+ user_id TEXT NOT NULL DEFAULT '', season INTEGER NOT NULL DEFAULT -1, episode INTEGER NOT NULL DEFAULT -1,
+ key_a TEXT NOT NULL DEFAULT '', key_b TEXT NOT NULL DEFAULT '', key_c TEXT NOT NULL DEFAULT '',
+ row_json TEXT NOT NULL CHECK(json_valid(row_json) AND json_type(row_json)='object'),
+ PRIMARY KEY(operation_id,media_id,surface,user_id,season,episode,key_a,key_b,key_c),
+ CHECK((surface IN ('user','continue') AND user_id<>'') OR (surface NOT IN ('user','continue') AND user_id='')),
+ CHECK((surface IN ('unit','continue') AND ((season=-1 AND episode=-1) OR (season>=0 AND episode>=0))) OR (surface NOT IN ('unit','continue') AND season=-1 AND episode=-1)),
+ CHECK(surface NOT IN ('card','unit','user','continue') OR (key_a='' AND key_b='' AND key_c='')),
+ CHECK(surface NOT IN ('web_term','protocol_term','entity') OR key_c='')
+) WITHOUT ROWID;
+```
+
+**显式命名索引**
+
+```sql
+CREATE INDEX integrity_rows_media ON library_integrity_rows(media_id);
 ```
 
 ## library_item_terms
@@ -2160,6 +2202,7 @@ CREATE TABLE user_library_continue_units (
 **显式命名索引**
 
 ```sql
+CREATE INDEX user_continue_integrity ON user_library_continue_units(library_id,media_id,user_id,season,episode);
 CREATE INDEX user_continue_media ON user_library_continue_units(media_id,library_id,season,episode);
 CREATE INDEX user_continue_owner_resume ON user_library_continue_units(user_id,library_id,media_id,watch_activity_at DESC,season DESC,episode DESC) WHERE position_ms>0;
 CREATE INDEX user_continue_owner_season_resume ON user_library_continue_units(user_id,library_id,media_id,season,watch_activity_at DESC,episode DESC) WHERE position_ms>0;
