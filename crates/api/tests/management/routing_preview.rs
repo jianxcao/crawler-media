@@ -63,7 +63,6 @@ fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_catalog(catalog);

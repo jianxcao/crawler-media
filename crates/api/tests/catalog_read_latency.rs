@@ -145,7 +145,6 @@ fn fixture(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Router) {
         ProfileSet::load(None).unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_catalog(source);

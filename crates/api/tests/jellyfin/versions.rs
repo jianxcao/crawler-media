@@ -52,7 +52,6 @@ fn router_for(store: Store, dir: &Path) -> axum::Router {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.join("stage"))),
-            dir.join("library"),
         )
         .unwrap(),
     )

@@ -368,7 +368,6 @@ async fn list_tasks_does_not_prune_stale_pending_when_snapshots_unsupported() {
             bodies: HashMap::new(),
         }),
         Arc::new(UnsupportedSnapshotDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state);
@@ -628,5 +627,63 @@ async fn d_l4_deleting_a_downloader_orphans_its_pending() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn task_snapshot_exposes_only_supported_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_pending_at(
+        tmp.path(),
+        "https://pt.example/download.php?id=shape",
+        now_secs(),
+    );
+    let body = list_tasks_json(&app(&tmp)).await;
+    let data = body["data"].as_object().unwrap();
+    assert_eq!(
+        data.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["items"]
+    );
+    let items = task_items(&body);
+    assert_eq!(items.len(), 1);
+    let mut expected = vec![
+        "id",
+        "info_hash",
+        "name",
+        "downloader_id",
+        "downloader_name",
+        "progress",
+        "size_bytes",
+        "dlspeed_bytes",
+        "upspeed_bytes",
+        "uploaded_bytes",
+        "completed_bytes",
+        "state",
+        "site_id",
+        "media_item_id",
+        "media_title",
+        "media_kind",
+        "score",
+        "subscriptions",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        items[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(items[0]["state"], "missing");
+    assert_eq!(
+        items[0]["subscriptions"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["id", "media_item_id", "media_kind", "media_title"]
     );
 }

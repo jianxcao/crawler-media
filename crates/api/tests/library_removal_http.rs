@@ -30,7 +30,6 @@ async fn delete_returns_operation_and_status_then_preserves_files() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let root = temp.path().join("extra");

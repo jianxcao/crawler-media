@@ -26,7 +26,6 @@ fn app(root: &Path) -> axum::Router {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     )
@@ -372,7 +371,6 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state.clone());
@@ -400,7 +398,7 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
             .put_setting(
                 &key,
                 &json!({
-                    "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
+                    "version": 1, "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
                     "cursor": null, "error": null, "updated_at": 1
                 })
                 .to_string(),

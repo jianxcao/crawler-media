@@ -20,7 +20,6 @@ fn new_state(temp: &tempfile::TempDir, data_dir: &std::path::Path) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap()
 }

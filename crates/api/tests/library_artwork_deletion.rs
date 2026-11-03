@@ -34,7 +34,6 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     let directory = root.join("extra");

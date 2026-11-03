@@ -3580,7 +3580,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
             engine={engineRef.current}
             qoe={() => liveStats(qoeRef.current)}
             landscape={landscape}
-            diagnostics={null}
             onClose={() => setDiagnosticsOpen(false)}
           />
         ) : null}

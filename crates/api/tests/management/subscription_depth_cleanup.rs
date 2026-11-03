@@ -389,3 +389,48 @@ async fn delete_subscription_can_cascade_torrent_removal() {
         .unwrap();
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn season_cleanup_deletes_the_whole_file_when_selected_units_share_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = authed_app(&tmp);
+    let (id, media_id) = setup_tv_subscription_with_two_seasons(&app, &tmp).await;
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let directory = tmp.path().join("data/library/tv");
+    let shared = directory.join("shared-s1-s2.mkv");
+    std::fs::write(&shared, b"shared").unwrap();
+    store::test_support::publish_fixture_file_units(
+        &store,
+        &FixtureFile {
+            media_id: media_id.parse().unwrap(),
+            path: shared.display().to_string(),
+            ..Default::default()
+        },
+        &[domain::UnitKey::new(1, 2), domain::UnitKey::new(2, 2)],
+    )
+    .unwrap();
+    let result = app
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/subscriptions/{id}/season-cleanup"),
+            Some("management-secret"),
+            json!({
+                "seasons": [2], "delete_library_files": true, "delete_torrents": false,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.status(), StatusCode::OK);
+    assert_eq!(json_body(result).await["data"]["binned"], 2);
+    assert!(
+        !shared.exists(),
+        "a physical file cannot retain its unselected-season bytes"
+    );
+    assert!(!directory.join("s2e1.mkv").exists());
+    assert!(directory.join("s1e1.mkv").exists());
+    let remaining = store
+        .file_coverage_for_media(media_id.parse().unwrap())
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].units, vec![domain::UnitKey::new(1, 1)]);
+}

@@ -159,7 +159,6 @@ pub fn catalog_app(catalog: Arc<dyn Catalog>) -> (tempfile::TempDir, Router) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_catalog(catalog);
@@ -249,7 +248,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap()
         .with_catalog(catalog.clone());

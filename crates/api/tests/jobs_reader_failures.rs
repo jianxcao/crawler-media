@@ -34,7 +34,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-            temp.path().join("library"),
         )
         .unwrap();
         let def = state

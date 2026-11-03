@@ -333,7 +333,6 @@ async fn changing_default_does_not_move_an_existing_pending_task() {
             ProfileSet::load(None).unwrap(),
             fetcher,
             dynamic,
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

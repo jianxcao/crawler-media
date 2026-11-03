@@ -32,16 +32,12 @@ function task(overrides = {}) {
 }
 
 /** 一条订阅投递引用：带媒体身份与集清单——「这部作品被 crawler-media 投递过」的唯一凭据。 */
-function subscription({ mediaItemId = "00000000-0000-4000-8000-000000000007", units = [] } = {}) {
+function subscription({ mediaItemId = "00000000-0000-4000-8000-000000000007" } = {}) {
   return {
     id: "sub-1",
     media_item_id: mediaItemId,
     media_title: "剧",
     media_kind: "tv",
-    poster_url: null,
-    purpose: "download",
-    upgrade_keep_old: false,
-    units,
   };
 }
 
@@ -52,29 +48,6 @@ test("订阅任务在下载器里报错要用户处理", () => {
   const subscribed = { subscriptions: [subscription()] };
   assert.equal(downloadTaskNeedsAttention(task({ ...subscribed, state: "error" }), null), true);
   assert.equal(downloadTaskNeedsAttention(task({ ...subscribed, state: "missing" }), null), true);
-});
-
-test("内容核验证明种子里没有这一集算待办：等它永远等不到", () => {
-  const contentMissing = {
-    subscriptions: [
-      subscription({
-        units: [
-          {
-            season_number: 1,
-            episode_number: 3,
-            status: "downloaded",
-            replaced: false,
-            content_missing: true,
-          },
-        ],
-      }),
-    ],
-  };
-  assert.equal(
-    downloadTaskNeedsAttention(task({ ...contentMissing, state: "completed" }), null),
-    true,
-  );
-  assert.equal(downloadTaskNeedsAttention(task({ state: "completed" }), null), false);
 });
 
 test("手动下载的任务同样受 crawler-media 照看", () => {

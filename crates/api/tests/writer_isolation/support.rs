@@ -155,7 +155,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             fetcher,
             downloader,
-            temp.path().join("library"),
         )
         .unwrap()
         .with_catalog(Arc::new(Offline));

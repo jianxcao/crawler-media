@@ -41,7 +41,6 @@ pub fn build_state(root: &Path, store: Store, executor: Arc<dyn DatabaseExecutor
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_maintenance_executor(executor);

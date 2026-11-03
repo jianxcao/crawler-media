@@ -612,7 +612,6 @@ mod still_fallback_tests {
             indexer::ProfileSet::load(None).unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap()
         .with_poster_fetch(Arc::new(RenameFetch {

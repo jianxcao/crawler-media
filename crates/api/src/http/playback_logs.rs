@@ -276,11 +276,6 @@ pub(crate) async fn clear_history(
     }
 }
 
-#[allow(dead_code)]
-fn _err_shape() -> Response {
-    err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "")
-}
-
 fn history_page(
     store: &crate::Store,
     user_id: domain::UserId,

@@ -517,7 +517,6 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
 

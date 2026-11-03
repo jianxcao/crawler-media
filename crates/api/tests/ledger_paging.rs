@@ -141,7 +141,6 @@ async fn ledger_rows_preserve_owner_media_transfer_and_size() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("out"),
     )
     .unwrap()
     .with_file_stat_read(Arc::new(PersistedStrmSize));
@@ -213,7 +212,6 @@ fn ledger_work(files: usize) -> QueryMetricsSnapshot {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("out"),
     )
     .unwrap();
     let (rows, metrics) = runtime().block_on(measured_ledger(state));

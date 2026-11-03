@@ -23,7 +23,6 @@ async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let root = temp.path().join("extra");
@@ -79,7 +78,6 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let root = temp.path().join("stuck");

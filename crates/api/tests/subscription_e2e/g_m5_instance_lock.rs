@@ -14,7 +14,6 @@ fn open(dir: &std::path::Path) -> ApiState {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(super::harness::SearchFixture::empty()),
         Arc::new(downloader::MemoryDownloader::new(dir.join("stage"))),
-        dir.join("library"),
     )
     .unwrap()
 }

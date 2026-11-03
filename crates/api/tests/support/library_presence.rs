@@ -105,7 +105,6 @@ impl PresenceFixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap();
 

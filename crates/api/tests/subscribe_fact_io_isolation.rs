@@ -97,7 +97,6 @@ fn make_state(root: &Path, files: Arc<GatedFileStatRead>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_file_stat_read(files)

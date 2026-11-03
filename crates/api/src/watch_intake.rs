@@ -236,7 +236,6 @@ mod tests {
             ProfileSet::load(None).unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap();
 
@@ -260,7 +259,6 @@ mod tests {
             ProfileSet::load(None).unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap();
         let tv_library = state
@@ -324,7 +322,6 @@ mod tests {
             ProfileSet::load(None).unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap();
         let tv_library = state

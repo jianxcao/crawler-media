@@ -39,13 +39,6 @@ impl Store {
         self.insert_user_with_prepared_password(user, &prepared)
     }
 
-    /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
-    pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
-        let prepared =
-            crate::password::PreparedPassword::new(password).map_err(StoreError::PasswordHash)?;
-        self.update_user_with_prepared_password(user, &prepared)
-    }
-
     /// 在单一事务中原子插入种子管理员（id、login、password、role=admin）并登记 CLI Token。
     /// 任何一步失败整个事务完整回滚，绝不残留无密码或无 Token 的半成状态。
     pub fn seed_admin_with_credentials(

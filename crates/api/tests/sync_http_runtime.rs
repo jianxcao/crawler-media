@@ -216,7 +216,6 @@ fn make_state(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         downloader,
-        root.join("library"),
     )
     .unwrap()
     .with_notify_transport(transport)

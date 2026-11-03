@@ -258,7 +258,6 @@ mod tests {
             ProfileSet::load(None).unwrap(),
             scripted.clone(),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap();
         let site = Site {

@@ -59,7 +59,6 @@ fn boot_inside_runtime(root: &std::path::Path) -> (tokio::runtime::Runtime, ApiS
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap()
     });

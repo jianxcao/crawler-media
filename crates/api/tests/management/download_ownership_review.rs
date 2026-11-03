@@ -106,7 +106,6 @@ fn setup(tmp: &tempfile::TempDir) -> (axum::Router, Store, Arc<OwnedDownloads>) 
             bodies: HashMap::new(),
         }),
         downloads.clone(),
-        tmp.path().join("library"),
     )
     .unwrap();
     (
@@ -443,7 +442,6 @@ fn live_task_setup(tmp: &tempfile::TempDir) -> (axum::Router, Store, Arc<LiveTas
             bodies: HashMap::new(),
         }),
         downloads.clone(),
-        tmp.path().join("library"),
     )
     .unwrap();
     (

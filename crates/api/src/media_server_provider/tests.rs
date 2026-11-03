@@ -27,7 +27,6 @@ fn readonly_page_keeps_original_token_and_skips_incidental_device_binding() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap();
     let user_id = state

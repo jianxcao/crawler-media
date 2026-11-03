@@ -196,7 +196,6 @@ fn app_seeded(root: &Path, seed: impl FnOnce(&Path)) -> (axum::Router, MediaId, 
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap()
         .with_image_fetch(Arc::new(|url| {
@@ -264,7 +263,6 @@ fn app_with_clock(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_playback_clock(clock);

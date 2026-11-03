@@ -85,6 +85,22 @@ async fn assert_progress_and_preview(app: &axum::Router, id: &str) {
             .unwrap(),
     )
     .await;
+    assert_eq!(
+        preview["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "library_bytes",
+            "library_file_count",
+            "torrent_count",
+            "torrent_count_inferred",
+            "torrent_titles"
+        ]
+    );
+    assert_eq!(preview["data"]["torrent_count_inferred"], false);
     assert_eq!(preview["data"]["torrent_count"], 1);
     assert!(
         preview["data"]["torrent_titles"][0]
@@ -313,5 +329,47 @@ async fn create_and_patch_report_timestamp_read_errors_after_business_write() {
     assert_eq!(
         state, "paused",
         "render errors do not roll back committed business writes"
+    );
+}
+
+#[tokio::test]
+async fn removal_preview_marks_matching_downloader_counts_as_inferred() {
+    let tmp = tempfile::tempdir().unwrap();
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    downloader.push_snapshot(downloader::TaskSnapshot {
+        tag: downloader::TASK_TAG.into(),
+        name: "The Matrix.2026.1080p".into(),
+        ..Default::default()
+    });
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        downloader,
+    ));
+    let created = json_body(app.clone().oneshot(request("POST", "/api/v1/subscriptions",
+        Some("management-secret"), json!({
+            "media": { "kind": "movie", "title": "The Matrix" }, "coverage": { "kind": "movie" },
+        }))).await.unwrap()).await;
+    let id = created["data"]["id"].as_str().unwrap();
+    let preview = json_body(
+        app.oneshot(request(
+            "GET",
+            &format!("/api/v1/subscriptions/{id}/removal-preview"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        preview["data"],
+        json!({
+            "library_file_count": 0, "library_bytes": 0, "torrent_count": 1,
+            "torrent_count_inferred": true, "torrent_titles": ["The Matrix.2026.1080p"],
+        })
     );
 }

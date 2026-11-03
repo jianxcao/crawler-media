@@ -23,17 +23,13 @@ import {
 } from "@/components/icons";
 import { Modal } from "@/components/modal";
 import { OverflowText } from "@/components/overflow-text";
-import { PosterImage } from "@/components/poster-image";
 import {
   deleteDownloadTask,
   replaceDownloadTask,
   type DownloadTask,
-  type DownloadTaskSource,
 } from "@/lib/api/downloaders";
 import { useDownloadTasks } from "@/lib/download-tasks";
 import { formatBytes } from "@/lib/format";
-import { imageUrl } from "@/lib/image-proxy";
-import { summarizeEpisodeUnits } from "@/lib/episode-units";
 import {
   buildIngestHistoryDetail,
   type IngestHistoryDetail,
@@ -56,7 +52,6 @@ import {
 import { useJobs } from "@/lib/jobs";
 import type { TaskCenterViewName } from "@/lib/task-center";
 import {
-  contentMissingLabel,
   downloadTaskNeedsAttention,
   isSubscriptionTask,
   taskSourceOf,
@@ -109,7 +104,6 @@ export function TaskCenterView({
   const toast = useToast();
   const { refresh: refreshJobs, upsert } = useJobs();
   const {
-    sources,
     loading,
     error,
     refreshedAt,
@@ -236,7 +230,6 @@ export function TaskCenterView({
     (showActive ? activeTotal : 0) +
     (showActive && boostTasks.length > 0 ? 1 : 0) +
     (showHistory ? standaloneHistoricalJobs.length : 0);
-  const failedSources = sources.filter((source) => source.status !== "active");
   const viewCounts: Partial<Record<TaskCenterViewName, number>> = {
     attention: attentionTotal,
     active: activeTotal,
@@ -245,12 +238,7 @@ export function TaskCenterView({
 
   return (
     <>
-        {/* 一切正常时的"自动更新正常 / 下载器 N/N 可用"是纯噪音，占掉首屏一整条；
-            出问题时下面的 SourceWarning 会指名道姓说清哪个下载器怎么了并给出设置入口，
-            比一句"0/1 可用"信息量更大，所以这条状态条整体去掉，只保留告警 */}
-        {(failedSources.length > 0 || error) && (
-          <SourceWarning sources={failedSources} error={error} />
-        )}
+        {error && <SourceWarning error={error} />}
 
         <div className="mt-6 flex items-center gap-3 border-b border-white/[0.08] max-md:mt-5">
           <div className="scroll-thin flex min-w-0 flex-1 gap-1 overflow-x-auto pb-2">
@@ -453,16 +441,11 @@ function DeleteDownloadTaskDialog({
   );
 }
 
-function SourceWarning({ sources, error }: { sources: DownloadTaskSource[]; error: string | null }) {
-  const message = error
-    ? error
-    : sources
-        .map((source) => `「${source.name}」${source.message || "当前不可用"}`)
-        .join("；");
+function SourceWarning({ error }: { error: string }) {
   return (
     <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sub leading-6 text-amber-100">
       <InfoIcon className="mt-0.5 size-4 shrink-0" />
-      <p className="min-w-0 flex-1">{message}</p>
+      <p className="min-w-0 flex-1">{error}</p>
       <Link to={"/settings/downloaders"}
         className="shrink-0 font-semibold text-amber-50 hover:underline"
       >
@@ -1016,11 +999,6 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-2">
       <div className="flex w-[4.5rem] shrink-0">
-        {task.site_name && (
-          <span className="truncate rounded-full bg-white/[0.06] px-2 py-0.5 text-caption font-medium text-white/55">
-            {task.site_name}
-          </span>
-        )}
       </div>
       {name}
       {/* 窄屏字号比桌面大一档（--text-caption 11px → 13px），5.5rem 装不下
@@ -1200,56 +1178,6 @@ function ingestOwnsTaskState(task: DownloadTask, ingestJob: JobView | null): boo
   return task.state === "completed";
 }
 
-/** 这条任务是不是洗版（要洗的集本来就在库里，进度讲的是替换而非入库）。 */
-function isUpgradeTask(task: DownloadTask): boolean {
-  return task.subscriptions[0]?.purpose === "upgrade";
-}
-
-/**
- * 洗版任务的身份标。洗版与补缺下载在任务中心同形，但读法完全不同——库里
- * 已有这些集、这个种子是来换掉它们的，没有这个标就只能靠文案猜。青色沿用
- * 订阅详情页的洗版专属色，跨页面同一概念同一颜色。
- */
-function UpgradeTaskBadge({ task }: { task: DownloadTask }) {
-  if (!isUpgradeTask(task)) return null;
-  return (
-    <span
-      title="洗版任务：这些集库里已有旧版本，本次下载完成并校验后替换"
-      className="shrink-0 rounded-full border border-[#2dd4bf]/30 bg-[#2dd4bf]/[0.12] px-1.5 py-0.5 text-[11px] font-semibold leading-none text-[#2dd4bf]"
-    >
-      洗版
-    </span>
-  );
-}
-
-/**
- * 按逐集工单汇总任务的交付进度；没有订阅上下文（手动/外部任务）时为 null。
- *
- * 补缺下载数「已入库」，洗版数「已替换」。洗版单元在投递那一刻就全是
- * imported（库里有旧版本），继续按 imported 汇总会让刚投递的种子直接显示
- * 「已入库 16/16 集、入库完成」，与 0% 的下载进度自相矛盾（真实教训）。
- */
-function ingestUnitSummary(
-  task: DownloadTask,
-): { done: number; total: number; upgrade: boolean } | null {
-  const subscription = task.subscriptions[0];
-  if (!subscription || !subscription.units || subscription.units.length === 0) return null;
-  const upgrade = subscription.purpose === "upgrade";
-  return {
-    done: subscription.units.filter((unit) => (upgrade ? unit.replaced : unit.status === "imported"))
-      .length,
-    total: subscription.units.length,
-    upgrade,
-  };
-}
-
-/** 多集资源分批交付时的「已入库/已替换 N/M 集」；单集与电影没有分批语义，返回 null。 */
-function partialIngestLabel(task: DownloadTask): string | null {
-  const summary = ingestUnitSummary(task);
-  if (summary == null || summary.total <= 1) return null;
-  return `${summary.upgrade ? "已替换" : "已入库"} ${summary.done}/${summary.total} 集`;
-}
-
 function downloadGroupTimelineTone(
   group: DownloadTaskGroup,
   ingestJobsByHash: Map<string, JobView>,
@@ -1360,12 +1288,10 @@ function DownloadTaskFeedItem({
   // 周期承担，覆盖集标签会标注已入库进度，feed 行只保留下载态/换源提示
   const note = ingestJob != null ? null : downloadTaskNote(task, null);
   const showReplace = shouldOfferInlineReplacement(task);
-  const firstSubscription = task.subscriptions[0];
   // 种子名前用站点徽标回答"这个资源从哪来"；画面规格与文件尺寸紧随
   // 其后，弥补高度同质化的 release 名。状态与进度由底部生命周期承担，不再
   // 重复；速度与剩余时间单独一行，专注实时传输信息。
   const specs = [
-    task.resolution,
     task.size_bytes != null ? formatBytes(task.size_bytes) : null,
   ].filter((item): item is string => item != null);
   // 下行速度只在真正下载时有意义；上行（做种）在下载中和等待入库期间都可能存在
@@ -1391,24 +1317,9 @@ function DownloadTaskFeedItem({
                 实时
               </span>
             )}
-            {task.site_name && (
-              <span className="shrink-0 rounded-full border border-white/[0.14] bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium leading-none text-white/55">
-                {task.site_name}
-              </span>
-            )}
+
             <OverflowText className="flex-1">{title}</OverflowText>
           </h3>
-          {/* 覆盖集号紧跟标题：先答"这个种子给的是哪几集"，再看规格与速度。
-              洗版标紧贴集号——它限定的正是这些集的性质（换掉而非新增） */}
-          {firstSubscription && firstSubscription.units && (
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption">
-              <UpgradeTaskBadge task={task} />
-              <EpisodeUnitsLabel
-                units={firstSubscription.units}
-                purpose={firstSubscription.purpose}
-              />
-            </div>
-          )}
           {specs.length > 0 && (
             <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-caption text-white/88">
               {specs.map((spec, index) => (
@@ -1507,16 +1418,9 @@ function DownloadTaskGroupCard({
       <div className="flex items-center gap-3.5 border-b border-white/[0.07] px-4 py-3 max-md:px-3.5">
         <div className="w-10 shrink-0 max-md:w-9">
           <div className="aspect-[2/3] overflow-hidden rounded-lg bg-[#141824] ring-1 ring-white/10">
-            <PosterImage
-              src={imageUrl(group.posterUrl)}
-              alt={`${group.title}海报`}
-              className="size-full"
-              fallback={
-                <div className="flex size-full items-center justify-center bg-gradient-to-b from-white/[0.07] to-[#11141c] text-white/25">
-                  {isTv ? <TvIcon className="size-4" /> : <FilmIcon className="size-4" />}
-                </div>
-              }
-            />
+            <div className="flex size-full items-center justify-center bg-gradient-to-b from-white/[0.07] to-[#11141c] text-white/25">
+              {isTv ? <TvIcon className="size-4" /> : <FilmIcon className="size-4" />}
+            </div>
           </div>
         </div>
         <div className="min-w-0 flex-1">
@@ -1589,7 +1493,6 @@ function DownloadTaskCard({
   const percent = task.progress == null ? null : Math.floor(task.progress * 100);
   const displayPercent = percent;
   const progressLabel = "下载进度";
-  const firstSubscription = task.subscriptions[0];
   const showInlineReplace = shouldOfferInlineReplacement(task);
   // 与侧栏角标、「需要处理」分区同一口径（download-attention）：外部任务只观察不报警
   const needsAttention = downloadTaskNeedsAttention(task, ingestJob);
@@ -1660,12 +1563,6 @@ function DownloadTaskCard({
                 </button>
               )}
             </div>
-          </div>
-        )}
-        {firstSubscription && firstSubscription.units && (
-          <div className="mt-2.5 flex flex-wrap items-start gap-x-2 gap-y-1.5 text-caption">
-            <UpgradeTaskBadge task={task} />
-            <EpisodeUnitsLabel units={firstSubscription.units} purpose={firstSubscription.purpose} />
           </div>
         )}
         <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-caption text-white/40">
@@ -1767,61 +1664,11 @@ const GRID_COLS_BY_STEPS: Record<number, string> = {
 };
 
 /**
- * 下载完成后**还没发生**的那几步。
- *
- * 新契约 DownloadTask 不再下发 plan（DownloadTaskPlan 类型保留但字段已移除），
- * 无法预告后端推导的搬运方式与落点，退回统一的「等待下载完成 / 等待入库」话术；
- * 洗版任务仍按订阅上下文补上替换与回收/保留两步。
- *
- * 只在"什么都还没开始"时使用：一旦入库开始，事实源就是下载状态本身，
- * 步骤链收回到观测态，不再拿预测覆盖已经发生的事。
- */
-function plannedSteps(
-  task: DownloadTask,
-  { downloaded, upgrade, keepOld }: { downloaded: boolean; upgrade: boolean; keepOld: boolean },
-): LifecycleStep[] {
-  void task;
-  if (!downloaded) {
-    return [
-      { label: "等待下载完成", detail: "下一步", tone: "future" },
-    ];
-  }
-  const steps: LifecycleStep[] = [
-    { label: "等待入库", detail: "下载完成后自动入库并刮削元数据", tone: "future" },
-  ];
-  // 洗版的终点不是入库：新版本入库后还要比对档位，确认更优才替换掉旧版本
-  // （校验不通过会保留旧版本），是与入库分开的一次真实事件
-  if (upgrade) {
-    steps.push({
-      label: "待替换",
-      detail: "校验档位，确认新版本更优才替换旧版本",
-      tone: "future",
-    });
-    // 替换真正对磁盘做的事：默认把旧版本直接物理删除；开了收藏家
-    // 模式则多版本共存。这一步决定的是"要不要多占一份空间"，不能不说
-    steps.push(
-      keepOld
-        ? {
-            label: "旧版本保留",
-            detail: "按规则组的保留共存设置，旧版本不删除，与新版本并存",
-            tone: "future",
-          }
-        : {
-            label: "直接删除",
-            detail: "旧版本直接物理删除，释放磁盘空间",
-            tone: "future",
-          },
-    );
-  }
-  return steps;
-}
-
-/**
  * 把下载器状态投影成同一条业务过程。这里不生成新状态：每一步都能回溯到下载
  * 快照或逐集工单，因此刷新、重试与回退仍由原领域负责。
  *
  * 新契约不再把入库 Job 与下载任务按 infohash 关联（JobDef 无 resources 字段），
- * ingestJob 恒为 null；入库轴只由逐集工单（subscriptions[].units）与下载状态派生。
+ * ingestJob 恒为 null；只展示下载快照已知的状态。
  */
 function DownloadLifecycle({
   task,
@@ -1863,69 +1710,13 @@ function DownloadLifecycle({
     };
   }
 
-  // 入库进度来自工单而非 Job：分批入库的两批之间没有 Job，但「已入库 2/10
-  // 集」依然成立，这一步不能因为 Job 消失就退回「等待入库」
-  const partialLabel = partialIngestLabel(task);
-  const summary = ingestUnitSummary(task);
-  const missingLabel = contentMissingLabel(task);
-  // 拿不到工单上下文（手动/外部任务）时不做分批判断
-  const fullyDelivered = summary == null || summary.done >= summary.total;
-  // 洗版任务的终点是"旧版本被换掉"，入库只是中间态：新文件入库后还要经过
-  // 档位校验才算替换成功，因此这一列整体改说替换
-  const upgrade = summary?.upgrade === true;
-
-  // 二选一：要么已经开始了（ingestStep，观测态），要么还没开始（futureSteps，预测态）
-  let ingestStep: LifecycleStep | null = null;
-  let futureSteps: LifecycleStep[] | null = null;
-  if (missingLabel != null) {
-    // 种子里根本没有这一集：继续等这个任务没有意义，说清事实并交代去向
-    ingestStep = {
-      label: "内容不符",
-      detail:
-        (partialLabel ? `${partialLabel}；` : "") +
-        `种子里没有 ${missingLabel}，已退回重新寻找资源`,
-      tone: "attention",
-    };
-  } else if (summary != null && summary.done > 0) {
-    // 分批推进期间如实说明还差几集。洗版下入库成功 ≠ 替换完成，部分替换
-    // 只按 units[].replaced 讲
-    const done = downloaded && fullyDelivered;
-    ingestStep = {
-      label: done
-        ? upgrade
-          ? "替换完成"
-          : "入库完成"
-        : upgrade
-          ? "部分替换"
-          : "部分入库",
-      detail: done
-        ? upgrade
-          ? "已全部替换为新版本"
-          : "已全部入库"
-        : upgrade
-          ? `${partialLabel ?? "已替换"}，其余等待下载与校验`
-          : `${partialLabel ?? "已入库"}，其余等待下载完成`,
-      tone: done ? "done" : "waiting",
-    };
-  } else if (upgrade) {
-    ingestStep = {
-      label: downloaded ? "等待替换" : "等待下载完成",
-      detail: downloaded ? "新版本入库后校验档位再替换" : "下一步",
-      tone: "future",
-    };
-  } else {
-    // 什么都还没开始：把剩下的路如实展开，而不是笼统说"下一步"
-    futureSteps = plannedSteps(task, {
-      downloaded,
-      upgrade,
-      keepOld: task.subscriptions[0]?.upgrade_keep_old === true,
-    });
-  }
-
+  const nextStep: LifecycleStep = downloaded
+    ? { label: "等待入库", detail: "等待自动入库或媒体库扫描收尾", tone: "future" }
+    : { label: "等待下载完成", detail: "下一步", tone: "future" };
   const steps: LifecycleStep[] = [
     { label: "已投递", detail: source, tone: "done" },
     downloadStep,
-    ...(futureSteps ?? [ingestStep!]),
+    nextStep,
   ];
   const feed = variant === "feed";
 
@@ -2014,26 +1805,11 @@ function downloadTaskNote(
   ingestJob: JobView | null,
 ): string | null {
   void ingestJob;
-  const missingLabel = contentMissingLabel(task);
-  if (missingLabel != null) {
-    // 内容核验的结论优先于入库 Job：Job 成功搬完了包里存在的集，但用户等的
-    // 那一集根本不在包里，这时说"入库已完成"是误导
-    return `种子里没有 ${missingLabel}（声明的覆盖范围与实际内容不符），这部分已退回重新寻找资源；包里其余集不受影响`;
-  }
-  const summary = ingestUnitSummary(task);
-  if (summary != null && summary.done < summary.total) {
-    return summary.upgrade
-      ? `已完成 ${summary.done}/${summary.total} 集替换，其余等待下载完成后自动校验替换`
-      : `已入库 ${summary.done}/${summary.total} 集，其余等待下载完成后自动入库`;
-  }
-  if (summary?.upgrade && task.state === "completed") {
-    return "替换已完成，等待活动页同步收尾";
-  }
   if (task.state === "error") {
     // 下载器给出的具体原因（文件缺失 / errorString）必须放在最前——它回答的是
     // "错在哪"；换源提示只是"还能怎么办"，不能把原因盖掉。非订阅投递的任务再补
     // 一句它不归 crawler-media 管，免得用户在这里找不到处理入口
-    const reason = task.error_message || "下载器报告该任务出错，请在下载器中查看具体原因";
+    const reason = "下载器报告该任务出错，请在下载器中查看具体原因";
     return isSubscriptionTask(task) ? reason : `${reason}（非订阅投递的任务，仅观察）`;
   }
   if (task.state === "missing") {
@@ -2046,111 +1822,6 @@ function downloadTaskNote(
   if (task.state === "stalled") return "暂无可用连接，等待继续下载";
   if (task.state === "unknown") return "下载器未返回可识别的状态";
   return null;
-}
-
-/**
- * 多集资源默认显示连续区间，同一标签内并列入库进度；点击后按季查看完整
- * 集号，已入库的集标绿。原生 details 保留了键盘与读屏交互，也不会为了
- * 这块纯展示状态引入额外 React 状态。
- *
- * 收起态刻意做成"带展开箭头的文字"而非按钮：它是行内的一条事实，和规格、
- * 速度同级，做成描边填充的胶囊会盖过标题。可点击性交给箭头与 hover 提亮，
- * 键盘焦点另给焦点环（去掉背景后默认 outline 不再可辨）。
- */
-function EpisodeUnitsLabel({
-  units,
-  purpose,
-}: {
-  units: DownloadTask["subscriptions"][number]["units"];
-  purpose: DownloadTask["subscriptions"][number]["purpose"];
-}) {
-  const summary = summarizeEpisodeUnits(units);
-  if (!summary) return null;
-  // 洗版口径：绿色标的是"已经被这个种子换掉的集"。沿用 imported 会把要洗
-  // 的集全标绿（它们本来就在库里），读起来像任务已完成
-  const upgrade = purpose === "upgrade";
-  const doneKeys = new Set(
-    units
-      .filter((unit) => (upgrade ? unit.replaced : unit.status === "imported"))
-      .map((unit) => `${unit.season_number}:${unit.episode_number}`),
-  );
-  const doneCount = doneKeys.size;
-  const doneWord = upgrade ? "已替换" : "已入库";
-  if (summary.kind === "movie" || summary.episodeCount <= 1) {
-    return (
-      <span className="tnum">
-        {summary.label}
-        {summary.kind === "episodes" && doneCount > 0 && (
-          <span className="text-[var(--ok)]">（{doneWord}）</span>
-        )}
-      </span>
-    );
-  }
-
-  return (
-    <details className="group min-w-0 max-w-full open:basis-full open:w-full">
-      <summary
-        aria-label={`覆盖 ${summary.episodeCount} 集：${summary.fullLabel}。${
-          doneCount > 0
-            ? upgrade
-              ? `已完成 ${doneCount} 集替换。`
-              : `其中 ${doneCount} 集已入库。`
-            : ""
-        }展开查看全部集号`}
-        className="flex w-fit max-w-full cursor-pointer list-none items-center gap-1 rounded text-white/88 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent-ring)] [&::-webkit-details-marker]:hidden"
-      >
-        <OverflowText
-          focusable={false}
-          placement="top-start"
-          className="tnum"
-          tooltipContent={
-            <span className="tnum break-words [overflow-wrap:anywhere]">{summary.fullLabel}</span>
-          }
-        >
-          {summary.label}
-        </OverflowText>
-        {doneCount > 0 && (
-          <span className="tnum shrink-0 text-[var(--ok)]">
-            {upgrade ? `（已完成 ${doneCount} 集替换）` : `（有 ${doneCount} 集已入库）`}
-          </span>
-        )}
-        <ChevronRightIcon className="size-3 shrink-0 rotate-90 opacity-45 transition-transform group-open:-rotate-90" />
-      </summary>
-      <div className="mt-2 max-w-xl space-y-2.5 rounded-xl border border-white/[0.07] bg-white/[0.035] px-3 py-2.5">
-        {summary.seasons.map((season) => (
-          <div key={season.seasonNumber}>
-            <div className="mb-1.5 flex items-center gap-2 font-medium text-white/65">
-              <span className="tnum">S{String(season.seasonNumber).padStart(2, "0")}</span>
-              <span className="font-normal text-white/35">共 {season.episodes.length} 集</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {season.episodes.map((episode) => {
-                const done = doneKeys.has(`${season.seasonNumber}:${episode}`);
-                return (
-                  <span
-                    key={episode}
-                    title={done ? doneWord : undefined}
-                    className={`tnum rounded-md px-1.5 py-0.5 text-micro ${
-                      done
-                        ? "bg-[var(--ok)]/[0.16] text-[var(--ok)]"
-                        : "bg-white/[0.055] text-white/60"
-                    }`}
-                  >
-                    E{String(episode).padStart(2, "0")}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-        {summary.seasons.length > 1 && (
-          <p className="border-t border-white/[0.06] pt-2 text-right text-micro text-white/35">
-            合计 {summary.episodeCount} 集
-          </p>
-        )}
-      </div>
-    </details>
-  );
 }
 
 function EmptyView({ view }: { view: TaskCenterViewName }) {

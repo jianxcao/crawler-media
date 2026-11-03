@@ -304,3 +304,9 @@ Web 详情展示等待状态，只在 `pending` 时轮询；离开当前条目�
 - Photos 模块
 
 历史上的上游兼容层（`webapi/` 信封、`numeric_id`）已删除，不要加回来。
+
+### Downloader task snapshots
+
+`GET /api/v1/downloaders/tasks` returns `{items}`. Each task contains `id`, `info_hash`, `name`, `downloader_id`, `downloader_name`, `progress`, `size_bytes`, `dlspeed_bytes`, `upspeed_bytes`, `uploaded_bytes`, `completed_bytes`, `state`, `site_id`, `media_item_id`, `media_title`, `media_kind`, `score`, and `subscriptions`. A subscription reference contains only `id`, `media_item_id`, `media_title`, and `media_kind`. No placeholder error, Site name, resolution, source-health list, episode progress or wash-cut purpose is returned. The Web uses actual task state and a readable generic error explanation.
+
+`GET/PUT /api/v1/downloaders/limits` supports `download_limit_bytes` and `upload_limit_bytes` only; responses add `status` and `error`. No queue or alternate-speed settings are exposed.

@@ -25,25 +25,6 @@ pub enum EventDecision {
     Ignore,
 }
 
-/// Classify an incoming playback event based on session identity, bindings, and previous session.
-///
-/// Implements the state machine in Section 2.3 and 2.4 of Batch 2 design:
-/// - With PlaySessionId:
-///   * Verified against server-issued binding (user, device, ledger).
-///   * Start / Playing can activate a pending session and close older ones.
-///   * Progress / Stop only updates an active session matching the exact session ID.
-///   * EventSequence if present must be strictly greater than last_event_sequence.
-///   * Unknown, closed, or mismatched ID events are ignored (return Ignore).
-pub fn classify_event(
-    previous: Option<&SessionRow>,
-    binding: Option<&PlaySessionBinding>,
-    identity: &PlaybackEventIdentity,
-    ledger: LedgerId,
-    event: PlaybackEventKind,
-) -> EventDecision {
-    classify_event_with_target(previous, binding, identity, ledger, None, event)
-}
-
 pub fn classify_event_with_target(
     previous: Option<&SessionRow>,
     binding: Option<&PlaySessionBinding>,

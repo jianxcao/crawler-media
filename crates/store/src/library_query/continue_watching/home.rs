@@ -59,36 +59,6 @@ impl Store {
                 .collect())
         })
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn home_continue_query_plans(
-        &self,
-        query: &HomeQuery,
-        windows: &[HomeWindow],
-    ) -> Result<Vec<String>, StoreError> {
-        let libraries = scope::authorized(self, query.user_id, &query.libraries)?;
-        self.with_read(crate::Db::Library, |conn| {
-            let activity = activity_query(query, &libraries)?;
-            let subscriptions =
-                subscription_query(query.user_id, &libraries, windows, &[], query.limit)?;
-            let artwork = artwork_query(
-                query.user_id,
-                &libraries,
-                &windows
-                    .iter()
-                    .map(|window| window.media_id)
-                    .collect::<Vec<_>>(),
-            )?;
-            super::explain(
-                conn,
-                &[
-                    ("activity", &activity),
-                    ("subscriptions", &subscriptions),
-                    ("artwork", &artwork),
-                ],
-            )
-        })
-    }
 }
 
 fn activity_query(query: &HomeQuery, libraries: &[LibraryId]) -> Result<sql::Query, StoreError> {

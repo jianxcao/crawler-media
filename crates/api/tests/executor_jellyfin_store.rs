@@ -27,7 +27,6 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     let user = domain::User {

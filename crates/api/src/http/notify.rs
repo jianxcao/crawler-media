@@ -59,35 +59,6 @@ pub fn save_config(
     Ok(())
 }
 
-/// Post a message to the notify service. Errors are returned but callers
-/// should treat them as best-effort (never block the loop).
-#[allow(dead_code)]
-pub fn send(store: &crate::Store, title: &str, content: &str) -> Result<(), String> {
-    let base = notify_url(store).unwrap_or_default();
-    let token = notify_token(store).unwrap_or_default();
-    if base.is_empty() || token.is_empty() {
-        return Ok(()); // not configured, skip silently
-    }
-    let app_id = base
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("system_alerts")
-        .to_string();
-    let root = base.trim_end_matches(&format!("/{}", app_id));
-    let url = format!("{root}/api/v1/notify/{app_id}");
-    let payload = json!({
-        "title": title,
-        "content": content,
-    });
-    let _ = ureq::post(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .send(payload.to_string())
-        .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
 /// Send with explicit credentials (no store lock needed). 保持同步 API：后台
 /// worker 本身不在 async worker 上；HTTP handler 必须走 `http_work` 预算。
 pub fn send_configured(base: &str, token: &str, title: &str, content: &str) -> Result<(), String> {

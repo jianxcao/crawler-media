@@ -744,22 +744,13 @@ export function unsubscribeFromSubscription(id: string): Promise<Record<string, 
   ).then(() => ({}));
 }
 
-/** 按季清理时被有意保留的跨季种子（整季包仍被保留的季使用）。 */
-export interface RetainedCrossSeasonTorrent {
-  title: string;
-  /** 该种子覆盖到的季号；空 = 无从按季定位的存量数据 */
-  seasons: number[];
-}
-
-/** 可一并清理的内容（见 schemas.subscription.SubscriptionRemovalPreviewView）。 */
+/** 整个 Media 的文件数量，以及该订阅的待下载或推断 Torrent 数量。 */
 export interface SubscriptionRemovalPreview {
-  torrent_count: number;
-  torrent_titles: string[];
-  hit_and_run_count: number;
   library_file_count: number;
   library_bytes: number;
-  recycle_retention_days: number;
-  retained_cross_season: RetainedCrossSeasonTorrent[];
+  torrent_count: number;
+  torrent_count_inferred: boolean;
+  torrent_titles: string[];
 }
 
 /** 联动清理选项；两项都不勾 = 什么都不删（默认）。 */
@@ -768,41 +759,18 @@ export interface SubscriptionRemovalOptions {
   deleteLibraryFiles: boolean;
 }
 
-/**
- * 确认弹窗打开时拉取：能一起删掉多少种子与媒体库文件。
- *
- * `seasons`：只看这几季（减季后的按季清理）；不传 = 整条退订的范围——后端按
- * 「这条订阅覆盖过的季」收口，不是条目下的一切。
- * 新契约只回 `{library_file_count, library_bytes, torrent_count}`，其余字段补默认。
- */
-export function getSubscriptionRemovalPreview(
-  id: string,
-  seasons?: number[],
-): Promise<SubscriptionRemovalPreview> {
-  const query = seasons?.length
-    ? `?${new URLSearchParams(seasons.map((s) => ["seasons", String(s)]))}`
-    : "";
+/** 取消订阅时读取全作品文件与该订阅 Torrent 预览；不支持按季过滤。 */
+export function getSubscriptionRemovalPreview(id: string): Promise<SubscriptionRemovalPreview> {
   return unwrap(
-    request<ApiEnvelope<SubscriptionRemovalPreview>>(
-      `/subscriptions/${id}/removal-preview${query}`,
-    ),
-  ).then((preview) => ({
-    torrent_count: preview.torrent_count ?? 0,
-    torrent_titles: preview.torrent_titles ?? [],
-    hit_and_run_count: preview.hit_and_run_count ?? 0,
-    library_file_count: preview.library_file_count ?? 0,
-    library_bytes: preview.library_bytes ?? 0,
-    recycle_retention_days: preview.recycle_retention_days ?? 0,
-    retained_cross_season: preview.retained_cross_season ?? [],
-  }));
+    request<ApiEnvelope<SubscriptionRemovalPreview>>(`/subscriptions/${id}/removal-preview`),
+  );
 }
 
 /**
  * 清理已移出订阅范围的那几季的内容（减季后的可选收尾）。
  *
- * 订阅不会被删——它还在追别的季。后端会拒绝仍在范围内的季，并把退出那几季
- * 已入库的单元退回缺口（以后重新勾选该季会重新下载）。
- * 回执即服务端的 `{queued}`。
+ * 按文件覆盖单元和 Torrent 的季号选择清理范围，订阅本身保留。
+ * 请求返回时清理已执行；回执中的 queued 不表示存在后台 Job。
  */
 export function cleanupSubscriptionSeasons(
   id: string,
@@ -850,13 +818,9 @@ export interface SubscriptionDownload {
   progress: number | null;
   size_bytes: number | null;
   dlspeed_bytes: number | null;
-  eta_seconds: number | null;
   /** missing = 种子已不在任何可用下载器中（救援巡检稍后会退回工单重找） */
   state: "downloading" | "stalled" | "paused" | "completed" | "error" | "missing" | "unknown";
-  /** state 为 error 时下载器给出的可读原因（文件缺失 / 出错详情）；其余为 null */
-  error_message: string | null;
   downloader_name: string | null;
-  units: { season_number: number; episode_number: number }[];
 }
 
 /**
@@ -880,11 +844,8 @@ export async function listActiveSubscriptionDownloads(
       progress: task.progress,
       size_bytes: task.size_bytes,
       dlspeed_bytes: task.dlspeed_bytes,
-      eta_seconds: null,
       state: task.state as SubscriptionDownload["state"],
-      error_message: task.error_message ?? null,
       downloader_name: task.downloader_name,
-      units: [],
     }));
 }
 

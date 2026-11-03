@@ -51,7 +51,6 @@ async fn tv_unidentified_lists_and_filters_by_persisted_owner() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state);
@@ -104,7 +103,6 @@ async fn identify_and_transfer_may_change_parked_movie_owner_to_explicit_tv_targ
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let shared = state.store();

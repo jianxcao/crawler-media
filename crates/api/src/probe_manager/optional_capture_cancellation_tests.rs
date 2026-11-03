@@ -118,7 +118,6 @@ fn optional_capture_state(
         Arc::new(downloader::MemoryDownloader::new(
             harness._tmp.path().join("stage"),
         )),
-        harness._tmp.path().join("library"),
     )
     .unwrap();
     let manager = Arc::new(ProbeManager::with_engines(

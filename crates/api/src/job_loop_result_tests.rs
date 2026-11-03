@@ -25,7 +25,6 @@ fn assert_completed_result_retries(sql_busy: bool) {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(Offline),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let job = {

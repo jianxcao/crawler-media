@@ -25,7 +25,6 @@ fn state(tmp: &tempfile::TempDir) -> ApiState {
         Arc::new(downloader::MemoryDownloader::new(
             tmp.path().join("staging"),
         )),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_poster_fetch(Arc::new(NoNetwork))

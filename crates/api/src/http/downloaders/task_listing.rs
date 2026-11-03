@@ -235,10 +235,7 @@ fn task_row_json(
         "uploaded_bytes": snapshot.map(|s| s.uploaded_bytes),
         "completed_bytes": snapshot.map(|s| s.downloaded_bytes),
         "state": state,
-        "error_message": null,
         "site_id": torrent.site_id.to_string(),
-        "site_name": null,
-        "resolution": null,
         "media_item_id": if subscribed { Some(media_item_id.clone()) } else { None },
         "media_title": if subscribed { Some(media_title.clone()) } else { None },
         "media_kind": if subscribed { Some(media_kind.clone()) } else { None },
@@ -325,7 +322,7 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
     )
     .await
     {
-        Ok(items) => ok(json!({ "items": items, "sources": [] })).into_response(),
+        Ok(items) => ok(json!({ "items": items })).into_response(),
         Err(error) => error.response(),
     }
 }

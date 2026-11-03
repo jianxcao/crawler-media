@@ -224,7 +224,6 @@ async fn pause_during_legacy_run_search_skips_downloader_add() {
         ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(api_state);

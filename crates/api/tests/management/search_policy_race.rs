@@ -101,7 +101,6 @@ fn build_test_state(
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp_path.join("library"),
     )
     .unwrap()
 }

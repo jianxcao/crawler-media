@@ -283,10 +283,6 @@ impl Store {
         }
     }
 
-    pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
-        self.with_library_write(|db| db.delete_media(id))
-    }
-
     pub fn list_media(&self) -> Result<Vec<Media>, StoreError> {
         self.with_library_read(|db| db.list_media())
     }

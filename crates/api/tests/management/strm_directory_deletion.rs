@@ -31,7 +31,6 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
 
@@ -187,7 +186,6 @@ async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let media = domain::Media {
@@ -258,7 +256,6 @@ async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let media = domain::Media {
@@ -331,7 +328,6 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let media = domain::Media {
@@ -580,7 +576,6 @@ fn episode_fixture() -> EpisodeFixture {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let media_id = domain::MediaId::new();
@@ -734,7 +729,6 @@ async fn deleting_the_show_directory_removes_every_episode_ledger_row() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let media = domain::Media {

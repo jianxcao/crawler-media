@@ -3,7 +3,6 @@ mod startup;
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -97,8 +96,6 @@ pub struct ApiState {
     pub(crate) jellyfin_server_id: Arc<String>,
     pub(crate) indexer: Arc<Indexer>,
     pub(crate) downloader: Arc<dyn Downloader>,
-    #[allow(dead_code)]
-    pub(crate) library_root: Arc<PathBuf>,
     pub(crate) catalog: Arc<dyn Catalog>,
     /// Parsed country and language tables for this process.
     pub(crate) configuration_memory: Arc<crate::configuration_memory::ConfigurationMemory>,
@@ -135,22 +132,8 @@ pub struct ApiState {
         Option<Arc<dyn Fn(&domain::ProtocolItemPage) + Send + Sync>>,
     pub(crate) library_header_barrier: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) library_read_stage_barrier: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
-    /// 测试 seam：浏览请求真正解码的投影 file facts 行数（生产只读计数，无副作用）。
-    /// 计数发生在**读取/解析处**，包含随后被丢弃或解析失败的行，以及依赖覆盖的
-    /// 回退重读；热页只应解码选中 Media 的 facts。
-    pub(crate) browse_page_decoded_files: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：浏览请求真正解码的投影 media facts 行数（同上口径）。
-    pub(crate) browse_page_decoded_media: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：选页读过的轻候选 JSON 行数（常用排序的 SQL 分页应为 0）。
-    pub(crate) browse_page_candidate_rows: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：投影依赖覆盖读过的轻量行数（列读 + 候选行；重启后的首个小页
-    /// 只应产生这一项成本，不应解码整份 facts）。
-    pub(crate) browse_page_dependency_rows: Arc<std::sync::atomic::AtomicUsize>,
     /// 测试 seam：统计计算在计划收集与 totals 读取之间的屏障（生产为 `None`）。
     pub statistics_phase_barrier: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// 测试 seam：统计路径执行的用户 role 查询次数（生产只读计数）。
-    #[allow(dead_code)]
-    pub(crate) statistics_role_lookups: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn apply_admin_bootstrap(
@@ -209,13 +192,12 @@ impl ApiState {
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
         let store = Arc::new(store);
-        Self::new_arc(store, token, profiles, fetcher, downloader, library_root)
+        Self::new_arc(store, token, profiles, fetcher, downloader)
     }
 
     /// Variant that takes the Store already shared through Arc, so
@@ -226,20 +208,11 @@ impl ApiState {
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        Self::new_arc_with_admin_password(
-            store,
-            token,
-            None,
-            profiles,
-            fetcher,
-            downloader,
-            library_root,
-        )
+        Self::new_arc_with_admin_password(store, token, None, profiles, fetcher, downloader)
     }
 
     pub fn new_arc_with_admin_password<F>(
@@ -249,7 +222,6 @@ impl ApiState {
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
@@ -267,14 +239,7 @@ impl ApiState {
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        Self::new_arc_with_admin_bootstrap(
-            store,
-            profiles,
-            fetcher,
-            downloader,
-            library_root,
-            action,
-        )
+        Self::new_arc_with_admin_bootstrap(store, profiles, fetcher, downloader, action)
     }
 
     pub fn new_arc_with_admin_bootstrap<F>(
@@ -282,13 +247,11 @@ impl ApiState {
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        std::fs::create_dir_all(&library_root)?;
         apply_admin_bootstrap(&store.as_ref(), action)?;
         let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref())?;
         let jobs_path = store.as_ref().data_dir().join("jobs.db");
@@ -365,7 +328,6 @@ impl ApiState {
             jellyfin_server_id: Arc::new(jellyfin_server_id),
             indexer: Arc::new(Indexer::new(profiles, fetcher)),
             downloader,
-            library_root: Arc::new(library_root),
             catalog: catalog.clone(),
             configuration_memory: Arc::new(
                 crate::configuration_memory::ConfigurationMemory::default(),
@@ -388,12 +350,7 @@ impl ApiState {
             protocol_selection_barrier: None,
             library_header_barrier: None,
             library_read_stage_barrier: None,
-            browse_page_decoded_files: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_decoded_media: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_candidate_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_dependency_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             statistics_phase_barrier: None,
-            statistics_role_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         state.finish_initialization(startup_browser.1)
     }
@@ -547,65 +504,6 @@ impl ApiState {
     ) -> Self {
         self.library_read_stage_barrier = Some(barrier);
         self
-    }
-
-    /// 替换浏览页工作量计数 seam（测试注入自有计数器以观察本页解码行数）。
-    pub fn with_browse_page_counters(
-        mut self,
-        decoded_files: Arc<std::sync::atomic::AtomicUsize>,
-        decoded_media: Arc<std::sync::atomic::AtomicUsize>,
-        candidate_rows: Arc<std::sync::atomic::AtomicUsize>,
-        dependency_rows: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
-        self.browse_page_decoded_files = decoded_files;
-        self.browse_page_decoded_media = decoded_media;
-        self.browse_page_candidate_rows = candidate_rows;
-        self.browse_page_dependency_rows = dependency_rows;
-        self
-    }
-
-    /// 浏览请求真正解码的投影 file facts 行数。
-    pub fn browse_page_decoded_files(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_decoded_files.clone()
-    }
-
-    /// 浏览请求真正解码的投影 media facts 行数。
-    pub fn browse_page_decoded_media(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_decoded_media.clone()
-    }
-
-    /// 选页读过的轻候选 JSON 行数。
-    pub fn browse_page_candidate_rows(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_candidate_rows.clone()
-    }
-
-    /// 投影依赖覆盖读过的轻量行数。
-    pub fn browse_page_dependency_rows(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_dependency_rows.clone()
-    }
-
-    /// 记录本次请求真正解码的投影行数：计数在**读取/解析处**，包含随后被丢弃或
-    /// 解析失败的行（测试 seam；生产只读计数，无副作用）。
-    #[allow(dead_code)]
-    pub(crate) fn count_decoded(&self, files: usize, media: usize) {
-        self.browse_page_decoded_files
-            .fetch_add(files, std::sync::atomic::Ordering::SeqCst);
-        self.browse_page_decoded_media
-            .fetch_add(media, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// 记录选页读过的轻候选 JSON 行数。
-    #[allow(dead_code)]
-    pub(crate) fn count_candidate_rows(&self, rows: usize) {
-        self.browse_page_candidate_rows
-            .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// 记录依赖覆盖读过的轻量行数（file 依赖列 + 候选行）。
-    #[allow(dead_code)]
-    pub(crate) fn count_dependency_rows(&self, rows: usize) {
-        self.browse_page_dependency_rows
-            .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 替换 notify 发送实现（测试注入阻塞实现以验证预算准入）。

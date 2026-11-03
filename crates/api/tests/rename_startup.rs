@@ -71,7 +71,6 @@ async fn startup_resumes_planned_and_disk_staged_rename_intents() {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            root,
         )
         .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -167,7 +166,6 @@ async fn startup_recovery_does_not_take_over_a_live_rename_intent() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        root,
     )
     .unwrap();
     // No await has let the spawned startup replay run yet.

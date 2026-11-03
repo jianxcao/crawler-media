@@ -16,7 +16,6 @@ export interface DownloadTaskGroup {
   mediaItemId: string | null;
   title: string;
   kind: string | null;
-  posterUrl: string | null;
   tasks: DownloadTask[];
 }
 
@@ -54,10 +53,6 @@ function mediaItemIdOf(task: DownloadTask): string | null {
   return task.subscriptions[0]?.media_item_id ?? null;
 }
 
-function posterUrlOf(task: DownloadTask): string | null {
-  return task.subscriptions[0]?.poster_url ?? null;
-}
-
 export function groupDownloadTasks(tasks: DownloadTask[]): DownloadTaskGroup[] {
   const groups = new Map<string, DownloadTaskGroup>();
   for (const task of tasks) {
@@ -68,8 +63,6 @@ export function groupDownloadTasks(tasks: DownloadTask[]): DownloadTaskGroup[] {
     const existing = groups.get(key);
     if (existing) {
       existing.tasks.push(task);
-      const poster = posterUrlOf(task);
-      if (!existing.posterUrl && poster) existing.posterUrl = poster;
       continue;
     }
     groups.set(key, {
@@ -82,27 +75,10 @@ export function groupDownloadTasks(tasks: DownloadTask[]): DownloadTaskGroup[] {
         task.info_hash ||
         task.id,
       kind: task.media_kind ?? task.subscriptions[0]?.media_kind ?? null,
-      posterUrl: posterUrlOf(task),
       tasks: [task],
     });
   }
   return [...groups.values()];
-}
-
-/**
- * 内容核验证明种子里没有的集（声明的覆盖范围与实际文件不符）。
- *
- * 这些集已经退回重新寻找资源，等这个种子永远等不到——不能再按"其余等待下载
- * 完成"讲，否则会出现「下载完成 7.59 GB」和「等待下载完成」同框的自相矛盾。
- */
-export function contentMissingLabel(task: DownloadTask): string | null {
-  const units = (task.subscriptions[0]?.units ?? []).filter((unit) => unit.content_missing);
-  if (units.length === 0) return null;
-  const first = units[0];
-  const label = `S${String(first.season_number).padStart(2, "0")}E${String(
-    first.episode_number,
-  ).padStart(2, "0")}`;
-  return units.length === 1 ? label : `${label} 等 ${units.length} 集`;
 }
 
 /**
@@ -122,7 +98,6 @@ export function downloadTaskNeedsAttention(
   return (
     task.state === "error" ||
     task.state === "missing" ||
-    contentMissingLabel(task) != null ||
     (ingestJob != null && jobNeedsAttention(ingestJob))
   );
 }

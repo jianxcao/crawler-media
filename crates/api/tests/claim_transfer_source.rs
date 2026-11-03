@@ -82,7 +82,6 @@ async fn move_claim_rejects_a_source_replaced_after_copy_without_deleting_it() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_catalog(Arc::new(PosterCatalog))

@@ -52,7 +52,6 @@ impl Fixture {
             downloader.unwrap_or_else(|| {
                 Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage")))
             }),
-            tmp.path().join("library"),
         )
         .unwrap();
         let app = router(state.clone());

@@ -30,7 +30,6 @@ async fn facets_obey_worker_budget_and_recover_after_capacity_returns() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_http_work(budget.clone());

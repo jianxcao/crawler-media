@@ -67,7 +67,6 @@ fn stage(temp: &tempfile::TempDir) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap()
 }

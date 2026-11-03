@@ -381,21 +381,6 @@ impl crate::LibraryConnection<'_> {
         Ok((incoming, None))
     }
 
-    pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
-        let tx = crate::write_tx(self.library)?;
-        crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, id)?;
-        tx.execute(
-            "DELETE FROM media_aliases WHERE media_id = ?1",
-            params![id.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM media WHERE media_id = ?1",
-            params![id.to_string()],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn list_media(&self) -> Result<Vec<Media>, StoreError> {
         let sql = format!("{MEDIA_SELECT} ORDER BY m.title, m.media_id");
         let mut stmt = self.library.prepare(&sql)?;

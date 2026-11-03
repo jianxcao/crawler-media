@@ -68,7 +68,6 @@ fn fixture(root: &Path) -> Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     );

@@ -94,7 +94,6 @@ fn make_state(root: &std::path::Path, gated: Arc<GatedFileRead>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_file_stat_read(gated)

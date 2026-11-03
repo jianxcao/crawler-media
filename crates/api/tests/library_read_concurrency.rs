@@ -44,7 +44,6 @@ fn paused_protocol_cold_stage_does_not_hold_writer_store_mutex() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_protocol_selection_barrier(Arc::new(move |_| {
@@ -118,7 +117,6 @@ fn item_index_revalidates_revoked_credentials_and_library_access() {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap()
         .with_library_read_stage_barrier(Arc::new(move |stage| {
@@ -177,7 +175,6 @@ fn slow_library_reader_does_not_hold_writer_store_mutex(endpoint: &str) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap();
     let wait = Arc::new(move || {
@@ -251,7 +248,6 @@ fn dropping_api_state_preserves_a_shared_store_for_reads_and_new_state() {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap()
     };
@@ -292,7 +288,6 @@ fn pool_closes_on_shutdown_and_releases_after_final_owner() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap();
     let weak = state.library_read_pool_weak();
@@ -327,7 +322,6 @@ fn one_reader_fixture(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.join("stage"))),
-        dir.join("library"),
     )
     .unwrap()
     .with_library_read_pool_size(std::num::NonZeroUsize::new(1).unwrap())
@@ -456,7 +450,6 @@ fn paused_stage_expires_at_deadline(target: &'static str) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_library_read_stage_barrier(Arc::new(move |stage| {
@@ -546,7 +539,6 @@ fn read_only_instance_serves_leased_reads_and_rejects_explicit_write() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_instance_writable(false);
@@ -601,7 +593,6 @@ fn dropped_caller_retains_worker_permit_and_lease_until_exit() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_http_work(budget.clone())
@@ -726,7 +717,6 @@ fn selected_page_cold_stage_timeout_never_publishes_stale_success() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_protocol_selection_barrier(Arc::new(move |page| {
@@ -768,7 +758,6 @@ fn shutdown_during_protocol_cold_stage_cannot_publish_page() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_protocol_selection_barrier(Arc::new(move |_| {

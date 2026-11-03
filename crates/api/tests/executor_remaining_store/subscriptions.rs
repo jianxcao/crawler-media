@@ -322,7 +322,6 @@ fn subscription_removal_preview_downloader_is_off_executor_and_outside_store() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         downloader.clone(),
-        f._tmp.path().join("preview-library"),
     )
     .unwrap();
     assert!(downloader.0.set(f.state.store()).is_ok());

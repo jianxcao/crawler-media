@@ -216,7 +216,6 @@ fn create_api_state(
         ProfileSet::load(Some(overlay_dir))?,
         Arc::new(HttpFetcher),
         downloader,
-        data_dir.join("library"),
         action,
     )?
     .with_log_buffer(log_buffer)

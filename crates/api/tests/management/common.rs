@@ -93,7 +93,6 @@ pub(crate) fn state(
         ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        root.join("library"),
     )
     .unwrap()
 }

@@ -226,21 +226,6 @@ impl FileCoverage {
     pub fn is_episodic(&self) -> bool {
         self.units.iter().any(|unit| !unit.is_whole())
     }
-
-    /// The season to file this coverage under, replacing the retired
-    /// `season.unwrap_or(1)`: the highest concrete episode season, or `1` when
-    /// the file covers the whole work (a whole-work file carried no season and
-    /// defaulted to `1`). Matches `preferred_coverage`'s ordering:
-    /// the max `(season, episode)` unit has the max season.
-    pub fn season_or_one(&self) -> u32 {
-        self.units
-            .iter()
-            .filter(|unit| !unit.is_whole())
-            .map(|unit| unit.season)
-            .max()
-            .and_then(|season| u32::try_from(season).ok())
-            .unwrap_or(1)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

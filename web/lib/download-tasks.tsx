@@ -13,7 +13,6 @@ import {
   listDownloadTasks,
   type DownloadTask,
   type DownloadTaskSnapshot,
-  type DownloadTaskSource,
 } from "@/lib/api/downloaders";
 import { isSubscriptionTask } from "@/lib/download-attention";
 import { useSession } from "@/lib/session";
@@ -23,7 +22,6 @@ const POLL_INTERVAL_MS = 10_000;
 
 interface DownloadTasksContextValue {
   tasks: DownloadTask[];
-  sources: DownloadTaskSource[];
   subscriptionTasks: DownloadTask[];
   loading: boolean;
   error: string | null;
@@ -40,7 +38,7 @@ const DownloadTasksContext = createContext<DownloadTasksContextValue | null>(nul
 export function DownloadTasksProvider({ children }: { children: React.ReactNode }) {
   const { session } = useSession();
   const enabled = session.role !== "member";
-  const [snapshot, setSnapshot] = useState<DownloadTaskSnapshot>({ items: [], sources: [] });
+  const [snapshot, setSnapshot] = useState<DownloadTaskSnapshot>({ items: [] });
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
@@ -82,7 +80,6 @@ export function DownloadTasksProvider({ children }: { children: React.ReactNode 
   const value = useMemo(
     () => ({
       tasks: snapshot.items,
-      sources: snapshot.sources,
       subscriptionTasks,
       loading,
       error,

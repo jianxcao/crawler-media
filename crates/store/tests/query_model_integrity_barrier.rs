@@ -57,10 +57,6 @@ fn integrity_blocks_changes_to_already_staged_media() {
         Err(store::StoreError::Protected(_))
     ));
     assert!(matches!(
-        store.delete_media(media),
-        Err(store::StoreError::Protected(_))
-    ));
-    assert!(matches!(
         store.delete_playback_for_media(media),
         Err(store::StoreError::Protected(_))
     ));

@@ -292,7 +292,6 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
                 DownloaderEnv::default(),
                 tmp.path(),
             )),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

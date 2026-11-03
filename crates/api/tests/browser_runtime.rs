@@ -39,7 +39,6 @@ fn state(root: &std::path::Path) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoHttp),
         Arc::new(MemoryDownloader::new(root.join("dl"))),
-        root.join("library"),
     )
     .unwrap()
 }
@@ -85,7 +84,6 @@ fn routed_app(root: &std::path::Path, store: Arc<Store>) -> (axum::Router, Endpo
         ProfileSet::load(Some(&overlay)).unwrap(),
         Arc::new(NoHttp),
         Arc::new(MemoryDownloader::new(root.join("dl"))),
-        root.join("library"),
     )
     .unwrap();
     let _ = browser; // browser held in state in Task 6

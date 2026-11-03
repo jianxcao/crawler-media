@@ -24,7 +24,6 @@ fn state(root: &std::path::Path) -> crate::management::ApiState {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
 }

@@ -184,7 +184,6 @@ fn provider(root: &Path) -> api::media_server_provider::ApiServerProvider {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     )

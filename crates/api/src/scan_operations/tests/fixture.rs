@@ -43,7 +43,6 @@ impl Fixture {
             indexer::ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap();
         let root = dir.path().join("movies");

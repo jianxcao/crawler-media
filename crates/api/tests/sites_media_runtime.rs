@@ -115,7 +115,6 @@ fn state<F: Fetcher + 'static>(root: &Path, fetcher: Arc<F>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         fetcher,
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
 }

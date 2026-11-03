@@ -189,7 +189,6 @@ fn failed_jobs_sql_and_failed_subscribe_compensation_recover_from_durable_dirty_
         std::sync::Arc::new(downloader::MemoryDownloader::new(
             fixture.temp.path().join("stage"),
         )),
-        fixture.temp.path().join("library"),
     )
     .unwrap()
     .with_catalog(std::sync::Arc::new(Offline));
@@ -339,7 +338,6 @@ fn committed_sync_receipt_preserves_later_manual_job_edit_after_ack_failure_and_
         std::sync::Arc::new(downloader::MemoryDownloader::new(
             fixture.temp.path().join("stage"),
         )),
-        fixture.temp.path().join("library"),
     )
     .unwrap()
     .with_catalog(std::sync::Arc::new(Offline));
@@ -689,7 +687,6 @@ fn deletion_jobs_busy_reports_external_cleanup_and_recovers_disabled_definition(
         indexer::ProfileSet::load(None).unwrap(),
         std::sync::Arc::new(Offline),
         downloader,
-        fixture.temp.path().join("library"),
     )
     .unwrap()
     .with_catalog(std::sync::Arc::new(Offline));

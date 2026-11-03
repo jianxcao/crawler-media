@@ -74,7 +74,6 @@ fn app(root: &Path) -> (axum::Router, String, String) {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     );
@@ -102,7 +101,6 @@ fn empty_library_app(root: &Path) -> axum::Router {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            library_root,
         )
         .unwrap(),
     )
@@ -324,7 +322,6 @@ async fn static_artwork_is_public_but_respects_authenticated_library_visibility(
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

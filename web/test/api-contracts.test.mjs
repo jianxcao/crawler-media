@@ -157,3 +157,16 @@ test("settings overview includes metadata network and proxy health panel", async
   assert.match(overview, /diagnoseProxySettings/);
   assert.match(overview, /元数据网络与代理体检/);
 });
+
+test("speed limit reads and writes preserve exactly the supported server shape", async () => {
+  const snapshot = { status: "available", error: null, download_limit_bytes: 1024, upload_limit_bytes: null };
+  let saved;
+  const api = await loadApiModule("downloaders", async (path, init) => {
+    assert.equal(path, "/downloaders/limits?id=dl%201");
+    if (init?.body) saved = JSON.parse(init.body);
+    return { ok: true, data: snapshot };
+  });
+  assert.deepEqual(await api.getDownloaderLimits("dl 1"), snapshot);
+  assert.deepEqual(await api.setDownloaderLimits("dl 1", { download_limit_bytes: 1024, upload_limit_bytes: null }), snapshot);
+  assert.deepEqual(saved, { download_limit_bytes: 1024, upload_limit_bytes: 0 });
+});

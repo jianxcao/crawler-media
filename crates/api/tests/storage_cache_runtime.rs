@@ -85,7 +85,6 @@ fn jobs_db_layout_gate_rejects_missing_tables_with_backup_guidance() {
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp.path().join("library"),
     );
 
     let err = match res {
@@ -159,7 +158,6 @@ fn live_databases_copy_is_accepted_and_stamped_properly() {
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp.path().join("library"),
     )
     .expect("live databases copy must be accepted and successfully initialized");
 
@@ -227,7 +225,6 @@ fn unstamped_jobs_db_is_rejected_without_changing_objects_or_headers() {
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp.path().join("library"),
     );
     assert!(result.is_err());
 
@@ -285,7 +282,6 @@ fn stamped_jobs_db_missing_declared_index_is_rejected() {
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        tmp.path().join("library"),
     );
 
     let err = match res {

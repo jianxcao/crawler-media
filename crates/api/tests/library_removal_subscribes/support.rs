@@ -141,7 +141,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(Offline),
             Arc::new(CompletedFile(source.clone())),
-            temp.path().join("library"),
         )
         .unwrap()
         .with_catalog(Arc::new(Offline));

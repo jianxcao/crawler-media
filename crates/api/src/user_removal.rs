@@ -12,13 +12,8 @@ pub const USER_REMOVAL_DONE_PREFIX: &str = "user_removal.done.";
 pub const RESULT_RETENTION_SECS: i64 = 7 * 24 * 3600;
 const RECORD_VERSION: u32 = 1;
 
-fn default_version() -> u32 {
-    RECORD_VERSION
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserRemovalRecord {
-    #[serde(default = "default_version")]
     pub version: u32,
     pub operation_id: String,
     pub user_id: String,
@@ -43,17 +38,6 @@ pub enum UserRemovalError {
 impl UserRemovalService {
     pub fn new(state: Arc<ApiState>) -> Self {
         Self { state }
-    }
-
-    /// Accept (or resume) the removal of one User and drive it to completion.
-    ///
-    /// The persisted `user_removal.<id>` record is authoritative: a repeated request or a
-    /// restart resumes the same operation from its stored phase instead of starting a new
-    /// one. Each phase is idempotent; a failure is written back into the record (phase kept,
-    /// `error` set) and returned, never swallowed.
-    pub fn start_removal(&self, user_id: UserId) -> Result<String, String> {
-        let record = self.accept(user_id).map_err(|error| error.to_string())?;
-        self.drive(user_id, record)
     }
 
     /// Accept a removal without driving it: the record is persisted and the `disabling`
@@ -182,7 +166,7 @@ impl UserRemovalService {
             .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
             .map_err(|e| e.to_string())?;
         let mut failures = Vec::new();
-        prune_results(&self.state.store.as_ref(), crate::job_loop::unix_now());
+        let mut pending = Vec::new();
         for key in keys {
             if key.starts_with(USER_REMOVAL_RESULT_PREFIX)
                 || key.starts_with(USER_REMOVAL_DONE_PREFIX)
@@ -202,6 +186,13 @@ impl UserRemovalService {
                     continue;
                 }
             };
+            pending.push((uid, record));
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("; "));
+        }
+        prune_results(&self.state.store.as_ref(), crate::job_loop::unix_now());
+        for (uid, record) in pending {
             tracing::warn!(user_id = %uid, operation_id = %record.operation_id, phase = %record.phase, "Recovering pending user removal");
             if let Err(error) = self.drive(uid, record) {
                 failures.push(format!("{uid}: {error}"));
@@ -226,9 +217,20 @@ fn read_record(store: &store::Store, user_id: UserId) -> Result<Option<UserRemov
     else {
         return Ok(None);
     };
-    serde_json::from_str(&raw)
+    decode_record(&raw)
         .map(Some)
-        .map_err(|e| format!("user removal record for {user_id} is unreadable: {e}"))
+        .map_err(|error| format!("user removal record for {user_id} is unreadable: {error}"))
+}
+
+fn decode_record(raw: &str) -> Result<UserRemovalRecord, String> {
+    let record: UserRemovalRecord = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    if record.version != RECORD_VERSION {
+        return Err(format!(
+            "unsupported user removal version {}",
+            record.version
+        ));
+    }
+    Ok(record)
 }
 
 fn write_record(
@@ -309,9 +311,7 @@ pub fn find_removal(
         .get_setting(&format!("{USER_REMOVAL_RESULT_PREFIX}{operation_id}"))
         .map_err(|e| e.to_string())?
     {
-        return serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|e| e.to_string());
+        return decode_record(&raw).map(Some);
     }
     let keys = store
         .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
@@ -324,9 +324,8 @@ pub fn find_removal(
         let Some(raw) = store.get_setting(&key).map_err(|e| e.to_string())? else {
             continue;
         };
-        if let Ok(record) = serde_json::from_str::<UserRemovalRecord>(&raw)
-            && record.operation_id == operation_id
-        {
+        let record = decode_record(&raw)?;
+        if record.operation_id == operation_id {
             return Ok(Some(record));
         }
     }
@@ -363,8 +362,12 @@ fn prune_results(store: &store::Store, now: i64) {
         let Ok(Some(raw)) = store.get_setting(&key) else {
             continue;
         };
-        let Ok(record) = serde_json::from_str::<UserRemovalRecord>(&raw) else {
-            continue;
+        let record = match decode_record(&raw) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%key, %error, "invalid user removal result retained");
+                continue;
+            }
         };
         if record.phase == "succeeded" && now - record.updated_at > RESULT_RETENTION_SECS {
             if let Err(error) = store.delete_setting(&key) {

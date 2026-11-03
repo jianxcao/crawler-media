@@ -26,7 +26,6 @@ fn fixture() -> (tempfile::TempDir, ApiState, Media, Subscribe) {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let media = Media {
@@ -296,7 +295,6 @@ fn restarted_pending_reservation_reuses_file_identity_and_version() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();

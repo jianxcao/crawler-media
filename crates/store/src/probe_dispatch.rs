@@ -18,7 +18,7 @@ use super::{ProbeJob, ProbeJobUnit, Store, StoreError};
 /// The dispatch refill statement, shared with the plan test so the assertion can never drift
 /// from production. `?1` = stage, `?2` = limit.
 #[doc(hidden)]
-pub const PENDING_DISPATCH_SQL: &str = "SELECT u.job_id, u.file_id
+const PENDING_DISPATCH_SQL: &str = "SELECT u.job_id, u.file_id
      FROM probe_job_units u
      JOIN probe_jobs j ON j.id = u.job_id
      WHERE u.stage = ?1 AND u.status = 'queued'

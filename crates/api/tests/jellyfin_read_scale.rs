@@ -116,7 +116,6 @@ fn seed(path: &Path, unrelated: usize) -> (ApiState, domain::UserId, String) {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(path.join("stage"))),
-        path.join("library"),
     )
     .unwrap();
     let user = state
@@ -288,7 +287,6 @@ fn tv_scale(target: usize, other: usize) -> ScaleTv {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_file_stat_read(files.clone())
@@ -447,7 +445,6 @@ fn resume_scale(in_progress: usize, played: usize) -> ScaleResume {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_file_stat_read(files.clone())

@@ -173,7 +173,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(temp.path().join("downloads"))),
-            temp.path().join("library"),
         )
         .unwrap();
         let service = Arc::new(

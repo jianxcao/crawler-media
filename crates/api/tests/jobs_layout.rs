@@ -31,7 +31,6 @@ async fn independently_created_queue_reopens_through_api_and_retains_inflight_jo
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     assert_eq!(

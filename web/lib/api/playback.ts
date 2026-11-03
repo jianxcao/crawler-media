@@ -562,60 +562,6 @@ export interface PlaybackSource {
   size_bytes: number | null;
 }
 
-export interface PlaybackArtifactUpload {
-  name: string;
-  status: number;
-  received_bytes: number;
-  content_length: number | null;
-  transfer_encoding: string | null;
-  occurred_at_ms: number;
-}
-
-/** 播放诊断接口的脱敏快照；不会包含源地址、签名 URL 或 Worker token。 */
-export interface PlaybackDiagnostics {
-  session_state: string;
-  session_error: string | null;
-  processing_mode: string;
-  execution_location: string;
-  backend: string | null;
-  encoder: string | null;
-  worker_id: string | null;
-  worker_version: string | null;
-  worker_platform: string | null;
-  worker_arch: string | null;
-  ffmpeg_version: string | null;
-  worker_online: boolean | null;
-  worker_last_seen_seconds: number | null;
-  job_id: string | null;
-  attempt_id: string | null;
-  job_state: string | null;
-  job_out_time_ms: number | null;
-  job_speed: string | null;
-  job_phase: string | null;
-  job_exit_code: number | null;
-  job_error: string | null;
-  job_stderr_tail: string | null;
-  head_segment: number | null;
-  highest_produced_segment: number | null;
-  requested_segment: number | null;
-  served_segment: number | null;
-  segment_wait_ms: number | null;
-  segment_status: number | null;
-  pending_segments: number[];
-  failed_segments: number[];
-  historical_failed_segments: number[];
-  recent_uploads: PlaybackArtifactUpload[];
-  cache_bytes: number;
-  total_segments: number | null;
-  /** 转码头领先播放头的秒数（闭环供片节流的输入，§A）；非 VOD 会话为 null */
-  lead_seconds?: number | null;
-  /** 当前挂起原因："lead" 领先过多 / "disk" 磁盘低水位；空 = 在跑 */
-  pause_reasons?: string[];
-  /** 开会话时认领到了同指纹的转码缓存（§B），以及当时可用的分片数 */
-  cache_hit?: boolean;
-  cached_segments?: number;
-}
-
 /** 进度条上的章节刻度。合成章节不下发 */
 export interface PlaybackChapterMark {
   start_ms: number;

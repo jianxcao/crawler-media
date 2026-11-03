@@ -62,7 +62,6 @@ fn self_auth_passes_selected_bearer_or_cookie_as_opaque_read_credential() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap();
     let user = state

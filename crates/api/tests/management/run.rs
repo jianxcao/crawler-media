@@ -236,7 +236,6 @@ async fn legacy_run_keeps_results_when_one_site_fails() {
         ProfileSet::load(None).unwrap(),
         fetcher.clone(),
         downloader.clone(),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state);
@@ -304,7 +303,6 @@ async fn pending_torrent_occupies_slot_and_prevents_duplicate_download_in_next_r
             ProfileSet::load(None).unwrap(),
             Arc::new(MultiRoundFetcher(round_fetcher)),
             downloader.clone(),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

@@ -51,18 +51,6 @@ impl Store {
         self.complete_file_rename(&request.rename_id, now)
     }
 
-    /// Run every [`Self::rename_file_within_root`] check without writing, so a
-    /// caller can refuse before it moves any bytes on disk.
-    pub fn check_file_rename(
-        &self,
-        file_id: LedgerId,
-        expected: &FileVersion,
-        from: &Path,
-        to: &Path,
-    ) -> Result<(), StoreError> {
-        self.rename_within_root(file_id, expected, from, to)
-    }
-
     fn rename_within_root(
         &self,
         file_id: LedgerId,

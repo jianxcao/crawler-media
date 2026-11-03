@@ -127,24 +127,6 @@ impl Store {
         )
     }
 
-    /// Ledger-only reconciliation: the bytes already sit at `to` and `from` is gone.
-    /// Evidence is observed at `to`, so the disk phase verifies the moved inode
-    /// instead of moving anything.
-    pub fn begin_file_reconciliation(
-        &self,
-        file_id: LedgerId,
-        expected: &FileVersion,
-        from: &Path,
-        to: &Path,
-        now: i64,
-    ) -> Result<FileRenameRequest, StoreError> {
-        self.begin_observed_file_rename(
-            self.plan_file_reconciliation(file_id, expected, from, to)?
-                .observe()?,
-            now,
-        )
-    }
-
     /// Persist owned observations; re-check the file, root scope and configuration.
     pub fn begin_observed_file_rename(
         &self,

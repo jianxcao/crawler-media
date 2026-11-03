@@ -25,7 +25,6 @@ fn api_app(root: &Path) -> axum::Router {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     )

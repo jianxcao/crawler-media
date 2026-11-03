@@ -38,12 +38,6 @@ const COLS: &str = "operation_id, library_id, state, error";
 /// `cleaning`, `failed`) is still owned by the removal driver and must survive retention.
 pub(crate) const SUCCEEDED_STATE: &str = "succeeded";
 
-/// Terminal predicate for retention, derived from the state this module writes.
-#[allow(dead_code)]
-pub(crate) fn terminal_operation_predicate() -> String {
-    format!("state = '{SUCCEEDED_STATE}'")
-}
-
 /// `settings` keys owned by a Library, stored as `<prefix><library_id>`.
 ///
 /// Library-scoped settings die with the Library; add the prefix here rather

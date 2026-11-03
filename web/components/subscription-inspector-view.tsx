@@ -2106,15 +2106,14 @@ function downloadNote(d: SubscriptionDownload): string {
   if (d.state === "error") {
     // 下载器里这条任务坏了（多半是文件缺失），不是死种：说清原因，并交代
     // 换源判定已暂停、要去下载器里处理
-    return `${pct} · ${d.error_message || "下载器报告任务出错"}；换源判定已暂停，请在下载器中处理`;
+    return `${pct} · 下载器报告任务出错；换源判定已暂停，请在下载器中处理`;
   }
   if (d.state === "stalled") return `${pct} · 等待连接做种`;
-  // downloading / unknown：速度与 ETA 有则展示
+  // downloading / unknown：展示实际速度
   const parts = [pct];
   if (d.dlspeed_bytes != null && d.dlspeed_bytes > 0) {
     parts.push(`${formatBytes(d.dlspeed_bytes)}/s`);
   }
-  if (d.eta_seconds != null) parts.push(`剩余约 ${formatDuration(d.eta_seconds)}`);
   if (d.size_bytes != null && parts.length === 1) parts.push(formatBytes(d.size_bytes));
   return parts.filter(Boolean).join(" · ");
 }

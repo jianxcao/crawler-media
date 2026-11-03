@@ -155,7 +155,6 @@ fn new_state(dir: &Path, files: Arc<CountingFiles>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.join("stage"))),
-        dir.join("library"),
     )
     .unwrap()
     .with_file_stat_read(files)

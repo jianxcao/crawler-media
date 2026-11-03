@@ -37,7 +37,6 @@ pub async fn resolved_chapters(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     api::marker_resolver::resolve_item_chapters(&state, &row, row.units[0], &media, None).await

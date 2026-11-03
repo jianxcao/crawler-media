@@ -95,7 +95,6 @@ async fn late_auto_generate_must_not_overwrite_manual_cover() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state.clone());

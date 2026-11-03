@@ -26,7 +26,6 @@ async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
             ProfileSet::load(None).unwrap(),
             Arc::new(UrlRecorder(urls.clone())),
             downloader.clone(),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

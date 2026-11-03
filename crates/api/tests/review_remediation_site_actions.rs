@@ -29,7 +29,6 @@ fn app(root: &std::path::Path) -> (axum::Router, ApiState) {
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     (router(state.clone()), state)

@@ -79,7 +79,6 @@ fn failed_poster_download_does_not_frame_a_vanished_video() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_catalog(Arc::new(PosterCatalog))
@@ -135,7 +134,6 @@ fn test_state(tmp: &std::path::Path) -> ApiState {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.join("stage"))),
-        tmp.join("library"),
     )
     .unwrap()
     .with_catalog(Arc::new(NoCatalog))

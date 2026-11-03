@@ -161,7 +161,6 @@ async fn seed_admin_rolls_back_when_token_insert_fails() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     );
     assert!(res.is_err());
 
@@ -181,7 +180,6 @@ fn build_test_app(store: Arc<Store>, tmp: &tempfile::TempDir, token: &str) -> ax
         ProfileSet::load(None).unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     router(state)
@@ -281,7 +279,6 @@ async fn bootstrap_admin_password_and_cli_token_are_separated() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state);

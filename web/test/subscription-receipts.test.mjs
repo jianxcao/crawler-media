@@ -57,6 +57,9 @@ test("downloads are scoped to the subscription's wanted hashes", async () => {
   assert.equal(calls, 0, "no wanted hashes means no request");
   const shown = await api.listActiveSubscriptionDownloads(["bbb"]);
   assert.deepEqual(shown.map((t) => t.info_hash), ["bbb"]);
+  assert.equal("error_message" in shown[0], false);
+  assert.equal("units" in shown[0], false);
+  assert.equal("eta_seconds" in shown[0], false);
 });
 
 test('rule-set API saves atoms directly and reloads every condition unchanged', async () => {
@@ -78,4 +81,22 @@ test('rule-set API saves atoms directly and reloads every condition unchanged', 
   assert.deepEqual(renamed, {
     id: 'filter-1', name: 'Renamed', atoms, keep_old_versions: false,
   });
+});
+
+test("removal preview preserves the five server fields without a season filter", async () => {
+  const preview = {
+    library_file_count: 3,
+    library_bytes: 123456,
+    torrent_count: 2,
+    torrent_count_inferred: true,
+    torrent_titles: ["First", "Second"],
+  };
+  let requestedPath;
+  const api = await load(async (path) => {
+    requestedPath = path;
+    return envelope(preview);
+  });
+  const result = await api.getSubscriptionRemovalPreview("s1", [2, 3]);
+  assert.equal(requestedPath, "/subscriptions/s1/removal-preview");
+  assert.deepEqual(result, preview);
 });

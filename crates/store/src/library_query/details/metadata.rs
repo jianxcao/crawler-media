@@ -21,9 +21,6 @@ pub struct AdoptedPerson {
     pub tmdb_id: Option<String>,
 }
 
-pub fn instance_default_locale(store: &Store) -> Result<Option<String>, StoreError> {
-    store.with_read(crate::Db::Library, instance_default_locale_on)
-}
 pub(crate) fn instance_default_locale_on(
     conn: &rusqlite::Connection,
 ) -> Result<Option<String>, StoreError> {

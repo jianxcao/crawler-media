@@ -54,7 +54,6 @@ fn fixture(root: &Path) -> (ApiState, String) {
         ProfileSet::load(None).unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     (state, library.id)

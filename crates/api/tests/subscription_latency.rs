@@ -91,7 +91,6 @@ fn fixture(
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_catalog(catalog);

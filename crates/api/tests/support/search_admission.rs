@@ -115,7 +115,6 @@ impl SearchAdmissionFixture {
             ProfileSet::load(None).unwrap(),
             fetcher.clone(),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap();
         let mut site_ids = Vec::new();

@@ -192,7 +192,6 @@ fn make_state(root: &Path, downloader: Arc<dyn Downloader>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         downloader,
-        root.join("library"),
     )
     .unwrap()
 }

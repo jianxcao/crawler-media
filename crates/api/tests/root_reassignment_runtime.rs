@@ -24,7 +24,6 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let parent = temp.path().join("parent");
@@ -127,7 +126,6 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let shared = state.store();
@@ -267,7 +265,6 @@ async fn idle_root_driver_releases_its_instance_budget_on_shutdown() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let budget = Arc::downgrade(&state.fs_work);
@@ -291,7 +288,6 @@ async fn formal_root_addition_queues_cross_library_ownership_until_ready() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let shared = state.store();

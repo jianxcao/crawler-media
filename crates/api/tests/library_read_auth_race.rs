@@ -43,7 +43,6 @@ fn revoked_original_token_cannot_publish_completed_facet_read() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_library_read_progress_observer(Arc::new(move || {
@@ -104,7 +103,6 @@ fn role_flip_status(flips: usize) -> (StatusCode, usize) {
         store, "management-secret".into(), ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     ).unwrap().with_library_read_progress_observer(Arc::new(move || {
         let attempt = count.fetch_add(1, Ordering::SeqCst);
         if attempt < flips {
@@ -168,7 +166,6 @@ fn early_library_headers_reject_role_change_after_cover_observation() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_library_header_barrier(Arc::new(move || {
@@ -217,7 +214,6 @@ fn retry_uses_remaining_deadline_and_timed_out_lease_recovers() {
         store, "management-secret".into(), ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     ).unwrap()
     .with_library_read_pool_size(std::num::NonZeroUsize::new(1).unwrap()).unwrap()
     .with_library_read_progress_observer(Arc::new(move || {
@@ -282,7 +278,6 @@ fn broken_library_query_returns_500_not_empty_success() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap();
     let conn = rusqlite::Connection::open(dir.path().join("data/library.db")).unwrap();
@@ -324,7 +319,6 @@ fn early_library_headers_reject_acl_change_after_cover_observation() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_library_header_barrier(Arc::new(move || {
@@ -373,7 +367,6 @@ fn protocol_role_flip_status(flips: usize) -> (StatusCode, usize) {
         "management-secret".into(), ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     ).unwrap().with_library_read_progress_observer(Arc::new(move || {
         let attempt = count.fetch_add(1, Ordering::SeqCst);
         if attempt < flips {

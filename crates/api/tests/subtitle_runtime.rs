@@ -156,7 +156,6 @@ fn make_state(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_subtitle_delivery(service.clone());

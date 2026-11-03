@@ -41,7 +41,6 @@ fn watcher_retry_scans_other_library_while_one_is_frozen() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
@@ -90,7 +89,6 @@ fn watcher_retry_scans_after_reconfiguration_releases_library() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
@@ -137,7 +135,6 @@ fn watcher_retry_eventually_scans_after_store_contention() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
@@ -327,7 +324,6 @@ fn realtime_library_root_matches_nested_strm_path() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
 
@@ -371,7 +367,6 @@ fn rescanning_a_show_queues_only_the_new_episode() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let show_dir = root.join("喜剧之王 (2026)");
@@ -669,7 +664,6 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
 

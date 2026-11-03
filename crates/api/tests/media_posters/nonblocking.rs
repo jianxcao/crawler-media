@@ -29,7 +29,6 @@ async fn cold_public_media_poster_times_out_without_blocking_the_async_worker() 
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
     let media_id = MediaId::new();
@@ -113,7 +112,6 @@ async fn cached_public_media_poster_returns_etag_and_not_modified() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
     let cache_dir = tmp.path().join("cache");
@@ -173,7 +171,6 @@ async fn cold_media_poster_reads_identity_without_the_writer_lock() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
     let media_id = MediaId::new();

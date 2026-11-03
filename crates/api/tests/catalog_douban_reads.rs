@@ -94,7 +94,6 @@ fn fixture_with_source(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Ro
         ProfileSet::load(None).unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_catalog(source);
@@ -197,7 +196,6 @@ fn douban_local_alias_keeps_tmdb_detail_fastpath() {
         ProfileSet::load(None).unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-        dir.path().join("library"),
     )
     .unwrap()
     .with_catalog(Arc::new(Source));

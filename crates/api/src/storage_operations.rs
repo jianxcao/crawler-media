@@ -173,19 +173,6 @@ pub fn operation_json(view: &LibraryOperationView) -> Value {
     })
 }
 
-/// One operation for HTTP, scoped to its Library. `None` means "answer 404".
-pub fn library_operation(
-    state: &ApiState,
-    library_id: &str,
-    operation_id: &str,
-) -> Result<Option<Value>, String> {
-    let view = operation_read(state, |store| store.library_operation_view(operation_id))
-        .map_err(|error| error.to_string())?;
-    Ok(view
-        .filter(|view| view.library_id == library_id)
-        .map(|view| operation_json(&view)))
-}
-
 /// Whether a write request must be refused because the Library is being reconfigured.
 #[derive(Debug, PartialEq)]
 pub enum WriteVerdict {
@@ -195,18 +182,6 @@ pub enum WriteVerdict {
     /// `library.reindexing`. The operation id is absent when only the frozen lifecycle
     /// row explains the refusal.
     Reindexing { operation_id: Option<String> },
-}
-
-/// The freeze verdict for a write to `library_id`.
-///
-/// A frozen Library is the trigger, not "an unfinished row exists": a row whose process
-/// died must not block a healthy Library, while a frozen Library must block even when its
-/// row is gone. Store errors answer `Proceed` so the caller keeps its own 404/500 path (an
-/// unknown Library must still be 404, never 409); the Store write barrier remains the last
-/// line of defence either way.
-pub fn write_verdict(state: &ApiState, library_id: &str) -> WriteVerdict {
-    let store = state.store.as_ref();
-    write_verdict_for_store(store, library_id)
 }
 
 pub(crate) fn write_verdict_for_store(store: &crate::Store, library_id: &str) -> WriteVerdict {

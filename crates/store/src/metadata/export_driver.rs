@@ -151,20 +151,6 @@ impl Store {
         })
     }
 
-    /// Recover one export after a restart.
-    ///
-    /// The file decides which step is missing: it already holds the intended
-    /// body (register only), it still holds what the intent saw (retry the
-    /// replacement), or a third party changed it; comparable edits are retained
-    /// locally before rerendering.
-    pub fn resume_nfo_export(
-        &self,
-        request: &NfoExportRequest,
-        now_ms: i64,
-    ) -> Result<NfoExportOutcome, StoreError> {
-        resume_nfo_export_phased(|| self, request, now_ms)
-    }
-
     /// The `export_digest` recorded when this library last wrote the sidecar.
     fn nfo_export_anchor(
         &self,

@@ -43,7 +43,6 @@ async fn assert_global_rss_identity(delete_during_fetch: bool, extra_argument: b
         ProfileSet::load(None).unwrap(),
         fetcher.clone(),
         downloader.clone(),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state.clone());

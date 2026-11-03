@@ -46,7 +46,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
-            dir.path().join("library"),
         )
         .unwrap();
         let library = {

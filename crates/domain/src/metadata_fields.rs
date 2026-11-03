@@ -22,10 +22,6 @@ impl<T> FieldValue<T> {
         matches!(self, Self::Empty)
     }
 
-    pub fn is_value(&self) -> bool {
-        matches!(self, Self::Value(_))
-    }
-
     pub fn value(&self) -> Option<&T> {
         match self {
             Self::Value(v) => Some(v),

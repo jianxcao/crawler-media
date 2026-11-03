@@ -33,7 +33,6 @@ async fn pausing_during_site_search_prevents_the_search_from_adding_torrents() {
             ProfileSet::load(None).unwrap(),
             fetcher,
             downloader.clone(),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );
@@ -125,7 +124,6 @@ async fn manual_search_rejects_a_paused_subscription() {
             ProfileSet::load(None).unwrap(),
             fetcher,
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );
@@ -239,7 +237,6 @@ async fn deletion_fixture(root: &Path) -> DeletionFixture {
             ProfileSet::load(None).unwrap(),
             fetcher,
             downloader.clone(),
-            root.join("library"),
         )
         .unwrap(),
     );

@@ -99,8 +99,3 @@ impl RedirectCache {
 pub fn resolve_remote(url: &str) -> String {
     REDIRECTS.resolve(url)
 }
-
-/// Forget a cached target after a remote read failed.
-pub fn invalidate_remote(url: &str) {
-    REDIRECTS.invalidate(url);
-}

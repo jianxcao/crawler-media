@@ -67,7 +67,6 @@ fn recent_sidecar_export_survives_retention_until_its_millisecond_timestamp() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        root,
     )
     .unwrap()
     .with_playback_clock(Arc::new(FixedClock(now_ms)));

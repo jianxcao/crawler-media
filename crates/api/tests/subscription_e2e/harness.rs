@@ -109,7 +109,6 @@ impl Harness {
             indexer::ProfileSet::load(None).unwrap(),
             self.search.clone(),
             client,
-            self.tmp.path().join("library"),
         )
         .unwrap();
         self.app = router(state.clone());
@@ -138,7 +137,6 @@ impl Harness {
             indexer::ProfileSet::load(None).unwrap(),
             search.clone(),
             client,
-            tmp.path().join("library"),
         )
         .unwrap();
         let state = match catalog {

@@ -108,7 +108,6 @@ function componentFixture(api) {
     "@/lib/use-visible-polling": { useVisiblePolling: () => { throw new Error("Untested configurations must not start polling"); } },
     "@/components/feedback": { useConfirm: () => async () => true },
     "@/lib/backdrop": { useBackdrop: () => ({}) },
-    "@/lib/downloader-limits-capabilities": { DOWNLOADER_LIMITS_CAPABILITIES: {}, editableLimitFields: () => [] },
     "@/components/icons": new Proxy({}, { get: () => noop }),
     "@/components/directory-picker": { DirectoryPicker: noop },
     "@/components/modal": { Modal: noop },

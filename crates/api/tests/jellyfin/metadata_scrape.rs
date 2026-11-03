@@ -210,7 +210,6 @@ fn rich_tv_app(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_image_fetch(Arc::new(|url| {

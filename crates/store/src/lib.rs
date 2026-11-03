@@ -99,9 +99,7 @@ pub mod playback;
 mod playback_devices;
 mod probe_dispatch;
 mod probe_tasks;
-pub use probe_dispatch::{
-    PENDING_DISPATCH_SQL, ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchStage,
-};
+pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchStage};
 pub mod library_operations;
 mod roots;
 pub use library_operations::LibraryReconfiguration;

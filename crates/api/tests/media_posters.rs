@@ -124,7 +124,6 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
 

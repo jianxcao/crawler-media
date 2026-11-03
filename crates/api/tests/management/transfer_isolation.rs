@@ -146,7 +146,6 @@ fn state_with_downloader(root: &std::path::Path, good_file: PathBuf) -> api::Api
             bodies: HashMap::new(),
         }),
         Arc::new(FailingDownloader { good_file }),
-        root.join("library"),
     )
     .unwrap()
 }

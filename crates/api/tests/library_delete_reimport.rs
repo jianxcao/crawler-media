@@ -138,7 +138,6 @@ impl Fixture {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-            temp.path().join("library"),
         )
         .unwrap()
         .with_catalog(catalog.clone());

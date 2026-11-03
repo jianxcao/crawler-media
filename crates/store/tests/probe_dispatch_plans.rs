@@ -7,9 +7,8 @@
 //! sorts every queued unit on every refill: measured 30,339 VM steps for 2,000 queued units
 //! and 300,339 for 20,000, i.e. O(N) per refill and O(N²/window) for one backlog drain.
 //!
-//! These cases pin the plan and the cost as deterministic counters (VM steps and
-//! `EXPLAIN QUERY PLAN` text), never wall-clock. Before the fix the first case fails on the
-//! `TEMP B-TREE` term and the second fails the absolute bound.
+//! Dispatch checks observe the public operation result ordering and VM-step cost, never
+//! wall-clock or production SQL text. Sibling reads additionally check their own plan.
 
 use rusqlite::Connection;
 use store::{ProbeDispatchStage, Store};
@@ -67,27 +66,6 @@ fn plan_text(conn: &Connection, sql: &str) -> String {
     .join(" | ")
 }
 
-#[test]
-fn dispatch_refill_sorts_nothing_and_scans_no_journal_table() {
-    let (_tmp, _store, conn) = open_store();
-    seed_queued_jobs(&conn, 0, BACKLOG);
-    let text = plan_text(&conn, store::PENDING_DISPATCH_SQL);
-    assert!(
-        !text.contains("TEMP B-TREE"),
-        "the refill must not sort the queued set: {text}"
-    );
-    assert!(
-        text.contains("probe_unit_dispatch"),
-        "the refill must reach the dispatch index: {text}"
-    );
-    for table in ["probe_jobs", "probe_job_units"] {
-        assert!(
-            !text.contains(&format!("SCAN {table}")),
-            "{table} must be searched through an index, not scanned: {text}"
-        );
-    }
-}
-
 /// The whole point: refill cost is set by the window, not by the backlog.
 ///
 /// Before the fix the same call cost 30,339 VM steps at 2,000 queued units and 300,339 at
@@ -96,16 +74,27 @@ fn dispatch_refill_sorts_nothing_and_scans_no_journal_table() {
 fn dispatch_refill_cost_does_not_grow_with_the_backlog() {
     let (_tmp, store, conn) = open_store();
     seed_queued_jobs(&conn, 0, BACKLOG);
-    let (ids, small_steps) = store
-        .pending_probe_dispatch_ids_with_vm_steps(ProbeDispatchStage::Metadata, LIMIT)
-        .unwrap();
+    let (result, stats) = store.with_stats(store::stats::StatsScope::Library, || {
+        store.pending_probe_dispatch_ids_with_vm_steps(ProbeDispatchStage::Metadata, LIMIT)
+    });
+    let (ids, small_steps) = result.unwrap();
+    assert_eq!(stats.fullscan_steps, 0);
+    assert_eq!(stats.sort_operations, 0);
     assert_eq!(ids.len(), LIMIT, "a full window must be filled");
+    let expected: Vec<_> = (0..LIMIT).map(|index| format!("job-{index:06}")).collect();
+    assert_eq!(
+        ids.iter().map(|id| id.job_id.clone()).collect::<Vec<_>>(),
+        expected
+    );
 
     seed_queued_jobs(&conn, BACKLOG, MORE_BACKLOG);
     let (more_ids, large_steps) = store
         .pending_probe_dispatch_ids_with_vm_steps(ProbeDispatchStage::Metadata, LIMIT)
         .unwrap();
-    assert_eq!(more_ids.len(), LIMIT);
+    assert_eq!(
+        more_ids, ids,
+        "backlog growth preserves the selected dispatch window"
+    );
 
     // 10x the backlog must not cost more than a bounded constant: the read touches the
     // window, not the queue. 64 index entries + 64 job probes is a few hundred steps; the
