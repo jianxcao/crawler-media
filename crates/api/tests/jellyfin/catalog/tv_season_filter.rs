@@ -464,3 +464,41 @@ async fn tv_season_filter_resume_and_show_played_marks_work() {
     marking_the_series_clears_next_up_and_resume(&fx).await;
     favoriting_an_unplayed_episode_does_not_invent_played(&fx).await;
 }
+
+#[tokio::test]
+async fn seasons_expose_stable_userdata_identity_on_both_protocol_prefixes() {
+    for prefix in ["", "/emby"] {
+        let fx = tv_season_filter_fixture().await;
+        let uri = format!("{prefix}/Shows/{}/Seasons", fx.series_id);
+        let mut snapshots = Vec::new();
+        for _ in 0..2 {
+            let response = fx
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header("authorization", "Bearer admin-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let payload = json(response).await;
+            let seasons = payload["Items"].as_array().unwrap();
+            assert_eq!(seasons.len(), 2, "{uri}");
+            let mut identities = Vec::new();
+            for season in seasons {
+                assert_eq!(season["Type"], "Season");
+                let id = season["Id"].as_str().filter(|id| !id.is_empty()).unwrap();
+                let data = &season["UserData"];
+                assert_eq!(data["ItemId"], id);
+                let key = data["Key"].as_str().filter(|key| !key.is_empty()).unwrap();
+                identities.push((id.to_owned(), key.to_owned()));
+            }
+            snapshots.push(identities);
+        }
+        assert_eq!(snapshots[0], snapshots[1], "{uri}");
+    }
+}

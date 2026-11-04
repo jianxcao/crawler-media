@@ -68,6 +68,8 @@ pub(super) async fn show_seasons(
         let season_total = season.total;
         let unplayed = season_total.saturating_sub(played_count);
         let user_data = json!({
+            "Key": season_id,
+            "ItemId": season_id,
             "PlaybackPositionTicks": 0,
             "PlayCount": 0,
             "IsFavorite": false,
