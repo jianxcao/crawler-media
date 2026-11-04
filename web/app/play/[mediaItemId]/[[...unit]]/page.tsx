@@ -32,7 +32,7 @@ function queryNumber(value: string | null): number | undefined {
 export default function PlayPage() {
   const params = useParams();
   const mediaItemId = params.mediaItemId ?? "";
-  const unitParam = params["*"] || params.unit;
+  const unitParam = params.unit;
   const [searchParams] = useSearchParams();
   const parsed = parseUnitSegment(unitParam);
   const startSeconds = queryNumber(searchParams.get("t"));
