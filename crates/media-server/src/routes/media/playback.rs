@@ -288,7 +288,7 @@ async fn stream(
         .resolve_stream_source_bound(
             user.id,
             &id,
-            query.media_source_id.as_deref(),
+            query.media_source_id.as_deref().filter(|id| !id.is_empty()),
             query.play_session_id.as_deref(),
             device_id,
         )

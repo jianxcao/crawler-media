@@ -213,6 +213,57 @@ async fn vidhub_static_stream_paths_enforce_auth_and_session_binding() {
 }
 
 #[tokio::test]
+async fn empty_media_source_id_uses_the_bound_source_and_rejects_invalid_sources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = fixture(tmp.path());
+    let (status, body) = get(
+        &f.app,
+        "POST",
+        &format!("/Items/{}/PlaybackInfo", f.item_id),
+        "vidhub-device",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap();
+    let stale_source = domain::PhysicalSourceId {
+        file_id: f.file_id,
+        revision: 99,
+    }
+    .to_wire_string();
+    for (source, device, session, expected) in [
+        ("", "vidhub-device", session, StatusCode::PARTIAL_CONTENT),
+        ("", "other-device", session, StatusCode::NOT_FOUND),
+        ("", "vidhub-device", "unknown", StatusCode::NOT_FOUND),
+        ("%20", "vidhub-device", session, StatusCode::NOT_FOUND),
+        ("invalid", "vidhub-device", session, StatusCode::NOT_FOUND),
+        (
+            stale_source.as_str(),
+            "vidhub-device",
+            session,
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let (status, bytes) = get(
+            &f.app,
+            "GET",
+            &format!(
+                "/videos/{}/stream.mp4?MediaSourceId={source}&PlaySessionId={session}&DeviceId={device}",
+                f.item_id
+            ),
+            device,
+        )
+        .await;
+        assert_eq!(status, expected);
+        if expected == StatusCode::PARTIAL_CONTENT {
+            assert_eq!(bytes, b"AAAA");
+        } else {
+            assert_ne!(bytes, b"AAAA");
+        }
+    }
+}
+
+#[tokio::test]
 async fn production_jellyfin_stream_uses_issued_binding() {
     let tmp = tempfile::tempdir().unwrap();
     let f = fixture(tmp.path());
