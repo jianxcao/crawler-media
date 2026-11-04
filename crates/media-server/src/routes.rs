@@ -167,12 +167,20 @@ pub fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             post(mark_favorite).delete(unmark_favorite),
         )
         .route(
+            "/Users/{user_id}/FavoriteItems/{id}/Delete",
+            post(unmark_favorite),
+        )
+        .route(
             "/UserFavoriteItems/{id}",
             post(mark_favorite).delete(unmark_favorite),
         )
         .route(
             "/Users/{user_id}/PlayedItems/{id}",
             post(mark_played).delete(unmark_played),
+        )
+        .route(
+            "/Users/{user_id}/PlayedItems/{id}/Delete",
+            post(unmark_played),
         )
         .route(
             "/UserPlayedItems/{id}",
