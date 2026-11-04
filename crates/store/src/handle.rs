@@ -18,6 +18,8 @@ pub struct Store {
     pub(crate) writers: std::sync::Arc<Writers>,
     pub(crate) readers: connections::Readers,
     pub(crate) aliases: path_key::RootAliases,
+    pub(crate) integrity_search:
+        std::sync::Arc<crate::query_projection::search_integrity::snapshots::Snapshots>,
 }
 
 impl std::fmt::Debug for Store {

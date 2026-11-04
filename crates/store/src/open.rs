@@ -107,6 +107,7 @@ impl Store {
             root_ledger_scans: Default::default(),
             media_ledger_reads: Default::default(),
             role_lookups: Default::default(),
+            integrity_search: Default::default(),
         })
     }
     pub fn data_dir(&self) -> &Path {

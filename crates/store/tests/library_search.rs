@@ -3,6 +3,9 @@ use domain::{LibraryId, Media, MediaId, MediaKind};
 use store::test_support::{FixtureFile, publish_fixture_file};
 use store::{Store, stats::StatsScope};
 
+#[path = "library_search/integrity_writer.rs"]
+mod integrity_writer;
+
 struct Fixture {
     dir: tempfile::TempDir,
     store: Store,

@@ -1,7 +1,11 @@
 //! Read physical facts and operation scratch without holding the writer.
 use super::*;
 
-pub(crate) fn prepare(conn: &Connection, operation: &str) -> Result<Option<Prepared>, StoreError> {
+pub(crate) fn prepare(
+    conn: &Connection,
+    snapshots: &Snapshots,
+    operation: &str,
+) -> Result<Option<Prepared>, StoreError> {
     let row:Option<(String,String,String,String,Option<String>)>=conn.query_row(
         "SELECT library_id,kind,state,plan_json,cursor_json FROM library_operations WHERE operation_id=?1",
         [operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
@@ -11,7 +15,7 @@ pub(crate) fn prepare(conn: &Connection, operation: &str) -> Result<Option<Prepa
     if kind != "integrity" || status == "succeeded" {
         return Ok(None);
     }
-    IntegrityOwner::acquire(conn, operation, library.parse()?)?;
+    let owner = IntegrityOwner::acquire(conn, operation, library.parse()?)?;
     let mut state = read_integrity_cursor(conn, operation)?;
     let plan: IntegrityPlan = serde_json::from_str(&plan)?;
     let mut actions = Vec::new();
@@ -26,14 +30,7 @@ pub(crate) fn prepare(conn: &Connection, operation: &str) -> Result<Option<Prepa
         match page.phase {
             Phase::Files => facts::files(conn, &library, &mut page, &mut actions)?,
             Phase::Coverage => facts::coverage(conn, &library, &mut page, &mut actions)?,
-            Phase::Header => prepare_header(
-                conn,
-                operation,
-                &library,
-                &mut page,
-                plan.repair,
-                &mut actions,
-            )?,
+            Phase::Header => prepare_header(conn, &library, &mut page, plan.repair, &mut actions)?,
             Phase::Users => users(conn, operation, &library, &mut page, &mut actions)?,
             Phase::Sync => sync::expected_page(
                 conn,
@@ -71,10 +68,15 @@ pub(crate) fn prepare(conn: &Connection, operation: &str) -> Result<Option<Prepa
                 true,
                 &mut actions,
             )?,
-            Phase::VerifyHeader => {
-                actions.push(Mutation::Header(header(conn, operation, &library, &page)?));
-                page.phase = Phase::Members;
-            }
+            Phase::VerifyHeader => verify_header(
+                conn,
+                snapshots,
+                &owner,
+                operation,
+                &library,
+                &mut page,
+                &mut actions,
+            )?,
             Phase::Members => {
                 let terms = rows::page(
                     conn,
@@ -120,6 +122,26 @@ pub(crate) fn prepare(conn: &Connection, operation: &str) -> Result<Option<Prepa
     }))
 }
 
+fn verify_header(
+    conn: &Connection,
+    snapshots: &Snapshots,
+    owner: &IntegrityOwner,
+    operation: &str,
+    library: &str,
+    page: &mut MediaPage,
+    actions: &mut Vec<Mutation>,
+) -> Result<(), StoreError> {
+    let expected = header(conn, library, page)?;
+    let key = ProjectionKey {
+        library_id: library.parse()?,
+        media_id: page.media.parse()?,
+    };
+    let actual = snapshots.document(conn, operation, key, owner.revision())?;
+    actions.push(Mutation::Header(expected, actual));
+    page.phase = Phase::Members;
+    Ok(())
+}
+
 fn next_media(
     conn: &Connection,
     library: &str,
@@ -140,7 +162,6 @@ fn next_media(
 
 fn header(
     conn: &Connection,
-    _operation: &str,
     library: &str,
     page: &MediaPage,
 ) -> Result<ExpectedProjection, StoreError> {
@@ -223,13 +244,12 @@ fn users(
 
 fn prepare_header(
     conn: &Connection,
-    operation: &str,
     library: &str,
     page: &mut MediaPage,
     repair: bool,
     out: &mut Vec<Mutation>,
 ) -> Result<(), StoreError> {
-    let header = header(conn, operation, library, page)?;
+    let header = header(conn, library, page)?;
     let actual = rows::actual(
         conn,
         "library_items",

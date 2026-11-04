@@ -22,6 +22,9 @@ pub(crate) struct IntegrityOwner {
     revision: i64,
 }
 impl IntegrityOwner {
+    pub(crate) fn revision(&self) -> i64 {
+        self.revision
+    }
     pub(crate) fn acquire(
         tx: &Connection,
         operation_id: &str,

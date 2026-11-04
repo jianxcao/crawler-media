@@ -82,6 +82,7 @@ pub(crate) fn header_matches(
     tx: &Connection,
     key: ProjectionKey,
     expected: &ExpectedProjection,
+    search_actual: Option<&super::search_integrity::Document>,
 ) -> Result<bool, StoreError> {
     let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
     let actual = actual_rows(tx, "library_items", &lib, &media)?;
@@ -95,7 +96,7 @@ pub(crate) fn header_matches(
         && super::people::read(tx, &lib, &media)? == expected.people
         && super::entities::read(tx, &lib, &media)? == expected.entities
         && super::entities::sources_match(tx, &lib, &media)?
-        && super::search_integrity::matches(tx, key, expected)?)
+        && super::search_integrity::matches(tx, key, expected, search_actual)?)
 }
 
 pub(crate) fn repair_header(
@@ -103,7 +104,7 @@ pub(crate) fn repair_header(
     owner: &IntegrityOwner,
     key: ProjectionKey,
     expected: &ExpectedProjection,
-) -> Result<(), StoreError> {
+) -> Result<Option<std::sync::Arc<super::search_integrity::Document>>, StoreError> {
     owner.validate(tx, key.library_id)?;
     let (lib, media) = (key.library_id.to_string(), key.media_id.to_string());
     let old_search_rowid = super::search::rowid(tx, key)?;
@@ -139,5 +140,5 @@ pub(crate) fn repair_header(
             params![lib, media],
         )?;
     }
-    super::search_integrity::refresh(tx, key, old_search_rowid, expected)
+    super::search_integrity::refresh(tx, key, expected)
 }

@@ -79,7 +79,7 @@ impl ReaderPool {
         validate: fn(&Connection) -> Result<(), StoreError>,
     ) -> Result<Self, StoreError> {
         let file_id = identity(&path)?;
-        let conn = open_reader_for(&path, validate)?;
+        let conn = open_reader_for(&path, database, validate)?;
         if identity(&path)? != file_id {
             return Err(StoreError::Invalid(format!(
                 "{database}.db changed during reader open"
@@ -340,12 +340,13 @@ impl Inner {
     }
 
     pub(super) fn open_connection(&self) -> Result<Connection, StoreError> {
-        open_reader_for(&self.path, self.validate)
+        open_reader_for(&self.path, self.database, self.validate)
     }
 }
 
 fn open_reader_for(
     path: &Path,
+    database: &str,
     validate: fn(&Connection) -> Result<(), StoreError>,
 ) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
@@ -354,7 +355,6 @@ fn open_reader_for(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI,
     )?;
-    conn.pragma_update(None, "query_only", "ON")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     // 与写连接同样的页缓存 / mmap / temp_store；只读连接不设 journal_size_limit，
@@ -362,6 +362,13 @@ fn open_reader_for(
     crate::open::apply_reader_pragma_tuning(&conn)?;
     crate::open::register_casefold(&conn)?;
     crate::path_key::register(&conn)?;
+    // temp_store tuning above discards TEMP objects, so register the readonly
+    // vocabulary afterwards, before sealing the publicly available lease.
+    // Main has remained SQLITE_OPEN_READ_ONLY throughout initialization.
+    if database == "library" {
+        crate::query_projection::search_integrity::open_reader(&conn)?;
+    }
+    conn.pragma_update(None, "query_only", "ON")?;
     validate(&conn)?;
     Ok(conn)
 }
@@ -413,7 +420,8 @@ mod pragma_tests {
     fn reader_connections_share_writer_pragma_tuning() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::Store::open(dir.path()).unwrap();
-        let conn = open_reader_for(&dir.path().join("library.db"), validate_reader).unwrap();
+        let conn =
+            open_reader_for(&dir.path().join("library.db"), "library", validate_reader).unwrap();
         for (name, expected) in [
             ("cache_size", crate::open::CACHE_SIZE_KIB),
             ("temp_store", crate::open::TEMP_STORE_MEMORY),

@@ -6,7 +6,7 @@ pub(crate) fn commit(
     conn: &Connection,
     operation: &str,
     now: i64,
-    mut prepared: Prepared,
+    prepared: &mut Prepared,
 ) -> Result<OperationStatus, StoreError> {
     let tx = crate::write_tx(conn)?;
     let current: Option<String> = tx.query_row(
@@ -20,14 +20,10 @@ pub(crate) fn commit(
     }
     let result = (|| {
         let owner = IntegrityOwner::acquire(&tx, operation, prepared.library.parse()?)?;
-        apply(&tx, &owner, operation, &mut prepared)?;
+        apply(&tx, &owner, operation, prepared)?;
         let final_state = if prepared.finish {
-            let (damage, more) = crate::query_projection::search_integrity::finish(
-                &tx,
-                operation,
-                prepared.plan.repair,
-                100,
-            )?;
+            let (damage, more) =
+                crate::query_projection::search_integrity::finish(&tx, prepared.plan.repair, 100)?;
             if damage {
                 prepared.state.report.query_count_mismatch = true;
                 prepared.state.issues_found += 1;
@@ -80,7 +76,6 @@ fn apply(
     prepared: &mut Prepared,
 ) -> Result<(), StoreError> {
     let Some(page) = prepared.state.current.as_mut() else {
-        crate::query_projection::search_integrity::prepare(tx, operation, &prepared.library)?;
         return Ok(());
     };
     let media: MediaId = page.media.parse()?;
@@ -133,21 +128,27 @@ fn apply(
                     );
                 }
             }
-            Mutation::Header(expected) => {
-                crate::query_projection::search_integrity::prepare(
-                    tx,
-                    operation,
-                    &prepared.library,
-                )?;
+            Mutation::Header(expected, actual) => {
                 let key = ProjectionKey {
                     library_id: prepared.library.parse()?,
                     media_id: media,
                 };
-                let mismatch = !crate::query_projection::repair::header_matches(tx, key, expected)?;
+                let mismatch = !crate::query_projection::repair::header_matches(
+                    tx,
+                    key,
+                    expected,
+                    actual.as_deref(),
+                )?;
                 page.mismatch |= mismatch;
                 if prepared.plan.repair {
-                    crate::query_projection::repair::repair_header(tx, owner, key, expected)?;
-                    if !crate::query_projection::repair::header_matches(tx, key, expected)? {
+                    let refreshed =
+                        crate::query_projection::repair::repair_header(tx, owner, key, expected)?;
+                    if !crate::query_projection::repair::header_matches(
+                        tx,
+                        key,
+                        expected,
+                        refreshed.as_deref(),
+                    )? {
                         return Err(StoreError::Protected(
                             "Integrity header verification failed".into(),
                         ));

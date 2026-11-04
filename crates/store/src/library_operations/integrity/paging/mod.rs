@@ -7,9 +7,11 @@ mod state;
 mod sync;
 
 use super::*;
+use crate::query_projection::search_integrity::{Document, snapshots::Snapshots};
 use crate::query_projection::{ExpectedProjection, expected::OwnedRow};
 pub(crate) use state::MediaPage;
 use state::{Key, Phase};
+use std::sync::Arc;
 
 enum Mutation {
     Stage(&'static str, OwnedRow),
@@ -20,7 +22,7 @@ enum Mutation {
     Resolution(String),
     MissingUser(String),
     OrphanUser(String),
-    Header(ExpectedProjection),
+    Header(ExpectedProjection, Option<Arc<Document>>),
     Cleanup(String, Key),
 }
 

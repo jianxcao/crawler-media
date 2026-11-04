@@ -176,7 +176,7 @@ impl Store {
                 std::time::Duration::from_secs(30),
                 || {
                     self.with_read(crate::Db::Library, |conn| {
-                        integrity::paging::prepare(conn, operation_id)
+                        integrity::paging::prepare(conn, &self.integrity_search, operation_id)
                     })
                 },
             )
@@ -190,14 +190,30 @@ impl Store {
                 return Err(error);
             }
         };
-        if let Some(prepared) = prepared {
-            return self.with_writer(crate::Db::Library, |conn| {
-                integrity::paging::commit(conn, operation_id, now_ms, prepared)
+        if let Some(mut prepared) = prepared {
+            // Keep evidence owned by the caller until the actual writer has
+            // released, including CAS rejection, errors and unwind.
+            let result = self.with_writer(crate::Db::Library, |conn| {
+                integrity::paging::commit(conn, operation_id, now_ms, &mut prepared)
             });
+            if result
+                .as_ref()
+                .is_ok_and(|status| status.state == SUCCEEDED_STATE)
+            {
+                self.integrity_search.finish(operation_id);
+            }
+            return result;
         }
-        self.with_library_write(|library| {
+        let result = self.with_library_write(|library| {
             library.advance_library_operation(operation_id, now_ms, max_media)
-        })
+        });
+        if result
+            .as_ref()
+            .is_ok_and(|status| status.state == SUCCEEDED_STATE)
+        {
+            self.integrity_search.finish(operation_id);
+        }
+        result
     }
 
     /// Current lifecycle state of a Library (`ready`, `reindexing`, ...).
