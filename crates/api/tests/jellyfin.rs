@@ -280,6 +280,8 @@ mod authentication_routes;
 mod endpoint_routes;
 #[path = "jellyfin/library_routes.rs"]
 mod library_routes;
+#[path = "jellyfin/playback_contract.rs"]
+mod playback_contract;
 #[path = "jellyfin/request_observation.rs"]
 mod request_observation;
 #[path = "jellyfin/user_marks_routes.rs"]

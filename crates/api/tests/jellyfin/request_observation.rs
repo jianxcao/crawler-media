@@ -51,7 +51,6 @@ impl futures_core::Stream for ArrivalCheckedBody {
     }
 }
 
-#[tokio::test]
 async fn protocol_arrival_is_logged_before_body_is_read() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, _) = app(tmp.path());
@@ -120,7 +119,6 @@ fn assert_observed(logs: &str, id: &str, method: &str, route: &str, status: u16)
     );
 }
 
-#[tokio::test]
 async fn protocol_requests_are_observed_without_sensitive_data() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, item_id) = app(tmp.path());
@@ -234,6 +232,12 @@ async fn protocol_requests_are_observed_without_sensitive_data() {
 
     let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert_safe_logs(&logs, &item_id, &session);
+}
+
+#[tokio::test]
+async fn protocol_request_observation_contract() {
+    protocol_arrival_is_logged_before_body_is_read().await;
+    protocol_requests_are_observed_without_sensitive_data().await;
 }
 
 fn assert_safe_logs(logs: &str, item_id: &str, session: &str) {

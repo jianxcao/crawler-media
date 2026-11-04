@@ -21,7 +21,7 @@ async fn get_json(app: &axum::Router, uri: &str) -> Value {
     json(response).await
 }
 
-fn new_media(kind: MediaKind, title: &str) -> Media {
+pub(super) fn new_media(kind: MediaKind, title: &str) -> Media {
     Media {
         id: MediaId::new(),
         kind,
@@ -37,7 +37,7 @@ fn new_media(kind: MediaKind, title: &str) -> Media {
     }
 }
 
-fn insert_episode(
+pub(super) fn insert_episode(
     store: &Store,
     root: &Path,
     media_id: MediaId,
