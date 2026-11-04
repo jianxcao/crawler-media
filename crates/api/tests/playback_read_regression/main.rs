@@ -7,3 +7,4 @@ mod support;
 mod activity_and_stream;
 mod common;
 mod favorites;
+mod stream_credentials;

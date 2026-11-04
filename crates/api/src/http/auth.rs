@@ -149,11 +149,11 @@ fn query_token(request: &Request) -> Option<String> {
     })
 }
 
-/// 从请求中提取会话 token：优先 Authorization: Bearer，其次会话 cookie，取流端点允许 query token。
+/// 显式凭据优先于浏览器自动附带的 cookie；query token 仅限取流端点。
 fn request_token(request: &Request) -> Option<String> {
     bearer_token(request)
-        .or_else(|| cookie_token(request))
         .or_else(|| query_token(request))
+        .or_else(|| cookie_token(request))
 }
 
 fn cookie_token(request: &Request) -> Option<String> {
