@@ -11,6 +11,11 @@ pub struct SubscribeCreation {
     pub(crate) epoch: i64,
     pub(crate) media_id: MediaId,
 }
+impl SubscribeCreation {
+    pub fn subscribe_id(&self) -> SubscribeId {
+        self.id
+    }
+}
 impl Store {
     pub fn begin_subscribe_creation(
         &self,
@@ -126,31 +131,52 @@ impl Store {
         }
         self.with_writer(Db::Subscribe,|conn| {conn.execute("UPDATE subscribe_reference_ops SET state='done' WHERE epoch=?1 AND generation=?2 AND state IN ('aborting','releasing')",params![op.epoch,op.generation])?;Ok(())})
     }
-    pub fn recover_subscribe_references(&self, limit: usize) -> Result<usize, StoreError> {
-        let pending=self.with_writer(Db::Subscribe,|conn| {
-            let tx=crate::write_tx(conn)?;
-            let mut after:i64=tx.query_row("SELECT epoch FROM subscribe_recovery_cursor WHERE id=1",[],|r|r.get(0))?;
-            let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribe_reference_ops WHERE state IN ('creating','retained','aborting','releasing') AND epoch>?1)",[after],|r|r.get(0))?;
+    pub fn pending_subscribe_references(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Result<SubscribeCreation, StoreError>>, StoreError> {
+        let pending=self.with_subscribe_read(|db| {
+            let conn=&db.subscribe;
+            let mut after:i64=conn.query_row("SELECT epoch FROM subscribe_recovery_cursor WHERE id=1",[],|r|r.get(0))?;
+            let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM subscribe_reference_ops WHERE state IN ('creating','retained','aborting','releasing') AND epoch>?1)",[after],|r|r.get(0))?;
             if !exists {after=0;}
-            let mut stmt=tx.prepare("SELECT subscribe_id,generation,epoch,media_id FROM subscribe_reference_ops WHERE state IN ('creating','retained','aborting','releasing') AND epoch>?1 ORDER BY epoch LIMIT ?2")?;
+            let mut stmt=conn.prepare("SELECT subscribe_id,generation,epoch,media_id FROM subscribe_reference_ops WHERE state IN ('creating','retained','aborting','releasing') AND epoch>?1 ORDER BY epoch LIMIT ?2")?;
             let pending=stmt.query_map(params![after,limit.min(64) as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?)))?.collect::<Result<Vec<_>,_>>()?;
-            drop(stmt);
-            tx.execute("UPDATE subscribe_recovery_cursor SET epoch=?1 WHERE id=1",[pending.last().map_or(0,|row|row.2)])?;
-            tx.commit()?;Ok(pending)
+            Ok(pending)
         })?;
-        let mut failure = None;
-        for (id, generation, epoch, media) in &pending {
-            let decoded = (|| {
-                Ok::<_, StoreError>(SubscribeCreation {
+        self.with_writer(Db::Subscribe, |conn| {
+            conn.execute(
+                "UPDATE subscribe_recovery_cursor SET epoch=?1 WHERE id=1",
+                [pending.last().map_or(0, |row| row.2)],
+            )?;
+            Ok(())
+        })?;
+        Ok(pending
+            .into_iter()
+            .map(|(id, generation, epoch, media)| {
+                Ok(SubscribeCreation {
                     id: id.parse()?,
-                    generation: generation.clone(),
-                    epoch: *epoch,
+                    generation,
+                    epoch,
                     media_id: media.parse()?,
                 })
-            })();
-            let result = decoded.and_then(|op| self.abort_subscribe_creation(&op));
-            if let Err(error) = result {
-                tracing::error!(subscribe_id=%id,generation=%generation,epoch,%media,%error,"Subscribe reference recovery deferred; raw cursor advanced");
+            })
+            .collect())
+    }
+    pub fn recover_subscribe_references(&self, limit: usize) -> Result<usize, StoreError> {
+        let pending = self.pending_subscribe_references(limit)?;
+        let mut failure = None;
+        for candidate in &pending {
+            let op = match candidate {
+                Ok(op) => op,
+                Err(error) => {
+                    tracing::error!(%error, "Invalid Subscribe reference recovery candidate; raw cursor advanced");
+                    failure = Some(StoreError::Invalid(error.to_string()));
+                    continue;
+                }
+            };
+            if let Err(error) = self.abort_subscribe_creation(op) {
+                tracing::error!(subscribe_id=%op.id,generation=%op.generation,epoch=op.epoch,media=%op.media_id,%error,"Subscribe reference recovery deferred; raw cursor advanced");
                 failure = Some(error);
             }
         }

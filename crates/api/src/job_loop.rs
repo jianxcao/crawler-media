@@ -207,7 +207,7 @@ async fn recover_startup_work(state: &ApiState) {
         for (stage, result) in [
             (
                 "Subscribe references",
-                reference_state.store.recover_subscribe_references(64),
+                recover_subscribe_references(&reference_state),
             ),
             (
                 "Collection deletion",
@@ -341,6 +341,34 @@ pub(crate) struct TickRun {
     pub skipped_maintenance: Vec<String>,
 }
 
+fn recover_subscribe_references(state: &ApiState) -> Result<usize, crate::store::StoreError> {
+    let pending = state.store.pending_subscribe_references(64)?;
+    let mut failure = None;
+    for candidate in &pending {
+        let op = match candidate {
+            Ok(op) => op,
+            Err(error) => {
+                tracing::error!(%error, "Invalid Subscribe reference recovery candidate; raw cursor advanced");
+                failure = Some(crate::store::StoreError::Invalid(error.to_string()));
+                continue;
+            }
+        };
+        let id = op.subscribe_id();
+        let guard = state.subscribe_guard(id);
+        let Some(_guard) = guard.try_lock() else {
+            continue;
+        };
+        if let Err(error) = state.store.abort_subscribe_creation(op) {
+            tracing::error!(subscribe_id=%id, %error, "Subscribe reference recovery deferred");
+            failure = Some(error);
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(pending.len())
+}
+
 /// Claim work while holding the queue lock, execute it without the lock, then
 /// briefly reacquire the queue to persist each outcome. Network-bound runners
 /// must never make `/jobs` readers wait for the full Job duration.
@@ -351,10 +379,7 @@ pub(crate) fn run_pending_jobs_with_clock(
     source: TickSource,
 ) -> Result<TickRun, JobsMutationError> {
     for (stage, result) in [
-        (
-            "Subscribe references",
-            state.store.recover_subscribe_references(64),
-        ),
+        ("Subscribe references", recover_subscribe_references(state)),
         (
             "Collection deletion",
             state.store.recover_collection_deletions(),

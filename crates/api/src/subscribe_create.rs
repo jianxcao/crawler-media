@@ -3,6 +3,10 @@ use domain::{Filter, Media, Subscribe};
 use crate::management::ApiState;
 use crate::store::StoreError;
 
+#[cfg(test)]
+#[path = "subscribe_create_tests.rs"]
+mod tests;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CreateError {
     #[error(transparent)]
@@ -27,6 +31,8 @@ pub(crate) fn create(
     mut subscribe: Subscribe,
     filter: Option<&Filter>,
 ) -> Result<(Media, Subscribe), CreateError> {
+    let guard = state.subscribe_guard(subscribe.id);
+    let _guard = guard.lock();
     let reservation = state
         .jobs
         .reserve()
