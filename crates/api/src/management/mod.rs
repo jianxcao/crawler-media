@@ -1,5 +1,6 @@
 mod error;
 mod filters;
+mod protocol_observation;
 mod query_phase;
 mod scan_catalog;
 mod state;
@@ -33,4 +34,5 @@ pub fn router(state: ApiState) -> Router {
         .nest("/api/v1", crate::http::router(state))
         .merge(jellyfin)
         .layer(crate::ui::cors_layer_from_env())
+        .layer(axum::middleware::from_fn(protocol_observation::observe))
 }
