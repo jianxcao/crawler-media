@@ -15,8 +15,8 @@
 //! * `read_scope`：**未测得**，见 [`READ_SCOPE_UNAVAILABLE`]；下面那条断言只钉住「两侧都是 `None`
 //!   （未采集）**未跑**」这个事实，**没有**测到任何读放大，也不构成假绿——将来谁把该字段填上，
 //!   那条断言就会失败，必须补成真断言。
-//! * 锁等待：**未测得**（没有公开计数器，也不许为此在生产路径加常驻日志）。下面用「扫描批次
-//!   持锁时长」和「心跳端到端延迟 p50/p95/max」作为上界；它们是「事务时长 + 排队」，不是纯锁等待。
+//! * 锁等待与事务：扫描线程采集每次 Library writer 样本；native 请求采集请求内所有
+//!   Store 数据库的 writer 等待总和与 covered owned 事务最大值。其他 raw 事务不在覆盖范围内。
 //!
 //! 本文件不改生产路径：无常驻每心跳 `info!`，无第二条写队列，不数 mock 调用次数，也不看 SQL 文本。
 //! 度量仪器与夹具按责任拆在 `storage_contention/{harness,fixtures}.rs`，本文件只放测试与断言。
@@ -194,12 +194,25 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         batches: episodes / PER_BATCH,
         per_batch: PER_BATCH,
     };
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
     let scanner = std::thread::spawn({
         let store = fixture.state.store();
-        move || run_scan(store, plan)
+        let active = active.clone();
+        move || run_scan(store, plan, active, started_tx)
     });
-    let (latencies, statuses) =
-        hammer_while_scanning(&fixture.app, fixture.series.id, device, &session, &scanner).await;
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (latencies, statuses, snapshots, attempts) = hammer_while_scanning(
+        &fixture.app,
+        fixture.series.id,
+        device,
+        &session,
+        &scanner,
+        &active,
+    )
+    .await;
     let report = scanner.join().unwrap();
     let (wal_after, rss_after) = (file_len(&wal), rss_kb());
 
@@ -209,12 +222,25 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         report.errors
     );
     assert_eq!(report.inserted, episodes, "全部集必须整批写入: {report:?}");
-    let ok = statuses.get(&200).copied().unwrap_or(0);
-    assert_eq!(
-        ok,
-        latencies.len(),
-        "并发扫描期间每个心跳都必须 2xx: {statuses:?}"
+    assert_eq!(report.samples.len(), report.batch_ms.len());
+    assert!(
+        report
+            .samples
+            .iter()
+            .all(|s| s.outcome == "ok" && s.tx_count == 1 && s.tx_max_ns > 0)
     );
+    assert!(
+        latencies.len() >= 20,
+        "fewer than 20 complete heartbeat requests during scan: {}",
+        latencies.len()
+    );
+    assert_eq!(snapshots.len(), latencies.len());
+    assert!(snapshots.iter().all(|s| s.pending_phases.is_empty()
+        && s.writer_wait_ns.is_some()
+        && s.covered_owned_write_tx_count.is_some_and(|n| n > 0)
+        && s.covered_owned_write_tx_max_ns.is_some_and(|n| n > 0)));
+    let ok = statuses.get(&200).copied().unwrap_or(0);
+    assert_eq!(ok, attempts, "并发扫描期间每个心跳都必须 2xx: {statuses:?}");
 
     watch.snapshot().unwrap();
     beat(&fixture.app, fixture.series.id, 40_000, device, &session).await;
@@ -237,10 +263,90 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         &report,
         &latencies,
         &statuses,
-        (wal_before, wal_after),
-        (rss_before, rss_after),
+        &snapshots,
+        attempts,
+        ((wal_before, wal_after), (rss_before, rss_after)),
         PER_BATCH,
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_heartbeat_metrics_observe_a_held_library_writer() {
+    let fixture = fixture("Writer wait control");
+    let device = "wait-control";
+    let session = open_play_session(&fixture.app, fixture.series.id, device).await;
+    beat(&fixture.app, fixture.series.id, 1_000, device, &session).await;
+    let writers = fixture.state.store().writers();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        writers
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (response, metrics) =
+        measured_heartbeat(&fixture.app, fixture.series.id, device, &session, 2_000).await;
+    release_tx.send(()).unwrap();
+    thread.join().unwrap();
+    assert_eq!(response.status(), 503);
+    assert!(metrics.pending_phases.is_empty());
+    assert!(
+        metrics.writer_wait_ns.is_some_and(|n| n >= 100_000_000),
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.covered_owned_write_tx_count, Some(0));
+    let (response, metrics) =
+        measured_heartbeat(&fixture.app, fixture.series.id, device, &session, 2_000).await;
+    assert_eq!(response.status(), 200);
+    assert!(metrics.pending_phases.is_empty());
+    assert!(
+        metrics.covered_owned_write_tx_count.is_some_and(|n| n > 0),
+        "{metrics:?}"
+    );
+    assert!(
+        metrics.covered_owned_write_tx_max_ns.is_some_and(|n| n > 0),
+        "{metrics:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_scanner_does_not_contribute_concurrent_heartbeat_samples() {
+    let fixture = fixture("Completed scan control");
+    let device = "completed-scan";
+    let session = open_play_session(&fixture.app, fixture.series.id, device).await;
+    let scanner = std::thread::spawn(|| ScanReport {
+        inserted: 0,
+        updated: 0,
+        unchanged: 0,
+        batch_ms: vec![],
+        errors: vec![],
+        samples: vec![],
+    });
+    while !scanner.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let active = std::sync::atomic::AtomicBool::new(false);
+    let (latencies, _, snapshots, _) = hammer_while_scanning(
+        &fixture.app,
+        fixture.series.id,
+        device,
+        &session,
+        &scanner,
+        &active,
+    )
+    .await;
+    assert!(latencies.is_empty());
+    assert!(snapshots.is_empty());
+    scanner.join().unwrap();
 }
 
 #[test]

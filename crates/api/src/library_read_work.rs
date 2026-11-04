@@ -250,6 +250,11 @@ pub(crate) async fn run_lease_stage(
                                 .unwrap_or(0)
                                 .saturating_add(stats.covered_owned_write_tx_ns),
                         );
+                        s.covered_owned_write_tx_max_ns = Some(
+                            s.covered_owned_write_tx_max_ns
+                                .unwrap_or(0)
+                                .max(stats.covered_owned_write_tx_max_ns),
+                        );
                         s.sort_operations =
                             Some(s.sort_operations.unwrap_or(0) + stats.sort_operations);
                         s.fullscan_steps =

@@ -16,7 +16,7 @@
 //! another episode of the same file, from leaking into the wrong unit or session.
 
 use domain::{MediaId, TypedItemId, UnitKey};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 use super::types::{BoundPlaybackEvent, EventOutcome, PlaybackEventType};
 use super::{PlayLogRow, Store, StoreError, UnitState};

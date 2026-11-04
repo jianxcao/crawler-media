@@ -9,9 +9,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<EventOutcome, StoreError> {
         let (media_id, unit) = playback_unit(&event.item);
         self.ensure_owns_transaction()?;
-        // `&self` only: `Store::library` is not reachable as `&mut` here, so ask rusqlite for
-        // the IMMEDIATE lock directly instead of `Connection::transaction_with_behavior`.
-        let tx = Transaction::new_unchecked(self.library, TransactionBehavior::Immediate)?;
+        let tx = crate::write_tx(self.library)?;
         crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
         let Some(binding) = read_binding(&tx, event)? else {
             return Ok(EventOutcome::IgnoredStale);

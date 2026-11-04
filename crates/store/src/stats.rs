@@ -64,6 +64,9 @@ pub(crate) fn record_writer(sample: &crate::writers::WriterSample) {
             total.covered_owned_write_tx_ns = total
                 .covered_owned_write_tx_ns
                 .saturating_add(sample.covered_owned_write_tx_ns);
+            total.covered_owned_write_tx_max_ns = total
+                .covered_owned_write_tx_max_ns
+                .max(sample.covered_owned_write_tx_max_ns);
         }
     });
 }

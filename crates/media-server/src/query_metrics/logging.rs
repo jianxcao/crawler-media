@@ -25,6 +25,7 @@ impl QueryMetrics {
                     writer_wait_ns=?s.writer_wait_ns, writer_hold_ns=?s.writer_hold_ns,
                     covered_owned_write_tx_count=?s.covered_owned_write_tx_count,
                     covered_owned_write_tx_ns=?s.covered_owned_write_tx_ns,
+                    covered_owned_write_tx_max_ns=?s.covered_owned_write_tx_max_ns,
                     timeout_stage=?s.timeout_stage, remaining_budget_ms=?s.remaining_budget_ms,
                     worker_stop_delay_ms=?s.worker_stop_delay_ms,
                     pool_rejections=s.pool_rejections, timeouts=s.timeouts, $message);

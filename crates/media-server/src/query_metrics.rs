@@ -42,6 +42,8 @@ pub struct QueryMetricsSnapshot {
     /// Only transactions owned by Store write_tx; not raw rusqlite transactions.
     pub covered_owned_write_tx_count: Option<u64>,
     pub covered_owned_write_tx_ns: Option<u64>,
+    /// Maximum single covered owned transaction duration, in nanoseconds.
+    pub covered_owned_write_tx_max_ns: Option<u64>,
     pub pool_rejections: u64,
     pub timeouts: u64,
     pub timeout_stage: Option<&'static str>,

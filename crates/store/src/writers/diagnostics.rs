@@ -18,6 +18,7 @@ pub struct WriterSample {
     pub writer_hold_ns: u64,
     pub covered_owned_write_tx_count: u64,
     pub covered_owned_write_tx_ns: u64,
+    pub covered_owned_write_tx_max_ns: u64,
 }
 type Observer = Rc<dyn Fn(&WriterSample)>;
 struct Delivery {
@@ -54,6 +55,7 @@ impl Measurement {
                 writer_hold_ns: 0,
                 covered_owned_write_tx_count: 0,
                 covered_owned_write_tx_ns: 0,
+                covered_owned_write_tx_max_ns: 0,
             })),
         }
     }
@@ -162,11 +164,13 @@ impl Drop for OwnedWriteTimer {
     fn drop(&mut self) {
         if let Some(sample) = &self.sample {
             let mut sample = sample.borrow_mut();
+            let elapsed = nanos(self.start);
             sample.covered_owned_write_tx_count =
                 sample.covered_owned_write_tx_count.saturating_add(1);
-            sample.covered_owned_write_tx_ns = sample
-                .covered_owned_write_tx_ns
-                .saturating_add(nanos(self.start));
+            sample.covered_owned_write_tx_ns =
+                sample.covered_owned_write_tx_ns.saturating_add(elapsed);
+            sample.covered_owned_write_tx_max_ns =
+                sample.covered_owned_write_tx_max_ns.max(elapsed);
         }
     }
 }

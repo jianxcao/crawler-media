@@ -13,6 +13,8 @@ pub struct QueryWorkStats {
     /// Only owned `write_tx` calls; excludes raw rusqlite transactions and nested borrows.
     pub covered_owned_write_tx_count: u64,
     pub covered_owned_write_tx_ns: u64,
+    /// Maximum duration of a single covered owned transaction, in nanoseconds.
+    pub covered_owned_write_tx_max_ns: u64,
     pub fullscan_steps: u64,
     pub vm_steps: u64,
     pub sort_operations: u64,

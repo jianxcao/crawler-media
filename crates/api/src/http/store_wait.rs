@@ -251,6 +251,12 @@ pub(super) fn observe_store_work<T>(
                 .unwrap_or(0)
                 .saturating_add(stats.covered_owned_write_tx_ns),
         );
+        snapshot.covered_owned_write_tx_max_ns = Some(
+            snapshot
+                .covered_owned_write_tx_max_ns
+                .unwrap_or(0)
+                .max(stats.covered_owned_write_tx_max_ns),
+        );
         snapshot.reader_checkouts =
             Some(snapshot.reader_checkouts.unwrap_or(0) + stats.reader_checkouts);
         snapshot.vm_steps = Some(snapshot.vm_steps.unwrap_or(0) + stats.vm_steps);

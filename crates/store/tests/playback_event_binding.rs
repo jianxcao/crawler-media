@@ -10,6 +10,43 @@ mod playback_event_support;
 use playback_event_support::*;
 
 #[test]
+fn playback_event_transaction_is_reported_by_store_diagnostics() {
+    let (_tmp, f) = seed();
+    let item = episode(&f, 1);
+    let session = issue(&f, &item, &f.file);
+    let bound = event(
+        &f,
+        item,
+        (&session.0, session.1),
+        &f.file,
+        5_000,
+        PlaybackEventType::Progress,
+    );
+    let (outcome, stats) = f.store.with_stats(store::stats::StatsScope::Library, || {
+        f.store.commit_playback_event(&bound, 3_000).unwrap()
+    });
+    assert_eq!(outcome, EventOutcome::Applied);
+    assert_eq!(stats.covered_owned_write_tx_count, 1);
+    let json = serde_json::to_value(stats).unwrap();
+    assert!(
+        json["covered_owned_write_tx_max_ns"]
+            .as_u64()
+            .is_some_and(|n| n > 0)
+    );
+    let mut stale = bound.clone();
+    stale.source_version = "stale".into();
+    let (outcome, stats) = f.store.with_stats(store::stats::StatsScope::Library, || {
+        f.store.commit_playback_event(&stale, 3_100).unwrap()
+    });
+    assert_eq!(outcome, EventOutcome::IgnoredStale);
+    assert_eq!(stats.covered_owned_write_tx_count, 1);
+    let nested = f
+        .store
+        .library_write(|db| db.commit_playback_event(&bound, 3_200));
+    assert!(matches!(nested, Err(store::StoreError::Invalid(_))));
+}
+
+#[test]
 fn merged_e02_heartbeat_updates_only_e02() {
     let (_tmp, f) = seed();
     let user: UserId = USER.parse().unwrap();

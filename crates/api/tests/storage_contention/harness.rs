@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -359,44 +360,111 @@ pub(crate) struct ScanReport {
     pub(crate) unchanged: usize,
     pub(crate) batch_ms: Vec<u128>,
     pub(crate) errors: Vec<String>,
+    pub(crate) samples: Vec<ScanSample>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScanSample {
+    pub(crate) outcome: &'static str,
+    pub(crate) wait_ns: u64,
+    pub(crate) hold_ns: u64,
+    pub(crate) tx_count: u64,
+    pub(crate) tx_max_ns: u64,
 }
 
 /// 扫描侧：拿真实 `publish_files`（每批 ≤100 文件 ⇒ 一个短事务）连续写一整个 Media。
-pub(crate) fn run_scan(store: Arc<Store>, plan: ScanPlan) -> ScanReport {
+pub(crate) fn run_scan(
+    store: Arc<Store>,
+    plan: ScanPlan,
+    active: Arc<AtomicBool>,
+    started: std::sync::mpsc::Sender<()>,
+) -> ScanReport {
     let mut report = ScanReport {
         inserted: 0,
         updated: 0,
         unchanged: 0,
         batch_ms: Vec::new(),
         errors: Vec::new(),
+        samples: Vec::new(),
     };
-    for batch in 0..plan.batches {
-        let mut files = Vec::with_capacity(plan.per_batch);
-        let mut keys = Vec::with_capacity(plan.per_batch);
-        for index in 0..plan.per_batch {
-            let episode = plan.first_episode + (batch * plan.per_batch + index) as i32;
-            files.push(episode_file(&plan.template, &plan.root, 1, episode));
-            keys.push(UnitKey::new(1, episode));
-        }
-        let started = Instant::now();
-        let outcome = publish(
-            &store,
-            &plan.library_id,
-            &files,
-            &keys,
-            2_000 + batch as i64,
-        );
-        report.batch_ms.push(started.elapsed().as_millis());
-        match outcome {
-            Ok(counts) => {
-                report.inserted += counts.inserted;
-                report.updated += counts.updated;
-                report.unchanged += counts.unchanged;
+    let samples = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = samples.clone();
+    store.with_writer_diagnostics(
+        move |sample| {
+            if sample.database == store::Db::Library {
+                observed.borrow_mut().push(ScanSample {
+                    outcome: sample.outcome,
+                    wait_ns: sample.writer_wait_ns,
+                    hold_ns: sample.writer_hold_ns,
+                    tx_count: sample.covered_owned_write_tx_count,
+                    tx_max_ns: sample.covered_owned_write_tx_max_ns,
+                });
             }
-            Err(error) => report.errors.push(error.to_string()),
-        }
-    }
+        },
+        || {
+            struct Active<'a>(&'a AtomicBool);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            active.store(true, Ordering::SeqCst);
+            let _active = Active(&active);
+            started.send(()).unwrap();
+            for batch in 0..plan.batches {
+                let mut files = Vec::with_capacity(plan.per_batch);
+                let mut keys = Vec::with_capacity(plan.per_batch);
+                for index in 0..plan.per_batch {
+                    let episode = plan.first_episode + (batch * plan.per_batch + index) as i32;
+                    files.push(episode_file(&plan.template, &plan.root, 1, episode));
+                    keys.push(UnitKey::new(1, episode));
+                }
+                let started = Instant::now();
+                let outcome = publish(
+                    &store,
+                    &plan.library_id,
+                    &files,
+                    &keys,
+                    2_000 + batch as i64,
+                );
+                report.batch_ms.push(started.elapsed().as_millis());
+                match outcome {
+                    Ok(counts) => {
+                        report.inserted += counts.inserted;
+                        report.updated += counts.updated;
+                        report.unchanged += counts.unchanged;
+                    }
+                    Err(error) => report.errors.push(error.to_string()),
+                }
+            }
+        },
+    );
+    report.samples = std::mem::take(&mut *samples.borrow_mut());
     report
+}
+
+pub(crate) async fn measured_heartbeat(
+    app: &Router,
+    series: MediaId,
+    device: &str,
+    session: &str,
+    position: i64,
+) -> (
+    axum::response::Response,
+    media_server::query_metrics::QueryMetricsSnapshot,
+) {
+    let timing = media_server::provider::QueryTiming::start();
+    let metrics = media_server::query_metrics::QueryMetrics::new(timing, true);
+    let mut request = crate::common::request(
+        "POST",
+        "/api/v1/playback/progress",
+        Some(TOKEN),
+        heartbeat_body(series, position, device, session),
+    );
+    request.extensions_mut().insert(timing);
+    request.extensions_mut().insert(metrics.clone());
+    let response = app.clone().oneshot(request).await.unwrap();
+    (response, metrics.snapshot())
 }
 
 /// 扫描进行中连续打心跳，返回 (每次端到端延迟, 状态码分布)。
@@ -406,31 +474,35 @@ pub(crate) async fn hammer_while_scanning(
     device: &str,
     session: &str,
     scanner: &JoinHandle<ScanReport>,
-) -> (Vec<Duration>, BTreeMap<u16, usize>) {
+    active: &AtomicBool,
+) -> (
+    Vec<Duration>,
+    BTreeMap<u16, usize>,
+    Vec<media_server::query_metrics::QueryMetricsSnapshot>,
+    usize,
+) {
     let mut latencies = Vec::new();
     let mut statuses: BTreeMap<u16, usize> = BTreeMap::new();
     let mut failure_codes: BTreeMap<String, usize> = BTreeMap::new();
-    while (!scanner.is_finished() || latencies.len() < 20) && latencies.len() < 5_000 {
-        let position = 31_000 + (latencies.len() as i64 % 2_000) * 1_000;
+    let mut snapshots = Vec::new();
+    let mut attempts = 0;
+    while (!scanner.is_finished() || attempts < 20) && attempts < 5_000 {
+        let position = 31_000 + (attempts as i64 % 2_000) * 1_000;
         let started = Instant::now();
-        let response = app
-            .clone()
-            .oneshot(crate::common::request(
-                "POST",
-                "/api/v1/playback/progress",
-                Some(TOKEN),
-                heartbeat_body(series, position, device, session),
-            ))
-            .await
-            .unwrap();
-        latencies.push(started.elapsed());
+        let began_during_scan = active.load(Ordering::SeqCst);
+        let (response, snapshot) = measured_heartbeat(app, series, device, session, position).await;
+        let elapsed = started.elapsed();
+        if began_during_scan && active.load(Ordering::SeqCst) {
+            snapshots.push(snapshot);
+            latencies.push(elapsed);
+        }
+        attempts += 1;
         let status = response.status().as_u16();
         *statuses.entry(status).or_default() += 1;
         if !(200..300).contains(&status) {
             // 非 2xx 只记状态码不足以定位：把信封里的 code/message 一起打出来，
             // 才能区分 auth / handler 读 / handler 写 / 门禁 哪一段判的繁忙。
             let body = crate::common::json_body(response).await;
-            let elapsed = latencies.last().copied().unwrap_or_default();
             *failure_codes
                 .entry(format!(
                     "{status} {} {} @{elapsed:?}",
@@ -442,7 +514,7 @@ pub(crate) async fn hammer_while_scanning(
     if !failure_codes.is_empty() {
         println!("非 2xx 明细（状态 + code + message → 次数）: {failure_codes:?}");
     }
-    (latencies, statuses)
+    (latencies, statuses, snapshots, attempts)
 }
 
 /// Step 2 的实测输出：吞吐 / 单批提交耗时 / 心跳延迟 / busy / WAL / RSS。取不到的写「未测得」。
@@ -450,10 +522,12 @@ pub(crate) fn print_step_two(
     report: &ScanReport,
     latencies: &[Duration],
     statuses: &BTreeMap<u16, usize>,
-    wal: (u64, u64),
-    rss: (Option<u64>, Option<u64>),
+    snapshots: &[media_server::query_metrics::QueryMetricsSnapshot],
+    attempts: usize,
+    environment: ((u64, u64), (Option<u64>, Option<u64>)),
     per_batch: usize,
 ) {
+    let (wal, rss) = environment;
     let mut batch_ms = report.batch_ms.clone();
     let mut heartbeat_ms: Vec<u128> = latencies.iter().map(Duration::as_millis).collect();
     batch_ms.sort_unstable();
@@ -506,5 +580,61 @@ pub(crate) fn print_step_two(
         }
         _ => println!("进程 RSS: 未测得（`ps -o rss= -p <pid>` 不可用）"),
     }
-    println!("锁等待: 未测得（无公开计数器）；上面的 max 是整个 public 调用的墙钟，不是纯锁等待");
+    let distribution = |label: &str, values: Vec<u64>| {
+        let mut values: Vec<u128> = values.into_iter().map(u128::from).collect();
+        values.sort_unstable();
+        println!(
+            "{label}: n={} p50={} ns p95={} ns max={} ns",
+            values.len(),
+            percentile(&values, 50),
+            percentile(&values, 95),
+            percentile(&values, 100)
+        );
+    };
+    distribution(
+        "扫描 Library writer 单次等待",
+        report.samples.iter().map(|s| s.wait_ns).collect(),
+    );
+    distribution(
+        "扫描 Library writer 单次持有",
+        report.samples.iter().map(|s| s.hold_ns).collect(),
+    );
+    let scanner_max = report
+        .samples
+        .iter()
+        .map(|s| s.tx_max_ns)
+        .max()
+        .unwrap_or(0);
+    let tx_count: u64 = report.samples.iter().map(|s| s.tx_count).sum();
+    println!(
+        "扫描 covered owned 事务: n={tx_count} max={scanner_max} ns; outcome={:?}",
+        report.samples.iter().map(|s| s.outcome).collect::<Vec<_>>()
+    );
+    let waits: Vec<_> = snapshots.iter().filter_map(|s| s.writer_wait_ns).collect();
+    distribution(
+        "native 请求内所有 Store 数据库 writer 等待之和",
+        waits.clone(),
+    );
+    let request_max = snapshots
+        .iter()
+        .filter_map(|s| s.covered_owned_write_tx_max_ns)
+        .max()
+        .unwrap_or(0);
+    let request_count: u64 = snapshots
+        .iter()
+        .filter_map(|s| s.covered_owned_write_tx_count)
+        .sum();
+    println!(
+        "native 并发请求: n={} 全部尝试={} 窗口外或跨边界={} wait_missing={} covered owned 事务 n={} max={} ns; 合并扫描 max={} ns",
+        snapshots.len(),
+        attempts,
+        attempts - snapshots.len(),
+        snapshots.len() - waits.len(),
+        request_count,
+        request_max,
+        scanner_max.max(request_max)
+    );
+    println!(
+        "事务计时从尝试 BEGIN 到 commit/rollback/drop，仅成功 BEGIN 计数；排除 borrowed 和其他 raw 事务。请求汇总跨 Store 数据库，不包含 Jellyfin 指标传播。"
+    );
 }

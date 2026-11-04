@@ -37,6 +37,11 @@ fn public_stats_expose_separate_writer_wait_hold_and_covered_transactions() {
             .is_some_and(|n| n > 0)
     );
     assert!(json["writer_hold_ns"].as_u64() >= json["covered_owned_write_tx_ns"].as_u64());
+    assert!(
+        json["covered_owned_write_tx_max_ns"]
+            .as_u64()
+            .is_some_and(|n| n > 0)
+    );
     store
         .writers()
         .with_writer(Db::Library, |_| Ok(()))
@@ -269,26 +274,55 @@ fn owned_write_transactions_measure_commit_error_and_panic_without_nested_double
         anilist_id: None,
     };
     for mode in ["commit", "error", "panic"] {
+        let samples = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = samples.clone();
+        let writers = store.writers();
         let mut item = media.clone();
         item.id = MediaId::new();
         let (outcome, stats) = store.with_stats(StatsScope::Library, || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                store.library_write(|db| {
-                    db.insert_media(&item)?;
-                    assert_eq!(db.get_media(item.id)?, Some(item.clone()));
-                    match mode {
-                        "error" => Err(store::StoreError::Protected("owned refusal".into())),
-                        "panic" => panic!("owned panic"),
-                        _ => Ok(()),
-                    }
-                })
-            }))
+            store.with_writer_diagnostics(
+                move |sample| {
+                    writers
+                        .with_writer_timeout(std::time::Duration::ZERO, Db::Library, |_| Ok(()))
+                        .unwrap();
+                    observed
+                        .borrow_mut()
+                        .push(serde_json::to_value(sample).unwrap());
+                },
+                || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        store.library_write(|db| {
+                            db.insert_media(&item)?;
+                            assert_eq!(db.get_media(item.id)?, Some(item.clone()));
+                            match mode {
+                                "error" => {
+                                    Err(store::StoreError::Protected("owned refusal".into()))
+                                }
+                                "panic" => panic!("owned panic"),
+                                _ => Ok(()),
+                            }
+                        })
+                    }))
+                },
+            )
         });
         assert_eq!(
             stats.covered_owned_write_tx_count, 1,
             "only outer owned transaction counted: {mode}"
         );
         assert!(stats.covered_owned_write_tx_ns > 0);
+        let json = serde_json::to_value(stats).unwrap();
+        assert_eq!(
+            json["covered_owned_write_tx_max_ns"],
+            json["covered_owned_write_tx_ns"]
+        );
+        let samples = samples.borrow();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0]["covered_owned_write_tx_count"], 1);
+        assert_eq!(
+            samples[0]["covered_owned_write_tx_max_ns"],
+            json["covered_owned_write_tx_max_ns"]
+        );
         assert!(stats.writer_hold_ns >= stats.covered_owned_write_tx_ns);
         assert_eq!(
             store.get_media(item.id).unwrap().is_some(),
@@ -302,6 +336,27 @@ fn owned_write_transactions_measure_commit_error_and_panic_without_nested_double
             assert!(outcome.is_err());
         }
     }
+}
+
+#[test]
+fn maximum_is_not_the_sum_of_multiple_owned_transactions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let (_, stats) = store.with_stats(StatsScope::Library, || {
+        for _ in 0..2 {
+            store
+                .library_write(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Ok(())
+                })
+                .unwrap();
+        }
+    });
+    let json = serde_json::to_value(stats).unwrap();
+    let max = json["covered_owned_write_tx_max_ns"].as_u64().unwrap();
+    assert_eq!(stats.covered_owned_write_tx_count, 2);
+    assert!(max >= 2_000_000);
+    assert!(max < stats.covered_owned_write_tx_ns);
 }
 
 #[test]
