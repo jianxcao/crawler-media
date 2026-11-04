@@ -8,7 +8,7 @@
 2. **审核基线与验收：** [存储审核及修复状态](audits/2026-11-02-storage-redesign-review.md)、[最终验收清单](superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md)；[前轮修复计划](superpowers/plans/2026-10-29-storage-redesign-fixes.md)用于提交对账，历史复选框不作为当前缺陷。
 3. **存储设计：** [存储设计 Spec](superpowers/specs/2026-10-18-library-storage-redesign.md)；[五文件数据库字典](database/README.md)。唯一可执行 DDL 在生产源码。
 4. **结构/性能证据（被源码注释引用）：** [结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)、短复现 [endpoint](audits/2026-10-12-remediation-review-repro/endpoint-perf.md) / [Jobs](audits/2026-10-12-remediation-review-repro/jobs-query-plans.md) / [Media lookup](audits/2026-10-12-remediation-review-repro/media-lookup-plans.md)。
-5. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
+5. **运行/API：** [deploy](deploy.md)、[自有 API 约定](api-contracts/self.md)、[Jellyfin 客户端协议与重构回归](api-contracts/jellyfin.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*` 为准。
 6. **测试：** [e2e runbook](testing/e2e-runbook.md)、[system regression](testing/system-regression-cases.md)、[性能 SLO](testing/performance-slo.md)（合同与场景清单，不是已运行证明）。
 7. Agent 领域导航：[domain](agents/domain.md)。
 

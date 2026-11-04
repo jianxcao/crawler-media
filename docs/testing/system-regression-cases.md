@@ -184,17 +184,20 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 以下用例必须在隔离实例上用 VidHub app 实测。每项同时检查浏览器/网络层结果，避免只凭页面截图判断 API 数据是否正确。
 
+重构时还须执行 [Jellyfin 客户端协议与重构回归](../api-contracts/jellyfin.md) 的公开请求链。自动化需校验关键响应字段、取流字节和持久状态；实际设备验收继续独立记录，不能由构造播放事件的测试代替。
+
 | ID | 优先级 | 用例与步骤 | 预期结果 |
 |---|---|---|---|
-| VH-01 | P0 | 在 VidHub 添加隔离实例地址；用管理员 User 登录；退出后用成员 User 登录。 | 服务器发现和登录成功；认证信息不会泄漏到界面或日志；成员只看到获授权的 Library。 |
+| VH-01 | P0 | 在 VidHub 选择 Jellyfin 类型添加隔离实例地址；用管理员 User 登录；退出后用成员 User 登录。 | 服务器发现和登录成功；认证信息不会泄漏到界面或日志；成员只看到获授权的 Library。 |
 | VH-02 | P0 | 浏览电影与 TV Library：首页、Library 列表、Media detail、Season 和 episode 页面；前进、返回并重进。 | 标题、简介、年份、评分、Season/episode 编号和条目数稳定显示；VidHub 常见的带 /Users/{userId}/ 前缀路径可用。 |
 | VH-03 | P0 | 检查海报、背景图、人物图、episode still、章节缩略图；分别对已认证与原生图片请求检查。 | 所有有数据的 artwork 均出现且比例正确；缺失图片使用 fallback；原生图片请求不会因缺少 Authorization header 返回 401。 |
-| VH-04 | P0 | 在 VidHub 播放电影和 TV episode；暂停、退出、重新进入并继续；切换 episode 或从详情再次播放。 | 视频可启动；进度恢复到正确位置；观看状态、已观看标记和下一集信息与服务端 User 状态一致。 |
+| VH-04 | P0 | 分别用本地视频与STRM，在同一User/逻辑单元执行Web播放、seek并退出→VidHub续播、seek并退出→Web刷新；重启隔离服务再重入，并切换两个episode。 | 两端实际出画；可读停止位置与服务端持久进度相符，正反两个方向均同步；重启后保持，各集独立；缺HUD时间明确记录限制，不按墙钟或按键推算。 |
 | VH-05 | P1 | 播放多音轨/多字幕/含章节 fixture；切换音轨与字幕并跳转章节。 | VidHub 仅显示实际可用轨道；切换后播放声音/字幕正确；章节标题与时间对应文件。 |
 | VH-06 | P1 | 由成员 User 播放同一 Media；再用另一个 User 查看进度与观看标记。 | 各 User 的 Playback 进度和观看标记互相隔离；共享 Library 文件仍可见范围一致。 |
 | VH-07 | P1 | 对支持 intro/outro marks 的 fixture 在 VidHub 查看是否出现对应标记/跳过提示；从 mark 前后 seek。 | 若 VidHub 当前版本支持协议字段，则 mark 时间、章节边界和跳转准确；若 app 不支持，基础 Playback 不受影响且记录为客户端兼容性差异。 |
 | VH-08 | P1 | 断开服务端网络后打开已访问详情，再恢复网络；重复进入 Media、刷新图片并继续 Playback。 | 离线状态有清楚提示且不显示错误数据；恢复后 API、图片与播放可重试，不要求重新创建 User 或 Library。 |
-| VH-09 | P1 | 在 VidHub 中通过搜索/筛选（若 app 提供）查找电影与 TV Media，并打开结果；退出 server 后重连。 | 结果与可见 Library 一致；重连后仍进入正确服务器；不支持的 VidHub UI 功能记为 app 范围外，不作为服务端失败。 |
+| VH-09 | P1 | 在 VidHub 中用完整标题、子串、短查询和无结果查询搜索电影/TV；分类浏览、排序和分页后打开结果；退出server后重连。 | 结果身份、类别和数量与当前用户可见数据oracle一致；完整列表无遗漏/重复；重连后仍进入正确服务器；客户端显示回退与服务端搜索结果分别记录。 |
+| VH-10 | P0 | 对电影和单集分别设置/取消收藏、设置/取消已播放；刷新、退出重入，并用另一用户查看。 | 标记即时持久化，列表/详情/筛选一致；支持VidHub实际POST Delete撤销；跨用户不串状态，隐藏条目不能修改。 |
 
 ## 覆盖清单
 
@@ -212,7 +215,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 - /transfers、/jobs、/cache：TRF-01/02、SET-10
 - /settings 与 /settings/:section：SET-01 至 SET-11
 - /play/:mediaItemId/:unit：PLAY-01 至 PLAY-06
-- VidHub Jellyfin-compatible routes：VH-01 至 VH-09
+- VidHub Jellyfin-compatible routes：VH-01 至 VH-10
 
 ## 结果记录
 

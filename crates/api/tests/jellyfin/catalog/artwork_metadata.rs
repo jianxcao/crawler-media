@@ -45,6 +45,7 @@ async fn tv_artwork_fixture() -> TvArtworkFixture {
     std::fs::write(show_dir.join("fanart.jpg"), b"fanart").unwrap();
     let episode_path = season_dir.join("Show S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
+    std::fs::write(season_dir.join("Show S01E01.en.srt"), b"subtitle").unwrap();
     std::fs::write(
         season_dir.join("Show S01E01.nfo"),
         "<episodedetails><title>Pilot</title><season>1</season><episode>1</episode><plot>Episode synopsis</plot><thumb>https://image.tmdb.org/t/p/w300/still.jpg</thumb></episodedetails>",
@@ -134,6 +135,56 @@ async fn tv_artwork_fixture() -> TvArtworkFixture {
         series_id,
         episode_id,
     }
+}
+
+#[tokio::test]
+async fn season_detail_source_subtitle_references_returned_episode() {
+    let fixture = tv_artwork_fixture().await;
+    let media = domain::TypedItemId::from_wire_string(&fixture.series_id)
+        .unwrap()
+        .media_id();
+    let season = domain::TypedItemId::Season { media, season: 1 }.to_wire_string();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{season}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = json(response).await;
+    assert_eq!(detail["Id"], fixture.episode_id);
+    let streams = detail["MediaSources"][0]["MediaStreams"]
+        .as_array()
+        .unwrap();
+    let subtitle = streams
+        .iter()
+        .find(|stream| stream["Type"] == "Subtitle" && stream["IsExternal"] == true)
+        .unwrap();
+    let url = subtitle["DeliveryUrl"].as_str().unwrap();
+    assert!(url.starts_with(&format!("/Videos/{}/Subtitles/", fixture.episode_id)));
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(url)
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(response.into_body(), 1024).await.unwrap()[..],
+        b"subtitle"
+    );
 }
 
 /// 剧集（series）明细携带 NFO 元数据与图集标签。

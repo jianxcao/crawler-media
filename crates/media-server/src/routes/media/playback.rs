@@ -412,49 +412,7 @@ pub async fn playback_info(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let path_str = snapshot.file.path.to_string_lossy();
-    let is_strm = path_str.to_ascii_lowercase().ends_with(".strm");
-    let direct_url = is_strm
-        .then(|| library::read_strm_url(FsPath::new(path_str.as_ref())))
-        .flatten();
-    if is_strm && direct_url.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let source_path = direct_url.as_deref().unwrap_or(path_str.as_ref());
-    let protocol = if source_path.starts_with("http://") || source_path.starts_with("https://") {
-        "Http"
-    } else {
-        "File"
-    };
-    let container = source_path
-        .split(['?', '#'])
-        .next()
-        .and_then(|path| FsPath::new(path).extension())
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    let runtime_ticks = snapshot.metadata.runtime_ticks;
-    let media_streams = dto::media_streams_with_item(&snapshot.metadata.tracks, Some(&id));
-    // Versioned physical source: a bare file UUID is not a MediaSourceId.
-    let source_id = domain::PhysicalSourceId {
-        file_id: snapshot.file.file_id,
-        revision: snapshot.file.version.revision,
-    }
-    .to_wire_string();
-    let mut source = json!({
-        "Id": source_id,
-        "Path": source_path,
-        "Protocol": protocol,
-        "Container": container,
-        "RunTimeTicks": runtime_ticks,
-        "MediaStreams": media_streams,
-        "IsRemote": is_strm,
-        "SupportsDirectPlay": true,
-        "SupportsDirectStream": true,
-        "SupportsTranscoding": false,
-    });
-    if let Some(name) = snapshot.metadata.episode_name.as_ref() {
-        source["Name"] = json!(name);
-    }
+    let source = super::source::media_source(&snapshot, &id).await?;
     let client = user.playback_client(&headers);
     let play_session_id = state
         .provider

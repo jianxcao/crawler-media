@@ -578,7 +578,30 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
     assert_eq!(body["MediaSources"][0]["Path"], direct_url);
     assert_eq!(body["MediaSources"][0]["Protocol"], "Http");
 
+    let user_id = store.user_id_by_token("admin-token").unwrap().unwrap();
+    for prefix in ["", "/emby"] {
+        for path in [
+            format!("/Items/{item_id}"),
+            format!("/Users/{user_id}/Items/{item_id}"),
+        ] {
+            let detail = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{prefix}{path}"))
+                        .header("authorization", "Bearer admin-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(detail.status(), StatusCode::OK);
+            assert_eq!(json(detail).await["MediaSources"], body["MediaSources"]);
+        }
+    }
+
     let stream = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -591,4 +614,24 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
         .unwrap();
     assert_eq!(stream.status(), StatusCode::FOUND);
     assert_eq!(stream.headers()["location"], direct_url);
+
+    std::fs::write(&strm_path, "").unwrap();
+    for (method, path) in [
+        ("GET", format!("/Items/{item_id}")),
+        ("POST", format!("/Items/{item_id}/PlaybackInfo")),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

@@ -116,6 +116,7 @@ async fn playback_chain(prefix: &'static str) {
     assert!(!views["Items"].as_array().unwrap().is_empty());
     let series_list = client.get("/Items?IncludeItemTypes=Series").await;
     assert_eq!(item(&series_list, &series)["Type"], "Series");
+    assert!(item(&series_list, &series).get("MediaSources").is_none());
     assert_positions(&client, &series, &episode, &episode2, 0).await;
 
     let response = client
@@ -123,6 +124,21 @@ async fn playback_chain(prefix: &'static str) {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let info = json(response).await;
+    for path in [
+        format!("/Items/{episode}"),
+        format!("/Users/{}/Items/{episode}", client.user),
+    ] {
+        let detail = client.get(&path).await;
+        assert_eq!(detail["MediaSources"], info["MediaSources"]);
+        assert!(detail.get("PlaySessionId").is_none());
+    }
+    assert!(
+        client
+            .get(&format!("/Items/{series}"))
+            .await
+            .get("MediaSources")
+            .is_none()
+    );
     let source = info["MediaSources"][0]["Id"].as_str().unwrap();
     let session = info["PlaySessionId"].as_str().unwrap();
     assert!(!source.is_empty() && !session.is_empty());
@@ -164,6 +180,7 @@ async fn movie_chain(prefix: &'static str) {
     assert!(!views["Items"].as_array().unwrap().is_empty());
     let list = client.get("/Items?IncludeItemTypes=Movie").await;
     assert_eq!(item(&list, &movie)["Type"], "Movie");
+    assert!(item(&list, &movie).get("MediaSources").is_none());
     let detail_path = format!("/Users/{}/Items/{movie}", client.user);
     let detail = client.get(&detail_path).await;
     assert_eq!(detail["Id"], movie);
@@ -174,6 +191,14 @@ async fn movie_chain(prefix: &'static str) {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let info = json(response).await;
+    for path in [
+        format!("/Items/{movie}"),
+        format!("/Users/{}/Items/{movie}", client.user),
+    ] {
+        let detail = client.get(&path).await;
+        assert_eq!(detail["MediaSources"], info["MediaSources"]);
+        assert!(detail.get("PlaySessionId").is_none());
+    }
     let source = info["MediaSources"][0]["Id"].as_str().unwrap();
     let session = info["PlaySessionId"].as_str().unwrap();
     assert!(!source.is_empty() && !session.is_empty());

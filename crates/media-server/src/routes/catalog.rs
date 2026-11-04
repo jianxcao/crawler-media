@@ -319,5 +319,14 @@ pub(super) async fn item_by_id(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(item_dto_json(snapshot)))
+    let source = if snapshot.is_series {
+        None
+    } else {
+        Some(super::media::media_source(&snapshot, &snapshot.protocol_id()).await?)
+    };
+    let mut item = item_dto_json(snapshot);
+    if let Some(source) = source {
+        item["MediaSources"] = json!([source]);
+    }
+    Ok(Json(item))
 }
