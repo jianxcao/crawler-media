@@ -273,20 +273,22 @@ export async function searchTitles(
 // 媒体库条目搜索（GET /search/library-items?keyword=）
 // ---------------------------------------------------------------------------
 
-/** 媒体库内条目命中的一行（ledger 行 + 所属媒体）。 */
+/** 媒体库内命中的 Media。 */
 export interface LibraryHit {
-  file_id: string;
+  library_id: string;
   media_item_id: string;
   title: string;
   kind: MediaType;
-  path: string;
-  units: Array<{ season: number; episode: number }>;
+  year: number | null;
+  matched_by: "title" | "person";
 }
 
 /** 搜索本地全部可见媒体库中的已入库条目。 */
-export function searchLibraryItems(keyword: string): Promise<LibraryHit[]> {
+export async function searchLibraryItems(keyword: string, cursor?: string): Promise<{ items: LibraryHit[]; next_cursor: string | null }> {
   const query = new URLSearchParams({ keyword });
-  return unwrap(request<ApiEnvelope<LibraryHit[]>>(`/search/library-items?${query}`));
+  if (cursor) query.set("cursor", cursor);
+  const page = await request<ApiEnvelope<LibraryHit[]> & { next_cursor: string | null }>(`/search/library-items?${query}`);
+  return { items: page.data, next_cursor: page.next_cursor };
 }
 
 // ---------------------------------------------------------------------------
