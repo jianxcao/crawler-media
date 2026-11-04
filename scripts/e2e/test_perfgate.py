@@ -97,6 +97,27 @@ class PerfGateTests(unittest.TestCase):
                 perfgate.validate_baseline(report, 'idle', [{'id': 'detail'}])
         self.assertEqual(perfgate.validate_baseline(valid, 'idle', [{'id': 'detail'}]), valid['cases'])
 
+    def test_empty_baseline_is_rejected_before_login_or_requests(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            (root / 'cases.json').write_text(json.dumps({'cases': [
+                {'id': 'detail', 'surface': 'self', 'class': 'L', 'url': '/detail'}],
+                'exemptions': []}))
+            (root / 'manifest.json').write_text(json.dumps({'users': [{'login': 'user'}]}))
+            (root / 'baseline.json').write_text('{}')
+            argv = ['perfgate', 'idle', '--cases', str(root / 'cases.json'),
+                    '--manifest', str(root / 'manifest.json'), '--baseline', str(root / 'baseline.json')]
+            with patch('sys.argv', argv), patch.object(perfgate, 'routes', return_value=[]), \
+                    patch.object(perfgate, 'Client') as client, patch.object(perfgate, 'login') as login:
+                with self.assertRaisesRegex(ValueError, 'baseline must be complete'):
+                    perfgate.main()
+                login.assert_not_called()
+                client.return_value.call.assert_not_called()
+
     def test_episode_workload_is_detail_and_requires_seventy_items(self):
         import json
         cases = json.loads(Path(__file__).with_name('perf-cases.json').read_text())['cases']

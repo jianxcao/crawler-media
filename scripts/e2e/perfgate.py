@@ -80,6 +80,27 @@ def comparable_p95(case, previous):
     return previous.get('p95')
 
 
+def baseline_invalid_reason(case, previous, expected_n):
+    p95 = previous.get('p95')
+    if (not isinstance(p95, (int, float)) or isinstance(p95, bool)
+            or not math.isfinite(p95) or p95 <= 0):
+        return 'baseline p95 invalid'
+    n, codes = previous.get('n'), previous.get('codes')
+    if (type(expected_n) is not int or expected_n <= 0 or type(n) is not int or n != expected_n
+            or not isinstance(codes, dict) or not codes
+            or any(not str(code).isdigit() or not 200 <= int(code) < 300
+                   or type(count) is not int or count <= 0 for code, count in codes.items())
+            or sum(codes.values()) < n):
+        return 'baseline HTTP samples invalid'
+    if (previous.get('errors') != [] or previous.get('precondition_codes') != {}
+            or previous.get('response_verified') is not True
+            or 'write_verified' not in previous
+            or (previous['write_verified'] is not None and previous['write_verified'] is not True)
+            or (case.get('prepare') == 'heartbeat' and previous['write_verified'] is not True)):
+        return 'baseline correctness evidence invalid or missing'
+    return None
+
+
 def close_clients(admin, clients):
     admin.close()
     for _, rest_client, protocol_client in clients:
@@ -330,7 +351,9 @@ def main():
     selected = [case for case in config['cases'] if case['id'].startswith(args.only)]
     if not selected:
         parser.error('--only selected no cases')
-    baseline = validate_baseline(json.loads(args.baseline.read_text()), args.mode, selected) if args.baseline else {}
+    baseline_report = json.loads(args.baseline.read_text()) if args.baseline else None
+    baseline = validate_baseline(baseline_report, args.mode, selected) if baseline_report is not None else {}
+    baseline_n = (1 if args.mode == 'cold' else baseline_report.get('n')) if baseline_report else None
     clients = []
     for user in manifest['users']:
         self_client, _ = login(args.base_url, user['login'], password)
@@ -432,8 +455,10 @@ def main():
                     samples.append(elapsed)
                     codes[code] += 1
                 index += 1
-            result = evaluate(samples, codes, case['class'], args.mode,
-                              comparable_p95(case, baseline.get(case['id'], {})))
+            previous = baseline.get(case['id'], {})
+            invalid_baseline = baseline_invalid_reason(case, previous, baseline_n) if args.baseline else None
+            baseline_p95 = comparable_p95(case, previous) if args.baseline and not invalid_baseline else None
+            result = evaluate(samples, codes, case['class'], args.mode, baseline_p95)
             result.update({'class': case['class'], 'surface': case['surface'],
                            'latency_scope': 'cached' if case.get('cache_read') else 'default',
                            'cache_preparation': population,
@@ -443,11 +468,28 @@ def main():
                            'precondition_codes': dict(precondition_codes),
                            'response_verified': all(responses_verified),
                            'write_verified': all(writes_verified) if writes_verified else None})
-            if case.get('cache_read') and comparable_p95(case, baseline.get(case['id'], {})) is None:
-                result['baseline_note'] = 'Cache-read scope requires a cache-read baseline; absolute SLO enforced'
             if similar_observations:
                 result['recommendations'] = summarize_similar(similar_observations, percentile)
-            if (sampler and sampler.failed) or errors or not all(responses_verified) or (writes_verified and not all(writes_verified)):
+            correctness_failed = ((sampler and sampler.failed) or errors or not all(responses_verified)
+                                  or (writes_verified and not all(writes_verified)))
+            absolute = evaluate(samples, codes, case['class'], args.mode)
+            result['absolute_passed'] = bool(absolute['passed'] and not correctness_failed)
+            if not args.baseline:
+                result['relative_status'] = 'not_requested'
+            elif not samples or any(not 200 <= int(code) < 300 for code in codes) or correctness_failed:
+                result['relative_status'] = 'unavailable'
+                result['baseline_note'] = 'current correctness evidence invalid'
+                result['regression_percent'] = None
+                result['regressed'] = False
+            elif invalid_baseline:
+                result['relative_status'] = 'unavailable'
+                result['baseline_note'] = invalid_baseline
+            elif baseline_p95 is None:
+                result['relative_status'] = 'cache_scope_unavailable'
+                result['baseline_note'] = 'Cache-read scope requires a cache-read baseline; absolute SLO enforced'
+            else:
+                result['relative_status'] = 'failed' if result['regressed'] else 'passed'
+            if correctness_failed or invalid_baseline:
                 result['passed'] = False
             results[case['id']] = result
             if args.out:

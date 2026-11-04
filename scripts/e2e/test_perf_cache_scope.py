@@ -117,7 +117,84 @@ class CacheScopeTests(unittest.TestCase):
         self.assertEqual(result['p95'], 1)
         self.assertTrue(result['passed'])
 
-    def run_fixture(self, mode, population_code, population_body=None, contract=None):
+    def test_invalid_baseline_evidence_cannot_pass_relative_gate(self):
+        invalid = [
+            {'codes': {'0': 1}},
+            {'codes': {'200': 1, '503': 1}},
+            {'response_verified': False},
+            {'errors': ['preparation failed']},
+            {'precondition_codes': {'503': 1}},
+            {'write_verified': False},
+            {'p95': float('nan')},
+            {'n': 0},
+            {'codes': {}},
+        ]
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                status, result, _ = self.run_fixture('cold', 200, baseline=changes)
+                self.assertEqual(status, 1)
+                self.assertTrue(result['absolute_passed'])
+                self.assertEqual(result['relative_status'], 'unavailable')
+                self.assertIsNone(result['regression_percent'])
+                self.assertFalse(result['passed'])
+
+    def test_baseline_failed_only_latency_is_still_comparable(self):
+        status, result, _ = self.run_fixture('cold', 200, baseline={'passed': False})
+        self.assertEqual(status, 0)
+        self.assertEqual(result['relative_status'], 'passed')
+        self.assertTrue(result['passed'])
+
+    def test_cache_scope_mismatch_keeps_absolute_only_exception(self):
+        status, result, _ = self.run_fixture('cold', 200, baseline={'latency_scope': 'default'})
+        self.assertEqual(status, 0)
+        self.assertTrue(result['absolute_passed'])
+        self.assertEqual(result['relative_status'], 'cache_scope_unavailable')
+        self.assertIsNone(result['regression_percent'])
+        self.assertTrue(result['passed'])
+
+    def test_no_baseline_reports_absolute_only(self):
+        status, result, _ = self.run_fixture('cold', 200)
+        self.assertEqual(status, 0)
+        self.assertTrue(result['absolute_passed'])
+        self.assertEqual(result['relative_status'], 'not_requested')
+        self.assertTrue(result['passed'])
+
+    def test_heartbeat_baseline_requires_verified_write(self):
+        status, result, _ = self.run_fixture('cold', 200, baseline={}, heartbeat=True)
+        self.assertEqual(status, 1)
+        self.assertTrue(result['absolute_passed'])
+        self.assertEqual(result['relative_status'], 'unavailable')
+        self.assertTrue(result['write_verified'])
+
+    def test_valid_baseline_still_enforces_relative_regression(self):
+        status, result, _ = self.run_fixture('cold', 200, baseline={'p95': 1}, elapsed=5)
+        self.assertEqual(status, 1)
+        self.assertTrue(result['absolute_passed'])
+        self.assertEqual(result['relative_status'], 'failed')
+        self.assertFalse(result['passed'])
+
+    def test_invalid_current_response_has_no_relative_result(self):
+        invalid = [(503, None), (200, b'{"data":{"sections":[{"error":{"code":"failed"}}]}}')]
+        for code, body in invalid:
+            with self.subTest(code=code, body=body):
+                status, result, _ = self.run_fixture('cold', 200, contract='discover',
+                                                     baseline={}, timed_code=code, timed_body=body)
+                self.assertEqual(status, 1)
+                self.assertFalse(result['absolute_passed'])
+                self.assertEqual(result['relative_status'], 'unavailable')
+                self.assertIsNone(result['regression_percent'])
+                self.assertFalse(result['passed'])
+
+    def test_incomplete_busy_baseline_samples_are_unavailable(self):
+        status, result, _ = self.run_fixture('busy', 200, baseline={}, baseline_n=40)
+        self.assertEqual(status, 1)
+        self.assertTrue(result['absolute_passed'])
+        self.assertEqual(result['relative_status'], 'unavailable')
+        self.assertIsNone(result['regression_percent'])
+        self.assertFalse(result['passed'])
+
+    def run_fixture(self, mode, population_code, population_body=None, contract=None, baseline=None,
+                    heartbeat=False, elapsed=1, timed_code=200, timed_body=None, baseline_n=1):
         events = []
         class Client:
             def __init__(self, *args):
@@ -126,11 +203,11 @@ class CacheScopeTests(unittest.TestCase):
                 return {'commit': 'fixture'}
             def raw(self, *args):
                 events.append('request')
-                code = population_code if self.first else 200
-                elapsed = 1400 if self.first else 1
-                body = population_body if self.first and population_body else b'{"data":{"sections":[{"items":[]}]}}'
+                code = population_code if self.first else timed_code
+                duration = 1400 if self.first else elapsed
+                body = (population_body if self.first else timed_body) or b'{"data":{"sections":[{"items":[]}]}}'
                 self.first = False
-                return code, elapsed, body
+                return code, duration, body
             def close(self):
                 pass
 
@@ -142,17 +219,32 @@ class CacheScopeTests(unittest.TestCase):
                     'class': 'A', 'url': '/catalog', 'cache_read': True}
             if contract:
                 case['response_contract'] = contract
+            if heartbeat:
+                case['prepare'] = 'heartbeat'
             (root / 'cases.json').write_text(json.dumps({'cases': [case], 'exemptions': []}))
-            (root / 'manifest.json').write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}]}))
+            (root / 'manifest.json').write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}],
+                                                            'libraries': {'tv': 'tv'}}))
             client = Client()
             args = ['perfgate', mode, '--n', '1', '--cases', str(root / 'cases.json'),
                     '--manifest', str(root / 'manifest.json'), '--out', str(root / 'report.json'),
                     '--restart-command', '/fake/restart']
+            if baseline is not None:
+                previous = {'p95': 10, 'n': 1, 'codes': {'200': 1}, 'errors': [],
+                            'precondition_codes': {}, 'response_verified': True,
+                            'write_verified': None, 'latency_scope': 'cached', 'passed': True}
+                previous.update(baseline)
+                (root / 'baseline.json').write_text(json.dumps(
+                    {'complete': True, 'mode': mode, 'n': baseline_n, 'cases': {'catalog': previous}}))
+                args.extend(['--baseline', str(root / 'baseline.json')])
             with patch('sys.argv', args), patch.object(perfgate, 'routes', return_value=[]), \
                     patch.object(perfgate, 'Client', Client), \
                     patch.object(perfgate, 'login', return_value=(client, {})), \
                     patch.object(perfgate, 'context', return_value={}), \
+                    patch.object(perfgate, 'prepare_heartbeat'), \
+                    patch.object(perfgate, 'verify_heartbeat', return_value=True), \
+                    patch.object(perfgate, 'BusyScan') as busy, \
                     patch.object(perfgate.subprocess, 'run', side_effect=lambda *a, **kw: events.append('restart')):
+                busy.return_value.running.return_value = True
                 status = perfgate.main()
             result = json.loads((root / 'report.json').read_text())['cases']['catalog']
             return status, result, events
