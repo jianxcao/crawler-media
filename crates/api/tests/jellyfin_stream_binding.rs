@@ -109,6 +109,110 @@ fn stream_uri(f: &Fixture, source: &str, session: &str, device: &str) -> String 
 }
 
 #[tokio::test]
+async fn vidhub_static_stream_paths_deliver_bound_ranges_with_query_auth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = fixture(tmp.path());
+    let (status, body) = get(
+        &f.app,
+        "POST",
+        &format!("/Items/{}/PlaybackInfo", f.item_id),
+        "vidhub-device",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap();
+
+    for prefix in ["", "/emby"] {
+        for path in ["Videos", "videos"] {
+            for suffix in ["stream", "stream.mp4"] {
+                for method in ["GET", "HEAD"] {
+                    let uri = format!(
+                        "{prefix}/{path}/{}/{suffix}?api_key=admin-token&PlaySessionId={session}&DeviceId=vidhub-device&Static=true",
+                        f.item_id
+                    );
+                    let response = f
+                        .app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri(&uri)
+                                .header("range", "bytes=0-3")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::PARTIAL_CONTENT,
+                        "{method} {prefix}/{path}/{suffix}"
+                    );
+                    assert_eq!(response.headers()["content-range"], "bytes 0-3/8");
+                    assert_eq!(response.headers()["content-length"], "4");
+                    assert_eq!(response.headers()["accept-ranges"], "bytes");
+                    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    let expected: &[u8] = if method == "HEAD" { b"" } else { b"AAAA" };
+                    assert_eq!(bytes.as_ref(), expected);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn vidhub_static_stream_paths_enforce_auth_and_session_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = fixture(tmp.path());
+    let (_, body) = get(
+        &f.app,
+        "POST",
+        &format!("/Items/{}/PlaybackInfo", f.item_id),
+        "vidhub-device",
+    )
+    .await;
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap();
+
+    for prefix in ["", "/emby"] {
+        for path in ["Videos", "videos"] {
+            for suffix in ["stream", "stream.mp4"] {
+                for (query, expected) in [
+                    (String::new(), StatusCode::UNAUTHORIZED),
+                    ("api_key=invalid".into(), StatusCode::UNAUTHORIZED),
+                    (
+                        format!(
+                            "api_key=admin-token&PlaySessionId={session}&DeviceId=other-device"
+                        ),
+                        StatusCode::NOT_FOUND,
+                    ),
+                    (
+                        "api_key=admin-token&PlaySessionId=unknown&DeviceId=vidhub-device".into(),
+                        StatusCode::NOT_FOUND,
+                    ),
+                ] {
+                    let response = f
+                        .app
+                        .clone()
+                        .oneshot(
+                            Request::get(format!("{prefix}/{path}/{}/{suffix}?{query}", f.item_id))
+                                .header("range", "bytes=0-3")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), expected, "{prefix}/{path}/{suffix}");
+                    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    assert_ne!(bytes.as_ref(), b"AAAA");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn production_jellyfin_stream_uses_issued_binding() {
     let tmp = tempfile::tempdir().unwrap();
     let f = fixture(tmp.path());

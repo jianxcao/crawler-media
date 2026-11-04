@@ -191,18 +191,23 @@ async fn strm_playback_redirects_directly_to_the_source_url() {
         strm_path,
     });
     let app = media_server::media_routes(provider);
-    let request = Request::get("/Videos/episode/stream")
-        .header("authorization", "Bearer play-token")
-        .body(Body::empty())
-        .unwrap();
+    for prefix in ["", "/emby"] {
+        for path in ["Videos", "videos"] {
+            for suffix in ["stream", "stream.mkv"] {
+                let request = Request::get(format!("{prefix}/{path}/episode/{suffix}"))
+                    .header("authorization", "Bearer play-token")
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-
-    assert_eq!(response.status(), StatusCode::FOUND);
-    assert_eq!(
-        response.headers().get("location").unwrap(),
-        "https://cdn.example/episode.mkv?token=secret"
-    );
+                assert_eq!(response.status(), StatusCode::FOUND);
+                assert_eq!(
+                    response.headers().get("location").unwrap(),
+                    "https://cdn.example/episode.mkv?token=secret"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -215,13 +220,21 @@ async fn revoked_device_stream_request_is_forbidden() {
         strm_path,
     });
     let app = media_server::media_routes(provider);
-    let request = Request::get("/Videos/episode/stream?DeviceId=banned-device")
-        .header("authorization", "Bearer play-token")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for prefix in ["", "/emby"] {
+        for path in ["Videos", "videos"] {
+            for suffix in ["stream", "stream.mkv"] {
+                let request = Request::get(format!(
+                    "{prefix}/{path}/episode/{suffix}?DeviceId=banned-device"
+                ))
+                .header("authorization", "Bearer play-token")
+                .body(Body::empty())
+                .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert!(response.headers().get("location").is_none());
+            }
+        }
+    }
 }
 
 #[tokio::test]

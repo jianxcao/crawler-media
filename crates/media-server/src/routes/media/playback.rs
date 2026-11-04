@@ -20,6 +20,9 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
     let stream_provider = provider.clone();
     Router::new()
         .route("/Videos/{id}/stream", get(stream))
+        .route("/Videos/{id}/stream.{container}", get(stream))
+        .route("/videos/{id}/stream", get(stream))
+        .route("/videos/{id}/stream.{container}", get(stream))
         .route(
             "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
             get(subtitle_stream),
@@ -264,10 +267,15 @@ struct StreamQuery {
     device_id: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct StreamPath {
+    id: String,
+}
+
 async fn stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
-    Path(id): Path<String>,
+    Path(StreamPath { id }): Path<StreamPath>,
     axum::extract::Query(query): axum::extract::Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
