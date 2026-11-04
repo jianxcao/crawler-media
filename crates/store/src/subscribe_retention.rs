@@ -115,9 +115,10 @@ impl Store {
             drop(stmt);
             for id in &ids {tx.execute("DELETE FROM subscribe_retention WHERE subscribe_id=?1 AND generation=?2 AND media_id=?3",params![op.id.to_string(),op.generation,id.to_string()])?;}
             let mut candidates = ids;
+            let remains:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribe_retention WHERE subscribe_id=?1 AND generation=?2)",params![op.id.to_string(),op.generation],|r|r.get(0))?;
+            if compensation.is_some() && !protected && !remains { candidates.insert(op.media_id); }
             if protected { candidates.remove(&op.media_id); }
             crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx,&candidates)?;
-            let remains:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribe_retention WHERE subscribe_id=?1 AND generation=?2)",params![op.id.to_string(),op.generation],|r|r.get(0))?;
             tx.commit()?;Ok(remains)
         })?;
         if remains {

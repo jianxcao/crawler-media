@@ -52,6 +52,112 @@ fn prepared(store: &Store, subscribe: &Subscribe) -> (Media, Media) {
     store.update_media(&expected).unwrap();
     (previous, expected)
 }
+
+fn new_ensured_media(store: &Store, template: MediaId) -> Media {
+    let mut incoming = store.get_media(template).unwrap().unwrap();
+    incoming.id = MediaId::new();
+    incoming.tmdb_id = Some(incoming.id.to_string());
+    let (media, previous) = store.ensure_media_with_previous(incoming).unwrap();
+    assert!(previous.is_none());
+    media
+}
+
+#[test]
+fn rollback_before_retention_purges_new_unreferenced_media() {
+    let (_tmp, store, template) = fixture();
+    let media = new_ensured_media(&store, template.media_id);
+    let subscribe = candidate(media.id);
+    let op = store
+        .begin_compensatable_subscribe_creation(&subscribe, &media, None)
+        .unwrap();
+
+    store.rollback_subscribe_creation(&op).unwrap();
+    assert!(store.get_subscribe(subscribe.id).unwrap().is_none());
+    assert!(store.get_media(media.id).unwrap().is_none());
+    assert!(
+        store
+            .get_media_by_alias("tmdb", media.tmdb_id.as_deref().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    store.recover_subscribe_references(64).unwrap();
+    assert!(store.get_media(media.id).unwrap().is_none());
+}
+
+#[test]
+fn recovery_before_retention_purges_new_unreferenced_media() {
+    let (tmp, store, template) = fixture();
+    let media = new_ensured_media(&store, template.media_id);
+    let subscribe = candidate(media.id);
+    store
+        .begin_compensatable_subscribe_creation(&subscribe, &media, None)
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(tmp.path()).unwrap();
+    store.recover_subscribe_references(64).unwrap();
+    assert!(store.get_subscribe(subscribe.id).unwrap().is_none());
+    assert!(store.get_media(media.id).unwrap().is_none());
+    assert!(
+        store
+            .get_media_by_alias("tmdb", media.tmdb_id.as_deref().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    store.recover_subscribe_references(64).unwrap();
+    assert!(store.get_media(media.id).unwrap().is_none());
+}
+
+#[test]
+fn rollback_before_retention_preserves_existing_and_referenced_media() {
+    let (_tmp, store, template) = fixture();
+    let (previous, expected) = prepared(&store, &template);
+    let op = store
+        .begin_compensatable_subscribe_creation(&template, &expected, Some(&previous))
+        .unwrap();
+    store.rollback_subscribe_creation(&op).unwrap();
+    assert_eq!(store.get_media(previous.id).unwrap(), Some(previous));
+
+    let media = new_ensured_media(&store, template.media_id);
+    let subscribe = candidate(media.id);
+    let op = store
+        .begin_compensatable_subscribe_creation(&subscribe, &media, None)
+        .unwrap();
+    let collection = store.create_collection(subscribe.user_id, "Keep").unwrap();
+    store
+        .add_collection_item(&collection, &media.id.to_string())
+        .unwrap();
+    store.rollback_subscribe_creation(&op).unwrap();
+    assert_eq!(store.get_media(media.id).unwrap(), Some(media));
+}
+
+#[test]
+fn rollback_before_retention_preserves_concurrently_changed_new_media() {
+    let (_tmp, store, template) = fixture();
+    let media = new_ensured_media(&store, template.media_id);
+    let subscribe = candidate(media.id);
+    let op = store
+        .begin_compensatable_subscribe_creation(&subscribe, &media, None)
+        .unwrap();
+    store
+        .add_media_alias(
+            media.id,
+            &domain::MediaAlias {
+                source: "tmdb".into(),
+                kind: media.kind,
+                external_id: "concurrent-before-retain".into(),
+            },
+        )
+        .unwrap();
+    store.rollback_subscribe_creation(&op).unwrap();
+    assert_eq!(store.get_media(media.id).unwrap(), Some(media));
+    assert!(
+        store
+            .get_media_by_alias("tmdb", "concurrent-before-retain")
+            .unwrap()
+            .is_some()
+    );
+}
 #[test]
 fn failed_creation_restores_preexisting_media_and_preserves_concurrent_identity() {
     let (_tmp, store, subscribe) = fixture();
