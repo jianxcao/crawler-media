@@ -58,6 +58,14 @@ P 类请求集合按当前 `web/components/library-view.tsx`、`library-detail-v
 
 输出逐用例 p50、p95、p99、max、状态码分布、SLO、相对上一阶段的 p95 变化和通过标记。分位数采用 nearest-rank。每个用例完成即写部分报告，最终报告 `complete: true`。缺少资源、超时、非 2xx 或无有效样本一律失败。报告不保存请求体、认证头或 token。
 
+## Jellyfin 业务正确性
+
+Genres、Studios、两种Items/Counts、指定Movie Library的Items和Latest共六项，必须在计时前载入独立的业务期望产物。清单通过`business_expectations`的绝对路径、版本和SHA256绑定它；`perf_business_oracle.py`只读取完整停服、播种完成的独立夹具，并校验两版正式DDL、外键、数据库与来源清单及工具摘要。不能从被测的条目、分类或计数投影反推期望。
+
+期望按每个User的实际Library权限，从原始文件/单元关系计算distinct作品、集数和授权成员集合。Items/Latest只证明总量、页长、唯一性和成员归属；Latest的精确顺序不在此证明范围。Genres交叉核对原始来源/override组合与持久显示字段及genres_json；Studios使用持久显示字段并合并NFO，因为显示Studio可以独立写入。该输入约定不证明元数据采纳流程正确。Missing、矛盾的Empty/value、多来源或不支持的locale保持Unverified；不能把未知当空集合。无任何locale的采纳行、无provider/override且NFO字段明确时，才允许NFO-only判断。
+
+HTTP200仍需通过这些业务断言；错误空页、重复或越权条目、布尔计数及缺失/损坏期望均不能通过。报告绑定六个工具文件（含oracle自身）、实际配置和选定用例；旧新相对比较要求相同合同及配置，只有`self-fs-browse`的绝对夹具路径可归一化。两版独立播种、停服所有权、投影收敛及实际二进制身份仍由外层执行者核验；合成CLI回归通过不代表真实seed或性能已经通过。
+
 ## 判定
 
 - idle：p95 与 p99 均满足表中目标；默认 40 次，任何非 2xx 和超时失败。
@@ -68,7 +76,7 @@ P 类请求集合按当前 `web/components/library-view.tsx`、`library-detail-v
 
 ## 命令
 
-同一时间仅允许运行一个 cargo 进程，build/test/clippy 串行，使用 `-j4`，测试 `-- --test-threads=4`。第一次建实例：
+同一时间仅允许运行一个cargo进程，使用`/tmp/cm-cargo.lock`协调；build/test/clippy串行，`TMPDIR=/tmp`、`-j8`，测试`-- --test-threads=8`。严格测量期间不运行其他构建或测试。第一次建实例：
 
 ```sh
 zsh scripts/e2e/stress-up.sh /tmp/e2e-stress

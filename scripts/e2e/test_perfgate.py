@@ -35,6 +35,23 @@ class PerfGateTests(unittest.TestCase):
         cases = [{'surface': 'self', 'route': '/covered'}]
         self.assertEqual(perfgate.uncovered_routes(routes, cases), [routes[1]])
 
+    def test_case_contract_normalizes_only_browse_absolute_root(self):
+        import json
+
+        def contract(url, exemptions=None):
+            config = {'cases': [{'id': 'self-fs-browse', 'url': url, 'class': 'A'}],
+                      'exemptions': exemptions or []}
+            return perfgate.perf_business.case_contract(json.dumps(config).encode(), ['self-fs-browse'])
+
+        old = contract('/api/v1/fs/browse?path=/tmp/old&mode=all')
+        new = contract('/api/v1/fs/browse?path=/tmp/new&mode=all')
+        changed = contract('/api/v1/fs/browse?path=/tmp/new&mode=other')
+        exempt = contract('/api/v1/fs/browse?path=/tmp/new&mode=all', [{'route': '/other'}])
+        self.assertNotEqual(old['actual_sha256'], new['actual_sha256'])
+        self.assertEqual(old['normalized_sha256'], new['normalized_sha256'])
+        self.assertNotEqual(old['normalized_sha256'], changed['normalized_sha256'])
+        self.assertNotEqual(old['normalized_sha256'], exempt['normalized_sha256'])
+
     def test_p95_over_slo_fails(self):
         result = perfgate.evaluate([180.0] * 40, {200: 40}, 'L', 'idle')
         self.assertEqual(result['p95'], 180)
@@ -160,6 +177,25 @@ class PerfGateTests(unittest.TestCase):
         self.assertFalse(sampler.can_attempt)
         self.assertTrue(sampler.failed)
         self.assertEqual(sampler.codes[503], 1)
+
+    def test_business_busy_window_is_captured_before_response_validation(self):
+        from unittest.mock import patch
+        events = []
+
+        class Client:
+            def raw(self, *args):
+                events.append('response')
+                return 200, 1, b'{}'
+
+        def validate(*args):
+            events.append('validation')
+            return True
+
+        case = {'id': 'jellyfin-items-counts', 'surface': 'jellyfin', 'url': '/Items/Counts'}
+        with patch.object(perfgate.perf_business, 'matches', side_effect=validate):
+            perfgate.run_case(case, {}, Client(), Client(), Client(), None,
+                              business_expectation={}, response_received=lambda: events.append('window'))
+        self.assertEqual(events, ['response', 'window', 'validation'])
 
     def test_busy_sampler_stops_when_no_request_fits_scan_window(self):
         sampler = perfgate.BusySamples(2)

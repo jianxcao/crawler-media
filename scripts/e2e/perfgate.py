@@ -21,12 +21,14 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from perf_support import ApiError, Client, login
 from perf_similar import measure_similar, similar_payload, similar_response, summarize_similar
+import perf_business
 
 # Milliseconds: idle p95 and p99.
 SLO = {'W': (50, 150), 'D': (100, 250), 'L': (150, 400), 'S': (200, 500),
        'A': (300, 800), 'U': (100, 250), 'U*': (500, 1000), 'P': (800, 1500)}
 # Relative p95 increases smaller than this are measurement noise.
 ABSOLUTE_P95_FLOOR_MS = 1.0
+RESERVED_REPORT = None
 
 
 def uncovered_routes(routes, cases):
@@ -103,7 +105,7 @@ def baseline_invalid_reason(case, previous, expected_n):
 
 def close_clients(admin, clients):
     admin.close()
-    for _, rest_client, protocol_client in clients:
+    for _, rest_client, protocol_client, *_ in clients:
         rest_client.close()
         protocol_client.close()
 
@@ -287,7 +289,8 @@ def page_request(client, request, fields):
     return code, elapsed, payload
 
 
-def run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=None):
+def run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=None,
+             business_expectation=None, response_received=None):
     client = jf_client if case['surface'] == 'jellyfin' else self_client
     if case.get('admin'):
         client = admin
@@ -310,7 +313,13 @@ def run_case(case, fields, self_client, jf_client, admin, executor, similar_requ
     started = time.perf_counter()
     code, elapsed, payload = client.raw(url, case.get('method', 'GET'),
                                       interpolate(case.get('body'), fields), case.get('auth', True))
-    matches = not 200 <= code < 300 or response_matches(case, payload)
+    if response_received is not None:
+        response_received()
+    if case['id'] in perf_business.CASES:
+        matches = (not 200 <= code < 300 or perf_business.matches(
+            perf_business.CASES[case['id']], payload, business_expectation))
+    else:
+        matches = not 200 <= code < 300 or response_matches(case, payload)
     if case.get('response_contract') == 'similar':
         matches = similar_response(code, payload) is not None
         if similar_requests is not None:
@@ -319,6 +328,7 @@ def run_case(case, fields, self_client, jf_client, admin, executor, similar_requ
 
 
 def main():
+    global RESERVED_REPORT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['idle', 'busy', 'cold'])
     parser.add_argument('--n', type=int, default=40)
@@ -331,7 +341,14 @@ def main():
     parser.add_argument('--cases', type=Path, default=HERE / 'perf-cases.json')
     parser.add_argument('--restart-command', help='Argument string executed without a shell before each cold case')
     args = parser.parse_args()
-    config = json.loads(args.cases.read_text())
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with args.out.open('x') as output:
+            json.dump({'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+                       'business_status': 'unverified', 'business_reason': 'run did not complete'}, output)
+        RESERVED_REPORT = args.out
+    cases_bytes = args.cases.read_bytes()
+    config = json.loads(cases_bytes)
     missing = uncovered_routes(routes(), config['cases'] + config['exemptions'])
     if missing:
         print(json.dumps({'uncovered_get_routes': missing}, ensure_ascii=False, indent=2))
@@ -354,19 +371,77 @@ def main():
     baseline_report = json.loads(args.baseline.read_text()) if args.baseline else None
     baseline = validate_baseline(baseline_report, args.mode, selected) if baseline_report is not None else {}
     baseline_n = (1 if args.mode == 'cold' else baseline_report.get('n')) if baseline_report else None
+    business_cases = [case for case in selected if case['id'] in perf_business.CASES]
+    case_contract = perf_business.case_contract(cases_bytes, [case['id'] for case in selected]) if business_cases else None
+    artifact, business_provenance = None, None
+    if business_cases:
+        try:
+            artifact, business_provenance = perf_business.load(manifest)
+            for case in business_cases:
+                perf_business.verify_case(case)
+        except perf_business.Unverified as error:
+            report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+                      'business_status': 'unverified', 'business_reason': str(error)}
+            if args.out:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(json.dumps(report, indent=2) + '\n')
+            return 1
     clients = []
-    for user in manifest['users']:
-        self_client, _ = login(args.base_url, user['login'], password)
-        jf_client, _ = login(args.base_url, user['login'], password, jellyfin=True)
-        clients.append((user, self_client, jf_client))
-    busy = BusyScan(admin, manifest['libraries']['tv']) if args.mode == 'busy' else None
+    try:
+        for user in manifest['users']:
+            try:
+                self_client, self_id = login(args.base_url, user['login'], password)
+            except (RuntimeError, OSError, ValueError, KeyError) as error:
+                raise perf_business.Unverified('self login failed') from error
+            try:
+                jf_client, jf_id = login(args.base_url, user['login'], password, jellyfin=True)
+            except (RuntimeError, OSError, ValueError, KeyError) as error:
+                self_client.close()
+                raise perf_business.Unverified('Jellyfin login failed') from error
+            clients.append((user, self_client, jf_client, (self_id, jf_id)))
+        busy = BusyScan(admin, manifest['libraries']['tv']) if args.mode == 'busy' else None
+    except Exception:
+        close_clients(admin, clients)
+        raise
     results = {}
     with client_connections(admin, clients), ThreadPoolExecutor(max_workers=8) as executor:
-        commit = admin.call('/api/v1/health').get('commit')
+        try:
+            commit = admin.call('/api/v1/health').get('commit')
+        except (RuntimeError, OSError, ValueError, KeyError, AttributeError) as error:
+            raise perf_business.Unverified('health admission failed') from error
+        if business_cases and (not isinstance(commit, str) or len(commit) < 7
+                               or not business_provenance['product_commit'].startswith(commit)):
+            report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+                      'business_status': 'unverified', 'business_reason': 'live product commit mismatch'}
+            if args.out:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(json.dumps(report, indent=2) + '\n')
+            return 1
+        visible_movies = {}
+        if business_cases:
+            try:
+                for user, _, jf_client, login_ids in clients:
+                    if not isinstance(user.get('id'), str) or any(value != user['id'] for value in login_ids):
+                        raise perf_business.Unverified('authenticated user does not match manifest')
+                    path = '/Users/' + urllib.parse.quote(user['id'], safe='') + '/Views?IncludeHidden=true'
+                    views = jf_client.call(path, envelope=False)
+                    items = views.get('Items') if isinstance(views, dict) else None
+                    if not isinstance(items, list):
+                        raise perf_business.Unverified('user views invalid')
+                    visible_movies[user['id']] = any(isinstance(item, dict)
+                            and item.get('Id') == manifest['libraries']['movie'] for item in items)
+            except (perf_business.Unverified, RuntimeError, KeyError, ValueError) as error:
+                report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+                          'business_status': 'unverified', 'business_reason': 'user views admission failed'}
+                if args.out:
+                    args.out.parent.mkdir(parents=True, exist_ok=True)
+                    args.out.write_text(json.dumps(report, indent=2) + '\n')
+                return 1
         for case in selected:
             samples, codes, outside_busy, errors = [], Counter(), 0, []
             writes_verified = []
             responses_verified = []
+            business_assertions = []
             similar_observations = []
             precondition_codes = Counter()
             count = 1 if args.mode == 'cold' else args.n
@@ -376,13 +451,18 @@ def main():
             def issue_warmup():
                 # Same resolved URL as the first timed sample, without shifting later choices.
                 saved = rng.getstate()
-                user, self_client, jf_client = clients[len(results) % len(clients)]
+                user, self_client, jf_client, login_ids = clients[len(results) % len(clients)]
                 fields = context(manifest, user, rng)
                 rng.setstate(saved)
                 fields['sequence'] = 1
                 fields['position'] = 120000
                 try:
-                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor)
+                    expected = None
+                    if case['id'] in perf_business.CASES:
+                        perf_business.verify_context(manifest, user, fields, login_ids)
+                        expected = perf_business.expectation(artifact, case['id'], user['id'], fields['movie_library'])
+                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor,
+                                                      business_expectation=expected)
                     return {'code': code, 'elapsed_ms': elapsed, 'response_verified': matches}
                 except (KeyError, RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
                     return {'code': failure_code(error), 'elapsed_ms': None,
@@ -394,14 +474,21 @@ def main():
                 errors.append('cache preparation failed')
             # Bounded replacement is only for scan-window crossings, never to hide errors.
             while sampler.can_attempt if sampler else index < count:
-                user, self_client, jf_client = clients[(index + len(results)) % len(clients)]
-                fields = context(manifest, user, rng)
-                fields['sequence'] = 1
-                fields['position'] = 120000 + index + len(results) * args.n
+                user, self_client, jf_client, login_ids = clients[(index + len(results)) % len(clients)]
                 matches = False
                 measured = False
                 deferred_similar = []
+                window = []
                 try:
+                    fields = context(manifest, user, rng)
+                    fields['sequence'] = 1
+                    fields['position'] = 120000 + index + len(results) * args.n
+                    expected = None
+                    if case['id'] in perf_business.CASES:
+                        perf_business.verify_context(manifest, user, fields, login_ids)
+                        if perf_business.CASES[case['id']] in ('items', 'latest') and not visible_movies[user['id']]:
+                            raise perf_business.Unverified('movie library absent from user views')
+                        expected = perf_business.expectation(artifact, case['id'], user['id'], fields['movie_library'])
                     if case.get('prepare') == 'heartbeat' or case['id'] == 'self-playback-chapters':
                         prepare_heartbeat(self_client, fields)
                     if args.mode == 'cold':
@@ -412,8 +499,21 @@ def main():
                                        stdout=subprocess.DEVNULL)
                     if busy:
                         busy.ensure()
-                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=deferred_similar)
+                    code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor,
+                                                      similar_requests=deferred_similar, business_expectation=expected,
+                                                      response_received=(lambda: window.append(bool(busy.running())))
+                                                      if busy and case['id'] in perf_business.CASES else None)
                     measured = True
+                    if case['id'] in perf_business.CASES:
+                        valid = 200 <= code < 300 and matches
+                        business_assertions.append({'name': perf_business.CASES[case['id']],
+                                                    'status': 'verified' if valid else 'failed',
+                                                    'reason': None if valid else 'response mismatch or HTTP failure'})
+                except perf_business.Unverified as error:
+                    code, elapsed = 0, 0
+                    errors.append('business expectation unavailable')
+                    business_assertions.append({'name': perf_business.CASES[case['id']],
+                                                'status': 'unverified', 'reason': str(error)})
                 except KeyError as error:
                     code, elapsed = 0, 0
                     errors.append(f'dataset resource {error.args[0]} not prepared')
@@ -424,7 +524,7 @@ def main():
                 in_window = measured
                 if busy:
                     try:
-                        if not busy.running():
+                        if not (window[0] if window else busy.running()):
                             outside_busy += 1
                             in_window = False
                     except RuntimeError as error:
@@ -457,6 +557,10 @@ def main():
                 index += 1
             previous = baseline.get(case['id'], {})
             invalid_baseline = baseline_invalid_reason(case, previous, baseline_n) if args.baseline else None
+            if args.baseline and case['id'] in perf_business.CASES and not invalid_baseline:
+                invalid_baseline = perf_business.baseline_reason(baseline_report, business_provenance, case_contract)
+                if not invalid_baseline and previous.get('business_status') != 'verified':
+                    invalid_baseline = 'baseline business assertion unverified'
             baseline_p95 = comparable_p95(case, previous) if args.baseline and not invalid_baseline else None
             result = evaluate(samples, codes, case['class'], args.mode, baseline_p95)
             result.update({'class': case['class'], 'surface': case['surface'],
@@ -468,6 +572,13 @@ def main():
                            'precondition_codes': dict(precondition_codes),
                            'response_verified': all(responses_verified),
                            'write_verified': all(writes_verified) if writes_verified else None})
+            if case['id'] in perf_business.CASES:
+                result['business_assertions'] = business_assertions
+                statuses = [row['status'] for row in business_assertions]
+                result['business_status'] = ('unverified' if 'unverified' in statuses or not statuses
+                                             else 'failed' if 'failed' in statuses else 'verified')
+                if perf_business.CASES[case['id']] == 'latest':
+                    result['latest_order'] = {'status': 'unverified', 'reason': 'independent ordering unavailable'}
             if similar_observations:
                 result['recommendations'] = summarize_similar(similar_observations, percentile)
             correctness_failed = ((sampler and sampler.failed) or errors or not all(responses_verified)
@@ -504,6 +615,14 @@ def main():
               'commit': commit,
               'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'cases': results, 'passed': all(result['passed'] for result in results.values())}
+    if business_cases:
+        statuses = [results[case['id']]['business_status'] for case in business_cases]
+        report['business_status'] = ('unverified' if 'unverified' in statuses
+                                     else 'failed' if 'failed' in statuses else 'verified')
+        report['business_provenance'] = business_provenance
+        report['business_manifest_path'] = str(args.manifest.resolve())
+        report['case_contract'] = case_contract
+        report['case_config_path'] = str(args.cases.resolve())
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
@@ -513,6 +632,10 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (RuntimeError, OSError, ValueError) as error:
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError, IndexError) as error:
+        if RESERVED_REPORT is not None:
+            reason = str(error) if isinstance(error, perf_business.Unverified) else type(error).__name__
+            RESERVED_REPORT.write_text(json.dumps({'complete': False, 'cases': {}, 'passed': False,
+                'business_status': 'unverified', 'business_reason': reason}) + '\n')
         print(f'perfgate: {error}', file=sys.stderr)
         sys.exit(1)
