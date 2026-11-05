@@ -1310,6 +1310,21 @@
     },
     {
       "surface": "jellyfin",
+      "route": "/Videos/{id}/stream.{container}",
+      "reason": "Streaming video response"
+    },
+    {
+      "surface": "jellyfin",
+      "route": "/videos/{id}/stream",
+      "reason": "Streaming video response"
+    },
+    {
+      "surface": "jellyfin",
+      "route": "/videos/{id}/stream.{container}",
+      "reason": "Streaming video response"
+    },
+    {
+      "surface": "jellyfin",
       "route": "/socket",
       "reason": "WebSocket is an unbounded connection"
     },

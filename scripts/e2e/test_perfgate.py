@@ -14,6 +14,14 @@ spec.loader.exec_module(perfgate)
 
 
 class PerfGateTests(unittest.TestCase):
+    def test_default_cli_covers_real_route_inventory(self):
+        root = Path(__file__).resolve().parents[2]
+        result = subprocess.run([sys.executable, str(root / 'scripts/e2e/perfgate.py'),
+                                 'idle', '--dry-run', '--route-root', str(root)],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'Coverage OK: [1-9][0-9]* GET routes;')
+
     def test_relocated_cli_requires_nonempty_explicit_route_inventory(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
