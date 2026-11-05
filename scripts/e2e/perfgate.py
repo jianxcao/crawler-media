@@ -123,6 +123,19 @@ def completion_p95(summary, expected_n, contract):
     return value if summary.get('complete_body_p95_ms') == value else None
 
 
+def busy_completion_summary(summary, attempts, per_sample):
+    if not isinstance(summary, dict) or type(attempts) is not int or attempts <= 0:
+        return None
+    observations = summary.get('observations')
+    accepted = summary.get('accepted_window')
+    if (not isinstance(observations, list) or len(observations) != attempts * per_sample
+            or not isinstance(accepted, dict)
+            or any(not isinstance(item, dict) or type(item.get('in_window')) is not bool for item in observations)
+            or accepted.get('observations') != [item for item in observations if item['in_window']]):
+        return None
+    return accepted
+
+
 def close_clients(admin, clients):
     admin.close()
     for _, rest_client, protocol_client, *_ in clients:
@@ -476,6 +489,7 @@ def main():
             responses_verified = []
             business_assertions = []
             similar_observations = []
+            accepted_similar_observations = []
             precondition_codes = Counter()
             count = 1 if args.mode == 'cold' else args.n
             sampler = BusySamples(count) if busy else None
@@ -571,7 +585,10 @@ def main():
                 for source, url, initial, started in deferred_similar:
                     observed = measure_similar(source, url, initial=initial, started_at=started,
                                                contract=args.similar_contract)
+                    observed['in_window'] = in_window
                     similar_observations.append(observed)
+                    if in_window:
+                        accepted_similar_observations.append(observed)
                     matches = matches and observed['passed']
                 if case.get('prepare') == 'heartbeat':
                     try:
@@ -616,6 +633,8 @@ def main():
                     result['latest_order'] = {'status': 'unverified', 'reason': 'independent ordering unavailable'}
             if similar_observations:
                 result['recommendations'] = summarize_similar(similar_observations, percentile, args.similar_contract)
+                result['recommendations']['accepted_window'] = summarize_similar(
+                    accepted_similar_observations, percentile, args.similar_contract)
             correctness_failed = ((sampler and sampler.failed) or errors or not all(responses_verified)
                                   or (writes_verified and not all(writes_verified)))
             absolute = evaluate(samples, codes, case['class'], args.mode)
@@ -631,9 +650,14 @@ def main():
             if contract_unknown or contract_changed:
                 result['initial_relative_status'] = 'unavailable_contract_changed' if contract_changed else 'unavailable_contract_missing'
                 result['relative_metric'] = 'complete_body_p95_ms'
-                old_completion = completion_p95(previous.get('recommendations'), baseline_n * similar_per_sample,
+                old_summary = previous.get('recommendations')
+                if args.mode == 'busy':
+                    old_summary = busy_completion_summary(old_summary, previous.get('attempts'), similar_per_sample)
+                old_completion = completion_p95(old_summary, baseline_n * similar_per_sample,
                                                 baseline_contract) if type(baseline_n) is int else None
-                current_completion = completion_p95(result.get('recommendations'), len(samples) * similar_per_sample,
+                current_summary = (busy_completion_summary(result.get('recommendations'), result['attempts'], similar_per_sample)
+                                   if args.mode == 'busy' else result.get('recommendations', {}).get('accepted_window'))
+                current_completion = completion_p95(current_summary, len(samples) * similar_per_sample,
                                                     args.similar_contract)
                 result['relative_baseline_p95_ms'] = old_completion
                 result['relative_current_p95_ms'] = current_completion

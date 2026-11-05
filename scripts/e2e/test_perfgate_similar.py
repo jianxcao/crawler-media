@@ -32,6 +32,88 @@ class FiniteSource:
 
 
 class SimilarPerfTests(unittest.TestCase):
+    def test_busy_cli_replacement_compares_only_in_window_completions(self):
+        class Client:
+            fail_first = False
+
+            def __init__(self, *args):
+                self.requests = 0
+
+            def raw(self, *args):
+                self.requests += 1
+                if self.fail_first and self.requests == 1:
+                    return 200, 1.0, json.dumps({'ok': False}).encode()
+                return 200, 1.0, json.dumps(READY).encode()
+
+            def call(self, *args, **kwargs):
+                return {'commit': 'fixture'}
+
+            def close(self):
+                pass
+
+        class BusyWindow:
+            def __init__(self, *args):
+                self.windows = iter((False, True))
+
+            def ensure(self):
+                pass
+
+            def running(self):
+                return next(self.windows)
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            manifest = root / 'manifest.json'
+            manifest.write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}],
+                                            'libraries': {'tv': 'tv'}}))
+            for bundle, fail_boundary, fault in ((False, False, None), (True, False, None),
+                    (False, True, None), (True, True, None), (False, False, 'subset'),
+                    (False, False, 'marker'), (False, False, 'count')):
+                Client.fail_first = fail_boundary
+                case = {'id': 'detail' if bundle else 'similar', 'surface': 'self', 'class': 'L',
+                        'route': '/similar'}
+                if bundle:
+                    case['requests'] = [{'url': '/similar', 'response_contract': 'similar'}]
+                else:
+                    case.update(url='/similar', response_contract='similar')
+                cases = root / 'cases.json'
+                cases.write_text(json.dumps({'cases': [case], 'exemptions': []}))
+                baseline = root / 'baseline.json'
+                observation = {'passed': True, 'completion_ms': 100.0, 'terminal_code': 200,
+                               'terminal_state': 'ready', 'in_window': True}
+                previous = {'p95': 100.0, 'n': 1, 'attempts': 1, 'codes': {'200': 1}, 'errors': [],
+                            'precondition_codes': {}, 'response_verified': True, 'write_verified': None,
+                            'recommendations': {'contract': 'legacy-list', 'passed': True,
+                                'complete_body_p95_ms': 100.0, 'observations': [observation]}}
+                previous['recommendations']['accepted_window'] = dict(previous['recommendations'])
+                if fault == 'subset':
+                    previous['recommendations']['accepted_window']['observations'] = []
+                elif fault == 'marker':
+                    del observation['in_window']
+                elif fault == 'count':
+                    previous['attempts'] = 2
+                baseline.write_text(json.dumps({'mode': 'busy', 'complete': True, 'n': 1,
+                                                'similar_contract': 'legacy-list', 'cases': {case['id']: previous}}))
+                out = root / f'{bundle}-{fail_boundary}-{fault}.json'
+                argv = ['perfgate', 'busy', '--n', '1', '--cases', str(cases), '--manifest', str(manifest),
+                        '--baseline', str(baseline), '--out', str(out)]
+                with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[
+                        {'method': 'get', 'surface': 'self', 'path': '/similar'}]), \
+                     patch.object(perfgate, 'Client', Client), patch.object(perfgate, 'BusyScan', BusyWindow), \
+                     patch.object(perfgate, 'login', side_effect=lambda *a, **k: (Client(), 'user')), \
+                     patch.object(perfgate, 'context', return_value={}), contextlib.redirect_stdout(io.StringIO()):
+                    result = perfgate.main()
+                row = json.loads(out.read_text())['cases'][case['id']]
+                self.assertEqual(result, 1 if fail_boundary or fault else 0, row)
+                self.assertEqual(row['attempts'], 2)
+                self.assertEqual(len(row['invalid_samples']), 1)
+                self.assertEqual(len(row['recommendations']['observations']), 2)
+                self.assertEqual([item['in_window'] for item in row['recommendations']['observations']], [False, True])
+                self.assertEqual(len(row['recommendations']['accepted_window']['observations']), 1)
+                self.assertEqual(row['relative_status'], 'unavailable' if fail_boundary or fault else 'passed')
+                self.assertEqual(row['response_verified'], not fail_boundary)
+                self.assertIsNotNone(row['relative_current_p95_ms'])
+
     def test_cli_cross_contract_uses_completed_result_for_relative_gate(self):
         class Client:
             def __init__(self, *args):
