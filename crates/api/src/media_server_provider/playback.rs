@@ -18,9 +18,10 @@ pub(super) fn resolve_target(
     provider: &ApiServerProvider,
     user_id: UserId,
     id: &str,
+    source: Option<&domain::PhysicalSourceId>,
 ) -> Result<Option<PlaybackTarget>, String> {
     let entry = provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-        super::items::resolve_entry(store, Some(user_id), id)
+        super::items::resolve_entry_with_source(store, Some(user_id), id, source)
     })?;
     let Some(entry) = entry else {
         return Ok(None);
@@ -75,8 +76,15 @@ pub(super) fn report_event(
     event: PlaybackEvent,
     identity: media_server::provider::PlaybackEventIdentity,
 ) -> Result<(), String> {
-    let target = resolve_target(provider, user_id, id)?
-        .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
+    let Some(target) = resolve_target(provider, user_id, id, identity.media_source_id.as_ref())?
+    else {
+        if identity.media_source_id.is_some() {
+            return Ok(());
+        }
+        return Err(format!(
+            "Jellyfin playback item {id} is missing or not visible"
+        ));
+    };
     let now_ms = provider.state.playback_clock.now_ms();
     provider.bounded_store(|store| {
     if store
@@ -138,6 +146,12 @@ impl ProtocolEvent<'_> {
                 .map_err(|error| error.to_string())?,
             None => None,
         };
+        if let (Some(source), Some(binding)) = (&self.identity.media_source_id, &binding)
+            && (binding.ledger_id != source.file_id
+                || binding.file_revision != Some(source.revision))
+        {
+            return Ok(None);
+        }
         let kind = match self.event {
             PlaybackEvent::Playing => crate::playback_events::PlaybackEventKind::Start,
             PlaybackEvent::Progress => crate::playback_events::PlaybackEventKind::Progress,

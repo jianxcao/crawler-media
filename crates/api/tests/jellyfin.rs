@@ -278,6 +278,8 @@ async fn json(response: axum::response::Response) -> Value {
 mod authentication_routes;
 #[path = "jellyfin/endpoint_routes.rs"]
 mod endpoint_routes;
+#[path = "jellyfin/event_sources.rs"]
+mod event_sources;
 #[path = "jellyfin/library_routes.rs"]
 mod library_routes;
 #[path = "jellyfin/playback_contract.rs"]

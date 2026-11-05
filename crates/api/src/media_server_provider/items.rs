@@ -69,6 +69,15 @@ pub(super) fn resolve_entry(
     user_id: Option<UserId>,
     id: &str,
 ) -> Result<Option<ResolvedEntry>, String> {
+    resolve_entry_with_source(store, user_id, id, None)
+}
+
+pub(super) fn resolve_entry_with_source(
+    store: &crate::Store,
+    user_id: Option<UserId>,
+    id: &str,
+    preferred: Option<&domain::PhysicalSourceId>,
+) -> Result<Option<ResolvedEntry>, String> {
     let Some(item) = domain::TypedItemId::from_wire_string(id) else {
         return Ok(None);
     };
@@ -78,7 +87,12 @@ pub(super) fn resolve_entry(
         None => store.published_entries_for_item(&item),
     }
     .map_err(|error| error.to_string())?;
-    let Some(source) = selected.into_iter().next() else {
+    let Some(source) = selected.into_iter().find(|source| {
+        preferred.is_none_or(|preferred| {
+            source.file.file_id == preferred.file_id
+                && source.file.version.revision == preferred.revision
+        })
+    }) else {
         return Ok(None);
     };
     let Some(media) = store

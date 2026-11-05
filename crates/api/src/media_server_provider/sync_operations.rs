@@ -251,7 +251,7 @@ impl ApiServerProvider {
             return Err("instance is read-only or under maintenance".into());
         }
 
-        let target = playback::resolve_target(self, user_id, id)?
+        let target = playback::resolve_target(self, user_id, id, None)?
             .ok_or_else(|| format!("Playback item {id} missing or not visible"))?;
         use std::str::FromStr;
         let ledger_id = domain::LedgerId::from_str(&target.ledger_id).map_err(|e| e.to_string())?;

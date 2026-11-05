@@ -1,6 +1,6 @@
 # Jellyfin 客户端协议与重构回归
 
-本服务通过根路径与 `/emby` 提供 ADR-0005 定义的播放协议子集。自有 `/api/v1` 是独立表面；两者的认证规则不能相互替代。本文记录客户端依赖、自动化回归与真实设备验收的对应关系。当前已用实际同片源单变量对照定位VidHub无上报的触发点：单项详情缺少MediaSources；生产修复与完整矩阵仍在验证，最终验收尚未通过。
+本服务通过根路径与 `/emby` 提供 ADR-0005 定义的播放协议子集。自有 `/api/v1` 是独立表面；两者的认证规则不能相互替代。本文记录客户端依赖、自动化回归与真实设备验收的对应关系。VidHub无上报的触发点已定位为单项详情缺少MediaSources；`73da134e`生产修复已完成四源实播、双端续播、重启和成员隔离验证。随后复审另发现的事件来源绑定缺陷已修复，定向和最终稳定树全套通过；491真实来源完整页面和最终性能门尚未闭合。以下历史记录保留各自版本和当时结论，不将旧轮失败追认为通过。
 
 ## 验证完整请求链
 
@@ -8,13 +8,13 @@
 
 | 环节 | 必须验证的可观察行为 | 当前回归位置 |
 |---|---|---|
-| 发现与登录 | 根路径和 `/emby` 的实例身份一致；密码登录签发可用且不同于密码的 AccessToken；错误凭据拒绝 | `crates/api/tests/jellyfin/library_routes.rs`、`authentication_routes.rs` |
-| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、两种 token header 与支持的播放 URL 凭据生效；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`visibility.rs`、`playback_read_regression/stream_credentials.rs` |
-| 用户与 Library | 登录用户、资料、Views 的身份和访问范围一致；成员不可通过隐藏 Library 的直接条目或视频地址绕过限制 | `jellyfin/protocol.rs`、`visibility.rs` |
-| 列表与详情 | Movie / Series / Episode 的身份、类型、父子关系、数量及元数据一致；搜索和分类命中可以打开同一详情；分页不丢失或重复条目 | `jellyfin/library_routes.rs`、`catalog/`、`metadata_parity.rs`、`filters.rs` |
+| 发现与登录 | 根路径和 `/emby` 的实例身份一致；密码登录签发可用且不同于密码的 AccessToken；错误凭据拒绝 | `jellyfin/library_routes.rs`、`jellyfin/authentication_routes.rs` |
+| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、两种 token header 与支持的播放 URL 凭据生效；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
+| 用户与 Library | 登录用户、资料、Views 的身份和访问范围一致；成员不可通过隐藏 Library 的直接条目或视频地址绕过限制 | `jellyfin/protocol.rs`、`jellyfin/visibility.rs` |
+| 列表与详情 | Movie / Series / Episode 的身份、类型、父子关系、数量及元数据一致；搜索和分类命中可以打开同一详情；分页不丢失或重复条目 | `jellyfin/library_routes.rs`、`jellyfin/catalog/`、`jellyfin/metadata_parity.rs`、`jellyfin/filters.rs` |
 | 播放信息与取流 | 可播放详情返回MediaSources，稳定fixture下与PlaybackInfo一致；消费返回的源/SID，本地Range字节正确，STRM保留直放语义 | `jellyfin/playback.rs`、`jellyfin_stream_binding.rs` |
-| 播放事件 | Playing / Progress / Stopped 使用签发的绑定；缺失或 null PositionTicks 不伪造位置；进度与日志持久化，停止后会话关闭，另一用户不受影响 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`playback_null_position.rs`、`playback_event_identity.rs` |
-| 收藏与已播放 | 设置和撤销的响应、详情重入、过滤查询及持久事实一致；覆盖 VidHub 实际使用的 POST Delete | `jellyfin/user_marks_routes.rs`、`filters.rs` |
+| 播放事件 | Playing / Progress / Stopped 使用签发的绑定和明确的版本化来源；旧源、跨单元、隐藏来源或与SID冲突的事件不写入；缺失或 null PositionTicks 不伪造位置；进度与日志持久化，停止后会话关闭，另一用户不受影响 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources.rs`、`jellyfin/playback_null_position.rs`、`playback_event_identity.rs` |
+| 收藏与已播放 | 设置和撤销的响应、详情重入、过滤查询及持久事实一致；覆盖 VidHub 实际使用的 POST Delete、跨用户与隐藏条目的拒绝 | `jellyfin/user_marks_routes.rs`、`jellyfin/visibility.rs`、`jellyfin/filters.rs` |
 | 图片 | 自有静态 poster / fanart / still / chapter / Library cover 保持匿名可读；验证 Content-Type 和实际字节；Jellyfin 图片按其独立规则测试 | `jellyfin/protocol.rs`、`executor_library_admin/images.rs` |
 | 重构后的错误诊断 | 两个服务入口都能区分请求到达与响应头完成；拒绝和未知路由也可观察，日志不含敏感 query、认证头或正文 | `jellyfin/request_observation.rs` |
 
@@ -31,6 +31,8 @@
 | VidHub 发送精确空参数 `MediaSourceId=` | `047e7d1e`：按未指定处理；非空错误值、空白、旧 revision 及错误会话继续拒绝 |
 | Playing / Stopped 中 PositionTicks 缺失或为 null | `4ae4a85e`：活动与停止语义正确，已有位置保留；不能把缺失位置解释为 0 |
 | 季列表独立构造 UserData，缺少身份字段 | `32591af5`：返回稳定的 Key 和与季 Id 一致的 ItemId；公开回归覆盖根路径、`/emby` 及重复读取 |
+| 可播放单项详情缺少MediaSources，客户端没有初始化播放报告 | `73da134e`：详情与PlaybackInfo共用来源构造；Movie/Episode及Season字幕身份有公开失败回归，真实四源和双端矩阵另行验证 |
+| 事件带有明确MediaSourceId，服务端却按当前首选来源保存进度 | 本次修复严格选择可见、覆盖目标且版本一致的来源，检查SID与来源一致；旧源、非首选、隐藏来源、跨Media及SID冲突有公开失败回归 |
 
 各修复都保留先失败、后通过的公开回归；提交后的真实客户端结果另外记录。完整测试不能仅使用手工固定的管理员 token 或自己构造的 ItemId：至少一条连续链必须消费真实登录与 PlaybackInfo 响应，并回读列表、详情和用户隔离状态。
 
@@ -90,13 +92,27 @@ VidHub实际首帧00:00.250，五次快进后01:02.500，暂停01:15.833，Comma
 
 该对照将此File场景的触发点定位为详情缺少媒体源初始化：仅返回PlaybackInfo中的源，不足以使VidHub建立报告所需状态。补齐详情字段即可让现有typed条目ID及版本化源ID完成真实上报，当前证据不支持修改这些身份格式。生产修复、公开HTTP失败回归、STRM/Episode及Web双向验证继续执行；此结果来自临时隔离桥，不能提前标记生产验收通过。
 
-后续重构必须同时保留详情初始化和实际事件闭环：只测试PlaybackInfo返回源、或由测试直接构造Playing/Progress/Stopped并不能发现客户端根本不发报告的缺陷。公开HTTP回归从实际登录取得token，先消费详情MediaSources，再获取PI并使用返回源/SID取流、报告和回读；Movie、Episode和本地STRM分别覆盖两个详情入口及两协议前缀。真实VidHub与Web仍需独立复验，自动化不会证明第三方客户端一定启动上报。
+后续重构必须同时保留详情初始化和实际事件闭环：只测试PlaybackInfo返回源、或由测试直接构造Playing/Progress/Stopped并不能发现客户端根本不发报告的缺陷。公开HTTP回归从实际登录取得token，同时读取详情与PI、断言MediaSources一致，再使用PI返回的源/SID取流、报告和回读；Movie、Episode和本地STRM分别覆盖两个详情入口及两协议前缀。该自动化检查字段和服务端合同，真实VidHub与Web仍需独立复验，不能据此证明第三方客户端一定启动上报。
 
 ### 生产修复与自动化回归
 
 生产详情与PlaybackInfo共用私有source构造，可播放Movie/Episode详情补齐MediaSources，Series与列表不新增此字段。STRM在取得owned快照后通过阻塞任务读取本地文件，不访问远端、不持有Store读租约或writer；源revision、typed条目ID、会话、认证及不支持转码的声明保持原语义。无效STRM详情与PI一致返回404。
 
-公开HTTP回归先有两条Movie/Episode链因详情字段缺失而失败，再通过。独立审查另发现Season请求解析成Episode后，新增源字幕URL使用请求SeasonId，与返回Episode不符；新增真实侧车字幕GET回归先失败，再改为绑定返回条目的身份。最终Jellyfin76项、绑定5项、media-server去重40项及相关release Clippy/fmt通过；media-server首轮有两项回环监听EPERM，授权仅重跑对应target后通过，保留该失败。尚未运行最终workspace全套，正式候选真实双端矩阵继续执行。
+公开HTTP回归先有两条Movie/Episode链因详情字段缺失而失败，再通过。独立审查另发现Season请求解析成Episode后，新增源字幕URL使用请求SeasonId，与返回Episode不符；新增真实侧车字幕GET回归先失败，再改为绑定返回条目的身份。最终Jellyfin76项、绑定5项、media-server去重40项及相关release Clippy/fmt通过；media-server首轮有两项回环监听EPERM，授权仅重跑对应target后通过，保留该失败。`73da134e`稳定代码的最终release workspace含doc-tests退出0：596个结果组汇总3911 passed、0 failed、25 ignored（含子进程汇总、非去重数），不将忽略项计作通过；正式候选真实双端矩阵继续执行。
+
+`73da134e`正式候选新建四个独立播放单元与两个成员，使用未注入字段的生产详情和透明转发。本地Movie、HTTP STRM Movie、本地E01和HTTP STRM E02均实际出画、seek、暂停并正常关闭，真实Sessions均204、SID关闭，停止ticks转换成毫秒后与unit和log一致；首次位置分别为75723、75262、85895和82395ms。本地Movie重入再停为75068ms。Movie连续链为Native75068→Web144457→Native169317→Web183088ms；E02为Native82395→Web114586→Native160854→Web177745ms，每次新日志起点等于前次停止，兄弟单元不变。
+
+同一数据库正常停服重启，四张Playback表逐行一致，无快照恢复；重启后Web从183088继续至201197ms，Native再从201197开始并保存194895ms。成员B真实播放从0保存82792ms，成员A四个单元不变，切回A可见其独立进度。终态5个用户单元、14条日志、14个closed SID、0活动会话；正常停止、原app/sidecar与STRM/pan清单一致，无强杀。Native首帧可能早于请求位置，E02画面烧录166.667秒与报告160.854秒不同，不宣称帧精确恢复；实际Native直取HTTP origin的Range未捕获，不能用setup的206代替。该轮通过范围是四源控制片及上述连续操作，不能代替491真实来源完整页面。
+
+本轮首次实际登录401另有明确输入原因：Reqable比对成功setup请求与失败请求，密码完全一致而用户名不同，GUI工具漏入用户名开头两个中文字符；完整输入后实际用户名和密码均匹配、登录200。保留该失败，不归因为密码校验或API授权回归。
+
+### 播放事件明确来源的复审修复
+
+73da后的独立复审发现既有来源绑定缺陷：事件JSON的MediaSourceId未被读取，provider按ItemId选当前首选文件。无SID的旧revision事件因此可能对新来源签发绑定并写进度；合法的非首选来源也被绑定到首选来源；有SID时明确的另一来源没有参与冲突检查。此缺陷与此前VidHub不发Sessions是两条独立因果链。
+
+公开Router回归先复现旧revision、非首选来源、SID来源冲突，以及同Media隐藏Library来源和另一Media有效来源的错误写入，再实现严格的版本化来源选择与绑定核验。非空值只接受PhysicalSourceId，裸file UUID、畸形、空白、失效revision、其他单元、不可见来源和SID冲突返回204并忽略；合法非首选来源须保存到该来源。精确空字符串、null和缺省按未指定处理，与既有取流空值合同一致；事件body的空值是设计约定，不冒称实际Native抓包。无SID仍是合法入口，来源/coverage/配置/lifecycle及最终提交授权复查继续保留。来源定向8项GREEN，独立审查未发现新增可操作缺陷；本次稳定工作树最终release workspace含doc-tests退出0：596个结果组汇总3919 passed、0 failed、25 ignored（含子进程汇总、非去重数）。畸形来源的补项还直接验证pending绑定未变及下一次正常签发generation只增1；其他拒绝来源测试观测session/unit/log，零签发另由provider的提前返回保证，不把这些状态断言夸成完整数据库逐行对账。
+
+新增两前缀下隐藏条目的两种详情、PlaybackInfo及两类POST Delete的跨用户/隐藏条目负例，验证拒绝且持久标记不变。其首次执行通过，属于授权合同补覆盖，不声称此前存在已复现的绕过漏洞。
 
 ## 每次重构的完成条件
 
@@ -105,3 +121,15 @@ VidHub实际首帧00:00.250，五次快进后01:02.500，暂停01:15.833，Comma
 3. 对照本文件与 [系统回归](../testing/system-regression-cases.md) 的 VH / PLAY 用例，在隔离实例实测 Web 和 VidHub。两端都消费同一逻辑单元的进度；本地视频与 STRM 分别验收。
 4. 每轮恢复原数据库与 STRM/pan 文件，删除本轮私有凭据、数据库副本、临时连接与自有进程；凭据及完整敏感URL不进入日志或Git。
 5. 在 [审核记录](../audits/2026-11-02-storage-redesign-review.md) 与 [最终验收清单](../superpowers/plans/2026-11-02-storage-redesign-final-acceptance.md) 区分实际通过、失败和未执行。自动化通过不能代替真实客户端进度同步通过。
+
+协议路由、认证、DTO、来源构造或Store provider改动时，必须同时运行`media-server`测试和`api`中的公开Router合同；只运行`media-server`不会执行本轮捕获详情缺字段的失败回归。取得AGENTS约定的Cargo锁后，顺序执行以下定向门，不能并行启动Cargo：
+
+```sh
+TMPDIR=/tmp cargo test --release -j8 -p media-server -- --test-threads=8
+TMPDIR=/tmp cargo test --release -j8 -p api \
+  --test jellyfin --test jellyfin_stream_binding \
+  --test playback_event_identity \
+  --test playback_read_regression -- --test-threads=8
+```
+
+分页、搜索、ACL或图片行为变更还须执行表中对应的分页/图片/可见性目标，不能把这组播放定向门称为整个Jellyfin表面的完整覆盖。最终稳定树仍按仓库要求执行一次workspace全套，真实设备矩阵分别覆盖本地与STRM、Movie与Episode、同单元跨端续播、重启和两个User。

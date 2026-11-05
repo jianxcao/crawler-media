@@ -81,7 +81,7 @@ async fn parent_library_scope_excludes_nested_library_items() {
 #[tokio::test]
 async fn selected_library_bytes_require_auth_and_visibility() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, _) = app(tmp.path());
+    let (app, visible_media, visible_id) = app(tmp.path());
     let hidden_media = seed_hidden_media(tmp.path());
     let created = app
         .clone()
@@ -124,7 +124,6 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         .unwrap()
         .id;
     let hidden_id = work_id(hidden_media.id);
-    let hidden_media_id = work_id(hidden_media.id);
     let items = super::playback::items_for(&app, &token).await;
     assert!(
         items["Items"]
@@ -134,14 +133,23 @@ async fn selected_library_bytes_require_auth_and_visibility() {
             .all(|item| item["Id"] != hidden_id)
     );
     assert_hidden_stream_and_artwork(&app, &token, &hidden_id).await;
+    assert_hidden_details_and_delete_scope(
+        &app,
+        &token,
+        member_id,
+        &hidden_id,
+        hidden_media.id,
+        &visible_id,
+        visible_media,
+        tmp.path(),
+    )
+    .await;
     let hidden_mark = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/Users/{member_id}/FavoriteItems/{hidden_media_id}"
-                ))
+                .uri(format!("/Users/{member_id}/FavoriteItems/{hidden_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -189,6 +197,83 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         &to_bytes(poster.into_body(), usize::MAX).await.unwrap()[..],
         b"secret poster"
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assert_hidden_details_and_delete_scope(
+    app: &axum::Router,
+    token: &str,
+    member_id: domain::UserId,
+    hidden_id: &str,
+    hidden_media: MediaId,
+    visible_id: &str,
+    visible_media: MediaId,
+    root: &Path,
+) {
+    let admin_id = Store::open(root.join("data"))
+        .unwrap()
+        .user_id_by_token("admin-token")
+        .unwrap()
+        .unwrap();
+    for mark in ["FavoriteItems", "PlayedItems"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/Users/{admin_id}/{mark}/{visible_id}"))
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    for prefix in ["", "/emby"] {
+        for (method, path) in [
+            ("GET", format!("/Items/{hidden_id}")),
+            ("GET", format!("/Users/{member_id}/Items/{hidden_id}")),
+            ("POST", format!("/Items/{hidden_id}/PlaybackInfo")),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("{prefix}{path}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{prefix}{path}");
+        }
+        for mark in ["FavoriteItems", "PlayedItems"] {
+            for path in [
+                format!("/Users/{member_id}/{mark}/{hidden_id}/Delete"),
+                format!("/Users/{admin_id}/{mark}/{visible_id}/Delete"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(format!("{prefix}{path}"))
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{prefix}{path}");
+            }
+        }
+    }
+    let store = Store::open(root.join("data")).unwrap();
+    assert_eq!(store.playback_marks(member_id, hidden_media).unwrap(), None);
+    let admin_marks = store
+        .playback_marks(admin_id, visible_media)
+        .unwrap()
+        .unwrap();
+    assert!(admin_marks.0 && admin_marks.1);
 }
 #[tokio::test]
 async fn items_series_counts_only_episodes_from_visible_libraries() {

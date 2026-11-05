@@ -45,6 +45,7 @@ pub struct PlaybackClientInfo {
 pub struct PlaybackEventIdentity {
     pub play_session_id: Option<String>,
     pub event_sequence: Option<i64>,
+    pub media_source_id: Option<domain::PhysicalSourceId>,
 }
 
 /// One library entry as the protocol layer sees it: the selected source file,

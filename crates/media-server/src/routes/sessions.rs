@@ -20,6 +20,8 @@ pub(super) struct ProgressBody {
     play_session_id: Option<String>,
     #[serde(default, rename = "EventSequence")]
     event_sequence: Option<i64>,
+    #[serde(default, rename = "MediaSourceId")]
+    media_source_id: Option<String>,
 }
 
 async fn report_session_event(
@@ -41,9 +43,17 @@ async fn report_session_event(
     {
         return StatusCode::BAD_REQUEST;
     }
+    let media_source_id = match body.media_source_id.as_deref() {
+        None | Some("") => None,
+        Some(value) => match domain::PhysicalSourceId::from_wire_string(value) {
+            Some(source) => Some(source),
+            None => return StatusCode::NO_CONTENT,
+        },
+    };
     let identity = crate::provider::PlaybackEventIdentity {
         play_session_id: body.play_session_id,
         event_sequence: body.event_sequence,
+        media_source_id,
     };
     let Some(item_id) = body.item_id.as_deref() else {
         return StatusCode::NO_CONTENT;
