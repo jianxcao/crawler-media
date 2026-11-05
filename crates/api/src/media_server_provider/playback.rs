@@ -76,9 +76,23 @@ pub(super) fn report_event(
     event: PlaybackEvent,
     identity: media_server::provider::PlaybackEventIdentity,
 ) -> Result<(), String> {
-    let Some(target) = resolve_target(provider, user_id, id, identity.media_source_id.as_ref())?
-    else {
-        if identity.media_source_id.is_some() {
+    let bound_source = if identity.media_source_id.is_none() {
+        if let Some(session_id) = identity.play_session_id.as_deref() {
+            let Some(source) =
+                provider.session_physical_source(user_id, Some(&client.device_id), session_id)?
+            else {
+                return Ok(());
+            };
+            Some(source)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let source = identity.media_source_id.as_ref().or(bound_source.as_ref());
+    let Some(target) = resolve_target(provider, user_id, id, source)? else {
+        if source.is_some() {
             return Ok(());
         }
         return Err(format!(

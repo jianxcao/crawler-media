@@ -9,6 +9,31 @@ use super::ApiServerProvider;
 use super::items::ResolvedEntry;
 
 impl ApiServerProvider {
+    pub(super) fn session_physical_source(
+        &self,
+        user_id: UserId,
+        device_id: Option<&str>,
+        session_id: &str,
+    ) -> Result<Option<domain::PhysicalSourceId>, String> {
+        let Some(device_id) = device_id else {
+            return Ok(None);
+        };
+        self.bounded_reader(&[store::Db::Library], |store| {
+            let binding = store
+                .play_session_binding(user_id, device_id, session_id)
+                .map_err(|error| error.to_string())?;
+            Ok(binding.and_then(|binding| {
+                if binding.state == PlaySessionIdState::Closed {
+                    return None;
+                }
+                Some(domain::PhysicalSourceId {
+                    file_id: binding.ledger_id,
+                    revision: binding.file_revision?,
+                })
+            }))
+        })
+    }
+
     pub(super) fn stream_matches_binding(
         &self,
         user_id: UserId,

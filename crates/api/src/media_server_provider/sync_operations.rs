@@ -128,8 +128,21 @@ impl ApiServerProvider {
         {
             return Ok(None);
         }
+        let bound_source = if media_source_id.is_none() {
+            if let Some(session_id) = play_session_id {
+                let Some(source) = self.session_physical_source(user_id, device_id, session_id)?
+                else {
+                    return Ok(None);
+                };
+                Some(source)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let entry = self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-            items::resolve_entry(store, Some(user_id), id)
+            items::resolve_entry_with_source(store, Some(user_id), id, bound_source.as_ref())
         })?;
         let Some(entry) = entry else {
             return Ok(None);

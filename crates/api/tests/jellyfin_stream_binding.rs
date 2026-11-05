@@ -108,6 +108,92 @@ fn stream_uri(f: &Fixture, source: &str, session: &str, device: &str) -> String 
     )
 }
 
+fn publish_new_preferred_source(root: &Path, f: &Fixture) -> String {
+    let store = Store::open(root.join("data")).unwrap();
+    let item = domain::TypedItemId::from_wire_string(&f.item_id).unwrap();
+    let media = match &item {
+        domain::TypedItemId::Work(media) => *media,
+        _ => unreachable!(),
+    };
+    let user = store.user_id_by_token("admin-token").unwrap().unwrap();
+    let path = f.path.with_file_name("new-preferred.mkv");
+    std::fs::write(&path, b"BBBBBBBB").unwrap();
+    let file = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: path.display().to_string(),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let scope = store::library_write::WriteScope {
+        library_id: file.library_id,
+        config_revision: store
+            .library_config_revision(&file.library_id.to_string())
+            .unwrap(),
+    };
+    std::fs::write(&path, b"BBBBBBBB revised").unwrap();
+    let observation = api::fingerprint_job::observe_source(&path).unwrap();
+    store
+        .replace_file_source(&scope, file.file_id, &file.version, &observation, 5_000)
+        .unwrap();
+    let entries = store.playable_entries(user, &item).unwrap();
+    assert_eq!(entries[0].file.file_id, file.file_id);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.file.file_id == f.file_id && entry.file.version.revision == 1)
+    );
+    domain::PhysicalSourceId {
+        file_id: file.file_id,
+        revision: entries[0].file.version.revision,
+    }
+    .to_wire_string()
+}
+
+#[tokio::test]
+async fn unspecified_stream_source_follows_session_after_preference_changes() {
+    for prefix in ["", "/emby"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = fixture(tmp.path());
+        let (status, body) = get(
+            &f.app,
+            "POST",
+            &format!("{prefix}/Items/{}/PlaybackInfo", f.item_id),
+            "tv-1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        let sid = info["PlaySessionId"].as_str().unwrap();
+        assert_eq!(
+            info["MediaSources"][0]["Id"],
+            domain::PhysicalSourceId {
+                file_id: f.file_id,
+                revision: 1
+            }
+            .to_wire_string()
+        );
+        let other = publish_new_preferred_source(tmp.path(), &f);
+        for source in ["", "&MediaSourceId="] {
+            let uri = format!(
+                "{prefix}/Videos/{}/stream?PlaySessionId={sid}&DeviceId=tv-1{source}",
+                f.item_id
+            );
+            let (status, bytes) = get(&f.app, "GET", &uri, "tv-1").await;
+            assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{uri}");
+            assert_eq!(bytes, b"AAAA");
+        }
+        let uri = format!("{prefix}{}", stream_uri(&f, &other, sid, "tv-1"));
+        let (status, bytes) = get(&f.app, "GET", &uri, "tv-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_ne!(bytes, b"BBBB");
+    }
+}
+
 #[tokio::test]
 async fn vidhub_static_stream_paths_deliver_bound_ranges_with_query_auth() {
     let tmp = tempfile::tempdir().unwrap();
@@ -350,6 +436,15 @@ async fn production_jellyfin_stream_uses_issued_binding() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_ne!(bytes, b"XXXX");
+    for query in ["", "&MediaSourceId="] {
+        let uri = format!(
+            "/Videos/{}/stream?PlaySessionId={session}&DeviceId=tv-1{query}",
+            f.item_id
+        );
+        let (status, bytes) = get(&f.app, "GET", &uri, "tv-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_ne!(bytes, b"XXXX");
+    }
 }
 
 /// R10: a Jellyfin event's duration comes from the current physical source, never from a

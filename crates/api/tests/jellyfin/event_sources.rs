@@ -1,5 +1,10 @@
 use super::*;
 
+#[path = "event_sources/bound_source_guards.rs"]
+mod bound_source_guards;
+#[path = "event_sources/shared_episode_binding.rs"]
+mod shared_episode_binding;
+
 const DEVICE: &str = "source-contract-device";
 
 struct Fixture {
@@ -98,6 +103,47 @@ impl Fixture {
         domain::PhysicalSourceId {
             file_id: file.file_id,
             revision: file.version.revision,
+        }
+    }
+
+    fn publish_new_preferred_source(&self) -> domain::PhysicalSourceId {
+        let path = self._tmp.path().join("new-preferred.mkv");
+        std::fs::write(&path, b"new source").unwrap();
+        let file = store::test_support::publish_fixture_file(
+            &self.store,
+            &FixtureFile {
+                media_id: self.media,
+                path: path.display().to_string(),
+                quality_source: QualitySource::Probe,
+                confidence: Confidence::High,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let scope = store::library_write::WriteScope {
+            library_id: file.library_id,
+            config_revision: self
+                .store
+                .library_config_revision(&file.library_id.to_string())
+                .unwrap(),
+        };
+        std::fs::write(&path, b"new source revised").unwrap();
+        let observation = api::fingerprint_job::observe_source(&path).unwrap();
+        self.store
+            .replace_file_source(&scope, file.file_id, &file.version, &observation, 5_000)
+            .unwrap();
+        let item = domain::TypedItemId::from_wire_string(&self.item).unwrap();
+        let entries = self.store.playable_entries(self.user, &item).unwrap();
+        assert_eq!(entries[0].file.file_id, file.file_id);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.file.file_id == self.source.file_id
+                    && entry.file.version.revision == self.source.revision)
+        );
+        domain::PhysicalSourceId {
+            file_id: file.file_id,
+            revision: entries[0].file.version.revision,
         }
     }
 
@@ -513,5 +559,104 @@ async fn null_source_and_omitted_session_still_record_playback() {
         assert_eq!(stopped.1.unwrap().position_ms, 5_000);
         assert_eq!(stopped.2.len(), 1);
         assert_eq!(stopped.2[0].end_position_ms, 5_000);
+    }
+}
+
+#[tokio::test]
+async fn session_events_follow_bound_source_after_preference_changes() {
+    for prefix in ["", "/emby"] {
+        for source_kind in ["omitted", "null", "empty"] {
+            for already_active in [false, true] {
+                let f = Fixture::new();
+                let info = f.info(prefix).await;
+                let sid = info["PlaySessionId"].as_str().unwrap();
+                assert_eq!(info["MediaSources"][0]["Id"], f.source.to_wire_string());
+                if already_active {
+                    f.event(prefix, "/Sessions/Playing", None, Some(sid), 10_000_000)
+                        .await;
+                }
+                let other = f.publish_new_preferred_source().to_wire_string();
+                let before = f.state();
+                f.event(
+                    prefix,
+                    "/Sessions/Playing",
+                    Some(&other),
+                    Some(sid),
+                    90_000_000,
+                )
+                .await;
+                assert_eq!(f.state(), before, "conflicting source must be ignored");
+                for (path, ticks) in [
+                    ("/Sessions/Playing", 10_000_000),
+                    ("/Sessions/Playing/Progress", 30_000_000),
+                    ("/Sessions/Playing/Stopped", 50_000_000),
+                ] {
+                    let mut body =
+                        json!({"ItemId": f.item, "PlaySessionId": sid, "PositionTicks": ticks});
+                    match source_kind {
+                        "null" => body["MediaSourceId"] = Value::Null,
+                        "empty" => body["MediaSourceId"] = json!(""),
+                        _ => {}
+                    }
+                    f.send_event(prefix, path, body).await;
+                    if path != "/Sessions/Playing/Stopped" {
+                        let (active, unit, _) = f.state();
+                        assert_eq!(
+                            active.unwrap().ledger_id,
+                            Some(f.source.file_id.to_string())
+                        );
+                        assert_eq!(unit.unwrap().position_ms, ticks / 10_000);
+                    }
+                }
+                let (active, unit, logs) = f.state();
+                assert!(active.is_none());
+                assert_eq!(unit.unwrap().position_ms, 5_000);
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].end_position_ms, 5_000);
+                assert_eq!(
+                    f.store
+                        .play_session_binding(f.user, DEVICE, sid)
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    store::PlaySessionIdState::Closed
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unspecified_event_source_does_not_revive_stale_session_source() {
+    for prefix in ["", "/emby"] {
+        let f = Fixture::new();
+        let info = f.info(prefix).await;
+        let sid = info["PlaySessionId"].as_str().unwrap();
+        f.replace_source();
+        for path in [
+            "/Sessions/Playing",
+            "/Sessions/Playing/Progress",
+            "/Sessions/Playing/Stopped",
+        ] {
+            for source in ["omitted", "null", "empty"] {
+                let mut body =
+                    json!({"ItemId": f.item, "PlaySessionId": sid, "PositionTicks": 10_000_000});
+                match source {
+                    "null" => body["MediaSourceId"] = Value::Null,
+                    "empty" => body["MediaSourceId"] = json!(""),
+                    _ => {}
+                }
+                f.send_event(prefix, path, body).await;
+                assert_eq!(f.state(), (None, None, Vec::new()));
+            }
+        }
+        assert_eq!(
+            f.store
+                .play_session_binding(f.user, DEVICE, sid)
+                .unwrap()
+                .unwrap()
+                .state,
+            store::PlaySessionIdState::Pending
+        );
     }
 }
