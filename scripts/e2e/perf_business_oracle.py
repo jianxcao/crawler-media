@@ -198,7 +198,7 @@ def derive(app, db, manifest):
         allowed = {lib['library_id']: lib for lib in visible}
         selected = [f for f in files if f['library_id'] in allowed and f['publication_state'] == 'published']
         if any(f['presence_state'] != 'present' or f['media_id'] not in media or
-               media[f['media_id']]['identity_state'] != 'confirmed' or
+               media[f['media_id']]['identity_state'] not in ('confirmed', 'provisional') or
                f['kind'] != media[f['media_id']]['kind'] or f['kind'] != allowed[f['library_id']]['kind'] for f in selected):
             reason = 'unsupported file or identity state'
         owners = {}

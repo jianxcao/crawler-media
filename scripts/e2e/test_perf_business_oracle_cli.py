@@ -192,6 +192,56 @@ class OracleCliTests(unittest.TestCase):
                 self.assertNotIn(ids['m2'], artifact['users'][ids['bob']]['movie_libraries'])
                 self.assertIn(ids['m2'], artifact['users'][ids['admin']]['movie_libraries'])
 
+    def test_published_provisional_nfo_work_is_verified(self):
+        for layout in ('old', 'new'):
+            with self.subTest(layout=layout):
+                stage, baseline, path, manifest, ids = self.fixture(layout)
+                fields = {'genres': {'state': 'value', 'value': [
+                    {'source': 'nfo', 'source_id': None, 'name': 'Local Drama', 'filter_key': 'local drama'}]},
+                    'studios': {'state': 'value', 'value': ['Local Studio']}}
+                with sqlite3.connect(baseline / 'data' / 'library.db') as db:
+                    db.execute("UPDATE media SET identity_state='provisional' WHERE media_id=?", (ids['movie'],))
+                    db.execute('DELETE FROM media_metadata_overrides WHERE media_id=?', (ids['movie'],))
+                    db.execute('DELETE FROM media_metadata WHERE media_id=?', (ids['movie'],))
+                    for lib in ('m1', 'm2'):
+                        db.execute("INSERT INTO library_metadata_inputs(library_id,media_id,entity_scope,season,episode,locale,input_key,root_id,path_key,parse_state,source_version,fields_json,present_fields_json,revision) VALUES(?,?,'work',-1,-1,'zh-CN','input',?,?,'valid','nfo_v1',?,?,1)",
+                                   (ids[lib], ids['movie'], 'root-' + lib, '/' + lib + '/movie.nfo',
+                                    json.dumps(fields), json.dumps(['genres', 'studios'])))
+                    self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+                self.reseal(stage, baseline, path, manifest)
+                out = stage / 'provisional.json'
+                result = self.invoke(baseline, path, out)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                users = json.loads(out.read_text())['users']
+                for name, item_count in (('alice', 3), ('bob', 2), ('admin', 3)):
+                    user = users[ids[name]]
+                    self.assertEqual(user['counts'], {'status': 'verified', 'value': {
+                        'MovieCount': 1, 'SeriesCount': 1, 'EpisodeCount': 2, 'ItemCount': item_count}})
+                    self.assertEqual(user['movie_libraries'][ids['m1']], {'status': 'verified',
+                                     'value': ['w1_' + ids['movie'].replace('-', '')]})
+                    self.assertEqual(user['genres'], {'status': 'verified', 'value': {'Local Drama': 1}})
+                    self.assertEqual(user['studios'], {'status': 'verified', 'value': {'Local Studio': 1}})
+                self.assertEqual(users[ids['alice']]['movie_libraries'][ids['m2']],
+                                 {'status': 'verified', 'value': ['w1_' + ids['movie'].replace('-', '')]})
+                self.assertNotIn(ids['m2'], users[ids['bob']]['movie_libraries'])
+
+    def test_unsupported_published_identity_remains_unverified(self):
+        for state in ('merging', 'retired', 'unknown'):
+            with self.subTest(state=state):
+                stage, baseline, path, manifest, ids = self.fixture('new', label=state)
+                with sqlite3.connect(baseline / 'data' / 'library.db') as db:
+                    db.execute('PRAGMA ignore_check_constraints=ON')
+                    db.execute('UPDATE media SET identity_state=?, survivor_id=? WHERE media_id=?',
+                               (state, ids['pending'] if state == 'retired' else None, ids['movie']))
+                self.reseal(stage, baseline, path, manifest)
+                out = stage / 'unsupported.json'
+                result = self.invoke(baseline, path, out)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for user in json.loads(out.read_text())['users'].values():
+                    for key in ('counts', 'genres', 'studios'):
+                        self.assertEqual(user[key]['status'], 'unverified')
+                    self.assertEqual(user['movie_libraries'][ids['m1']]['status'], 'unverified')
+
     def test_missing_metadata_is_unverified(self):
         stage, baseline, path, _, ids = self.fixture('new', ambiguous=True)
         out = stage / 'expectations.json'
@@ -562,15 +612,19 @@ class OracleCliTests(unittest.TestCase):
 
     def test_modified_schema_and_invalid_foreign_key_are_refused(self):
         for layout in ('old', 'new'):
-            for mutation in ('schema', 'foreign_key'):
+            for mutation in ('schema', 'foreign_key', 'missing_media'):
                 with self.subTest(layout=layout, mutation=mutation):
                     stage, baseline, path, manifest, ids = self.fixture(layout, label=layout + '-' + mutation)
                     with sqlite3.connect(baseline / 'data' / 'library.db') as db:
                         if mutation == 'schema':
                             db.execute('DROP INDEX files_presence')
-                        else:
+                        elif mutation == 'foreign_key':
                             db.execute('PRAGMA foreign_keys=OFF')
                             db.execute("UPDATE library_files SET root_id='missing-root' WHERE file_id='a'")
+                            self.assertTrue(db.execute('PRAGMA foreign_key_check').fetchall())
+                        else:
+                            db.execute('PRAGMA foreign_keys=OFF')
+                            db.execute("UPDATE library_files SET media_id=? WHERE file_id='a'", (uid(layout, 999),))
                             self.assertTrue(db.execute('PRAGMA foreign_key_check').fetchall())
                     self.reseal(stage, baseline, path, manifest)
                     out = stage / 'invalid.json'
