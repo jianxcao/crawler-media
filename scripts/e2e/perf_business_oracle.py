@@ -155,10 +155,13 @@ def categories(db, owners, kind):
                 if adopted_locale and lib['display_locale'] != adopted_locale:
                     raise ValueError('adopted locale selection is unsupported')
                 inputs = db.execute("SELECT locale,input_key,parse_state,fields_json FROM library_metadata_inputs WHERE library_id=? AND media_id=? AND entity_scope='work' AND season=-1 AND episode=-1", (lib['library_id'], media)).fetchall()
-                if len(inputs) > 1 or any(row['parse_state'] != 'valid' or row['locale'] != lib['display_locale'] for row in inputs):
+                if any(row['parse_state'] != 'valid' or row['locale'] != lib['display_locale'] for row in inputs):
                     raise ValueError('NFO input selection is unsupported')
                 if inputs:
-                    names.update(field_names(json.loads(inputs[0]['fields_json']), kind))
+                    input_names = [field_names(json.loads(row['fields_json']), kind) for row in inputs]
+                    if any(value != input_names[0] for value in input_names[1:]):
+                        raise ValueError('NFO category inputs disagree')
+                    names.update(input_names[0])
                 # Studios use persisted display facts: record_scraped_display
                 # can write them independently of provider/override composition.
                 names.update(display_names(display, lib['display_locale'], kind,

@@ -242,6 +242,53 @@ class OracleCliTests(unittest.TestCase):
                         self.assertEqual(user[key]['status'], 'unverified')
                     self.assertEqual(user['movie_libraries'][ids['m1']]['status'], 'unverified')
 
+    def test_multiple_nfo_inputs_require_agreement_per_category(self):
+        for layout in ('old', 'new'):
+            for scenario in ('agree', 'different', 'empty', 'missing', 'invalid', 'locale'):
+                with self.subTest(layout=layout, scenario=scenario):
+                    stage, baseline, path, manifest, ids = self.fixture(layout, label=layout + '-' + scenario)
+                    genre = {'state': 'value', 'value': [{'source': 'nfo', 'source_id': None,
+                             'name': 'Local Drama', 'filter_key': 'local drama'}]}
+                    studio = {'state': 'value', 'value': ['Local Studio']}
+                    first = {'genres': genre, 'studios': studio}
+                    second = {'genres': genre, 'studios': studio}
+                    if scenario == 'different':
+                        second = {'genres': {'state': 'value', 'value': [{'source': 'nfo',
+                                  'source_id': None, 'name': 'Comedy', 'filter_key': 'comedy'}]},
+                                  'studios': studio}
+                    elif scenario == 'empty':
+                        first = second = {'genres': {'state': 'empty'}, 'studios': {'state': 'empty'}}
+                    elif scenario == 'missing':
+                        second = {'studios': studio}
+                    with sqlite3.connect(baseline / 'data' / 'library.db') as db:
+                        db.execute('DELETE FROM media_metadata_overrides WHERE media_id=?', (ids['movie'],))
+                        db.execute('DELETE FROM media_metadata WHERE media_id=?', (ids['movie'],))
+                        for lib in ('m1', 'm2'):
+                            for key, fields in (('a', first), ('b', second)):
+                                locale = 'en-US' if scenario == 'locale' and key == 'b' else 'zh-CN'
+                                state = 'invalid' if scenario == 'invalid' and key == 'b' else 'valid'
+                                db.execute("INSERT INTO library_metadata_inputs(library_id,media_id,entity_scope,season,episode,locale,input_key,root_id,path_key,parse_state,source_version,fields_json,present_fields_json,revision) VALUES(?,?,'work',-1,-1,?,?,?,?,?,'nfo_v1',?,?,1)",
+                                           (ids[lib], ids['movie'], locale, key, 'root-' + lib,
+                                            '/' + lib + '/' + key + '.nfo', state, json.dumps(fields), json.dumps(list(fields))))
+                    self.reseal(stage, baseline, path, manifest)
+                    out = stage / 'multiple-nfo.json'
+                    result = self.invoke(baseline, path, out)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    for name, item_count in (('alice', 3), ('bob', 2), ('admin', 3)):
+                        user = json.loads(out.read_text())['users'][ids[name]]
+                        self.assertEqual(user['counts'], {'status': 'verified', 'value': {
+                            'MovieCount': 1, 'SeriesCount': 1, 'EpisodeCount': 2, 'ItemCount': item_count}})
+                        if scenario in ('invalid', 'locale'):
+                            self.assertEqual(user['studios']['status'], 'unverified')
+                        else:
+                            self.assertEqual(user['studios'], {'status': 'verified', 'value':
+                                             {} if scenario == 'empty' else {'Local Studio': 1}})
+                        if scenario in ('different', 'missing', 'invalid', 'locale'):
+                            self.assertEqual(user['genres']['status'], 'unverified')
+                        else:
+                            self.assertEqual(user['genres'], {'status': 'verified', 'value':
+                                             {} if scenario == 'empty' else {'Local Drama': 1}})
+
     def test_missing_metadata_is_unverified(self):
         stage, baseline, path, _, ids = self.fixture('new', ambiguous=True)
         out = stage / 'expectations.json'
