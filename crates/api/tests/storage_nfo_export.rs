@@ -27,6 +27,7 @@ const LOCALE: &str = "zh-CN";
 struct ExportCatalog {
     overview: Mutex<String>,
     title: Mutex<Option<String>>,
+    cast: Mutex<Vec<serde_json::Value>>,
 }
 
 impl ExportCatalog {
@@ -115,6 +116,7 @@ impl api::catalog::Catalog for ExportCatalog {
             "genres": [{"id": 18, "name": "Drama"}],
             "production_companies": [{"name": "Fixture Studio"}],
             "production_countries": [{"iso_3166_1": "US", "name": "United States"}],
+            "credits": {"cast": *self.cast.lock()},
         });
         media::normalize_metadata("tmdb", scope, &body.to_string(), preferences)
             .map(Some)
@@ -544,6 +546,54 @@ async fn provider_title_changes_when_only_plot_was_edited() {
     assert_eq!(
         after.overview.value().map(String::as_str),
         Some("USER PLOT")
+    );
+}
+
+#[tokio::test]
+async fn adopted_tmdb_person_thumbs_are_portable_in_exported_nfo() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let catalog = Arc::new(ExportCatalog::default());
+    catalog.set_overview("V1");
+    let state = export_state(temp.path(), catalog.clone());
+    let (library_id, video, nfo) = movie_fixture(&state);
+    let app = api::router(state.clone());
+    common::scan_and_wait(&app, &library_id.to_string()).await;
+    let media = media_at(&state, &video);
+    *catalog.cast.lock() = vec![
+        json!({"id": 1, "name": "Relative", "profile_path": "/person.jpg"}),
+        json!({"id": 2, "name": "External", "profile_path": "https://example.org/person.jpg"}),
+        json!({"id": 3, "name": "Missing", "profile_path": null}),
+        json!({"id": 4, "name": "Sized", "profile_path": "/t/p/w500/person.jpg"}),
+    ];
+
+    refresh_item(&app, library_id, media).await;
+
+    let body = std::fs::read_to_string(&nfo).unwrap();
+    let parsed = library::read_nfo(&nfo).unwrap();
+    let thumb = |name: &str| {
+        parsed
+            .cast
+            .iter()
+            .find(|person| person.name == name)
+            .unwrap()
+            .thumb
+            .as_deref()
+    };
+    assert_eq!(
+        thumb("Relative"),
+        Some("https://image.tmdb.org/t/p/w185/person.jpg"),
+        "{body}"
+    );
+    assert_eq!(
+        thumb("External"),
+        Some("https://example.org/person.jpg"),
+        "{body}"
+    );
+    assert_eq!(thumb("Missing"), None, "{body}");
+    assert_eq!(
+        thumb("Sized"),
+        Some("https://image.tmdb.org/t/p/w500/person.jpg"),
+        "{body}"
     );
 }
 

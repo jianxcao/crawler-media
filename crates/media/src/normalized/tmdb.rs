@@ -270,7 +270,7 @@ fn extract_credits(
             let thumb = c
                 .get("profile_path")
                 .and_then(Value::as_str)
-                .map(ToString::to_string);
+                .map(crate::tmdb_person_profile_url);
             let order = c.get("order").and_then(|v| v.as_u64()).map(|n| n as u32);
             cast.push(MetadataCast {
                 name,

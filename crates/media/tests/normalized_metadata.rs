@@ -2,6 +2,35 @@ use domain::{EntityScope, FieldValue, MetadataPreferences, SourceSelection};
 use media::normalize_metadata;
 
 #[test]
+fn tmdb_cast_preserves_absolute_and_missing_profile_paths() {
+    let raw = r#"{"title":"Movie","credits":{"cast":[
+        {"id":1,"name":"External","profile_path":"https://example.org/person.jpg"},
+        {"id":2,"name":"Missing","profile_path":null},
+        {"id":3,"name":"Sized","profile_path":"/t/p/w500/person.jpg"}
+    ]}}"#;
+    let normalized = normalize_metadata(
+        "tmdb",
+        EntityScope::Work,
+        raw,
+        &MetadataPreferences {
+            language_priority: vec!["en-US".into()],
+            cert_country_priority: vec!["US".into()],
+        },
+    )
+    .unwrap();
+    let cast = normalized.fields.cast.value().unwrap();
+    assert_eq!(
+        cast[0].thumb.as_deref(),
+        Some("https://example.org/person.jpg")
+    );
+    assert_eq!(cast[1].thumb, None);
+    assert_eq!(
+        cast[2].thumb.as_deref(),
+        Some("https://image.tmdb.org/t/p/w500/person.jpg")
+    );
+}
+
+#[test]
 fn normalized_tv_cast_preserves_aggregate_roles_and_person_identity() {
     let normalized = normalize_metadata(
         "tmdb",
@@ -18,7 +47,10 @@ fn normalized_tv_cast_preserves_aggregate_roles_and_person_identity() {
     assert_eq!(cast[0].name, "Bryan Cranston");
     assert_eq!(cast[0].role.as_deref(), Some("Walter White"));
     assert_eq!(cast[0].tmdb_id.as_deref(), Some("17419"));
-    assert_eq!(cast[0].thumb.as_deref(), Some("/bryan.jpg"));
+    assert_eq!(
+        cast[0].thumb.as_deref(),
+        Some("https://image.tmdb.org/t/p/w185/bryan.jpg")
+    );
     assert_eq!(cast[0].order, Some(0));
     assert_eq!(cast[1].name, "Aaron Paul");
     assert_eq!(cast[1].role.as_deref(), Some("Jesse Pinkman"));
@@ -208,6 +240,10 @@ fn complete_source_metadata_parses_all_fields_with_origins() {
     assert_eq!(cast.len(), 1);
     assert_eq!(cast[0].name, "Actor A");
     assert_eq!(cast[0].role.as_deref(), Some("Hero"));
+    assert_eq!(
+        cast[0].thumb.as_deref(),
+        Some("https://image.tmdb.org/t/p/w185/thumb.jpg")
+    );
 
     assert_eq!(
         norm.field_origins

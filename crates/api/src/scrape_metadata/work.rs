@@ -140,7 +140,10 @@ pub(crate) fn nfo_from_tmdb(media: &Media, metadata: &media::ItemMeta) -> librar
                 name: member.name.clone(),
                 role: member.role.clone(),
                 tmdb_id: member.person_id.map(|id| id.to_string()),
-                thumb: member.avatar_path.clone(),
+                thumb: member
+                    .avatar_path
+                    .as_deref()
+                    .map(media::tmdb_person_profile_url),
                 order: Some(member.order),
             })
             .collect(),

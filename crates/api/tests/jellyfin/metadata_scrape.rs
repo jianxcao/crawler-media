@@ -330,6 +330,15 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(show.end_date.as_deref(), Some("2025-02-21"));
     assert_eq!(show.vote_count, Some(1200));
     assert_eq!(show.cast.len(), 3);
+    assert_eq!(
+        show.cast
+            .iter()
+            .find(|person| person.name == "Paul Dano")
+            .unwrap()
+            .thumb
+            .as_deref(),
+        Some("https://image.tmdb.org/t/p/w185/paul.jpg")
+    );
     assert!(
         show.cast
             .iter()

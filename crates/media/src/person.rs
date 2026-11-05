@@ -94,3 +94,17 @@ pub fn person_details(body: &str) -> Result<PersonDetails, TmdbError> {
         items,
     })
 }
+
+/// Resolve a TMDB profile path for portable metadata output.
+pub fn tmdb_person_profile_url(path: &str) -> String {
+    if path.starts_with("/t/p/") {
+        format!("https://image.tmdb.org{path}")
+    } else if path
+        .strip_prefix('/')
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+    {
+        format!("https://image.tmdb.org/t/p/w185{path}")
+    } else {
+        path.to_owned()
+    }
+}
