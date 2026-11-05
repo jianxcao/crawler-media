@@ -241,6 +241,7 @@ fn check_indexed_queries(store: &Store, library: domain::LibraryId) {
         person_ids: vec![],
         studio_ids: vec![],
         search_term: None,
+        name_starts_with: None,
         genres: vec![],
         genre_ids: vec![],
         filters: vec![],

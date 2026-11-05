@@ -38,12 +38,30 @@ pub(super) fn build(
     season_clause(request, branch, bindings, &mut clauses);
     clauses.push(exact.to_string());
     search_clause(request, branch, bindings, &mut clauses);
+    name_prefix_clause(request, branch, bindings, &mut clauses);
     mark_clauses(request, branch, bindings, &mut clauses);
     Ok(if clauses.is_empty() {
         "1 = 1".to_string()
     } else {
         clauses.join(" AND ")
     })
+}
+
+fn name_prefix_clause(
+    request: &ProtocolItemQuery,
+    branch: Branch,
+    bindings: &mut Bindings,
+    clauses: &mut Vec<String>,
+) {
+    let Some(prefix) = request
+        .name_starts_with
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return;
+    };
+    let prefix = bindings.push(SqlValue::Text(prefix.to_lowercase()));
+    clauses.push(super::name_prefix::predicate(branch, &prefix));
 }
 
 /// `IncludeItemTypes` 与 `IsFolder`：本地没有目录实体，两者都只看媒体种类。

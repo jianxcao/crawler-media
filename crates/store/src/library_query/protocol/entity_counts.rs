@@ -39,6 +39,7 @@ pub(super) fn query(user: UserId, types: Vec<ProtocolItemType>) -> ProtocolItemQ
         person_ids: vec![],
         studio_ids: vec![],
         search_term: None,
+        name_starts_with: None,
         genres: vec![],
         genre_ids: vec![],
         filters: vec![],

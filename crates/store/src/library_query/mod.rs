@@ -8,6 +8,7 @@ mod page_hydration;
 pub mod page_inputs;
 mod page_validate;
 pub use page_hydration::HydratedFile;
+pub(crate) use page_hydration::hydrate_on as page_hydration_on;
 pub use page_validate::{PageSnapshot, PageValidation};
 pub mod playback_views;
 pub mod protocol;

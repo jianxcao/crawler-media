@@ -488,6 +488,7 @@ fn protocol_query(user: UserId, library: LibraryId, term: &str) -> ProtocolItemQ
         person_ids: vec![],
         studio_ids: vec![],
         search_term: Some(term.into()),
+        name_starts_with: None,
         genres: vec![],
         genre_ids: vec![],
         filters: vec![],

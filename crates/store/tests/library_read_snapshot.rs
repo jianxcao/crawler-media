@@ -247,6 +247,7 @@ fn protocol_and_facets_use_the_same_borrowed_cores() {
         page,
         inputs,
         series,
+        ..
     } = lease.execute(&context, &budget()).unwrap()
     else {
         panic!("wrong result")

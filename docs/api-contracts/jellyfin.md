@@ -172,3 +172,11 @@ TMPDIR=/tmp cargo test --release -j8 -p api \
 ```
 
 分页、搜索、ACL或图片行为变更还须执行表中对应的分页/图片/可见性目标，不能把这组播放定向门称为整个Jellyfin表面的完整覆盖。最终稳定树仍按仓库要求执行一次workspace全套，真实设备矩阵分别覆盖本地与STRM、Movie与Episode、同单元跨端续播、重启和两个User。
+
+## 19. 名称前缀与返回名称一致（2026-11-05）
+
+真实491来源验收中，VidHub 在无结果的 `SearchTerm` 请求后发送 `NameStartsWith`；此前协议查询忽略该参数，返回全部授权内容，界面因此显示无关条目。根路径及 `/emby` 的 `Items` 内容查询现在按最终显示名称执行大小写不敏感的字面前缀筛选：Series 使用 Media 标题，Movie/Video 使用显示标题，Episode 使用该单集的元数据名称或 `SxxExx`。百分号及下划线作为普通字符；筛选先于精确计数、跨 Library 去重和分页，仍遵循原 Library 授权。此范围不包括返回 Library 根 Folder 的既有快捷路径。
+
+数据库谓词共享页内元数据组合规则，保留 NFO、采纳、override、locale 及显式 Empty 的优先级。Series 的 SQL CASE 直接比较标题，避免读取候选的冷元数据。普通 Protocol/Latest 的已选页事实与页内元数据在同一 Library 快照读取；否则选页后改名可能让返回的 Name 不再满足前缀。hints/continuation 保持各自原有读取路径。
+
+公开 Router 测试先复现两个 Work 筛选失败、单集名称筛选失败，以及选页后通过真实 Store override 改名导致返回 `Changed Episode` 的失败。修复后六项前缀回归通过，覆盖隐藏库、分页、单集显示名/回退、Empty、多 Library 和确定性的快照交错；新增正控不计为缺陷 RED。合并工作树的 Jellyfin 集成109项、media-server全套及workspace all-target Clippy/fmt通过。稳定源码的release workspace运行记录3942 passed、25 ignored（结果组汇总，非去重数），但`executor_not_blocked`目标在SQLite首次初始化发生SIGSEGV，整轮退出101；该目标随后同参数定向重跑5/5通过。原崩溃及初始化调查单独保留，不宣称单轮workspace全绿。独立限定复审关闭快照一致性和Series读取成本两项发现；未进行实际SQL成本测量。修复后的真实VidHub无结果搜索仍待定向复验，不能以集成通过追认旧页面失败。

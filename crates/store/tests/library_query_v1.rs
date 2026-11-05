@@ -452,6 +452,7 @@ fn protocol_item_page_pagination_and_wire_ids() {
         person_ids: vec![],
         studio_ids: vec![],
         search_term: None,
+        name_starts_with: None,
         genres: vec![],
         genre_ids: vec![],
         filters: vec![],

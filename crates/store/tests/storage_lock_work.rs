@@ -186,6 +186,7 @@ fn played_series_vm_steps(episodes: i32) -> u64 {
         person_ids: vec![],
         studio_ids: vec![],
         search_term: None,
+        name_starts_with: None,
         genres: vec![],
         genre_ids: vec![],
         filters: vec![],

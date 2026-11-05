@@ -42,19 +42,19 @@ pub(super) const PLANS: &[&str] = &[
     SOURCES_SQL,
     OVERRIDES_SQL,
 ];
-type EntityLocale = (MediaId, EntityScope, String);
-type InputKey = (LibraryId, MediaId, EntityScope);
-struct Adopted {
-    title: String,
-    details: String,
-    origins: String,
+pub(crate) type EntityLocale = (MediaId, EntityScope, String);
+pub(crate) type InputKey = (LibraryId, MediaId, EntityScope);
+pub(crate) struct Adopted {
+    pub(crate) title: String,
+    pub(crate) details: String,
+    pub(crate) origins: String,
 }
 #[derive(Default)]
-struct Facts {
-    inputs: HashMap<InputKey, MetadataFields>,
-    adopted: HashMap<(MediaId, String), Adopted>,
-    sources: HashMap<EntityLocale, Vec<SourceSnapshot>>,
-    overrides: HashMap<EntityLocale, (MetadataFields, i64)>,
+pub(crate) struct Facts {
+    pub(crate) inputs: HashMap<InputKey, MetadataFields>,
+    pub(crate) adopted: HashMap<(MediaId, String), Adopted>,
+    pub(crate) sources: HashMap<EntityLocale, Vec<SourceSnapshot>>,
+    pub(crate) overrides: HashMap<EntityLocale, (MetadataFields, i64)>,
 }
 
 pub(super) fn hydrate(
@@ -77,10 +77,16 @@ pub(super) fn hydrate(
             .locales
             .get(&(owner.library, owner.media))
             .map(String::as_str);
-        let work = fields(&facts, owner, EntityScope::Work, locale);
+        let work = fields(
+            &facts,
+            owner.library,
+            owner.media,
+            EntityScope::Work,
+            locale,
+        );
         if let Some(scopes) = scopes.get(&owner.file) {
             for scope in scopes {
-                let mut value = fields(&facts, owner, *scope, locale);
+                let mut value = fields(&facts, owner.library, owner.media, *scope, locale);
                 if *scope != EntityScope::Work {
                     overlay_missing(&mut value, &work);
                 }
@@ -90,23 +96,24 @@ pub(super) fn hydrate(
     }
     Ok(())
 }
-fn fields(
+pub(crate) fn fields(
     facts: &Facts,
-    owner: &Owner,
+    library: LibraryId,
+    media: MediaId,
     scope: EntityScope,
     locale: Option<&str>,
 ) -> MetadataFields {
     let mut fields = facts
         .inputs
-        .get(&(owner.library, owner.media, scope))
+        .get(&(library, media, scope))
         .cloned()
         .unwrap_or_default();
     let Some(locale) = locale else { return fields };
-    let Some(adopted) = facts.adopted.get(&(owner.media, locale.to_string())) else {
+    let Some(adopted) = facts.adopted.get(&(media, locale.to_string())) else {
         return fields;
     };
     if scope == EntityScope::Work {
-        overlay_adopted_details(&mut fields, &adopted.details, owner.media);
+        overlay_adopted_details(&mut fields, &adopted.details, media);
         fill_from_adopted_parts(
             &mut fields,
             &adopted.title,
@@ -114,13 +121,13 @@ fn fields(
             &adopted.origins,
         );
     }
-    let key = (owner.media, scope, locale.to_string());
+    let key = (media, scope, locale.to_string());
     let sources = facts
         .sources
         .get(&key)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let composed = compose_loaded(owner.media, sources, facts.overrides.get(&key).cloned()).0;
+    let composed = compose_loaded(media, sources, facts.overrides.get(&key).cloned()).0;
     overlay_missing(&mut fields, &composed);
     fields
 }

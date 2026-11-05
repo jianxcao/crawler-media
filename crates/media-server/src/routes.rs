@@ -91,6 +91,8 @@ pub struct ItemsQuery {
     pub is_folder: Option<bool>,
     #[serde(default, rename = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
+    #[serde(default, rename = "NameStartsWith", alias = "nameStartsWith")]
+    pub name_starts_with: Option<String>,
     #[serde(
         default,
         rename = "Genres",
@@ -261,6 +263,7 @@ impl ItemsQuery {
             recursive: self.recursive.unwrap_or(true),
             is_folder: self.is_folder,
             search_term: self.search_term.clone(),
+            name_starts_with: self.name_starts_with.clone(),
             genres: self.genres.clone(),
             genre_ids: self.genre_ids.clone(),
             studio_ids: self.studio_ids.clone(),

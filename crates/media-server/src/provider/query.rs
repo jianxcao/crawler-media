@@ -30,6 +30,7 @@ pub struct ServerItemQuery {
     pub recursive: bool,
     pub is_folder: Option<bool>,
     pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
     pub genres: Option<String>,
     pub genre_ids: Option<String>,
     pub studio_ids: Option<String>,
@@ -331,8 +332,30 @@ fn matches_filter_predicates(item: &MediaItemSnapshot, query: &ServerItemQuery) 
         && matches_include_item_types(item, query.include_item_types.as_deref())
         && matches_is_folder(item, query.is_folder)
         && matches_search_term(item, query.search_term.as_deref())
+        && matches_name_prefix(item, query.name_starts_with.as_deref())
         && matches_genres(item, query.genres.as_deref(), query.genre_ids.as_deref())
         && matches_studios(item, query.studio_ids.as_deref())
+}
+
+fn matches_name_prefix(item: &MediaItemSnapshot, prefix: Option<&str>) -> bool {
+    let Some(prefix) = prefix.filter(|value| !value.trim().is_empty()) else {
+        return true;
+    };
+    let fallback = if item.media.kind == MediaKind::Tv && !item.is_series {
+        format!(
+            "S{:02}E{:02}",
+            item.unit.map(|unit| unit.season as u32).unwrap_or(0),
+            item.unit.map(|unit| unit.episode as u32).unwrap_or(0)
+        )
+    } else {
+        item.media.title.clone()
+    };
+    let name = if item.is_series {
+        &fallback
+    } else {
+        item.metadata.episode_name.as_ref().unwrap_or(&fallback)
+    };
+    name.to_lowercase().starts_with(&prefix.to_lowercase())
 }
 
 fn matches_is_folder(item: &MediaItemSnapshot, is_folder: Option<bool>) -> bool {

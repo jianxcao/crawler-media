@@ -27,6 +27,7 @@ pub use seasons::ProtocolSeason;
 mod folder;
 mod latest;
 mod membership;
+mod name_prefix;
 pub(crate) use latest::select_latest;
 pub(crate) mod metadata;
 mod order;
@@ -96,6 +97,13 @@ fn select_protocol_inner(
 ) -> Result<ProtocolItemPage, StoreError> {
     let normalized = request::normalize(request)?;
     let request = &normalized.original;
+    if request
+        .name_starts_with
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        name_prefix::register(tx)?;
+    }
     let Some(scope) = scope::Scope::resolve(tx, authorized, request)? else {
         return Ok(empty_page());
     };

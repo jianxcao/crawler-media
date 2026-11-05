@@ -66,6 +66,7 @@ fn classification_queries_do_not_read_cold_metadata_but_search_does() {
             person_ids: vec![],
             studio_ids: vec![],
             search_term: None,
+            name_starts_with: None,
             genres: vec![],
             genre_ids: vec![],
             filters: vec![],

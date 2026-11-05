@@ -35,6 +35,7 @@ pub(in crate::media_server_provider) async fn hints(
             page,
             inputs,
             series,
+            hydration: None,
         })
     })
     .await

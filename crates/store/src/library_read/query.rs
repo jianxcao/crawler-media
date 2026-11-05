@@ -28,6 +28,7 @@ pub enum LibraryReadResult {
         page: ProtocolItemPage,
         inputs: ProtocolPageInputs,
         series: HashMap<MediaId, ProtocolSeriesScalar>,
+        hydration: Option<HashMap<domain::LedgerId, crate::library_query::HydratedFile>>,
     },
 }
 
@@ -141,6 +142,8 @@ fn protocol_on(
         context.is_admin(),
         &page.items,
     )?;
+    let files = inputs.files.keys().copied().collect::<Vec<_>>();
+    let hydration = crate::library_query::page_hydration_on(conn, &files)?;
     let allowed_strings: HashSet<_> = allowed.iter().map(ToString::to_string).collect();
     let mut series = HashMap::new();
     for reference in &page.items {
@@ -167,5 +170,6 @@ fn protocol_on(
         page,
         inputs,
         series,
+        hydration: Some(hydration),
     })
 }

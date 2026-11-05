@@ -46,7 +46,8 @@ const NFO_JSON: &str = "COALESCE(\
 pub(super) fn scoped_cte(scope: &Scope, work_search: bool) -> String {
     if !work_search {
         return format!(
-            "scoped AS (SELECT i.search_rowid, i.library_id, i.media_id, i.kind, i.title, i.protocol_title_key, i.added_at_sort, i.pref_locale, i.search_text FROM {} WHERE {})",
+            "scoped AS (SELECT i.search_rowid, i.library_id, i.media_id, i.kind, i.title, i.protocol_title_key, i.added_at_sort, i.pref_locale, {} AS instance_locale, i.search_text FROM {} WHERE {})",
+            scope.instance_locale,
             items_with_locale_sql(scope),
             scope.where_sql
         );
@@ -57,7 +58,7 @@ pub(super) fn scoped_cte(scope: &Scope, work_search: bool) -> String {
            {NFO_JSON} AS nfo_json, \
            mm.details_json AS adopted_json, mm.genres_json AS adopted_genres, \
            mm.overview AS adopted_overview, mm.original_title AS adopted_original, \
-           i.pref_locale AS pref_locale, i.search_text AS search_text \
+           i.pref_locale AS pref_locale, {instance_locale} AS instance_locale, i.search_text AS search_text \
          FROM {items} \
          LEFT JOIN media_metadata mm ON mm.media_id = i.media_id \
            AND mm.locale = COALESCE(\
@@ -68,6 +69,7 @@ pub(super) fn scoped_cte(scope: &Scope, work_search: bool) -> String {
          WHERE {})",
         scope.where_sql,
         items = items_with_locale_sql(scope),
+        instance_locale = scope.instance_locale,
     )
 }
 

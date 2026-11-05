@@ -105,6 +105,7 @@ fn protocol_query(
             .search_term
             .clone()
             .map(|term| term.trim().to_string()),
+        name_starts_with: query.name_starts_with.clone(),
         genres: values(query.genres.as_deref()),
         genre_ids: values(query.genre_ids.as_deref()),
         filters: mark_filters(query.filters.as_deref()),

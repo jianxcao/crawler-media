@@ -427,6 +427,7 @@ pub struct ProtocolItemQuery {
     pub person_ids: Vec<String>,
     pub studio_ids: Vec<String>,
     pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
     pub genres: Vec<String>,
     pub genre_ids: Vec<String>,
     pub filters: Vec<ProtocolMarkFilter>,

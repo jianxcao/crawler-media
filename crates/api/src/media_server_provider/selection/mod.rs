@@ -58,6 +58,7 @@ async fn finish_protocol(
         page,
         inputs,
         series,
+        hydration,
     } = result
     else {
         return Err(QueryError::Internal("wrong Library read result".into()).into());
@@ -69,15 +70,24 @@ async fn finish_protocol(
     let references = page.items.clone();
     let snapshot = inputs.page_snapshot();
     let files = inputs.files.keys().copied().collect::<Vec<_>>();
-    let hydration = crate::library_read_work::run_store_query_stage_named(
-        state,
-        deadline,
-        "hydrate",
-        move |store| store.page_hydration(&files).map_err(Into::into),
-    )
-    .await?;
+    let captured = hydration.is_some();
+    let hydration = match hydration {
+        Some(hydration) => hydration,
+        None => {
+            crate::library_read_work::run_store_query_stage_named(
+                state,
+                deadline,
+                "hydrate",
+                move |store| store.page_hydration(&files).map_err(Into::into),
+            )
+            .await?
+        }
+    };
     let cold_state = state.clone();
     let selected = crate::library_read_work::run_cold_query_stage(state, deadline, move |budget| {
+        if captured && let Some(barrier) = &cold_state.library_read_stage_barrier {
+            barrier("hydrate");
+        }
         if let Some(barrier) = &cold_state.protocol_selection_barrier {
             barrier(&page);
         }

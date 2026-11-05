@@ -174,6 +174,7 @@ fn capture(
         page,
         inputs,
         series: HashMap::new(),
+        hydration: None,
     })
 }
 

@@ -306,6 +306,8 @@ mod filters;
 mod metadata_parity;
 #[path = "jellyfin/metadata_scrape.rs"]
 mod metadata_scrape;
+#[path = "jellyfin/name_prefix.rs"]
+mod name_prefix;
 #[path = "jellyfin/people.rs"]
 mod people;
 #[path = "jellyfin/versions.rs"]

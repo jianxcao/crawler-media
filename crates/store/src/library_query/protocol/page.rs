@@ -27,6 +27,9 @@ pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> Pr
         || !q.filters.is_empty()
         || q.is_favorite.is_some()
         || q.is_played.is_some()
+        || q.name_starts_with
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
         || q.search_term
             .as_deref()
             .is_some_and(|v| !v.trim().is_empty());
@@ -88,6 +91,10 @@ pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> Pr
     let effective = effective_sorts(q, scope.granularity);
     let indexed = scope.library_ids.len() == 1
         && request.people.is_empty()
+        && !q
+            .name_starts_with
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
         && !q
             .search_term
             .as_deref()

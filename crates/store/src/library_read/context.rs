@@ -43,6 +43,7 @@ impl LibraryReadRequest {
             person_ids: Vec::new(),
             studio_ids: Vec::new(),
             search_term: None,
+            name_starts_with: None,
             genres: Vec::new(),
             genre_ids: Vec::new(),
             filters: Vec::new(),

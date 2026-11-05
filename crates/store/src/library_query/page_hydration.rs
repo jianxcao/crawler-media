@@ -1,5 +1,5 @@
 //! All cold page facts are captured by a fixed set of indexed, read-only batches.
-mod metadata;
+pub(crate) mod metadata;
 use crate::{Store, StoreError, StoredMediaMarker};
 use domain::{EntityScope, LedgerId, LibraryId, MediaId, MetadataFields};
 use rusqlite::Connection;
@@ -48,7 +48,7 @@ impl Store {
         self.with_library_read(|db| db.page_read_query_plans())
     }
 }
-fn hydrate_on(
+pub(crate) fn hydrate_on(
     conn: &Connection,
     files: &[LedgerId],
 ) -> Result<HashMap<LedgerId, HydratedFile>, StoreError> {
