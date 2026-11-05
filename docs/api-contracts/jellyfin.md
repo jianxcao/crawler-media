@@ -180,3 +180,9 @@ TMPDIR=/tmp cargo test --release -j8 -p api \
 数据库谓词共享页内元数据组合规则，保留 NFO、采纳、override、locale 及显式 Empty 的优先级。Series 的 SQL CASE 直接比较标题，避免读取候选的冷元数据。普通 Protocol/Latest 的已选页事实与页内元数据在同一 Library 快照读取；否则选页后改名可能让返回的 Name 不再满足前缀。hints/continuation 保持各自原有读取路径。
 
 公开 Router 测试先复现两个 Work 筛选失败、单集名称筛选失败，以及选页后通过真实 Store override 改名导致返回 `Changed Episode` 的失败。修复后六项前缀回归通过，覆盖隐藏库、分页、单集显示名/回退、Empty、多 Library 和确定性的快照交错；新增正控不计为缺陷 RED。合并工作树的 Jellyfin 集成109项、media-server全套及workspace all-target Clippy/fmt通过。稳定源码的release workspace运行记录3942 passed、25 ignored（结果组汇总，非去重数），但`executor_not_blocked`目标在SQLite首次初始化发生SIGSEGV，整轮退出101；该目标随后同参数定向重跑5/5通过。原崩溃及初始化调查单独保留，不宣称单轮workspace全绿。独立限定复审关闭快照一致性和Series读取成本两项发现；未进行实际SQL成本测量。修复后的真实VidHub无结果搜索仍待定向复验，不能以集成通过追认旧页面失败。
+
+## 20. Episodes 仅按显式参数分页（2026-11-05）
+
+VidHub 对实际163集的TV Media请求Episodes时没有发送Limit，收到100项后也没有发起下一页。此前共用Items默认页长100和上限200，导致后续单集在客户端缺失。Episodes现在省略Limit时返回剩余全部授权单集；仅StartIndex仍返回全部剩余项，显式Limit则保留请求值，不再套用Items的200上限。Series、Season与Library授权范围不变。
+
+公开Router五项回归均先复现截断再通过：230个可见单元、省略Limit、只传StartIndex、显式205大页、季范围，以及隐藏和未知ParentId；根路径和`/emby`均覆盖。Jellyfin完整109项、media-server全套、Clippy/fmt和限定独立静态审查已通过。合并树workspace的SQLite初始化崩溃与定向重跑结果见上一节；真实VidHub的163集列表及边界单集仍须使用新候选复验。

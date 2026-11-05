@@ -134,6 +134,9 @@ pub(super) async fn show_episodes(
 /// 清空，绝不因为它们把结果收窄成旧行为之外的一页。
 fn episode_query(series_id: &str, query: &ItemsQuery) -> crate::provider::ServerItemQuery {
     let mut mapped = query.to_server_query();
+    // Jellyfin only pages Episodes when requested; an omitted Limit includes
+    // every remaining visible unit, even when StartIndex is present.
+    mapped.limit = query.limit.unwrap_or(usize::MAX);
     mapped.parent_id = Some(series_id.to_string());
     mapped.series_id = None;
     mapped.include_item_types = Some("Episode".to_string());
