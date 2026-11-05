@@ -5,7 +5,7 @@ import math
 import time
 
 
-def similar_payload(payload):
+def similar_payload(payload, contract='stateful'):
     try:
         response = json.loads(payload)
     except (ValueError, TypeError):
@@ -13,6 +13,10 @@ def similar_payload(payload):
     if not isinstance(response, dict) or response.get('ok') is not True:
         return None
     data = response.get('data')
+    if contract == 'legacy-list':
+        return {'state': 'ready', 'items': data} if isinstance(data, list) else None
+    if contract != 'stateful':
+        return None
     if not isinstance(data, dict):
         return None
     if data.get('state') == 'ready' and isinstance(data.get('items'), list):
@@ -25,20 +29,20 @@ def similar_payload(payload):
     return None
 
 
-def similar_response(code, payload):
-    data = similar_payload(payload)
+def similar_response(code, payload, contract='stateful'):
+    data = similar_payload(payload, contract)
     if data and ((code == 200 and data['state'] == 'ready')
                  or (code == 202 and data['state'] == 'pending')):
         return data
     return None
 
 
-def measure_similar(client, url, deadline_seconds=30, initial=None, started_at=None):
+def measure_similar(client, url, deadline_seconds=30, initial=None, started_at=None, contract='stateful'):
     started = time.perf_counter() if started_at is None else started_at
     deadline = started + deadline_seconds
     response = initial if initial is not None else client.raw(url)
     code, elapsed, payload = response
-    data = similar_response(code, payload)
+    data = similar_response(code, payload, contract)
     observation = {'initial_code': code, 'initial_ms': elapsed,
                    'initial_state': data['state'] if data else 'error',
                    'terminal_code': code, 'terminal_state': 'error',
@@ -46,7 +50,7 @@ def measure_similar(client, url, deadline_seconds=30, initial=None, started_at=N
                    'completion_ms': None, 'passed': False}
     while True:
         code, _, payload = response
-        data = similar_response(code, payload)
+        data = similar_response(code, payload, contract)
         observation['terminal_code'] = code
         if data is None:
             break
@@ -68,10 +72,10 @@ def measure_similar(client, url, deadline_seconds=30, initial=None, started_at=N
     return observation
 
 
-def summarize_similar(observations, percentile):
+def summarize_similar(observations, percentile, contract='stateful'):
     durations = [item['completion_ms'] for item in observations]
-    return {'contract': 'initial pending/ready response; complete result observed separately',
-            'historical_latency_comparability': 'initial response contract changed; completion remains explicit',
+    return {'contract': contract,
+            'historical_latency_comparability': 'legacy initial response is a complete list; stateful initial response may be pending; completion remains explicit',
             'initial_pending': sum(item['initial_state'] == 'pending' for item in observations),
             'initial_ready': sum(item['initial_state'] == 'ready' for item in observations),
             'terminal_codes': dict(Counter(item['terminal_code'] for item in observations)),

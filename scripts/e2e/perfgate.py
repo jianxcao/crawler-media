@@ -103,6 +103,26 @@ def baseline_invalid_reason(case, previous, expected_n):
     return None
 
 
+def completion_p95(summary, expected_n, contract):
+    if not isinstance(summary, dict) or summary.get('contract') != contract or summary.get('passed') is not True:
+        return None
+    observations = summary.get('observations')
+    if not isinstance(observations, list) or len(observations) != expected_n or not observations:
+        return None
+    durations = []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            return None
+        duration = observation.get('completion_ms')
+        if (observation.get('passed') is not True or observation.get('terminal_code') != 200
+                or observation.get('terminal_state') != 'ready' or isinstance(duration, bool)
+                or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0):
+            return None
+        durations.append(duration)
+    value = percentile(durations, .95)
+    return value if summary.get('complete_body_p95_ms') == value else None
+
+
 def close_clients(admin, clients):
     admin.close()
     for _, rest_client, protocol_client, *_ in clients:
@@ -128,9 +148,9 @@ def validate_baseline(report, mode, selected):
     return cases
 
 
-def response_matches(case, payload):
+def response_matches(case, payload, similar_contract='stateful'):
     if case.get('response_contract') == 'similar':
-        return similar_payload(payload) is not None
+        return similar_payload(payload, similar_contract) is not None
     if case.get('response_contract') == 'title_search':
         data = json.loads(payload).get('data', {})
         providers, titles = data.get('providers'), data.get('titles')
@@ -170,8 +190,8 @@ def verify_heartbeat(client, fields):
     return state['position_ms'] == fields['position']
 
 
-def routes():
-    result = subprocess.run([sys.executable, str(HERE / 'list-routes.py')], check=True,
+def routes(root):
+    result = subprocess.run([sys.executable, str(HERE / 'list-routes.py'), '--root', str(root)], check=True,
                             text=True, capture_output=True)
     return json.loads(result.stdout)
 
@@ -290,7 +310,7 @@ def page_request(client, request, fields):
 
 
 def run_case(case, fields, self_client, jf_client, admin, executor, similar_requests=None,
-             business_expectation=None, response_received=None):
+             business_expectation=None, response_received=None, similar_contract='stateful'):
     client = jf_client if case['surface'] == 'jellyfin' else self_client
     if case.get('admin'):
         client = admin
@@ -303,7 +323,7 @@ def run_case(case, fields, self_client, jf_client, admin, executor, similar_requ
         matches = True
         for request, result in zip(case['requests'], results):
             if request.get('response_contract') == 'similar':
-                matches = matches and similar_response(result[0], result[2]) is not None
+                matches = matches and similar_response(result[0], result[2], similar_contract) is not None
                 if similar_requests is not None:
                     source = admin if request.get('admin') else client
                     similar_requests.append((source, interpolate(request['url'], fields), result, started))
@@ -319,9 +339,9 @@ def run_case(case, fields, self_client, jf_client, admin, executor, similar_requ
         matches = (not 200 <= code < 300 or perf_business.matches(
             perf_business.CASES[case['id']], payload, business_expectation))
     else:
-        matches = not 200 <= code < 300 or response_matches(case, payload)
+        matches = not 200 <= code < 300 or response_matches(case, payload, similar_contract)
     if case.get('response_contract') == 'similar':
-        matches = similar_response(code, payload) is not None
+        matches = similar_response(code, payload, similar_contract) is not None
         if similar_requests is not None:
             similar_requests.append((client, url, (code, elapsed, payload), started))
     return code, elapsed, matches
@@ -340,20 +360,33 @@ def main():
     parser.add_argument('--manifest', type=Path, default=Path('/tmp/e2e-stress/perf-dataset.json'))
     parser.add_argument('--cases', type=Path, default=HERE / 'perf-cases.json')
     parser.add_argument('--restart-command', help='Argument string executed without a shell before each cold case')
+    parser.add_argument('--similar-contract', choices=['stateful', 'legacy-list'], default='stateful')
+    parser.add_argument('--route-root', type=Path, default=HERE.parents[1])
     args = parser.parse_args()
+    route_root = args.route_root.resolve()
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open('x') as output:
-            json.dump({'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+            json.dump({'mode': args.mode, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'complete': False, 'cases': {}, 'passed': False,
                        'business_status': 'unverified', 'business_reason': 'run did not complete'}, output)
         RESERVED_REPORT = args.out
     cases_bytes = args.cases.read_bytes()
     config = json.loads(cases_bytes)
-    missing = uncovered_routes(routes(), config['cases'] + config['exemptions'])
+    inventory = routes(route_root)
+    get_count = sum(r['method'] == 'get' for r in inventory)
+    if args.out:
+        args.out.write_text(json.dumps({'mode': args.mode, 'similar_contract': args.similar_contract,
+            'route_root': str(route_root), 'get_route_count': get_count, 'complete': False,
+            'cases': {}, 'passed': False, 'business_status': 'unverified',
+            'business_reason': 'zero GET routes' if not get_count else 'route coverage not established'}) + '\n')
+    if not get_count:
+        print('perfgate: route inventory contains zero GET routes', file=sys.stderr)
+        return 1
+    missing = uncovered_routes(inventory, config['cases'] + config['exemptions'])
     if missing:
         print(json.dumps({'uncovered_get_routes': missing}, ensure_ascii=False, indent=2))
         return 1
-    print(f'Coverage OK: {sum(r["method"] == "get" for r in routes())} GET routes; '
+    print(f'Coverage OK: {get_count} GET routes; '
           f'{len(config["cases"])} cases, {len(config["exemptions"])} exemptions', flush=True)
     if args.dry_run:
         return 0
@@ -380,7 +413,7 @@ def main():
             for case in business_cases:
                 perf_business.verify_case(case)
         except perf_business.Unverified as error:
-            report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+            report = {'mode': args.mode, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'get_route_count': get_count, 'complete': False, 'cases': {}, 'passed': False,
                       'business_status': 'unverified', 'business_reason': str(error)}
             if args.out:
                 args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -411,7 +444,7 @@ def main():
             raise perf_business.Unverified('health admission failed') from error
         if business_cases and (not isinstance(commit, str) or len(commit) < 7
                                or not business_provenance['product_commit'].startswith(commit)):
-            report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+            report = {'mode': args.mode, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'get_route_count': get_count, 'complete': False, 'cases': {}, 'passed': False,
                       'business_status': 'unverified', 'business_reason': 'live product commit mismatch'}
             if args.out:
                 args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -431,7 +464,7 @@ def main():
                     visible_movies[user['id']] = any(isinstance(item, dict)
                             and item.get('Id') == manifest['libraries']['movie'] for item in items)
             except (perf_business.Unverified, RuntimeError, KeyError, ValueError) as error:
-                report = {'mode': args.mode, 'complete': False, 'cases': {}, 'passed': False,
+                report = {'mode': args.mode, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'get_route_count': get_count, 'complete': False, 'cases': {}, 'passed': False,
                           'business_status': 'unverified', 'business_reason': 'user views admission failed'}
                 if args.out:
                     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -462,7 +495,7 @@ def main():
                         perf_business.verify_context(manifest, user, fields, login_ids)
                         expected = perf_business.expectation(artifact, case['id'], user['id'], fields['movie_library'])
                     code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor,
-                                                      business_expectation=expected)
+                                                      business_expectation=expected, similar_contract=args.similar_contract)
                     return {'code': code, 'elapsed_ms': elapsed, 'response_verified': matches}
                 except (KeyError, RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
                     return {'code': failure_code(error), 'elapsed_ms': None,
@@ -502,7 +535,8 @@ def main():
                     code, elapsed, matches = run_case(case, fields, self_client, jf_client, admin, executor,
                                                       similar_requests=deferred_similar, business_expectation=expected,
                                                       response_received=(lambda: window.append(bool(busy.running())))
-                                                      if busy and case['id'] in perf_business.CASES else None)
+                                                      if busy and case['id'] in perf_business.CASES else None,
+                                                      similar_contract=args.similar_contract)
                     measured = True
                     if case['id'] in perf_business.CASES:
                         valid = 200 <= code < 300 and matches
@@ -535,7 +569,8 @@ def main():
                 # Busy eligibility belongs to the initial response window. Poll
                 # full recommendations afterwards, with a separate wall clock.
                 for source, url, initial, started in deferred_similar:
-                    observed = measure_similar(source, url, initial=initial, started_at=started)
+                    observed = measure_similar(source, url, initial=initial, started_at=started,
+                                               contract=args.similar_contract)
                     similar_observations.append(observed)
                     matches = matches and observed['passed']
                 if case.get('prepare') == 'heartbeat':
@@ -580,11 +615,37 @@ def main():
                 if perf_business.CASES[case['id']] == 'latest':
                     result['latest_order'] = {'status': 'unverified', 'reason': 'independent ordering unavailable'}
             if similar_observations:
-                result['recommendations'] = summarize_similar(similar_observations, percentile)
+                result['recommendations'] = summarize_similar(similar_observations, percentile, args.similar_contract)
             correctness_failed = ((sampler and sampler.failed) or errors or not all(responses_verified)
                                   or (writes_verified and not all(writes_verified)))
             absolute = evaluate(samples, codes, case['class'], args.mode)
             result['absolute_passed'] = bool(absolute['passed'] and not correctness_failed)
+            similar_per_sample = (1 if case.get('response_contract') == 'similar' else
+                                  sum(request.get('response_contract') == 'similar'
+                                      for request in case.get('requests', [])))
+            baseline_contract = baseline_report.get('similar_contract') if baseline_report else None
+            contract_unknown = bool(args.baseline and similar_per_sample and
+                                    baseline_contract not in ('legacy-list', 'stateful'))
+            contract_changed = bool(args.baseline and similar_per_sample and not contract_unknown and
+                                    baseline_contract != args.similar_contract)
+            if contract_unknown or contract_changed:
+                result['initial_relative_status'] = 'unavailable_contract_changed' if contract_changed else 'unavailable_contract_missing'
+                result['relative_metric'] = 'complete_body_p95_ms'
+                old_completion = completion_p95(previous.get('recommendations'), baseline_n * similar_per_sample,
+                                                baseline_contract) if type(baseline_n) is int else None
+                current_completion = completion_p95(result.get('recommendations'), len(samples) * similar_per_sample,
+                                                    args.similar_contract)
+                result['relative_baseline_p95_ms'] = old_completion
+                result['relative_current_p95_ms'] = current_completion
+                if contract_unknown or old_completion is None or current_completion is None:
+                    invalid_baseline = invalid_baseline or 'similar completion or contract evidence invalid'
+                    result['regression_percent'] = None
+                    result['regressed'] = False
+                else:
+                    comparison = evaluate([current_completion], {200: 1}, case['class'], args.mode, old_completion)
+                    result['regression_percent'] = comparison['regression_percent']
+                    result['regressed'] = comparison['regressed']
+                result['passed'] = result['absolute_passed'] and not result['regressed'] and not invalid_baseline
             if not args.baseline:
                 result['relative_status'] = 'not_requested'
             elif not samples or any(not 200 <= int(code) < 300 for code in codes) or correctness_failed:
@@ -595,7 +656,7 @@ def main():
             elif invalid_baseline:
                 result['relative_status'] = 'unavailable'
                 result['baseline_note'] = invalid_baseline
-            elif baseline_p95 is None:
+            elif baseline_p95 is None and not contract_changed:
                 result['relative_status'] = 'cache_scope_unavailable'
                 result['baseline_note'] = 'Cache-read scope requires a cache-read baseline; absolute SLO enforced'
             else:
@@ -605,13 +666,13 @@ def main():
             results[case['id']] = result
             if args.out:
                 args.out.parent.mkdir(parents=True, exist_ok=True)
-                args.out.write_text(json.dumps({'mode': args.mode, 'commit': commit,
+                args.out.write_text(json.dumps({'mode': args.mode, 'commit': commit, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'get_route_count': get_count,
                     'complete': False, 'cases': results, 'passed': False},
                     ensure_ascii=False, indent=2) + '\n')
             print(f'{case["id"]}: p50={result["p50"]} p95={result["p95"]} '
                   f'p99={result["p99"]} max={result["max"]}ms '
                   f'codes={dict(codes)} {"PASS" if result["passed"] else "FAIL"}', flush=True)
-    report = {'mode': args.mode, 'complete': True, 'base_url': args.base_url, 'n': args.n,
+    report = {'mode': args.mode, 'complete': True, 'base_url': args.base_url, 'n': args.n, 'similar_contract': args.similar_contract, 'route_root': str(route_root), 'get_route_count': get_count,
               'commit': commit,
               'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'cases': results, 'passed': all(result['passed'] for result in results.values())}
@@ -635,7 +696,8 @@ if __name__ == '__main__':
     except (RuntimeError, OSError, ValueError, KeyError, TypeError, IndexError) as error:
         if RESERVED_REPORT is not None:
             reason = str(error) if isinstance(error, perf_business.Unverified) else type(error).__name__
-            RESERVED_REPORT.write_text(json.dumps({'complete': False, 'cases': {}, 'passed': False,
-                'business_status': 'unverified', 'business_reason': reason}) + '\n')
+            report = json.loads(RESERVED_REPORT.read_text())
+            report.update(complete=False, passed=False, business_status='unverified', business_reason=reason)
+            RESERVED_REPORT.write_text(json.dumps(report) + '\n')
         print(f'perfgate: {error}', file=sys.stderr)
         sys.exit(1)

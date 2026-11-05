@@ -1,9 +1,14 @@
 """Finite recommendation HTTP observations: readiness is not completion."""
 import importlib.util
 import json
+import contextlib
+import io
 from pathlib import Path
+import sys
+import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('perfgate', Path(__file__).with_name('perfgate.py'))
 perfgate = importlib.util.module_from_spec(spec)
@@ -27,6 +32,139 @@ class FiniteSource:
 
 
 class SimilarPerfTests(unittest.TestCase):
+    def test_cli_cross_contract_uses_completed_result_for_relative_gate(self):
+        class Client:
+            def __init__(self, *args):
+                self.pending = False
+
+            def raw(self, *args):
+                if not self.pending:
+                    self.pending = True
+                    return 202, 1.0, json.dumps(PENDING).encode()
+                time.sleep(.18)
+                return 200, 180.0, json.dumps(READY).encode()
+
+            def call(self, *args, **kwargs):
+                return {'commit': 'fixture'}
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            manifest = root / 'manifest.json'
+            manifest.write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}], 'libraries': {}}))
+            for bundle in (False, True):
+                case = {'id': 'detail' if bundle else 'similar', 'surface': 'self', 'class': 'L',
+                        'route': '/similar'}
+                if bundle:
+                    case['requests'] = [{'url': '/similar', 'response_contract': 'similar'}]
+                else:
+                    case.update(url='/similar', response_contract='similar')
+                cases = root / 'cases.json'
+                cases.write_text(json.dumps({'cases': [case], 'exemptions': []}))
+                for old_ms, fault in ((100.0, None), (300.0, None), (100.0, 'contract'),
+                                      (100.0, 'completion'), (100.0, 'count')):
+                    baseline = root / 'baseline.json'
+                    old_observation = {'passed': True, 'completion_ms': old_ms, 'terminal_code': 200,
+                                       'terminal_state': 'ready'}
+                    previous = {'p95': old_ms, 'n': 1, 'codes': {'200': 1}, 'errors': [],
+                                'precondition_codes': {}, 'response_verified': True, 'write_verified': None,
+                                'recommendations': {'contract': 'legacy-list', 'passed': True,
+                                    'complete_body_p95_ms': old_ms, 'observations': [old_observation]}}
+                    if fault == 'completion':
+                        old_observation['passed'] = False
+                    if fault == 'count':
+                        previous['recommendations']['observations'] = []
+                    baseline_data = {'mode': 'idle', 'complete': True, 'n': 1,
+                                     'similar_contract': 'legacy-list', 'cases': {case['id']: previous}}
+                    if fault == 'contract':
+                        del baseline_data['similar_contract']
+                    baseline.write_text(json.dumps(baseline_data))
+                    out = root / f'{bundle}-{old_ms}-{fault}.json'
+                    argv = ['perfgate', 'idle', '--n', '1', '--cases', str(cases), '--manifest', str(manifest),
+                            '--baseline', str(baseline), '--out', str(out)]
+                    with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[
+                            {'method': 'get', 'surface': 'self', 'path': '/similar'}]), \
+                         patch.object(perfgate, 'Client', Client), \
+                         patch.object(perfgate, 'login', side_effect=lambda *a, **k: (Client(), 'user')), \
+                         patch.object(perfgate, 'context', return_value={}), contextlib.redirect_stdout(io.StringIO()):
+                        result = perfgate.main()
+                    row = json.loads(out.read_text())['cases'][case['id']]
+                    self.assertTrue(row['absolute_passed'])
+                    self.assertEqual(row['relative_metric'], 'complete_body_p95_ms')
+                    self.assertEqual(row['initial_relative_status'],
+                                     'unavailable_contract_missing' if fault == 'contract' else 'unavailable_contract_changed')
+                    self.assertEqual(row['relative_baseline_p95_ms'], old_ms if fault is None else None)
+                    self.assertGreaterEqual(row['relative_current_p95_ms'], 180)
+                    self.assertEqual(row['relative_status'], 'unavailable' if fault else
+                                     'failed' if old_ms == 100 else 'passed')
+                    self.assertEqual(result, 1 if fault or old_ms == 100 else 0)
+
+    def test_cli_legacy_list_is_complete_and_preserves_absolute_slo(self):
+        class Client:
+            def __init__(self, *args):
+                pass
+
+            def raw(self, *args):
+                return 200, 180.0, json.dumps({'ok': True, 'data': [{'id': 'one'}]}).encode()
+
+            def call(self, *args, **kwargs):
+                return {'commit': 'fixture'}
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            cases = root / 'cases.json'
+            cases.write_text(json.dumps({'cases': [dict(CASE, surface='self', url='/similar', route='/similar',
+                                                       **{'class': 'L'})], 'exemptions': []}))
+            manifest = root / 'manifest.json'
+            manifest.write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}], 'libraries': {}}))
+            for contract in ('legacy-list', 'stateful', 'default'):
+                out = root / (contract + '.json')
+                argv = ['perfgate.py', 'idle', '--n', '1', '--cases', str(cases), '--manifest',
+                        str(manifest), '--out', str(out)]
+                if contract != 'default':
+                    argv += ['--similar-contract', contract]
+                with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[
+                        {'method': 'get', 'surface': 'self', 'path': '/similar'}]), \
+                     patch.object(perfgate, 'Client', Client), \
+                     patch.object(perfgate, 'login', side_effect=lambda *a, **k: (Client(), 'user')), \
+                     patch.object(perfgate, 'context', return_value={}), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(perfgate.main(), 1)
+                report = json.loads(out.read_text())
+                self.assertEqual(report['similar_contract'], 'stateful' if contract == 'default' else contract)
+                case = report['cases']['similar']
+                self.assertFalse(case['absolute_passed'])
+                observation = case['recommendations']['observations'][0]
+                self.assertEqual(observation['passed'], contract == 'legacy-list')
+                if contract == 'legacy-list':
+                    self.assertEqual(observation['items_count'], 1)
+                    self.assertEqual(observation['pending_responses'], 0)
+                    self.assertEqual(observation['completion_ms'], 180.0)
+                    self.assertTrue(case['response_verified'])
+
+    def test_legacy_list_rejects_stateful_errors_and_wrong_status(self):
+        for code, body in [(202, {'ok': True, 'data': []}), (200, PENDING), (200, READY),
+                           (200, {'ok': False, 'data': []}), (200, {'ok': True, 'data': {}})]:
+            with self.subTest(code=code, body=body):
+                observed = perfgate.measure_similar(FiniteSource([(code, body)]), '/similar',
+                                                   contract='legacy-list')
+                self.assertFalse(observed['passed'])
+                self.assertEqual(observed['terminal_state'], 'error')
+
+    def test_page_bundle_uses_explicit_legacy_contract(self):
+        from concurrent.futures import ThreadPoolExecutor
+        source = FiniteSource([(200, {'ok': True, 'data': []})])
+        case = {'id': 'page-detail', 'surface': 'self', 'requests': [
+            {'url': '/similar', 'response_contract': 'similar'}]}
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            _, _, matches = perfgate.run_case(case, {}, source, source, source, executor,
+                                              similar_contract='legacy-list')
+        self.assertTrue(matches)
+
     def test_pending_is_a_distinct_explicit_contract_not_a_successful_empty_list(self):
         self.assertTrue(perfgate.response_matches(CASE, json.dumps(PENDING).encode()))
         self.assertTrue(perfgate.response_matches(CASE, json.dumps(READY).encode()))

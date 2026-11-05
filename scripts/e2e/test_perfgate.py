@@ -1,6 +1,11 @@
 """Offline tests for the performance gate; no server is required."""
 import importlib.util
+import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('perfgate', Path(__file__).with_name('perfgate.py'))
@@ -9,6 +14,38 @@ spec.loader.exec_module(perfgate)
 
 
 class PerfGateTests(unittest.TestCase):
+    def test_relocated_cli_requires_nonempty_explicit_route_inventory(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            scripts = root / 'scripts' / 'e2e'
+            scripts.mkdir(parents=True)
+            for source in Path(__file__).parent.glob('*.py'):
+                shutil.copy2(source, scripts / source.name)
+            cases = root / 'cases.json'
+            cases.write_text(json.dumps({'cases': [], 'exemptions': []}))
+            base = [sys.executable, str(scripts / 'perfgate.py'), 'idle', '--dry-run', '--cases', str(cases)]
+            empty_report = root / 'empty-report.json'
+            empty = subprocess.run(base + ['--out', str(empty_report)], capture_output=True, text=True)
+            self.assertNotEqual(empty.returncode, 0)
+            self.assertNotIn('Coverage OK: 0 GET routes', empty.stdout)
+            self.assertIn('zero GET routes', empty.stderr)
+            self.assertEqual(json.loads(empty_report.read_text())['get_route_count'], 0)
+            fixture = root / 'source'
+            rust = fixture / 'crates' / 'api' / 'src' / 'http' / 'routes.rs'
+            rust.parent.mkdir(parents=True)
+            rust.write_text('router.route("/fixture", get(handler));\n')
+            uncovered_report = root / 'uncovered-report.json'
+            uncovered = subprocess.run(base + ['--route-root', str(fixture), '--out', str(uncovered_report)], capture_output=True, text=True)
+            self.assertNotEqual(uncovered.returncode, 0)
+            self.assertIn('/fixture', uncovered.stdout)
+            report = json.loads(uncovered_report.read_text())
+            self.assertEqual(report['route_root'], str(fixture.resolve()))
+            self.assertEqual(report['get_route_count'], 1)
+            cases.write_text(json.dumps({'cases': [{'surface': 'self', 'route': '/fixture'}], 'exemptions': []}))
+            covered = subprocess.run(base + ['--route-root', str(fixture)], capture_output=True, text=True)
+            self.assertEqual(covered.returncode, 0, covered.stderr + covered.stdout)
+            self.assertIn('Coverage OK: 1 GET routes', covered.stdout)
+
     def test_fixture_disables_only_optional_global_scrape(self):
         from perf_support import disable_auxiliary_scrape
 
@@ -122,13 +159,14 @@ class PerfGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
             (root / 'cases.json').write_text(json.dumps({'cases': [
-                {'id': 'detail', 'surface': 'self', 'class': 'L', 'url': '/detail'}],
+                {'id': 'detail', 'surface': 'self', 'class': 'L', 'url': '/detail', 'route': '/detail'}],
                 'exemptions': []}))
             (root / 'manifest.json').write_text(json.dumps({'users': [{'login': 'user'}]}))
             (root / 'baseline.json').write_text('{}')
             argv = ['perfgate', 'idle', '--cases', str(root / 'cases.json'),
                     '--manifest', str(root / 'manifest.json'), '--baseline', str(root / 'baseline.json')]
-            with patch('sys.argv', argv), patch.object(perfgate, 'routes', return_value=[]), \
+            with patch('sys.argv', argv), patch.object(perfgate, 'routes', return_value=[
+                    {'method': 'get', 'surface': 'self', 'path': '/detail'}]), \
                     patch.object(perfgate, 'Client') as client, patch.object(perfgate, 'login') as login:
                 with self.assertRaisesRegex(ValueError, 'baseline must be complete'):
                     perfgate.main()
@@ -427,7 +465,7 @@ class ColdConnectionTests(unittest.TestCase):
                         'movies': [{'media_item_id': 'movie'}] * 501,
                         'series': [{'media_item_id': 'series'}],
                         'users': [{'id': 'user', 'login': 'user', 'collections': ['collection']}]}
-            config = {'exemptions': [], 'cases': [
+            config = {'exemptions': [{'surface': 'self', 'route': '/health'}], 'cases': [
                 {'id': 'first-write', 'surface': 'self', 'class': 'W',
                  'url': '/first-write', 'method': 'POST', 'body': {}},
                 {'id': 'second-write', 'surface': 'self', 'class': 'W',
@@ -438,7 +476,8 @@ class ColdConnectionTests(unittest.TestCase):
                     '--manifest', str(root / 'manifest.json'),
                     '--cases', str(root / 'cases.json'), '--out', str(root / 'report.json'),
                     '--restart-command', 'fixture-restart']
-            with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[]), \
+            with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[
+                    {'method': 'get', 'surface': 'self', 'path': '/health'}]), \
                     patch.object(perfgate, 'login', side_effect=login), \
                     patch.object(perfgate.subprocess, 'run', side_effect=restart), \
                     contextlib.redirect_stdout(io.StringIO()):
