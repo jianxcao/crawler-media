@@ -94,6 +94,11 @@ async fn similar_cold_request_is_explicitly_pending_then_returns_complete_result
         first.expect("uncached recommendations must not block the detail response on origin");
     assert_eq!(first.0, StatusCode::ACCEPTED);
     assert_eq!(first.1["data"]["state"], "pending");
+    let retry_ms = first.1["data"]["retry_after_ms"].as_u64().unwrap();
+    assert!(
+        (1..=100).contains(&retry_ms),
+        "pending retry hint must be at most 100ms"
+    );
     assert!(
         first.1["data"].get("items").is_none(),
         "pending must not pretend to be an empty ready result"

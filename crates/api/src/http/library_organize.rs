@@ -424,7 +424,7 @@ fn similar_inner(
     let hits = match selected {
         crate::similar_reads::SimilarRead::Ready(hits) => hits,
         crate::similar_reads::SimilarRead::Pending => {
-            let mut response = ok(json!({"state":"pending", "retry_after_ms":250})).into_response();
+            let mut response = ok(json!({"state":"pending", "retry_after_ms":100})).into_response();
             *response.status_mut() = StatusCode::ACCEPTED;
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,

@@ -173,7 +173,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 `GET /libraries/{id}/items/{media_item_id}/similar` 返回带状态的 `data`：
 
-- HTTP 202：`{state: "pending", retry_after_ms: 250}`，不含 `items`。客户端按提示重取同一 URL。
+- HTTP 202：`{state: "pending", retry_after_ms: 100}`，不含 `items`。客户端按提示重取同一 URL；较短间隔可减少就绪结果的观察滞后，也会增加轮询请求。
 - HTTP 200：`{state: "ready", items: [...]}`，包含完整推荐字段。来源明确返回 NotFound 或未配置来源时可以为空数组。
 - 来源或缓存读取失败返回 HTTP 502 错误 envelope；队列满返回 HTTP 503。失败不转换为空推荐。
 
