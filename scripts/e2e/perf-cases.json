@@ -1285,7 +1285,8 @@
       "surface": "jellyfin",
       "route": "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
       "class": "D",
-      "url": "/Videos/{subtitle_item}/Subtitles/{subtitle_index}/Stream.{subtitle_codec}"
+      "prepare": "subtitle",
+      "url": "/Videos/{subtitle_item}/Subtitles/{subtitle_index}/Stream.{subtitle_codec}?MediaSourceId={subtitle_source}"
     },
     {
       "id": "self-subtitle",

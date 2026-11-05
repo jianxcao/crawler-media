@@ -236,7 +236,8 @@ class CacheScopeTests(unittest.TestCase):
                 (root / 'baseline.json').write_text(json.dumps(
                     {'complete': True, 'mode': mode, 'n': baseline_n, 'cases': {'catalog': previous}}))
                 args.extend(['--baseline', str(root / 'baseline.json')])
-            with patch('sys.argv', args), patch.object(perfgate, 'routes', return_value=[]), \
+            with patch('sys.argv', args), patch.object(perfgate, 'routes', return_value=[
+                    {'method': 'get', 'surface': 'self', 'path': '/catalog'}]), \
                     patch.object(perfgate, 'Client', Client), \
                     patch.object(perfgate, 'login', return_value=(client, {})), \
                     patch.object(perfgate, 'context', return_value={}), \

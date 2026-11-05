@@ -370,6 +370,109 @@ class PerfGateTests(unittest.TestCase):
             server.server_close()
 
 
+class SubtitlePreparationTests(unittest.TestCase):
+    def test_cli_resolves_subtitle_source_before_measurement_and_cold_restart(self):
+        import contextlib
+        import io
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from unittest.mock import patch
+        from perf_support import Client
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.server.events.append(self.path)
+                if self.path == '/api/v1/health':
+                    body = b'{"ok":true,"data":{"commit":"fixture"}}'
+                    code = 200
+                elif self.path.startswith('/Items/') and '/PlaybackInfo' in self.path:
+                    body = (b'{bad' if self.server.sources == 'malformed' else
+                            json.dumps({'MediaSources': self.server.sources, 'PlaySessionId': 'secret-sid'}).encode())
+                    code = 503 if self.server.sources == 'http-error' else 200
+                elif self.path == '/Videos/work/Subtitles/2/Stream.vtt?MediaSourceId=opaque%2Bid':
+                    body, code = b'WEBVTT\n\n', 200
+                else:
+                    body, code = b'not found', 404
+                self.send_response(code)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        class Busy:
+            def __init__(self, *args):
+                pass
+            def ensure(self):
+                pass
+            def running(self):
+                return True
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.events = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = 'http://127.0.0.1:%d' % server.server_address[1]
+        source = {'Id': 'opaque+id', 'MediaStreams': [{'Type': 'Subtitle', 'Index': 2, 'IsExternal': True}]}
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            manifest = root / 'manifest.json'
+            manifest.write_text(json.dumps({'users': [{'id': 'user', 'login': 'user'}], 'libraries': {'tv': 'tv'}}))
+            cases = root / 'cases.json'
+            cases.write_text(json.dumps({'cases': [{'id': 'jellyfin-subtitle', 'surface': 'jellyfin',
+                'route': '/Videos/{id}/Subtitles/{index}/Stream.{codec}', 'class': 'D', 'prepare': 'subtitle',
+                'url': '/Videos/{subtitle_item}/Subtitles/{subtitle_index}/Stream.{subtitle_codec}?MediaSourceId={subtitle_source}'}], 'exemptions': []}))
+            for number, (mode, sources, valid) in enumerate([
+                    ('idle', 'malformed', False), ('idle', 'http-error', False),
+                    ('idle', [source], True), ('busy', [source], True), ('cold', [source], True),
+                    ('idle', [], False), ('idle', [source, dict(source, Id='other')], False),
+                    ('idle', [dict(source, Id='')], False),
+                    ('idle', [{'Id': 'opaque+id', 'MediaStreams': [{'Type': 'Subtitle', 'Index': 2,
+                                                                    'IsExternal': False}]}], False)]):
+                server.events = []
+                server.sources = sources
+                out = root / ('%s-%d.json' % (mode, number))
+                argv = ['perfgate', mode, '--n', '1', '--base-url', base, '--cases', str(cases),
+                        '--manifest', str(manifest), '--out', str(out)]
+                if mode == 'cold':
+                    argv += ['--restart-command', 'restart']
+                def restart(*args, **kwargs):
+                    server.events.append('restart')
+                    return subprocess.CompletedProcess(args[0], 0)
+                with patch.object(sys, 'argv', argv), patch.object(perfgate, 'routes', return_value=[
+                        {'method': 'get', 'surface': 'jellyfin', 'path': '/Videos/{id}/Subtitles/{index}/Stream.{codec}'}]), \
+                     patch.object(perfgate, 'login', side_effect=lambda *a, **k: (Client(base, 'fixture', jellyfin=k.get('jellyfin', False)), 'user')), \
+                     patch.object(perfgate, 'context', return_value={'subtitle_item': 'work', 'subtitle_index': 2, 'subtitle_codec': 'vtt'}), \
+                     patch.object(perfgate, 'BusyScan', Busy), patch.object(perfgate.subprocess, 'run', side_effect=restart), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    result = perfgate.main()
+                report = json.loads(out.read_text())
+                self.assertEqual(result, 0 if valid else 1, report)
+                self.assertTrue(report['complete'])
+                row = report['cases']['jellyfin-subtitle']
+                self.assertEqual(row['preparation']['type'], 'subtitle')
+                self.assertEqual(row['preparation']['attempts'], 1)
+                self.assertEqual(row['preparation']['observations'], [{'code': 503 if sources == 'http-error' else 200,
+                                 'outside_timing': True, 'session_id_advertised': sources not in ('malformed', 'http-error'),
+                                 'passed': valid}])
+                self.assertNotIn('secret-sid', json.dumps(report))
+                self.assertNotIn('opaque+id', json.dumps(report))
+                if not valid:
+                    self.assertTrue(row['precondition_codes'])
+                    self.assertTrue(row['errors'])
+                if valid:
+                    self.assertIn('/Videos/work/Subtitles/2/Stream.vtt?MediaSourceId=opaque%2Bid', server.events)
+                    pi = next(i for i, event in enumerate(server.events) if '/PlaybackInfo' in event)
+                    if mode == 'cold':
+                        self.assertLess(pi, server.events.index('restart'))
+                        self.assertEqual(sum('/PlaybackInfo' in event for event in server.events), 1)
+                else:
+                    self.assertFalse(any('/Subtitles/' in event for event in server.events))
+
+
 class ColdConnectionTests(unittest.TestCase):
     def setUp(self):
         import socket

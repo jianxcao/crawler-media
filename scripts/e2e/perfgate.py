@@ -198,6 +198,39 @@ def prepare_heartbeat(client, fields):
         'event': 'start', 'event_sequence': 0, 'position_ms': 0, 'duration_ms': 7200000})
 
 
+def prepare_subtitle(client, fields, observations):
+    item = urllib.parse.quote(str(fields['subtitle_item']), safe='')
+    code, _, payload = client.raw('/Items/' + item + '/PlaybackInfo')
+    observation = {'code': code, 'outside_timing': True, 'session_id_advertised': False, 'passed': False}
+    observations.append(observation)
+    if not 200 <= code < 300:
+        raise RuntimeError(f'subtitle PlaybackInfo HTTP {code}')
+    try:
+        info = json.loads(payload)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError(f'subtitle PlaybackInfo JSON invalid: {error}') from error
+    if isinstance(info, dict):
+        sid = info.get('PlaySessionId')
+        observation['session_id_advertised'] = isinstance(sid, str) and bool(sid)
+    if not isinstance(info, dict) or not isinstance(info.get('MediaSources'), list):
+        raise RuntimeError('subtitle PlaybackInfo sources invalid')
+    matches = []
+    for source in info['MediaSources']:
+        if not isinstance(source, dict) or not isinstance(source.get('MediaStreams'), list):
+            raise RuntimeError('subtitle PlaybackInfo source invalid')
+        if any(isinstance(track, dict) and track.get('Type') == 'Subtitle'
+               and track.get('IsExternal') is True and type(track.get('Index')) is int
+               and track['Index'] == fields['subtitle_index'] for track in source['MediaStreams']):
+            source_id = source.get('Id')
+            if not isinstance(source_id, str) or not source_id:
+                raise RuntimeError('subtitle source ID missing')
+            matches.append(source_id)
+    if len(matches) != 1:
+        raise RuntimeError('subtitle source is missing or ambiguous')
+    fields['subtitle_source'] = urllib.parse.quote(matches[0], safe='')
+    observation['passed'] = True
+
+
 def verify_heartbeat(client, fields):
     state = client.call('/api/v1/playback/resume?media_item_id=' + fields['session_movie'])
     return state['position_ms'] == fields['position']
@@ -490,6 +523,7 @@ def main():
             business_assertions = []
             similar_observations = []
             accepted_similar_observations = []
+            preparation_observations = []
             precondition_codes = Counter()
             count = 1 if args.mode == 'cold' else args.n
             sampler = BusySamples(count) if busy else None
@@ -538,6 +572,8 @@ def main():
                         expected = perf_business.expectation(artifact, case['id'], user['id'], fields['movie_library'])
                     if case.get('prepare') == 'heartbeat' or case['id'] == 'self-playback-chapters':
                         prepare_heartbeat(self_client, fields)
+                    if case.get('prepare') == 'subtitle':
+                        prepare_subtitle(jf_client, fields, preparation_observations)
                     if args.mode == 'cold':
                         # This is an intentional connection boundary, not a
                         # retry: writes must never reuse a pre-restart socket.
@@ -624,6 +660,9 @@ def main():
                            'precondition_codes': dict(precondition_codes),
                            'response_verified': all(responses_verified),
                            'write_verified': all(writes_verified) if writes_verified else None})
+            if case.get('prepare') == 'subtitle':
+                result['preparation'] = {'type': 'subtitle', 'attempts': len(preparation_observations),
+                                         'observations': preparation_observations}
             if case['id'] in perf_business.CASES:
                 result['business_assertions'] = business_assertions
                 statuses = [row['status'] for row in business_assertions]
