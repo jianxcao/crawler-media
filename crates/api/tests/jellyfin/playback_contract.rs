@@ -1,5 +1,99 @@
 use super::*;
 
+#[tokio::test]
+async fn playback_without_device_id_streams_and_records_issued_session() {
+    for prefix in ["", "/emby"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, media, item) = app(tmp.path());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Users/AuthenticateByName"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"Username":"admin","Pw":"admin-token"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let token = json(login).await["AccessToken"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let auth = format!("Bearer {token}");
+        let info = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Items/{item}/PlaybackInfo"))
+                    .header("authorization", &auth)
+                    .header("X-Emby-Client", "NoDevice")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(info.status(), StatusCode::OK);
+        let info = json(info).await;
+        let sid = info["PlaySessionId"].as_str().unwrap();
+        let source = info["MediaSources"][0]["Id"].as_str().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "{prefix}/Videos/{item}/stream?MediaSourceId={source}&PlaySessionId={sid}"
+                ))
+                .header("authorization", &auth)
+                .header("X-Emby-Client", "NoDevice")
+                .header("range", "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            to_bytes(response.into_body(), 100).await.unwrap().as_ref(),
+            b"0123"
+        );
+        for (client, device_query) in [("OtherClient", ""), ("NoDevice", "&DeviceId=wrong-device")]
+        {
+            let response = app.clone().oneshot(Request::get(format!("{prefix}/Videos/{item}/stream?MediaSourceId={source}&PlaySessionId={sid}{device_query}"))
+                .header("authorization", &auth).header("X-Emby-Client", client)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Sessions/Playing"))
+                    .header("authorization", &auth)
+                    .header("X-Emby-Client", "NoDevice")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"ItemId":item,"PlaySessionId":sid,"PositionTicks":10000000})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let user = store.user_id_by_token(&token).unwrap().unwrap();
+        assert_eq!(
+            store
+                .unit_state(user, media, -1, -1)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            1_000
+        );
+    }
+}
+
 struct Client {
     app: axum::Router,
     prefix: &'static str,

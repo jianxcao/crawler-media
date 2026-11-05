@@ -48,7 +48,7 @@ pub(in crate::routes) async fn media_source(
         "Protocol": protocol,
         "Container": container,
         "RunTimeTicks": snapshot.metadata.runtime_ticks,
-        "MediaStreams": dto::media_streams_with_item(&snapshot.metadata.tracks, Some(item_id)),
+        "MediaStreams": dto::media_streams_with_item(&snapshot.metadata.tracks, Some(item_id), Some(&source_id)),
         "IsRemote": is_strm,
         "SupportsDirectPlay": true,
         "SupportsDirectStream": true,

@@ -229,7 +229,7 @@ impl MediaServerProvider for FakeProvider {
         &self,
         _user_id: UserId,
         _device_id: &str,
-        _item_id: &str,
+        _snapshot: &media_server::provider::MediaItemSnapshot,
     ) -> Result<String, String> {
         Ok(uuid::Uuid::new_v4().to_string())
     }

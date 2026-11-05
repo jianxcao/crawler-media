@@ -21,6 +21,112 @@ use tower::ServiceExt;
 /// NFO sidecar：只在 `publish_fixture_file` 发布那一刻被观察并采纳成库内事实。
 const COARSE_NFO: &str = "<movie><genre>Drama</genre><studio>Studio X</studio></movie>";
 
+#[tokio::test]
+async fn unknown_entity_parent_does_not_expand_to_global_scope() {
+    let fx = coarse();
+    let app = router(fx.state.clone());
+    for prefix in ["", "/emby"] {
+        for endpoint in ["Genres", "Studios"] {
+            let global = get_json(&app, &format!("{prefix}/{endpoint}")).await;
+            assert!(global["TotalRecordCount"].as_u64().unwrap() > 0);
+            let visible = get_json(
+                &app,
+                &format!("{prefix}/{endpoint}?ParentId={}", fx.movies_library),
+            )
+            .await;
+            assert!(visible["TotalRecordCount"].as_u64().unwrap() > 0);
+            let unknown = get_json(
+                &app,
+                &format!("{prefix}/{endpoint}?ParentId=unknown-parent"),
+            )
+            .await;
+            assert_eq!(unknown["TotalRecordCount"], 0, "{prefix}/{endpoint}");
+            assert!(unknown["Items"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn hidden_entity_parent_does_not_expand_to_global_scope() {
+    let fx = coarse();
+    let root = fx._dir.path().join("visible-movies");
+    std::fs::create_dir_all(&root).unwrap();
+    fx.state
+        .store()
+        .create_library(
+            MediaKind::Movie,
+            "Visible",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    insert_movie(&fx.state.store(), &root, "Visible Movie");
+    let member = domain::User {
+        id: domain::UserId::new(),
+        login: "entity-member".into(),
+        enabled: true,
+        role: domain::UserRole::Member,
+    };
+    fx.state
+        .store()
+        .insert_user_with_password(&member, "password")
+        .unwrap();
+    fx.state
+        .store()
+        .set_user_token(member.id, "entity-token")
+        .unwrap();
+    fx.state
+        .store()
+        .update_library(
+            &fx.movies_library,
+            None,
+            None,
+            Some(("selected", true, &[])),
+        )
+        .unwrap();
+    let app = router(fx.state.clone());
+    for prefix in ["", "/emby"] {
+        for endpoint in ["Genres", "Studios"] {
+            let global = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("{prefix}/{endpoint}"))
+                        .header("authorization", "Bearer entity-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(global.status(), StatusCode::OK);
+            let global: Value =
+                serde_json::from_slice(&to_bytes(global.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert!(global["TotalRecordCount"].as_u64().unwrap() > 0);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "{prefix}/{endpoint}?ParentId={}",
+                        fx.movies_library
+                    ))
+                    .header("authorization", "Bearer entity-token")
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["TotalRecordCount"], 0);
+            assert!(body["Items"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
 struct NoFetch;
 
 impl Fetcher for NoFetch {

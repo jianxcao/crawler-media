@@ -10,6 +10,61 @@ struct EpisodeFixture {
     root: PathBuf,
 }
 
+#[tokio::test]
+async fn shared_file_subtitle_session_rejects_another_episode() {
+    for prefix in ["", "/emby"] {
+        let f = EpisodeFixture::new();
+        std::fs::write(f.root.join("a.srt"), b"episode subtitle").unwrap();
+        let first = unit_id(f.media, 1, 1);
+        let second = unit_id(f.media, 1, 2);
+        let response = f
+            .app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Items/{first}/PlaybackInfo"))
+                    .header("authorization", "Bearer admin-token")
+                    .header("X-Emby-Device-Id", DEVICE)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let info = json(response).await;
+        let sid = info["PlaySessionId"].as_str().unwrap();
+        let url = info["MediaSources"][0]["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["Type"] == "Subtitle")
+            .unwrap()["DeliveryUrl"]
+            .as_str()
+            .unwrap();
+        for (item, expected) in [(&first, StatusCode::OK), (&second, StatusCode::NOT_FOUND)] {
+            let target = url.replacen(&first, item, 1);
+            let response = f
+                .app
+                .clone()
+                .oneshot(
+                    Request::get(format!("{prefix}{target}&PlaySessionId={sid}"))
+                        .header("authorization", "Bearer admin-token")
+                        .header("X-Emby-Device-Id", DEVICE)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::OK {
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+                    b"episode subtitle"
+                );
+            }
+        }
+    }
+}
+
 impl EpisodeFixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();

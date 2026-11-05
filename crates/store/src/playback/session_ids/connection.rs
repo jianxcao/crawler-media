@@ -2,6 +2,17 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    pub fn play_session_library_current(
+        &self,
+        library_id: &str,
+        revision: i64,
+    ) -> Result<bool, StoreError> {
+        self.library.query_row(
+            "SELECT EXISTS(SELECT 1 FROM libraries WHERE library_id = ?1 AND lifecycle_state = 'ready' AND config_revision = ?2)",
+            params![library_id, revision], |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
     pub fn issue_play_session(
         &self,
         user_id: UserId,
@@ -11,6 +22,7 @@ impl crate::LibraryConnection<'_> {
         unit: domain::UnitKey,
         version: &domain::FileVersion,
         now: i64,
+        role: domain::UserRole,
     ) -> Result<String, StoreError> {
         let play_session_id = uuid::Uuid::new_v4().to_string();
         let user_str = user_id.to_string();
@@ -49,6 +61,11 @@ impl crate::LibraryConnection<'_> {
         let Some((file_media, library_id, revision, source_version)) = file_info else {
             return Err(StoreError::Missing(format!("playable file {ledger_id}")));
         };
+        if !crate::library_read::authorized_ids_on(&tx, user_id, role)?.contains(&library_id) {
+            return Err(StoreError::Protected(format!(
+                "library {library_id} is not visible"
+            )));
+        }
         if file_media != media_id.to_string()
             || revision != version.revision
             || source_version != version.source_version

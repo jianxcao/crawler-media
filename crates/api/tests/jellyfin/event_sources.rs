@@ -2,8 +2,12 @@ use super::*;
 
 #[path = "event_sources/bound_source_guards.rs"]
 mod bound_source_guards;
+#[path = "event_sources/playback_info_race.rs"]
+mod playback_info_race;
 #[path = "event_sources/shared_episode_binding.rs"]
 mod shared_episode_binding;
+#[path = "event_sources/subtitle_source.rs"]
+mod subtitle_source;
 
 const DEVICE: &str = "source-contract-device";
 

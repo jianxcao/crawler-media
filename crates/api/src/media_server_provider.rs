@@ -31,6 +31,7 @@ mod item_metadata;
 mod person_images;
 mod playback;
 mod stream_binding;
+mod subtitle;
 mod sync_operations;
 use item_metadata::{
     backdrop_path, item_metadata, local_primary_image, merge_catalog_metadata, primary_image_url,
@@ -194,14 +195,9 @@ impl MediaServerProvider for ApiServerProvider {
     async fn deliver_subtitle(
         &self,
         user_id: UserId,
-        item_id: &str,
-        index: u32,
-        wants_vtt: bool,
+        request: media_server::provider::SubtitleRequest<'_>,
     ) -> Result<Option<library::SubtitlePayload>, SubtitleDeliveryError> {
-        let snapshot = self
-            .resolve_single_item(user_id, item_id)
-            .await
-            .map_err(SubtitleDeliveryError::Failed)?;
+        let snapshot = subtitle::resolve_snapshot(self, user_id, &request).await?;
         let Some(snapshot) = snapshot else {
             return Ok(None);
         };
@@ -210,8 +206,8 @@ impl MediaServerProvider for ApiServerProvider {
             source_path: snapshot.file.path.clone(),
             kind: snapshot.media.kind,
             tracks: snapshot.metadata.tracks,
-            index,
-            wants_vtt,
+            index: request.index,
+            wants_vtt: request.wants_vtt,
         };
         match self
             .state
@@ -681,12 +677,14 @@ impl MediaServerProvider for ApiServerProvider {
         &self,
         user_id: UserId,
         device_id: &str,
-        id: &str,
+        snapshot: &MediaItemSnapshot,
     ) -> Result<String, String> {
-        let id = id.to_owned();
+        let snapshot = snapshot.clone();
         let device_id = device_id.to_owned();
-        self.run_sync(move |provider| provider.issue_play_session_sync(user_id, &device_id, &id))
-            .await?
+        self.run_sync(move |provider| {
+            provider.issue_play_session_sync(user_id, &device_id, &snapshot)
+        })
+        .await?
     }
 
     async fn report_playback_event(

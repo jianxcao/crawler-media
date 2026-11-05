@@ -48,6 +48,15 @@ pub struct PlaybackEventIdentity {
     pub media_source_id: Option<domain::PhysicalSourceId>,
 }
 
+pub struct SubtitleRequest<'a> {
+    pub item_id: &'a str,
+    pub media_source_id: Option<&'a str>,
+    pub play_session_id: Option<&'a str>,
+    pub device_id: &'a str,
+    pub index: u32,
+    pub wants_vtt: bool,
+}
+
 /// One library entry as the protocol layer sees it: the selected source file,
 /// the row view its artwork/NFO helpers consume, and the media it belongs to.
 #[derive(Clone, Debug)]
@@ -337,9 +346,7 @@ pub trait MediaServerProvider: Send + Sync + 'static {
     async fn deliver_subtitle(
         &self,
         _user_id: UserId,
-        _item_id: &str,
-        _index: u32,
-        _wants_vtt: bool,
+        _request: SubtitleRequest<'_>,
     ) -> Result<Option<library::SubtitlePayload>, SubtitleDeliveryError> {
         Err(SubtitleDeliveryError::Unsupported)
     }
@@ -574,7 +581,7 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         &self,
         user_id: UserId,
         device_id: &str,
-        item_id: &str,
+        snapshot: &MediaItemSnapshot,
     ) -> Result<String, String>;
 
     #[allow(clippy::too_many_arguments)]

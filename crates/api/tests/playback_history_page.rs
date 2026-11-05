@@ -161,21 +161,27 @@ fn seed_hidden_media(store: &Store, title: &str) -> MediaId {
     media.id
 }
 
-/// 成员不可见 Library 中的媒体：有真实发布文件可签发 session，但对成员 hidden。
-fn seed_hidden_playable_media(store: &Store, root: &Path, title: &str) -> (MediaId, LedgerId) {
+/// 先授权成员创建历史，再由调用方隐藏该 Library。
+fn seed_hidden_playable_media(
+    store: &Store,
+    root: &Path,
+    title: &str,
+    member: domain::UserId,
+) -> (MediaId, LedgerId, String) {
     let library_root = root.join("hidden-library");
     std::fs::create_dir_all(&library_root).unwrap();
-    store
+    let library = store
         .create_library(
             MediaKind::Movie,
             "Hidden",
             &[library_root.to_str().unwrap()],
             "selected",
             true,
-            &[],
+            &[member],
         )
         .unwrap();
-    seed_media_with_ledger(store, &library_root, title)
+    let (media, file) = seed_media_with_ledger(store, &library_root, title);
+    (media, file, library.id)
 }
 
 fn log_play(
@@ -229,17 +235,21 @@ async fn entries_skip_hidden_rows_and_hidden_count_covers_scope() {
     let store = state.store();
     let library_root = seed_visible_library(store.as_ref(), tmp.path());
     let (member, token) = seed_member(store.as_ref(), "alice");
-    let (visible, visible_file, hidden, hidden_file) = {
+    let (visible, visible_file, hidden, hidden_file, hidden_library) = {
         let guard = store.as_ref();
         let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "Visible");
-        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "Hidden");
-        (visible, visible_file, hidden, hidden_file)
+        let (hidden, hidden_file, library) =
+            seed_hidden_playable_media(guard, tmp.path(), "Hidden", member);
+        (visible, visible_file, hidden, hidden_file, library)
     };
     {
         let guard = store.as_ref();
         log_play(guard, member, visible, visible_file, 3000, "dev-visible");
         log_play(guard, member, hidden, hidden_file, 2000, "dev-hidden");
         log_play(guard, member, visible, visible_file, 1000, "dev-visible-2");
+        guard
+            .update_library(&hidden_library, None, None, Some(("selected", true, &[])))
+            .unwrap();
     }
 
     let data = history(&app, &token, "").await;
@@ -310,11 +320,12 @@ async fn days_filter_applies_to_page_and_hidden_count() {
     let store = state.store();
     let library_root = seed_visible_library(store.as_ref(), tmp.path());
     let (member, token) = seed_member(store.as_ref(), "carol");
-    let (visible, visible_file, hidden, hidden_file) = {
+    let (visible, visible_file, hidden, hidden_file, hidden_library) = {
         let guard = store.as_ref();
         let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "Recent");
-        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "HiddenRecent");
-        (visible, visible_file, hidden, hidden_file)
+        let (hidden, hidden_file, library) =
+            seed_hidden_playable_media(guard, tmp.path(), "HiddenRecent", member);
+        (visible, visible_file, hidden, hidden_file, library)
     };
     let now = now_secs();
     {
@@ -351,6 +362,9 @@ async fn days_filter_applies_to_page_and_hidden_count() {
             now - 11 * 86_400,
             "dev-hidden-old",
         );
+        guard
+            .update_library(&hidden_library, None, None, Some(("selected", true, &[])))
+            .unwrap();
     }
 
     let data = history(&app, &token, "days=5").await;
@@ -371,16 +385,20 @@ async fn admin_scope_all_ignores_visibility() {
     let store = state.store();
     let library_root = seed_visible_library(store.as_ref(), tmp.path());
     let (member, _token) = seed_member(store.as_ref(), "dave");
-    let (visible, visible_file, hidden, hidden_file) = {
+    let (visible, visible_file, hidden, hidden_file, hidden_library) = {
         let guard = store.as_ref();
         let (visible, visible_file) = seed_media_with_ledger(guard, &library_root, "AdminVisible");
-        let (hidden, hidden_file) = seed_hidden_playable_media(guard, tmp.path(), "AdminHidden");
-        (visible, visible_file, hidden, hidden_file)
+        let (hidden, hidden_file, library) =
+            seed_hidden_playable_media(guard, tmp.path(), "AdminHidden", member);
+        (visible, visible_file, hidden, hidden_file, library)
     };
     {
         let guard = store.as_ref();
         log_play(guard, member, visible, visible_file, 2000, "dev-visible");
         log_play(guard, member, hidden, hidden_file, 1000, "dev-hidden");
+        guard
+            .update_library(&hidden_library, None, None, Some(("selected", true, &[])))
+            .unwrap();
     }
 
     let data = history(&app, "management-secret", "scope=all").await;
@@ -396,7 +414,8 @@ async fn member_without_visible_library_gets_empty_page() {
     let app = router(state.clone());
     let store = state.store();
     let (member, token) = seed_member(store.as_ref(), "erin");
-    let (hidden, hidden_file) = seed_hidden_playable_media(store.as_ref(), tmp.path(), "NoLibrary");
+    let (hidden, hidden_file, hidden_library) =
+        seed_hidden_playable_media(store.as_ref(), tmp.path(), "NoLibrary", member);
     log_play(
         store.as_ref(),
         member,
@@ -405,6 +424,9 @@ async fn member_without_visible_library_gets_empty_page() {
         1000,
         "dev-hidden",
     );
+    store
+        .update_library(&hidden_library, None, None, Some(("selected", true, &[])))
+        .unwrap();
 
     let data = history(&app, &token, "").await;
     assert_eq!(data["entries"].as_array().unwrap().len(), 0, "{data}");

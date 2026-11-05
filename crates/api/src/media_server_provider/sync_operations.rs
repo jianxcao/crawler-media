@@ -258,16 +258,12 @@ impl ApiServerProvider {
         &self,
         user_id: UserId,
         device_id: &str,
-        id: &str,
+        snapshot: &MediaItemSnapshot,
     ) -> Result<String, String> {
         if !self.state.instance_writable() {
             return Err("instance is read-only or under maintenance".into());
         }
 
-        let target = playback::resolve_target(self, user_id, id, None)?
-            .ok_or_else(|| format!("Playback item {id} missing or not visible"))?;
-        use std::str::FromStr;
-        let ledger_id = domain::LedgerId::from_str(&target.ledger_id).map_err(|e| e.to_string())?;
         // 播放域时间走注入时钟；`issue_play_session` 的 `issued_at` 是**秒**。
         let now = self.state.playback_clock.now_ms() / 1000;
         self.bounded_store(|store| {
@@ -275,10 +271,10 @@ impl ApiServerProvider {
                 .issue_play_session(
                     user_id,
                     device_id,
-                    ledger_id,
-                    target.media.id,
-                    domain::UnitKey::new(target.season, target.episode),
-                    &target.file.version,
+                    snapshot.file.file_id,
+                    snapshot.media.id,
+                    snapshot.unit.unwrap_or(domain::UnitKey::WHOLE),
+                    &snapshot.file.version,
                     now,
                 )
                 .map_err(|e| e.to_string())

@@ -158,10 +158,13 @@ async fn nested_hidden_library_does_not_leak_through_visible_parent() {
             &[child_root.to_str().unwrap()],
             "selected",
             true,
-            &[],
+            &[member_id],
         )
         .unwrap();
     let media = seed_nested_hidden_movie(&store, &child_root, member_id);
+    store
+        .update_library(&child.id, None, None, Some(("selected", true, &[])))
+        .unwrap();
     drop(store);
 
     let search = app
@@ -255,17 +258,17 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
         )
         .unwrap();
 
-    // 2. TV library is selected-only and member is NOT in it (hidden)
+    // 2. Grant access while the member's playback history is created.
     let tv_root = tmp.path().join("tv_root");
     std::fs::create_dir_all(&tv_root).unwrap();
-    let _tv_lib = store
+    let tv_lib = store
         .create_library(
             MediaKind::Tv,
             "Hidden TV",
             &[tv_root.to_str().unwrap()],
             "selected",
             true,
-            &[], // empty members -> hidden from member
+            &[member_id],
         )
         .unwrap();
 
@@ -331,6 +334,9 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
         })
         .unwrap();
     store.close_session(member_id, "dev-tv", 1050).unwrap();
+    store
+        .update_library(&tv_lib.id, None, None, Some(("selected", true, &[])))
+        .unwrap();
     drop(store);
 
     // 4. Query history as member: must NOT fall back to visible Movie library!

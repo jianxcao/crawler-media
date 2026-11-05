@@ -62,8 +62,14 @@ impl Store {
         version: &domain::FileVersion,
         now: i64,
     ) -> Result<String, StoreError> {
+        let role = self
+            .user_role(user_id)?
+            .parse()
+            .map_err(StoreError::Invalid)?;
         self.with_library_write(|db| {
-            db.issue_play_session(user_id, device_id, ledger_id, media_id, unit, version, now)
+            db.issue_play_session(
+                user_id, device_id, ledger_id, media_id, unit, version, now, role,
+            )
         })
     }
 
@@ -75,6 +81,15 @@ impl Store {
         play_session_id: &str,
     ) -> Result<Option<PlaySessionBinding>, StoreError> {
         self.with_library_read(|db| db.play_session_binding(user_id, device_id, play_session_id))
+    }
+
+    /// Check that the Library generation recorded in a session is still playable.
+    pub fn play_session_library_current(
+        &self,
+        library_id: &str,
+        revision: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_library_read(|db| db.play_session_library_current(library_id, revision))
     }
 
     /// Activate a play session ID.

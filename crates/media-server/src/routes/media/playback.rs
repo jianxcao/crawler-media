@@ -228,15 +228,28 @@ async fn subtitle_stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Path((id, index, codec)): Path<(String, u32, String)>,
+    axum::extract::Query(query): axum::extract::Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 字幕").await?;
 
     let wants_vtt = codec.eq_ignore_ascii_case("vtt");
+    let client = user.playback_client(&headers);
+    let device_id = query.device_id.as_deref().unwrap_or(&client.device_id);
     // 协议层只调用 provider seam；同步提取与 single-flight 都在 provider 内部。
     match state
         .provider
-        .deliver_subtitle(user.id, &id, index, wants_vtt)
+        .deliver_subtitle(
+            user.id,
+            crate::provider::SubtitleRequest {
+                item_id: &id,
+                media_source_id: query.media_source_id.as_deref(),
+                play_session_id: query.play_session_id.as_deref(),
+                device_id,
+                index,
+                wants_vtt,
+            },
+        )
         .await
     {
         Ok(Some(payload)) => Ok((
@@ -281,7 +294,8 @@ async fn stream(
 ) -> Result<Response, StatusCode> {
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 取流").await?;
 
-    let device_id = query.device_id.as_deref().or(user.device_id.as_deref());
+    let client = user.playback_client(&headers);
+    let device_id = query.device_id.as_deref().unwrap_or(&client.device_id);
 
     let (path, is_strm) = state
         .provider
@@ -290,7 +304,7 @@ async fn stream(
             &id,
             query.media_source_id.as_deref().filter(|id| !id.is_empty()),
             query.play_session_id.as_deref(),
-            device_id,
+            Some(device_id),
         )
         .await
         .map_err(|error| {
@@ -416,7 +430,7 @@ pub async fn playback_info(
     let client = user.playback_client(&headers);
     let play_session_id = state
         .provider
-        .issue_play_session(user.id, &client.device_id, &id)
+        .issue_play_session(user.id, &client.device_id, &snapshot)
         .await
         .map_err(|error| {
             tracing::error!(%error, user_id = %user.id, item_id = %id, "failed to issue playback session");

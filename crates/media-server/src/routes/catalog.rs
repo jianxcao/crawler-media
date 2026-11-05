@@ -201,6 +201,9 @@ async fn entity_page(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let parent = query::library_parent(query.parent_id.as_deref(), &libraries);
+    if query.parent_id.is_some() && parent.is_none() {
+        return Ok(Json(json!({"Items": [], "TotalRecordCount": 0})));
+    }
     let page = state
         .provider
         .query_entities(

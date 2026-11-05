@@ -45,16 +45,28 @@ impl ApiServerProvider {
         let Some(device_id) = device_id else {
             return Ok(false);
         };
-        let Some(binding) = self.bounded_reader(&[store::Db::Library], |store| {
-            store
-                .play_session_binding(user_id, device_id, session_id)
-                .map_err(|e| e.to_string())
-        })?
+        let Some((binding, library_current)) =
+            self.bounded_reader(&[store::Db::Library], |store| {
+                let Some(binding) = store
+                    .play_session_binding(user_id, device_id, session_id)
+                    .map_err(|e| e.to_string())?
+                else {
+                    return Ok(None);
+                };
+                let current = match binding.library_id.as_deref() {
+                    Some(id) if id == file.library_id.to_string() => store
+                        .play_session_library_current(id, binding.config_revision)
+                        .map_err(|e| e.to_string())?,
+                    _ => false,
+                };
+                Ok(Some((binding, current)))
+            })?
         else {
             return Ok(false);
         };
         let file_id = file.file_id.to_string();
-        Ok(binding.state != PlaySessionIdState::Closed
+        Ok(library_current
+            && binding.state != PlaySessionIdState::Closed
             && binding.media_id == entry.media.id
             && binding.unit == domain::UnitKey::new(entry.unit.0, entry.unit.1)
             && binding.file_id.as_deref() == Some(file_id.as_str())

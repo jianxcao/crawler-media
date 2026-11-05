@@ -200,7 +200,13 @@ fn add_artwork_and_streams(value: &mut Value, snapshot: &MediaItemSnapshot, item
         });
     }
     if !snapshot.is_series {
-        let media_streams = media_streams_with_item(&snapshot.metadata.tracks, Some(item_id));
+        let source_id = domain::PhysicalSourceId {
+            file_id: snapshot.file.file_id,
+            revision: snapshot.file.version.revision,
+        }
+        .to_wire_string();
+        let media_streams =
+            media_streams_with_item(&snapshot.metadata.tracks, Some(item_id), Some(&source_id));
         if !media_streams.is_empty() {
             value["MediaStreams"] = json!(media_streams);
         }

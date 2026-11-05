@@ -1,6 +1,6 @@
 # Jellyfin 客户端协议与重构回归
 
-本服务通过根路径与 `/emby` 提供 ADR-0005 定义的播放协议子集。自有 `/api/v1` 是独立表面；两者的认证规则不能相互替代。本文记录客户端依赖、自动化回归与真实设备验收的对应关系。VidHub无上报的触发点已定位为单项详情缺少MediaSources；`73da134e`生产修复已完成四源实播、双端续播、重启和成员隔离验证。随后复审另发现的事件来源绑定缺陷已修复，定向和最终稳定树全套通过；491真实来源完整页面和最终性能门尚未闭合。以下历史记录保留各自版本和当时结论，不将旧轮失败追认为通过。
+本服务通过根路径与 `/emby` 提供 ADR-0005 定义的播放协议子集。自有 `/api/v1` 是独立表面；两者的认证规则不能相互替代。本文记录客户端依赖、自动化回归与真实设备验收的对应关系。VidHub无上报的触发点已定位为单项详情缺少MediaSources；`73da134e`生产修复已完成四源实播、双端续播、重启和成员隔离验证。随后复审的事件来源绑定、PlaybackInfo竞态、设备身份、字幕与分类范围问题已修复，定向和最终稳定树全套通过；491真实来源完整页面和最终性能门尚未闭合。以下历史记录保留各自版本和当时结论，不将旧轮失败追认为通过。
 
 ## 验证完整请求链
 
@@ -12,7 +12,9 @@
 | 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、两种 token header 与支持的播放 URL 凭据生效；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
 | 用户与 Library | 登录用户、资料、Views 的身份和访问范围一致；成员不可通过隐藏 Library 的直接条目或视频地址绕过限制 | `jellyfin/protocol.rs`、`jellyfin/visibility.rs` |
 | 列表与详情 | Movie / Series / Episode 的身份、类型、父子关系、数量及元数据一致；搜索和分类命中可以打开同一详情；分页不丢失或重复条目 | `jellyfin/library_routes.rs`、`jellyfin/catalog/`、`jellyfin/metadata_parity.rs`、`jellyfin/filters.rs` |
-| 播放信息与取流 | 可播放详情返回MediaSources，稳定fixture下与PlaybackInfo一致；消费返回的源/SID，本地Range字节正确，STRM保留直放语义 | `jellyfin/playback.rs`、`jellyfin_stream_binding.rs` |
+| 播放信息与取流 | 可播放详情返回MediaSources，稳定fixture下与PlaybackInfo一致；消费返回的源/SID，本地Range字节正确，STRM保留直放语义；选源变化与缺DeviceId不破坏有效绑定 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources/playback_info_race.rs`、`jellyfin_stream_binding.rs` |
+| 字幕 | 消费详情和PlaybackInfo生成的版本化来源URL，交付实际来源字幕字节；有SID时拒绝来源/单元/用户/设备冲突、关闭会话及Library配置失效 | `jellyfin/event_sources/subtitle_source.rs`、`jellyfin/event_sources/shared_episode_binding.rs` |
+| 分类范围 | Genres/Studios缺省父Library时只查可见范围，明确未知或隐藏父Library时返回空页 | `jellyfin_coarse_routes.rs` |
 | 播放事件 | Playing / Progress / Stopped 使用签发的绑定和明确的版本化来源；旧源、跨单元、隐藏来源或与SID冲突的事件不写入；缺失或 null PositionTicks 不伪造位置；进度与日志持久化，停止后会话关闭，另一用户不受影响 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources.rs`、`jellyfin/playback_null_position.rs`、`playback_event_identity.rs` |
 | 收藏与已播放 | 设置和撤销的响应、详情重入、过滤查询及持久事实一致；覆盖 VidHub 实际使用的 POST Delete、跨用户与隐藏条目的拒绝 | `jellyfin/user_marks_routes.rs`、`jellyfin/visibility.rs`、`jellyfin/filters.rs` |
 | 图片 | 自有静态 poster / fanart / still / chapter / Library cover 保持匿名可读；验证 Content-Type 和实际字节；Jellyfin 图片按其独立规则测试 | `jellyfin/protocol.rs`、`executor_library_admin/images.rs` |
@@ -124,6 +126,32 @@ VidHub实际首帧00:00.250，五次快进后01:02.500，暂停01:15.833，Comma
 公开回归覆盖根路径与`/emby`、pending和active SID、事件中省略/null/精确空来源、取流省略/精确空来源，断言来源A的实际Range字节、进度、日志与会话关闭；同SID明确指定B必须拒绝。另保留A真实替换后的反例：旧SID事件204且不改变事实，旧SID取流404，不得用新revision复活旧绑定。本节的修复验证结果在审核与最终验收清单中按提交分别记录，不用自动化替代真实客户端验收。
 
 补充的公开负例验证未知SID、错误设备、另一用户、跨Media、closed SID和签发后Library隐藏均不写入、不返回媒体字节。同物理文件覆盖E01/E02的回归还验证：来源首选变化后E01仍按原绑定播放和停止，E02不能借用E01的SID更新进度或取流。稳定定向矩阵通过89项Jellyfin、6项取流绑定、14项事件身份和12项播放读取；上述授权补项首次执行通过，属于覆盖补强。最终稳定工作树release workspace含doc-tests退出0：596个结果组汇总3925 passed、0 failed、25 ignored（含子进程汇总、非去重数）；代码文件哈希与验证收据一致。Season/Work聚合入口的同类来源切换未直接实测，不将单集测试推广为所有聚合入口已验证。
+
+## 9087 后的协议复审修复波次
+
+宽面复审的四个问题及定向复审新增的配置绑定问题均先由公开 Router 失败回归确认，再修复并通过最终稳定树验证：
+
+| 场景 | 实际失败 | 修复合同 |
+|---|---|---|
+| PlaybackInfo 读取来源 A 后，B 成为首选 | 同一响应的 A 与 SID 组合取流404；读详情后隐藏成员 Library 也仍签发200 | 按首次快照的具体逻辑单元与版本化来源签发，事务内复查来源、覆盖、生命周期及当前 Library 授权；App角色观察不构成跨库原子性 |
+| 有效登录但没有 DeviceId，使用同样请求头消费返回的 SID | Range404而非206 | 签发、事件和取流使用相同的既有设备身份解析；不同身份和撤销仍拒绝 |
+| 获取 A 的字幕地址后，B 成为首选 | 原地址返回 B 的实际字幕字节 | 详情和PlaybackInfo的字幕地址携带版本化MediaSourceId；有SID时额外核验用户、设备、单元、来源与会话状态；无SID仍核验可见性、覆盖和版本 |
+| Genres/Studios指定未知父Library | 返回全可见分类而非空页 | 缺省ParentId保留全可见范围，未知或不可见ParentId返回空页，不扩大全局范围 |
+| 签发SID后Library配置或生命周期变化，源本身仍存在 | 原字幕URL带旧SID仍返回200；同一SID的事件提交已拒绝 | 视频和字幕共用绑定校验，核对实际来源Library、ready生命周期及配置revision；旧SID拒绝，无SID的严格来源URL仍按当前授权判断，重新签发的SID可用 |
+
+首次字幕fixture缺轨道、竞态测试括号错误及命令参数拼写错误分别保留为测试准备/工具失败，不计为产品RED。有效RED均通过真实provider/Store及HTTP结果或交付字节断言；首个字幕与来源竞态定向GREEN不代替整波次、真实设备或最终性能验收。
+
+上述第五项来自原四项修复后的定向复审，公开Router回归实际复现旧SID字幕200而非404；它同时涉及已有视频绑定校验，不能因字幕新路径已检查用户和来源就认为历史配置绑定有效。受影响API crate首轮执行在四个回环监听测试处因沙箱PermissionDenied退出101（284 passed、4 failed），当次未执行该命令后续集成目标；该环境失败保留，之后具备本机监听权限的最终workspace结果另记，不能将首轮记作通过。
+
+本波次新增公开负例覆盖：fallback客户端元数据变化、明确错误DeviceId、字幕的错误用户/关闭SID/隐藏来源、同物理文件跨单元SID，以及成员另有可见Library时的隐藏ParentId。字幕还实际消费详情顶层和MediaSources内的DeliveryUrl，断言A/B不同字节；配置变化后先恢复ready，再验证旧SID的视频/字幕均拒绝、无SID严格来源和fresh SID均可读。PlaybackInfo通过已有FileStatRead注入真实首选来源变化、文件替换和授权变化，断言响应来源/SID的Range字节及持久进度，不断言私有helper或mock次数。
+
+定向API重跑114项通过，后续新增负例及字幕拆分后的两目标矩阵108项通过；这些是不同命令范围，不能相加为去重总数。Store release全套退出0（207结果组汇总1035 passed、12 ignored，含子进程汇总、非去重数）。media-server首轮38 passed、2项本机监听PermissionDenied，授权重跑对应目标3/3通过；保留首轮失败。字幕provider的参数lint与813行文件上限另有真实失败，改用typed请求并将来源解析移入私有模块；原审查者确认字段和绑定语义不变。最终release all-target Clippy、fmt、文件/函数尺寸和diff检查通过，稳定树workspace结果见下文；这些自动化结果不代替新候选真实媒体库验收。
+
+初轮稳定树release workspace含doc-tests实际退出101：596结果组汇总3930 passed、6 failed、25 ignored（含子进程汇总、非去重数），代码前后hash一致。六项分别属于management的两个隐藏库测试和playback_history_page的四个历史范围测试，均在fixture签发SID时被新增授权检查拒绝，尚未进入原防泄露断言。夹具应先在成员有权限时创建并关闭真实播放历史，再撤销Library访问、执行原查询断言；不得削弱生产授权、提升角色或绕过session helper伪造记录。该夹具修正及稳定树重跑结果另记，不将初轮改为通过。
+
+夹具仅修改上述两个测试文件，生产代码与初轮1977项代码hash清单比较无变化；所有原查询、断言和session helper均保留。修正后management完整目标609 passed、1 ignored，playback_history_page完整目标6 passed，两个命令目标整体退出0；最终release all-target Clippy、fmt、文件/函数硬门和diff检查通过。随后进行稳定树workspace必要重测，结果不由这两个目标的局部通过代替。
+
+最终稳定树release workspace必要重测含doc-tests实际退出0：596结果组汇总3936 passed、0 failed、25 ignored（含子进程汇总、非去重数），1977项代码hash前后一致。原四项、配置绑定及必要字幕拆分的独立定向复审均已关闭，没有剩余阻断发现；该结论仅覆盖已审查修复及直接改动，不宣称完整Jellyfin产品全部功能已实现，也不代替新构建的491页面、真实来源播放和最终性能验收。初轮失败及之后的修正结果分别保留。
 
 ## 每次重构的完成条件
 

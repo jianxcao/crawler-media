@@ -52,6 +52,56 @@ fn contended(kind: &str) {
     let (state, token) = state_with_admin(tmp.path());
     let user = state.store().user_by_token(&token).unwrap().unwrap().id;
     let provider = api::media_server_provider::ApiServerProvider::new(state.clone());
+    let snapshot = if kind == "session" {
+        let media = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "Executor".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        state.store().insert_media(&media).unwrap();
+        state
+            .store()
+            .create_library(
+                domain::MediaKind::Movie,
+                "Movies",
+                &[tmp.path().to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let path = tmp.path().join("movie.mkv");
+        std::fs::write(&path, b"movie").unwrap();
+        store::test_support::publish_fixture_file(
+            &state.store(),
+            &store::test_support::FixtureFile {
+                media_id: media.id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = domain::TypedItemId::Work(media.id).to_wire_string();
+        Some(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(provider.resolve_single_item(user, &id))
+                .unwrap()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     let store = state.store();
     let db = if matches!(kind, "user" | "device" | "credential") {
         store::Db::App
@@ -73,7 +123,7 @@ fn contended(kind: &str) {
         let start = Instant::now();
         let (_, elapsed) = tokio::join!(
             async {
-                exercise(&provider, user, kind).await;
+                exercise(&provider, user, kind, snapshot.as_ref()).await;
             },
             async {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -105,6 +155,7 @@ async fn exercise(
     provider: &api::media_server_provider::ApiServerProvider,
     user: domain::UserId,
     kind: &str,
+    snapshot: Option<&media_server::provider::MediaItemSnapshot>,
 ) {
     let id = domain::TypedItemId::Work(domain::MediaId::new()).to_wire_string();
     match kind {
@@ -129,9 +180,9 @@ async fn exercise(
         ),
         "session" => assert!(
             provider
-                .issue_play_session(user, "device", &id)
+                .issue_play_session(user, "device", snapshot.unwrap())
                 .await
-                .is_err()
+                .is_ok()
         ),
         _ => unreachable!(),
     }
