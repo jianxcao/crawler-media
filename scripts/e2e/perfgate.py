@@ -200,7 +200,7 @@ def prepare_heartbeat(client, fields):
 
 def prepare_subtitle(client, fields, observations):
     item = urllib.parse.quote(str(fields['subtitle_item']), safe='')
-    code, _, payload = client.raw('/Items/' + item + '/PlaybackInfo')
+    code, _, payload = client.raw('/Items/' + item + '/PlaybackInfo', method='POST')
     observation = {'code': code, 'outside_timing': True, 'session_id_advertised': False, 'passed': False}
     observations.append(observation)
     if not 200 <= code < 300:

@@ -386,13 +386,24 @@ class SubtitlePreparationTests(unittest.TestCase):
                     body = b'{"ok":true,"data":{"commit":"fixture"}}'
                     code = 200
                 elif self.path.startswith('/Items/') and '/PlaybackInfo' in self.path:
-                    body = (b'{bad' if self.server.sources == 'malformed' else
-                            json.dumps({'MediaSources': self.server.sources, 'PlaySessionId': 'secret-sid'}).encode())
-                    code = 503 if self.server.sources == 'http-error' else 200
+                    body, code = b'method not allowed', 405
                 elif self.path == '/Videos/work/Subtitles/2/Stream.vtt?MediaSourceId=opaque%2Bid':
                     body, code = b'WEBVTT\n\n', 200
                 else:
                     body, code = b'not found', 404
+                self.send_response(code)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.server.events.append(self.path)
+                if self.path != '/Items/work/PlaybackInfo':
+                    body, code = b'not found', 404
+                else:
+                    body = (b'{bad' if self.server.sources == 'malformed' else
+                            json.dumps({'MediaSources': self.server.sources, 'PlaySessionId': 'secret-sid'}).encode())
+                    code = 503 if self.server.sources == 'http-error' else 200
                 self.send_response(code)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -465,10 +476,10 @@ class SubtitlePreparationTests(unittest.TestCase):
                     self.assertTrue(row['errors'])
                 if valid:
                     self.assertIn('/Videos/work/Subtitles/2/Stream.vtt?MediaSourceId=opaque%2Bid', server.events)
-                    pi = next(i for i, event in enumerate(server.events) if '/PlaybackInfo' in event)
+                    pi = server.events.index('/Items/work/PlaybackInfo')
                     if mode == 'cold':
                         self.assertLess(pi, server.events.index('restart'))
-                        self.assertEqual(sum('/PlaybackInfo' in event for event in server.events), 1)
+                        self.assertEqual(server.events.count('/Items/work/PlaybackInfo'), 1)
                 else:
                     self.assertFalse(any('/Subtitles/' in event for event in server.events))
 
