@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+最终候选验证已完成记录，**整体验收仍未通过**：`da68921a` 的 release workspace 实际退出0（602组汇总3976 passed、0 failed、25 ignored，含嵌套汇总未去重），Web lint/typecheck/940项测试/build及相关release all-target Clippy通过。正式候选对历史准入基线的 idle/busy/cold 三轮分别164/166、161/166、160/166，均完整、业务和绝对预算通过，但原相对门失败；不是新配对六阶段通过，也未归因为代理。最终二进制有限桌面/390px页面、分集切换、空库/404恢复及四类静态图检查完成，31次图片请求无Authorization；章节帧成功与真实慢源页面为Not run。每轮来源清单一致，自有服务/句柄/副本均清理。详见[最终验证记录](2026-11-06-storage-redesign-final-verification.md)。历史COMMIT/有限内存/严格Playback及缺失引用的限制保留。
+
 - 图片内部504放大缺陷已按TDD修复：新观察者不再继承过期fill截止，保留各自两秒预算；首次名额/回源准入及真实worker所有权不变。新增分段、共享终态/个人截止区分和关联完成事件，公开Router验证8槽排队及实际缓存完成后离线读回。图片单元26、相关HTTP集成19、release all-target Clippy/fmt及Web940项通过；测试采集失败与清理补项保留。详见[专项记录](2026-11-06-image-delivery-deadlines.md)。不能据此归因所有历史504；下一步最终workspace与受影响实际验收。
 
 - 有界COMMIT诊断已结束：2f5cd923的独立副本各推进224,978步，诊断覆盖100,000次Users→Users，无≥100ms的COMMIT PROFILE样本；控制同一步数/状态，两轮退出0，源码绑定、原夹具元数据及副本清理核验通过。只保留16个正常样本的VFS明细，没有复现或归因历史2.735秒尖峰，不改SQLite策略，也不追认为完整容量门通过。详见[专项记录](2026-11-06-commit-tail-observation.md)。下一项为图片504回归与分段观察。

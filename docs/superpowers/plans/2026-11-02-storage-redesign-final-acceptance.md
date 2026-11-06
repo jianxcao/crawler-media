@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+最终候选验证已完成记录，**整体验收仍未通过**：`da68921a` 的 release workspace 实际退出0（602组汇总3976 passed、0 failed、25 ignored，含嵌套汇总未去重），Web lint/typecheck/940项测试/build及相关release all-target Clippy通过。正式候选对历史准入基线的 idle/busy/cold 三轮分别164/166、161/166、160/166，均完整、业务和绝对预算通过，但原相对门失败；不是新配对六阶段通过，也未归因为代理。最终二进制有限桌面/390px页面、分集切换、空库/404恢复及四类静态图检查完成，31次图片请求无Authorization；章节帧成功与真实慢源页面为Not run。每轮来源清单一致，自有服务/句柄/副本均清理。详见[最终验证记录](../../audits/2026-11-06-storage-redesign-final-verification.md)。历史COMMIT/有限内存/严格Playback及缺失引用的限制保留。
+
 图片截止修复及分段诊断已完成：后加入者保持自己的两秒预算，初始排队截止、名额及worker所有权不变；公开Router覆盖排队共享超时、个人截止区别及缓存完成后的离线恢复。图片单元26/HTTP集成19、release all-target Clippy/fmt与Web940项通过，采集和清理补项的原失败保留；详见[专项记录](../../audits/2026-11-06-image-delivery-deadlines.md)。历史504具体归属仍不能一概而论，最终workspace、正式性能及实际页面验收另记。
 
 有界COMMIT诊断完成：2f5cd923的诊断/无插桩控制各224,978步、同状态、退出0；十万次Users COMMIT PROFILE未出现≥100ms样本。源码摘要、原夹具元数据与副本清理通过；此为acceptance_eligible=false的部分观察，未复现或解释历史2.735秒风险，不替代完整容量终态。见[专项记录](../../audits/2026-11-06-commit-tail-observation.md)。继续图片504回归及最终受影响验收。
