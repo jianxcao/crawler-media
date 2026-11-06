@@ -2,7 +2,19 @@
 
 ## 最新状态（2026-11-06）
 
-- 当前匹配性能仍未验收通过。产品`97cc6b1b`、测量工具`159934b2`、冻结fixture来源`1c3af023`分别绑定；没有重seed或改写原baseline、binding及历史报告。三个独立campaign的真实终态如下，不能拼称单次六阶段通过。
+- 用户怀疑代理不稳定并要求再试后，独立复测[本轮 idle/busy](/private/tmp/crawler-matched-final-hint100-post-v4/campaign-20261106T020030Z/campaign.json)已完成。产品`97cc6b1b`、工具`159934b2`、fixture来源`1c3af023`及原门槛不变；仅衍生driver的模式与独立轮元数据变化，没有新增请求重试、重seed或覆盖原失败。
+
+| 本轮阶段 | 实际终态 | 关键结果 |
+|---|---|---|
+| 旧idle | 完整166项、164通过，退出1；严格基线准入verified | Similar及page-detail各200次200；初始p95 869.336/803.530ms，绝对失败保留 |
+| 新idle | 完整166项、166通过，退出0 | Similar/page-detail初始p95 2.484/21.244ms；完整结果p95 856.394/876.744ms，相对−1.501%/+9.095% |
+| 旧busy | 完整166项、165通过，退出1；严格基线准入verified | Similar取得200个窗口内样本，203次尝试全200；page-detail取得200个窗口内样本，202次尝试全200；仅Similar绝对失败 |
+| 新busy | 完整166项、165通过，退出1 | 唯一失败为收藏写入：200次200，p95由0.951917增至3.509875ms，相对+268.716%，绝对预算通过、相对门失败；Similar/page-detail完整结果p95 949.996/859.837ms，相对+6.665%/+8.163%，均通过 |
+
+- 本轮四阶段业务均verified、来源清单均匹配且无listener/owner/live残留。两种推荐用例在各阶段均取得200个有效完整结果；busy边界外成功尝试另留，不删样本。所有推荐观察均为空，不能推广为非空推荐性能；也不能由延迟推断每次回源或缓存命中。本轮未复现原EOF/502，但新busy收藏相对门失败使`all_candidate_passed=false`，整体验收仍未通过。汇总见`/tmp/crawler-tmdb-network-repeat-20261106-summary.json`。
+- 此前失败的`/tv/9500258/similar`和`/movie/9000417/similar`又各做3次独立curl诊断，6次均完成TLS并返回HTTP404（请求使用合成ID），耗时0.626–0.821秒；未验证正文，不冒称typed NotFound合同测试。诊断保持系统路由，使用IPv4且无显式应用代理；curl并非产品ureq传输，不能据此确定此前EOF连接阶段或代理根因。凭据仅在内存及stdin使用，冻结app hash未变，见`/tmp/crawler-tmdb-failed-path-recheck-20261106.json`。
+- 收藏相对失败的只读核对尚不能归因：两版marks handler的相关行为与mutation SQL相同，重复`favorite=true`仍进入事务、upsert及summary刷新；普通POST日志只有整数毫秒响应头耗时，且与played共用路由，不能拆出writer等待、SQL或COMMIT。保留正式Fail，下一步只做隔离收藏诊断，不以单轮差异断言代码缺陷或抖动，见`/tmp/crawler-favorite-busy-relative-root-cause-review.md`。
+- 以下为本轮之前三个独立campaign的原始终态，失败及Not run保持当时语境，不拼称单次六阶段通过。产品、工具、fixture分别绑定，没有改写原baseline、binding及历史报告。
 
 | 轮次 | 终态 | 基线与后续 |
 |---|---|---|
