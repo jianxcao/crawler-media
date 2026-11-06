@@ -2,11 +2,17 @@
 
 ## 最新状态（2026-11-06）
 
+后续[单次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)在旧版完整166项后停止：162通过、stage退出1、业务verified，但人物图片504、人物详情502、poster504及Similar不足样本/502使基线无效。协调器及quiet wrapper实际退出2，新版**Not run**，没有继续重复对照。旧版收藏本次200次HTTP200、p95 3.436208ms；虽然接近此前新版3.509875ms，整轮无效基线不能支持版本比较或根因结论，原新busy相对Fail保留。
+
+本次TMDB推荐日志为整体请求超时、人物为连接超时，客户端域名是`api.themoviedb.org`；图片日志仅能定位到交付截止超时。事后对fixture的`image.tmdb.org`头像地址做3次独立curl请求，均200、0.242–0.356秒，正文未验证；不能据此确认代理根因或图片504的具体来源。来源及清理通过、23份绑定输入未变，产品和原门槛不变。证据为`/tmp/crawler-favorite-followup-20261106-summary.json`及`/tmp/crawler-tmdb-image-recheck-20261106.json`。以下为此前各轮实际结果，保留历史失败与Not run。
+
 用户要求再次验证疑似代理波动后，[独立idle/busy复测](/private/tmp/crawler-matched-final-hint100-post-v4/campaign-20261106T020030Z/campaign.json)已完成：旧idle164/166、新idle166/166、旧busy165/166、新busy165/166，各阶段完整。两份旧基线HTTP/业务有效且严格准入verified，旧版绝对延迟失败保留；新版busy唯一失败是收藏写入p95由0.951917增至3.509875ms（+268.716%），200次请求全200，绝对预算通过但原相对门失败。故本轮`all_candidate_passed=false`，匹配性能和整体验收仍未通过，不把失败归为已确认代码缺陷或测量抖动。
 
 本轮推荐和详情各阶段均取得200个有效完整结果，无原EOF/502；新idle两项完整p95为856.394/876.744ms（−1.501%/+9.095%），新busy为949.996/859.837ms（+6.665%/+8.163%），均过原门。busy旧版额外3/2次窗口外成功尝试保留；推荐观察全部为空，不推广为非空推荐性能。四阶段业务、来源及清理通过，产品97/工具159/fixture1c3与原门槛不变，没有新增请求重试或覆盖旧失败。详见[审核记录](../../audits/2026-11-02-storage-redesign-review.md)及`/tmp/crawler-tmdb-network-repeat-20261106-summary.json`。
 
 此前两个失败TMDB路径另各做3次curl诊断，6次均完成TLS并返回HTTP404，请求使用合成ID、正文未验证；使用IPv4、无显式应用代理、系统路由未改，curl不等于产品ureq链路。当前可达不足以定位此前EOF或确认代理根因，冻结app hash未变，凭据未输出。证据为`/tmp/crawler-tmdb-failed-path-recheck-20261106.json`。
+
+后续[收藏聚焦诊断](/tmp/crawler-favorite-focused-campaign-20261106T025249Z/campaign.json)完成旧→新→旧→新四轮busy测量，仅运行原收藏写入用例，每轮200次HTTP200；p95依次为1.287375、1.359042、1.204958、1.319708ms。四轮退出0、来源及清理通过，没有复现完整busy中的3.509875ms。两个新版诊断仍绑定原完整旧busy基线；本诊断标记`diagnostic_only=true`、`acceptance_eligible=false`，不能替代完整166项验收。由于前序请求和扫描时机不同，根因仍未确认，原正式失败保留。
 
 以下保留本轮之前的匹配结果。被测产品`97cc6b1b`、测量工具`159934b2`、冻结fixture来源`1c3af023`分别绑定，没有重seed或改写原baseline、binding及历史报告。新包准入退出0：30项绑定、154 GET/166 cases/10 exemptions、两版各50用户400项业务断言verified及freeze匹配；准入不替代实际性能。
 
@@ -66,7 +72,7 @@ seed后发现WAL sidecar及3302个work缺少studio，不能放宽oracle。旧版
 |---|---|---|
 | Web | af40真实491来源Movie/Episode与VidHub双向续播、同库重启和页面/身份检查已有实际证据 | 保留实际范围及差异，不将历史候选结果重标为1c3 |
 | VidHub/Jellyfin | af40真实播放及目录/标记证据；cd80有限前缀、163集及保存位置复验完成，测试连接已清理 | 严格六行Playback基线Fail及原driver退出Unverified保留，不能据此称整轮通过 |
-| 性能 | v2及原EOF轮失败保留；97/159独立cold166/166；本轮有效旧基线下新idle166/166、新busy165/166 | 定位busy收藏写入相对门失败；保留外网失败、空推荐和各独立轮边界 |
+| 性能 | v2及原EOF轮失败保留；97/159独立cold166/166；网络复测新idle166/166、新busy165/166；后续聚焦四轮未复现，单次完整旧busy基线无效、新版Not run | 收藏相对失败及网络/图片超时根因仍待定位；保留空推荐、各独立轮及无效基线边界 |
 | 容量 | 100k Media、1M文件/Playback及查询工作量断言已执行；61ee的Header/small及插桩fullB终态、双oracle完成 | 保留2.735秒提交尾延迟风险；插桩诊断不能代替最终性能判定 |
 | 内存 | 6批Scan、3批Transfer、独立heap轮及主要分配来源分析 | 保留对象归属与观测窗口边界，不宣称长期无泄漏 |
 | 交付 | 已完成修复均独立提交推送 | 后续发现修复、最终证据对账/复审及文档提交推送 |
@@ -189,7 +195,7 @@ Task 16：release `57386abb`；downloader `908e57bb` / `4f911f94`；library `89e
 - 历史失败保留：候选`cc7c997be6ff`的完整idle未通过。该轮完整166项、每项200样本，164项通过、2项失败。Similar初始p95为2.545292ms、相对+92.746%，完整结果199项ready、1项502；日志导出p95为23.969584ms，满足300ms绝对预算但相对+32.228%失败。保留阶段D及各轮历史报告、ready/pending条件差异，不拼接成全绿，也不提高预算或删样本。本轮原app/sidecar及pan/STRM清单一致，无残留listener/owner/live副本；此前两次测试脚本把`/tmp`与`/private/tmp`误判为不同路径的启动失败独立保留，路径规范化后seed完成。
 - 历史失败保留：候选`cc7c997be6ff`的busy/cold按当时缓存口径重测后仍未通过。该轮busy完整166项、每项200样本，155项通过、11项相对基线回退失败；两种Jellyfin计数、ledger、gallery、up-next、日志导出、两种登录、PlaybackInfo、收藏和进度写入的失败均保留。Similar本轮200个完整结果均成功，不回填idle的一次502。cold按用例分别重启，完整166项、160项通过、6项失败：日志导出、两种登录、PlaybackInfo、收藏及已看写入。两轮均正常清理，原app/sidecar及pan/STRM清单一致，无listener/owner/live残留。`phaseC-busy.json` / `phaseC-cold.json` 保留为旧提交的比较基线，不当成当前版本通过结果。
   cold原六项失败中，两种登录、PlaybackInfo、收藏及已看写入的旧基线均为`code=0`连接失败；工具曾误把其约0.1ms耗时作为可比性能。修复后离线核对另发现chapters和progress的历史基线耗时为零且前置失败，共七项相对门不可验证。原报告与退出1保留，工具已按TDD修复，尚未据此取得新的运行结果。日志导出使用成功HTTP基线，其相对失败仍成立。绝对预算及业务正确性不因缺少有效相对基线自动证明整项通过。
-- [ ] 最终匹配性能：独立新cold166/166与本轮新idle166/166已有有效旧基线、health、业务、来源和清理证据；本轮新busy165/166，收藏写入相对失败（0.951917→3.509875ms，200次200）待定位。原EOF/502、v2五阶段及首次中止的部分旧idle均保留。保留此前实际491/UI和容量/内存结果，不重复作为当前候选新运行。
+- [ ] 最终匹配性能：独立新cold166/166与网络复测新idle166/166已有有效旧基线、health、业务、来源和清理证据；该轮新busy165/166，收藏写入相对失败（0.951917→3.509875ms，200次200）待定位。聚焦四轮未复现；随后单次完整旧busy为162/166、HTTP/准备错误导致基线无效，新版Not run，不能替代原比较。原EOF/502、v2五阶段及首次中止的部分旧idle均保留。保留此前实际491/UI和容量/内存结果，不重复作为当前候选新运行。
 - [ ] 汇总实际证据与剩余Unverified，复审并完成文档交付；严格六行Playback基线Fail及driver退出Unverified不可追认为Pass。
 
 ## 4. 最终验收矩阵

@@ -2,6 +2,11 @@
 
 ## 最新状态（2026-11-06）
 
+- 后续按预先限定的停止条件，仅做[一次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)。旧版完整166项、162通过、stage退出1、业务verified，但严格基线准入失败；协调器及quiet wrapper实际退出2，新版**Not run**，未继续重复对照。人物图片和poster的准备请求各504，人物详情准备502；Similar仅记录84个窗口内样本，86次尝试为85次200、1次502，无法作为200样本基线。原失败报告全部保留。
+- 本次旧版收藏写入为200次HTTP200、p95 3.436208ms，接近此前新版3.509875ms；只能记录旧版也出现该量级耗时，整轮旧基线无效，不能由此作有效版本比较或确认抖动/扫描阶段等根因。原网络复测的新busy收藏相对Fail不变，后续聚焦结果亦不替代该失败。
+- 本次日志将TMDB推荐失败记为`timeout: global`（`/movie/9001506/similar`），人物详情记为`timeout: connect`（`/person/3234`），两者均无有效stale缓存；该客户端固定访问`api.themoviedb.org`。图片日志仅有`image delivery deadline reached`，没有具体连接阶段证据。结束后对fixture记录的`image.tmdb.org`头像地址做3次独立curl诊断，均HTTP200、0.242–0.356秒；保持系统路由、IPv4，无显式代理环境变量，未验证图片正文。curl与产品链路不同，不能据此确认代理根因，或把两项504直接归因图片CDN。
+- 此次来源清单匹配，无listener/owner/live残留；23份绑定输入摘要未变，没有产品、门槛、请求重试或fixture变化。预启动工具的公开CLI回归4项通过，独立复核关闭基线附属证据哈希缺口后才运行。原始结果汇总为`/tmp/crawler-favorite-followup-20261106-summary.json`，图片诊断为`/tmp/crawler-tmdb-image-recheck-20261106.json`。以下网络复测与更早结果保留各自时点，不拼成单轮通过。
+
 - 用户怀疑代理不稳定并要求再试后，独立复测[本轮 idle/busy](/private/tmp/crawler-matched-final-hint100-post-v4/campaign-20261106T020030Z/campaign.json)已完成。产品`97cc6b1b`、工具`159934b2`、fixture来源`1c3af023`及原门槛不变；仅衍生driver的模式与独立轮元数据变化，没有新增请求重试、重seed或覆盖原失败。
 
 | 本轮阶段 | 实际终态 | 关键结果 |
@@ -13,7 +18,8 @@
 
 - 本轮四阶段业务均verified、来源清单均匹配且无listener/owner/live残留。两种推荐用例在各阶段均取得200个有效完整结果；busy边界外成功尝试另留，不删样本。所有推荐观察均为空，不能推广为非空推荐性能；也不能由延迟推断每次回源或缓存命中。本轮未复现原EOF/502，但新busy收藏相对门失败使`all_candidate_passed=false`，整体验收仍未通过。汇总见`/tmp/crawler-tmdb-network-repeat-20261106-summary.json`。
 - 此前失败的`/tv/9500258/similar`和`/movie/9000417/similar`又各做3次独立curl诊断，6次均完成TLS并返回HTTP404（请求使用合成ID），耗时0.626–0.821秒；未验证正文，不冒称typed NotFound合同测试。诊断保持系统路由，使用IPv4且无显式应用代理；curl并非产品ureq传输，不能据此确定此前EOF连接阶段或代理根因。凭据仅在内存及stdin使用，冻结app hash未变，见`/tmp/crawler-tmdb-failed-path-recheck-20261106.json`。
-- 收藏相对失败的只读核对尚不能归因：两版marks handler的相关行为与mutation SQL相同，重复`favorite=true`仍进入事务、upsert及summary刷新；普通POST日志只有整数毫秒响应头耗时，且与played共用路由，不能拆出writer等待、SQL或COMMIT。保留正式Fail，下一步只做隔离收藏诊断，不以单轮差异断言代码缺陷或抖动，见`/tmp/crawler-favorite-busy-relative-root-cause-review.md`。
+- 收藏相对失败的只读核对尚不能归因：两版marks handler的相关行为与mutation SQL相同，重复`favorite=true`仍进入事务、upsert及summary刷新；普通POST日志只有整数毫秒响应头耗时，且与played共用路由，不能拆出writer等待、SQL或COMMIT。不以单轮差异断言代码缺陷或抖动，见`/tmp/crawler-favorite-busy-relative-root-cause-review.md`。
+- 后续[收藏聚焦诊断](/tmp/crawler-favorite-focused-campaign-20261106T025249Z/campaign.json)已完成旧→新→旧→新四轮busy测量，仅运行原`self-write-favorite`，每轮200次HTTP200；p95依次为1.287375、1.359042、1.204958、1.319708ms。四轮均退出0，来源清单匹配且无listener/owner/live残留；没有复现原完整busy的3.509875ms。该诊断明确`diagnostic_only=true`、`acceptance_eligible=false`；两个新版诊断仍使用原完整旧busy报告作基线，不把相邻聚焦旧轮当完整基线。聚焦轮改变前序请求与扫描时机，不能据此定位根因、追认原165/166为通过，或替代完整166项验收。
 - 以下为本轮之前三个独立campaign的原始终态，失败及Not run保持当时语境，不拼称单次六阶段通过。产品、工具、fixture分别绑定，没有改写原baseline、binding及历史报告。
 
 | 轮次 | 终态 | 基线与后续 |
