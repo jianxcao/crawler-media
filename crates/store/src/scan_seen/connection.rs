@@ -32,7 +32,9 @@ impl crate::LibraryConnection<'_> {
                 "UPDATE library_files
                     SET mtime_ns = ?2 * 1000000, size_bytes = ?3,
                         source_digest = ?4
-                  WHERE path_key = ?1",
+                  WHERE path_key = ?1
+                    AND (mtime_ns IS NOT ?2 * 1000000 OR size_bytes IS NOT ?3
+                         OR source_digest IS NOT ?4)",
                 params![path_key, mtime_ms, file_size, content_digest],
             )?;
         }
