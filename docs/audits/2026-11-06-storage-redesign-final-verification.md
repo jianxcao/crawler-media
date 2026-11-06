@@ -40,7 +40,7 @@ cold 其余四项单样本相对变化：`jellyfin-genres` +74.01%、`jellyfin-s
 
 最终产品 `da68921a1a5d`、同版本构建的 UI bundle 在 `127.0.0.1:18766` 运行，启动健康检查、二进制摘要与 UI 逐文件摘要匹配；浏览器使用获授权的新测试空间，结束时关闭。有限 smoke 实际检查：桌面媒体库首页与电影列表、Movie/TV 详情、390×844 手机布局、S01E01→S01E02 分集选择、返回与刷新、空库、媒体库不存在及返回恢复。首页显示 4 个可见 Library、3000 Movie、300 TV，所选剧集显示 70/70 集；电影与剧集标题、简介、选择集和空媒体轨道提示可见。手机首页和剧集详情实测 `scrollWidth=innerWidth=390`。这不是全部页面、全部详情字段或新的 VidHub 实播验收。
 
-图片检查取得 poster、fanart、still、Library cover 四项 HTTP 200、`image/jpeg`；前三项完整字节与对应本地副本文件的 SHA256 一致，分别为 21,796、21,796、21,401 字节，cover 为 88,455 字节并实际渲染。夹具使用其既有占位画面，不代表真实影片海报或人物头像。抓到的 31 次静态图片请求均无 Authorization，应用数据请求使用独立测试会话。无章节帧的已知文件及不存在 poster 的无鉴权请求均为预期 HTTP404；**成功章节帧和真实慢源图片 smoke 为 Not run**，没有捏造对应夹具。受控超时、共享填充与缓存恢复的公开 Router 回归仍是独立自动化证据。
+图片检查取得 poster、fanart、still、Library cover 四项 HTTP 200、`image/jpeg`；前三项完整字节与对应本地副本文件的 SHA256 一致，分别为 21,796、21,796、21,401 字节，cover 为 88,455 字节并实际渲染。夹具使用其既有占位画面，不代表真实影片海报或人物头像。抓到的 31 次静态图片请求均无 Authorization，应用数据请求使用独立测试会话。无章节帧的已知文件及不存在 poster 的无鉴权请求均为预期 HTTP404；**该轮成功章节帧和真实慢源图片 smoke 为 Not run**，没有捏造对应夹具。受控超时、共享填充与缓存恢复的公开 Router 回归仍是独立自动化证据。
 
 已捕获的 TV 与错误路径浏览器事件没有未处理 JavaScript 异常；5 条控制台网络错误均来自主动访问不存在 Library 的 API 请求。Movie 事件捕获不含 Runtime console 订阅，不能据此声称全程零 console error。正常页面网络事件、图片字节及截图保存在 `/private/tmp/cm-final-page-service-da68921a/`，主收据为 `browser-receipt.json`；`browser-actions.json`、`public-image-results.json` 与各 `events-sanitized.json` 记录实际范围。
 
@@ -49,6 +49,14 @@ cold 其余四项单样本相对变化：`jellyfin-genres` +74.01%、`jellyfin-s
 页面准备改变的是自有副本的后台工作状态，不能称其与性能工作量等价。`performance-slo.md` 明确保留必需 media-info probe，idle 仅表示没有 full scan；两份性能 baseline 的 queued probe 分别为 23,681/23,668、running 各 1，obligation 为 20,227/20,058。最终 idle/busy 全日志分别出现 896/1085 次媒体信息探测开始；这些计数不与具体请求关联，既不能否定正式结果，也不能证明性能失败由 probe 造成。业务 oracle 和字节绑定不证明后台负载相等，详见 `/tmp/cm-final-fixture-background-review.md`。
 
 正常 TERM 后 DB-family 句柄、18766 listener 和 owner 均关闭，自有 LIVE 副本已删除，冻结 baseline、原 app/sidecar 及 STRM/pan 清单仍一致；`stopped.json`、`cleanup.json` 记录核验。测试密码和原始含请求头事件仅保存在私有临时记录，公开文档不含凭据。
+
+### 后续章节图片页面补测
+
+使用同一最终二进制/UI 的新独立副本，生成 320×180 的 JPEG 测试图并只给该副本的一条有效章节缓存填入明确标注的合成章节。生产 `/api/v1/chapters/{file_id}/0` 无凭据请求返回 HTTP 200、`image/jpeg`、7,526 字节，与生成文件 SHA256 一致；浏览器直接图片及 Movie 详情章节卡片均实际显示 320×180 图像，截图已检查。此为本地图片交付/展示验证，不是视频抽帧或实际影片章节识别验证；真实慢源页面仍为 Not run。
+
+准备阶段先因用户授权清理的旧 `97cc6b1b` 二进制不再存在而拒绝，服务/副本均未创建；随后只对该未使用的历史路径及精确哈希核对清理清单，其他冻结输入、当前二进制及 UI 摘要继续完整核验，原 freeze 未改。该准入补项先失败后通过，3 项离线回归通过。第二次准备把停止态 sidecar 误判为活跃数据库，未启动服务；来源一致、句柄检查后删除副本并保留失败。最终准备改为检查进程/端口/全部 DB-family 句柄，允许正常 SQLite 处理停止态 WAL family。
+
+本轮点击章节的播放按钮曾打开合成媒体播放器，显示无法直接播放提示后返回，没有确认实播；不计为播放验收或大图灯箱通过。返回后未等待第二次懒加载，复入图片状态为 Unverified，首次详情显示证据独立保留。测试空间 2 已关闭；服务正常 TERM、生命周期脚本退出 0，原清单一致，端口/句柄/owner 关闭且 LIVE 已删除。证据在 `/tmp/cm-final-chapter-page-da68921a/` 的 `public-image-result.json`、`detail-result.json`、`browser-receipt.json`、`stopped.json` 和 `cleanup.json`。
 
 ## 容量与内存边界
 
@@ -63,6 +71,14 @@ cold 其余四项单样本相对变化：`jellyfin-genres` +74.01%、`jellyfin-s
 原引用的 2026-10-29 审核报告缺失，其 S-DB5、Z4、Z3、5.2 及 D1–D13 原始细项仍为 unknown，不据猜测标记完成。历史容量 COMMIT 尾延迟、内存长期归属、三轮性能相对失败仍未闭合；有限页面 smoke 已完成，不替代其余门。
 
 历史实播受控恢复记录原 app/sidecar 和 STRM/pan 清单一致、测试连接及自有进程清理；本次三轮性能各自 source/cleanup 收据通过。页面 smoke 的独立来源与正常停机/句柄/副本清理收据均通过。
+
+## 后续 Playback 保留验证与临时数据清理
+
+最终产品 `da68921a` 新增独立保留/重启轮通过：完整复制恢复停止态的 DB、WAL 和 SHM，实际基线为 7 条 unit、7 条 log、7 个关闭 SID、0 个 active session。只在自有副本停用后台监听和定时任务，连续两次正常启动、登录、通过 marks/resume 读回管理员六条记录并正常 TERM；四张 Playback 表的全部行在两轮后均与七行基线精确一致，包括另一用户的数据。二进制摘要和两次 health 身份匹配，各次服务退出 0；原恢复源 DB family、原 app/sidecar 及 STRM/pan 清单一致，端口与句柄关闭，测试副本已删除。收据为 `/tmp/cm-final-playback-preservation-da68921a-v3/receipt.json`。
+
+这轮验证没有新增 Native 实播，不改写历史严格六行基线 Fail 或原 driver 退出 Unverified。前两次工具失败分别报告 `'position_ms'` 和 `unable to open database file`，原失败收据保留。后续脚本位置从 resume 读取，只有自有副本已停止且无 sidecar/句柄时才使用 immutable，运行中及有 WAL 的数据库保持普通只读。
+
+用户授权清理历史 `/tmp` 测试数据后，18 份已结束后端日志经无损压缩、解压 SHA256 核验才删除原日志，释放 6,274,760,296 字节；另在确认无打开句柄后删除过期候选二进制和六份已结束测试快照的数据库，共 170 个文件、1,342,450,328 字节。小型报告、摘要及清理清单保留；旧日志应通过 `.log.gz` 读取，已删除的旧二进制/数据库不能再声称可重放。清单为 `/tmp/cm-evidence-compression-20261106.json` 和 `/tmp/cm-ended-history-cleanup-20261106.json`。当前构建缓存、最终产品、正式基线及待诊断的容量和恢复源均保留，原用户数据库与媒体未参与删除。
 
 ## 复核与交付边界
 
