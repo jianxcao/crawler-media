@@ -2,7 +2,9 @@
 
 ## 最新状态（2026-11-06）
 
-后续完整 COMMIT 插桩轮已完成 450 万步及双 oracle，最大已覆盖写事务约 1.728 秒定位到 WAL 同步墙钟区间，只证明 writer 至少被持有相应时长；Integrity 推进与扫描/Transfer 发布严格区分，诊断仍不能替代正式性能门。单次 busy 的 166 项 gate/业务检查已完成，后处理因混写 JSON 退出，关联审计无效、原 `complete=false` 和相对失败保留；分流修复正在验证，新实际轮尚未运行。用户要求的增量清理已完成，核验时 `/private/tmp` 约 33GiB、磁盘可用约 93GiB。详见[最终验证追补](../../audits/2026-11-06-storage-redesign-final-verification.md)。整体验收状态不变。
+混写采集缺陷已修复并完成一次分流补跑：166 项各 200 个样本、双通道完整性和独立核验通过；采集 driver 退出 0、性能 gate 退出 1，相对门 163/166。played/progress/page-detail 完整响应仍失败，played 与 scan 持锁高度重叠但尚无子阶段根因，progress 无同等仪表。原数据/基线清单一致，自有进程、句柄与副本清理完成。该插桩诊断含明确记录的监控干扰，原正式失败及 COMMIT 风险均未关闭，见[分流补跑记录](../../audits/2026-11-06-storage-redesign-final-verification.md#分流修复后的完整补跑)。
+
+此前完整 COMMIT 插桩轮已完成 450 万步及双 oracle，最大已覆盖写事务约 1.728 秒定位到 WAL 同步墙钟区间，只证明 writer 至少被持有相应时长；Integrity 推进与扫描/Transfer 发布严格区分，诊断仍不能替代正式性能门。首次完整 busy 的 166 项 gate/业务检查已完成，后处理因混写 JSON 退出，关联审计无效、原 `complete=false` 和相对失败保留；该轮结束时分流修复尚在验证，后续完成结果见上。用户要求的增量清理已完成，核验时 `/private/tmp` 约 33GiB、磁盘可用约 93GiB。详见[最终验证追补](../../audits/2026-11-06-storage-redesign-final-verification.md)。整体验收状态不变。
 
 后续独立补测：最终产品的七行 Playback 副本连续两次正常重启、公开 marks/resume 读回和四表逐行保留通过；新隔离页面轮的本地合成章节图片无鉴权交付及首次详情卡片显示通过，服务正常退出且原清单/句柄/副本清理通过。保留历史六行基线 Fail、原 driver Unverified、页面复入懒加载未复验及真实慢源 Not run。用户授权的历史 `/tmp` 日志压缩和过期二进制/数据库清理已释放约 7.1 GiB，详见[最终验证追补](../../audits/2026-11-06-storage-redesign-final-verification.md)。性能相对门及 COMMIT 尾延迟仍未闭合，整体状态不变。
 

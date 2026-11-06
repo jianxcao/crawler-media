@@ -2,7 +2,9 @@
 
 ## 最新状态（2026-11-06）
 
-后续完整 COMMIT 插桩轮已完成 450 万步及前后规模/外键 oracle，退出 0；最大已覆盖写事务约 1.728 秒定位到 WAL `xSync` 的墙钟区间，只证明 writer 至少被持有相应时长，未测精确最大持锁时间。设备等待与调度未区分，历史 2.735 秒不能追溯归因。操作为 Integrity 推进，不能改称 L1 的发布事务；仍保留尾延迟风险和诊断非正式门的边界。单次 busy 关联诊断已完成 166 项及业务检查，但 driver 因 stdout/stderr 混写的 JSON 解析失败，原 `complete=false`、相对失败及无有效关联审计均保留。日志分流正在验证，未启动新实际轮。历史数据再次按精确范围清理后 `/private/tmp` 约 33GiB、磁盘可用约 93GiB；保留原日志和当前基线。详见[最终验证追补](2026-11-06-storage-redesign-final-verification.md)及[COMMIT 观察](2026-11-06-commit-tail-observation.md)。
+日志分流修复后的单次完整补跑已结束：166 项各 200 个样本，采集 driver 退出 0、双通道数量/请求关联/最终水印通过，业务 verified；性能 gate 退出 1，相对门 163/166（played、progress、page-detail 完整响应失败）。本轮 played 的慢尾主要表现为 writer 等待，与同实例 scan 持锁区间高度重叠，自有 COMMIT p95 约 0.060ms；未锁定扫描子阶段，progress 原因 unknown。推荐的主要时间位于 HTTP 调用区间，不能再细分本地客户端、网络或上游。原混写失败不变；本轮是有已知监控干扰限制的插桩诊断，不能替代正式门。详情、原始回执和完整边界见[分流补跑记录](2026-11-06-storage-redesign-final-verification.md#分流修复后的完整补跑)。
+
+此前完整 COMMIT 插桩轮已完成 450 万步及前后规模/外键 oracle，退出 0；最大已覆盖写事务约 1.728 秒定位到 WAL `xSync` 的墙钟区间，只证明 writer 至少被持有相应时长，未测精确最大持锁时间。设备等待与调度未区分，历史 2.735 秒不能追溯归因。操作为 Integrity 推进，不能改称 L1 的发布事务；仍保留尾延迟风险和诊断非正式门的边界。首次完整 busy 关联诊断已完成 166 项及业务检查，但 driver 因 stdout/stderr 混写的 JSON 解析失败，原 `complete=false`、相对失败及无有效关联审计均保留。该轮结束时日志分流尚在验证，后续完成结果见上。历史数据再次按精确范围清理后 `/private/tmp` 约 33GiB、磁盘可用约 93GiB；保留原日志和当前基线。详见[最终验证追补](2026-11-06-storage-redesign-final-verification.md)及[COMMIT 观察](2026-11-06-commit-tail-observation.md)。
 
 后续独立补测：最终产品的七行 Playback 副本连续两次正常重启、公开 marks/resume 读回和四表逐行保留通过；新隔离页面轮的本地合成章节图片无鉴权交付及首次详情卡片显示通过，服务正常退出且原清单/句柄/副本清理通过。保留历史六行基线 Fail、原 driver Unverified、页面复入懒加载未复验及真实慢源 Not run。用户授权的历史 `/tmp` 日志压缩和过期二进制/数据库清理已释放约 7.1 GiB，详见[最终验证追补](2026-11-06-storage-redesign-final-verification.md)。性能相对门及 COMMIT 尾延迟仍未闭合，整体状态不变。
 

@@ -84,11 +84,25 @@ cold 其余四项单样本相对变化：`jellyfin-genres` +74.01%、`jellyfin-s
 
 完整 COMMIT 插桩轮已完成 4,500,001 次推进、前后规模/外键 oracle 与副本清理，退出 0。最大已覆盖写事务约 1.728 秒，主要处于 WAL `xSync` 墙钟区间，同库 writer 至少被持有相应时长；未测精确最大持锁时间。另有 PROFILE 后数据库同步长区间，设备等待与调度尚不能区分。该轮是 Integrity 诊断、`acceptance_eligible=false`，不替代正式容量门或归因历史峰值。首次第 41 步因 read ring 溢出的失败与后续聚合修正分别保留，见[COMMIT 观察](2026-11-06-commit-tail-observation.md)。
 
-单次完整 busy 关联诊断的 gate 已完成全部 166 项，每项 200 个准入样本，业务 verified、stage 退出 1，性能结果仍有失败；随后 driver 在解析混写的 writer JSON 时退出，原收据保持 `complete=false`，未生成有效关联审计。原日志与性能报告保留在 `/private/tmp/crawler-perfgate-matched-candidate-1c3af0236c14/retests/causal-da68921a-reviewed-20261106T100015Z/` 及该 root 的 `backend-logs/1793960016213790000.log`。严格离线恢复未能证明完整拆分，因此没有补写派生通过结论。源码核查确认临时启动脚本把 stdout tracing 与 stderr 结构化事件重定向到同一文件；分流修复正在验证，新的实际诊断尚未运行。此前因工具摘要绑定拒绝的零样本尝试也独立保留，不计入完整诊断。
+首次完整 busy 关联诊断的 gate 已完成全部 166 项，每项 200 个准入样本，业务 verified、stage 退出 1，性能结果仍有失败；随后 driver 在解析混写的 writer JSON 时退出，原收据保持 `complete=false`，未生成有效关联审计。原日志与性能报告保留在 `/private/tmp/crawler-perfgate-matched-candidate-1c3af0236c14/retests/causal-da68921a-reviewed-20261106T100015Z/` 及该 root 的 `backend-logs/1793960016213790000.log`。严格离线恢复未能证明完整拆分，因此没有补写派生通过结论。源码核查确认临时启动脚本把 stdout tracing 与 stderr 结构化事件重定向到同一文件；当时分流修复尚在验证，后续补跑结果见下。此前因工具摘要绑定拒绝的零样本尝试也独立保留，不计入完整诊断。
 
 本次忙碌轮正常清理，自有 listener、owner、LIVE 均不存在，原 app/sidecar、STRM/pan 和 baseline 清单一致。关联审计缺失不能被业务 verified 或 report complete 替代，原正式相对失败不变。
 
 用户再次要求检查 `/private/tmp` 后，确认 `/tmp` 是同目录链接。清理了无打开句柄的旧 Go 缓存，并对另外五份历史 backend 日志无损压缩、解压 SHA256 核验后删除原文本，回收逻辑字节 1,890,459,955。随后取得两把 Cargo 槽锁、确认无 cargo/rustc 进程和打开句柄，仅删除三处 Rust incremental 子目录，逻辑字节 16,952,378,165；编译产物、源码和测试事实仍保留。两步的可用空间增量分别为 1,965,051,904 和 15,860,408,320 字节，不能把逻辑体积当成 APFS 实际回收量。核验时 `/private/tmp` 约 33GiB、磁盘可用约 93GiB；同卷其他进程可能改变后续值。收据为 `/tmp/cm-history-cleanup-20261106T102325Z.json` 和 `/tmp/cm-incremental-cache-cleanup-20261106T102606Z.json`。旧 Go 只读目录首次删除失败后，仅将缓存目录设为当前用户可写并重试，失败记录保留。当前容量源、性能基线、恢复源、凭据和新原始日志均未删除，原用户数据库和媒体未参与清理。
+
+### 分流修复后的完整补跑
+
+临时启动脚本仅将 stderr 从合并的 `backend.log` 分到 `backend-diagnostics.log`，沿用同一个插桩二进制，产品及六份冻结性能工具均未修改。公开 subprocess 回归确定性复现旧合并写入会打断 JSON；失败后实现分流和审计，3 项 CLI 回归通过，覆盖真实 ANSI 格式的脱敏日志、缺失/损坏记录、重复编号、水印/丢失计数及 page-detail 缺少子请求的拒绝。父任务独立重跑 3 项均退出 0、核对源码/冻结工具摘要与独立静态复审后，补跑原 166 项顺序和每项 200 个样本。
+
+新轮实际 559.563 秒，采集 driver 退出 0、`complete=true`、`capture_valid=true`；性能 gate 仍退出 1，业务 verified、所有绝对门通过，相对门 163/166。其中 played p95 5.395708ms（+332.09%）、progress p95 5.985708ms（+43.80%）、page-detail **完整响应** p95 1053.018334ms（+32.46%）未通过；page-detail 初始 bundle 的 8.735250ms 不是该相对门比较值。progress 保留额外一次窗口外尝试。本轮收藏相对门通过，不追溯解释或改写旧失败。此为插桩诊断，不能替代正式性能验收。
+
+两通道完整审计及父任务独立复核均通过：257,337 条唯一 writer、10,174 条 Similar 事件、3,987 次目标请求、800 条 stdout 请求诊断、3,187 个 Similar caller，最终数量水印匹配、丢失为 0。原收据的 `diagnostic_valid=false` 明确保留逐阶段分析与采集有效性之间的区别，不能将其解释为采集再次失败。原 app/sidecar、STRM/pan 及 baseline 清单一致，自有 listener、owner、LIVE 和进程均已清理。原混写轮的失败与原始材料保持不变。
+
+200 个 played 请求均能按 request ID 和采集样本 ID 唯一关联到同一 Library writer 实例。writer 等待 p95 4.778458ms，自有 COMMIT p95 0.059959ms；这是各自独立分位，不能相加。客户端 attempt 的 p95 样本等待 4.793709ms，其中与 scan 确定持锁区间重叠 4.786417ms，自有 COMMIT 0.034125ms；最大 attempt 样本等待 5.017875ms，scan 重叠约 5.010–5.012ms。按全部同实例候选区间的并集计算，200 个请求中 174 个有 scan 候选，另有 3 个 unknown 候选；支持本轮扫描竞争解释，不证明唯一因果，不定位到具体扫描子阶段。progress 没有同等逐请求仪表，原因仍 unknown。
+
+推荐分析覆盖独立 Similar 的 193 个 pending 和 page-detail 的 147 个 pending 窗口；其余分别 7/53 个初始 ready。340 个同 key 窗口各观察到一组 worker/origin 边界及一次 404 attempt，未见重试；origin p95 分别约 909.796/968.457ms，后台 ready 到最后一次 poll 进入的 p95 约 103.812/97.050ms。HTTP 调用区间占主要耗时，但未区分本地 HTTP 客户端、网络与上游处理；key 与时间窗口不证明唯一请求所有权。初始 ready 样本不能填入虚构刷新阶段。监控期间曾误完整读取一次当时 stdout 文件，实际字节数 unknown，潜在时序干扰无法量化，已作为诊断限制保留；没有因此重跑或追认为正式通过。
+
+新收据、报告、客户端事件和父核验在 `/private/tmp/crawler-perfgate-matched-candidate-1c3af0236c14/retests/causal-da68921a-separated-v3/`；两份原始日志为该 root 的 `backend-logs/1793962507692359000.stdout.log` / `.stderr.log`。`parent-verification.json` 绑定原始字节及摘要。采集工具与回归位于 `/tmp/cm-final-separated-capture-v3/`；逐请求分析为 `/tmp/cm-final-separated-played-analysis-union.json` 及 `/tmp/cm-final-separated-similar-analysis.json`，报告同名 `.md`（played 报告不带 `-union`）。本次只关闭混写采集缺陷，既有严格验收和尾延迟限制保持不变。
 
 ## 复核与交付边界
 
