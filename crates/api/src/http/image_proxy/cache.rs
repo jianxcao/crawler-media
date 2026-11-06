@@ -70,9 +70,12 @@ impl ImageCache {
     ) -> Result<Image, String> {
         let path = self.root.join(format!("{}.img", super::cache_key(url)));
         {
+            super::phase::set("cache_prepare_lock");
             let _guard = self.publication.lock().map_err(|e| e.to_string())?;
+            super::phase::set("cache_prepare");
             fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
             self.reserve(0)?;
+            super::phase::set("cache_lookup");
             if let Some(image) = self.read(&path, true)? {
                 return Ok(image);
             }
@@ -90,13 +93,18 @@ impl ImageCache {
         {
             return Err("Invalid image content type".into());
         }
+        super::phase::set("cache_publish_lock");
         let _guard = self.publication.lock().map_err(|e| e.to_string())?;
+        super::phase::set("cache_reserve");
         self.reserve(0)?;
+        super::phase::set("cache_lookup");
         if let Some(image) = self.read(&path, true)? {
             return Ok(image);
         }
         let size = content_type.len() as u64 + 1 + bytes.len() as u64;
+        super::phase::set("cache_reserve");
         self.reserve(size)?;
+        super::phase::set("cache_publish");
         let temp = self.root.join(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()

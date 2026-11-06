@@ -3,6 +3,10 @@ use super::*;
 use tokio::sync::watch;
 
 type Outcome = Result<Arc<Image>, DeliveryError>;
+pub(super) enum WaitResult {
+    Shared(Outcome),
+    Deadline,
+}
 const ADMISSION_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -26,36 +30,92 @@ impl From<&str> for DeliveryError {
         Self::Upstream(error.into())
     }
 }
+impl DeliveryError {
+    pub(super) fn class(&self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::Timeout => "timeout",
+            Self::Upstream(_) => "upstream",
+            Self::Cache(_) => "cache",
+        }
+    }
+}
+#[derive(Default)]
+struct Completion {
+    timed_out: bool,
+    outcome: Option<(&'static str, u64)>,
+    logged: bool,
+}
 pub(super) struct Fill {
-    deadline: Instant,
+    pub(super) id: u64,
+    pub(super) progress: Arc<Progress>,
+    started: Instant,
+    completion: Mutex<Completion>,
     outcome: watch::Sender<Option<Outcome>>,
 }
 impl Fill {
-    fn new(deadline: Instant) -> Self {
+    fn new() -> Self {
         Self {
-            deadline,
+            id: phase::id(),
+            progress: Progress::new("fill_gate"),
+            started: Instant::now(),
+            completion: Mutex::new(Completion::default()),
             outcome: watch::channel(None).0,
         }
     }
-    pub(super) async fn wait(&self, observer_deadline: Instant) -> Outcome {
-        let deadline = observer_deadline.min(self.deadline);
+    pub(super) async fn wait(&self, observer_deadline: Instant) -> WaitResult {
         let mut receiver = self.outcome.subscribe();
         loop {
             if let Some(outcome) = receiver.borrow().clone() {
-                return outcome;
+                return WaitResult::Shared(outcome);
             }
             match tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
+                tokio::time::Instant::from_std(observer_deadline),
                 receiver.changed(),
             )
             .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
-                    return Err(DeliveryError::Cache("image worker lost its result".into()));
+                    return WaitResult::Shared(Err(DeliveryError::Cache(
+                        "image worker lost its result".into(),
+                    )));
                 }
-                Err(_) => return Err(DeliveryError::Timeout),
+                Err(_) => return WaitResult::Deadline,
             }
+        }
+    }
+    pub(super) fn observer_timed_out(&self) {
+        let outcome = {
+            let mut state = self.completion.lock();
+            state.timed_out = true;
+            Self::take_completion(&mut state)
+        };
+        self.log_completion(outcome);
+    }
+    fn finished(&self, outcome: &Outcome) {
+        let outcome = {
+            let mut state = self.completion.lock();
+            let class = match outcome {
+                Ok(_) => "success",
+                Err(error) => error.class(),
+            };
+            state.outcome = Some((class, phase::millis(self.started)));
+            Self::take_completion(&mut state)
+        };
+        self.log_completion(outcome);
+    }
+    fn take_completion(state: &mut Completion) -> Option<(&'static str, u64)> {
+        if state.timed_out && !state.logged && state.outcome.is_some() {
+            state.logged = true;
+            state.outcome
+        } else {
+            None
+        }
+    }
+    fn log_completion(&self, outcome: Option<(&'static str, u64)>) {
+        if let Some((outcome, fill_elapsed_ms)) = outcome {
+            tracing::info!(target: "api::image_delivery", event = "image_fill_complete", fill_id = self.id, outcome, fill_elapsed_ms);
         }
     }
 }
@@ -64,16 +124,16 @@ impl ImageProxy {
         self: &Arc<Self>,
         url: String,
         deadline: Instant,
-    ) -> Result<Arc<Fill>, DeliveryError> {
+    ) -> Result<(Arc<Fill>, &'static str), DeliveryError> {
         let fill = {
             let mut pending = self.pending.lock();
             if let Some(fill) = pending.get(&url) {
-                return Ok(fill.clone());
+                return Ok((fill.clone(), "joined"));
             }
             if pending.len() >= ADMISSION_CAPACITY {
                 return Err(DeliveryError::Busy);
             }
-            let fill = Arc::new(Fill::new(deadline));
+            let fill = Arc::new(Fill::new());
             pending.insert(url.clone(), fill.clone());
             fill
         };
@@ -101,9 +161,12 @@ impl ImageProxy {
                     return;
                 }
             };
+            flight.fill.progress.set("fill_worker_queue");
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let outcome = fetch_cached(&proxy, &flight.url, deadline);
+                let outcome = phase::scope(flight.fill.progress.clone(), || {
+                    fetch_cached(&proxy, &flight.url, deadline)
+                });
                 flight.complete(outcome);
             })
             .await;
@@ -111,7 +174,7 @@ impl ImageProxy {
                 tracing::error!(%error, "Image delivery worker failed");
             }
         });
-        Ok(fill)
+        Ok((fill, "leader"))
     }
 }
 fn fetch_cached(proxy: &ImageProxy, url: &str, deadline: Instant) -> Outcome {
@@ -122,6 +185,7 @@ fn fetch_cached(proxy: &ImageProxy, url: &str, deadline: Instant) -> Outcome {
             return Err("image queue deadline reached".into());
         }
         // Synchronous transport retains this worker's permit until it really ends.
+        phase::set("upstream_request");
         (proxy.fetch)(url).map_err(|error| {
             fetch_error = Some(error.clone());
             error.to_string()
@@ -140,6 +204,7 @@ struct Flight {
 impl Flight {
     fn complete(&mut self, outcome: Outcome) {
         if !self.completed {
+            self.fill.finished(&outcome);
             self.fill.outcome.send_replace(Some(outcome));
             self.completed = true;
         }

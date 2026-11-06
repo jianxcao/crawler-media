@@ -317,9 +317,8 @@ async fn stalled_person_image_source_has_bounded_completion() {
             .starts_with(b"\x89PNG")
     );
     // The worker may still publish after this observer's deadline. Observe
-    // recovery through HTTP; joining that expired flight may legitimately return
-    // 504 until its actual completion. This is an eventual recovery assertion,
-    // not a retry added to the production delivery path.
+    // recovery through HTTP. A completed flight may still report its terminal
+    // error before a subsequent request starts a new one.
     let recovered = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let response = image(fixture.app(), "/Persons/Jane%20Roe/Images/Primary").await;
@@ -339,6 +338,47 @@ async fn stalled_person_image_source_has_bounded_completion() {
     .await
     .expect("completed origin work must restore usable cached delivery");
     assert_image(recovered).await;
+}
+
+#[tokio::test]
+async fn later_person_image_observer_keeps_its_own_deadline() {
+    let source = Gate::new(true);
+    let _release = Release(source.clone());
+    let fixture = Fixture::new(source.transport());
+    let uri = "/Persons/Jane%20Roe/Images/Primary";
+    let first = tokio::spawn(image(fixture.app(), uri));
+    entered(&source).await;
+    let first_result = tokio::time::timeout(Duration::from_secs(3), first).await;
+
+    let mut second = tokio::spawn(image(fixture.app(), uri));
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut second).await;
+    let was_pending = early.is_err();
+    source.release();
+    let second_result = if was_pending {
+        tokio::time::timeout(Duration::from_secs(1), second).await
+    } else {
+        early
+    };
+
+    assert_eq!(
+        first_result.unwrap().unwrap().status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
+    assert!(
+        second_result.is_ok(),
+        "later observer did not complete after release"
+    );
+    assert!(
+        was_pending,
+        "later observer returned before the shared fill completed"
+    );
+    assert_image(second_result.unwrap().unwrap()).await;
+
+    let offline = fixture
+        .state
+        .clone()
+        .with_image_fetch(Arc::new(|_| Err("origin is now unavailable".into())));
+    assert_image(image(api::router(offline), uri).await).await;
 }
 
 #[tokio::test]

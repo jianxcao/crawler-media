@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod cache;
+mod phase;
 mod runtime;
 pub(crate) use runtime::ImageProxy;
 pub type ImageFetch = Arc<dyn Fn(&str) -> Result<(String, Vec<u8>), String> + Send + Sync>;
@@ -182,6 +183,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), runtime::DeliveryError> {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .ok_or(runtime::DeliveryError::Timeout)?;
+        phase::set("upstream_request");
         let response = request
             .config()
             .timeout_global(Some(remaining))
@@ -215,6 +217,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), runtime::DeliveryError> {
         if !content_type.starts_with("image/") {
             return Err(format!("上游不是图片: {content_type}").into());
         }
+        phase::set("upstream_body");
         let bytes = read_image_body(response.into_body(), IMAGE_RESPONSE_LIMIT)?;
         return Ok((content_type, bytes));
     }
