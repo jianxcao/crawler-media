@@ -19,6 +19,12 @@ struct Genre {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum TmdbError {
+    #[error("catalog origin deadline elapsed")]
+    OriginTimeout,
+    #[error("catalog request deadline elapsed")]
+    Deadline,
+    #[error("catalog request cancelled")]
+    Cancelled,
     #[error("not found: {0}")]
     NotFound(String),
     #[error("http: {0}")]

@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+用户确认的收尾顺序为 TMDB 有限重试 → 收藏 busy 性能 → COMMIT 尾延迟 → 图片504定位 → 最终受影响验收。第1项已按TDD实现：最多三次、上游六秒含刷新/名额等待与正文、继承调用方取消/截止、429 Retry-After和抖动、永久错误停止、共享 origin 超时与个人取消区分；stale、typed 404及缓存发布错误保留。media全套94通过，API单元与六组相关集成合计352通过，release all-target Clippy及独立review通过。细节见[TMDB 请求回归](../../testing/tmdb-retry-regressions.md)。同步网络尝试受剩余超时约束，不能立即强制取消；本项不追认任何旧性能/页面失败，也未重跑491、容量和内存。下一项定位收藏原相对门失败。
+
 用户于2026-11-06明确允许TMDB网络问题先暂缓：已确认的外网请求超时不再反复阻塞本轮本地修复，原失败与Not run仍如实保留，原SLO和基线准入规则不变。代理根因尚未确认；图片代理504的内部等待仍待排查，不能一并排除。当前优先定位收藏写入波动和2.735秒COMMIT尖峰，此项暂缓不代表整体验收通过。
 
 后续[单次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)在旧版完整166项后停止：162通过、stage退出1、业务verified，但人物图片504、人物详情502、poster504及Similar不足样本/502使基线无效。协调器及quiet wrapper实际退出2，新版**Not run**，没有继续重复对照。旧版收藏本次200次HTTP200、p95 3.436208ms；虽然接近此前新版3.509875ms，整轮无效基线不能支持版本比较或根因结论，原新busy相对Fail保留。

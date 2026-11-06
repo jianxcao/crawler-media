@@ -48,13 +48,27 @@ impl Drop for Admission {
 }
 pub(super) struct OriginPermit;
 impl OriginPermit {
-    pub(super) fn acquire() -> Self {
+    pub(super) fn acquire() -> Result<Self, TmdbError> {
         let mut counts = budget().counts.lock();
-        while counts.active >= 8 {
-            budget().ready.wait(&mut counts);
+        loop {
+            crate::catalog_request::check_current()?;
+            if counts.active < 8 {
+                break;
+            }
+            if let Some(request) = crate::CatalogRequest::current() {
+                let remaining = request
+                    .deadline()
+                    .saturating_duration_since(std::time::Instant::now());
+                budget().ready.wait_for(
+                    &mut counts,
+                    remaining.min(std::time::Duration::from_millis(20)),
+                );
+            } else {
+                budget().ready.wait(&mut counts);
+            }
         }
         counts.active += 1;
-        Self
+        Ok(Self)
     }
 }
 impl Drop for OriginPermit {
@@ -67,20 +81,39 @@ struct Leader<'a> {
     flights: &'a Flights,
     key: &'a str,
     flight: Arc<Flight>,
-    _admission: Admission,
+    admission: Option<Admission>,
 }
 impl Leader<'_> {
+    fn release(&mut self) {
+        let mut flights = self.flights.0.lock();
+        if flights
+            .get(self.key)
+            .is_some_and(|flight| Arc::ptr_eq(flight, &self.flight))
+        {
+            flights.remove(self.key);
+        }
+        drop(flights);
+        drop(self.admission.take());
+    }
+
     fn publish(&self, outcome: Outcome) {
         *self.flight.result.lock() = Some(outcome);
         self.flight.ready.notify_all();
     }
+
+    fn complete(mut self, outcome: Outcome) -> Outcome {
+        // Free this leader's admission before a live follower can re-elect.
+        self.release();
+        self.publish(outcome.clone());
+        outcome
+    }
 }
 impl Drop for Leader<'_> {
     fn drop(&mut self) {
+        self.release();
         if self.flight.result.lock().is_none() {
             self.publish(Err(TmdbError::Http("catalog refresh interrupted".into())));
         }
-        self.flights.0.lock().remove(self.key);
     }
 }
 impl Flights {
@@ -89,38 +122,65 @@ impl Flights {
         key: &str,
         work: impl FnOnce() -> Outcome,
     ) -> Result<Outcome, CapacityExhausted> {
-        let (flight, admission) = {
-            let mut flights = self.0.lock();
-            if let Some(flight) = flights.get(key) {
-                (flight.clone(), None)
-            } else {
-                let admission = Admission::acquire()?;
-                let flight = Arc::new(Flight::default());
-                flights.insert(key.to_string(), flight.clone());
-                (flight, Some(admission))
+        loop {
+            if let Err(error) = crate::catalog_request::check_current() {
+                return Ok(Err(error));
             }
-        };
-        if let Some(admission) = admission {
-            let leader = Leader {
-                flights: self,
-                key,
-                flight,
-                _admission: admission,
+            let (flight, admission) = {
+                let mut flights = self.0.lock();
+                if let Some(flight) = flights.get(key) {
+                    (flight.clone(), None)
+                } else {
+                    let admission = Admission::acquire()?;
+                    let flight = Arc::new(Flight::default());
+                    flights.insert(key.to_string(), flight.clone());
+                    (flight, Some(admission))
+                }
             };
-            let outcome = work();
-            leader.publish(outcome.clone());
-            Ok(outcome)
-        } else {
-            let mut result = flight.result.lock();
-            while result.is_none() {
-                flight.ready.wait(&mut result);
+            if let Some(admission) = admission {
+                let leader = Leader {
+                    flights: self,
+                    key,
+                    flight,
+                    admission: Some(admission),
+                };
+                let outcome = work();
+                return Ok(leader.complete(outcome));
+            } else {
+                let mut result = flight.result.lock();
+                while result.is_none() {
+                    if let Some(request) = crate::CatalogRequest::current() {
+                        if let Err(error) = request.check() {
+                            return Ok(Err(error));
+                        }
+                        let remaining = request
+                            .deadline()
+                            .saturating_duration_since(std::time::Instant::now());
+                        flight.ready.wait_for(
+                            &mut result,
+                            remaining.min(std::time::Duration::from_millis(20)),
+                        );
+                    } else {
+                        flight.ready.wait(&mut result);
+                    }
+                }
+                if let Err(error) = crate::catalog_request::check_current() {
+                    return Ok(Err(error));
+                }
+                // The loop establishes a completed result without a panicking unwrap.
+                let outcome = result.clone().unwrap_or_else(|| {
+                    Err(TmdbError::Http(
+                        "catalog refresh completed without a result".into(),
+                    ))
+                });
+                drop(result);
+                if matches!(outcome, Err(TmdbError::Deadline | TmdbError::Cancelled)) {
+                    // This caller still has its own live budget. The old leader
+                    // has ended; it must not cancel an independent observer.
+                    continue;
+                }
+                return Ok(outcome);
             }
-            // The loop establishes a completed result without a panicking unwrap.
-            Ok(result.clone().unwrap_or_else(|| {
-                Err(TmdbError::Http(
-                    "catalog refresh completed without a result".into(),
-                ))
-            }))
         }
     }
 }

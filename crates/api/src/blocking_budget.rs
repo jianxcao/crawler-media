@@ -1,13 +1,20 @@
 //! 有界 blocking 预算：把 owned 快照上的 CPU/IO/网络工作移出 async worker。
 //!
-//! 这不是全局请求超时，也不是取消机制：`run` 的外层 `tokio::time::timeout`
-//! 只决定调用方愿意等待多久，permit 由 `spawn_blocking` 闭包持有到闭包真正
-//! 结束，因此超时后阻塞工作仍会跑完并释放槽位。
+//! `run` installs a cooperative catalog deadline/cancellation scope. Arbitrary
+//! blocking work cannot be forcibly stopped; its permit stays owned until the
+//! actual worker ends, including after the async caller leaves.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+struct CancelCatalog(media::CatalogRequest);
+impl Drop for CancelCatalog {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -75,9 +82,11 @@ impl BlockingBudget {
             .clone()
             .try_acquire_owned()
             .map_err(|_| BlockingError::Busy)?;
+        let request = media::CatalogRequest::new(std::time::Instant::now() + deadline);
+        let _cancel = CancelCatalog(request.clone());
         let task = tokio::task::spawn_blocking(move || {
             let _permit: OwnedSemaphorePermit = permit;
-            work()
+            request.scope(work)
         });
         match tokio::time::timeout(deadline, task).await {
             Ok(Ok(value)) => Ok(value),
@@ -138,9 +147,11 @@ impl Reservation {
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, BlockingError> {
         let permit = self.permit;
+        let request = media::CatalogRequest::new(std::time::Instant::now() + deadline);
+        let _cancel = CancelCatalog(request.clone());
         let task = tokio::task::spawn_blocking(move || {
             let _permit: OwnedSemaphorePermit = permit;
-            work()
+            request.scope(work)
         });
         match tokio::time::timeout(deadline, task).await {
             Ok(Ok(value)) => Ok(value),

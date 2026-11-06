@@ -47,6 +47,7 @@ dependencies = [
  "flate2",
  "futures-core",
  "hooks",
+ "httpdate",
  "image",
  "indexer",
  "jobs",

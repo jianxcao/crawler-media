@@ -98,6 +98,23 @@ impl CatalogCache {
         key: &str,
         decode: impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<T, TmdbError> {
+        if self.source == crate::response_cache::CacheSource::Tmdb {
+            let request = crate::CatalogRequest::origin(
+                std::time::Instant::now() + crate::TMDB_REQUEST_TIMEOUT,
+            );
+            request.scope(|| self.get_or_fetch_in_scope(http, key, decode))
+        } else {
+            self.get_or_fetch_in_scope(http, key, decode)
+        }
+    }
+
+    fn get_or_fetch_in_scope<T>(
+        &self,
+        http: &impl crate::client::CatalogGet,
+        key: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<T, TmdbError> {
+        crate::catalog_request::check_current()?;
         if let Some(body) = self.get_fresh(key)? {
             match decode(&body) {
                 Ok(value) => {
@@ -122,22 +139,17 @@ impl CatalogCache {
             self.refresh_body(http, key, &decode)
         });
         let body = match refresh {
-            Ok(result) => result?,
+            Ok(Ok(body)) => body,
+            Ok(Err(error @ TmdbError::OriginTimeout)) => {
+                return self.stale_or_error(key, error, &decode);
+            }
+            Ok(Err(error)) => return Err(error),
             Err(refresh::CapacityExhausted) => {
-                // Admission failed before any work: retain valid stale results,
-                // while backend failures and completed refresh errors stay typed.
-                if let Some(body) = self.get_stale(key)? {
-                    match decode(&body) {
-                        Ok(value) => {
-                            tracing::warn!(source = %self.source, path = key, "Catalog refresh capacity exhausted; using valid stale Metadata cache");
-                            return Ok(value);
-                        }
-                        Err(error) => {
-                            tracing::warn!(source = %self.source, path = key, %error, "Rejected stale Metadata cache after refresh admission failure");
-                        }
-                    }
-                }
-                return Err(TmdbError::Http("catalog refresh capacity exhausted".into()));
+                return self.stale_or_error(
+                    key,
+                    TmdbError::Http("catalog refresh capacity exhausted".into()),
+                    &decode,
+                );
             }
         };
         decode(&body)
@@ -149,9 +161,10 @@ impl CatalogCache {
         key: &str,
         decode: &impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<Arc<str>, TmdbError> {
-        let response = {
-            let _permit = refresh::OriginPermit::acquire();
-            http.get(key)
+        let response = refresh::OriginPermit::acquire().and_then(|_permit| http.get(key));
+        let response = match crate::catalog_request::check_current() {
+            Ok(()) => response,
+            Err(error) => Err(error),
         };
         let fetched = match response {
             Ok(body) => match decode(&body) {
@@ -179,22 +192,47 @@ impl CatalogCache {
         match fetched {
             Ok(body) => Ok(body),
             Err(error) => {
-                tracing::warn!(source = %self.source, path = key, %error, "Metadata refresh failed; trying valid stale cache");
-                if let Some(body) = self.get_stale(key)? {
-                    match decode(&body) {
-                        Ok(_) => {
-                            tracing::info!(source = %self.source, path = key, "Using valid stale Metadata cache");
-                            return Ok(Arc::from(body));
-                        }
-                        Err(stale_error) => {
-                            tracing::warn!(source = %self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");
-                        }
-                    }
-                }
-                tracing::error!(source = %self.source, path = key, %error, "Metadata unavailable without valid cache");
-                Err(error)
+                self.stale_or_error(key, error, &|body| decode(body).map(|_| Arc::from(body)))
             }
         }
+    }
+
+    fn stale_or_error<T>(
+        &self,
+        key: &str,
+        error: TmdbError,
+        decode: &impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<T, TmdbError> {
+        if matches!(
+            &error,
+            TmdbError::NotFound(_) | TmdbError::Cancelled | TmdbError::Deadline
+        ) {
+            return Err(error);
+        }
+        // An origin timeout still permits local stale data. A caller leaving
+        // does not: check it again before and after the cache IO.
+        match crate::catalog_request::check_current() {
+            Ok(()) | Err(TmdbError::OriginTimeout) => {}
+            Err(error) => return Err(error),
+        }
+        tracing::warn!(source = %self.source, path = key, %error, "Metadata refresh failed; trying valid stale cache");
+        if let Some(body) = self.get_stale(key)? {
+            match decode(&body) {
+                Ok(value) => {
+                    match crate::catalog_request::check_current() {
+                        Ok(()) | Err(TmdbError::OriginTimeout) => {}
+                        Err(error) => return Err(error),
+                    }
+                    tracing::info!(source = %self.source, path = key, "Using valid stale Metadata cache");
+                    return Ok(value);
+                }
+                Err(stale_error) => {
+                    tracing::warn!(source = %self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");
+                }
+            }
+        }
+        tracing::error!(source = %self.source, path = key, %error, "Metadata unavailable without valid cache");
+        Err(error)
     }
 
     fn load(&self, key: &str, allow_stale: bool) -> Result<Option<String>, TmdbError> {

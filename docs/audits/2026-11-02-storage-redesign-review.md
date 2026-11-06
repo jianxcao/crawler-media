@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+- 本轮按用户确认的顺序先完成 TMDB 有限重试：最多三个实际尝试（含双栈），上游六秒预算贯穿刷新等待、origin 准入、完整正文和退避，并继承调用方截止/取消；429 遵守 Retry-After，永久错误与重定向停止。共享上游超时与个人取消分开，保留有效 stale、typed 404 和缓存发布错误。TDD、共享取消/限流/断流/真实本机 HTTP 等回归及独立 review 已完成；media 全套94通过，API单元与六组相关集成合计352通过，release all-target Clippy通过。策略、回归位置及同步网络取消限制见[TMDB 请求回归](../testing/tmdb-retry-regressions.md)。本项未重跑正式 perfgate、491/UI、容量或内存，不改变下述历史失败；下一项为收藏 busy 性能定位。
+
 - 用户于2026-11-06明确允许TMDB网络问题先暂缓处理；已确认的外网请求超时不再反复阻塞本轮本地修复。原HTTP失败、无效基线和Not run仍保留，不改原SLO或准入规则；代理根因尚未确认，图片代理504也未证明全部来自外网，仍需排查其内部等待。后续优先定位收藏写入波动和2.735秒COMMIT尖峰。
 
 - 后续按预先限定的停止条件，仅做[一次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)。旧版完整166项、162通过、stage退出1、业务verified，但严格基线准入失败；协调器及quiet wrapper实际退出2，新版**Not run**，未继续重复对照。人物图片和poster的准备请求各504，人物详情准备502；Similar仅记录84个窗口内样本，86次尝试为85次200、1次502，无法作为200样本基线。原失败报告全部保留。

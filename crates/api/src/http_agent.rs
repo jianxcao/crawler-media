@@ -155,6 +155,18 @@ pub fn refresh_direct_agents() {
     *DIRECT_V6.write() = build_agent(None, IpFamily::Ipv6Only);
 }
 
+/// Select one address family without performing a second request on failure.
+pub(crate) fn catalog_agent(proxy: Option<&str>, family: IpFamily) -> ureq::Agent {
+    match proxy.filter(|value| !value.trim().is_empty()) {
+        Some(proxy) => build_agent(Some(proxy), family),
+        None => match family {
+            IpFamily::Ipv4Only => DIRECT_V4.read().clone(),
+            IpFamily::Ipv6Only => DIRECT_V6.read().clone(),
+            _ => build_agent(None, family),
+        },
+    }
+}
+
 /// 允许走全局代理的外部元数据域名白名单。
 /// 只有属于该列表的国外服务才允许通过代理转发；网盘、视频直链、测试用例等一律直连。
 const PROXY_ALLOWED_HOST_SUFFIXES: &[&str] = &[
