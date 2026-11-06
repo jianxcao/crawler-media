@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+后续完整 COMMIT 插桩轮已完成 450 万步及前后规模/外键 oracle，退出 0；最大已覆盖写事务约 1.728 秒定位到 WAL `xSync` 的墙钟区间，只证明 writer 至少被持有相应时长，未测精确最大持锁时间。设备等待与调度未区分，历史 2.735 秒不能追溯归因。操作为 Integrity 推进，不能改称 L1 的发布事务；仍保留尾延迟风险和诊断非正式门的边界。单次 busy 关联诊断已完成 166 项及业务检查，但 driver 因 stdout/stderr 混写的 JSON 解析失败，原 `complete=false`、相对失败及无有效关联审计均保留。日志分流正在验证，未启动新实际轮。历史数据再次按精确范围清理后 `/private/tmp` 约 33GiB、磁盘可用约 93GiB；保留原日志和当前基线。详见[最终验证追补](2026-11-06-storage-redesign-final-verification.md)及[COMMIT 观察](2026-11-06-commit-tail-observation.md)。
+
 后续独立补测：最终产品的七行 Playback 副本连续两次正常重启、公开 marks/resume 读回和四表逐行保留通过；新隔离页面轮的本地合成章节图片无鉴权交付及首次详情卡片显示通过，服务正常退出且原清单/句柄/副本清理通过。保留历史六行基线 Fail、原 driver Unverified、页面复入懒加载未复验及真实慢源 Not run。用户授权的历史 `/tmp` 日志压缩和过期二进制/数据库清理已释放约 7.1 GiB，详见[最终验证追补](2026-11-06-storage-redesign-final-verification.md)。性能相对门及 COMMIT 尾延迟仍未闭合，整体状态不变。
 
 最终候选验证已完成记录，**整体验收仍未通过**：`da68921a` 的 release workspace 实际退出0（602组汇总3976 passed、0 failed、25 ignored，含嵌套汇总未去重），Web lint/typecheck/940项测试/build及相关release all-target Clippy通过。正式候选对历史准入基线的 idle/busy/cold 三轮分别164/166、161/166、160/166，均完整、业务和绝对预算通过，但原相对门失败；不是新配对六阶段通过，也未归因为代理。最终二进制有限桌面/390px页面、分集切换、空库/404恢复及四类静态图检查完成，31次图片请求无Authorization；该轮章节帧成功与真实慢源页面为Not run，后续章节图片补测见上。每轮来源清单一致，自有服务/句柄/副本均清理。详见[最终验证记录](2026-11-06-storage-redesign-final-verification.md)。历史COMMIT/有限内存/严格Playback及缺失引用的限制保留。

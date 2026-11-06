@@ -1,5 +1,15 @@
 # 百万文件夹具的有界 COMMIT 观察
 
+## 后续完整推进诊断（2026-11-06）
+
+最终产品 `da68921a` 的独立插桩轮完成 4,500,001 次连续推进，退出 0、耗时 1,743.2493405 秒。前后 oracle 均核验 100,000 Media、1,000,000 文件、1,000,000 Playback、10 用户和外键错误 0；有效设置仍为 WAL、FULL、autocheckpoint 1000。收据为 `/tmp/cm-final-commit-tail/receipt-yxe3jjl0/receipt.json`，完整分段和限制见 `/tmp/cm-final-commit-tail-result.md`。本轮 `acceptance_eligible=false`，不替代无插桩的正式容量性能门。
+
+最大已覆盖写事务为 1.728381958 秒，其中 WAL `xSync` 墙钟区间为 1.728137 秒，位于 COMMIT PROFILE 内；该 PROFILE 的线程 CPU 约 0.163ms。另一次已覆盖写事务为 1.286486959 秒，数据库 `xSync` 为 1.285887 秒且在 PROFILE 之后。这些事务在 writer 内执行，只能据此证明相应持锁至少达到该时长，harness 没有记录精确的最大 `writer_hold_ns`。只能定位新样本的同步调用区间，不能区分设备等待与线程调度，也不能追溯归因历史 2.735 秒样本。该操作是 Integrity 推进，不是扫描或 Transfer 发布，不将其改写为审核 L1 所述的“发布单事务”。FULL 同步期间仍占用同库 writer，相关尾延迟风险继续保留；1 秒 API 准入限时不等于已准入事务的执行上限。
+
+首次完整诊断在第 41 步因旧 VFS read ring 溢出退出 101，只有 before oracle，没有 after；原失败收据 `/tmp/cm-final-commit-tail/receipt-ahlwefoh/receipt.json` 保留。真实 SQLite 聚合读取的失败回归及修正验证后，后续轮改为保留全部读取总量和最慢 16 个读取区间，非读取事件溢出仍拒绝；新轮发现 133 个至少 100ms 的触发。不能据最慢 16 个区间推算全部读取的文件分类或 COMMIT 读取占比，mmap fetch 未计时。终态触发没有后续八个控制，另一次重叠触发少五个控制，均明示保留。
+
+后续完整轮已删除测试副本，源夹具 inode/大小/mtime 清单一致，自有进程退出；这只是源元数据核验。持久性、checkpoint、资源常量与产品代码均未修改。以下保留此前有界轮的实际结果及其版本。
+
 本轮在 `2f5cd923f95f` 的独立 APFS 副本中没有复现历史 2.735 秒 COMMIT。临时诊断与无插桩控制均实际退出 0；这关闭本轮观察，不关闭历史尾延迟风险，也不替代此前完整容量终态。
 
 ## 边界与实际结果

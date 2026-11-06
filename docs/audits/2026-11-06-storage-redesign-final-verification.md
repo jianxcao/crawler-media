@@ -80,6 +80,16 @@ cold 其余四项单样本相对变化：`jellyfin-genres` +74.01%、`jellyfin-s
 
 用户授权清理历史 `/tmp` 测试数据后，18 份已结束后端日志经无损压缩、解压 SHA256 核验才删除原日志，释放 6,274,760,296 字节；另在确认无打开句柄后删除过期候选二进制和六份已结束测试快照的数据库，共 170 个文件、1,342,450,328 字节。小型报告、摘要及清理清单保留；旧日志应通过 `.log.gz` 读取，已删除的旧二进制/数据库不能再声称可重放。清单为 `/tmp/cm-evidence-compression-20261106.json` 和 `/tmp/cm-ended-history-cleanup-20261106.json`。当前构建缓存、最终产品、正式基线及待诊断的容量和恢复源均保留，原用户数据库与媒体未参与删除。
 
+## 后续性能诊断与增量清理（2026-11-06）
+
+完整 COMMIT 插桩轮已完成 4,500,001 次推进、前后规模/外键 oracle 与副本清理，退出 0。最大已覆盖写事务约 1.728 秒，主要处于 WAL `xSync` 墙钟区间，同库 writer 至少被持有相应时长；未测精确最大持锁时间。另有 PROFILE 后数据库同步长区间，设备等待与调度尚不能区分。该轮是 Integrity 诊断、`acceptance_eligible=false`，不替代正式容量门或归因历史峰值。首次第 41 步因 read ring 溢出的失败与后续聚合修正分别保留，见[COMMIT 观察](2026-11-06-commit-tail-observation.md)。
+
+单次完整 busy 关联诊断的 gate 已完成全部 166 项，每项 200 个准入样本，业务 verified、stage 退出 1，性能结果仍有失败；随后 driver 在解析混写的 writer JSON 时退出，原收据保持 `complete=false`，未生成有效关联审计。原日志与性能报告保留在 `/private/tmp/crawler-perfgate-matched-candidate-1c3af0236c14/retests/causal-da68921a-reviewed-20261106T100015Z/` 及该 root 的 `backend-logs/1793960016213790000.log`。严格离线恢复未能证明完整拆分，因此没有补写派生通过结论。源码核查确认临时启动脚本把 stdout tracing 与 stderr 结构化事件重定向到同一文件；分流修复正在验证，新的实际诊断尚未运行。此前因工具摘要绑定拒绝的零样本尝试也独立保留，不计入完整诊断。
+
+本次忙碌轮正常清理，自有 listener、owner、LIVE 均不存在，原 app/sidecar、STRM/pan 和 baseline 清单一致。关联审计缺失不能被业务 verified 或 report complete 替代，原正式相对失败不变。
+
+用户再次要求检查 `/private/tmp` 后，确认 `/tmp` 是同目录链接。清理了无打开句柄的旧 Go 缓存，并对另外五份历史 backend 日志无损压缩、解压 SHA256 核验后删除原文本，回收逻辑字节 1,890,459,955。随后取得两把 Cargo 槽锁、确认无 cargo/rustc 进程和打开句柄，仅删除三处 Rust incremental 子目录，逻辑字节 16,952,378,165；编译产物、源码和测试事实仍保留。两步的可用空间增量分别为 1,965,051,904 和 15,860,408,320 字节，不能把逻辑体积当成 APFS 实际回收量。核验时 `/private/tmp` 约 33GiB、磁盘可用约 93GiB；同卷其他进程可能改变后续值。收据为 `/tmp/cm-history-cleanup-20261106T102325Z.json` 和 `/tmp/cm-incremental-cache-cleanup-20261106T102606Z.json`。旧 Go 只读目录首次删除失败后，仅将缓存目录设为当前用户可写并重试，失败记录保留。当前容量源、性能基线、恢复源、凭据和新原始日志均未删除，原用户数据库和媒体未参与清理。
+
 ## 复核与交付边界
 
 四个顺序项已分别提交推送：TMDB 有界重试 `e7a12033`、收藏争用诊断 `2f5cd923`、有界 COMMIT 观察 `590d96dd`、图片观察者截止及分段日志修复 `da68921a`。最终产品独立源码复核未发现新增必须修改项；本记录经独立数值/状态及页面证据复核，未发现必须修改的实质性不一致（`/tmp/cm-final-closeout-doc-review.md`、`/tmp/cm-final-page-evidence-review.md`）；性能失败复核尚无足够因果证据支持新的产品修复。没有改门槛、删除失败样本、把初始响应替代完整响应、调整 SQLite 持久化策略或资源常量。
