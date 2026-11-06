@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+用户于2026-11-06明确允许TMDB网络问题先暂缓：已确认的外网请求超时不再反复阻塞本轮本地修复，原失败与Not run仍如实保留，原SLO和基线准入规则不变。代理根因尚未确认；图片代理504的内部等待仍待排查，不能一并排除。当前优先定位收藏写入波动和2.735秒COMMIT尖峰，此项暂缓不代表整体验收通过。
+
 后续[单次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)在旧版完整166项后停止：162通过、stage退出1、业务verified，但人物图片504、人物详情502、poster504及Similar不足样本/502使基线无效。协调器及quiet wrapper实际退出2，新版**Not run**，没有继续重复对照。旧版收藏本次200次HTTP200、p95 3.436208ms；虽然接近此前新版3.509875ms，整轮无效基线不能支持版本比较或根因结论，原新busy相对Fail保留。
 
 本次TMDB推荐日志为整体请求超时、人物为连接超时，客户端域名是`api.themoviedb.org`；图片日志仅能定位到交付截止超时。事后对fixture的`image.tmdb.org`头像地址做3次独立curl请求，均200、0.242–0.356秒，正文未验证；不能据此确认代理根因或图片504的具体来源。来源及清理通过、23份绑定输入未变，产品和原门槛不变。证据为`/tmp/crawler-favorite-followup-20261106-summary.json`及`/tmp/crawler-tmdb-image-recheck-20261106.json`。以下为此前各轮实际结果，保留历史失败与Not run。

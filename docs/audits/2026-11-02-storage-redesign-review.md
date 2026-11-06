@@ -2,6 +2,8 @@
 
 ## 最新状态（2026-11-06）
 
+- 用户于2026-11-06明确允许TMDB网络问题先暂缓处理；已确认的外网请求超时不再反复阻塞本轮本地修复。原HTTP失败、无效基线和Not run仍保留，不改原SLO或准入规则；代理根因尚未确认，图片代理504也未证明全部来自外网，仍需排查其内部等待。后续优先定位收藏写入波动和2.735秒COMMIT尖峰。
+
 - 后续按预先限定的停止条件，仅做[一次完整busy对照](/private/tmp/crawler-matched-final-hint100-post-v4/favorite-full-busy-replay-20261106T031247Z/campaign.json)。旧版完整166项、162通过、stage退出1、业务verified，但严格基线准入失败；协调器及quiet wrapper实际退出2，新版**Not run**，未继续重复对照。人物图片和poster的准备请求各504，人物详情准备502；Similar仅记录84个窗口内样本，86次尝试为85次200、1次502，无法作为200样本基线。原失败报告全部保留。
 - 本次旧版收藏写入为200次HTTP200、p95 3.436208ms，接近此前新版3.509875ms；只能记录旧版也出现该量级耗时，整轮旧基线无效，不能由此作有效版本比较或确认抖动/扫描阶段等根因。原网络复测的新busy收藏相对Fail不变，后续聚焦结果亦不替代该失败。
 - 本次日志将TMDB推荐失败记为`timeout: global`（`/movie/9001506/similar`），人物详情记为`timeout: connect`（`/person/3234`），两者均无有效stale缓存；该客户端固定访问`api.themoviedb.org`。图片日志仅有`image delivery deadline reached`，没有具体连接阶段证据。结束后对fixture记录的`image.tmdb.org`头像地址做3次独立curl诊断，均HTTP200、0.242–0.356秒；保持系统路由、IPv4，无显式代理环境变量，未验证图片正文。curl与产品链路不同，不能据此确认代理根因，或把两项504直接归因图片CDN。
