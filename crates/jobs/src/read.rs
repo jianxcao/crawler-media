@@ -90,20 +90,19 @@ fn collect_last(
     index: &HashMap<JobDefId, usize>,
     children: &mut [JobChildren],
 ) -> Result<(), JobError> {
-    let placeholders = vec!["?"; chunk.len()].join(",");
-    // 使用 SQLite 窗口函数 ROW_NUMBER() 仅取出每个 def 的 top 1 最新终态记录，
-    // 避免全量历史加载和反序列化，防止历史行损坏或大历史导致的内存/CPU开销。
+    let values = vec!["(?)"; chunk.len()].join(",");
+    // Seek one index entry per requested definition before fetching full rows.
+    // Exact finished_at/run_after ties intentionally retain the single-read
+    // selection policy; retention continues protecting the whole maximum tie.
     let sql = format!(
-        "WITH ranked AS (
-             SELECT {JOB_COLS},
-                    ROW_NUMBER() OVER (
-                        PARTITION BY def_id
-                        ORDER BY finished_at DESC, run_after DESC
-                    ) as rn
-             FROM jobs
-             WHERE def_id IN ({placeholders}) AND status IN ('succeeded','failed','cancelled')
-         )
-         SELECT {JOB_COLS} FROM ranked WHERE rn = 1"
+        "WITH requested(def_id) AS (VALUES {values})
+         SELECT {JOB_COLS} FROM jobs WHERE id IN (
+             SELECT (SELECT id FROM jobs AS history
+                     WHERE history.def_id = requested.def_id
+                       AND status IN ('succeeded','failed','cancelled')
+                     ORDER BY finished_at DESC, run_after DESC LIMIT 1)
+             FROM requested
+         )"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(

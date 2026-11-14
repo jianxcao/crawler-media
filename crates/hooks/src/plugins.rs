@@ -156,14 +156,12 @@ fn browser_render(
         proxy: site.proxy.clone(),
         cdp_url: site.cdp_url.clone(),
     };
-    browser
-        .render(&request)
-        .map_err(|err| match err {
-            indexer::IndexerError::BrowserSetup(_) | indexer::IndexerError::BrowserBusy => {
-                PluginError::BrowserPreNavigation(err.to_string())
-            }
-            other => PluginError::Fetch(other.to_string()),
-        })
+    browser.render(&request).map_err(|err| match err {
+        indexer::IndexerError::BrowserSetup(_) | indexer::IndexerError::BrowserBusy => {
+            PluginError::BrowserPreNavigation(err.to_string())
+        }
+        other => PluginError::Fetch(other.to_string()),
+    })
 }
 
 fn require_cookie(site: &Site) -> Result<(), PluginError> {
@@ -311,7 +309,8 @@ impl<'a> CheckInPlugin<'a> {
         let url = format!("{}attendance.php", site_base(&site));
         let (body, cookie_update) = match via {
             CheckInVia::Http(http) => {
-                let response = http.post(&url, "", site.cookie.as_deref(), site.proxy.as_deref())?;
+                let response =
+                    http.post(&url, "", site.cookie.as_deref(), site.proxy.as_deref())?;
                 let body = response_body(&response).to_string();
                 let cookie = cookies_from_response(&response);
                 (body, cookie)

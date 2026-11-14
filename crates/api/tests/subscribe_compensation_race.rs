@@ -24,7 +24,9 @@ fn undo_ensured_media_guards_and_leaves_referenced_media() {
 
     // With no reference, undo succeeds
     assert!(store.get_media(media_id).unwrap().is_some());
-    let deleted = store.undo_ensured_media_if_unreferenced(media_id, &media).unwrap();
+    let deleted = store
+        .undo_ensured_media_if_unreferenced(media_id, &media)
+        .unwrap();
     assert!(deleted);
     assert!(store.get_media(media_id).unwrap().is_none());
 }
@@ -95,7 +97,10 @@ fn undo_ensured_media_refuses_to_restore_over_concurrent_alias_change() {
     let restored = store.undo_ensured_media(&media, previous.as_ref()).unwrap();
     assert!(!restored, "并发改写后不得恢复旧身份");
     let current = store.get_media(existing_id).unwrap().unwrap();
-    assert_eq!(current.original_title.as_deref(), Some("Concurrent Rewrite"));
+    assert_eq!(
+        current.original_title.as_deref(),
+        Some("Concurrent Rewrite")
+    );
 
     // 没有并发改写时，恢复必须成功且回到 previous 的内容。
     let restored = store

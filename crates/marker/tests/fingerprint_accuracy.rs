@@ -53,9 +53,17 @@ fn adjacent_matching_ranges_are_combined_into_the_full_three_minute_segment() {
 #[test]
 fn outro_matching_preserves_full_boundaries_and_builds_a_credits_chapter() {
     let (first, second) = split_three_minute_match();
-    let detected = match_episodes_outros(&[(1, first, 600_000), (2, second, 900_000)], 15.0, 240.0);
+    let detected = match_episodes_outros(
+        &[
+            (1, first.clone(), 600_000),
+            (2, second, 900_000),
+            (3, first, 700_000),
+        ],
+        15.0,
+        240.0,
+    );
 
-    assert_eq!(detected.len(), 2);
+    assert_eq!(detected.len(), 3);
     assert_eq!(detected[0].outro_start_ms, 600_000);
     assert!((175_000..=185_000).contains(&(detected[0].outro_end_ms - detected[0].outro_start_ms)));
 
@@ -80,22 +88,23 @@ impl FingerprintEngine for FixedEngine {
         _path: &Path,
         start_secs: u32,
         duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         Ok(vec![start_secs, duration_secs])
     }
 
     fn find_common_segment(
         &self,
-        _first: &[u32],
-        _second: &[u32],
+        first: &[u32],
+        second: &[u32],
         _min_duration_secs: f32,
         _max_duration_secs: f32,
     ) -> Option<CommonSegment> {
         Some(CommonSegment {
-            start1_sec: 2.0,
-            end1_sec: 182.0,
-            start2_sec: 5.0,
-            end2_sec: 185.0,
+            start1_sec: 3.0 * first[0] as f32 - 1.0,
+            end1_sec: 3.0 * first[0] as f32 + 179.0,
+            start2_sec: 3.0 * second[0] as f32 - 1.0,
+            end2_sec: 3.0 * second[0] as f32 + 179.0,
             duration_sec: 180.0,
             score: 0.5,
         })
@@ -105,13 +114,23 @@ impl FingerprintEngine for FixedEngine {
 #[test]
 fn a_different_fingerprint_engine_can_be_injected_without_ffmpeg() {
     let engine = FixedEngine;
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, Path::new("ignored.mkv"), 12, 30)
-        .expect("injected extraction should be used");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        Path::new("ignored.mkv"),
+        12,
+        30,
+        &marker::WorkControl::default(),
+    )
+    .expect("injected extraction should be used");
     assert_eq!(fingerprint, vec![12, 30]);
 
-    let matched =
-        match_episodes_fingerprints_with(&engine, &[(1, vec![1]), (2, vec![2])], 15.0, 240.0);
-    assert_eq!(matched.len(), 2);
+    let matched = match_episodes_fingerprints_with(
+        &engine,
+        &[(1, vec![1, 11]), (2, vec![2, 12]), (3, vec![3, 13])],
+        15.0,
+        240.0,
+    );
+    assert_eq!(matched.len(), 3);
     assert_eq!(matched[0].intro_start_ms, 2_000);
     assert_eq!(matched[1].intro_start_ms, 5_000);
 }
@@ -126,6 +145,7 @@ impl FingerprintEngine for TruncatedRemoteStreamOnce {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             Err("Empty fingerprint extracted: File ended prematurely".into())
@@ -149,13 +169,19 @@ impl FingerprintEngine for TruncatedRemoteStreamOnce {
 fn remote_truncated_fingerprint_sample_is_retried_once() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("episode.strm");
-    std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
+    std::fs::write(&path, "http://127.0.0.1:9/episode.mkv\n").unwrap();
     let engine = TruncatedRemoteStreamOnce {
         attempts: AtomicUsize::new(0),
     };
 
-    let fingerprint =
-        extract_audio_fingerprint_at_with(&engine, &path, 2398, 180).expect("retry should recover");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("retry should recover");
 
     assert_eq!(fingerprint, vec![7, 11, 13]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 2);
@@ -172,6 +198,7 @@ impl FingerprintEngine for TransientRemoteStreamTwice {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
             Err(self.error.into())
@@ -195,14 +222,20 @@ impl FingerprintEngine for TransientRemoteStreamTwice {
 fn remote_truncated_fingerprint_retries_after_repeated_transient_failures() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("episode.strm");
-    std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
+    std::fs::write(&path, "http://127.0.0.1:9/episode.mkv\n").unwrap();
     let engine = TransientRemoteStreamTwice {
         attempts: AtomicUsize::new(0),
         error: "Empty fingerprint extracted: File ended prematurely",
     };
 
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
-        .expect("retries should recover after repeated temporary truncation");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("retries should recover after repeated temporary truncation");
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
@@ -212,14 +245,20 @@ fn remote_truncated_fingerprint_retries_after_repeated_transient_failures() {
 fn remote_read_errors_are_retried_after_transient_truncated_streams() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("episode.strm");
-    std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
+    std::fs::write(&path, "http://127.0.0.1:9/episode.mkv\n").unwrap();
     let engine = TransientRemoteStreamTwice {
         attempts: AtomicUsize::new(0),
         error: "Empty fingerprint extracted: Read error",
     };
 
-    let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
-        .expect("remote read errors should retry and recover");
+    let fingerprint = extract_audio_fingerprint_at_with(
+        &engine,
+        &path,
+        2398,
+        180,
+        &marker::WorkControl::default(),
+    )
+    .expect("remote read errors should retry and recover");
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
@@ -237,7 +276,12 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
             .with_max_level(tracing::Level::INFO)
             .try_init();
         let fingerprint = ChromaprintEngine
-            .extract_at(Path::new("ignored.mkv"), 0, 30)
+            .extract_at(
+                Path::new("ignored.mkv"),
+                0,
+                30,
+                &marker::WorkControl::default(),
+            )
             .expect("fake ffmpeg should return decodable PCM");
         assert!(!fingerprint.is_empty());
         return;
@@ -268,6 +312,8 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+    seal_executable(&ffmpeg);
+    fake_ffprobe(&bin_dir);
 
     let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
         .args([
@@ -316,7 +362,8 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
             .try_init();
         let temp = std::env::var_os("MARKER_EMPTY_PCM_STRM_PATH")
             .expect("test STRM path should be provided");
-        let result = ChromaprintEngine.extract_at(Path::new(&temp), 0, 30);
+        let result =
+            ChromaprintEngine.extract_at(Path::new(&temp), 0, 30, &marker::WorkControl::default());
         assert!(result.is_err(), "empty FFmpeg output must fail extraction");
         return;
     }
@@ -325,7 +372,7 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
 
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let strm_path = temp.path().join("episode.strm");
-    std::fs::write(&strm_path, "https://media.example/episode.mkv\n")
+    std::fs::write(&strm_path, "http://127.0.0.1:9/episode.mkv\n")
         .expect("STRM fixture should be written");
     let bin_dir = temp.path().join("bin");
     std::fs::create_dir(&bin_dir).expect("fake ffmpeg directory should be created");
@@ -340,6 +387,8 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+    seal_executable(&ffmpeg);
+    fake_ffprobe(&bin_dir);
 
     let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
         .args([
@@ -389,4 +438,34 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
             && !logs.contains("relative-secret"),
         "diagnostic must not leak URL credentials or headers: {logs}"
     );
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
+}
+
+#[cfg(unix)]
+fn fake_ffprobe(bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let program = bin.join("ffprobe");
+    std::fs::write(&program, r##"#!/bin/sh
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"audio","start_pts":0,"time_base":"1/16000"}],"format":{"start_time":"0"}}'
+"##).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    seal_executable(&program);
 }

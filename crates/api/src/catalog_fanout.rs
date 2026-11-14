@@ -16,6 +16,12 @@ impl<H: media::CatalogGet + Send + Sync> DoubanCatalog<H> {
 }
 
 impl<H: media::CatalogGet + Send + Sync> Catalog for DoubanCatalog<H> {
+    fn douban_subject_with_credits(
+        &self,
+        id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        self.inner.subject_with_credits(id)
+    }
     fn source_name(&self) -> &'static str {
         "douban"
     }
@@ -227,6 +233,16 @@ impl FanoutCatalog {
 }
 
 impl Catalog for FanoutCatalog {
+    fn douban_subject_with_credits(
+        &self,
+        id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        self.source("douban")
+            .ok_or_else(|| {
+                media::TmdbError::Http("Douban catalog source is not configured".into())
+            })?
+            .douban_subject_with_credits(id)
+    }
     fn source_name(&self) -> &'static str {
         "fanout"
     }
@@ -331,6 +347,34 @@ impl Catalog for FanoutCatalog {
         }
         Ok(Vec::new())
     }
+    fn cached_metadata_with_preferences(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        languages: &[String],
+        countries: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_metadata_with_preferences(kind, id, languages, countries),
+            None => Ok(None),
+        }
+    }
+    fn cached_poster_url(&self, kind: MediaKind, id: &str) -> Result<Option<String>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_poster_url(kind, id),
+            None => Ok(None),
+        }
+    }
+    fn cached_season_episodes(
+        &self,
+        id: &str,
+        season: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_season_episodes(id, season),
+            None => Ok(None),
+        }
+    }
     fn cached_season_details(
         &self,
         tmdb_id: &str,
@@ -340,6 +384,17 @@ impl Catalog for FanoutCatalog {
             return tmdb.cached_season_details(tmdb_id, season);
         }
         Ok(None)
+    }
+    fn cached_season_details_lang(
+        &self,
+        id: &str,
+        season: u32,
+        language: &str,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        match self.source("tmdb") {
+            Some(source) => source.cached_season_details_lang(id, season, language),
+            None => Ok(None),
+        }
     }
     fn season_details_lang(
         &self,
@@ -351,6 +406,16 @@ impl Catalog for FanoutCatalog {
             return tmdb.season_details_lang(tmdb_id, season, lang);
         }
         Ok(Vec::new())
+    }
+    fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        match self.source("tmdb") {
+            Some(tmdb) => tmdb.cached_similar(kind, tmdb_id),
+            None => Ok(Some(Vec::new())),
+        }
     }
     fn similar(&self, kind: MediaKind, tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
         if let Some(tmdb) = self.source("tmdb") {
@@ -379,6 +444,19 @@ impl Catalog for FanoutCatalog {
             return tmdb.image_candidates(kind, tmdb_id);
         }
         Ok(crate::catalog::ArtworkCandidates::default())
+    }
+    fn normalized_metadata(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        // TMDB ids are the refresh target; only that child parses a TMDB response.
+        match self.source("tmdb") {
+            Some(tmdb) => tmdb.normalized_metadata(kind, id, scope, preferences),
+            None => Ok(None),
+        }
     }
     fn metadata(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<media::ItemMeta>, String> {
         if let Some(tmdb) = self.source("tmdb") {

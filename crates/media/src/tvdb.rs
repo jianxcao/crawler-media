@@ -25,6 +25,10 @@ impl<H: CatalogGet> Tvdb<H> {
         })
     }
 
+    pub fn with_cache(http: H, cache: CatalogCache) -> Self {
+        Self { http, cache }
+    }
+
     pub fn set_now(&self, now: i64) {
         self.cache.set_now(now);
     }
@@ -96,11 +100,10 @@ fn parse_search(kind: MediaKind, body: &str) -> Result<Vec<CatalogHit>, TmdbErro
 }
 
 fn matches_kind(kind: MediaKind, raw: Option<&str>) -> bool {
-    match (kind, raw) {
-        (MediaKind::Movie, Some("series")) => false,
-        (MediaKind::Tv, Some("movie")) => false,
-        _ => true,
-    }
+    !matches!(
+        (kind, raw),
+        (MediaKind::Movie, Some("series")) | (MediaKind::Tv, Some("movie"))
+    )
 }
 
 fn id_string(value: serde_json::Value) -> Option<String> {

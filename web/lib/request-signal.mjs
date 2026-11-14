@@ -35,7 +35,7 @@ export function linkRequestSignal(externalSignal, timeoutMs = 15000) {
     }
   }
 
-  if (!externalSignal && timeoutMs > 0 && !controller.signal.aborted) {
+  if (timeoutMs > 0 && !controller.signal.aborted) {
     timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();

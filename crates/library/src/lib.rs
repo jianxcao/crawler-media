@@ -1,11 +1,13 @@
+mod capture_source;
 mod file_transfer;
+pub use capture_source::capture_source;
 mod frame_control;
 pub use frame_control::extract_frame_controlled;
 pub mod fingerprint;
 pub mod latest;
 pub mod markers;
 mod naming;
-mod nfo;
+pub mod nfo;
 mod nfo_identity;
 mod nfo_season;
 mod watch_identity;
@@ -13,7 +15,12 @@ pub use nfo_identity::{NfoIdentity, parse_nfo_identity};
 pub use watch_identity::read_watch_identity;
 mod probe_target;
 mod scrape;
+pub mod sidecar_cleanup;
+pub mod source_observation;
 pub mod subtitles;
+pub use source_observation::{
+    MISSING_SOURCE_VERSION, SourceObservation, current_source_version, observe_source,
+};
 mod tracks;
 mod watch;
 mod work_control;
@@ -50,11 +57,13 @@ pub use watch::{
     scan_watch_intake_controlled, scan_watch_reported,
 };
 pub use watch::{ScanChunk, ScanWalkBudget, ScanWalker};
-mod frames;
-mod quality_probe;
+
+mod error;
+mod frame;
+mod media_probe;
 mod transfer_mode;
-mod types;
-pub use frames::{extract_frame, extract_frame_with_ffmpeg, probe_duration};
-pub use quality_probe::{Ffprobe, MediaProbe};
-pub use transfer_mode::resolve_mode;
-pub use types::{FileQuality, LibraryError, TransferMode};
+
+pub use error::LibraryError;
+pub use frame::{extract_frame, extract_frame_with_ffmpeg, probe_duration};
+pub use media_probe::{Ffprobe, FileQuality, MediaProbe};
+pub use transfer_mode::{TransferMode, resolve_mode};

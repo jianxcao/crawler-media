@@ -3,17 +3,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::browse_file_read::BrowseFileRead;
-use api::{ApiState, PosterFetch, Store, router};
+use api::file_stat_read::FileStatRead;
+use api::{ApiState, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, Coverage, FetchMode, FilterId, LedgerId, LedgerRow, Media, MediaId, MediaKind,
-    QualitySource, Subscribe, SubscribeId, UserId,
+    Confidence, Coverage, FetchMode, FilterId, Media, MediaId, MediaKind, QualitySource, Subscribe,
+    SubscribeId, UserId,
 };
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use store::{LibraryPathResolver, LibraryPathScope, StoreError};
 use tower::ServiceExt;
 
@@ -45,9 +46,11 @@ impl Gate {
         *self.entered.lock() = true;
         self.entered_cv.notify_all();
         let mut open = self.open.lock();
-        while !*open {
-            self.open_cv.wait(&mut open);
-        }
+        self.open_cv
+            .wait_while_for(&mut open, |open| !*open, std::time::Duration::from_secs(30));
+        let released = *open;
+        drop(open);
+        assert!(released, "test must release the subscription I/O gate");
     }
 
     fn entered(&self) -> bool {
@@ -68,11 +71,11 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-struct GatedBrowseFileRead {
+struct GatedFileStatRead {
     gate: Arc<Gate>,
 }
 
-impl BrowseFileRead for GatedBrowseFileRead {
+impl FileStatRead for GatedFileStatRead {
     fn read_nfo(&self, path: &Path) -> Option<library::NfoMeta> {
         library::read_nfo(path)
     }
@@ -87,22 +90,21 @@ impl BrowseFileRead for GatedBrowseFileRead {
     }
 }
 
-fn make_state(root: &Path, files: Arc<GatedBrowseFileRead>) -> ApiState {
+fn make_state(root: &Path, files: Arc<GatedFileStatRead>) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
-    .with_browse_file_read(files)
+    .with_file_stat_read(files)
 }
 
 fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let lib_dir = tmp.join("movies");
     std::fs::create_dir_all(&lib_dir).unwrap();
     let library = guard
@@ -135,20 +137,20 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     };
     guard.insert_media(&media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: movie_file.to_str().unwrap().into(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(85),
-    };
-    guard.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        guard,
+        &FixtureFile {
+            media_id,
+            path: movie_file.to_str().unwrap().into(),
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: Some(85),
+            ..FixtureFile::default()
+        },
+    )
+    .unwrap();
 
     let sub = Subscribe {
         id: SubscribeId::new(),
@@ -172,13 +174,11 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(
         tmp.path(),
-        Arc::new(GatedBrowseFileRead {
-            gate: gate.clone(),
-        }),
+        Arc::new(GatedFileStatRead { gate: gate.clone() }),
     );
     let (subscribe, movie_file) = seed_subscription(&state, tmp.path());
     // Start the production facts read on a current-thread blocking worker
@@ -202,7 +202,10 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "Store lock must be free while out-of-lock facts evaluation is blocked"
         );
     }
@@ -222,7 +225,10 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     gate.release();
     let facts_res = facts_handle.await.unwrap().expect("facts read result");
     let movie_fact = facts_res.movie().expect("movie fact should be discovered");
-    assert_eq!(movie_fact.path.as_deref(), Some(movie_file.to_str().unwrap()));
+    assert_eq!(
+        movie_fact.path.as_deref(),
+        Some(movie_file.to_str().unwrap())
+    );
     assert_eq!(movie_fact.score, 85);
 }
 
@@ -245,13 +251,13 @@ impl LibraryPathResolver for FailingResolver {
 
 #[test]
 fn failing_resolver_propagates_permission_denied() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let broader_root = tmp.path().join("media");
     let deeper_root = broader_root.join("special");
     std::fs::create_dir_all(&deeper_root).unwrap();
 
-    let broader_lib = store
+    let _broader_lib = store
         .create_library(
             MediaKind::Movie,
             "Broader",
@@ -294,4 +300,40 @@ fn failing_resolver_propagates_permission_denied() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_read_rejects_facts_changed_during_unlocked_io() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let gate = Arc::new(Gate::new());
+    let state = make_state(
+        tmp.path(),
+        Arc::new(GatedFileStatRead { gate: gate.clone() }),
+    );
+    let (subscribe, path) = seed_subscription(&state, tmp.path());
+    let owned = state.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        api::read_subscribe_library_facts(&owned, &subscribe, MediaKind::Movie)
+    });
+    let _release = ReleaseOnDrop(gate.clone());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !gate.entered() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let handle = state.store();
+    {
+        handle
+            .writers()
+            .with_writer_timeout(Duration::from_secs(1), store::Db::Library, |_| Ok(()))
+            .expect("IO must not hold the Library writer");
+        handle.delete_ledger_path(path.to_str().unwrap()).unwrap();
+    }
+    gate.release();
+    assert!(
+        work.await.unwrap().is_err(),
+        "a deleted generation must not count as owned"
+    );
 }

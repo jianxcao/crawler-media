@@ -224,7 +224,7 @@ export function MaintenanceJobSettings({
             </button>
             {preview && (
               <span className="text-white/70">
-                检视 {preview.examined ?? preview.scanned} · 候选 {preview.candidates} · 保护{" "}
+                检视 {preview.examined ?? 0} · 候选 {preview.candidates} · 保护{" "}
                 {preview.protected} ·{" "}
                 {preview.incomplete
                   ? "窗口外仍有剩余（计数为下界，非精确总量）"

@@ -16,6 +16,7 @@ use tower::ServiceExt;
 use super::common::*;
 pub(crate) use super::common::{install_fake_ffprobe, probed_video, unprobeable_video};
 use super::mock_qbit::MockQbit;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub const TOKEN: &str = "management-secret";
 pub const MATRIX_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-GROUP";
@@ -108,7 +109,6 @@ impl Harness {
             indexer::ProfileSet::load(None).unwrap(),
             self.search.clone(),
             client,
-            self.tmp.path().join("library"),
         )
         .unwrap();
         self.app = router(state.clone());
@@ -137,7 +137,6 @@ impl Harness {
             indexer::ProfileSet::load(None).unwrap(),
             search.clone(),
             client,
-            tmp.path().join("library"),
         )
         .unwrap();
         let state = match catalog {
@@ -192,7 +191,6 @@ impl Harness {
         let media_id = self
             .state
             .store()
-            .lock()
             .get_subscribe(id)
             .unwrap()
             .unwrap()
@@ -203,36 +201,37 @@ impl Harness {
             .join(format!("The Matrix (1999) - {height}p.mkv"));
         std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
         std::fs::write(&owned, probed_video(height, codec, false)).unwrap();
-        let row = domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id,
-            path: owned.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: Some(format!("{height}p")),
-            codec: Some(codec.into()),
-            hdr: None,
-            quality_source: domain::QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: Some(score),
-        };
-        let mut facts = subscribe::SubscribeFacts::default();
+        let owned_path = owned.display().to_string();
+        let mut facts = domain::SubscribeFacts::default();
         facts.replace(
             None,
             None,
-            subscribe::QualityFact {
+            domain::QualityFact {
                 score,
-                path: Some(row.path.clone()),
+                path: Some(owned_path.clone()),
             },
         );
         let codec_tag = if codec == "hevc" { "x265" } else { "x264" };
         facts.set_quality(
-            row.path.clone(),
+            owned_path.clone(),
             release::parse(&format!("The.Matrix.1999.{height}p.WEB-DL.{codec_tag}")),
         );
         let store = self.state.store();
-        let store = store.lock();
-        store.insert_ledger(&row).unwrap();
+        let store = store.as_ref();
+        publish_fixture_file(
+            store,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
+                media_id,
+                path: owned_path,
+                resolution: Some(format!("{height}p")),
+                codec: Some(codec.into()),
+                quality_source: domain::QualitySource::Probe,
+                filter_score: Some(score),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store.save_subscribe_facts(id, &facts).unwrap();
         owned
     }
@@ -240,7 +239,6 @@ impl Harness {
     pub fn owned_movie_path(&self, id: SubscribeId) -> Option<String> {
         self.state
             .store()
-            .lock()
             .load_subscribe_facts(id)
             .unwrap()
             .movie()
@@ -335,8 +333,9 @@ impl Harness {
             let payload = json!({ "subscribe_id": id.to_string() }).to_string();
             let job = state
                 .jobs()
-                .lock()
-                .enqueue(jobs::JobKind::SubscribeSearch, &payload, 0)
+                .acquire()
+                .unwrap()
+                .enqueue(jobs::JobIdentity::subscribe_search(id), &payload, 0)
                 .unwrap();
             api::worker::StateRunner {
                 state: state.clone(),
@@ -372,13 +371,12 @@ impl Harness {
     }
 
     pub fn pending(&self, id: SubscribeId) -> Vec<(i32, api::store::PendingDownload)> {
-        self.state.store().lock().load_pending(id).unwrap()
+        self.state.store().load_pending(id).unwrap()
     }
 
     pub fn pending_state(&self, id: SubscribeId, state: &str) -> usize {
         self.state
             .store()
-            .lock()
             .load_pending_state(id, state)
             .unwrap()
             .len()
@@ -388,7 +386,7 @@ impl Harness {
     /// active pending row's `submitted_at` by `secs`.
     pub fn age_pending(&self, id: SubscribeId, secs: i64) {
         let store = self.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         for (score, mut pending) in store.load_pending(id).unwrap() {
             pending.submitted_at = Some(api::job_loop::unix_now() - secs);
             store
@@ -400,7 +398,6 @@ impl Harness {
     pub fn movie_library_root(&self) -> PathBuf {
         self.state
             .store()
-            .lock()
             .default_library(MediaKind::Movie)
             .unwrap()
             .unwrap()
@@ -411,11 +408,10 @@ impl Harness {
     pub fn ledger_paths(&self) -> Vec<String> {
         self.state
             .store()
-            .lock()
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .map(|r| r.path)
+            .map(|coverage| coverage.file.path.to_string_lossy().into_owned())
             .collect()
     }
 
@@ -435,9 +431,9 @@ impl Harness {
         }
         let mut out = Vec::new();
         walk(&self.movie_library_root(), &mut out);
-        let tv = self.state.store().lock().default_library(MediaKind::Tv);
+        let tv = self.state.store().default_library(MediaKind::Tv);
         if let Ok(Some(tv)) = tv {
-            let tv = PathBuf::from(tv.root_paths[0].clone());
+            let tv = tv.root_paths[0].clone();
             if tv != self.movie_library_root() {
                 walk(&tv, &mut out);
             }

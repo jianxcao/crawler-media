@@ -4,7 +4,7 @@ import { PlayerPage } from "@/components/player/player-page";
 import { parseUnitSegment } from "@/lib/player/play-links";
 
 /**
- * 网页播放页（docs/design/web-player.md §6.10）。
+ * 网页播放页。
  *
  * 地址就是分享凭证，形态按「短、稳、可读」设计：
  *
@@ -32,17 +32,19 @@ function queryNumber(value: string | null): number | undefined {
 export default function PlayPage() {
   const params = useParams();
   const mediaItemId = params.mediaItemId ?? "";
-  const unitParam = params["*"] || params.unit;
+  const unitParam = params.unit;
   const [searchParams] = useSearchParams();
   const parsed = parseUnitSegment(unitParam);
   const startSeconds = queryNumber(searchParams.get("t"));
-  const playerKey = `${mediaItemId}:${parsed?.season ?? 0}:${parsed?.episode ?? 0}`;
+  const fileId = searchParams.get("file_id") ?? undefined;
+  const playerKey = `${mediaItemId}:${parsed?.season ?? 0}:${parsed?.episode ?? 0}:${fileId ?? ""}`;
   return (
     <PlayerPage
       key={playerKey}
       mediaItemId={mediaItemId}
       season={parsed?.season}
       episode={parsed?.episode}
+      fileId={fileId}
       startMsOverride={startSeconds !== undefined ? startSeconds * 1000 : undefined}
     />
   );

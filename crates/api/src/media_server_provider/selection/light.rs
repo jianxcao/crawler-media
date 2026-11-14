@@ -4,23 +4,104 @@
 //! 才读（线性成本，调用方显式记录）；tracks/chapters/NFO 细节留给选中的那一页。
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use domain::{LedgerRow, Media, MediaId, MediaKind};
-use media_server::provider::{MediaItemMetadata, MediaItemSnapshot, ServerItemQuery};
+use domain::{FileCoverage, LibraryFile, Media, MediaId, MediaKind};
+use media_server::provider::{MediaItemMetadata, MediaItemSnapshot};
 
 use super::super::items::{
-    UnitIndex, file_date_created, find_unit, unit_counts_from_snapshot, unit_index,
+    UnitIndex, file_date_created, find_unit, snapshot_unit, unit_counts_from_snapshot,
 };
-use super::scope::{in_scope_folder, row_visible, ScopedRead};
+
+pub(super) fn selected_light_item(
+    reference: &domain::ProtocolItemRef,
+    inputs: &store::library_query::page_inputs::ProtocolPageInputs,
+    coverages: &HashMap<domain::LedgerId, Arc<FileCoverage>>,
+    units: &UnitIndex<'_>,
+    scalar: Option<store::library_query::series_scalar::ProtocolSeriesScalar>,
+) -> Result<LightItem, String> {
+    let source = reference
+        .preferred_source
+        .as_ref()
+        .ok_or("selected source missing")?;
+    let file = inputs
+        .files
+        .get(&source.file_id)
+        .ok_or("selected file missing")?
+        .clone();
+    if file.version.revision != source.revision || file.library_id != reference.library_id {
+        return Err("selected source revision or Library changed".into());
+    }
+    let coverage = coverages
+        .get(&file.file_id)
+        .ok_or("selected coverage missing")?;
+    let media = inputs
+        .media
+        .get(&file.media_id)
+        .ok_or("selected Media missing")?;
+    let is_series =
+        matches!(reference.item, domain::TypedItemId::Work(_)) && media.kind == MediaKind::Tv;
+    let coord = match &reference.item {
+        domain::TypedItemId::Unit { key, .. } => (key.season, key.episode),
+        _ => coverage
+            .units
+            .first()
+            .map(|u| (u.season, u.episode))
+            .ok_or("selected coverage has no logical unit")?,
+    };
+    if !coverage
+        .units
+        .iter()
+        .any(|u| (u.season, u.episode) == coord)
+    {
+        return Err("selected logical unit no longer covered".into());
+    }
+    let parent_id = if is_series || media.kind != MediaKind::Tv {
+        reference.library_id.to_string()
+    } else {
+        media.id.to_string().replace('-', "")
+    };
+    let mut item = light_item(
+        units,
+        &HashMap::new(),
+        coverage,
+        file,
+        coord,
+        media,
+        is_series,
+        None,
+        parent_id,
+    );
+    if item.snapshot.item_identity() != reference.item {
+        return Err("selected logical identity differs from reference".into());
+    }
+    if is_series {
+        let scalar = scalar.ok_or("selected Series scalar missing")?;
+        item.child_counts = Some((scalar.episodes, scalar.seasons));
+        item.snapshot.played = scalar.episodes == scalar.completed;
+        item.snapshot.unplayed_item_count = Some(scalar.episodes.saturating_sub(scalar.completed));
+        item.snapshot.play_count = 0;
+        item.snapshot.ticks = 0;
+        item.stat_paths.clear();
+        item.date_created = scalar.latest_created_ns.and_then(|ns| {
+            u64::try_from(ns).ok().and_then(|ns| {
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(ns))
+            })
+        });
+    }
+    Ok(item)
+}
 
 pub(super) struct LightItem {
     pub(super) snapshot: MediaItemSnapshot,
+    /// 该条目的已发布 coverage：探测与页内重元数据必须看到同一份单元集合。
+    pub(super) coverage: Arc<FileCoverage>,
     /// series 折叠条目：作用域内可见的分集/季数。
     pub(super) child_counts: Option<(usize, usize)>,
-    /// 非 series：DateCreated 用这条路径 stat；series：这些行取 ingest 最大值。
-    pub(super) stat_paths: Vec<String>,
+    /// 非 series：DateCreated 用这条路径 stat；series：这些文件取 ingest 最大值。
+    pub(super) stat_paths: Vec<PathBuf>,
     /// person 过滤用到的 catalog 载荷：本页重建 metadata 时按同一份载荷重放。
     pub(super) catalog: Option<super::super::enrichment::CatalogMerge>,
     /// 已为排序算出的 DateCreated，避免本页再 stat 一次。
@@ -31,154 +112,49 @@ pub(super) struct LightItem {
     pub(super) whole_unit: Option<crate::store::PlaybackUnitSnapshot>,
 }
 
-/// 折叠/展开都在同一份候选上完成：folder 归属先定，再决定剧条目与分集条目。
-pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> Vec<LightItem> {
-    let units = unit_index(&scope.units);
-    let mut show_episodes: HashMap<MediaId, HashSet<(u32, u32)>> = HashMap::new();
-    let mut show_seasons: HashMap<MediaId, HashSet<u32>> = HashMap::new();
-    for row in &scope.rows {
-        let Some(media) = scope.media.get(&row.media_id) else {
-            continue;
-        };
-        if media.kind != MediaKind::Tv || !row_visible(scope, row) || !in_scope_folder(scope, row) {
-            continue;
-        }
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            show_episodes
-                .entry(media.id)
-                .or_default()
-                .insert((season, episode));
-            show_seasons.entry(media.id).or_default().insert(season);
-        }
-    }
-    let wants_episodes = query.wants_episodes();
-    let wants_series = query.wants_series();
-    let mut order: Vec<MediaId> = Vec::new();
-    let mut groups: HashMap<MediaId, Vec<&LedgerRow>> = HashMap::new();
-    for row in &scope.rows {
-        if !row_visible(scope, row) || !in_scope_folder(scope, row) {
-            continue;
-        }
-        let group = groups.entry(row.media_id).or_default();
-        if group.is_empty() {
-            order.push(row.media_id);
-        }
-        group.push(row);
-    }
-    let mut items = Vec::new();
-    for media_id in order {
-        let Some(media) = scope.media.get(&media_id).cloned() else {
-            continue;
-        };
-        let rows = groups.remove(&media_id).unwrap_or_default();
-        let Some(first) = rows.first().copied() else {
-            continue;
-        };
-        let series_parent_id = media.id.to_string().replace('-', "");
-        let library_id = scope
-            .ownership
-            .owner(Path::new(&first.path), media.kind)
-            .map(|owner| owner.id.clone())
-            .unwrap_or_else(|| series_parent_id.clone());
-        let all_paths: Vec<String> = rows.iter().map(|row| row.path.clone()).collect();
-        if scope.media_scoped {
-            // 读已经收敛到单个 Media：一行一条，不折叠（旧 `requested_series` 语义）。
-            for row in rows {
-                items.push(light_item(
-                    &units,
-                    &show_episodes,
-                    row,
-                    &media,
-                    false,
-                    None,
-                    series_parent_id.clone(),
-                ));
-            }
-            continue;
-        }
-        if media.kind != MediaKind::Tv {
-            for row in rows {
-                items.push(light_item(
-                    &units,
-                    &show_episodes,
-                    row,
-                    &media,
-                    false,
-                    None,
-                    library_id.clone(),
-                ));
-            }
-            continue;
-        }
-        if wants_episodes {
-            for row in rows {
-                items.push(light_item(
-                    &units,
-                    &show_episodes,
-                    row,
-                    &media,
-                    false,
-                    None,
-                    series_parent_id.clone(),
-                ));
-            }
-        }
-        if wants_series {
-            let counts = (
-                show_episodes.get(&media_id).map(HashSet::len).unwrap_or(0),
-                show_seasons.get(&media_id).map(HashSet::len).unwrap_or(0),
-            );
-            items.push(light_item(
-                &units,
-                &show_episodes,
-                first,
-                &media,
-                true,
-                Some(counts),
-                library_id,
-            ));
-            if let Some(item) = items.last_mut() {
-                // series 的 DateCreated 取该 Media 在作用域内可见行的 ingest 最大值。
-                item.stat_paths = all_paths;
-            }
-        }
-    }
-    items
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(super) fn light_item(
     units: &UnitIndex<'_>,
     show_episodes: &HashMap<MediaId, HashSet<(u32, u32)>>,
-    row: &LedgerRow,
+    coverage: &Arc<FileCoverage>,
+    file: LibraryFile,
+    unit_coords: (i32, i32),
     media: &Media,
     is_series: bool,
     child_counts: Option<(usize, usize)>,
     parent_id: String,
 ) -> LightItem {
-    let season = row
-        .season
-        .map(|value| value as i32)
-        .unwrap_or(crate::store::UNIT_WHOLE);
-    let episode = row
-        .episode
-        .map(|value| value as i32)
-        .unwrap_or(crate::store::UNIT_WHOLE);
-    let unit = find_unit(units, row.media_id, season, episode).cloned();
-    let (played, play_count, unplayed_item_count) =
-        unit_counts_from_snapshot(units, row, media, is_series, show_episodes);
-    let whole_unit = is_series.then(|| {
-        find_unit(
-            units,
-            row.media_id,
-            crate::store::UNIT_WHOLE,
-            crate::store::UNIT_WHOLE,
-        )
-        .cloned()
-    }).flatten();
-    let favorite_unit = if is_series { whole_unit.as_ref() } else { unit.as_ref() };
+    let (season, episode) = unit_coords;
+    let media_id = coverage.file.media_id;
+    let unit = find_unit(units, media_id, season, episode).cloned();
+    let (played, play_count, unplayed_item_count) = unit_counts_from_snapshot(
+        units,
+        &coverage.file,
+        unit_coords,
+        media,
+        is_series,
+        show_episodes,
+    );
+    let whole_unit = is_series
+        .then(|| {
+            find_unit(
+                units,
+                media_id,
+                crate::store::UNIT_WHOLE,
+                crate::store::UNIT_WHOLE,
+            )
+            .cloned()
+        })
+        .flatten();
+    let favorite_unit = if is_series {
+        whole_unit.as_ref()
+    } else {
+        unit.as_ref()
+    };
     LightItem {
         snapshot: MediaItemSnapshot {
-            row: row.clone(),
+            file,
+            unit: snapshot_unit(unit_coords),
             media: media.clone(),
             ticks: if is_series {
                 0
@@ -202,8 +178,9 @@ pub(super) fn light_item(
                 ..Default::default()
             },
         },
+        coverage: Arc::clone(coverage),
         child_counts,
-        stat_paths: vec![row.path.clone()],
+        stat_paths: vec![coverage.file.path.clone()],
         catalog: None,
         date_created: None,
         unit,
@@ -211,70 +188,22 @@ pub(super) fn light_item(
     }
 }
 
-pub(super) fn needs_filter_facts(query: &ServerItemQuery, unknown_parent: bool) -> bool {
-    unknown_parent
-        || query
-            .search_term
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .genres
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .genre_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .studio_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .person_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
-pub(super) fn merge_filter_facts(
-    mut metadata: MediaItemMetadata,
-    facts: MediaItemMetadata,
-) -> MediaItemMetadata {
-    metadata.overview = facts.overview;
-    metadata.genres = facts.genres;
-    metadata.studios = facts.studios;
-    metadata.original_title = facts.original_title;
-    metadata.people = facts.people;
-    metadata
-}
-
-pub(super) fn set_date_created(browse: &dyn crate::browse_file_read::BrowseFileRead, item: &mut LightItem) {
-    let created = item_date_created(browse, item);
-    item.date_created = created;
-    item.snapshot.metadata.date_created = created.and_then(crate::compact_time::format_rfc3339_utc);
-}
-
-pub(super) fn item_date_created(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
-    item: &LightItem,
-) -> Option<SystemTime> {
-    paths_date_created(browse, item.snapshot.is_series, &item.stat_paths)
-}
-
-/// 非 series 取该行的 stat 时间；series 取作用域内可见行的 ingest 最大值
-/// （与旧 `latest_ingest_by_media` 同口径）。
+/// 非 series 取该文件的 stat 时间；series 取作用域内可见文件的 ingest 最大值
+/// （与旧 `latest_ingest_by_media` 同口径：旧实现每行入账一次，取最大值，
+/// 同一文件的多行对 `max` 无影响）。
 pub(super) fn paths_date_created(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
+    browse: &dyn crate::file_stat_read::FileStatRead,
     is_series: bool,
-    paths: &[String],
+    paths: &[PathBuf],
 ) -> Option<SystemTime> {
     if is_series {
         paths
             .iter()
-            .filter_map(|path| file_date_created(browse, path))
+            .filter_map(|path| file_date_created(browse, path.as_path()))
             .max()
     } else {
         paths
             .first()
-            .and_then(|path| file_date_created(browse, path))
+            .and_then(|path| file_date_created(browse, path.as_path()))
     }
 }

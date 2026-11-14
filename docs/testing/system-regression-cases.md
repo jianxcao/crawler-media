@@ -4,7 +4,11 @@
 
 从用户可见的入口和工作流检查 Web 工作台，以及 VidHub 通过 Jellyfin-compatible API 访问本系统时的页面呈现、图片加载、播放和进度同步。本文覆盖当前 Web 路由、设置分区和关键跨页流程；用例以可观察结果为准。
 
+“预期结果”是待验收合同，不是已实现/已通过的功能声明。自动化源代码存在不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`；性能、规模及资源测量见 [存储性能测试](storage-performance.md)。
+
 测试环境必须是隔离实例，数据写入临时目录和测试数据库。不得用生产 Site、真实 Downloader、真实 Library 文件目录或真实 User 的观看记录执行有写入的流程。
+
+隔离实例使用独立 `CRAWLER_MEDIA_DATA`。四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列在 `jobs.db`。fixture 使用正式 DDL；不匹配布局应拒绝打开。每轮保留原数据库及 sidecar、STRM/pan 的前后清单；测试结束按 [E2E 手册](e2e-runbook.md) 核对恢复并清理本轮副本，不删除真实实例目录。
 
 ## 执行方式与判定规则
 
@@ -20,12 +24,13 @@
 
 ### 结果状态和失败原因
 
-每条用例只能标记为 Pass、Fail、Blocked 或 Not run：
+每条用例标记为 Pass、Fail、Blocked、Not run 或 Unverified：
 
 - **Pass**：所有 UI 步骤完成，页面可见结果符合预期。
 - **Fail**：UI 流程已执行，但出现了与预期不符的显示或行为；必须填写失败原因。
 - **Blocked**：环境、账号权限、依赖服务或测试数据阻止流程开始/继续；写清阻塞原因和恢复条件，不算作 Fail，也不算通过。
 - **Not run**：没有执行；不得计入通过率。
+- **Unverified**：已执行，但缺少足够证据确认结果，例如没有可读 HUD、完整持久化记录或有效来源清单；不得计入通过率。
 
 每个 Fail 项必须记录：
 
@@ -47,7 +52,7 @@
 - pnpm lint：检查前端静态规则。
 - pnpm build：构建 Web 前端。
 
-后端当前工作流要求：对本次触及的每个 Rust crate 运行对应的 cargo test -p 命令，并在该工作项结束时运行 cargo test --workspace。API 与 Playback 的测试使用 fake / fixture；不访问真实 Metadata source、Site、Downloader 或 Chromium。
+后端对本次触及的 Rust crate 运行定向测试，稳定代码树收尾按仓库规则运行一次 workspace 全套。构建和测试经 `scripts/with-build-lock.py` 协调，正式性能测量独占资源。API 与 Playback 的测试使用 fake / fixture；不访问真实 Metadata source、Site、Downloader 或 Chromium。
 
 ### UI 流程执行顺序
 
@@ -55,7 +60,7 @@
 2. 通过真实 UI 登录并进入用例起点。每个用例按步骤从头操作，不通过 API 或地址栏直达中间步骤。
 3. 观察页面可见内容、控件状态、路由和反馈；截图记录关键成功状态。检查服务端记录和文件只用于确认 UI 操作产生的结果。
 4. 一旦不符合预期，保留当前页面并截图/录屏，记录最后一个成功步骤、首次失败步骤、实际表现和失败原因；再收集控制台或服务端日志辅助定位。
-5. 按结果状态规则记录 Pass、Fail、Blocked 或 Not run；修复后重跑失败用例及相关回归项。
+5. 按结果状态规则记录 Pass、Fail、Blocked、Not run 或 Unverified；修复后重跑失败用例及相关回归项。
 
 现有 web/package.json 提供单测、类型检查、lint 和 build，但没有配置 Playwright 等浏览器 E2E runner。这些命令只能作为辅助质量门槛，不能代替上述真实 UI 操作。要在 CI 中稳定重放浏览器流程，需要单独补 E2E harness 和测试数据装载入口。
 
@@ -66,7 +71,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 准备以下可重置数据：
 
 - 一个管理员 User 和两个成员 User；成员甲可见 Library A，成员乙不可见 Library A。
-- 一条电影 Media、一条 TV Media，TV Media 至少含两个 Season、一个缺集、一个特别篇和一个已观看单集。
+- 多个 Movie 和 TV Media，包含超过 200 集的 TV、至少两个 Season、一个缺集、一个特别篇和一个已观看单集。单个 Movie/TV 的冒烟不能证明完整列表、搜索和分类正确。
 - 两个 Library（电影与 TV），分别包含有海报/背景图、缺少 artwork、多个文件版本、可播放文件和 Unidentified 文件的条目。
 - 至少一个高置信度与一个低置信度的 Release；低置信度 Torrent 和文件都应进入 Unidentified 流程，不得自动 Transfer。
 - 一个 fake Site/Indexer，返回匹配候选、Filter 拒绝候选、免费/HR 标记候选、空结果和单 Site 超时；另一个 Site 正常返回，用于验证并发搜索降级。
@@ -126,16 +131,16 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 | ID | 优先级 | 用例与步骤 | 预期结果 |
 |---|---|---|---|
-| LIB-01 | P0 | 创建电影与 TV Library；编辑名称、kind、root paths、访问范围和收藏范围；运行扫描；刷新页面。 | 字段和 User 可见范围持久化；扫描结果正确建立 Library ledger；访问未授权的 Library 不返回条目。 |
+| LIB-01 | P0 | 创建电影与 TV Library 时选择 kind；编辑名称、root paths、访问范围和收藏范围；运行扫描；刷新页面。 | 字段和 User 可见范围持久化；编辑不能更改 kind；扫描结果正确建立 Library ledger；访问未授权的 Library 不返回条目。 |
 | LIB-02 | P0 | 浏览 Library；组合类型、年代、地区、观看状态、评分、片长、语言、resolution、HDR 和库存筛选；切换排序/布局。 | 筛选组合与计数一致；已观看/未观看和库存状态正确；图片加载失败有 fallback；翻页/虚拟列表无重复或跳项。 |
 | LIB-03 | P0 | 打开电影和 TV Library detail；查看 Media、Season、episode、缺集、文件版本；从详情进入 Media item 和播放。 | 详情数据与 Library ledger 一致；Season/episode 层级正确；打开的 item 与播放 URL 对应；静态 artwork 不要求浏览器携带自定义 Authorization header。 |
 | LIB-04 | P1 | 打开 library/manage；扫描、重识别 Unidentified 文件、手动 claim、查看重复文件；删除测试文件并按产品恢复路径还原。 | 识别建议可复核；低置信度不会自动 Transfer；受影响路径与文件名可见；可恢复删除能恢复记录和文件。 |
 | LIB-05 | P1 | 加入/移出收藏夹；切换 User；在收藏页打开 Media 并返回。 | 收藏是 User 维度；成员之间不串数据；收藏页和详情状态一致。 |
 | LIB-06 | P1 | 打开 Library customize 修改可见信息、排序与卡片呈现；保存后刷新并恢复默认。 | 自定义仅影响预期视图；保存后保持；恢复默认不改变 Library 文件或其他 User 设置。 |
 | LIB-07 | P0 | 准备额外 TV Library A、本地 tvshow.nfo/STRM/字幕/图片、两 User 的 S01E03 进度 750000/120000ms 与不同已看/收藏状态；另一 Library B 保留同 Media 文件。管理员从管理页删除 A，观察确认文案、删除中卡片和终态，再从 UI 用同根目录重建并扫描；分别登录两 User 查看进度与收藏。 | 202 接受不等于成功：只有 succeeded 才移除卡片；文件及侧车字节不变；旧 ledger/探测缓存清除，新 ledger id 不同但可靠 NFO 别名复用 MediaId；两 User 状态各自恢复；B 的文件、ledger 和缓存不变；新库片头/声纹默认关闭，基本媒体探测仍安排。 |
-| LIB-08 | P0 | 用电影 Library 重复 LIB-07；再分别准备同名不同外部 ID、无 ID 且身份歧义的 NFO，删除后重建；检查原历史和新文件详情。 | 整片进度可在可靠 movie 身份下恢复；不同 ID 不串进度；无可靠身份不强行合并，保留旧历史但不承诺自动恢复；episode NFO 的单集 ID 不当作 TV 作品 ID。 |
-| LIB-09 | P0 | fixture 在扫描、probe、侧车发布或 Transfer 边界暂停；从 UI 删除其 Library，释放 fixture；删除中刷新页面。再用排空超时 fixture 观察失败并重试。 | 删除中不能新扫描/Scrape/Transfer/Playback；只有旧租约退出且不能再发布才成功；超时显示失败并保持冻结，错误可读、可重试；旧任务不能在同根新库复活数据或改写侧车；另一库的独立工作继续。 |
-| LIB-10 | P0 | 隔离实例分别在 draining 与两个数据库清理阶段之间重启，再从 UI 回到管理页；检查重复删除/重试、成员浏览和显式绑定旧库的 Subscribe。 | 恢复同一操作与快照计数，不恢复被取消 probe；冻结库成员不可见，管理卡保留状态；Subscribe 保留但提示目标 Library 不可用，不自动改绑默认库；失败不报成功。 |
+| LIB-08 | P0 | 用电影 Library 重复 LIB-07；再分别准备同名不同外部 ID、无 ID 且身份歧义的 NFO，删除后重建；检查原历史和新文件详情。另删除某 Media 的最后一个文件。 | 仍有其他 Library 引用时，可靠 movie 身份保留对应进度；不同 ID 不串进度；身份歧义不强行合并；最后引用删除后按 ADR-0012 清理孤儿 Media 及其收藏/进度；episode NFO 的单集 ID 不当作 TV 作品 ID。 |
+| LIB-09 | P0 | fixture 在扫描、probe、侧车发布或 Transfer 边界暂停；从 UI 删除其 Library，释放 fixture；删除中刷新页面。再注入清理失败并重试。 | 先隐藏、关闭发布门并立即取消所有该库任务，然后删除，不等待慢 worker 排空；删除中不能新扫描/Scrape/Transfer/Playback；迟到任务不能在同根新库复活数据或改写侧车；失败保留冻结和可重试状态；另一库工作继续。 |
+| LIB-10 | P0 | 隔离实例在持久删除阶段及 Library 清理与 Subscribe 解绑提交之间重启；从 UI 重复删除/重试并检查成员和 Subscribe。 | 恢复同一操作与快照计数，不恢复被取消 probe；冻结库成员不可见；Subscribe 本身保留，显式 Library 绑定在独立事务清空，后续 Transfer 解析同 kind 当前默认 Library；解绑完成前公开状态仍为 cleaning，不能提前显示 succeeded。 |
 | LIB-11 | P1 | fixture 建父库与独立嵌套子库；从 UI 删除非最后一个默认库，再尝试删除同类型最后一个库；检查静态封面和其他库 Playback。 | 最长唯一根归属保证子库/同 Media 其他文件不受影响；默认只提升现存库；最后同类型库受保护；只关闭命中删除快照的播放，其他库 Playback 正常；静态 artwork 继续无需自定义 Authorization header。 |
 | TRF-01 | P0 | 在转移预览中选 hardlink、copy、move；以同盘/跨盘 fixture 运行 Transfer；对比来源与目标文件、Naming template 和 ledger。 | 目标名称按 Naming template 展开且空字段不留下多余括号；hardlink/copy 保留源文件，move 移除源文件；探测到的文件 quality 写入 ledger。 |
 | TRF-02 | P0 | 将高置信度与低置信度文件放入 intake Watch directory；运行一次 intake；对 Unidentified 项手动 claim 后再次运行。 | 可识别文件 Transfer 到目标 Library；Unidentified 留在待处理列表，不按猜测移动；claim 后使用明确 Media 重新执行。 |
@@ -145,9 +150,9 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 #### Library removal 自动化辅助验收与未覆盖项
 
-`cargo test -p api --test library_delete_reimport` 通过公开 DELETE/status/创建/scan 路由检查 TV 两 User、电影整片、不同 NFO 别名不串进度、旧缓存删除和独立 Library 同 Media 保留。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。已有 file_meta 使用有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
+`crates/api/tests/library_delete_reimport.rs` 的公开 DELETE/status/创建/scan 路由用例包含 TV 两 User、电影整片、不同 NFO 别名不串进度、缓存删除和独立 Library 同 Media 保留等断言；此处列覆盖设计，不声明已执行通过。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。媒体详情位于 `file_details`；缓存需有有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
 
-这个 API 测试不是浏览器 E2E，不替代 LIB-07–11。它检查新 ledger 没有复制旧缓存，不验证新 fake-probe 成功写入 file_meta，也不独立覆盖重启/取消竞态、无 ID 歧义、成员权限、Subscribe 失效或实际播放。上述 UI 用例本次新增时均为 **Not run**；必须记录实际命令退出码和 UI 证据之后才能标记 Pass。
+这个 API 测试不是浏览器 E2E，不替代 LIB-07–11。新 ledger 没有复制缓存不等于新 probe 已成功；重启/取消竞态、无 ID 歧义、成员权限、Subscribe 失效和实际播放分别需要证据。只有实际命令退出码和 UI 证据齐全后才能标记 Pass。
 
 ### 系统配置、管理和运维页面
 
@@ -180,17 +185,20 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 以下用例必须在隔离实例上用 VidHub app 实测。每项同时检查浏览器/网络层结果，避免只凭页面截图判断 API 数据是否正确。
 
+重构时还须执行 [Jellyfin 客户端协议与重构回归](../api-contracts/jellyfin.md) 的公开请求链。自动化需校验关键响应字段、取流字节和持久状态；实际设备验收继续独立记录，不能由构造播放事件的测试代替。
+
 | ID | 优先级 | 用例与步骤 | 预期结果 |
 |---|---|---|---|
-| VH-01 | P0 | 在 VidHub 添加隔离实例地址；用管理员 User 登录；退出后用成员 User 登录。 | 服务器发现和登录成功；认证信息不会泄漏到界面或日志；成员只看到获授权的 Library。 |
+| VH-01 | P0 | 在 VidHub 选择 Jellyfin 类型添加隔离实例地址；用管理员 User 登录；退出后用成员 User 登录。 | 服务器发现和登录成功；认证信息不会泄漏到界面或日志；成员只看到获授权的 Library。 |
 | VH-02 | P0 | 浏览电影与 TV Library：首页、Library 列表、Media detail、Season 和 episode 页面；前进、返回并重进。 | 标题、简介、年份、评分、Season/episode 编号和条目数稳定显示；VidHub 常见的带 /Users/{userId}/ 前缀路径可用。 |
 | VH-03 | P0 | 检查海报、背景图、人物图、episode still、章节缩略图；分别对已认证与原生图片请求检查。 | 所有有数据的 artwork 均出现且比例正确；缺失图片使用 fallback；原生图片请求不会因缺少 Authorization header 返回 401。 |
-| VH-04 | P0 | 在 VidHub 播放电影和 TV episode；暂停、退出、重新进入并继续；切换 episode 或从详情再次播放。 | 视频可启动；进度恢复到正确位置；观看状态、已观看标记和下一集信息与服务端 User 状态一致。 |
+| VH-04 | P0 | 分别用本地视频与STRM，在同一User/逻辑单元执行Web播放、seek并退出→VidHub续播、seek并退出→Web刷新；重启隔离服务再重入，并切换两个episode。 | 两端实际出画；可读停止位置与服务端持久进度相符，正反两个方向均同步；重启后保持，各集独立；缺HUD时间明确记录限制，不按墙钟或按键推算。 |
 | VH-05 | P1 | 播放多音轨/多字幕/含章节 fixture；切换音轨与字幕并跳转章节。 | VidHub 仅显示实际可用轨道；切换后播放声音/字幕正确；章节标题与时间对应文件。 |
 | VH-06 | P1 | 由成员 User 播放同一 Media；再用另一个 User 查看进度与观看标记。 | 各 User 的 Playback 进度和观看标记互相隔离；共享 Library 文件仍可见范围一致。 |
 | VH-07 | P1 | 对支持 intro/outro marks 的 fixture 在 VidHub 查看是否出现对应标记/跳过提示；从 mark 前后 seek。 | 若 VidHub 当前版本支持协议字段，则 mark 时间、章节边界和跳转准确；若 app 不支持，基础 Playback 不受影响且记录为客户端兼容性差异。 |
 | VH-08 | P1 | 断开服务端网络后打开已访问详情，再恢复网络；重复进入 Media、刷新图片并继续 Playback。 | 离线状态有清楚提示且不显示错误数据；恢复后 API、图片与播放可重试，不要求重新创建 User 或 Library。 |
-| VH-09 | P1 | 在 VidHub 中通过搜索/筛选（若 app 提供）查找电影与 TV Media，并打开结果；退出 server 后重连。 | 结果与可见 Library 一致；重连后仍进入正确服务器；不支持的 VidHub UI 功能记为 app 范围外，不作为服务端失败。 |
+| VH-09 | P1 | 在 VidHub 中用完整标题、子串、短查询和无结果查询搜索电影/TV；分类浏览、排序和分页后打开结果；退出server后重连。 | 结果身份、类别和数量与当前用户可见数据oracle一致；完整列表无遗漏/重复；重连后仍进入正确服务器；客户端显示回退与服务端搜索结果分别记录。 |
+| VH-10 | P0 | 对电影和单集分别设置/取消收藏、设置/取消已播放；刷新、退出重入，并用另一用户查看。 | 标记即时持久化，列表/详情/筛选一致；支持VidHub实际POST Delete撤销；跨用户不串状态，隐藏条目不能修改。 |
 
 ## 覆盖清单
 
@@ -208,29 +216,36 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 - /transfers、/jobs、/cache：TRF-01/02、SET-10
 - /settings 与 /settings/:section：SET-01 至 SET-11
 - /play/:mediaItemId/:unit：PLAY-01 至 PLAY-06
-- VidHub Jellyfin-compatible routes：VH-01 至 VH-09
+- VidHub Jellyfin-compatible routes：VH-01 至 VH-10
 
 ## 结果记录
 
-每轮回归为每个 ID 记录：构建号、环境、User 角色、浏览器或 VidHub 版本、结果（Pass/Fail/Blocked/Not run）、实际结果和证据文件位置。Fail 必须包含失败原因、失败步骤、预期与实际结果、复现条件；Blocked 必须包含阻塞原因和解除条件；如已创建缺陷，还要记录缺陷链接。不得把 Blocked 或 Not run 计入通过率。
+每轮回归为每个 ID 记录：构建号、环境、User 角色、浏览器或 VidHub 版本、结果（Pass/Fail/Blocked/Not run/Unverified）、实际结果和证据文件位置。Fail 必须包含失败原因、失败步骤、预期与实际结果、复现条件；Blocked 必须包含阻塞原因和解除条件；Unverified 写明缺少的证据；如已创建缺陷，还要记录缺陷链接。只有 Pass 计入通过。
 
-## 数据库／维护新增验收（2026-10-13，尚未执行）
+## 维护与存储交叉回归
 
-本节是待执行用例，不计入本轮workspace通过数。缺陷和自动化任务对应 [总复核](<../audits/2026-10-13-database-api-review.md>) 与 [T1–T9](<../superpowers/plans/2026-10-13-database-api-followup.md>)。
+这些场景补充 UI 主链路。可通过 fixture 在操作边界暂停，但操作与回读仍消费公开入口；每轮独立填写结果，不把文档中的预期当作运行记录。
 
-| ID | 操作／条件 | 预期 | 当前状态 |
-|---|---|---|---|
-| DB8-01 | 清理第一批提交后禁用def | 已提交保留结果，不启动下一批 | 已知F01；本用例Not run |
-| DB8-02 | future queued已存在，90天改365天或打开dry_run | 尚未运行child采用新策略，running不改 | 已知F02；本用例Not run |
-| DB8-03 | payload＋schedule保存遭schedule写入失败／并发仅改周期 | 整笔回滚／陈旧token409，响应为实际状态 | 已知F04；本用例Not run |
-| DB8-04 | 600保护行、0可删；600保护＋1200可删多批 | 截断如实标志、保护不重复计数 | 已知F03；本用例Not run |
-| DB8-05 | 无过期／全部保护大历史，预览同时进行无关请求 | 真预算退出，不占async worker，lower bound明确 | F05待实现与测量 |
-| DB8-06 | 改预览草稿后旧响应晚返回 | 旧结果丢弃，报告显示本策略与预算限制 | 已知F12；本用例Not run |
-| DB8-07 | future queued点立即执行；开发tick与后台维护同时存在 | queued安全提前、无重复live；tick不取消维护 | 已知F12；本用例Not run |
-| DB8-08 | 显式VACUUM超时／disk变化／scan在预检后开始 | 真实停止或明确best-effort超限，不谎报硬界 | F06需先批准合同 |
-| DB8-09 | 升级首次调度＋重启保存后的开关／策略 | 默认警告明确，配置不复位；不把StateRunner直调当loop验收 | T9待补 |
-| COVER-LEGACY | legacy封面升级中freeze／CAS失败／trigger拒绝 | 当前引用bytes不变，只清未引用版本 | 已知F08；本用例Not run |
+| ID | 操作／条件 | 预期与观察边界 |
+|---|---|---|
+| MAINT-01 | 清理第一批提交后禁用 JobDef | 已提交结果保留，不再启动下一批；取消不声称恢复已删除数据。 |
+| MAINT-02 | future queued 已存在，修改保留期或 dry_run | queued 使用提交后的策略，running 保持执行快照；配置与 queued 更新同事务。 |
+| MAINT-03 | payload 与 schedule 保存失败、并发修改 payload 或仅改周期 | 写失败原子回滚，过期 payload token 返回 409；token 只覆盖 payload，不能声称检测仅周期冲突。 |
+| MAINT-04 | 600 保护行、0 可删；600 保护加 1200 可删 | 截断、已检查、候选和保护计数如实描述窗口，不重复计数，不冒称全库精确总量。 |
+| MAINT-05 | 大历史预览，同时进行无关 UI 操作 | 不阻塞 async worker；报告实际工作量、截止与 incomplete，等待超时不被说成底层 SQL 已硬停止。 |
+| MAINT-06 | 改预览草稿后前一响应晚返回 | 丢弃不属于当前草稿的结果；用户看到的策略与报告绑定。 |
+| MAINT-07 | future queued 立即执行、后台 tick 并发 | 安全提前，已有 live 不重复创建；UI 回执区分 created/expedited/already_queued/already_running。 |
+| MAINT-08 | VACUUM 中磁盘变化或新扫描开始 | 记录实际取消与持锁边界，不把 best-effort 当作硬时限。 |
+| MAINT-09 | 首次配置并重启已保存的开关/策略 | 默认状态明确，配置不复位；通过实际后台 loop 验证调度。 |
+| STORAGE-01 | 多集物理文件选 E02 播放并 heartbeat | 只更新 E02；没有管理员终止事实就不显示 ended_by_admin。 |
+| STORAGE-02 | 签发会话后换源、同路径替换或轨道重排，再送迟到/重复事件 | Web/Jellyfin 统一校验来源版本、用户/设备/单元和代际；无效事件不写新来源。 |
+| STORAGE-03 | 单文件增量发布后比较 TV 集数、两个 User 状态、Summary/Episodes | 公共事实和用户投影同事务更新；身份、数量和可见性一致。 |
+| STORAGE-04 | 0/49/50/51/100/101 文件，且同 Media 至少 301 文件 | UI 续页无重复/遗漏，末页无虚假游标；多目录/Season/NFO 层次逐批重开仍守恒。 |
+| STORAGE-05 | 采纳 runtime/rating/tagline/certification、显式 Empty 和多 locale | Library 卡片、筛选和详情读取同一事实与优先级，缺失不冒充空值。 |
+| STORAGE-06 | 已有 Library 改根，嵌套根重分配、失败及重启 | 归属一致、外键有效，operation 可恢复；未知 IO 不误删，迟到 worker 不复活旧归属。 |
+| STORAGE-07 | 同来源多别名更新并刷新目标 | 未替换别名保留，refresh target 唯一，卡片与实际刷新一致。 |
+| STORAGE-08 | 公开完整性检查、Media 合并、失败重试及重启 | 有真实终态；失败不改身份；survivor、收藏/进度和跨库引用守恒。 |
+| STORAGE-09 | 非法 marks 参数、重复坐标、越界和坏类型 | 请求失败且零写；Whole 与合法 TV S00E00 各有正控。 |
+| STORAGE-10 | 缓存更新/清空、文件系统或 NFO 慢读、竞争 writer | 业务事实不丢；读不取 writer；等待与持锁分别有界，UI 保持可响应。 |
 
-## 当前限制
-
-本文件是可评审的回归用例基线，不代表这些流程已执行。当前仓库有前端逻辑/契约测试，但没有浏览器 E2E runner；VidHub 也需要隔离实例和 app 实测。下一步应先用真实浏览器和 VidHub app 执行 P0 用例，逐项保留结果与失败原因，再将高频浏览器流程落成可重放的 E2E，并将 VH 用例保留为每次发布的设备验收清单。
+容量、百万级无关数据增长、SQL 工作量、内存和正式性能见 [存储性能测试](storage-performance.md)。API 集成不替代页面与客户端，合成媒体不替代真实来源，有限观测不证明长期无泄漏。

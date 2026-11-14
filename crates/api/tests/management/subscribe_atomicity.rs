@@ -50,7 +50,7 @@ async fn invalid_self_interval_does_not_insert_media() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), 0);
+    assert_eq!(rows(&tmp, "library.db", "media"), 0);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
 }
 
@@ -72,7 +72,7 @@ async fn invalid_legacy_downloader_does_not_insert_media_or_filter() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), 0);
+    assert_eq!(rows(&tmp, "library.db", "media"), 0);
     assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
 }
 
@@ -106,7 +106,7 @@ async fn failed_job_seed_rolls_back_legacy_and_self_resources() {
             uri,
             response.status()
         );
-        assert_eq!(rows(&tmp, "app.db", "media"), 0);
+        assert_eq!(rows(&tmp, "library.db", "media"), 0);
         assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
         assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
         assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);
@@ -132,6 +132,27 @@ async fn failed_catalog_seed_removes_search_job_and_restores_existing_media() {
         anilist_id: None,
     };
     store.insert_media(&previous).unwrap();
+    let viewer = domain::UserId::new();
+    store
+        .set_playback_state(
+            viewer,
+            previous.id,
+            1234,
+            Some(true),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
+    let before_progress = store.playback_progress(viewer, previous.id).unwrap();
+    let metadata = domain::MetadataFields::default();
+    store
+        .set_metadata_overrides(previous.id, domain::EntityScope::Work, "en", &metadata, 0)
+        .unwrap();
+    let before_metadata = store
+        .get_metadata_overrides(previous.id, domain::EntityScope::Work, "en")
+        .unwrap();
+    assert!(before_metadata.is_some());
     let before_jobs = rows(&tmp, "jobs.db", "job_defs");
     let jobs = Connection::open(tmp.path().join("data/jobs.db")).unwrap();
     jobs.execute_batch("CREATE TRIGGER block_catalog BEFORE INSERT ON job_defs WHEN NEW.kind = 'catalog_refresh' BEGIN SELECT RAISE(FAIL, 'blocked'); END;").unwrap();
@@ -141,7 +162,7 @@ async fn failed_catalog_seed_removes_search_job_and_restores_existing_media() {
             "/api/v1/subscriptions",
             Some("management-secret"),
             json!({
-                "media": { "kind": "movie", "title": "New title", "tmdb_id": "atomic-tmdb", "year": 2024 },
+                "media": { "kind": "movie", "title": "New title", "tmdb_id": "atomic-tmdb", "douban_id": "ensure-added", "year": 2024 },
                 "coverage": { "kind": "movie" }
             }),
         ))
@@ -150,6 +171,29 @@ async fn failed_catalog_seed_removes_search_job_and_restores_existing_media() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
-    assert_eq!(rows(&tmp, "app.db", "media"), 1);
-    assert_eq!(store.get_media(previous.id).unwrap(), Some(previous));
+    assert_eq!(rows(&tmp, "library.db", "media"), 1);
+    assert_eq!(
+        store.get_media(previous.id).unwrap(),
+        Some(previous.clone())
+    );
+    assert!(
+        store
+            .get_media_by_alias("douban", "ensure-added")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.playback_progress(viewer, previous.id).unwrap(),
+        before_progress
+    );
+    assert_eq!(
+        store.playback_marks(viewer, previous.id).unwrap(),
+        Some((true, true))
+    );
+    assert_eq!(
+        store
+            .get_metadata_overrides(previous.id, domain::EntityScope::Work, "en")
+            .unwrap(),
+        before_metadata
+    );
 }

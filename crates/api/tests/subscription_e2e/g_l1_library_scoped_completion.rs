@@ -20,13 +20,13 @@ async fn facts_outside_the_target_library_do_not_complete() {
     let video = probed_video(1080, "h264", false);
     h.qb.complete(0, E01, &[(&format!("{E01}.mkv"), &video)]);
     h.transfer(id).await.unwrap();
-    assert!(h.state.store().lock().get_setting(&key).unwrap().is_some());
+    assert!(h.state.store().get_setting(&key).unwrap().is_some());
 
     // Switch the subscription to another (empty) TV library.
     let other_root = tempfile::tempdir().unwrap();
     {
         let store = h.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let library = store
             .create_library(
                 domain::MediaKind::Tv,
@@ -46,7 +46,7 @@ async fn facts_outside_the_target_library_do_not_complete() {
     h.set_search_rows(&[]);
     h.scheduled_search(id).await.unwrap();
     assert!(
-        h.state.store().lock().get_setting(&key).unwrap().is_none(),
+        h.state.store().get_setting(&key).unwrap().is_none(),
         "no completion notice for files in another library"
     );
 }

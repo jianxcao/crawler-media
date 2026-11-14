@@ -5,6 +5,11 @@ async fn registered_jellyfin_endpoint_families_accept_their_documented_methods()
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, item_id) = app(tmp.path());
     let user_id = "00000000-0000-0000-0000-000000000001";
+    let play_session = play_session_for(&app, &item_id, None).await;
+    assert_eq!(
+        post_event_without_device(&app, "/Sessions/Playing", &item_id, &play_session, 0).await,
+        StatusCode::NO_CONTENT
+    );
     let progress = app
         .clone()
         .oneshot(
@@ -14,7 +19,12 @@ async fn registered_jellyfin_endpoint_families_accept_their_documented_methods()
                 .header("authorization", "Bearer admin-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "ItemId": item_id, "PositionTicks": 10_000_000 }).to_string(),
+                    json!({
+                        "ItemId": item_id,
+                        "PositionTicks": 10_000_000,
+                        "PlaySessionId": play_session
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -23,7 +33,7 @@ async fn registered_jellyfin_endpoint_families_accept_their_documented_methods()
     assert_eq!(progress.status(), StatusCode::NO_CONTENT);
     assert_ping_methods(&app).await;
     assert_user_endpoint_methods(&app, user_id, &item_id).await;
-    assert_playback_event_methods(&app, &item_id).await;
+    assert_playback_event_methods(&app, &item_id, &play_session).await;
 }
 
 async fn assert_ping_methods(app: &axum::Router) {
@@ -95,7 +105,7 @@ async fn assert_user_endpoint_methods(app: &axum::Router, user_id: &str, item_id
     }
 }
 
-async fn assert_playback_event_methods(app: &axum::Router, item_id: &str) {
+async fn assert_playback_event_methods(app: &axum::Router, item_id: &str, play_session_id: &str) {
     for path in [
         "/Sessions/Playing",
         "/Sessions/Playing/Progress",
@@ -110,7 +120,12 @@ async fn assert_playback_event_methods(app: &axum::Router, item_id: &str) {
                     .header("authorization", "Bearer admin-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({ "ItemId": item_id, "PositionTicks": 10_000_000 }).to_string(),
+                        json!({
+                            "ItemId": item_id,
+                            "PositionTicks": 10_000_000,
+                            "PlaySessionId": play_session_id
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )

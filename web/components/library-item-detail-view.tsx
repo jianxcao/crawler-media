@@ -1,5 +1,11 @@
 "use client";
+import { createLibraryItemProbe } from "@/lib/library-item-probe";
+import { createChapterFrameSession, shouldPollFrameTask, type FrameTask } from "@/lib/chapter-frame-task";
 
+import { waitForSimilar } from "@/lib/similar-read";
+
+import { ArtworkImage } from "@/components/artwork-image";
+import { playLinkFileId } from "@/lib/player/active-target";
 import type { ReactNode } from "react";
 import { Children, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -8,7 +14,8 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 
-import { shouldPollProbeDetails } from "@/lib/probe-status";
+import { isPlayableFile } from "@/lib/library-file-pages";
+import { startSingleFlightPoll } from "@/lib/single-flight-poll";
 import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
 import { CastRow, type CastRowPerson } from "@/components/cast-row";
@@ -41,6 +48,8 @@ import {
   type ItemDeleteResult,
   type LibraryEpisode,
   fetchItemChapters,
+  fetchChapterFrameStatus,
+  type ChapterTarget,
   fetchItemSimilar,
   generateItemChapters,
   probeItem,
@@ -53,6 +62,7 @@ import {
   getItemEpisodes,
   getLibrary,
   getLibraryItemDetail,
+  getAllLibraryItemFiles,
   listLibraries,
   refreshItemMetadata,
 } from "@/lib/api/libraries";
@@ -91,6 +101,8 @@ export interface SelectedEpisodeContext<F = LibraryItemFile> {
 /** 分集区需要的条目最小形状（详情视图与分享页的访客视图都满足）。 */
 export interface EpisodeSectionItem<F extends { file_id: string; season: number | null }> {
   media_item_id: string;
+  /** 在库的季号列表（剧集区季选择器；电影为空） */
+  seasons: number[];
   files: F[];
 }
 
@@ -134,6 +146,9 @@ export function LibraryItemDetailView({
   const discoveryReturnPath = getDiscoveryReturnPath(returnTo);
   const confirm = useConfirm();
   const toast = useToast();
+  const pageKey = `${libraryId}/${mediaItemId}`;
+  const currentPageKey = useRef(pageKey);
+  currentPageKey.current = pageKey;
   const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
   const [library, setLibrary] = useState<MediaLibrary | null>(null);
   const [failed, setFailed] = useState(false);
@@ -146,12 +161,17 @@ export function LibraryItemDetailView({
   useEffect(() => {}, [navigate, detail]);
 
   const [reidentifyOpen, setReidentifyOpen] = useState(false);
-  const [chapters, setChapters] = useState<ItemChapter[]>([]);
-  const [chaptersBusy, setChaptersBusy] = useState(false);
-  const [chapterError, setChapterError] = useState<string | null>(null);
-  const chapterRefreshTimer = useRef<number | null>(null);
-  const chapterRefreshToken = useRef(0);
+  const [chapterRows, setChapters] = useState<ItemChapter[]>([]);
+  const [chapterPending, setChaptersBusy] = useState(false);
+  const [knownChapterError, setChapterError] = useState<string | null>(null);
+  const [knownFrameTask, setFrameTask] = useState<FrameTask | null>(null);
+  const chapterSession = useRef<ReturnType<typeof createChapterFrameSession<ItemChapter>> | null>(null);
+  const itemProbe = useRef<ReturnType<typeof createLibraryItemProbe> | null>(null);
+  const [chapterDiscovery, setChapterDiscovery] = useState(0);
+  const [presentedChapterKey, setPresentedChapterKey] = useState("");
   const [similar, setSimilar] = useState<MediaItem[]>([]);
+  const [similarPending, setSimilarPending] = useState(false);
+  const [similarError, setSimilarError] = useState<string | null>(null);
   const [reidentifyDirty, setReidentifyDirty] = useState(false);
   // 元数据刷新的失败提示（原先与重识别共用一条横幅）
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -184,6 +204,30 @@ export function LibraryItemDetailView({
   const [episodesVersion, setEpisodesVersion] = useState(0);
   const [probing, setProbing] = useState(false);
 
+  const trackFiles = detail?.kind !== "tv"
+    ? (detail?.files ?? [])
+    : (selectedSeriesEpisode?.files ?? []);
+  // 缺失/未知的文件仍可查看（保留在列表里说明「文件不在位」），但不作为可播版本。
+  const availableTrackFiles = trackFiles.filter(isPlayableFile);
+  const selectedTrackFile =
+    availableTrackFiles.find((file) => file.file_id === selectedTrackFileId) ??
+    availableTrackFiles[0] ??
+    null;
+  const chapterFileId = selectedTrackFile?.file_id;
+  const chapterIsTv = detail?.kind === "tv";
+  const chapterSeason = selectedSeriesEpisode?.seasonNumber;
+  const chapterEpisode = selectedSeriesEpisode?.episode.episode_number;
+  const chapterTarget = useMemo<ChapterTarget | null>(() => {
+    if (!chapterFileId || (chapterIsTv && (chapterSeason == null || chapterEpisode == null))) return null;
+    return { file_id: chapterFileId, ...(chapterIsTv ? { season: chapterSeason, episode: chapterEpisode } : {}) };
+  }, [chapterFileId, chapterIsTv, chapterSeason, chapterEpisode]);
+  const chapterKey = JSON.stringify([libraryId, mediaItemId, chapterTarget]);
+  const currentChapterSelection = chapterKey === presentedChapterKey;
+  const chapters = currentChapterSelection ? chapterRows : [];
+  const frameTask = currentChapterSelection ? knownFrameTask : null;
+  const chapterError = currentChapterSelection ? knownChapterError : null;
+  const chaptersBusy = currentChapterSelection && chapterPending;
+
   /**
    * 播放入口指向的播放单元（media_item + 季集三元组，与播放器同一套约定）。
    * 电影用 (0, 0) 哨兵；剧集跟随分集区当前选中的那一集，选集变了续播点也要跟着变。
@@ -191,22 +235,19 @@ export function LibraryItemDetailView({
   const playUnit = useMemo<PlaybackUnit | null>(() => {
     if (!detail) return null;
     if (detail.kind !== "tv") {
-      // 电影与其他库条目都是单一播放单元 (0, 0)
       return {
-        // lib/api/playback 的播放单元仍按 number 声明，条目 id 是 UUID 字符串，
-        // 这里仅做类型投影，运行期原样传给播放器
-        media_item_id: detail.media_item_id as unknown as number,
-        season_number: 0,
-        episode_number: 0,
+        media_item_id: detail.media_item_id,
+        file_id: selectedTrackFileId ?? undefined,
       };
     }
     if (!selectedSeriesEpisode) return null;
     return {
-      media_item_id: detail.media_item_id as unknown as number,
+      media_item_id: detail.media_item_id,
       season_number: selectedSeriesEpisode.seasonNumber,
       episode_number: selectedSeriesEpisode.episode.episode_number,
+      file_id: selectedTrackFileId ?? undefined,
     };
-  }, [detail, selectedSeriesEpisode]);
+  }, [detail, selectedSeriesEpisode, selectedTrackFileId]);
 
   // 单元三元组的字符串形式：detail 每次轮询都是新对象，直接依赖 playUnit
   // 会让刮削期间每两秒重查一次续播点。
@@ -236,7 +277,7 @@ export function LibraryItemDetailView({
   useEffect(() => {
     let cancelled = false;
     setFavorite(null);
-    fetchPlaybackMarks({ media_item_id: mediaItemId as unknown as number })
+    fetchPlaybackMarks({ media_item_id: mediaItemId })
       .then((marks) => {
         if (!cancelled) setFavorite(marks.is_favorite);
       })
@@ -255,7 +296,7 @@ export function LibraryItemDetailView({
     setFavorite(next);
     try {
       const marks = await setPlaybackMarks(
-        { media_item_id: mediaItemId as unknown as number },
+        { media_item_id: mediaItemId },
         { favorite: next },
       );
       setFavorite(marks.is_favorite);
@@ -287,106 +328,121 @@ export function LibraryItemDetailView({
     }
   }, [marking, playUnit, toast, watched]);
 
-  const reload = useCallback(() => {
-    setFailed(false);
-    Promise.all([
-      getLibraryItemDetail(libraryId, mediaItemId),
-      getLibrary(libraryId).catch(() => null),
-    ])
-      .then(([data, lib]) => {
+  // Only the latest reload may publish; an older one that settles late is ignored.
+  const reloadSeq = useRef(0);
+  const fetchDetail = useCallback(
+    async (signal?: AbortSignal): Promise<LibraryItemDetail | null> => {
+      const seq = ++reloadSeq.current;
+      setFailed(false);
+      try {
+        const [data, lib] = await Promise.all([
+          getLibraryItemDetail(libraryId, mediaItemId, { signal }),
+          getLibrary(libraryId).catch(() => null),
+        ]);
+        if (signal?.aborted || seq !== reloadSeq.current || currentPageKey.current !== pageKey) return null;
         setDetail(data);
         setLibrary(lib);
-      })
-      .catch(() => setFailed(true));
-  }, [libraryId, mediaItemId]);
+        return data;
+      } catch (error) {
+        if (!signal?.aborted && seq === reloadSeq.current && currentPageKey.current === pageKey) setFailed(true);
+        throw error;
+      }
+    },
+    [libraryId, mediaItemId, pageKey],
+  );
+  const reload = useCallback(() => {
+    fetchDetail().catch(() => undefined);
+  }, [fetchDetail]);
 
   useEffect(() => {
     setDetail(null);
     setRefreshError(null);
     setSelectedSeriesEpisode(null);
     setSelectedTrackFileId(null);
-    reload();
-  }, [reload]);
+    const controller = new AbortController();
+    fetchDetail(controller.signal).catch(() => undefined);
+    return () => controller.abort();
+  }, [fetchDetail]);
 
-  useEffect(() => () => {
-    chapterRefreshToken.current += 1;
-    if (chapterRefreshTimer.current != null) {
-      window.clearTimeout(chapterRefreshTimer.current);
-      chapterRefreshTimer.current = null;
-    }
-  }, []);
+  useEffect(() => {
+    const operation = createLibraryItemProbe({
+      request: (signal) => probeItem(libraryId, mediaItemId, signal),
+      reload: fetchDetail,
+      chapterSession: () => chapterSession.current,
+      pageCurrent: () => currentPageKey.current === pageKey,
+      onBusy: setProbing,
+      onError: setRefreshError,
+      onResult: (result) => {
+        if (result.already_running) toast.info("该条目已有媒体探测任务正在运行");
+        else toast.success(`已提交 ${result.queued} 个文件的媒体信息与声纹探测`);
+      },
+    });
+    itemProbe.current = operation;
+    setProbing(false);
+    return () => { operation.stop(); if (itemProbe.current === operation) itemProbe.current = null; };
+  }, [libraryId, mediaItemId, fetchDetail, pageKey, toast]);
 
   // 后台任务状态存储在数据库。即使已有章节，也持续刷新详情直到探测任务终态，
   // 这样媒体流信息和声纹结果会在任务完成后及时显示。
+  // 单在途（review L5）：上一轮结束后才排下一轮，切页/卸载会取消在途请求并忽略过期结果。
+  const probeQueued = !!detail?.files.some((file) => file.probe_queued);
   useEffect(() => {
-    if (!detail || detail.files.length === 0) return;
-    const stages = detail.files.flatMap((file) =>
-      file.probe_stages
-        ? [file.probe_stages.metadata, file.probe_stages.intro, file.probe_stages.outro].filter(
-            (stage): stage is NonNullable<typeof stage> => stage != null,
-          )
-        : [],
-    );
-    const active = stages.length > 0
-      ? shouldPollProbeDetails(stages)
-      : detail.files.some((file) => file.probe_queued);
-    if (!active) return;
-    const timer = window.setInterval(() => {
-      reload();
+    if (!probeQueued) return;
+    return startSingleFlightPoll(async (signal) => {
+      const latest = await fetchDetail(signal);
+      return latest == null || latest.files.some((file) => file.probe_queued);
     }, 5000);
-    return () => window.clearInterval(timer);
-  }, [detail, reload]);
+  }, [probeQueued, fetchDetail]);
 
-  // Reattach to a persisted season refresh after navigation or browser reload.
-  // The click handler also reports immediate progress, while this effect owns
-  // the longer-lived page state and reloads chapter results at a terminal state.
-  const probeSeasonsKey = detail?.kind === "tv"
-    ? [...new Set(detail.files.map((file) => file.season ?? 1))].sort((a, b) => a - b).join(",")
-    : "";
+  // The same selected-file session owns discovery, generation and every terminal reload.
   useEffect(() => {
-    if (!detail || detail.kind !== "tv" || !probeSeasonsKey) return;
-    let cancelled = false;
-    let timer: number | null = null;
+    setPresentedChapterKey(chapterKey);
+    setChapters([]); setFrameTask(null); setChapterError(null); setChaptersBusy(false);
+    if (!chapterTarget) return;
+    const session = createChapterFrameSession<ItemChapter>({
+      loadChapters: (signal) => fetchItemChapters(libraryId, mediaItemId, chapterTarget, signal),
+      loadStatus: (expected, signal) => fetchChapterFrameStatus(libraryId, mediaItemId, chapterTarget, expected, signal),
+      onChapters: setChapters, onTask: setFrameTask, onError: setChapterError,
+      onBusy: setChaptersBusy,
+    });
+    chapterSession.current = session;
+    void session.discover();
+    return () => { session.stop(); if (chapterSession.current === session) chapterSession.current = null; };
+  }, [libraryId, mediaItemId, chapterTarget, chapterKey]);
+
+  // Persisted season work retains its whole-season scope; only its displayed result follows this file.
+  const probeSeasonsKey = detail?.kind === "tv" ? [...new Set(detail.seasons)].sort((a, b) => a - b).join(",") : "";
+  useEffect(() => {
+    const session = chapterSession.current;
+    if (!session || !chapterTarget || !probeSeasonsKey) return;
+    const controller = new AbortController();
     const observedActive = new Set<number>();
-    const seasons = probeSeasonsKey.split(",").map(Number);
-    const poll = async () => {
-      let stillActive = false;
-      for (const season of seasons) {
+    const read = async () => {
+      let active = false;
+      for (const season of probeSeasonsKey.split(",").map(Number)) {
+        const version = session.version();
         try {
-          const status = await fetchItemProbeStatus(libraryId, detail.media_item_id, season);
-          if (status.active) {
-            observedActive.add(season);
-            stillActive = true;
-            continue;
-          }
+          const status = await fetchItemProbeStatus(libraryId, mediaItemId, season, controller.signal);
+          if (controller.signal.aborted) return false;
+          if (!session.active(version)) { active = true; continue; }
+          if (status.active) { observedActive.add(season); active = true; continue; }
           const wasActive = observedActive.delete(season);
-          const selected = selectedSeriesEpisode;
-          if (
-            (wasActive || status.job?.status === "succeeded" || status.job?.status === "failed" || status.job?.status === "cancelled")
-            && selected?.seasonNumber === season
-          ) {
-            const target = {
-              season,
-              episode: selected.episode.episode_number,
-            };
-            const latestChapters = await fetchItemChapters(libraryId, detail.media_item_id, target);
-            if (!cancelled) setChapters(latestChapters);
-          }
-        } catch {
-          // Retry transient status failures instead of abandoning a persisted job.
-          stillActive = true;
-        }
+          if (chapterTarget.season === season && (wasActive || status.job)) await session.discover();
+          if (controller.signal.aborted) return false;
+        } catch { if (!controller.signal.aborted) active = true; }
       }
-      if (!cancelled && stillActive) {
-        timer = window.setTimeout(() => void poll(), 5000);
-      }
+      return active;
     };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer != null) window.clearTimeout(timer);
-    };
-  }, [libraryId, detail?.media_item_id, detail?.kind, probeSeasonsKey, selectedSeriesEpisode]);
+    let stop: (() => void) | undefined;
+    void read().then((active) => { if (!controller.signal.aborted && active) stop = startSingleFlightPoll(read, 5000); });
+    return () => { controller.abort(); stop?.(); };
+  }, [libraryId, mediaItemId, probeSeasonsKey, chapterTarget, chapterDiscovery]);
+
+  const wasProbeQueued = useRef(false);
+  useEffect(() => {
+    if (wasProbeQueued.current && !probeQueued) void chapterSession.current?.discover();
+    wasProbeQueued.current = probeQueued;
+  }, [probeQueued]);
 
   // 沉浸背景：进入本页把全站背景临时换成该片剧照（侧栏、外壳留白一起透出，
   // 不再只铺详情卡片的局部），离开即恢复用户配置的背景——见 lib/backdrop.tsx
@@ -470,38 +526,25 @@ export function LibraryItemDetailView({
   const hidePageNav = isNfDesktop;
   const back = useBackNavigation(navFallback.href);
 
-  useEffect(() => {
-    if (!detail || detail.files.length === 0) return;
-    if (detail.kind === "tv" && !selectedSeriesEpisode) {
-      setChapters([]);
-      return;
-    }
-    let cancelled = false;
-    const target = detail.kind === "tv" && selectedSeriesEpisode
-      ? { season: selectedSeriesEpisode.seasonNumber, episode: selectedSeriesEpisode.episode.episode_number }
-      : undefined;
-    void fetchItemChapters(libraryId, detail.media_item_id, target)
-      .then((list) => {
-        if (!cancelled && list.length > 0) setChapters(list);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [libraryId, detail?.media_item_id, selectedSeriesEpisode?.seasonNumber, selectedSeriesEpisode?.episode.episode_number]);
-
-  // 相似推荐：仅依赖 tmdb_id 和 media_item_id，一次加载终身缓存，绝不随详情轮询重复请求导致页面闪跳
+  // Explicit pending is polled independently of the Library detail refresh.
   const mediaTmdbId = detail?.tmdb_id;
   const mediaItemIdKey = detail?.media_item_id;
   useEffect(() => {
+    setSimilar([]);
+    setSimilarPending(false);
+    setSimilarError(null);
     if (!mediaTmdbId || !mediaItemIdKey) return;
-    let cancelled = false;
-    void fetchItemSimilar(libraryId, mediaItemIdKey)
+    const controller = new AbortController();
+    void waitForSimilar(
+      (signal) => fetchItemSimilar(libraryId, mediaItemIdKey, signal),
+      { signal: controller.signal, onPending: () => setSimilarPending(true) },
+    )
       .then((hits) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        setSimilarPending(false);
         setSimilar(
           hits.map((hit) => ({
-            id: hit.tmdb_id ?? hit.id ?? "",
+            id: hit.tmdb_id ?? "",
             title: hit.title,
             type: hit.kind === "tv" ? "tv" : "movie",
             year: hit.year ?? undefined,
@@ -512,10 +555,12 @@ export function LibraryItemDetailView({
           }) as unknown as MediaItem),
         );
       })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setSimilarPending(false);
+        setSimilarError(error instanceof Error ? error.message : "相似推荐暂时不可用");
+      });
+    return () => controller.abort();
   }, [libraryId, mediaTmdbId, mediaItemIdKey]);
 
   if (failed) {
@@ -562,15 +607,6 @@ export function LibraryItemDetailView({
   // 条目所在库有刮削链（影视库）才给「刷新元数据/更换图片」等入口；
   // 新契约的能力位字段已删，按库形态判定
   const scrapedLibrary = library != null && (library.kind === "movie" || library.kind === "tv");
-  const trackFiles = isMovie
-    ? detail.files
-    : (selectedSeriesEpisode?.files ?? []);
-  // 新契约的详情文件没有 state 字段：返回的文件都是可播在位文件
-  const availableTrackFiles = trackFiles;
-  const selectedTrackFile =
-    availableTrackFiles.find((file) => file.file_id === selectedTrackFileId) ??
-    availableTrackFiles[0] ??
-    null;
   // 电影和剧集共用同一套基础信息层级：标题行只保留年份、片长、分辨率、HDR；
   // 帧率、编码、文件大小等技术细节留在文件区。电影概览全部版本，
   // 剧集只显示当前集当前文件的画面规格，并随文件选择器同步变化。
@@ -600,6 +636,7 @@ export function LibraryItemDetailView({
   const itemFacts = [
     detail.year ? String(detail.year) : null,
     detail.rating ? `评分 ${detail.rating}` : null,
+    detail.content_rating ? `分级 ${detail.content_rating}` : null,
     detail.runtime_minutes ? `${detail.runtime_minutes} 分钟` : null,
   ].filter((fact): fact is string => Boolean(fact));
   const itemPlot =
@@ -629,121 +666,28 @@ export function LibraryItemDetailView({
   };
 
   const regenerateChapters = async () => {
-    setChaptersBusy(true);
-    try {
-      const target = !isMovie && selectedSeriesEpisode
-        ? { season: selectedSeriesEpisode.seasonNumber, episode: selectedSeriesEpisode.episode.episode_number }
-        : undefined;
-      await generateItemChapters(libraryId, detail.media_item_id, target);
-      setChapters(await fetchItemChapters(libraryId, detail.media_item_id, target));
-    } catch (error) {
-      setChapterError(error instanceof Error ? error.message : "章节生成失败");
-    } finally {
-      setChaptersBusy(false);
-    }
+    if (!chapterTarget) return;
+    await chapterSession.current?.generate((signal) => generateItemChapters(
+      libraryId, detail.media_item_id, chapterTarget,
+      frameTask?.state === "partial" || frameTask?.state === "failed", signal,
+    ));
   };
 
-  const forceRefreshChaptersAndMarkers = async () => {
-    if (chapterRefreshTimer.current != null) {
-      window.clearTimeout(chapterRefreshTimer.current);
-      chapterRefreshTimer.current = null;
-    }
-    const refreshToken = ++chapterRefreshToken.current;
-    setChaptersBusy(true);
-    try {
-      const target = !isMovie && selectedSeriesEpisode
-        ? { season: selectedSeriesEpisode.seasonNumber, episode: selectedSeriesEpisode.episode.episode_number }
-        : undefined;
-      const refreshed = await refreshItemChapters(libraryId, detail.media_item_id, target);
-      if (chapterRefreshToken.current !== refreshToken) return;
-      setChapterError(null);
-      if (refreshed.fingerprint_refresh_error) {
-        throw new Error(refreshed.fingerprint_refresh_error);
-      }
-      if (refreshed.fingerprint_refresh_already_running && !refreshed.fingerprint_refresh_queued) {
-        setChapters((current) => current.length > 0 ? current : refreshed.chapters);
-        toast.info("该剧该季已有探测任务正在运行，请等待完成后再刷新片头片尾");
-      } else if (refreshed.fingerprint_refresh_queued) {
-        setChapters((current) => current.length > 0 ? current : refreshed.chapters);
-        toast.info(refreshed.fingerprint_refresh_already_running
-          ? "该剧该季的片头片尾正在生成中"
-          : "已提交片头片尾生成任务，当前结果会在完成后更新");
-      }
+  const forceRefreshChaptersAndMarkers = async (capturePolicy: "reuse_valid" | "recapture") => {
+    if (!chapterTarget) return;
+    await chapterSession.current?.run(async (operation) => {
+      const refreshed = await refreshItemChapters(libraryId, detail.media_item_id, chapterTarget, capturePolicy, operation.signal);
+      if (!operation.current()) return;
+      if (refreshed.fingerprint_refresh_error) throw new Error(refreshed.fingerprint_refresh_error);
       if (refreshed.fingerprint_refresh_queued || refreshed.fingerprint_refresh_already_running) {
-        const poll = (attempt: number) => {
-          if (chapterRefreshToken.current !== refreshToken) return;
-          const delay = Math.min(5_000 * 2 ** Math.min(attempt, 3), 30_000);
-          chapterRefreshTimer.current = window.setTimeout(async () => {
-            if (chapterRefreshToken.current !== refreshToken) return;
-            try {
-              const latest = await fetchItemProbeStatus(
-                libraryId,
-                detail.media_item_id,
-                target?.season ?? refreshed.fingerprint_refresh_job?.season ?? 1,
-              );
-              if (chapterRefreshToken.current !== refreshToken) return;
-              if (latest.active) {
-                void poll(attempt + 1);
-                return;
-              }
-              if (latest.job?.status === "succeeded") {
-                const updated = await fetchItemChapters(libraryId, detail.media_item_id, target);
-                if (chapterRefreshToken.current !== refreshToken) return;
-                setChapters(updated);
-                chapterRefreshTimer.current = null;
-                toast.success("片头片尾任务已完成，章节结果已更新");
-                return;
-              }
-              if (latest.job?.status === "cancelled") {
-                chapterRefreshTimer.current = null;
-                toast.info("源文件已删除，片头片尾任务已取消，原有结果已保留");
-                return;
-              }
-              if (latest.job?.status === "failed") {
-                const updated = await fetchItemChapters(libraryId, detail.media_item_id, target);
-                if (chapterRefreshToken.current !== refreshToken) return;
-                setChapters(updated);
-                chapterRefreshTimer.current = null;
-                toast.error(latest.job.error
-                  ? `片头片尾生成失败：${latest.job.error}`
-                  : "片头片尾生成失败，原有章节结果已保留");
-                return;
-              }
-              poll(attempt + 1);
-            } catch {
-              poll(attempt + 1);
-            }
-          }, delay);
-        };
-        poll(0);
-      } else if (!refreshed.fingerprint_refresh_already_running) {
-        setChapters(refreshed.chapters);
-        toast.success("章节已刷新");
+        toast.info("已提交片头片尾任务，当前结果会在完成后更新");
+        setChapterDiscovery((value) => value + 1);
       }
-    } catch (error) {
-      setChapterError(error instanceof Error ? error.message : "重新获取片头与章节失败");
-    } finally {
-      setChaptersBusy(false);
-    }
+      await operation.discover();
+    });
   };
 
-  const handleProbeMedia = async () => {
-    if (!detail) return;
-    setProbing(true);
-    try {
-      const result = await probeItem(libraryId, detail.media_item_id);
-      if (result.already_running) {
-        toast.info("该条目已有媒体探测任务正在运行");
-      } else {
-        toast.success(`已提交 ${result.queued} 个文件的媒体信息与声纹探测`);
-      }
-      reload();
-    } catch (error) {
-      setRefreshError(error instanceof Error ? error.message : "重新探测媒体信息失败");
-    } finally {
-      setProbing(false);
-    }
-  };
+  const handleProbeMedia = () => itemProbe.current?.run();
 
   // 页面级操作（⋯ 菜单）：银玻璃/移动端排在 PageNav 吸顶行右端；Netflix 桌面
   // 没有 PageNav，由 NetflixPageActions 浮在顶栏下方右上角（与返回键对称）
@@ -760,9 +704,9 @@ export function LibraryItemDetailView({
         }).then((ok) => {
           if (!ok) return;
           clearPlaybackHistory("item", {
-            mediaItemId: detail.media_item_id as unknown as number,
+            mediaItemId: detail.media_item_id,
           })
-            .then(({ message }) => toast.success(message))
+            .then((cleared) => toast.success(`已清除 ${cleared.deleted_states} 条观看记录`))
             .catch((e) => toast.error((e as Error).message));
         });
       }}
@@ -773,7 +717,8 @@ export function LibraryItemDetailView({
       searchHref={`/search?q=${encodeURIComponent(detail.title)}`}
       onReidentify={() => setReidentifyOpen(true)}
       onRefreshMetadata={runMetadataRefresh}
-      onRefreshChapters={detail.files.length > 0 ? () => void forceRefreshChaptersAndMarkers() : undefined}
+      onRefreshChapters={detail.files.length > 0 ? () => void forceRefreshChaptersAndMarkers("reuse_valid") : undefined}
+      onRecaptureAudio={detail.files.length > 0 ? () => void forceRefreshChaptersAndMarkers("recapture") : undefined}
       onChangeArtwork={() => setArtworkOpen(true)}
 
       onDelete={() => setDeleteOpen(true)}
@@ -843,7 +788,7 @@ export function LibraryItemDetailView({
           className="pointer-events-none absolute inset-x-0 top-0 z-0 overflow-hidden"
           style={{ height: mobileHeroHeight }}
         >
-          <img src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
+          <ArtworkImage src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
           <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
           <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
         </div>
@@ -872,7 +817,7 @@ export function LibraryItemDetailView({
            页首 Hero 承担封面展示，这里不再重复 */}
         {!isMobile && immersiveUrl && (
           <div className="mb-6 flex items-start gap-6">
-            <img
+            <ArtworkImage
               src={immersiveUrl}
               alt=""
               decoding="async"
@@ -950,7 +895,7 @@ export function LibraryItemDetailView({
                 // sessionStorage。读 location 而不是 useSearchParams()：
                 // 后者会把整页拖进「必须包 Suspense」的预渲染约束。
                 rememberPlayerReturnPath(window.location.pathname + window.location.search);
-                navigate(playHref(detail.media_item_id as unknown as number, {
+                navigate(playHref(detail.media_item_id, {
                     season:
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.seasonNumber
@@ -959,6 +904,12 @@ export function LibraryItemDetailView({
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
+                    // 只有用户真的选过版本才带 file_id；默认展示的文件不是显式选择 (R10)
+                    fileId: playLinkFileId(
+                      availableTrackFiles.some((file) => file.file_id === selectedTrackFileId)
+                        ? selectedTrackFileId
+                        : null,
+                    ),
                   }),);
               }}
             />
@@ -982,7 +933,7 @@ export function LibraryItemDetailView({
 
       {/* —— 剧集分集区：季选择 + 分集横滚卡 + 选中集的简介/规格/文件 ——
           分集置于简介之后，确保追剧用户首屏滑下即可立即选集 */}
-      {!isMovie && detail.files.some((f) => f.season != null) && (
+      {!isMovie && detail.seasons.length > 0 && (
         <div className="mt-6 px-12 max-md:px-4">
           <SeasonEpisodesSection
             libraryId={libraryId}
@@ -995,7 +946,7 @@ export function LibraryItemDetailView({
         </div>
       )}
 
-      {/* 章节：内嵌章节标记 + 场景图（chapter_N.jpg），从章节起播跳到对应时间点。
+      {/* 章节：内嵌章节标记 + 场景图，从章节起播跳到对应时间点。
           即使暂未识别到任何章节/片头片尾，也保留区块与「重新获取」入口，
           避免用户连从哪里触发识别都找不到（STRM 场景尤其需要手动配置 TheIntroDB 后重试）。 */}
       {detail.files.length > 0 && (
@@ -1005,20 +956,20 @@ export function LibraryItemDetailView({
             <div className="flex flex-wrap items-center gap-1.5 text-micro">
               <button
                 type="button"
-                disabled={chaptersBusy}
-                onClick={() => void forceRefreshChaptersAndMarkers()}
-                title="清除缓存并重新从 TheIntroDB 或视频内嵌章节识别"
+                disabled={chaptersBusy || !chapterTarget}
+                onClick={() => void forceRefreshChaptersAndMarkers("reuse_valid")}
+                title="复用有效音频并重新识别片头片尾和章节"
                 className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
               >
                 {chaptersBusy ? "识别中…" : "重新获取片头/章节"}
               </button>
               <button
                 type="button"
-                disabled={chaptersBusy}
+                disabled={chaptersBusy || !chapterTarget}
                 onClick={() => void regenerateChapters()}
                 className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
               >
-                {chaptersBusy ? "生成中…" : "生成场景图"}
+                {chaptersBusy ? "提交中…" : frameTask?.state === "partial" || frameTask?.state === "failed" ? "重试失败场景图" : "生成场景图"}
               </button>
               <button
                 type="button"
@@ -1031,6 +982,9 @@ export function LibraryItemDetailView({
               </button>
             </div>
           </div>
+          {frameTask && <p role="status" className="mb-2 text-caption text-white/60">
+            {frameTask.state === "queued" ? `场景图已排队 ${frameTask.ready}/${frameTask.total}` : frameTask.state === "running" ? `正在生成场景图 ${frameTask.ready}/${frameTask.total}` : frameTask.state === "cancelled" ? "场景图任务已取消" : frameTask.state === "superseded" ? "场景图任务已更新" : `已完成 ${frameTask.ready}/${frameTask.total}${frameTask.failed ? `，${frameTask.failed} 张失败` : ""}`}
+          </p>}
           {chapters.length === 0 && (
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-5 text-caption text-white/45">
               暂未识别到片头片尾或章节数据。
@@ -1049,14 +1003,15 @@ export function LibraryItemDetailView({
               synthetic: false,
               image_url: chapter.image_url,
             }))}
-            pending={chaptersBusy}
+            pending={chaptersBusy || shouldPollFrameTask(frameTask)}
             resumeMs={watched?.position_ms ?? null}
             onPlay={(chapter) => {
               rememberPlayerReturnPath(window.location.pathname + window.location.search);
               navigate(
-                playHref(detail.media_item_id as unknown as number, {
+                playHref(detail.media_item_id, {
                   season: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.seasonNumber : undefined,
                   episode: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.episode.episode_number : undefined,
+                  fileId: selectedTrackFile?.file_id,
                   tSeconds: Math.floor(chapter.start_ms / 1000),
                 }),
               );
@@ -1099,6 +1054,16 @@ export function LibraryItemDetailView({
         );
       })()}
 
+      {similarPending && (
+        <p role="status" className="mt-8 px-12 text-sm text-[var(--text-muted)] max-md:px-4">
+          正在加载相似推荐…
+        </p>
+      )}
+      {similarError && (
+        <p role="alert" className="mt-8 px-12 text-sm text-[var(--text-muted)] max-md:px-4">
+          相似推荐暂时不可用：{similarError}
+        </p>
+      )}
       {similar.length > 0 && (
         <div className="mt-8">
           <MediaRow
@@ -1372,6 +1337,7 @@ function ItemActionsMenu({
   onReidentify,
   onRefreshMetadata,
   onRefreshChapters,
+  onRecaptureAudio,
   onChangeArtwork,
   onDelete,
   onUpgrade,
@@ -1391,6 +1357,7 @@ function ItemActionsMenu({
   onReidentify: () => void;
   onRefreshMetadata: () => void;
   onRefreshChapters?: () => void;
+  onRecaptureAudio?: () => void;
   onChangeArtwork: () => void;
   onDelete: () => void;
   /** 洗版入口（quality-upgrade.md §13.5）；无订阅权限或条目未识别时不传 */
@@ -1466,6 +1433,11 @@ function ItemActionsMenu({
                   className={itemClass}
                 >
                   重新识别片头片尾与章节
+                </DropdownMenu.Item>
+              )}
+              {onRecaptureAudio && (
+                <DropdownMenu.Item onSelect={onRecaptureAudio} className={itemClass}>
+                  重新读取音频
                 </DropdownMenu.Item>
               )}
               {scraped && (
@@ -1661,19 +1633,8 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
   /** 变化即静默重拉本季分集（页面内改了观看状态后），不重置选中集与滚动位置 */
   refreshKey?: number;
 }) {
-  // 季清单：新契约详情不下发 seasons，从文件里实有的季号推导
-  const seasons = useMemo(() => {
-    const set = new Set<number>();
-    for (const f of detail.files) {
-      if (f.season != null) set.add(f.season);
-    }
-    return [...set].sort((a, b) => a - b);
-  }, [detail.files]);
-  // 哪些季真在库——台账文件的季号集合（这里与 seasons 同源）
-  const ownedSeasons = useMemo(
-    () => new Set(detail.files.map((f) => f.season).filter((v): v is number => v != null)),
-    [detail.files],
-  );
+  const seasons = detail.seasons;
+  const ownedSeasons = useMemo(() => new Set(detail.seasons), [detail.seasons]);
   // 默认落在第一个在库的季，而不是季号最小的那一季：只存了第 5、6 季的剧，
   // 打开详情页就停在满屏置灰的第 1 季，第一眼像"我的片子没了"
   const defaultSeason = seasons.find((s) => ownedSeasons.has(s)) ?? seasons[0];
@@ -1773,7 +1734,7 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
     [detail.files],
   );
   const current =
-    data?.season_number === season
+    data !== null && data.season_number === season
       ? (data.episodes.find((e) => e.episode_number === selected) ?? null)
       : null;
   const currentFiles = useMemo(

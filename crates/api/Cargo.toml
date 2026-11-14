@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+time = { workspace = true }
+httpdate.workspace = true
 async-trait = "0.1"
 axum = "0.8"
 domain.workspace = true
@@ -49,7 +51,9 @@ sha2.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+store = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { version = "1", features = ["test-util"] }
 
 [[bin]]
 name = "crawler-media"
@@ -58,6 +62,10 @@ path = "src/main.rs"
 [[bin]]
 name = "live-loop"
 path = "src/bin/live_loop/main.rs"
+
+[[bin]]
+name = "fingerprint-bench"
+path = "src/bin/fingerprint-bench.rs"
 
 [[test]]
 name = "adaptive_review9_regression"

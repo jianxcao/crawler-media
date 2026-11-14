@@ -1,11 +1,10 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use domain::UserId;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
-async fn visible_scope_loads_strictly_owned_media_ids() {
+async fn visible_scope_loads_libraries_owning_media() {
     let fix = PresenceFixture::new();
 
     let (m1, _) = fix.insert_media_and_ledger("vis1.mkv");
@@ -13,16 +12,19 @@ async fn visible_scope_loads_strictly_owned_media_ids() {
 
     let admin_id = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
+        let guard = store_arc.as_ref();
         guard.user_by_token(&fix.admin_token).unwrap().unwrap().id
     };
 
     let scope = {
         let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        api::visible_scope::VisibleScope::load(&guard, admin_id).unwrap()
+        let guard = store_arc.as_ref();
+        api::visible_scope::visible_library_ids(guard, admin_id).unwrap()
     };
 
-    assert!(scope.media_ids().contains(&m1));
-    assert!(scope.media_ids().contains(&m2));
+    let store = fix.state.store();
+    for media in [m1, m2] {
+        let coverage = store.file_coverage_for_media(media).unwrap();
+        assert!(scope.contains(&coverage[0].file.library_id));
+    }
 }

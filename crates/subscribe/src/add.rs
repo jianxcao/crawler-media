@@ -112,8 +112,8 @@ pub fn admit_and_add<D: Downloader + ?Sized>(
         outcome: RunOutcome {
             completed,
             facts: input.facts.clone(),
-            ledger: Vec::new(),
-            ledger_sources: Vec::new(),
+            files: Vec::new(),
+            file_sources: Vec::new(),
             removed_paths: Vec::new(),
             transferred_enclosures: Vec::new(),
             rejected_enclosures: broken.iter().map(|s| s.torrent.enclosure.clone()).collect(),

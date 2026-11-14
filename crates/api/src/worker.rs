@@ -6,10 +6,8 @@ use crate::management::ApiState;
 pub(crate) mod finish_search;
 use finish_search::finish_search;
 mod search;
-pub(crate) use search::{
-    report_site_failures, search_torrents_for_subscribe,
-};
 pub use search::{page_is_full_and_irrelevant, search_keywords_for};
+pub(crate) use search::{report_site_failures, search_torrents_for_subscribe};
 pub(crate) mod transfer;
 pub use transfer::transfer_one;
 
@@ -23,7 +21,7 @@ pub(crate) fn notify(state: &ApiState, title: &str, content: &str) {
     // Extract config synchronously (parking_lot guard must not cross await),
     // then send best-effort on the current runtime.
     let (url, token): (Option<String>, Option<String>) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             crate::http::notify::notify_url(&store),
             crate::http::notify::notify_token(&store),
@@ -62,7 +60,13 @@ pub struct StateRunner {
 impl Runner for StateRunner {
     fn run(&self, job: &Job) -> Result<(), String> {
         match job.kind {
-            JobKind::SubscribeSearch | JobKind::SubscribeRss => search(&self.state, job, None),
+            JobKind::SubscribeSearch => {
+                let jobs::JobScope::Subscribe(id) = job.scope else {
+                    return Err("SubscribeSearch requires Subscribe scope".into());
+                };
+                search(&self.state, job, id, None)
+            }
+            JobKind::SubscribeRss => run_rss_for_subscriptions(&self.state, job),
             JobKind::Transfer => transfer(&self.state),
             JobKind::WatchIntake => crate::watch_intake::run(&self.state),
             JobKind::Scrape => crate::watch_scrape::run(&self.state),
@@ -82,23 +86,30 @@ impl Runner for StateRunner {
     }
 }
 
-fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(), String> {
-    let subscribe_id = match payload_subscribe_id(&job.payload) {
-        Ok(id) => id,
-        Err(_) if job.kind == JobKind::SubscribeRss => {
-            return run_rss_for_subscriptions(state, job);
-        }
-        Err(err) => return Err(err),
-    };
-    let (subscribe, media, filter, sites) = {
-        let store = state.store.lock();
+fn search(
+    state: &ApiState,
+    job: &Job,
+    subscribe_id: SubscribeId,
+    rss_batch: Option<&RssBatch>,
+) -> Result<(), String> {
+    let (subscribe, media, _filter, sites) = {
+        let store = state.store.as_ref();
         let maybe_sub = store
             .get_subscribe(subscribe_id)
             .map_err(|e| e.to_string())?;
         let Some(subscribe) = maybe_sub else {
-            // 订阅已被删除，自动清理残留孤儿 JobDef，避免循环调度与报警。
-            drop(store);
-            let _ = state.jobs.lock().delete_defs_for_payload(&job.payload);
+            // Stop scheduling an orphan Search while preserving its active outcome.
+            // Explicit/durable Subscribe deletion owns identity/history cleanup.
+            if let (JobKind::SubscribeSearch, jobs::JobScope::Subscribe(id), Some(_)) =
+                (job.kind, job.scope, job.def_id)
+            {
+                let jobs = state
+                    .jobs
+                    .acquire()
+                    .map_err(|error| format!("orphan Subscribe Job cleanup admission: {error}"))?;
+                jobs.set_def_enabled(jobs::JobIdentity::subscribe_search(id), false)
+                    .map_err(|error| format!("orphan Subscribe Job cleanup: {error}"))?;
+            }
             return Ok(());
         };
         let media = store
@@ -182,7 +193,7 @@ fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(
 
 fn run_rss_for_subscriptions(state: &ApiState, job: &Job) -> Result<(), String> {
     let (subscriptions, sites) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         (
             store
                 .list_all_subscribes()
@@ -209,12 +220,7 @@ fn run_rss_for_subscriptions(state: &ApiState, job: &Job) -> Result<(), String> 
     let mut ran = 0usize;
     let mut failed = 0usize;
     for subscribe in subscriptions {
-        let mut scoped_job = job.clone();
-        scoped_job.payload = serde_json::json!({
-            "subscribe_id": subscribe.id.to_string()
-        })
-        .to_string();
-        if let Err(error) = search(state, &scoped_job, Some(&batch)) {
+        if let Err(error) = search(state, job, subscribe.id, Some(&batch)) {
             tracing::error!(subscribe_id = %subscribe.id, %error, "RSS 订阅搜索失败，继续处理其他订阅");
             failed += 1;
         }
@@ -243,7 +249,9 @@ pub(crate) fn notify_subscription_complete(
     subscribe: &domain::Subscribe,
     media: &domain::Media,
 ) -> Result<(), String> {
-    crate::completion::mark_if_complete(state, subscribe);
+    let Some(subscribe) = crate::completion::mark_if_complete(state, subscribe) else {
+        return Ok(());
+    };
     if matches!(
         subscribe.coverage,
         domain::Coverage::Tv {
@@ -253,20 +261,35 @@ pub(crate) fn notify_subscription_complete(
     ) {
         return Ok(());
     }
-    // L4: a unit only counts while its file is still on disk.
-    let done = crate::completion::units_on_disk(state, subscribe);
-    let store = state.store.lock();
-    let key = format!("subscribe.completed:{}", subscribe.id);
-    if !done {
-        // L4: no longer complete → the next completion notifies again.
-        let _ = store.delete_setting(&key);
-        return Ok(());
+    // L4: observe disk without holding the Subscribe decision guard.
+    let done = crate::completion::units_on_disk(state, &subscribe);
+    {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        if !crate::completion::current_is_unchanged(state, &subscribe)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+        let store = state.store.as_ref();
+        let key = format!("subscribe.completed:{}", subscribe.id);
+        if !done {
+            store
+                .delete_setting(&key)
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        if store
+            .get_setting(&key)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        store
+            .put_setting(&key, "1")
+            .map_err(|error| error.to_string())?;
     }
-    if store.get_setting(&key).ok().flatten().is_some() {
-        return Ok(()); // 已通知过
-    }
-    let _ = store.put_setting(&key, "1");
-    drop(store);
     notify(
         state,
         "订阅已完成",
@@ -281,11 +304,11 @@ fn record_wanted_round<D: downloader::Downloader + ?Sized>(
     state: &ApiState,
     subscribe: &domain::Subscribe,
     added: &subscribe::Added<'_, D>,
+    cap: Option<u32>,
+    catalog_max: Option<u32>,
 ) -> Result<(), String> {
     let now = crate::job_loop::unix_now();
-    let cap = crate::air_gate::aired_cap(state, subscribe, added.input.media);
-    let catalog_max = crate::air_gate::catalog_aired_max(state, subscribe, added.input.media);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let facts = store
         .load_subscribe_facts(subscribe.id)
         .map_err(|e| e.to_string())?;
@@ -372,7 +395,7 @@ fn covered_units(release: &domain::Release) -> Vec<(Option<u32>, Option<u32>)> {
 fn transfer(state: &ApiState) -> Result<(), String> {
     let subscribes = state
         .store
-        .lock()
+        .as_ref()
         .list_all_subscribes()
         .map_err(|e| e.to_string())?;
     let mut failures = 0usize;
@@ -388,15 +411,6 @@ fn transfer(state: &ApiState) -> Result<(), String> {
     } else {
         Err(format!("{failures} Subscribe Transfer failed"))
     }
-}
-
-fn payload_subscribe_id(payload: &str) -> Result<SubscribeId, String> {
-    let value: serde_json::Value = serde_json::from_str(payload).map_err(|err| err.to_string())?;
-    let raw = value
-        .get("subscribe_id")
-        .and_then(|v| v.as_str())
-        .ok_or("missing subscribe_id")?;
-    raw.parse().map_err(|err: uuid::Error| err.to_string())
 }
 
 #[cfg(test)]

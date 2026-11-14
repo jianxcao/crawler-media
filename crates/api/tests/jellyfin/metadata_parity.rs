@@ -53,21 +53,7 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
     store.insert_media(&show).unwrap();
     let episode_path = show_root.join("Pantheon S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
-    let episode = LedgerRow {
-        id: LedgerId::new(),
-        media_id: show.id,
-        path: episode_path.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&episode).unwrap();
-
+    // Task 8/17 只在 publish_fixture_file 时观测旁车 NFO：夹具必须在写文件之前落盘。
     std::fs::write(
         show_root.join("tvshow.nfo"),
         r#"<tvshow>
@@ -89,8 +75,24 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
         "<episodedetails><title>Zero Day</title><aired>2022-09-01</aired><season>1</season><episode>1</episode></episodedetails>",
     )
     .unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id: show.id,
+        path: episode_path.display().to_string(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
 
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
     let series = get_json(&app, &format!("/Items/{series_id}")).await;
     assert_eq!(series["ProductionYear"], 2022);
     assert_eq!(series["PremiereDate"], "2022-09-01");
@@ -110,7 +112,7 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
     );
     assert_eq!(series["People"][0]["Name"], "Paul Dano");
 
-    let episode_id = episode.id.to_string().replace('-', "");
+    let episode_id = unit_id(show.id, 1, 1);
     let episode = get_json(&app, &format!("/Items/{episode_id}")).await;
     assert_eq!(episode["Name"], "Zero Day");
     assert_eq!(episode["PremiereDate"], "2022-09-01");

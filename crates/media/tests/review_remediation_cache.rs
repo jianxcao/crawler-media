@@ -246,12 +246,13 @@ fn douban_endpoint_cases() -> Vec<Case> {
 
 fn cache_rows(db: &Path) -> Vec<(String, String, i64)> {
     let conn = rusqlite::Connection::open(db).unwrap();
-    conn.prepare("SELECT cache_key, body, fetched_at FROM catalog_cache ORDER BY cache_key")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    let rows = media::response_cache::list(&conn, None).unwrap();
+    let mut mapped: Vec<(String, String, i64)> = rows
+        .into_iter()
+        .map(|r| (r.cache_key, r.body, r.fetched_at))
+        .collect();
+    mapped.sort_by(|a, b| a.0.cmp(&b.0));
+    mapped
 }
 
 fn assert_stale_survives(case: Case, bad: &str) {
@@ -334,8 +335,13 @@ fn every_metadata_source_retries_preexisting_malformed_fresh_cache() {
         let http = Reply(Arc::new(Mutex::new(case.body.into())));
         let expected = (case.run)(http.clone(), &db, NOW).unwrap();
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute("UPDATE catalog_cache SET body = ?1", [ERROR])
+        for source in media::response_cache::CACHE_SOURCES {
+            conn.execute(
+                &format!("UPDATE {} SET body = ?1", source.table_name()),
+                [ERROR],
+            )
             .unwrap();
+        }
         let actual = (case.run)(http, &db, NOW + 1);
         assert_eq!(
             actual.unwrap_or_else(|e| panic!("{}: {e}", case.name)),

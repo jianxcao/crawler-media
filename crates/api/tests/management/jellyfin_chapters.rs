@@ -19,7 +19,10 @@ fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
     });
     let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
     let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let st = state(tmp.path(), fetcher, downloader);
+    let root = tmp.path().to_path_buf();
+    let st = std::thread::spawn(move || state(&root, fetcher, downloader))
+        .join()
+        .unwrap();
     (router(st), store)
 }
 
@@ -32,9 +35,9 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
     std::fs::create_dir_all(&tv_dir).unwrap();
 
     let strm_file = tv_dir.join("Frieren.S01E01.strm");
-    std::fs::write(&strm_file, "https://cdn.example.com/frieren/ep01.mkv\n").unwrap();
+    std::fs::write(&strm_file, "http://[invalid/frieren/ep01.mkv\n").unwrap();
 
-    // 1. Manually add Media and LedgerRow
+    // 1. Manually add Media and its Library file
     let media = domain::Media {
         id: domain::MediaId::new(),
         kind: domain::MediaKind::Tv,
@@ -50,8 +53,7 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
     };
     let media = store.ensure_media(media).unwrap();
 
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media.id,
         path: strm_file.display().to_string(),
         season: Some(1),
@@ -62,14 +64,14 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
         quality_source: domain::QualitySource::Release,
         confidence: domain::Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
 
-    // 2. Add an intro marker in media_markers table (simulate TheIntroDB or previous scan)
-    let marker = api::store::StoredMediaMarker {
-        media_id: media.id,
-        season: 1,
-        episode: 1,
+    // 2. Add an intro marker in file_markers table (simulate TheIntroDB or previous scan)
+    let marker = api::store::StoredFileMarker {
         intro_start_ms: Some(95_000),
         intro_end_ms: Some(185_000),
         outro_start_ms: Some(1_320_000),
@@ -77,8 +79,9 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
         source: "theintrodb".into(),
         locked: false,
         updated_at: 0,
+        ..store::test_support::fixture_marker(&store, media.id, domain::UnitKey::new(1, 1))
     };
-    store.put_media_marker(&marker).unwrap();
+    store.put_fixture_marker(&marker).unwrap();
 
     // 3. Query Jellyfin /Items (protected route merged at root)
     let res = app

@@ -11,7 +11,7 @@
  * 的个人数据，它该长在展示这些记录的地方。这里按时间与范围给四种清法：
  * 今天 / 最近一周 / 全部 / 某个媒体库（弹窗里下拉选库）。
  *
- * 四条都是删自己的记录（docs/design/library-access.md 2.6），二次确认后
+ * 四条都是删自己的记录，二次确认后
  * 调同一个接口；成功后由父组件重新拉数据，这一行随之刷新或整段隐藏
  * （记录清空了，也就没有「接下来」可言）。
  */
@@ -67,14 +67,10 @@ export function WatchHistoryMenu({
     }).then((ok) => {
       if (!ok) return;
       clearPlaybackHistory("all", since ? { since } : {})
-        .then(({ result, message }) => {
+        .then((result) => {
           // 时间窗口的回执由前端组句：服务端不知道「这段时间」是今天还是一周
           toast.success(
-            since
-              ? result.deleted_states > 0
-                ? `已清空${label}`
-                : `${label}里没有可清除的记录`
-              : message,
+            result.deleted_states > 0 ? `已清空${label}` : `${label}里没有可清除的记录`,
           );
           onCleared();
         })
@@ -177,14 +173,9 @@ function ClearLibraryHistoryDialog({
   const submit = () => {
     if (libraryId === null || busy) return;
     setBusy(true);
-    // 新契约 MediaLibrary.id 是 UUID 字符串；旧播放接口仍按数值型 library_id
-    // 声明，按原样透传（后端按字符串解析），这里只做类型收窄。
-    clearPlaybackHistory(
-      "library",
-      { libraryId: libraryId ?? undefined } as unknown as { libraryId?: number },
-    )
-      .then(({ message }) => {
-        toast.success(message);
+    clearPlaybackHistory("library", { libraryId })
+      .then((cleared) => {
+        toast.success(`已清除 ${cleared.deleted_states} 条观看记录`);
         onCleared();
         onClose();
       })

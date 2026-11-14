@@ -14,13 +14,13 @@ fn is_generic_episode_stem(title: &str) -> bool {
     let token = stem.split('.').next().unwrap_or(stem);
     let token = token.split(' ').next().unwrap_or(token);
     let token = token.split('-').next().unwrap_or(token);
-    if let Some(rest) = token.strip_prefix('s') {
-        if let Some((season, episode)) = rest.split_once('e') {
-            return !season.is_empty()
-                && !episode.is_empty()
-                && season.chars().all(|c| c.is_ascii_digit())
-                && episode.chars().all(|c| c.is_ascii_digit());
-        }
+    if let Some(rest) = token.strip_prefix('s')
+        && let Some((season, episode)) = rest.split_once('e')
+    {
+        return !season.is_empty()
+            && !episode.is_empty()
+            && season.chars().all(|c| c.is_ascii_digit())
+            && episode.chars().all(|c| c.is_ascii_digit());
     }
     let s = token
         .strip_prefix("ep")
@@ -56,10 +56,10 @@ fn is_generic_movie_stem(title: &str) -> bool {
 }
 
 fn has_foreign_conflict(media: &Media, release: &Release) -> bool {
-    if let (Some(y1), Some(y2)) = (media.year, release.year) {
-        if y1 != y2 {
-            return true;
-        }
+    if let (Some(y1), Some(y2)) = (media.year, release.year)
+        && y1 != y2
+    {
+        return true;
     }
     if !release.title.is_empty()
         && !is_generic_episode_stem(&release.title)
@@ -116,10 +116,10 @@ pub fn resolve_file_release(
                 );
                 return None;
             };
-            if let Some(t_season) = torrent_release.season {
-                if !has_explicit_season_in_filename(file_path) {
-                    candidate.season = Some(t_season);
-                }
+            if let Some(t_season) = torrent_release.season
+                && !has_explicit_season_in_filename(file_path)
+            {
+                candidate.season = Some(t_season);
             }
             let slots = covered_slots(subscribe, &candidate);
             if slots.is_empty() {

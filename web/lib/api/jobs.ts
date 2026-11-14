@@ -53,6 +53,8 @@ export interface MaintenanceSummary {
   qoe_days?: number;
   transient_cache_days?: number;
   probe_days?: number;
+  /** operation 历史行（扫描/重配置/合并/删除作业）的保留天数；省略时服务端按 30 天。 */
+  operations_days?: number;
   /** 数据库维护。 */
   vacuum_enabled?: boolean;
   /** payload 损坏时后端显式标记，不假装是默认策略。 */
@@ -71,12 +73,13 @@ export interface MaintenancePreview {
   protected: number;
   protected_truncated?: boolean;
   truncated: boolean;
-  /** DB-05：分类历史保留的窗口检视行数。 */
+  /** `data_retention` 专用：本轮窗口内检视的行数（含保护行）。分类保留的规模只能看它。 */
   examined?: number;
   incomplete?: boolean;
   classes?: Array<{
     class: string;
     cutoff_ms?: number;
+    /** 该类窗口内检视的行数；`candidates = examined - protected`。 */
     examined?: number;
     candidates?: number;
     protected?: number;
@@ -99,8 +102,9 @@ export interface MaintenanceReport {
   protected_is_lower_bound?: boolean;
   batches?: number;
   budget_exhausted?: boolean;
-  /** DB-05：分类历史保留的窗口检视/剩余信号。 */
+  /** DB-05：分类历史保留本轮检视的行数（窗口内，含保护行）。 */
   examined?: number;
+  /** DB-05：分类历史保留的剩余信号。 */
   incomplete?: boolean;
   remaining?: boolean;
   classes?: Array<{
@@ -165,11 +169,6 @@ export async function listJobs(
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<JobDef[]>>(`/jobs${suffix}`));
-}
-
-/** 读取单个任务定义。 */
-export function getJob(jobId: string): Promise<JobView> {
-  return unwrap(request<ApiEnvelope<JobDef>>(`/jobs/${jobId}`));
 }
 
 /** 切换任务启用/停用状态。 */
@@ -266,36 +265,5 @@ export function runJob(jobId: string): Promise<{ queued: boolean }> {
 export function cancelJob(jobId: string): Promise<{ cancelled: number }> {
   return unwrap(
     request<ApiEnvelope<{ cancelled: number }>>(`/jobs/${jobId}/cancel`, { method: "POST" }),
-  );
-}
-
-/** 重新执行：新契约无 /retry 端点，等价于立即 run 一次。 */
-export function retryJob(jobId: string): Promise<{ queued: boolean }> {
-  return runJob(jobId);
-}
-
-/**
- * 忽略一条失败任务：新契约无 /dismiss 端点，退化为读取当前定义
- * （组件依赖的返回类型 JobView 不变；静音语义由组件适配阶段另行处理）。
- */
-export async function dismissJob(jobId: string, muteSource = false): Promise<JobView> {
-  return getJob(jobId);
-}
-
-/** 取消「已忽略」：同上，退化为读取当前定义。 */
-export async function undismissJob(jobId: string): Promise<JobView> {
-  return getJob(jobId);
-}
-
-/** 收口失败任务：无批量端点，返回当前处于 failed 的定义列表。 */
-export async function dismissAllFailedJobs(): Promise<JobView[]> {
-  const jobs = await listJobs();
-  return jobs.filter((job) => job.last_status === "failed");
-}
-
-/** 手动触发一次调度 tick（开发用）。 */
-export function tickJobs(): Promise<Record<string, unknown>> {
-  return unwrap(
-    request<ApiEnvelope<Record<string, unknown>>>("/jobs/tick", { method: "POST" }),
   );
 }

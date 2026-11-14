@@ -27,13 +27,22 @@ fn nfo_escapes_xml_special_chars_on_round_trip() {
         rating: Some("8.1".into()),
         runtime_minutes: Some("45".into()),
         genres: vec!["剧情 & 犯罪".into()],
-        cast: vec![library::CastMember {
-            name: "A&B <C>".into(),
-            role: Some("R&D".into()),
-            tmdb_id: Some("42".into()),
-            thumb: Some("https://img.example.com/a&b.jpg".into()),
-            order: None,
-        }],
+        cast: vec![
+            library::CastMember {
+                name: "A&B <C>".into(),
+                role: Some("R&D".into()),
+                tmdb_id: Some("42".into()),
+                thumb: Some("https://img.example.com/a&b.jpg".into()),
+                order: None,
+            },
+            library::CastMember {
+                name: "Local".into(),
+                role: None,
+                tmdb_id: None,
+                thumb: Some("actors/local.jpg".into()),
+                order: None,
+            },
+        ],
         season: Some(1),
         episode: Some(5),
         thumb: Some("https://img.example.com/x?a=1&b=2".into()),
@@ -61,6 +70,7 @@ fn nfo_escapes_xml_special_chars_on_round_trip() {
     assert_eq!(parsed.genres, vec!["剧情 & 犯罪"]);
     assert_eq!(parsed.cast[0].name, "A&B <C>");
     assert_eq!(parsed.cast[0].role.as_deref(), Some("R&D"));
+    assert_eq!(parsed.cast[1].thumb.as_deref(), Some("actors/local.jpg"));
     assert_eq!(
         parsed.thumb.as_deref(),
         Some("https://img.example.com/x?a=1&b=2")

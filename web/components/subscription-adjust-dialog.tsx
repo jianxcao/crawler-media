@@ -12,8 +12,7 @@
  *
  * 减季的清理收尾（season-cleanup-dialog.tsx）刻意做成保存**之后**的第二步：
  * ① 保存按钮不该变成破坏性操作——同一个弹窗还能改入库库，调库的人不该撞见
- * 一排删除勾选；② 清理数量必须是实测的，想在保存前给出数量就得把后端的出域
- * 判定复制一份到前端，那是第二份真相源。先保存，再拿真实的 reconcile 结果追问。
+ * 一排删除勾选；② 保存成功后，管理员显式选择是否清理旧季的文件和下载任务。
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -26,7 +25,6 @@ import { isLibraryDirty, libraryPatch } from "@/lib/subscription-form";
 import { listLibraries, type MediaLibrary } from "@/lib/api/libraries";
 import {
   cleanupSubscriptionSeasons,
-  getSubscriptionRemovalPreview,
   previewSubscriptionDownloadRouting,
   previewSubscriptionTitle,
   updateSubscription,
@@ -34,7 +32,6 @@ import {
   type SeasonOverview,
   type SubscriptionDetail,
   type SubscriptionRemovalOptions,
-  type SubscriptionRemovalPreview,
 } from "@/lib/api/subscriptions";
 import { usePermissions } from "@/lib/permissions";
 
@@ -68,10 +65,9 @@ export function SubscriptionAdjustDialog({
   const [preview, setPreview] = useState<DispatchPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // 保存成功后的清理追问；null = 不追问（没减季 / 无可清理内容 / 预览失败）
+  // 保存成功后的清理追问；全作品预览不能用来决定旧季是否有可清理内容。
   const [cleanup, setCleanup] = useState<{
     seasons: number[];
-    preview: SubscriptionRemovalPreview;
   } | null>(null);
 
   useEffect(() => {
@@ -109,7 +105,7 @@ export function SubscriptionAdjustDialog({
     setPreview(null);
     previewSubscriptionDownloadRouting(
       detail.media.kind,
-      libraryId as unknown as number | null,
+      libraryId,
       detail.media.tmdb_id ?? null,
     )
       .then((p) => {
@@ -156,24 +152,16 @@ export function SubscriptionAdjustDialog({
     try {
       await updateSubscription(detail.id, {
         ...(changed.seasons
-          ? { selected_seasons: [...selectedSeasons].sort((a, b) => a - b) }
+          ? { coverage: { kind: "tv" as const, season: [...selectedSeasons].sort((a, b) => a - b)[0], episode_from: 1 } }
           : {}),
         // 显式带上 null 即「清除指定库、改回默认库路由」（后端区分未传与 null）
         ...(canManageSubscriptions ? libraryPatch(initialLibraryId, libraryId) : {}),
       });
       toast.success("订阅已调整");
       if (dropped.length > 0 && canManageSubscriptions) {
-        // 数量取自后端保存后的真实出域结果，不在前端推算
-        const plan = await getSubscriptionRemovalPreview(detail.id, dropped).catch(() => null);
-        if (plan === null) {
-          // 预览拿不到就不追问——没数字的勾选框等于让用户盲签。但要明确说出
-          // "没做清理"，用户才知道要不要自己去处理
-          toast.info("订阅已调整；这一季的内容未作清理");
-        } else if (plan.torrent_count > 0 || plan.library_file_count > 0) {
-          setCleanup({ seasons: dropped, preview: plan });
-          setBusy(false);
-          return; // 等用户在追问弹窗里决定；onSaved() 推迟到那一步
-        }
+        setCleanup({ seasons: dropped });
+        setBusy(false);
+        return; // onSaved 推迟到用户完成清理选择后
       }
       onSaved();
     } catch (e) {
@@ -187,7 +175,7 @@ export function SubscriptionAdjustDialog({
     if (cleanup === null) return;
     try {
       await cleanupSubscriptionSeasons(detail.id, cleanup.seasons, options);
-      toast.success("正在后台清理，可在「任务中心」查看进度");
+      toast.success("所选内容已清理");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "清理失败，请稍后重试");
     }
@@ -195,7 +183,7 @@ export function SubscriptionAdjustDialog({
     onSaved();
   };
 
-  // 减季保存成功且有内容可清理：由追问弹窗接手（不叠在本弹窗之上——季已经改完，
+  // 减季保存成功：由追问弹窗接手（不叠在本弹窗之上——季已经改完，
   // 让两个弹窗同时在场只会让人以为还能回去改）
   if (cleanup !== null) {
     return (
@@ -203,7 +191,6 @@ export function SubscriptionAdjustDialog({
         open
         title={detail.media.title}
         seasons={cleanup.seasons}
-        preview={cleanup.preview}
         onClose={() => {
           setCleanup(null);
           onSaved();

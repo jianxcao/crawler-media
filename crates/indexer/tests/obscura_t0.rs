@@ -17,7 +17,10 @@ fn sessions_are_isolated_by_browser_context() {
     {
         let a = open_cdp_session(&endpoint()).expect("createBrowserContext supported");
         a.set_site_cookies(url, "t0_probe=1").unwrap();
-        assert!(a.cookie_header(url).unwrap().contains("t0_probe=1"), "getCookies{{urls}} reads back");
+        assert!(
+            a.cookie_header(url).unwrap().contains("t0_probe=1"),
+            "getCookies{{urls}} reads back"
+        );
     }
     let b = open_cdp_session(&endpoint()).unwrap();
     assert!(
@@ -37,7 +40,9 @@ fn local_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             let mut stream = stream;
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap_or(0);
-            log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            log.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).into_owned());
             let body = "<html><body>t0-ok</body></html>";
             let _ = write!(
                 stream,
@@ -69,7 +74,13 @@ fn render_end_to_end_navigates_injects_and_reads_back_cookies() {
         .expect("render against real Obscura");
     assert!(page.html.contains("t0-ok"), "{}", page.html);
     let requests = seen.lock().unwrap().join("\n");
-    assert!(requests.contains("uid=42"), "injected cookie must reach the site: {requests}");
+    assert!(
+        requests.contains("uid=42"),
+        "injected cookie must reach the site: {requests}"
+    );
     let header = page.cookie_header.unwrap_or_default();
-    assert!(header.contains("srv=7"), "server cookie read back: {header}");
+    assert!(
+        header.contains("srv=7"),
+        "server cookie read back: {header}"
+    );
 }

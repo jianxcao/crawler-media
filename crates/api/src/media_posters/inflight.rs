@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::Instant;
 
 use domain::MediaId;
 use parking_lot::Mutex;
@@ -15,14 +15,16 @@ pub struct PosterInflight {
     pub outcome: Mutex<Option<Result<PosterBytes, PosterError>>>,
     pub changed: Notify,
     waiters: AtomicUsize,
+    pub(super) deadline: Instant,
 }
 
 impl PosterInflight {
-    pub fn new() -> Self {
+    pub fn new(deadline: Instant) -> Self {
         Self {
             outcome: Mutex::new(None),
             changed: Notify::new(),
             waiters: AtomicUsize::new(0),
+            deadline,
         }
     }
 
@@ -38,12 +40,6 @@ impl PosterInflight {
             }
         }
         self.changed.notify_waiters();
-    }
-}
-
-impl Default for PosterInflight {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -110,17 +106,21 @@ impl Drop for PosterWorkerGuard {
                 elapsed_ms,
                 "海报 worker 异常终止未发布终态，发布 Io 错误并移除 inflight 条目"
             );
-            self.entry.publish(Err(PosterError::Io("poster worker terminated unexpectedly".into())));
+            self.entry.publish(Err(PosterError::Io(
+                "poster worker terminated unexpectedly".into(),
+            )));
             self.completed = true;
         }
 
         // Identity-checked retirement: older worker can never remove newer generation's entry
         // Clean up from map only if the weak entry points to our entry or is dead
         let mut map = self.in_flight.lock();
-        if let Some(weak) = map.get(&self.media_id) {
-            if weak.upgrade().is_none_or(|current| Arc::ptr_eq(&current, &self.entry)) {
-                map.remove(&self.media_id);
-            }
+        if let Some(weak) = map.get(&self.media_id)
+            && weak
+                .upgrade()
+                .is_none_or(|current| Arc::ptr_eq(&current, &self.entry))
+        {
+            map.remove(&self.media_id);
         }
     }
 }
@@ -135,7 +135,7 @@ impl<'a> Drop for WaiterGuard<'a> {
 
 pub async fn wait_poster(
     entry: Arc<PosterInflight>,
-    deadline: Duration,
+    observer_deadline: Instant,
 ) -> Result<PosterBytes, PosterError> {
     // 1. Fast path: check before registering notification or incrementing waiter count
     if let Some(res) = entry.outcome.lock().clone() {
@@ -160,7 +160,8 @@ pub async fn wait_poster(
         }
     };
 
-    match tokio::time::timeout(deadline, wait_fut).await {
+    let deadline = observer_deadline.min(entry.deadline);
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), wait_fut).await {
         Ok(res) => res,
         Err(_) => {
             tracing::warn!("海报等待请求超时");

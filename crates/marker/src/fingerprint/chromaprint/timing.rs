@@ -5,6 +5,10 @@ use super::diagnostics::{FfmpegBenchmark, sanitized_excerpt};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExtractionTimings {
+    pub(crate) remote_gate_wait_ms: u64,
+    pub(crate) process_elapsed_ms: Option<u64>,
+    pub(crate) source_facts: Option<super::super::capture_types::CaptureSourceFacts>,
+    pub(crate) timeline: super::super::timeline::TimelineObserver,
     pub(crate) command_setup_ms: u128,
     pub(crate) ffmpeg_spawn_ms: u128,
     pub(crate) time_to_first_pcm_ms: Option<u128>,
@@ -15,7 +19,9 @@ pub(crate) struct ExtractionTimings {
     pub(crate) ffmpeg_wait_ms: u128,
     pub(crate) stderr_collect_ms: u128,
     pub(crate) pcm_bytes: u64,
+    pub(crate) pcm_sha256: sha2::Sha256,
     pub(crate) sample_count: u64,
+    pub(crate) pcm_rms: crate::fingerprint::capture::PcmRms,
     pub(crate) ffmpeg_log_level: String,
     pub(crate) ffmpeg_exit_code: Option<i32>,
     pub(crate) ffmpeg_stderr_tail: String,

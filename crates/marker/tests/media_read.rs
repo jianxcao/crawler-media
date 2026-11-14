@@ -15,7 +15,7 @@ fn metadata_and_fingerprint_reads_share_exclusion_and_cooldown() {
     let dir = tempfile::tempdir().unwrap();
     let path = remote(dir.path());
     let cooldown = Duration::from_millis(40);
-    let gate = Arc::new(MediaReadGate::new(cooldown));
+    let gate = Arc::new(MediaReadGate::new(1, cooldown));
     let ready = Arc::new(Barrier::new(3));
     let (tx, rx) = mpsc::channel();
     let workers: Vec<_> = ["metadata", "fingerprint"]
@@ -53,7 +53,7 @@ fn metadata_and_fingerprint_reads_share_exclusion_and_cooldown() {
 fn cancelled_waiter_does_not_read_or_block_next_episode() {
     let dir = tempfile::tempdir().unwrap();
     let path = remote(dir.path());
-    let gate = Arc::new(MediaReadGate::new(Duration::ZERO));
+    let gate = Arc::new(MediaReadGate::new(1, Duration::ZERO));
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let running = {
@@ -101,7 +101,7 @@ fn cancelled_waiter_does_not_read_or_block_next_episode() {
 fn local_reads_are_not_serialized_behind_remote_episode() {
     let dir = tempfile::tempdir().unwrap();
     let path = remote(dir.path());
-    let gate = Arc::new(MediaReadGate::new(Duration::from_secs(5)));
+    let gate = Arc::new(MediaReadGate::new(1, Duration::from_secs(5)));
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let worker = {
@@ -129,7 +129,7 @@ fn failed_remote_read_still_cools_down_and_releases_admission() {
     let dir = tempfile::tempdir().unwrap();
     let path = remote(dir.path());
     let cooldown = Duration::from_millis(40);
-    let gate = MediaReadGate::new(cooldown);
+    let gate = MediaReadGate::new(1, cooldown);
     assert!(
         gate.read::<()>(&path, &WorkControl::default(), || Err("HTTP 500".into()))
             .is_err()
@@ -140,4 +140,123 @@ fn failed_remote_read_still_cools_down_and_releases_admission() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn gate_admits_up_to_its_limit_of_concurrent_remote_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = remote(dir.path());
+    let gate = Arc::new(MediaReadGate::new(2, Duration::ZERO));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let workers: Vec<_> = (0..3)
+        .map(|n| {
+            let (gate, path, started_tx, release_rx) = (
+                gate.clone(),
+                path.clone(),
+                started_tx.clone(),
+                release_rx.clone(),
+            );
+            std::thread::spawn(move || {
+                gate.read(&path, &WorkControl::default(), || {
+                    started_tx.send(n).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            })
+        })
+        .collect();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        started_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "third read must wait for a free slot"
+    );
+    release_tx.send(()).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn gate_limit_can_be_raised_at_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = remote(dir.path());
+    let gate = Arc::new(MediaReadGate::new(1, Duration::ZERO));
+    gate.configure(3, Duration::ZERO);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let workers: Vec<_> = (0..3)
+        .map(|_| {
+            let (gate, path, started_tx, release_rx) = (
+                gate.clone(),
+                path.clone(),
+                started_tx.clone(),
+                release_rx.clone(),
+            );
+            std::thread::spawn(move || {
+                gate.read(&path, &WorkControl::default(), || {
+                    started_tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            })
+        })
+        .collect();
+    for _ in 0..3 {
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+    for _ in 0..3 {
+        release_tx.send(()).unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn direct_chapter_probe_waits_for_shared_remote_admission_and_cancels() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("local-only.strm");
+    // An invalid URI exercises STRM admission without a valid network target,
+    // even in the regression's ungated implementation.
+    std::fs::write(&path, "http://[invalid/chapter-fixture.mkv\n").unwrap();
+    let permit = marker::media_read::acquire_media_read(&path, &WorkControl::default()).unwrap();
+    let control = WorkControl::default();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = {
+        let control = control.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(marker::probe_chapters_controlled(&path, &control))
+                .unwrap();
+        })
+    };
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let premature = done_rx.recv_timeout(Duration::from_millis(500));
+    control.cancel();
+    let was_waiting = matches!(premature, Err(mpsc::RecvTimeoutError::Timeout));
+    if was_waiting {
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_none()
+        );
+    }
+    worker.join().unwrap();
+    drop(permit);
+    assert!(
+        was_waiting,
+        "chapter ffprobe bypassed the shared remote read permit"
+    );
 }

@@ -14,7 +14,6 @@ async fn run(policy: Option<&str>) -> Vec<String> {
     if let Some(policy) = policy {
         h.state
             .store()
-            .lock()
             .put_setting(api::settings_keys::SUBSCRIBE_OVERLAP_POLICY, policy)
             .unwrap();
     }
@@ -33,7 +32,7 @@ async fn run(policy: Option<&str>) -> Vec<String> {
             atom(domain::AtomRule::TitleMatch("x265".into()), 150),
         ],
     );
-    h.state.store().lock().insert_filter(&filter).unwrap();
+    h.state.store().insert_filter(&filter).unwrap();
     let filter = json!({ "filter_id": filter.id.to_string() });
     let id = tv_subscribe(&h, window, filter).await;
     h.set_search_rows(&[(PACK, 1), (SINGLE, 2)]);

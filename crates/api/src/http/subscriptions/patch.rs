@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -16,7 +15,22 @@ pub(crate) async fn patch_subscription(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
     Path(id): Path<String>,
-    Json(body): Json<PatchSubscriptionInput>,
+    crate::http::strict_json::StrictJson(body): crate::http::strict_json::StrictJson<
+        PatchSubscriptionInput,
+    >,
+) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        patch_blocking(state, user_id, id, body)
+    })
+    .await
+}
+
+fn patch_blocking(
+    state: ApiState,
+    user_id: UserId,
+    id: String,
+    body: PatchSubscriptionInput,
 ) -> Response {
     let sid = match parse_subscribe_id(&id) {
         Ok(id) => id,
@@ -46,9 +60,24 @@ pub(crate) async fn patch_subscription(
     if let Some(auto) = auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, auto);
     }
-    let store = state.store.lock();
-    let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
-    let body = super::subscription_json(&store, state.catalog.as_ref(), &subscribe, &media, &facts);
+    drop(_guard);
+    let snapshot = {
+        let store = state.store.as_ref();
+        let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+        super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
+    };
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, "Subscribe timestamp read failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
+    let body = super::views::render_subscription_snapshot(&snapshot, state.file_stats.as_ref());
     ok(body).into_response()
 }
 
@@ -68,7 +97,7 @@ fn load_and_patch(
     user_id: UserId,
     body: PatchSubscriptionInput,
 ) -> Result<(Subscribe, Subscribe, Media), Response> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(mut subscribe) = store.get_subscribe(id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -76,9 +105,7 @@ fn load_and_patch(
             "订阅不存在",
         ));
     };
-    if let Err(response) = super::ensure_subscribe_owner(&store, &subscribe, user_id) {
-        return Err(response);
-    }
+    super::ensure_subscribe_owner(&store, &subscribe, user_id)?;
     let previous = subscribe.clone();
     apply_patch_fields(&store, &mut subscribe, body)?;
     let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {
@@ -96,46 +123,100 @@ fn persist_subscription(
     previous: &Subscribe,
     subscribe: &Subscribe,
 ) -> Result<(), Response> {
-    // G-M1: a coverage / library change must not overlap a sibling subscription.
-    if previous.coverage != subscribe.coverage || previous.library_id != subscribe.library_id {
-        let overlap =
-            crate::subscribe_create::overlapping_subscription(&state.store.lock(), subscribe);
-        if let Ok(Some(other)) = overlap {
+    let reservation = state
+        .jobs
+        .reserve()
+        .map_err(crate::http::jobs::jobs_acquire_response)?;
+    if let Err(error) = state
+        .store
+        .as_ref()
+        .update_nonoverlapping_subscribe(subscribe)
+    {
+        if let crate::store::StoreError::SubscribeOverlap { subscribe_id } = error {
             return Err(err(
                 StatusCode::CONFLICT,
                 "subscription.overlap",
-                &format!("同一媒体库中已有覆盖重叠的订阅（{other}），请合并或调整集数范围"),
+                &format!("同一媒体库中已有覆盖重叠的订阅（{subscribe_id}），请合并或调整集数范围"),
             ));
         }
-    }
-    if let Err(error) = state.store.lock().update_subscribe(subscribe) {
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",
             &error.to_string(),
         ));
     }
+    let intent = state
+        .store
+        .subscribe_job_sync(subscribe.id)
+        .map_err(|error| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "subscription.job_sync_pending",
+                &error.to_string(),
+            )
+        })?;
     let subscribe_id = subscribe.id.to_string();
-    if let Err(error) = super::patch_jobs::sync_jobs(
-        state,
-        &subscribe_id,
-        subscribe.tracking_state == "paused",
-        subscribe.search_interval_secs,
-    ) {
-        rollback_subscription(state, &subscribe_id, previous);
-        tracing::error!(subscribe_id, error = %error, "订阅更新已回滚：搜索 Job 同步失败");
+    let sync = match intent.as_ref() {
+        Some(intent) => crate::subscribe_job_sync::publish(&reservation, intent, ""),
+        None => Ok(()),
+    };
+    if let Err(error) = sync {
+        let compensation = rollback_subscription(state, &reservation, &subscribe_id, previous);
+        tracing::error!(subscribe_id, error = %error, "Subscribe Jobs sync failed; compensation attempted and durable intent retained until convergence");
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "subscription.job_sync_failed",
-            &error.to_string(),
+            &format!("{error}; {compensation}"),
         ));
+    }
+    if let Some(intent) = intent {
+        state
+            .store
+            .acknowledge_subscribe_job_sync(subscribe.id, &intent.generation, intent.revision)
+            .map_err(|error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subscription.job_sync_pending",
+                    &error.to_string(),
+                )
+            })?;
     }
     Ok(())
 }
 
-fn rollback_subscription(state: &ApiState, id: &str, previous: &Subscribe) {
-    if let Err(error) = state.store.lock().update_subscribe(previous) {
-        tracing::error!(subscribe_id = id, error = %error, "队列同步失败后回滚订阅状态失败");
+fn rollback_subscription(
+    state: &ApiState,
+    reservation: &crate::JobsReservation<'_>,
+    id: &str,
+    previous: &Subscribe,
+) -> String {
+    if let Err(error) = state.store.as_ref().update_subscribe(previous) {
+        tracing::error!(subscribe_id = id, %error, "Subscribe compensation failed; durable current-config intent will retry");
+        // Jobs transaction rolled back, so leave durable current Subscribe state
+        // to recovery rather than publishing an uncommitted previous config.
+        return format!("Subscribe compensation failed; synchronization pending: {error}");
     }
-    super::patch_jobs::rollback_jobs(state, id, previous);
+    let intent = match state.store.subscribe_job_sync(previous.id) {
+        Ok(Some(intent)) => intent,
+        Ok(None) => return "Subscribe restored; no Jobs change pending".into(),
+        Err(error) => {
+            return format!("Subscribe restored; Jobs compensation intent read failed: {error}");
+        }
+    };
+    if let Err(error) = crate::subscribe_job_sync::publish(reservation, &intent, "") {
+        tracing::error!(subscribe_id = id, %error, "Jobs compensation failed; durable intent will retry");
+        return format!("Jobs compensation failed; synchronization pending: {error}");
+    }
+    match state.store.acknowledge_subscribe_job_sync(
+        previous.id,
+        &intent.generation,
+        intent.revision,
+    ) {
+        Ok(true) => "Subscribe and Jobs restored".into(),
+        Ok(false) => "Subscribe compensation changed; synchronization pending".into(),
+        Err(error) => {
+            tracing::error!(subscribe_id = id, %error, "Jobs compensation committed; receipt preserves it until acknowledgment retry");
+            format!("Jobs compensation committed; acknowledgment pending: {error}")
+        }
+    }
 }

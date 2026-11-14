@@ -43,6 +43,15 @@ impl ImageCache {
         }
     }
 
+    /// Immutable entries are published by atomic rename. Hits need no publication
+    /// mutex, directory scan, eviction, or upstream capacity.
+    pub(super) fn lookup(&self, url: &str) -> Result<Option<Image>, String> {
+        self.read(
+            &self.root.join(format!("{}.img", super::cache_key(url))),
+            false,
+        )
+    }
+
     pub(super) fn get(
         &self,
         url: &str,
@@ -61,10 +70,13 @@ impl ImageCache {
     ) -> Result<Image, String> {
         let path = self.root.join(format!("{}.img", super::cache_key(url)));
         {
+            super::phase::set("cache_prepare_lock");
             let _guard = self.publication.lock().map_err(|e| e.to_string())?;
+            super::phase::set("cache_prepare");
             fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
             self.reserve(0)?;
-            if let Some(image) = self.read(&path)? {
+            super::phase::set("cache_lookup");
+            if let Some(image) = self.read(&path, true)? {
                 return Ok(image);
             }
         }
@@ -81,13 +93,18 @@ impl ImageCache {
         {
             return Err("Invalid image content type".into());
         }
+        super::phase::set("cache_publish_lock");
         let _guard = self.publication.lock().map_err(|e| e.to_string())?;
+        super::phase::set("cache_reserve");
         self.reserve(0)?;
-        if let Some(image) = self.read(&path)? {
+        super::phase::set("cache_lookup");
+        if let Some(image) = self.read(&path, true)? {
             return Ok(image);
         }
         let size = content_type.len() as u64 + 1 + bytes.len() as u64;
+        super::phase::set("cache_reserve");
         self.reserve(size)?;
+        super::phase::set("cache_publish");
         let temp = self.root.join(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()
@@ -110,7 +127,7 @@ impl ImageCache {
         Ok((content_type, bytes))
     }
 
-    fn read(&self, path: &Path) -> Result<Option<Image>, String> {
+    fn read(&self, path: &Path, discard_invalid: bool) -> Result<Option<Image>, String> {
         let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -120,17 +137,19 @@ impl ImageCache {
         file.take(self.response_limit + 1026)
             .read_to_end(&mut payload)
             .map_err(|e| e.to_string())?;
-        if let Some(split) = payload.iter().position(|b| *b == b'\n') {
-            if split <= 1024 && payload.len() - split - 1 <= self.response_limit as usize {
-                if let Ok(kind) = std::str::from_utf8(&payload[..split]) {
-                    if kind.starts_with("image/") && !kind.contains('\r') {
-                        return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
-                    }
-                }
-            }
+        if let Some(split) = payload.iter().position(|b| *b == b'\n')
+            && split <= 1024
+            && payload.len() - split - 1 <= self.response_limit as usize
+            && let Ok(kind) = std::str::from_utf8(&payload[..split])
+            && kind.starts_with("image/")
+            && !kind.contains('\r')
+        {
+            return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
         }
-        tracing::warn!(path = %path.display(), "Removing invalid or oversized image cache entry");
-        self.remove_checked(path)?;
+        tracing::warn!(path = %path.display(), "Invalid or oversized image cache entry");
+        if discard_invalid {
+            self.remove_checked(path)?;
+        }
         Ok(None)
     }
 

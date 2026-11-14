@@ -1,38 +1,33 @@
 use crate::fingerprint_job::EpisodeDetection;
-use marker::adaptive::VerificationOutcome;
+use marker::adaptive::SegmentKind;
 
-/// Every version participates, including versions with no marker in either kind.
-pub(super) fn validate_version_outcomes(detections: &[EpisodeDetection]) -> Result<(), String> {
-    for (index, first) in detections.iter().enumerate() {
-        for second in &detections[index + 1..] {
-            if first.episode != second.episode {
-                continue;
-            }
-            for (kind, left, right) in [
-                ("intro", &first.intro_outcome, &second.intro_outcome),
-                ("outro", &first.outro_outcome, &second.outro_outcome),
-            ] {
-                if conflicting(left.as_ref(), right.as_ref()) {
-                    return Err(format!(
-                        "episode_version_conflict: episode={} kind={kind} ledgers={} vs {}",
-                        first.episode, first.ledger_id, second.ledger_id
-                    ));
-                }
+/// No-match decisions cannot remove an older interval outside decoded coverage.
+pub(super) fn validate_previous_absence(
+    previous: Option<&store::StoredFileMarker>,
+    detection: Option<&EpisodeDetection>,
+) -> Result<(), String> {
+    if let (Some(previous), Some(detection)) = (previous, detection) {
+        for (kind, outcome, evidence) in [
+            (
+                SegmentKind::Intro,
+                &detection.intro_outcome,
+                &detection.intro_evidence,
+            ),
+            (
+                SegmentKind::Outro,
+                &detection.outro_outcome,
+                &detection.outro_evidence,
+            ),
+        ] {
+            if matches!(outcome, Some(marker::VerificationOutcome::NoMatch { .. })) {
+                super::super::markers::validate_absence_coverage(
+                    previous,
+                    kind,
+                    evidence.as_ref().map(|e| &e.capture),
+                )
+                .map_err(|error| error.to_string())?;
             }
         }
     }
     Ok(())
-}
-
-fn conflicting(left: Option<&VerificationOutcome>, right: Option<&VerificationOutcome>) -> bool {
-    use VerificationOutcome::{NoMatch, Verified};
-    match (left, right) {
-        (Some(Verified(a)), Some(Verified(b))) => {
-            (a.start_ms - b.start_ms).abs() > 1000 || (a.end_ms - b.end_ms).abs() > 1000
-        }
-        (Some(Verified(_)), Some(NoMatch { .. })) | (Some(NoMatch { .. }), Some(Verified(_))) => {
-            true
-        }
-        _ => false,
-    }
 }

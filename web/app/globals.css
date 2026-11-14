@@ -164,7 +164,7 @@
 
   /* PageNav 吸顶雾的渐变（银玻璃蓝黑）：page-nav.tsx 的内联 style 引用它，
      Netflix 主题在覆盖组里换成纯黑系——内联 style 无法被 CSS 选择器压过，
-     必须走变量（docs/design/web-themes-mobile/01-外壳与导航.md §3） */
+     必须走变量 */
   --page-fog: linear-gradient(
     180deg,
     rgba(9, 11, 16, 0.72) 0%,
@@ -250,8 +250,7 @@ html {
    的规则永远压过 Tailwind 的 @layer utilities，与特异性无关。此前这条没有
    layer，播放器进度条上的 `touch-none` 被它压成 manipulation——竖屏沿条拖是
    横向、页面横向没得滚才碰巧没事；伪横屏容器转了 90°，沿条就是物理竖直方向，
-   浏览器把触摸当翻页手势收走（pointercancel），进度条一动不动
-   （2026-09-14 真触摸复现，docs/design/player-feel.md §19.8）。 */
+   浏览器把触摸当翻页手势收走（pointercancel），进度条一动不动。 */
 @layer base {
   button,
   a,
@@ -1257,7 +1256,6 @@ html.immersive-route .page-solid {
 .btn-accent:active {
   transform: scale(0.96);
 }
-
 /*
  * 次级玻璃胶囊按钮：设置页的「编辑 / 刷新 / 取消」等次要操作。
  * 与侧栏「新任务」同一语言：极暗半透填充 + 发丝描边 + 一线内高光，
@@ -1278,10 +1276,6 @@ html.immersive-route .page-solid {
     background 150ms ease,
     border-color 150ms ease,
     color 150ms ease;
-}
-.btn-glass:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.15);
 }
 .btn-glass:disabled {
   opacity: 0.5;
@@ -1592,7 +1586,7 @@ body.cmdk-open .app-shell {
   animation: search-progress-sweep 1.1s ease-in-out infinite;
 }
 /* ---------------------------------------------------------------------------
-   网页播放器（components/player/*，docs/design/web-player.md §6）
+   网页播放器（components/player/）
 
    配色仍走产品的冷银强调色，只是把轨道与缓冲压得更暗，让银色在纯黑画面上
    读得出来——播放器背景是纯黑，沿用工作台那套轨道亮度会让三段颜色糊成一片。
@@ -1620,7 +1614,7 @@ body.cmdk-open .app-shell {
   --player-buffered: rgba(255, 255, 255, 0.55);
 }
 
-/* ---- iOS PWA 安全区（docs/design/web-player.md §6.8） --------------------
+/* ---- iOS PWA 安全区 --------------------
    /play 路由刻意不套工作台外壳，也就没了外壳那层 --safe-top 适配；而站点是
    black-translucent 状态栏 + viewport-fit=cover，PWA 里页面直接画到状态栏和
    Home 指示条底下——顶栏返回键会顶进时钟里（真机截图证实）。iOS 标准播放器
@@ -1986,7 +1980,6 @@ html:has(.player-root) {
  * ============================================================================
  * 「Netflix」主题（html[data-theme="netflix"]）
  * ============================================================================
- * 规格来源：docs/design/web-themes.md（§4 token 全表 / §2 设计语言调研）。
  *
  * 生效分三层，全部挂在本作用域上：
  *   1. token 层：语义变量整组覆盖，全站组件消费变量、皮肤自动跟随；
@@ -2594,7 +2587,7 @@ html[data-theme="netflix"] .nf-nav-offset {
   }
 }
 
-/* —— 移动端收口（docs/design/web-themes-mobile/）—— */
+/* —— 移动端收口—— */
 
 /* 设置页大图标头（settings-view 的分区头）：Netflix 移动端由页顶的
    NetflixSettingsNav（返回键 + 分区名）承担定位，窄屏不再重复占位 */

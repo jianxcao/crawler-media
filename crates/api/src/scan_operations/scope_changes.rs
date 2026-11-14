@@ -10,7 +10,6 @@ async fn another_kind_library_does_not_interrupt_running_scan() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
 
@@ -23,7 +22,6 @@ async fn another_kind_library_does_not_interrupt_running_scan() {
         Box::new(move || {
             state
                 .store()
-                .lock()
                 .create_library(
                     MediaKind::Movie,
                     "Other movies",
@@ -44,9 +42,9 @@ async fn another_kind_library_does_not_interrupt_running_scan() {
         "{}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, episode.display().to_string());
+    assert_eq!(rows[0].file.path, episode);
 }
 
 #[tokio::test]
@@ -58,7 +56,6 @@ async fn disjoint_same_kind_library_does_not_interrupt_running_scan() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let state = fix.state.clone();
@@ -69,7 +66,6 @@ async fn disjoint_same_kind_library_does_not_interrupt_running_scan() {
         Box::new(move || {
             state
                 .store()
-                .lock()
                 .create_library(
                     MediaKind::Movie,
                     "Other movies",
@@ -90,9 +86,9 @@ async fn disjoint_same_kind_library_does_not_interrupt_running_scan() {
         "{}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, movie.display().to_string());
+    assert_eq!(rows[0].file.path, movie);
 }
 
 #[tokio::test]
@@ -107,7 +103,6 @@ async fn disjoint_same_kind_root_update_does_not_interrupt_running_scan() {
     let other = fix
         .state
         .store()
-        .lock()
         .create_library(
             MediaKind::Movie,
             "Other",
@@ -121,7 +116,6 @@ async fn disjoint_same_kind_root_update_does_not_interrupt_running_scan() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let state = fix.state.clone();
@@ -130,7 +124,6 @@ async fn disjoint_same_kind_root_update_does_not_interrupt_running_scan() {
         Box::new(move || {
             state
                 .store()
-                .lock()
                 .update_library(&other.id, None, Some(&[moved_root.to_str().unwrap()]), None)
                 .unwrap();
         }),
@@ -147,8 +140,7 @@ async fn disjoint_same_kind_root_update_does_not_interrupt_running_scan() {
     assert!(
         fix.state
             .store()
-            .lock()
-            .ledger_by_path(&movie.display().to_string())
+            .file_coverage_by_path(&movie.display().to_string())
             .unwrap()
             .is_some()
     );
@@ -168,7 +160,6 @@ async fn symlinked_nested_library_prevents_stale_publication() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let state = fix.state.clone();
@@ -177,7 +168,6 @@ async fn symlinked_nested_library_prevents_stale_publication() {
         Box::new(move || {
             state
                 .store()
-                .lock()
                 .create_library(
                     MediaKind::Movie,
                     "Alias",
@@ -198,7 +188,7 @@ async fn symlinked_nested_library_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().list_file_coverage().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -210,7 +200,6 @@ async fn frozen_library_prevents_scan_publication() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let state = fix.state.clone();
@@ -218,11 +207,7 @@ async fn frozen_library_prevents_scan_publication() {
     crate::http::library_scan::runner::test_observe_hook::set(
         &op.id,
         Box::new(move || {
-            state
-                .store()
-                .lock()
-                .begin_library_removal(&library_id)
-                .unwrap();
+            state.store().begin_library_removal(&library_id).unwrap();
         }),
     );
 
@@ -234,7 +219,7 @@ async fn frozen_library_prevents_scan_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().list_file_coverage().unwrap().is_empty());
 }
 
 /// Same-kind ownership changes still invalidate the original publication scope.
@@ -249,7 +234,6 @@ async fn nested_library_created_during_scan_prevents_stale_publication() {
     let op = fix
         .state
         .store()
-        .lock()
         .enqueue_scan(&fix.library_id, &signature, &[], 1000)
         .unwrap();
     let state = fix.state.clone();
@@ -258,7 +242,6 @@ async fn nested_library_created_during_scan_prevents_stale_publication() {
         Box::new(move || {
             state
                 .store()
-                .lock()
                 .create_library(
                     MediaKind::Movie,
                     "Independent",
@@ -279,5 +262,5 @@ async fn nested_library_created_during_scan_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().list_file_coverage().unwrap().is_empty());
 }

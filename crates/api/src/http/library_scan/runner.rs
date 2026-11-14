@@ -26,16 +26,20 @@
 //! 与失败响应）、`hooks`（测试屏障，仅 `cfg(test)`）。
 
 mod checkpoint;
+mod hold;
 mod metadata;
 mod outcome;
 mod scope;
 mod walk;
 
+#[allow(unused_imports)]
 pub(crate) use checkpoint::checkpoint_fresh;
 
 #[cfg(test)]
 mod hooks;
 
+#[cfg(test)]
+mod hold_tests;
 #[cfg(test)]
 mod tests;
 
@@ -55,9 +59,9 @@ use outcome::{ScanRun, failed_response};
 use scope::capture_and_verify_scope;
 use walk::ScanContext;
 
-pub(crate) use outcome::{ScanRunError, ScanRunFailure};
 #[cfg(test)]
 pub(crate) use hooks::{test_metadata_hook, test_observe_hook, test_scope_hook};
+pub(crate) use outcome::{ScanRunError, ScanRunFailure};
 
 /// 把库根与增量目标映射成 (身份解析根, 起始目录) 列表。
 ///
@@ -82,7 +86,9 @@ fn scan_starts(
             .max_by_key(|root| root.components().count());
         match owner {
             Some(root) => starts.push((root.clone(), target.clone())),
-            None => tracing::warn!(target = %target.display(), "增量扫描目标不属于任何库根，已忽略"),
+            None => {
+                tracing::warn!(target = %target.display(), "增量扫描目标不属于任何库根，已忽略")
+            }
         }
     }
     starts
@@ -99,7 +105,7 @@ pub(crate) fn scan_library_leased_resumable(
     op_id: Option<&str>,
 ) -> Result<(library::ScanReport, Value), ScanRunError> {
     let (kind, roots, scrape) = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         let Some(library) = library_by_id(&store, id) else {
             return Err(failed_response(missing_library(), "library.missing"));
         };
@@ -169,18 +175,7 @@ pub(crate) fn scan_library_leased_resumable(
             error: "library.root_unavailable".to_string(),
         }));
     }
-    {
-        // 封面失效只做锁内短 DB 读写：`clear_library_cover_checked` 清掉「可重试」
-        // 标记，让下一次封面读取走 `LibraryCoverService::ensure_cover` 重生成。
-        //
-        // 这里**不再**调用 `library_cover_path`（P2-2）：它只做 `Path::is_file`，
-        // 返回值本来就被丢弃，但在 Store 锁内做文件系统 IO 违反 B3 §1.3（慢挂载
-        // 会拖住所有 Store 使用者）。封面路径解析/生成由封面服务在锁外负责。
-        let store = state.store.lock();
-        if let Some(lib) = library_by_id(&store, id) {
-            clear_library_cover_checked(&store, &lib.id);
-        }
-    }
+    finish_scan_library(state, id, lease, full_scope || targets.is_empty());
     let total_errors: usize = run.root_reports.iter().map(|r| r.error_count).sum();
     let scan_report = library::ScanReport {
         roots: run.root_reports,
@@ -193,4 +188,44 @@ pub(crate) fn scan_library_leased_resumable(
     };
     let report_data = format_scan_report(&scan_report);
     Ok((scan_report, json!(report_data)))
+}
+
+fn finish_scan_library(
+    state: &ApiState,
+    id: &str,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
+    purge_vanished: bool,
+) {
+    if purge_vanished {
+        // 整库扫描确认源已消失：直接清理（行、孤立 Media、附属文件），不留 missing 行。
+        match crate::library_presence::purge_vanished(state, id, lease) {
+            Ok(result) if result.deleted > 0 => {
+                tracing::info!(
+                    library_id = id,
+                    deleted = result.deleted,
+                    "扫描清理已消失的源文件"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    library_id = id,
+                    ?error,
+                    "扫描后清理已消失源文件失败，保留现状"
+                );
+            }
+        }
+    }
+    {
+        // 封面失效只做锁内短 DB 读写：`clear_library_cover_checked` 清掉「可重试」
+        // 标记，让下一次封面读取走 `LibraryCoverService::ensure_cover` 重生成。
+        //
+        // 这里**不再**调用 `library_cover_path`（P2-2）：它只做 `Path::is_file`，
+        // 返回值本来就被丢弃，但在 Store 锁内做文件系统 IO 违反 B3 §1.3（慢挂载
+        // 会拖住所有 Store 使用者）。封面路径解析/生成由封面服务在锁外负责。
+        let store = state.store.as_ref();
+        if let Some(lib) = library_by_id(&store, id) {
+            clear_library_cover_checked(&store, &lib.id);
+        }
+    }
 }

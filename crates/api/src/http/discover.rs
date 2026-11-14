@@ -13,7 +13,9 @@ use crate::catalog::Catalog;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
+mod executor;
 mod sections;
+pub(crate) use executor::Executor;
 
 use self::sections::{
     collection_title, douban_movie_sections, douban_tv_sections, movie_sections, section_query,
@@ -57,54 +59,55 @@ pub(crate) async fn discover_kind(
     Path(kind): Path<String>,
     Query(query): Query<DiscoverQuery>,
 ) -> Response {
-    // 分区墙一次串行拉 20 个分区，每个都是同步 TMDB/豆瓣 HTTP 请求
-    //（ureq 阻塞 1-8s）。直接在 async handler 里跑会占满 tokio 工作线程，
-    // 其他请求（包括无锁的 /health）全部排队超时——表现为「正在连接服务…」。
-    // 挪到有界 blocking 池，worker 线程不被占用。
-    // 错误码区分：未知 kind/source 是客户端错（400），上游失败是 502。
-    let state_clone = state.clone();
-    let kind_clone = kind.clone();
-    let source = query.source.clone();
-    let sections = state
-        .http_work
-        .run(DISCOVER_DEADLINE, move || -> Result<Vec<Value>, (u16, String)> {
-            let mut catalog: &dyn Catalog = state_clone.catalog.as_ref();
-            if let Some(source) = source.as_deref().filter(|source| !source.is_empty()) {
-                match catalog.source(source) {
-                    Some(found) => catalog = found,
-                    None if catalog.source_name() == source => {}
-                    None => return Err((400, format!("未知数据源: {source}"))),
-                }
+    let catalog = state.catalog.as_ref();
+    let requested_source = query.source.filter(|source| !source.is_empty());
+    let catalog = match requested_source.as_deref() {
+        Some(source) => match catalog.source(source) {
+            Some(found) => found,
+            None if catalog.source_name() == source => catalog,
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "discover.upstream",
+                    &format!("未知数据源: {source}"),
+                );
             }
-            match kind_clone.as_str() {
-                // 豆瓣源用独立分区表（真实豆瓣 tag），不走 TMDB 分区映射。
-                "movie" if catalog.source_name() == "douban" => Ok(douban_movie_sections(catalog)),
-                "tv" if catalog.source_name() == "douban" => Ok(douban_tv_sections(catalog)),
-                "movie" => Ok(movie_sections("movie", catalog)),
-                "tv" => Ok(tv_sections("tv", catalog)),
-                _ => Err((400, "kind 必须是 movie 或 tv".into())),
-            }
-        })
-        .await;
-    let sections = match sections {
-        Ok(Ok(sections)) => sections,
-        Ok(Err((status, message))) => {
+        },
+        None => catalog,
+    };
+    let sections = match (kind.as_str(), catalog.source_name()) {
+        ("movie", "douban") => douban_movie_sections(),
+        ("tv", "douban") => douban_tv_sections(),
+        ("movie", _) => movie_sections(),
+        ("tv", _) => tv_sections(),
+        _ => {
             return err(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                StatusCode::BAD_REQUEST,
                 "discover.upstream",
-                &message,
+                "kind 必须是 movie 或 tv",
             );
         }
+    };
+    let sections = match state
+        .discover_work
+        .run(state.catalog.clone(), requested_source, sections)
+        .await
+    {
+        Ok(sections) => sections,
         Err(error) => return blocking_error(error),
     };
-    let tmdb_configured = state
-        .store
-        .lock()
-        .get_setting(crate::settings_keys::TMDB_API_KEY)
-        .ok()
-        .flatten()
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
+    let tmdb_configured = match super::store_wait::store_read(&state, &[store::Db::App], |store| {
+        store
+            .get_setting(crate::settings_keys::TMDB_API_KEY)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.is_empty())
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return error.response(),
+    };
     ok(json!({
         "kind": kind,
         "tmdb_configured": tmdb_configured,
@@ -269,15 +272,16 @@ pub(crate) async fn discover_filtered(
                             }
                         }
                     }
-                    "tv" => match catalog.collection_paged(domain::MediaKind::Tv, &qs_clone, page)
-                    {
-                        Ok(Some((hits, _, tp, tr))) => Ok((hits, tp, tr)),
-                        _ => {
-                            let hits = catalog.filtered_tv(&qs_clone).map_err(|e| (502, e))?;
-                            let len = hits.len() as i64;
-                            Ok((hits, if len > 0 { 1 } else { 0 }, len))
+                    "tv" => {
+                        match catalog.collection_paged(domain::MediaKind::Tv, &qs_clone, page) {
+                            Ok(Some((hits, _, tp, tr))) => Ok((hits, tp, tr)),
+                            _ => {
+                                let hits = catalog.filtered_tv(&qs_clone).map_err(|e| (502, e))?;
+                                let len = hits.len() as i64;
+                                Ok((hits, if len > 0 { 1 } else { 0 }, len))
+                            }
                         }
-                    },
+                    }
                     _ => Err((400, "kind 必须是 movie 或 tv".into())),
                 }
             },
@@ -362,10 +366,10 @@ pub(crate) async fn discover_collection(
         .http_work
         .run(DISCOVER_DEADLINE, move || {
             let mut catalog: &dyn Catalog = state_clone.catalog.as_ref();
-            if let Some(source) = source_clone.as_deref().filter(|source| !source.is_empty()) {
-                if let Some(found) = catalog.source(source) {
-                    catalog = found;
-                }
+            if let Some(source) = source_clone.as_deref().filter(|source| !source.is_empty())
+                && let Some(found) = catalog.source(source)
+            {
+                catalog = found;
             }
             catalog.collection_paged(media_kind_clone, &section_query, page)
         })
@@ -424,7 +428,9 @@ pub(crate) async fn genres(State(state): State<ApiState>, Path(kind): Path<Strin
     let state_clone = state.clone();
     let rows = state
         .http_work
-        .run(DISCOVER_DEADLINE, move || state_clone.catalog.genres(media_kind))
+        .run(DISCOVER_DEADLINE, move || {
+            state_clone.catalog.genres(media_kind)
+        })
         .await;
     let rows = match rows {
         Ok(Ok(rows)) => rows,

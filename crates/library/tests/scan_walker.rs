@@ -54,7 +54,10 @@ fn scan_walker_video_kind_keeps_low_confidence_names() {
     assert_eq!(chunk.files.len(), 2, "Video 库必须保留所有视频文件");
     assert_eq!(chunk.skipped, 1, "非视频文件必须计入 skipped");
     assert!(
-        chunk.files.iter().all(|file| file.identified_release.is_none()),
+        chunk
+            .files
+            .iter()
+            .all(|file| file.identified_release.is_none()),
         "Video 条目不做 Release 识别"
     );
 

@@ -16,6 +16,13 @@ fn recording_ffmpeg(tmp: &tempfile::TempDir) -> std::path::PathBuf {
     )
     .unwrap();
     std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    seal_executable(&ffmpeg);
+    let ffprobe = bin.join("ffprobe");
+    std::fs::write(&ffprobe, r##"#!/bin/sh
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"audio","start_pts":0,"time_base":"1/16000"}],"format":{"start_time":"0"}}'
+"##).unwrap();
+    std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    seal_executable(&ffprobe);
     bin
 }
 
@@ -26,7 +33,7 @@ fn remote_strm_timeout_precedes_ffmpeg_input() {
     let bin = recording_ffmpeg(&tmp);
     let args_file = tmp.path().join("args");
     let strm = tmp.path().join("episode.strm");
-    std::fs::write(&strm, "https://cdn.example.test/episode.mkv\n").unwrap();
+    std::fs::write(&strm, "http://127.0.0.1:9/episode.mkv\n").unwrap();
     let old_path = std::env::var_os("PATH");
     unsafe {
         std::env::set_var(
@@ -59,7 +66,7 @@ fn remote_strm_timeout_precedes_frame_input() {
     let bin = recording_ffmpeg(&tmp);
     let args_file = tmp.path().join("frame-args");
     let strm = tmp.path().join("episode.strm");
-    std::fs::write(&strm, "https://cdn.example.test/episode.mkv\n").unwrap();
+    std::fs::write(&strm, "http://127.0.0.1:9/episode.mkv\n").unwrap();
     let old_path = std::env::var_os("PATH");
     unsafe {
         std::env::set_var(
@@ -139,4 +146,23 @@ fn test_chromaprint_matching_synthesized_signal() {
         seg.duration_sec >= 30.0,
         "Matched duration should be close to 40s"
     );
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }

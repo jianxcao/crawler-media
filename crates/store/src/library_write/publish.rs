@@ -1,0 +1,406 @@
+//! Atomic file publication and presence maintenance.
+//!
+//! Every entry point validates the Library lifecycle, the file's root ownership and the
+//! Media identity state before writing, then reduces the affected summaries in the same
+//! transaction. Callers never refresh a card themselves.
+
+use std::collections::HashMap;
+
+use domain::{FileVersion, LedgerId, LibraryId, MediaId, MediaKind};
+use rusqlite::{Connection, OptionalExtension, params};
+
+use super::super::files::LibraryItemSummary;
+use super::super::{Store, StoreError};
+use super::publish_batch::{PendingChange, item_card_exists, reduce_publication_batch};
+use super::reduce::reduce_media_everywhere;
+use super::reduce_incremental::{read_file_summary_facts, read_file_units};
+use super::{FilePublication, PublishReport, WriteScope};
+
+mod file_row;
+mod stats;
+
+use file_row::{RowPlan, plan_file_row, sorted_units, update_file_row};
+pub(crate) use file_row::{enqueue_probe, insert_file_row, sync_coverage};
+pub(crate) use stats::PublicationCounters;
+#[cfg(feature = "test-support")]
+pub use stats::PublishStats;
+
+impl Store {
+    /// Publish files (pending or published) into a Library.
+    pub fn publish_files(
+        &self,
+        scope: &WriteScope,
+        files: &[FilePublication<'_>],
+        now_ms: i64,
+    ) -> Result<PublishReport, StoreError> {
+        self.with_library_write(|db| db.publish_files(scope, files, now_ms))
+    }
+
+    /// Measured publication: the same path, plus deterministic work counters.
+    ///
+    /// `test-support` only. An unchanged republish must write nothing, so the counters exist
+    /// to assert that instead of timing it.
+    ///
+    /// Reference shape for measured assertions (Task 21): hidden from the docs, compiled only
+    /// for tests, and `written_rows` comes from SQLite's own `total_changes` — never a counter
+    /// the write path increments by hand, which would only ever prove the path agrees with
+    /// itself.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn publish_files_with_stats(
+        &self,
+        scope: &WriteScope,
+        files: &[FilePublication<'_>],
+        now_ms: i64,
+    ) -> Result<(PublishReport, PublishStats), StoreError> {
+        self.with_library_write(|db| db.publish_files_with_stats(scope, files, now_ms))
+    }
+
+    /// Recompute the summaries of every library that owns files of `media_id`.
+    pub fn refresh_media_summaries(
+        &self,
+        media_id: MediaId,
+        _now_ms: i64,
+    ) -> Result<usize, StoreError> {
+        self.with_library_write(|db| db.refresh_media_summaries(media_id, _now_ms))
+    }
+
+    pub fn get_library_item(
+        &self,
+        library_id: LibraryId,
+        media_id: MediaId,
+    ) -> Result<Option<LibraryItemSummary>, StoreError> {
+        self.with_library_read(|db| db.get_library_item(library_id, media_id))
+    }
+
+    pub fn count_probe_obligations(&self) -> Result<usize, StoreError> {
+        self.with_library_read(|db| db.count_probe_obligations())
+    }
+
+    /// Store cold file details (tracks/chapters/fingerprints) after a source-version check.
+    pub fn publish_file_details(
+        &self,
+        file_id: LedgerId,
+        expected: &FileVersion,
+        details: &super::super::files::FileDetails,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.with_library_write(|db| db.publish_file_details(file_id, expected, details, _now_ms))
+    }
+
+    pub fn get_file_details(
+        &self,
+        file_id: LedgerId,
+    ) -> Result<Option<super::super::files::FileDetails>, StoreError> {
+        self.with_library_read(|db| db.get_file_details(file_id))
+    }
+}
+
+pub(crate) fn map_file_details(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<super::super::files::FileDetails> {
+    Ok(super::super::files::FileDetails {
+        source_revision: r.get(0)?,
+        source_version: r.get(1)?,
+        tracks_version: r.get(2)?,
+        video_json: r.get(3)?,
+        audio_json: r.get(4)?,
+        subtitle_json: r.get(5)?,
+        chapters_json: r.get(6)?,
+        fingerprint_json: r.get(7)?,
+        outro_fingerprint_json: r.get(8)?,
+        format_duration_ms: r.get(9)?,
+    })
+}
+
+/// Reject writes to a Library that is frozen, draining, being removed or reconfigured.
+pub(crate) fn ensure_library_writable(tx: &Connection, lib: &str) -> Result<(), StoreError> {
+    let row: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT lifecycle_state, config_revision FROM libraries WHERE library_id = ?1",
+            params![lib],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, revision)) = row else {
+        return Err(StoreError::Missing(format!("library {lib}")));
+    };
+    if state != "ready" {
+        return Err(StoreError::Protected(format!(
+            "library {lib} lifecycle is {state}"
+        )));
+    }
+    let blocked: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_removals
+                       WHERE library_id = ?1 AND state <> 'succeeded')",
+        params![lib],
+        |r| r.get(0),
+    )?;
+    if blocked != 0 {
+        return Err(StoreError::Protected(format!(
+            "library {lib} is being removed"
+        )));
+    }
+    let _ = revision;
+    Ok(())
+}
+
+/// Verify the caller's expected configuration revision. `0` is the real
+/// initial revision of a Library, never an "unspecified" wildcard.
+pub(crate) fn ensure_config_revision(
+    tx: &Connection,
+    scope: &WriteScope,
+) -> Result<(), StoreError> {
+    let current: i64 = tx.query_row(
+        "SELECT config_revision FROM libraries WHERE library_id = ?1",
+        params![scope.library_id.to_string()],
+        |r| r.get(0),
+    )?;
+    if current != scope.config_revision {
+        return Err(StoreError::Protected(format!(
+            "library {} config revision changed: expected {}, current {current}",
+            scope.library_id, scope.config_revision
+        )));
+    }
+    Ok(())
+}
+
+/// Reject new facts for a Media whose identity is frozen or retired.
+pub(crate) fn ensure_media_writable(tx: &Connection, media_id: MediaId) -> Result<(), StoreError> {
+    crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, media_id)?;
+    ensure_media_identity_writable(tx, media_id)
+}
+
+pub(crate) fn ensure_media_identity_writable(
+    tx: &Connection,
+    media_id: MediaId,
+) -> Result<(), StoreError> {
+    let identity: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT identity_state, survivor_id FROM media WHERE media_id = ?1",
+            params![media_id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, survivor)) = identity else {
+        return Err(StoreError::Missing(format!("media {media_id}")));
+    };
+    match state.as_str() {
+        "merging" | "retired" => {
+            tracing::warn!(%media_id, identity_state = state, ?survivor, "Media write rejected by identity barrier");
+            let survivor = survivor
+                .map(|id| format!("; survivor {id}"))
+                .unwrap_or_default();
+            Err(StoreError::Protected(format!(
+                "media {media_id} identity is {state}{survivor}"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(super) fn ensure_file_version(
+    tx: &Connection,
+    file_id: &str,
+    expected: &FileVersion,
+) -> Result<(), StoreError> {
+    let current: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1",
+            params![file_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((revision, source_version)) = current else {
+        return Err(StoreError::Missing(format!("file {file_id}")));
+    };
+    if revision != expected.revision || source_version != expected.source_version {
+        return Err(StoreError::Protected(format!(
+            "StaleVersion for file {file_id}: expected r{}v{}, got r{revision}v{source_version}",
+            expected.revision, expected.source_version
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn upsert_file_details(
+    tx: &Connection,
+    file_id: &str,
+    details: &super::super::files::FileDetails,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO file_details
+            (file_id, source_revision, source_version, tracks_version, video_json, audio_json,
+             subtitle_json, chapters_json, fingerprint_json, outro_fingerprint_json,
+             format_duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(file_id) DO UPDATE SET
+            source_revision = excluded.source_revision,
+            source_version = excluded.source_version,
+            tracks_version = excluded.tracks_version,
+            video_json = excluded.video_json,
+            audio_json = excluded.audio_json,
+            subtitle_json = excluded.subtitle_json,
+            chapters_json = excluded.chapters_json,
+            fingerprint_json = excluded.fingerprint_json,
+            outro_fingerprint_json = excluded.outro_fingerprint_json,
+            format_duration_ms = excluded.format_duration_ms",
+        params![
+            file_id,
+            details.source_revision,
+            details.source_version,
+            details.tracks_version,
+            details.video_json,
+            details.audio_json,
+            details.subtitle_json,
+            details.chapters_json,
+            details.fingerprint_json,
+            details.outro_fingerprint_json,
+            details.format_duration_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Mutable state of one publication batch.
+///
+/// Accumulating here keeps the transaction's control flow (`open → validate → publish each →
+/// settle → commit`) readable, and gives the per-file decision one home.
+#[derive(Default)]
+struct BatchState {
+    report: PublishReport,
+    frame_updates: Vec<(String, Vec<library::ChapterMarker>)>,
+    affected: HashMap<MediaId, Vec<PendingChange>>,
+    before_projection: HashMap<MediaId, crate::query_projection::ProjectionBefore>,
+    /// Media whose card row is missing, decided once per batch. An unchanged file still
+    /// repairs a missing card: the card is derived, not a fact the caller published.
+    card_present: HashMap<MediaId, bool>,
+}
+
+impl BatchState {
+    /// Publish one file: decide whether anything moved, then write only that.
+    fn publish(
+        &mut self,
+        tx: &Connection,
+        scope: &WriteScope,
+        pub_item: &FilePublication<'_>,
+        now_ms: i64,
+        counters: &mut PublicationCounters,
+    ) -> Result<(), StoreError> {
+        let file = pub_item.file;
+        if file.library_id != scope.library_id {
+            return Err(StoreError::Invalid(
+                "file library_id does not match write scope".into(),
+            ));
+        }
+        // A root-relative path is resolved once here; every key is absolute.
+        let absolutized = super::root_ownership::ensure_root_owns_path(tx, file)?;
+        let file = absolutized.as_ref().unwrap_or(file);
+        ensure_media_writable(tx, file.media_id)?;
+        let file_id = file.file_id.to_string();
+        let before = read_file_summary_facts(tx, &file_id)?;
+        let before_units = read_file_units(tx, &file_id)?;
+        let after_units = sorted_units(pub_item.units);
+        let coverage_changed = before_units != after_units;
+        // Decide the row write *before* touching anything else: an unchanged file owns no
+        // summary work, so it must not even capture a projection it will never settle.
+        let plan = plan_file_row(tx, file, pub_item.expected_version)?;
+        let frame_changed = !matches!(plan, RowPlan::Current) || coverage_changed;
+        let mut changed = frame_changed;
+        // NFO input feeds card facts, so it can change the card with an unchanged file row.
+        changed |= pub_item.nfo_observation.is_some();
+        if !changed {
+            changed = !self.card_present(tx, scope, file.media_id)?;
+        }
+        if changed {
+            // Captured before this media's first write; unchanged files write nothing, so
+            // deferring to here still sees the batch-start projection.
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.before_projection.entry(file.media_id)
+            {
+                entry.insert(crate::query_projection::capture(
+                    tx,
+                    crate::query_projection::ProjectionKey {
+                        library_id: scope.library_id,
+                        media_id: file.media_id,
+                    },
+                )?);
+            }
+        }
+        match plan {
+            RowPlan::Insert => {
+                insert_file_row(tx, file)?;
+                self.report.inserted += 1;
+            }
+            RowPlan::Update {
+                revision,
+                report_unchanged,
+            } => {
+                update_file_row(tx, file, revision)?;
+                if report_unchanged {
+                    self.report.unchanged += 1;
+                } else {
+                    self.report.updated += 1;
+                }
+            }
+            RowPlan::Current => self.report.unchanged += 1,
+        }
+        if coverage_changed {
+            sync_coverage(tx, file, pub_item.units)?;
+            counters.coverage_synced();
+        }
+        if frame_changed {
+            self.frame_updates.push((file_id.clone(), Vec::new()));
+        }
+        if let Some(observations) = pub_item.nfo_observation {
+            let target =
+                crate::metadata::nfo_input::NfoInputTarget::from_file(file).with_canonical_path(tx);
+            if !crate::metadata::nfo_input::record_nfo_observations(tx, &target, observations)? {
+                return Err(StoreError::Protected(format!(
+                    "stale NFO observation for {}",
+                    file.path.display()
+                )));
+            }
+        }
+        if pub_item.probe_required {
+            enqueue_probe(tx, file.file_id, now_ms)?;
+        }
+        if !changed {
+            // Nothing about this file or its coverage moved: no summary can change.
+            counters.file_unchanged();
+            return Ok(());
+        }
+        counters.file_changed();
+        let after = read_file_summary_facts(tx, &file_id)?
+            .ok_or_else(|| StoreError::Missing(format!("file {file_id}")))?;
+        self.affected
+            .entry(file.media_id)
+            .or_default()
+            .push(PendingChange {
+                before,
+                before_units,
+                after,
+                after_units,
+            });
+        Ok(())
+    }
+
+    /// Whether `(library, media)` already has a card row, asked once per batch.
+    fn card_present(
+        &mut self,
+        tx: &Connection,
+        scope: &WriteScope,
+        media_id: MediaId,
+    ) -> Result<bool, StoreError> {
+        match self.card_present.entry(media_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(*entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let present = item_card_exists(tx, scope.library_id, media_id)?;
+                Ok(*entry.insert(present))
+            }
+        }
+    }
+}
+
+#[path = "publish/connection.rs"]
+mod connection;

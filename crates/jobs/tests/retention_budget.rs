@@ -12,8 +12,8 @@ fn retention_cycle_completes_on_the_last_partial_window() {
         let conn = rusqlite::Connection::open(&db).unwrap();
         for i in 0..3i64 {
             conn.execute(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-                 VALUES (?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+                 VALUES ('global', ?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
                 rusqlite::params![format!("deletable-{i}"), 100 + i],
             )
             .unwrap();
@@ -48,8 +48,9 @@ fn retention_cursor_window_bounds_and_cleans_older_jobs() {
     let queue = Queue::open(tmp.path().join("jobs.db")).unwrap();
 
     let def_id = queue
-        .upsert_def(NewDef {
-            kind: JobKind::CatalogRefresh,
+        .create_def(NewDef {
+            kind: JobKind::Scrape,
+            scope: jobs::JobScope::Global,
             name: "retention_test".into(),
             enabled: true,
             schedule: None,
@@ -70,18 +71,24 @@ fn retention_cursor_window_bounds_and_cleans_older_jobs() {
 
     // Now prune with limit 2 at cutoff in the future
     let cutoff = 1_000_000;
-    let win1 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win1 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win1.scanned, 2);
     assert_eq!(win1.deleted, 2);
     assert!(win1.window_has_more);
 
     // Second window
-    let win2 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win2 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win2.scanned, 2);
     assert_eq!(win2.deleted, 2);
 
     // Third window: only 1 job left (the latest one!), which is protected by latest child rule
-    let win3 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win3 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win3.scanned, 1);
     assert_eq!(win3.protected, 1);
     assert_eq!(win3.deleted, 0);
@@ -100,8 +107,8 @@ fn retention_cursor_is_not_starved_by_a_protected_prefix() {
         // 20 个受保护行：各自属于独立 def，且是该 def 唯一的终态子任务。
         for i in 0..20i64 {
             conn.execute(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-                 VALUES (?1, ?2, 'scrape', '{}', 'succeeded', 0, ?3, ?3, ?3)",
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+                 VALUES ('global', ?1, ?2, 'scrape', '{}', 'succeeded', 0, ?3, ?3, ?3)",
                 rusqlite::params![format!("protected-{i}"), format!("def-{i}"), 100 + i],
             )
             .unwrap();
@@ -109,8 +116,8 @@ fn retention_cursor_is_not_starved_by_a_protected_prefix() {
         // 5 个可删行（def_id 为 NULL），finished_at 更晚。
         for i in 0..5i64 {
             conn.execute(
-                "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-                 VALUES (?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
+                "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+                 VALUES ('global', ?1, NULL, 'scrape', '{}', 'succeeded', 0, ?2, ?2, ?2)",
                 rusqlite::params![format!("deletable-{i}"), 1000 + i],
             )
             .unwrap();
@@ -123,7 +130,9 @@ fn retention_cursor_is_not_starved_by_a_protected_prefix() {
     let mut protected = 0usize;
     let mut windows = 0usize;
     loop {
-        let win = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+        let win = queue
+            .prune_terminal_window("test-def", cutoff, 2, false)
+            .unwrap();
         deleted += win.deleted;
         protected += win.protected;
         windows += 1;

@@ -1,32 +1,140 @@
-use super::{MarkerResultReplacement, Store, StoredMediaMarker};
+use super::{Store, StoredFileMarker};
+use crate::library_write::publish::{insert_file_row, sync_coverage};
 use crate::probe_tasks::ProbeJobUnitSpec;
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, UnitKey,
+};
 
 fn marker(
+    store: &Store,
     media_id: domain::MediaId,
     season: u32,
     source: &str,
     start_ms: i64,
-) -> StoredMediaMarker {
-    StoredMediaMarker {
-        media_id,
-        season,
-        episode: 1,
+) -> StoredFileMarker {
+    StoredFileMarker {
         intro_start_ms: Some(start_ms),
         intro_end_ms: Some(start_ms + 60_000),
         outro_start_ms: None,
         outro_end_ms: None,
-        source: source.into(),
+        source: source.to_string(),
         locked: false,
         updated_at: 1,
+        ..crate::test_support::fixture_marker(
+            store,
+            media_id,
+            domain::UnitKey::new((season) as i32, 1),
+        )
     }
+}
+
+/// One Media plus the Library/root that owns its files.
+struct Fixture {
+    library_id: LibraryId,
+    root_id: String,
+    root: std::path::PathBuf,
+    media_id: MediaId,
+    kind: MediaKind,
+}
+
+fn seed_fixture(store: &Store, dir: &std::path::Path, kind: MediaKind) -> Fixture {
+    let media_id = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: media_id,
+            kind,
+            title: "Fixture".into(),
+            year: Some(2024),
+            original_title: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+            aliases: vec![],
+        })
+        .unwrap();
+    let root = dir.to_path_buf();
+    let library = store
+        .create_library(
+            kind,
+            "Fixture",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.library_id.as_str() == library.id.as_str())
+        .map(|entry| entry.id)
+        .unwrap();
+    Fixture {
+        library_id: library.id.parse().unwrap(),
+        root_id,
+        root,
+        media_id,
+        kind,
+    }
+}
+
+/// Publish one real file fact row for `(season, episode)`, present on disk.
+fn seed_file(store: &Store, fixture: &Fixture, name: &str, season: i32, episode: i32) -> LedgerId {
+    let file_id = LedgerId::new();
+    let path = fixture.root.join(name);
+    std::fs::write(&path, b"fixture").unwrap();
+    let file = LibraryFile {
+        file_id,
+        library_id: fixture.library_id,
+        root_id: fixture.root_id.clone(),
+        media_id: fixture.media_id,
+        kind: fixture.kind,
+        path,
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(7),
+        stat_known: true,
+        created_ns: Some(1),
+        modified_ns: Some(1),
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    store
+        .with_writer(crate::Db::Library, |conn| {
+            insert_file_row(conn, &file)?;
+            sync_coverage(conn, &file, &[UnitKey::new(season, episode)])
+        })
+        .unwrap();
+    file_id
 }
 
 /// Seed two seasons with old markers/chapters and finish both units of a refresh job.
 fn two_season_refresh_setup(
     store: &Store,
-    media_id: domain::MediaId,
+    dir: &std::path::Path,
     job_id: &str,
-) -> Vec<library::ChapterMarker> {
+) -> (MediaId, Vec<LedgerId>, Vec<library::ChapterMarker>) {
     let old_chapters = vec![library::ChapterMarker {
         start_ms: 0,
         end_ms: 300_000,
@@ -34,60 +142,74 @@ fn two_season_refresh_setup(
         marker_type: None,
         synthetic: false,
     }];
-    for season in [1, 2] {
+    let fixture = seed_fixture(store, dir, MediaKind::Tv);
+    let file_ids = [1, 2]
+        .map(|season| seed_file(store, &fixture, &format!("s{season}.mkv"), season, 1))
+        .to_vec();
+    for (season, file_id) in [1u32, 2].iter().zip(&file_ids) {
         store
-            .put_media_marker(&marker(media_id, season, "old", season as i64 * 100_000))
+            .put_fixture_marker(&marker(
+                store,
+                fixture.media_id,
+                *season,
+                "old",
+                *season as i64 * 100_000,
+            ))
             .unwrap();
         store
-            .put_cached_chapters(&format!("ledger-s{season}"), &old_chapters)
+            .put_cached_chapters(&file_id.to_string(), &old_chapters)
             .unwrap();
     }
-    let specs = ["ledger-s1", "ledger-s2"].map(|ledger_id| ProbeJobUnitSpec {
-        ledger_id,
-        kind: "tv",
-        force_fingerprint: true,
-        reuse_fingerprint_cache: false,
-        overwrite_markers: true,
-        reuse_media_info_cache: true,
-    });
+    let unit_ids: Vec<String> = file_ids.iter().map(|id| id.to_string()).collect();
+    let specs: Vec<ProbeJobUnitSpec<'_>> = unit_ids
+        .iter()
+        .map(|unit_id| ProbeJobUnitSpec {
+            ledger_id: unit_id.as_str(),
+            kind: "tv",
+            force_fingerprint: true,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: true,
+            reuse_media_info_cache: true,
+        })
+        .collect();
     assert!(
         store
             .create_probe_job(
                 job_id,
                 "marker_refresh",
-                &media_id.to_string(),
+                &fixture.media_id.to_string(),
                 None,
                 "marker-refresh-test",
                 &specs,
             )
             .unwrap()
     );
-    for ledger_id in ["ledger-s1", "ledger-s2"] {
-        assert!(store.start_probe_unit(job_id, ledger_id).unwrap());
+    for unit_id in &unit_ids {
+        assert!(store.start_probe_unit(job_id, unit_id).unwrap());
         store
-            .finish_probe_unit(job_id, ledger_id, true, None)
+            .finish_probe_unit(job_id, unit_id, true, None)
             .unwrap();
     }
-    old_chapters
+    (fixture.media_id, file_ids, old_chapters)
 }
 
 #[test]
 fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let media_id = domain::MediaId::new();
     let job_id = "multi-season-refresh";
-    let old_chapters = two_season_refresh_setup(&store, media_id, job_id);
+    let (media_id, file_ids, old_chapters) = two_season_refresh_setup(&store, temp.path(), job_id);
 
-    let s1_new = marker(media_id, 1, "new", 111_000);
-    let s2_duplicate = marker(media_id, 2, "new", 222_000);
+    let s1_new = marker(&store, media_id, 1, "new", 111_000);
+    let s2_duplicate = marker(&store, media_id, 2, "new", 222_000);
     let replacements = [
-        MarkerResultReplacement {
+        crate::test_support::fixture_marker_replacement(
+            &store,
             media_id,
-            season: 1,
-            markers: vec![s1_new],
-            chapter_updates: vec![(
-                "ledger-s1".into(),
+            1,
+            vec![s1_new],
+            vec![(
+                file_ids[0].to_string(),
                 vec![library::ChapterMarker {
                     start_ms: 111_000,
                     end_ms: 171_000,
@@ -96,13 +218,14 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
                     synthetic: false,
                 }],
             )],
-        },
-        MarkerResultReplacement {
+        ),
+        crate::test_support::fixture_marker_replacement(
+            &store,
             media_id,
-            season: 2,
-            markers: vec![s2_duplicate.clone(), s2_duplicate],
-            chapter_updates: vec![("ledger-s2".into(), Vec::new())],
-        },
+            2,
+            vec![s2_duplicate.clone(), s2_duplicate],
+            vec![(file_ids[1].to_string(), Vec::new())],
+        ),
     ];
 
     assert!(
@@ -117,7 +240,7 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
     for season in [1, 2] {
         assert_eq!(
             store
-                .get_media_marker(media_id, Some(season), Some(1))
+                .get_fixture_marker(media_id, Some(season), Some(1))
                 .unwrap()
                 .unwrap()
                 .source,
@@ -125,7 +248,7 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
         );
         assert_eq!(
             store
-                .get_cached_chapters(&format!("ledger-s{season}"))
+                .get_cached_chapters(&file_ids[season as usize - 1].to_string())
                 .unwrap()
                 .unwrap(),
             old_chapters
@@ -133,18 +256,20 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
     }
 
     let valid_replacements = [
-        MarkerResultReplacement {
+        crate::test_support::fixture_marker_replacement(
+            &store,
             media_id,
-            season: 1,
-            markers: vec![marker(media_id, 1, "new", 111_000)],
-            chapter_updates: vec![("ledger-s1".into(), old_chapters.clone())],
-        },
-        MarkerResultReplacement {
+            1,
+            vec![marker(&store, media_id, 1, "new", 111_000)],
+            vec![(file_ids[0].to_string(), old_chapters.clone())],
+        ),
+        crate::test_support::fixture_marker_replacement(
+            &store,
             media_id,
-            season: 2,
-            markers: vec![marker(media_id, 2, "new", 222_000)],
-            chapter_updates: vec![("ledger-s2".into(), old_chapters.clone())],
-        },
+            2,
+            vec![marker(&store, media_id, 2, "new", 222_000)],
+            vec![(file_ids[1].to_string(), old_chapters.clone())],
+        ),
     ];
     store
         .complete_marker_refresh(job_id, &valid_replacements)
@@ -156,7 +281,7 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
     for (season, expected_source) in [(1, "new"), (2, "new")] {
         assert_eq!(
             store
-                .get_media_marker(media_id, Some(season), Some(1))
+                .get_fixture_marker(media_id, Some(season), Some(1))
                 .unwrap()
                 .unwrap()
                 .source,
@@ -166,27 +291,18 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
 }
 
 #[test]
-fn locked_marker_preserves_and_syncs_chapters_across_ledger_versions() {
+fn locked_marker_preserves_physical_chapters_across_file_versions() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let media_id = domain::MediaId::new();
-    let rows = seed_locked_versions(&store, media_id, dir.path());
+    let (media_id, file_ids) = seed_locked_versions(&store, dir.path());
 
-    let intro_from_cache = |id: &str| -> Option<Vec<(i64, i64)>> {
-        store.get_cached_chapters(id).unwrap().map(|c| {
-            c.into_iter()
-                .filter(|c| c.marker_type == Some(library::MarkerType::IntroStart))
-                .map(|c| (c.start_ms, c.end_ms))
-                .collect()
-        })
-    };
+    let original_chapters: Vec<_> = file_ids
+        .iter()
+        .map(|id| store.get_cached_chapters(&id.to_string()).unwrap())
+        .collect();
 
-    // When detected replacement arrives with 40s..100s, locked marker is preserved
-    // and all versions are synchronized to locked marker (10s..70s).
-    let detected_marker = StoredMediaMarker {
-        media_id,
-        season: 1,
-        episode: 1,
+    // A detected replacement must preserve both the locked marker and physical chapters.
+    let detected_marker = StoredFileMarker {
         intro_start_ms: Some(40_000),
         intro_end_ms: Some(100_000),
         outro_start_ms: None,
@@ -194,12 +310,13 @@ fn locked_marker_preserves_and_syncs_chapters_across_ledger_versions() {
         source: "voiceprint".into(),
         locked: false,
         updated_at: 2,
+        ..crate::test_support::fixture_marker(&store, media_id, domain::UnitKey::new(1, 1))
     };
-    let updates: Vec<_> = rows
+    let updates: Vec<_> = file_ids
         .iter()
-        .map(|r| {
+        .map(|id| {
             (
-                r.id.to_string(),
+                id.to_string(),
                 library::build_complete_timeline_chapters(&[], Some((40_000, 100_000)), None, None),
             )
         })
@@ -209,37 +326,37 @@ fn locked_marker_preserves_and_syncs_chapters_across_ledger_versions() {
         .unwrap();
 
     let cur_marker = store
-        .get_media_marker(media_id, Some(1), Some(1))
+        .get_fixture_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     assert_eq!(cur_marker.intro_start_ms, Some(10_000));
     assert_eq!(cur_marker.intro_end_ms, Some(70_000));
-    for r in &rows {
+    for (id, original) in file_ids.iter().zip(&original_chapters) {
         assert_eq!(
-            intro_from_cache(&r.id.to_string()),
-            Some(vec![(10_000, 70_000)])
+            store.get_cached_chapters(&id.to_string()).unwrap(),
+            *original
         );
     }
 
-    // When empty replacements arrive, locked marker and chapters still remain 10s..70s.
-    let empty_updates: Vec<_> = rows
+    // An empty replacement likewise leaves the locked marker and physical chapters intact.
+    let empty_updates: Vec<_> = file_ids
         .iter()
-        .map(|r| (r.id.to_string(), Vec::new()))
+        .map(|id| (id.to_string(), Vec::new()))
         .collect();
     store
         .replace_marker_results(media_id, 1, &[], &empty_updates)
         .unwrap();
 
     let cur_marker = store
-        .get_media_marker(media_id, Some(1), Some(1))
+        .get_fixture_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     assert_eq!(cur_marker.intro_start_ms, Some(10_000));
     assert_eq!(cur_marker.intro_end_ms, Some(70_000));
-    for r in &rows {
+    for (id, original) in file_ids.iter().zip(&original_chapters) {
         assert_eq!(
-            intro_from_cache(&r.id.to_string()),
-            Some(vec![(10_000, 70_000)])
+            store.get_cached_chapters(&id.to_string()).unwrap(),
+            *original
         );
     }
 }
@@ -248,28 +365,13 @@ fn locked_marker_preserves_and_syncs_chapters_across_ledger_versions() {
 fn locked_marker_rebuild_keeps_feature_within_known_media_duration() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let media_id = domain::MediaId::new();
-    let ledger = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id,
-        path: format!("{}/feature.mkv", dir.path().display()),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&ledger).unwrap();
-    let ledger_id = ledger.id.to_string();
+    let fixture = seed_fixture(&store, dir.path(), MediaKind::Tv);
+    let media_id = fixture.media_id;
+    let file_id = seed_file(&store, &fixture, "feature.mkv", 1, 1);
+    let ledger_id = file_id.to_string();
 
     store
-        .put_media_marker(&StoredMediaMarker {
-            media_id,
-            season: 1,
-            episode: 1,
+        .put_fixture_marker(&StoredFileMarker {
             intro_start_ms: Some(10_000),
             intro_end_ms: Some(70_000),
             outro_start_ms: None,
@@ -277,6 +379,7 @@ fn locked_marker_rebuild_keeps_feature_within_known_media_duration() {
             source: "fixture".into(),
             locked: true,
             updated_at: 1,
+            ..crate::test_support::fixture_marker(&store, media_id, domain::UnitKey::new(1, 1))
         })
         .unwrap();
     store
@@ -331,9 +434,11 @@ fn locked_marker_rebuild_keeps_feature_within_known_media_duration() {
 fn batch_replacement_stores_updated_at_in_unix_seconds() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let media_id = domain::MediaId::new();
+    let fixture = seed_fixture(&store, dir.path(), MediaKind::Tv);
+    let media_id = fixture.media_id;
+    let file_id = seed_file(&store, &fixture, "episode.mkv", 1, 1);
 
-    let mut detected = marker(media_id, 1, "voiceprint", 10_000);
+    let mut detected = marker(&store, media_id, 1, "voiceprint", 10_000);
     detected.updated_at = 0;
     let before_write = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -341,7 +446,12 @@ fn batch_replacement_stores_updated_at_in_unix_seconds() {
         .as_secs() as i64;
 
     store
-        .replace_marker_results(media_id, 1, &[detected], &[])
+        .replace_marker_results(
+            media_id,
+            1,
+            &[detected],
+            &[(file_id.to_string(), Vec::new())],
+        )
         .unwrap();
     let after_write = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -349,7 +459,7 @@ fn batch_replacement_stores_updated_at_in_unix_seconds() {
         .as_secs() as i64;
 
     let stored = store
-        .get_media_marker(media_id, Some(1), Some(1))
+        .get_fixture_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     assert!(
@@ -358,33 +468,12 @@ fn batch_replacement_stores_updated_at_in_unix_seconds() {
     );
 }
 
-fn seed_locked_versions(
-    store: &Store,
-    media_id: domain::MediaId,
-    root: &std::path::Path,
-) -> Vec<domain::LedgerRow> {
-    let rows: Vec<_> = (0..3)
-        .map(|v| domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id,
-            path: format!("{}/version-{v}.mkv", root.display()),
-            season: Some(1),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-        })
-        .collect();
-    for r in &rows {
-        store.insert_ledger(r).unwrap();
-    }
-    let locked_marker = StoredMediaMarker {
-        media_id,
-        season: 1,
-        episode: 1,
+fn seed_locked_versions(store: &Store, root: &std::path::Path) -> (MediaId, Vec<LedgerId>) {
+    let fixture = seed_fixture(store, root, MediaKind::Tv);
+    let file_ids = (0..3)
+        .map(|v| seed_file(store, &fixture, &format!("version-{v}.mkv"), 1, 1))
+        .collect::<Vec<_>>();
+    let locked_marker = StoredFileMarker {
         intro_start_ms: Some(10_000),
         intro_end_ms: Some(70_000),
         outro_start_ms: None,
@@ -392,23 +481,21 @@ fn seed_locked_versions(
         source: "fixture".into(),
         locked: true,
         updated_at: 1,
+        ..crate::test_support::fixture_marker(store, fixture.media_id, domain::UnitKey::new(1, 1))
     };
-    store.put_media_marker(&locked_marker).unwrap();
-    store
-        .put_cached_chapters(
-            &rows[0].id.to_string(),
-            &library::build_complete_timeline_chapters(&[], Some((10_000, 70_000)), None, None),
-        )
-        .unwrap();
-    store
-        .put_cached_chapters(
-            &rows[1].id.to_string(),
-            &library::build_complete_timeline_chapters(&[], Some((20_000, 80_000)), None, None),
-        )
-        .unwrap();
-    store
-        .put_cached_chapters(&rows[2].id.to_string(), &[])
-        .unwrap();
+    store.put_fixture_marker(&locked_marker).unwrap();
+    for (index, file_id) in file_ids.iter().enumerate() {
+        let chapters = vec![library::ChapterMarker {
+            start_ms: (index as i64 + 1) * 100_000,
+            end_ms: (index as i64 + 1) * 100_000 + 30_000,
+            title: Some("Scene".into()),
+            marker_type: None,
+            synthetic: false,
+        }];
+        store
+            .put_cached_chapters(&file_id.to_string(), &chapters)
+            .unwrap();
+    }
 
-    rows
+    (fixture.media_id, file_ids)
 }

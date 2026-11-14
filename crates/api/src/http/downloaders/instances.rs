@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 
-use super::tasks::{run_downloader_action, run_downloader_read};
+use super::tasks::{DownloaderWorkError, run_downloader_action, run_downloader_read};
 
 #[derive(Deserialize)]
 pub(crate) struct DownloaderInput {
@@ -103,23 +103,26 @@ fn parse_path_maps(input: Vec<PathMapInput>) -> Vec<downloader::PathMap> {
 }
 
 pub(crate) async fn list_downloaders(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let rows = match store.list_downloaders() {
-        Ok(rows) => rows,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    ok_list(
-        rows.iter()
-            .map(|r| downloader_json_with_store(r, &store))
-            .collect(),
-    )
-    .into_response()
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
+        let rows = match store.list_downloaders() {
+            Ok(rows) => rows,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        ok_list(
+            rows.iter()
+                .map(|r| downloader_json_with_store(r, &store))
+                .collect(),
+        )
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 pub(crate) async fn create_downloader(
@@ -152,24 +155,27 @@ pub(crate) async fn create_downloader(
         is_default: body.is_default,
         enabled: body.enabled.unwrap_or(true),
     };
-    let store = state.store.lock();
-    if let Err(error) = store.insert_downloader(&row) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    if row.is_default {
-        if let Err(error) = store.set_default_downloader(row.id) {
+    crate::http::store_wait::store_write(&state, move |store| {
+        if let Err(error) = store.insert_downloader(&row) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
-    (StatusCode::CREATED, ok(downloader_json(&row))).into_response()
+        if row.is_default
+            && let Err(error) = store.set_default_downloader(row.id)
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        (StatusCode::CREATED, ok(downloader_json(&row))).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn get_downloader(
@@ -186,11 +192,14 @@ pub(crate) async fn get_downloader(
             );
         }
     };
-    let store = state.store.lock();
-    let Some(row) = store.get_downloader(id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
-    };
-    ok(downloader_json(&row)).into_response()
+    crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
+        let Some(row) = store.get_downloader(id).ok().flatten() else {
+            return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
+        };
+        ok(downloader_json(&row)).into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 #[derive(Deserialize)]
@@ -257,32 +266,33 @@ pub(crate) async fn patch_downloader(
             );
         }
     };
-    let store = state.store.lock();
-    let Some(mut row) = store.get_downloader(id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
-    };
-    let make_default = body.is_default == Some(true);
-    apply_downloader_patch(&mut row, body);
-    if let Err(error) = store.save_downloader(&row) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    // Updating configuration invalidates previous verification state
-    let _ = store.delete_setting(&format!("downloader.{}.verified", row.id));
-    let _ = store.delete_setting(&format!("downloader.{}.last_error", row.id));
-    if make_default {
-        if let Err(error) = store.set_default_downloader(row.id) {
+    crate::http::store_wait::store_write(&state, move |store| {
+        let Some(mut row) = store.get_downloader(id).ok().flatten() else {
+            return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
+        };
+        let make_default = body.is_default == Some(true);
+        apply_downloader_patch(&mut row, body);
+        if let Err(error) = store.save_downloader(&row) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
-    ok(downloader_json(&row)).into_response()
+        // Updating configuration invalidates previous verification state
+        let _ = store.delete_setting(&format!("downloader.{}.verified", row.id));
+        let _ = store.delete_setting(&format!("downloader.{}.last_error", row.id));
+        if make_default && let Err(error) = store.set_default_downloader(row.id) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(downloader_json(&row)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn delete_downloader(
@@ -299,151 +309,45 @@ pub(crate) async fn delete_downloader(
             );
         }
     };
-    let store = state.store.lock();
-    let _ = store.delete_setting(&format!("downloader.{id}.verified"));
-    let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
-    match store.delete_downloader(id) {
-        Ok(true) => {
-            // D-L4: its in-flight pending rows can no longer be tracked.
-            let orphaned = store.mark_pending_orphaned(id).unwrap_or_else(|error| {
+    let orphaned = match crate::http::store_wait::store_write(&state, move |store| {
+        let _ = store.delete_setting(&format!("downloader.{id}.verified"));
+        let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
+        match store.delete_downloader(id) {
+            Ok(true) => Ok(store.mark_pending_orphaned(id).unwrap_or_else(|error| {
                 tracing::warn!(%id, %error, "标记已删除下载器的 pending 失败");
                 0
-            });
-            drop(store);
-            if orphaned > 0 {
-                tracing::warn!(%id, orphaned, "下载器已删除，其在途任务标记为 orphan");
-                crate::worker::notify(
-                    &state,
-                    "下载器已删除",
-                    &format!(
-                        "{orphaned} 个在途订阅任务失去下载器，已停止跟踪，可重新搜索提交到其它下载器"
-                    ),
-                );
-            }
-            ok(json!({ "deleted": true, "orphaned_pending": orphaned })).into_response()
+            })),
+            _ => Err(err(
+                StatusCode::NOT_FOUND,
+                "downloader.missing",
+                "下载器不存在",
+            )),
         }
-        _ => err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
+    })
+    .await
+    {
+        Ok(Ok(orphaned)) => orphaned,
+        Ok(Err(response)) | Err(response) => return response,
+    };
+    if orphaned > 0 {
+        tracing::warn!(%id, orphaned, "下载器已删除，其在途任务标记为 orphan");
+        let worker = state.clone();
+        if let Err(error) = state.http_work.run_to_completion(move || {
+            crate::worker::notify(&worker, "下载器已删除", &format!(
+                "{orphaned} 个在途订阅任务失去下载器，已停止跟踪，可重新搜索提交到其它下载器"
+            ));
+        }).await {
+            tracing::warn!(%id, %error, "下载器删除通知未能调度");
+        }
     }
+    ok(json!({ "deleted": true, "orphaned_pending": orphaned })).into_response()
 }
 
-pub(crate) async fn verify_downloader(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Response {
-    let id = match DownloaderId::from_str(&id) {
-        Ok(id) => id,
-        Err(_) => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "downloader.invalid",
-                "下载器 id 无效",
-            );
-        }
-    };
-    let row = {
-        let store = state.store.lock();
-        let Some(row) = store.get_downloader(id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
-        };
-        row
-    };
-    let url = row.url.clone();
-    let username = row.username.clone();
-    let password = row.password.clone();
-    let category = row.category.clone();
-    let path_maps = row.path_maps.clone();
-    let kind = row.kind.clone();
-    let runner: Box<dyn FnOnce() -> Result<(), String> + Send + 'static> = match kind.as_str() {
-        "qbittorrent" => Box::new(move || {
-            downloader::QbitDownloader::connect(downloader::QbitConfig {
-                url,
-                username: username.unwrap_or_default(),
-                password: password.unwrap_or_default(),
-                category,
-                path_maps,
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-        }),
-        "transmission" => Box::new(move || {
-            downloader::TransmissionDownloader::connect(downloader::TransmissionConfig {
-                url,
-                username,
-                password,
-                path_maps,
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-        }),
-        _ => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "downloader.invalid",
-                "未知下载器类型",
-            );
-        }
-    };
-    let task = tokio::task::spawn_blocking(move || runner());
-    let result = task.await;
-    match result {
-        Ok(Ok(_)) => {
-            let store = state.store.lock();
-            let _ = store.put_setting(&format!("downloader.{id}.verified"), "true");
-            let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
-            ok(json!({ "ok": true, "error": null })).into_response()
-        }
-        Ok(Err(error)) => {
-            let store = state.store.lock();
-            let _ = store.put_setting(&format!("downloader.{id}.verified"), "false");
-            let _ = store.put_setting(&format!("downloader.{id}.last_error"), &error);
-            tracing::error!(id = %id, error = %error, "下载器验证连接失败");
-            ok(json!({ "ok": false, "error": error })).into_response()
-        }
-        Err(join_err) => {
-            let err_msg = join_err.to_string();
-            let store = state.store.lock();
-            let _ = store.put_setting(&format!("downloader.{id}.verified"), "false");
-            let _ = store.put_setting(&format!("downloader.{id}.last_error"), &err_msg);
-            tracing::error!(id = %id, error = %join_err, "下载器验证连接任务异常中止");
-            ok(json!({ "ok": false, "error": err_msg })).into_response()
-        }
-    }
-}
-pub(crate) async fn target_prefs(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let raw = store.get_setting("download.target_prefs").ok().flatten();
-    let prefs = raw
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    ok(prefs).into_response()
-}
+mod verification;
+pub(crate) use verification::verify_downloader;
 
-pub(crate) async fn put_target_pref(
-    State(state): State<ApiState>,
-    Path(category): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    let store = state.store.lock();
-    let raw = store.get_setting("download.target_prefs").ok().flatten();
-    let mut prefs = raw
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    if body.is_null() {
-        if let Some(obj) = prefs.as_object_mut() {
-            obj.remove(&category);
-        }
-    } else {
-        prefs[category] = body;
-    }
-    if let Err(error) = store.put_setting("download.target_prefs", &prefs.to_string()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(prefs).into_response()
-}
+mod preferences;
+pub(crate) use preferences::{put_target_pref, target_prefs};
 
 #[derive(Deserialize, Default)]
 pub(crate) struct LimitsQuery {
@@ -497,14 +401,52 @@ pub(crate) async fn get_limits(
         Ok(id) => id,
         Err((status, code, msg)) => return err(status, code, &msg),
     };
+    if let Some(id) = downloader_id {
+        match crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
+            store.get_downloader(id)
+        })
+        .await
+        {
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => {
+                return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%id, %error, "读取下载器配置失败");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+            Err(error) => return error.response(),
+        }
+    }
     match run_downloader_read(&state, downloader_id, |client| client.get_speed_limits()).await {
         Ok((dl, ul)) => ok(json!({
+            "status": "available",
+            "error": null,
             "download_limit_bytes": if dl == 0 { Value::Null } else { json!(dl) },
             "upload_limit_bytes": if ul == 0 { Value::Null } else { json!(ul) },
         }))
         .into_response(),
+        Err(DownloaderWorkError::Resolve(message) | DownloaderWorkError::Operation(message)) => {
+            unavailable_limits(downloader_id, &message)
+        }
+        Err(DownloaderWorkError::Timeout) => unavailable_limits(downloader_id, "下载器响应超时"),
         Err(error) => error.response(),
     }
+}
+
+fn unavailable_limits(id: Option<DownloaderId>, message: &str) -> Response {
+    tracing::warn!(downloader_id = ?id, error = %message, "下载器限速状态不可用");
+    ok(json!({
+        "status": "unavailable",
+        "error": message,
+        "download_limit_bytes": null,
+        "upload_limit_bytes": null,
+    }))
+    .into_response()
 }
 
 /// PUT /downloaders/limits
@@ -532,6 +474,8 @@ pub(crate) async fn set_limits(
     .await
     {
         Ok(()) => ok(json!({
+            "status": "available",
+            "error": null,
             "download_limit_bytes": if dl == 0 { Value::Null } else { json!(dl) },
             "upload_limit_bytes": if ul == 0 { Value::Null } else { json!(ul) },
         }))

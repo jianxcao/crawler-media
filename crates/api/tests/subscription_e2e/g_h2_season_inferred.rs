@@ -25,8 +25,15 @@ async fn inferred_season_episode_beyond_catalog_s01_is_not_submitted() {
     h.set_search_rows(&[(ABSOLUTE, 1), (EXPLICIT, 2)]);
     h.scheduled_search(id).await.unwrap();
     let pending = h.pending(id);
-    let titles: Vec<_> = pending.iter().map(|(_, p)| p.torrent.title.clone()).collect();
-    assert_eq!(titles, vec![EXPLICIT.to_string()], "absolute-numbered E13 is not S01E13");
+    let titles: Vec<_> = pending
+        .iter()
+        .map(|(_, p)| p.torrent.title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![EXPLICIT.to_string()],
+        "absolute-numbered E13 is not S01E13"
+    );
 }
 
 #[tokio::test]

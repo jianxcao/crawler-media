@@ -8,7 +8,7 @@
 
 export type MediaType = "movie" | "tv";
 /** 媒体库的内容形态：发现/订阅只认 movie/tv，库还多两种本地形态——「其他」
- *  （video，无结构假设的本地视频，见 docs/design/library-other-kind.md）与
+ *  与
  */
 export type LibraryKind = MediaType | "video";
 /** 库内条目的身份来源：tmdb=有外部档案；local=本地内容或影视库里尚未识别的文件。 */
@@ -22,7 +22,7 @@ export type MediaSource = "tmdb" | "douban" | "tvdb" | "bangumi" | "anilist";
 
 /** 发现列表的轻量库存摘要；只用于入库标记，不携带文件详情。 */
 export interface MediaLibraryStatus {
-  mediaItemId: number;
+  mediaItemId: string;
   libraryCount: number;
   fileCount: number;
 }
@@ -72,7 +72,7 @@ export interface MediaItem {
   posterUrl: string;
   /** 仅 Hero 精选项需要的宽幅背景图 */
   backdropUrl?: string;
-  /** 有在位文件时的库存摘要；无匹配或旧接口响应时为空。 */
+  /** 有在位文件时的库存摘要；无匹配时为空。 */
   libraryStatus?: MediaLibraryStatus | null;
 }
 

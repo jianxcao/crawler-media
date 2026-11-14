@@ -1,0 +1,150 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use store::playback::MediaMergeRequest;
+
+use super::*;
+use crate::probe_manager::ProbeManager;
+mod model_bundle {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../store/tests/support/model_bundle.rs"
+    ));
+}
+
+fn media(store: &store::Store) -> MediaId {
+    let id = MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id,
+            kind: domain::MediaKind::Tv,
+            title: "Season model".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    id
+}
+
+fn publish(manager: &ProbeManager, media_id: MediaId, model: &TemplateModel) {
+    let policy = SamplingPolicy::default();
+    let access = SeasonAccess::from_manager(manager);
+    let ctx = adaptive_capture_context(
+        &access,
+        Arc::new(crate::fingerprint_job::adaptive::NoopGate),
+        "job-policy-test",
+    );
+    let pipeline = SeasonPipeline {
+        mgr: &access,
+        job_id: "pipeline-job",
+        media_id,
+        season: 1,
+        policy: &policy,
+        ctx: &ctx,
+        cost_summary: SourceCostSummary::default(),
+    };
+    if let Ok(bundle) = prepare_season_model(&pipeline, &mut model.clone()) {
+        let _ = persist_season_models(&pipeline, &[bundle]);
+    }
+}
+
+#[test]
+fn pipeline_publication_drops_transferred_media_without_redirecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(store::Store::open(dir.path()).unwrap());
+    let manager = ProbeManager::new(store.clone()).unwrap();
+    let guard = store.as_ref();
+    let loser = media(&guard);
+    let survivor = media(&guard);
+    let library = guard
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap();
+    let file = store::test_support::publish_fixture_file(
+        &guard,
+        &store::test_support::FixtureFile {
+            media_id: loser,
+            path: library.root_paths[0]
+                .join("episode.mkv")
+                .display()
+                .to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let other = store::test_support::publish_fixture_file(
+        guard,
+        &store::test_support::FixtureFile {
+            media_id: loser,
+            path: library.root_paths[0]
+                .join("second.mkv")
+                .display()
+                .to_string(),
+            season: Some(1),
+            episode: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let samples = vec![
+        model_bundle::capture(guard, &file, 1),
+        model_bundle::capture(guard, &other, 2),
+    ];
+    let captured_model =
+        serde_json::from_str(&model_bundle::bundle(loser, &samples).model.model_json).unwrap();
+    let operation = guard
+        .begin_media_merge(
+            &MediaMergeRequest {
+                request_id: MediaId::new().to_string(),
+                survivor,
+                loser,
+                survivor_revision: 0,
+                loser_revision: 0,
+                refresh_targets: BTreeMap::new(),
+            },
+            1000,
+        )
+        .unwrap();
+    guard.advance_media_merge(&operation, 1100).unwrap();
+    let current = guard.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(current.file.media_id, survivor);
+    assert_eq!(
+        current.file.version.source_version,
+        file.version.source_version
+    );
+    publish(&manager, loser, &captured_model);
+    let guard = store.as_ref();
+    assert!(
+        guard
+            .list_fingerprint_models(&loser.to_string(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        guard
+            .list_fingerprint_models(&survivor.to_string(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    // A newly computed pipeline for the current identity remains publishable.
+    let current_other = guard.file_coverage_by_id(other.file_id).unwrap().unwrap();
+    model_bundle::capture(guard, &current.file, 1);
+    model_bundle::capture(guard, &current_other.file, 2);
+    publish(&manager, survivor, &captured_model);
+    assert_eq!(
+        store
+            .as_ref()
+            .list_fingerprint_models(&survivor.to_string(), 1)
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -34,24 +34,25 @@ async fn items_series_and_season_filters_return_episode_children() {
     for (season, episode) in [(1, 1), (1, 2), (2, 1)] {
         let path = root.join(format!("S{season:02}E{episode:02}.mkv"));
         std::fs::write(&path, b"episode").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: show.id,
-                path: path.display().to_string(),
-                season: Some(season),
-                episode: Some(episode),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: show.id,
+            path: path.display().to_string(),
+            season: Some(season),
+            episode: Some(episode),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(&store, &spec).unwrap();
     }
 
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
     let all_episodes = get_json(&app, &format!("/Items?SeriesId={series_id}")).await;
     assert_eq!(all_episodes["TotalRecordCount"], 3);
     assert!(
@@ -62,7 +63,7 @@ async fn items_series_and_season_filters_return_episode_children() {
             .all(|item| item["Type"] == "Episode")
     );
 
-    let season_id = format!("{series_id}02");
+    let season_id = season_item_id(show.id, 2);
     let season_episodes = get_json(
         &app,
         &format!("/Items?SeriesId={series_id}&SeasonId={season_id}"),
@@ -156,4 +157,107 @@ async fn get_json(app: &axum::Router, uri: &str) -> Value {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "{uri}");
     json(response).await
+}
+
+/// genre/studio 过滤与 Web 浏览同一口径：已采纳的元数据优先，NFO 只在没有采纳行时兜底。
+#[tokio::test]
+async fn genre_and_studio_filters_read_adopted_metadata_instead_of_nfo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media_id, _) = app(tmp.path());
+    // NFO 与采纳行冲突：命中只可能来自采纳行。
+    std::fs::write(
+        tmp.path().join("matrix.nfo"),
+        "<movie><genre>Drama</genre><studio>Nfo Studio</studio></movie>",
+    )
+    .unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let fields = domain::MetadataFields {
+        genres: domain::FieldValue::Value(vec![domain::MetadataGenre {
+            source: "tmdb".into(),
+            source_id: None,
+            name: "Action".into(),
+            filter_key: "action".into(),
+        }]),
+        studios: domain::FieldValue::Value(vec!["Web Studio".into()]),
+        ..domain::MetadataFields::default()
+    };
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id,
+                scope: domain::EntityScope::Work,
+                locale: "en-US".into(),
+                source: "tmdb".into(),
+                provider_entity_id: "603".into(),
+                provider_work_id: "603".into(),
+                fetched_at: 1000,
+                normalized: domain::NormalizedMetadata {
+                    fields,
+                    field_origins: std::collections::BTreeMap::new(),
+                },
+                expected_revision: Some(0),
+                preferences: domain::MetadataPreferences {
+                    language_priority: vec!["en-US".into()],
+                    cert_country_priority: vec!["US".into()],
+                },
+            },
+            1000,
+        )
+        .unwrap();
+
+    assert_query_count(&app, "Genres=Action", 1).await;
+    assert_query_count(&app, "Genres=Drama", 0).await;
+    assert_query_count(&app, "StudioIds=Web%20Studio", 1).await;
+    assert_query_count(&app, "StudioIds=Nfo%20Studio", 0).await;
+}
+
+/// 搜索词与 person 过滤同样读取采纳行：NFO 冲突值不得命中，采纳的简介/演员必须命中。
+#[tokio::test]
+async fn search_and_people_filters_read_adopted_metadata_instead_of_nfo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media_id, _) = app(tmp.path());
+    std::fs::write(
+        tmp.path().join("matrix.nfo"),
+        "<movie><plot>Nfo only plot</plot><actor><name>Nfo Person</name></actor></movie>",
+    )
+    .unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let fields = domain::MetadataFields {
+        overview: domain::FieldValue::Value("Adopted plot text".into()),
+        cast: domain::FieldValue::Value(vec![domain::MetadataCast {
+            name: "Adopted Person".into(),
+            role: Some("Neo".into()),
+            tmdb_id: Some("6384".into()),
+            thumb: None,
+            order: Some(0),
+        }]),
+        ..domain::MetadataFields::default()
+    };
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id,
+                scope: domain::EntityScope::Work,
+                locale: "en-US".into(),
+                source: "tmdb".into(),
+                provider_entity_id: "603".into(),
+                provider_work_id: "603".into(),
+                fetched_at: 1000,
+                normalized: domain::NormalizedMetadata {
+                    fields,
+                    field_origins: std::collections::BTreeMap::new(),
+                },
+                expected_revision: Some(0),
+                preferences: domain::MetadataPreferences {
+                    language_priority: vec!["en-US".into()],
+                    cert_country_priority: vec!["US".into()],
+                },
+            },
+            1000,
+        )
+        .unwrap();
+
+    assert_query_count(&app, "SearchTerm=Adopted", 1).await;
+    assert_query_count(&app, "SearchTerm=Nfo%20only", 0).await;
+    assert_query_count(&app, "PersonIds=6384", 1).await;
 }

@@ -2,12 +2,12 @@ use crate::provider::PlaybackClientInfo;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use domain::UserId;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::provider::MediaServerProvider;
+use crate::provider::{MediaServerProvider, QueryTiming};
 
 #[derive(Clone)]
 pub struct AuthUser {
@@ -31,28 +31,6 @@ impl std::fmt::Debug for AuthUser {
     }
 }
 
-#[cfg(test)]
-mod debug_tests {
-    use super::AuthUser;
-    use domain::UserId;
-
-    #[test]
-    fn debug_never_prints_the_session_token() {
-        let user = AuthUser {
-            id: UserId::new(),
-            token: "session-token-secret".into(),
-            device_id: Some("device-1".into()),
-        };
-        let rendered = format!("{user:?}");
-        assert!(
-            !rendered.contains("session-token-secret"),
-            "Debug 不得输出 token: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"));
-        assert!(rendered.contains("device-1"));
-    }
-}
-
 pub async fn authenticate(
     provider: Arc<dyn MediaServerProvider>,
     mut request: Request,
@@ -62,20 +40,27 @@ pub async fn authenticate(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
+    let deadline = request
+        .extensions()
+        .get::<QueryTiming>()
+        .map(|timing| timing.deadline);
     let user_id = provider
-        .user_id_by_token(&token)
+        .user_id_by_token(&token, deadline)
         .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?
+        .map_err(|error| {
+            tracing::error!(%error, "Jellyfin token lookup failed");
+            error.status_code()
+        })?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let device_id = request_device_id(&request);
     if let Some(device_id) = device_id.as_deref() {
         provider
-            .bind_playback_credential(user_id, device_id, &token)
+            .bind_playback_credential(user_id, device_id, &token, deadline)
             .await
             .map_err(|error| {
-                tracing::error!(%user_id, device_id, %error, "Playback credential binding failed");
-                StatusCode::INTERNAL_SERVER_ERROR
+                tracing::error!(%user_id, %error, "Playback credential binding failed");
+                error.status_code()
             })?;
     }
     request.extensions_mut().insert(user_id);
@@ -160,10 +145,24 @@ pub async fn authenticate_optional(
     next: Next,
 ) -> Response {
     let user_id = if let Some(token) = request_token(&request) {
-        match provider.user_id_by_token(&token).await {
+        match provider
+            .user_id_by_token(
+                &token,
+                request
+                    .extensions()
+                    .get::<QueryTiming>()
+                    .map(|timing| timing.deadline),
+            )
+            .await
+        {
             Ok(user_id) => user_id,
             Err(error) => {
                 tracing::warn!(%error, "optional media image authentication lookup failed");
+                if request.extensions().get::<QueryTiming>().is_some()
+                    && matches!(error, crate::provider::QueryError::Unavailable)
+                {
+                    return error.status_code().into_response();
+                }
                 None
             }
         }
@@ -218,4 +217,26 @@ fn token_from_authorization(value: &str) -> Option<&str> {
             .eq_ignore_ascii_case("Token")
             .then(|| value.trim().trim_matches('"'))
     })
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::AuthUser;
+    use domain::UserId;
+
+    #[test]
+    fn debug_never_prints_the_session_token() {
+        let user = AuthUser {
+            id: UserId::new(),
+            token: "session-token-secret".into(),
+            device_id: Some("device-1".into()),
+        };
+        let rendered = format!("{user:?}");
+        assert!(
+            !rendered.contains("session-token-secret"),
+            "Debug 不得输出 token: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("device-1"));
+    }
 }

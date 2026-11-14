@@ -18,28 +18,32 @@ fn season_body(path: &Path, meta: &NfoMeta) -> io::Result<String> {
         }
     }
 
-    let mut body = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<season>\n");
+    let mut body =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<season>\n");
 
-    if let Some(ref title) = meta.title {
-        if !title.is_empty() {
-            body.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
-        }
+    if let Some(ref title) = meta.title
+        && !title.is_empty()
+    {
+        body.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
     }
 
-    if let Some(ref plot) = meta.plot {
-        if !plot.is_empty() {
-            body.push_str(&format!("  <plot>{}</plot>\n", xml_escape(plot)));
-        }
+    if let Some(ref plot) = meta.plot
+        && !plot.is_empty()
+    {
+        body.push_str(&format!("  <plot>{}</plot>\n", xml_escape(plot)));
     }
 
-    if let Some(ref premiered) = meta.premiered {
-        if !premiered.is_empty() {
-            body.push_str(&format!("  <premiered>{}</premiered>\n", xml_escape(premiered)));
-            if premiered.len() >= 4 {
-                if let Ok(year) = premiered[0..4].parse::<u16>() {
-                    body.push_str(&format!("  <year>{}</year>\n", year));
-                }
-            }
+    if let Some(ref premiered) = meta.premiered
+        && !premiered.is_empty()
+    {
+        body.push_str(&format!(
+            "  <premiered>{}</premiered>\n",
+            xml_escape(premiered)
+        ));
+        if premiered.len() >= 4
+            && let Ok(year) = premiered[0..4].parse::<u16>()
+        {
+            body.push_str(&format!("  <year>{}</year>\n", year));
         }
     }
 
@@ -47,10 +51,10 @@ fn season_body(path: &Path, meta: &NfoMeta) -> io::Result<String> {
         body.push_str(&format!("  <seasonnumber>{}</seasonnumber>\n", season));
     }
 
-    if let Some(ref thumb) = meta.thumb {
-        if !thumb.is_empty() {
-            body.push_str(&format!("  <thumb>{}</thumb>\n", xml_escape(thumb)));
-        }
+    if let Some(ref thumb) = meta.thumb
+        && !thumb.is_empty()
+    {
+        body.push_str(&format!("  <thumb>{}</thumb>\n", xml_escape(thumb)));
     }
 
     body.push_str("</season>\n");

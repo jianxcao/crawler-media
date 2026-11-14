@@ -1,19 +1,18 @@
+use super::ProbeManager;
+#[cfg(test)]
 use domain::MediaKind;
 use std::sync::atomic::Ordering;
-
-use super::{ProbeManager, ProbeUnit};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
     use std::sync::Arc;
 
     #[test]
     fn ordinary_recovery_keeps_other_library_units_queued() {
         for kind in ["probe", "marker_refresh"] {
             let temp = tempfile::tempdir().unwrap();
-            let store = Arc::new(Mutex::new(store::Store::open(temp.path()).unwrap()));
+            let store = Arc::new(store::Store::open(temp.path()).unwrap());
             let media = domain::Media {
                 id: domain::MediaId::new(),
                 kind: MediaKind::Tv,
@@ -27,14 +26,14 @@ mod tests {
                 bangumi_id: None,
                 anilist_id: None,
             };
-            store.lock().insert_media(&media).unwrap();
+            store.as_ref().insert_media(&media).unwrap();
             let mut libraries = Vec::new();
             let mut ledger_ids = Vec::new();
             for name in ["removed", "retained"] {
                 let root = temp.path().join(name);
                 libraries.push(
                     store
-                        .lock()
+                        .as_ref()
                         .create_library(
                             media.kind,
                             name,
@@ -45,21 +44,14 @@ mod tests {
                         )
                         .unwrap(),
                 );
-                let row = domain::LedgerRow {
-                    id: domain::LedgerId::new(),
-                    media_id: media.id,
-                    path: root.join("episode.mkv").to_string_lossy().into_owned(),
-                    season: Some(1),
-                    episode: Some(1),
-                    resolution: None,
-                    codec: None,
-                    hdr: None,
-                    quality_source: domain::QualitySource::Release,
-                    confidence: domain::Confidence::High,
-                    filter_score: None,
-                };
-                store.lock().insert_ledger(&row).unwrap();
-                ledger_ids.push(row.id.to_string());
+                let mut row = super::super::test_support::coverage(
+                    media.id,
+                    &root.join("episode.mkv").to_string_lossy(),
+                    Some(1),
+                    Some(1),
+                );
+                super::super::test_support::publish_into(&store.as_ref(), &mut row);
+                ledger_ids.push(row.file.file_id.to_string());
             }
             let specs: Vec<_> = ledger_ids
                 .iter()
@@ -73,7 +65,7 @@ mod tests {
                 })
                 .collect();
             store
-                .lock()
+                .as_ref()
                 .create_probe_job(
                     "mixed",
                     kind,
@@ -84,11 +76,11 @@ mod tests {
                 )
                 .unwrap();
             store
-                .lock()
+                .as_ref()
                 .begin_library_removal(&libraries[0].id)
                 .unwrap();
-            let manager = ProbeManager::new(store.clone());
-            let units = store.lock().probe_job_units("mixed").unwrap();
+            let manager = ProbeManager::new(store.clone()).unwrap();
+            let units = store.as_ref().probe_job_units("mixed").unwrap();
             assert_eq!(
                 units
                     .iter()
@@ -97,10 +89,7 @@ mod tests {
                     .status,
                 "cancelled"
             );
-            if kind == "marker_refresh" {
-                assert!(units.iter().all(|u| u.status == "cancelled"));
-                assert!(!manager.is_queued(&ledger_ids[1]));
-            } else {
+            {
                 assert_eq!(
                     units
                         .iter()
@@ -112,7 +101,7 @@ mod tests {
                 assert!(manager.is_queued(&ledger_ids[1]));
                 assert!(
                     store
-                        .lock()
+                        .as_ref()
                         .get_probe_job("mixed")
                         .unwrap()
                         .unwrap()
@@ -125,360 +114,79 @@ mod tests {
 
 impl ProbeManager {
     pub(crate) fn recover_pending_jobs(&self) {
-        if let Err(error) = self.store.lock().reset_running_probe_units() {
-            tracing::error!(%error, "恢复探测任务时重置运行中单元失败");
+        if let Err(error) = self.store.reset_running_probe_units() {
+            tracing::error!(%error,"恢复探测单元失败");
+            self.recovery_deferred.store(true, Ordering::SeqCst);
             return;
         }
+        self.retire_missing_source_work();
         self.repair_removed_window();
         self.recover_completed_jobs();
-        self.recover_marker_refreshes();
         self.fill_dispatch_windows();
     }
-
+    fn retire_missing_source_work(&self) {
+        loop {
+            let refs = match self.store.missing_source_probe_unit_refs(64) {
+                Ok(refs) => refs,
+                Err(error) => {
+                    tracing::error!(%error,"读取缺失源任务失败");
+                    return;
+                }
+            };
+            if refs.is_empty() {
+                return;
+            }
+            for (job, file) in refs {
+                if let Err(error) = self.store.cancel_probe_unit(&job, &file, "file_missing") {
+                    tracing::error!(%error,job,file,"取消缺失源单元失败");
+                    return;
+                }
+                self.seen.lock().remove(&file);
+            }
+        }
+    }
     fn repair_removed_window(&self) {
-        let refs = match self.store.lock().active_probe_unit_refs(64) {
+        let refs = match self.store.active_probe_unit_refs(64) {
             Ok(refs) => refs,
             Err(error) => {
-                tracing::error!(%error, "读取待修复探测窗口失败");
+                tracing::error!(%error,"读取恢复窗口失败");
                 return;
             }
         };
-        for (job_id, ledger_id) in refs {
-            let removed = self.removed_recovery_units(&[store_unit_stub(&job_id, &ledger_id)]);
-            if removed.is_empty() {
-                continue;
-            }
-            let kind = self
-                .store
-                .lock()
-                .get_probe_job(&job_id)
+        for (job, file) in refs {
+            let row = file
+                .parse()
                 .ok()
-                .flatten()
-                .map(|job| job.kind);
-            if kind.as_deref() == Some("marker_refresh") {
-                if let Err(error) = self.store.lock().cancel_probe_job(&job_id, "Library removed") {
-                    tracing::error!(%error, %job_id, "恢复时取消删除库任务失败");
+                .and_then(|id| self.store.file_coverage_by_id(id).ok().flatten());
+            if row.as_ref().is_none_or(|row| {
+                !self
+                    .store
+                    .library_accepts_work(&row.file.library_id.to_string())
+                    .unwrap_or(false)
+            }) {
+                if let Err(error) = self.store.cancel_probe_unit(&job, &file, "Library removed") {
+                    tracing::error!(%error,job,file,"取消删除库参与者失败");
                 }
-                continue;
-            }
-            if let Err(error) = self
-                .store
-                .lock()
-                .cancel_probe_unit(&job_id, &ledger_id, "Library removed")
-            {
-                tracing::error!(%error, %job_id, %ledger_id, "恢复时取消删除库单元失败");
+                self.seen.lock().remove(&file);
             }
         }
     }
-
-    fn recover_completed_jobs(&self) {
-        let jobs = match self.store.lock().active_completed_probe_jobs(64) {
+    pub(super) fn recover_completed_jobs(&self) {
+        let jobs = match self.store.active_completed_probe_jobs(64) {
             Ok(jobs) => jobs,
             Err(error) => {
-                tracing::error!(%error, "读取已完成待收尾探测任务失败");
+                tracing::error!(%error,"读取已完成探测任务失败");
                 return;
             }
         };
         for job in jobs {
-            self.finalize_recovered_job(&job);
-        }
-    }
-
-    fn recover_marker_refreshes(&self) {
-        let jobs = match self.store.lock().active_probe_jobs_by_kind("marker_refresh") {
-            Ok(jobs) => jobs,
-            Err(error) => {
-                tracing::error!(%error, "读取片头片尾刷新任务失败");
-                return;
-            }
-        };
-        for (job, units) in jobs {
-            if units.iter().any(|unit| unit.status == "cancelled") {
-                let reason = units
-                    .iter()
-                    .find(|unit| unit.status == "cancelled")
-                    .and_then(|unit| unit.error.as_deref())
-                    .unwrap_or("file_deleted");
-                if let Err(error) = self.store.lock().cancel_probe_job(&job.id, reason) {
-                    tracing::error!(%error, job_id = %job.id, "恢复原子刷新取消状态失败");
-                }
-                continue;
-            }
-            let removed = self.removed_recovery_units(&units);
-            if !removed.is_empty() {
-                if let Err(error) = self.store.lock().cancel_probe_job(&job.id, "Library removed") {
-                    tracing::error!(%error, job_id = %job.id, "恢复时取消删除库刷新失败");
-                }
-                continue;
-            }
-            tracing::info!(
-                job_id = %job.id,
-                pending = units.iter().filter(|unit| unit.status == "queued").count(),
-                "【探测任务】恢复片头片尾刷新"
-            );
-            self.recover_job_units(&job, &units);
-            self.finalize_recovered_job(&job);
-        }
-    }
-
-    fn finalize_recovered_job(&self, job: &crate::store::ProbeJob) {
-        let refreshed = self.store.lock().get_probe_job(&job.id);
-        let refreshed = match refreshed {
-            Ok(Some(refreshed)) => refreshed,
-            Ok(None) => {
-                tracing::error!(job_id = %job.id, "恢复探测任务后数据库中找不到任务记录");
-                return;
-            }
-            Err(error) => {
-                tracing::error!(%error, job_id = %job.id, "恢复探测任务后读取任务状态失败");
-                match self
-                    .store
-                    .lock()
-                    .fail_completed_probe_job(&job.id, "重启恢复时无法读取已完成任务状态")
-                {
-                    Ok(true) => {
-                        tracing::error!(job_id = %job.id, "已将无法确认状态的完成任务标记失败并释放任务范围")
-                    }
-                    Ok(false) => {
-                        tracing::warn!(job_id = %job.id, "未终止探测任务：任务可能仍有待处理单元或已被其他流程终止")
-                    }
-                    Err(finish_error) => {
-                        tracing::error!(%finish_error, job_id = %job.id, "读取任务状态失败后持久化失败状态也失败")
-                    }
-                }
-                return;
-            }
-        };
-        if refreshed.completed >= refreshed.total && refreshed.is_active() {
-            if refreshed.failed > 0 {
-                if let Err(error) = self.store.lock().finish_probe_job(
-                    &job.id,
-                    false,
-                    refreshed.error.as_deref(),
-                ) {
-                    tracing::error!(%error, job_id = %job.id, "持久化恢复任务的失败状态失败");
-                }
-            } else if refreshed.kind == "marker_refresh" {
-                match self.recovered_marker_refresh_unit(&refreshed) {
-                    Ok(unit) => {
-                        // 不在构造期间同步执行整季计算，避免等待尚未启动的 worker 导致死锁。
-                        // 暂存到 recovered_marker_refreshes，在 try_start_workers 启动 worker 后异步处理。
-                        self.recovered_marker_refreshes
-                            .lock()
-                            .push((refreshed, unit));
-                    }
-                    Err(crate::store::StoreError::Missing(reason))
-                        if crate::fingerprint_job::source::is_file_deleted(&reason) =>
-                    {
-                        if let Err(error) =
-                            self.store.lock().cancel_probe_job(&job.id, "file_deleted")
-                        {
-                            tracing::error!(%error, job_id = %job.id, "恢复时持久化任务取消状态失败");
-                        } else {
-                            tracing::info!(job_id = %job.id, reason = "file_deleted", "源文件已删除，取消待发布的刷新任务");
-                        }
-                    }
-                    Err(error) => {
-                        if let Err(finish_error) = self.store.lock().finish_probe_job(
-                            &job.id,
-                            false,
-                            Some("重启恢复时无法读取任务台账"),
-                        ) {
-                            tracing::error!(%finish_error, job_id = %job.id, "持久化无法恢复的片头片尾任务失败状态失败");
-                        }
-                        tracing::error!(%error, job_id = %job.id, "完成的片头片尾任务无法恢复，已标记失败并释放任务范围");
-                    }
-                }
-            } else if let Err(error) = self.store.lock().finish_probe_job(&job.id, true, None) {
-                tracing::error!(%error, job_id = %job.id, "持久化恢复任务的成功状态失败");
+            if let Err(error) = self.store.finish_probe_job(
+                &job.id,
+                job.failed == 0 && job.partial == 0,
+                job.error.as_deref(),
+            ) {
+                tracing::error!(%error,job_id=%job.id,"恢复探测终态失败");
             }
         }
-    }
-
-    fn recover_retained_units(
-        &self,
-        job: &crate::store::ProbeJob,
-        units: Vec<crate::store::ProbeJobUnit>,
-        removed: &[String],
-    ) {
-        for ledger_id in removed {
-            if let Err(error) = self.store.lock().cancel_probe_unit(&job.id, ledger_id, "Library removed") {
-                tracing::error!(%error, job_id = %job.id, %ledger_id, "恢复时取消删除库单元失败");
-            }
-        }
-        let retained: Vec<_> = units.into_iter().filter(|unit| !removed.contains(&unit.ledger_id)).collect();
-        self.recover_job_units(job, &retained);
-    }
-
-    fn removed_recovery_units(&self, units: &[crate::store::ProbeJobUnit]) -> Vec<String> {
-        let store = self.store.lock();
-        units
-            .iter()
-            .filter(|unit| {
-                let row = store.get_ledger(&unit.ledger_id).ok().flatten();
-                row.and_then(|row| {
-                    let media = store.get_media(row.media_id).ok().flatten()?;
-                    store
-                        .library_for_path_strict(std::path::Path::new(&row.path), media.kind)
-                        .ok()
-                        .flatten()
-                })
-                .is_some_and(|owner| !store.library_accepts_work(&owner.id).unwrap_or(false))
-            })
-            .map(|unit| unit.ledger_id.clone())
-            .collect()
-    }
-
-    fn recover_job_units(
-        &self,
-        job: &crate::store::ProbeJob,
-        units: &[crate::store::ProbeJobUnit],
-    ) {
-        for persisted in units.iter().filter(|unit| unit.status == "queued") {
-            if self
-                .store
-                .lock()
-                .get_probe_job(&job.id)
-                .ok()
-                .flatten()
-                .is_some_and(|job| !job.is_active())
-            {
-                break;
-            }
-            let row = self
-                .store
-                .lock()
-                .get_ledger(&persisted.ledger_id.replace('-', ""));
-            let row = match row {
-                Ok(Some(row)) => row,
-                Ok(None) => {
-                    let result = {
-                        let store = self.store.lock();
-                        store
-                            .cancel_probe_unit(&job.id, &persisted.ledger_id, "file_deleted")
-                            .and_then(|(_, _, _)| {
-                                if job.kind == "marker_refresh" {
-                                    store.cancel_probe_job(&job.id, "file_deleted")?;
-                                }
-                                Ok(())
-                            })
-                    };
-                    if let Err(error) = result {
-                        tracing::error!(%error, job_id = %job.id, "恢复时取消已删除文件任务失败");
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(%error, job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务读取台账失败");
-                    if let Err(finish_error) = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务时读取媒体台账失败"),
-                    ) {
-                        tracing::error!(%finish_error, job_id = %job.id, ledger_id = %persisted.ledger_id, "持久化恢复失败的任务单元失败");
-                    }
-                    continue;
-                }
-            };
-            let kind = match persisted.kind.parse::<MediaKind>() {
-                Ok(kind) => kind,
-                Err(kind) => {
-                    tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, %kind, "恢复探测任务媒体类型无效");
-                    let _ = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务时媒体类型无效"),
-                    );
-                    continue;
-                }
-            };
-            self.seen.lock().insert(persisted.ledger_id.clone());
-            let unit = ProbeUnit {
-                row,
-                kind,
-                force_fingerprint: persisted.force_fingerprint,
-                reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
-                overwrite_markers: persisted.overwrite_markers,
-                reuse_media_info_cache: persisted.reuse_media_info_cache,
-                marker_refresh_id: (job.kind == "marker_refresh")
-                    .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
-                job_id: Some(job.id.clone()),
-            };
-            if self.queue_metadata(unit).is_err() {
-                self.seen.lock().remove(&persisted.ledger_id);
-                tracing::info!(
-                    job_id = %job.id,
-                    ledger_id = %persisted.ledger_id,
-                    "恢复窗口已满，任务保持数据库排队"
-                );
-            }
-        }
-    }
-
-    fn recovered_marker_refresh_unit(
-        &self,
-        job: &crate::store::ProbeJob,
-    ) -> Result<ProbeUnit, crate::store::StoreError> {
-        let store = self.store.lock();
-        let persisted_units = store.probe_job_units(&job.id)?;
-        for unit in &persisted_units {
-            let row = store
-                .get_ledger(&unit.ledger_id.replace('-', ""))?
-                .ok_or_else(|| {
-                    crate::store::StoreError::Missing(format!(
-                        "file_deleted: ledger {}",
-                        unit.ledger_id
-                    ))
-                })?;
-            crate::fingerprint_job::source::ensure_source_available(&store, &row)
-                .map_err(crate::store::StoreError::Missing)?;
-        }
-        let persisted = persisted_units
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("units for job {}", job.id))
-            })?;
-        let row = store
-            .get_ledger(&persisted.ledger_id.replace('-', ""))?
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!(
-                    "file_deleted: ledger {}",
-                    persisted.ledger_id
-                ))
-            })?;
-        let kind = persisted
-            .kind
-            .parse::<MediaKind>()
-            .map_err(|_| crate::store::StoreError::Missing(format!("kind {}", persisted.kind)))?;
-        Ok(ProbeUnit {
-            row,
-            kind,
-            force_fingerprint: persisted.force_fingerprint,
-            reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
-            overwrite_markers: persisted.overwrite_markers,
-            reuse_media_info_cache: persisted.reuse_media_info_cache,
-            marker_refresh_id: Some(self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
-            job_id: Some(job.id.clone()),
-        })
-    }
-}
-
-fn store_unit_stub(job_id: &str, ledger_id: &str) -> crate::store::ProbeJobUnit {
-    crate::store::ProbeJobUnit {
-        job_id: job_id.to_string(),
-        ledger_id: ledger_id.to_string(),
-        kind: String::new(),
-        force_fingerprint: false,
-        reuse_fingerprint_cache: false,
-        overwrite_markers: false,
-        status: "queued".into(),
-        error: None,
-        sampling_plan_json: None,
-        detection_outcome_json: None,
-        reuse_media_info_cache: false,
-        stage: store::ProbeDispatchStage::Metadata,
     }
 }

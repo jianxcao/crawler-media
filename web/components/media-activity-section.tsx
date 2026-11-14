@@ -276,8 +276,7 @@ function ActivityTitle({ media }: { media: MediaActivityTarget }) {
 }
 
 /**
- * 状态徽标。窄屏收敛为单个彩色圆点（与任务视角既有约定一致，
- * docs/design/activity.md：状态在移动端压缩为一个彩色圆点）——
+ * 状态徽标。窄屏收敛为单个彩色圆点，与任务视角既有约定一致。
  * 文字降为 sr-only 而不是从 DOM 摘除，读屏用户仍能听到状态。
  */
 /**
@@ -587,7 +586,7 @@ const SCOPE_OPTIONS: readonly { value: MediaActivityScope; label: string; hint: 
 /**
  * 观看视角的工具栏：左边是三个切片（与任务视角的状态切片同一形态），右边是
  * 作用于整个切片的筛选条件。范围口径管的是整个观看视角，站在这里而不是
- * 挂在某个分区的标题上，作用域才一目了然（docs/design/activity.md）。
+ * 挂在某个分区的标题上，作用域才一目了然。
  */
 function WatchToolbar({
   view,
@@ -632,7 +631,7 @@ function WatchToolbar({
 }
 
 /**
- * 「观看」视角主体，三个切片各看各的（docs/design/activity.md「观看视角的三个切片」）：
+ * 「观看」视角主体，三个切片各看各的：
  * 正在播放（实时快照，轮询）/ 播放记录（每场一行，按天分组）/ 观看统计（按周期汇总）。
  * 三者时间语义与刷新节奏都不同，摞在一页里读不出重点。
  */

@@ -28,7 +28,6 @@ fn make_state(root: &Path) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
 }
@@ -56,31 +55,35 @@ async fn get_json(app: &axum::Router, uri: &str) -> Value {
 }
 
 fn add_finished_child(state: &ApiState, name: &str) -> jobs::JobDef {
+    let media_id = domain::MediaId::new();
     let queue = state.jobs();
     let def = queue
-        .lock()
-        .upsert_def(NewDef {
+        .acquire()
+        .unwrap()
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(media_id),
             name: name.into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: serde_json::json!({"media_id":media_id}).to_string(),
             timeout_secs: None,
             concurrency_key: None,
         })
         .unwrap();
     let child = queue
-        .lock()
+        .acquire()
+        .unwrap()
         .ensure_scheduled_for(0, def.id)
         .unwrap()
         .remove(0);
     // 队列里可能还有实例种子任务：claim 足够多，确认本 def 的子任务已进入 running。
-    let claimed = queue.lock().claim(1, 50).unwrap();
+    let claimed = queue.acquire().unwrap().claim(1, 50).unwrap();
     assert!(
         claimed.iter().any(|job| job.id == child.id),
         "child must be claimed"
     );
-    queue.lock().succeed(child.id, 1).unwrap();
+    queue.acquire().unwrap().succeed(child.id, 1).unwrap();
     def
 }
 
@@ -91,12 +94,15 @@ async fn two_subscribers_share_one_poller_and_propagate_changes() {
     let state = make_state(tmp.path()).with_job_updates(updates.clone());
     let queue = state.jobs();
 
-    let first = updates.subscribe(queue.clone()).await.unwrap();
-    let second = updates.subscribe(queue.clone()).await.unwrap();
+    let first = updates.subscribe(state.jobs_readers()).await.unwrap();
+    let second = updates.subscribe(state.jobs_readers()).await.unwrap();
     assert_eq!(updates.subscriber_count(), 2);
     let initial = first.borrow().count;
     assert_eq!(second.borrow().count, initial, "订阅即拿到真实当前计数");
-    assert_eq!(initial, queue.lock().count_finished_since(0).unwrap());
+    assert_eq!(
+        initial,
+        queue.acquire().unwrap().count_finished_since(0).unwrap()
+    );
 
     // 两个订阅者只应共用一个 2 秒 poller：4.6s 内轮询 1..=3 次。
     tokio::time::sleep(Duration::from_millis(4600)).await;
@@ -141,7 +147,7 @@ async fn two_subscribers_share_one_poller_and_propagate_changes() {
     );
 
     // 再次订阅可重启。
-    let _restarted = updates.subscribe(queue.clone()).await.unwrap();
+    let _restarted = updates.subscribe(state.jobs_readers()).await.unwrap();
     wait_for(
         || updates.poll_count() > stopped_at,
         Duration::from_secs(4),
@@ -183,23 +189,26 @@ async fn jobs_list_reports_live_child_while_job_runs() {
     let app = router(state.clone());
     let queue = state.jobs();
     let def = queue
-        .lock()
-        .upsert_def(NewDef {
+        .acquire()
+        .unwrap()
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media("00000000-0000-0000-0000-000000000001".parse().unwrap()),
             name: "running-def".into(),
             enabled: true,
             schedule: None,
-            payload: "{}".into(),
+            payload: r#"{"media_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: None,
             concurrency_key: None,
         })
         .unwrap();
     let child = queue
-        .lock()
+        .acquire()
+        .unwrap()
         .ensure_scheduled_for(0, def.id)
         .unwrap()
         .remove(0);
-    let claimed = queue.lock().claim(1, 50).unwrap();
+    let claimed = queue.acquire().unwrap().claim(1, 50).unwrap();
     assert!(
         claimed.iter().any(|job| job.id == child.id),
         "child must be claimed"

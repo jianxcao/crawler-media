@@ -15,6 +15,25 @@ pub(crate) async fn activities(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            activities_blocking(worker, user_id, id, query)
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => crate::http::library::browse_work_error(error),
+    }
+}
+
+fn activities_blocking(
+    state: ApiState,
+    user_id: domain::UserId,
+    id: String,
+    query: HashMap<String, String>,
+) -> Response {
     let (subscribe, _media) = match resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,
@@ -23,12 +42,36 @@ pub(crate) async fn activities(
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
-    let jobs = state
-        .jobs
-        .lock()
-        .jobs_for_payload(&format!("{{\"subscribe_id\":\"{}\"}}", subscribe.id), limit);
-    let store = state.store.lock();
-    let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+    let jobs = match crate::jobs_readers::read(&state.jobs_readers, |queue| {
+        queue.jobs_for_identity(jobs::JobIdentity::subscribe_search(subscribe.id), limit)
+    }) {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            tracing::warn!(%error, subscribe_id=%subscribe.id, "subscription activity query failed");
+            return crate::library_read_work::stage_response(error);
+        }
+    };
+    let store = state.store.clone();
+    let facts_count = store
+        .load_subscribe_facts(subscribe.id)
+        .unwrap_or_default()
+        .entries()
+        .count();
+    let created = match store
+        .subscribe_times(subscribe.id)
+        .and_then(|(created, _)| crate::http::subscriptions::timestamps::format(created))
+    {
+        Ok(created) => created,
+        Err(error) => {
+            tracing::error!(%error, subscribe_id=%subscribe.id, "Subscribe activity timestamp read failed");
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
+    drop(store);
     let fmt = crate::store::rfc3339_from_secs;
     let mut items: Vec<Value> = jobs
         .iter()
@@ -63,11 +106,6 @@ pub(crate) async fn activities(
         })
         .collect();
     // 最近一次入库事实也作为一条 imported 活动（facts 是权威来源，job 记录可能缺）。
-    let created = store
-        .subscribe_times(subscribe.id)
-        .map(|(c, _)| c)
-        .unwrap_or_default();
-    let facts_count = facts.entries().count();
     if facts_count > 0 {
         items.push(json!({
             "id": format!("facts-{}", subscribe.id),

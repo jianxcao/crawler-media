@@ -21,7 +21,9 @@ pub(crate) struct ScanRunFailure {
 /// 扫描执行错误。
 pub(crate) enum ScanRunError {
     /// 持久化 signature 与捕获 scope 不一致（P2-4）：必须取消且零登记。
-    ScopeChanged { reason: String },
+    ScopeChanged {
+        reason: String,
+    },
     Failed(ScanRunFailure),
 }
 
@@ -38,10 +40,14 @@ pub(super) fn failed_response(response: Response, error: impl Into<String>) -> S
 pub(super) fn presence_error(error: crate::library_presence::PresenceError) -> Response {
     use crate::library_presence::PresenceError;
     match error {
-        PresenceError::Deleting => err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除"),
-        PresenceError::ScopeChanged => {
-            err(StatusCode::CONFLICT, "library.scope_changed", "Library 配置变化")
+        PresenceError::Deleting => {
+            err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除")
         }
+        PresenceError::ScopeChanged => err(
+            StatusCode::CONFLICT,
+            "library.scope_changed",
+            "Library 配置变化",
+        ),
         PresenceError::Ambiguous => err(
             StatusCode::CONFLICT,
             "library.ownership_ambiguous",

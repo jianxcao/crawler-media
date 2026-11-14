@@ -2,7 +2,7 @@
 
 **Library** 是已拥有文件的唯一事实来源。Infuse 等客户端通过 Jellyfin 兼容 HTTP API 连接，把这个进程当作 Jellyfin 服务器：浏览、直连播放、同步进度。我们只实现这些客户端实际调用的子集（认证、视图、条目、播放信息、Range 流、会话进度）。不克隆完整 Jellyfin（LiveTV、SyncPlay、DLNA、插件目录）。
 
-这是从 MoviePilot（为外部服务器整理）向自己拥有媒体库并直接提供服务的产品分叉。v1 的这套 API 不做转码：MediaSources 只宣称直连播放。以后的 Web 播放器可以在不同路径上转码，而无需改变面向 Infuse 的响应。qBittorrent / Transmission 仍是下载器；播放永远不会拉取 Torrent。
+这套 API 直接服务 Library 中已拥有的文件。MediaSources 只宣称直连播放，Web 播放器同样不转码；无法解码的格式需要支持相应格式的客户端。qBittorrent / Transmission 负责下载；Playback 不拉取 Torrent。
 
 **备选方案**：无播放，把媒体库作为 Emby/Jellyfin 的文件夹；仅海报墙 UI；实现 Emby 或 Plex。
 
@@ -29,7 +29,7 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 3. 缺失、错误、过期或已撤销的 token 得到 `401`；有效 token 仍受用户范围和媒体库可见性约束。
 4. 401 排查先核对脱敏后的请求认证 scheme、token 是否来自登录响应、会话年龄及是否被撤销；不得记录原始 token，也不得通过关闭鉴权来“修复”兼容性。
 
-协议格式以 [Jellyfin TypeScript SDK 生成 Authorization 头的实现](https://github.com/jellyfin/jellyfin-sdk-typescript/blob/1ef06252cef5d1729646331e64059e230f11a08b/src/utils/authentication.ts) 为参考；URL 中携带凭证时的日志风险见 [Jellyfin 反向代理文档](https://jellyfin.org/docs/general/post-install/networking/reverse-proxy/#logging)。VidHub 实际需要的兼容形式以抓包证据和本仓库集成测试为准。
+协议格式以 [Jellyfin TypeScript SDK 的认证实现](https://github.com/jellyfin/jellyfin-sdk-typescript) 为参考；URL 中携带凭证时的日志风险见 [Jellyfin 反向代理文档](https://jellyfin.org/docs/general/post-install/networking/reverse-proxy/#logging)。VidHub 实际需要的兼容形式以抓包证据和本仓库集成测试为准。
 
 ## 「最近入库」的播放状态口径
 
@@ -40,11 +40,15 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 理由：一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了；而"最近入库"这个名字描述的就是入库时间，把看过的藏起来反而名不副实。Jellyfin Web 的「最近添加」不传 `isPlayed`（`src/components/homesections/sections/recentlyAdded.ts` 只传 `userId/limit/fields/parentId`），所以它也会看到已看完的排在行尾。
 
 代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
-## 播放会话代际与 PlaySessionId 约束 (2026-10-13 Batch 2)
+## 播放会话代际与 PlaySessionId
 
-Jellyfin 客户端在 `PlaybackInfo` 阶段获得由服务端生成的持久 `PlaySessionId`（绑定 User、Device、LedgerId）。
+Items/PersonIds 使用持久协议查询与写入期候选索引；Web/Jellyfin 显式事件共用 `Store::commit_playback_event`。协议表面及客户端验证方法见 [Jellyfin 合同](../api-contracts/jellyfin.md)。
+
+PlaybackInfo 签发持久 PlaySessionId，取流使用版本化来源和 User/Device/逻辑 Media-unit/Library 配置绑定；协议参数与真实客户端验收以 handler 和集成回归为准。
 
 - 客户端在 `/Sessions/Playing`、`/Sessions/Playing/Progress` 和 `/Sessions/Playing/Stopped` 中回传可选的 `PlaySessionId` 和 `EventSequence`。
-- 迟到的旧会话 Progress / Stop 事件（generation 低于当前会话）不会影响或关闭正在播放的新会话。
-- 无 `PlaySessionId` 的旧客户端（Legacy）仅在目标 LedgerId 与当前活跃会话相同时才更新状态，避免跨文件污染。
+- 回传 PlaySessionId 的旧会话 Progress / Stop 事件（generation 低于当前会话）不会影响或关闭正在播放的新会话。
+- 无 PlaySessionId 客户端是合法协议入口；适配层按逻辑单元和物理源复用有效绑定，新的 Playing 可签发绑定，Progress/Stop 不凭空绑定。所有提交都使用实际会话绑定；只比较 LedgerId 会混写同文件的不同集。
+- 无 PlaySessionId 时，事件关联当前设备、逻辑单元和物理源；同一目标的迟到事件与当前事件、重复 Playing 与新一次播放可能具有完全相同的报文，无法保证跨代去重。跨代迟到保护需要客户端回传 PlaySessionId；有无位置使用相同的绑定规则。
+- PositionTicks 缺失或为 null 时仍处理合法会话的开始、暂停及结束，但不覆盖单元的恢复位置、已看状态或播放次数。会话保留最后已知位置（全程未知时内部以0占位），观看时长采样在未知位置处断开，下一次有效位置不补算未知区间；无位置的 Stop 按最后已知会话位置计算归档日志的完成状态，不因缺失位置推断完成或更新单元已看状态及播放次数。
 - 观看时长累计严格按墙钟推进与播放倍率限制，超过正常播放速率与容差的快进跳转（Seek）不虚增观看时长。

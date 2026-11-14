@@ -49,17 +49,27 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(30), |open| {
+                !*open
+            })
+            .unwrap()
+            .0;
+        assert!(released, "test must release the removal gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the removal gate");
     }
 
     fn release(&self) {
@@ -125,6 +135,21 @@ fn seed_pending(root: &Path, enclosure: &str) -> String {
         search_interval_secs: 1800,
         keep_old_versions: false,
     };
+    store
+        .insert_media(&domain::Media {
+            id: subscribe.media_id,
+            kind: domain::MediaKind::Movie,
+            title: "Removal cancellation fixture".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
     store.insert_subscribe(&subscribe).unwrap();
     let torrent = Torrent {
         id: None,
@@ -134,7 +159,7 @@ fn seed_pending(root: &Path, enclosure: &str) -> String {
         size_bytes: Some(100),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -167,7 +192,6 @@ fn make_state(root: &Path, downloader: Arc<dyn Downloader>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         downloader,
-        root.join("library"),
     )
     .unwrap()
 }
@@ -186,7 +210,7 @@ fn remove_request(task_id: &str) -> Request<Body> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_remove_request_still_finalizes_pending() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let enclosure = "https://pt.example/download.php?id=r4";
     let task_id = seed_pending(tmp.path(), enclosure);
     let gate = Arc::new(Gate::new());
@@ -226,7 +250,7 @@ async fn dropped_remove_request_still_finalizes_pending() {
     // 可观测条件轮询 + 超时上限，不猜固定 sleep。
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let pending = state.store().lock().list_all_pending().unwrap();
+        let pending = state.store().list_all_pending().unwrap();
         if pending.is_empty() {
             break;
         }

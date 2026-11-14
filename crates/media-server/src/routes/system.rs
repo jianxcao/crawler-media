@@ -1,9 +1,9 @@
 //! Jellyfin/Emby system, authentication and device endpoints.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -56,6 +56,7 @@ pub(super) async fn authenticate_by_name(
         Ok(Some(res)) => res,
         Ok(None) => return Err(StatusCode::UNAUTHORIZED),
         Err(AuthenticateError::Busy) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(AuthenticateError::ReadOnly) => return Err(StatusCode::CONFLICT),
         Err(AuthenticateError::Internal(message)) => {
             tracing::error!(%message, "Jellyfin 密码登录失败");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);

@@ -12,6 +12,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod douban;
+pub(crate) use douban::douban_detail;
+
 const TMDB_POSTER: &str = "https://image.tmdb.org/t/p/w342";
 const TMDB_BACKDROP_SIZE: &str = "w1280";
 
@@ -66,27 +69,34 @@ pub(crate) async fn season_detail(
                 Ok(None) => return err(StatusCode::NOT_FOUND, "media.missing", "条目不存在"),
                 Err(response) => return response,
             };
-            let meta_episodes = catalog.season_details(&tmdb_id, season).unwrap_or_default();
-            match catalog.season_episodes(&tmdb_id, season) {
-                Ok(episodes) => {
-                    let items: Vec<Value> = episodes
-                        .into_iter()
-                        .map(|ep| {
-                            let ep_num = ep.episode_number;
-                            let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
-                            json!({
-                                "episode_number": ep_num,
-                                "name": meta.and_then(|m| m.name.clone()),
-                                "overview": meta.and_then(|m| m.overview.clone()),
-                                "still_url": meta.and_then(|m| m.still_path.as_deref().map(|p| format!("https://image.tmdb.org/t/p/w300{p}"))),
-                                "air_date": ep.air_date,
-                            })
-                        })
-                        .collect();
-                    ok(json!({ "episodes": items })).into_response()
+            let meta_episodes = match catalog.cached_season_details(&tmdb_id, season) {
+                Ok(Some(rows)) => rows,
+                Ok(None) | Err(_) => Vec::new(),
+            };
+            let episodes = match catalog.cached_season_episodes(&tmdb_id, season) {
+                Ok(Some(episodes)) => episodes,
+                Ok(None) => {
+                    return ok(json!({ "episodes": [] })).into_response();
                 }
-                Err(error) => err(StatusCode::BAD_GATEWAY, "media.upstream", &error),
-            }
+                Err(error) => {
+                    return err(StatusCode::BAD_GATEWAY, "media.upstream", &error);
+                }
+            };
+            let items: Vec<Value> = episodes
+                .into_iter()
+                .map(|ep| {
+                    let ep_num = ep.episode_number;
+                    let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
+                    json!({
+                        "episode_number": ep_num,
+                        "name": meta.and_then(|m| m.name.clone()),
+                        "overview": meta.and_then(|m| m.overview.clone()),
+                        "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
+                        "air_date": ep.air_date,
+                    })
+                })
+                .collect();
+            ok(json!({ "episodes": items })).into_response()
         })
         .await;
     match work {
@@ -101,31 +111,32 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
         .as_deref()
         .and_then(|id| {
             store
-                .get_media_by_alias_kind("tmdb_id", id, Some(media.kind))
+                .get_media_by_alias_kind("tmdb", id, Some(media.kind))
                 .ok()
                 .flatten()
         })
         .map(|m| m.id)
         .unwrap_or(media.id);
     let mut links = Vec::new();
-    for row in store.list_ledger().unwrap_or_default() {
-        if row.media_id == canonical_id || row.media_id == media.id {
+    for row in store
+        .file_coverage_for_media_batch(&[canonical_id, media.id])
+        .unwrap_or_default()
+    {
+        {
             if let Some(owner) = store
-                .get_media(row.media_id)
+                .get_media(row.file.media_id)
                 .ok()
                 .flatten()
-                .and_then(|m| crate::http::library::library_for_row(store, &row, &m))
-            {
-                if !links
+                .and_then(|m| crate::http::library::library_for_file(store, &row.file, &m))
+                && !links
                     .iter()
                     .any(|link: &Value| link["library_id"] == owner.id)
-                {
-                    links.push(json!({
-                        "library_id": owner.id,
-                        "library_name": owner.name,
-                        "media_item_id": row.media_id.to_string(),
-                    }));
-                }
+            {
+                links.push(json!({
+                    "library_id": owner.id,
+                    "library_name": owner.name,
+                    "media_item_id": row.file.media_id.to_string(),
+                }));
             }
         }
     }
@@ -264,7 +275,7 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
 
     let (posters, backdrops, poster_url, backdrop_url, related) =
         fetch_images_and_related(catalog, media_kind, &tmdb_id);
-    let library_links = find_library_links(&state.store.lock(), &media);
+    let library_links = find_library_links(&state.store.as_ref(), &media);
     let cast = fetch_cast(&meta);
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
     let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id);
@@ -349,13 +360,12 @@ fn tmdb_id_for(
         return Ok(Some(tid));
     }
     // Douban id: alias lookup in local media table, then catalog search.
-    let store = state.store.lock();
-    if let Some(media) = store.get_media_by_alias("douban_id", &tid).ok().flatten() {
-        if let Some(tmdb) = media.tmdb_id {
-            return Ok(Some(tmdb));
-        }
+    let store = state.store.as_ref();
+    if let Some(media) = store.get_media_by_alias("douban", &tid).ok().flatten()
+        && let Some(tmdb) = media.tmdb_id
+    {
+        return Ok(Some(tmdb));
     }
-    drop(store);
     match kind {
         domain::MediaKind::Movie => catalog.search_movie(raw).map(|hits| {
             hits.into_iter()
@@ -405,6 +415,27 @@ fn image_json(candidate: &crate::catalog::ArtworkCandidate) -> Value {
         "width": candidate.width,
         "height": candidate.height,
     })
+}
+
+/// Episode stills use public local delivery or the same-origin image cache.
+pub(super) fn episode_still_url(reference: &str) -> String {
+    if reference.starts_with("/stills/") {
+        return reference.to_string();
+    }
+    let remote = if reference.starts_with("http://") || reference.starts_with("https://") {
+        reference.to_string()
+    } else if reference.starts_with("/t/p/") {
+        format!("https://image.tmdb.org{reference}")
+    } else {
+        format!(
+            "https://image.tmdb.org/t/p/w300/{}",
+            reference.trim_start_matches('/')
+        )
+    };
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", &remote)
+        .finish();
+    format!("/images/proxy?{query}")
 }
 
 fn remote_or_prefixed(path: Option<&str>, prefix: &str) -> Option<String> {
@@ -483,270 +514,45 @@ pub(crate) struct PersonPageQuery {
     page_size: Option<i64>,
 }
 
-/// `GET /media/douban/{id}` — douban subject id → TMDB detail (kind probed
-/// via the catalog, since douban ids don't encode movie/tv).
-pub(crate) async fn douban_detail(
+#[derive(Deserialize)]
+pub(crate) struct PutMetadataOverridesRequest {
+    pub scope: domain::EntityScope,
+    pub locale: String,
+    pub fields: domain::MetadataFields,
+    pub expected_revision: i64,
+}
+
+pub(crate) async fn put_metadata_overrides(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    axum::Json(payload): axum::Json<PutMetadataOverridesRequest>,
 ) -> Response {
-    let state_clone = state.clone();
-    let id_clone = id.clone();
-    let res = state
-        .http_work
-        .run(MEDIA_DEADLINE, move || {
-            douban_detail_blocking(&state_clone, &id_clone)
-        })
-        .await;
-    match res {
-        Ok(resp) => resp,
-        Err(error) => blocking_error(error, "media.timeout"),
-    }
-}
-
-fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
-    // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
-    // 有映射走完整 TMDB 详情。
-    let store = state.store.lock();
-    let local_media = store.get_media_by_alias("douban_id", id).ok().flatten();
-    drop(store);
-    if let Some(media) = local_media {
-        if let Some(tmdb_id) = media.tmdb_id {
-            let kind = if media.kind == domain::MediaKind::Tv {
-                "tv"
-            } else {
-                "movie"
-            };
-            return media_detail_inner(state, kind, &tmdb_id);
-        }
-    }
-
-    // 豆瓣 Rexxar 移动 API：实时拉取该条目详情与演职员表（带头像）
-    let (douban_rexxar, douban_celebrities) = {
-        let rexxar = fetch_douban_rexxar(id);
-        let celeb = fetch_douban_celebrities(id);
-        (rexxar, celeb)
+    let Ok(media_id) = id.parse::<domain::MediaId>() else {
+        return err(StatusCode::BAD_REQUEST, "invalid_id", "Invalid media ID");
     };
 
-    if let Some(data) = douban_rexxar {
-        let is_tv = data.get("type").and_then(|v| v.as_str()) == Some("tv")
-            || data.get("is_tv").and_then(|v| v.as_bool()).unwrap_or(false);
-        let kind = if is_tv { "tv" } else { "movie" };
-        let title = data
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let year = data
-            .get("year")
-            .and_then(|v| v.as_str())
-            .and_then(|y| y.parse::<u16>().ok());
-        let poster_url = data
-            .get("cover_url")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                data.get("pic")
-                    .and_then(|p| p.get("large"))
-                    .and_then(|v| v.as_str())
-            })
-            .map(str::to_string);
-        let rating = data
-            .get("rating")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_f64());
-        let overview = data
-            .get("intro")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let genres: Vec<Value> = data
-            .get("genres")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+    let result = match super::store_wait::store_write(&state, move |store| {
+        store.set_metadata_overrides(
+            media_id,
+            payload.scope,
+            &payload.locale,
+            &payload.fields,
+            payload.expected_revision,
+        )
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-        // 演员头像优先使用 /celebrities 接口
-        let cast: Vec<Value> = if let Some(celeb_actors) = douban_celebrities
-            .as_ref()
-            .and_then(|c| c.get("actors"))
-            .and_then(|v| v.as_array())
-        {
-            celeb_actors.iter().take(16).map(|a| {
-                json!({
-                    "name": a.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
-                    "role": a.get("character").and_then(|v| v.as_str()),
-                    "tmdb_person_id": Value::Null,
-                    "avatar_url": a.get("avatar").and_then(|av| av.get("large").or_else(|| av.get("normal"))).and_then(|v| v.as_str()),
-                })
-            }).collect()
-        } else {
-            data.get("actors").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter().take(10).map(|a| {
-                    json!({
-                        "name": a.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
-                        "role": a.get("character").and_then(|v| v.as_str()),
-                        "tmdb_person_id": Value::Null,
-                        "avatar_url": a.get("avatar").and_then(|av| av.get("large").or_else(|| av.get("normal"))).and_then(|v| v.as_str()),
-                    })
-                }).collect()
-            }).unwrap_or_default()
-        };
-
-        let directors: Vec<Value> = data
-            .get("directors")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|d| d.get("name")).cloned().collect())
-            .unwrap_or_default();
-        let countries = data
-            .get("countries")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|c| c.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / ")
-            })
-            .unwrap_or_default();
-        let languages = data
-            .get("languages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|l| l.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / ")
-            })
-            .unwrap_or_default();
-        let released = data
-            .get("release_date")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                data.get("pubdate")
-                    .and_then(|p| p.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|v| v.as_str())
-            })
-            .unwrap_or_default();
-        let aliases: Vec<Value> = data
-            .get("aka")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let posters: Vec<Value> = poster_url
-            .as_deref()
-            .map(|p| {
-                vec![json!({
-                    "preview_url": p,
-                    "full_url": p,
-                    "width": 300,
-                    "height": 450,
-                })]
-            })
-            .unwrap_or_default();
-
-        let backdrops: Vec<Value> = poster_url
-            .as_deref()
-            .map(|p| {
-                vec![json!({
-                    "preview_url": p,
-                    "full_url": p,
-                    "width": 300,
-                    "height": 450,
-                })]
-            })
-            .unwrap_or_default();
-
-        return ok(json!({
-            "item": {
-                "id": id,
-                "title": title,
-                "year": year,
-                "kind": kind,
-                "tmdb_id": Value::Null,
-                "poster_url": poster_url.clone(),
-                "backdrop_url": poster_url.clone(),
-                "rating": rating,
-            },
-            "info": {
-                "overview": overview,
-                "rating": rating.map(|r| format!("{r:.1}")),
-                "runtime": Value::Null,
-                "genres": genres,
-                "cast": cast,
-                "directors": directors,
-                "director_credits": [],
-                "country": countries,
-                "language": languages,
-                "released": released,
-                "aliases": aliases,
-            },
-            "videos": [],
-            "backdrops": backdrops,
-            "posters": posters,
-            "related": [],
-            "library_links": [],
-        }))
-        .into_response();
+    match result {
+        Ok(rev) => ok(json!({ "revision": rev })).into_response(),
+        Err(store::StoreError::Conflict(msg)) => err(StatusCode::CONFLICT, "conflict", &msg),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &e.to_string(),
+        ),
     }
-
-    ok(json!({
-        "item": {
-            "id": id,
-            "title": Value::Null,
-            "year": Value::Null,
-            "kind": "movie",
-            "tmdb_id": Value::Null,
-            "poster_url": Value::Null,
-            "backdrop_url": Value::Null,
-            "rating": Value::Null,
-        },
-        "info": {
-            "overview": Value::Null,
-            "rating": Value::Null,
-            "runtime": Value::Null,
-            "genres": [],
-            "cast": [],
-            "directors": [],
-            "director_credits": [],
-            "country": "",
-            "language": "",
-            "released": "",
-            "aliases": [],
-        },
-        "videos": [],
-        "backdrops": [],
-        "posters": [],
-        "related": [],
-        "library_links": [],
-    }))
-    .into_response()
-}
-
-fn fetch_douban_rexxar(id: &str) -> Option<Value> {
-    const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";
-    let url = format!("https://m.douban.com/rexxar/api/v2/movie/{id}?for_mobile=1");
-    let response = crate::http_agent::call_douban(|agent| {
-        agent
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Referer", "https://m.douban.com/movie/")
-            .call()
-    })
-    .ok()?;
-    let body = response.into_body().read_to_string().ok()?;
-    serde_json::from_str(&body).ok()
-}
-
-fn fetch_douban_celebrities(id: &str) -> Option<Value> {
-    const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";
-    let url = format!("https://m.douban.com/rexxar/api/v2/movie/{id}/celebrities?for_mobile=1");
-    let response = crate::http_agent::call_douban(|agent| {
-        agent
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Referer", "https://m.douban.com/movie/")
-            .call()
-    })
-    .ok()?;
-    let body = response.into_body().read_to_string().ok()?;
-    serde_json::from_str(&body).ok()
 }

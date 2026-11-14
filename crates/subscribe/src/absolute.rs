@@ -97,6 +97,9 @@ mod tests {
         );
         assert_eq!(map.remap(&release::parse("Show Episode 5 1080p")), Ok(None));
         assert_eq!(map.remap(&release::parse("Show.S01E13.1080p")), Ok(None));
-        assert_eq!(map.remap(&release::parse("Show Episode 30 1080p")), Err(Unmappable));
+        assert_eq!(
+            map.remap(&release::parse("Show Episode 30 1080p")),
+            Err(Unmappable)
+        );
     }
 }

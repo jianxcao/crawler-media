@@ -1,5 +1,8 @@
 mod error;
 mod filters;
+mod protocol_observation;
+mod query_phase;
+mod scan_catalog;
 mod state;
 mod subscribes;
 
@@ -7,6 +10,7 @@ use axum::Router;
 
 pub(crate) use error::ApiError;
 pub(crate) use filters::default_filter_id;
+pub use query_phase::QueryPhaseSnapshot;
 pub(crate) use state::SubscribeDeletionReservation;
 pub use state::{ApiState, ApiStateError};
 pub(crate) use subscribes::run_subscribe;
@@ -18,10 +22,17 @@ pub fn router(state: ApiState) -> Router {
     let ms_routes = media_server::routes(media_server_provider.clone());
     let ms_media_routes = media_server::media_routes(media_server_provider);
 
-    let jellyfin = Router::new().merge(ms_routes).merge(ms_media_routes);
+    let jellyfin = Router::new()
+        .merge(ms_routes)
+        .merge(ms_media_routes)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::protocol_write_gate,
+        ));
 
     Router::new()
         .nest("/api/v1", crate::http::router(state))
         .merge(jellyfin)
         .layer(crate::ui::cors_layer_from_env())
+        .layer(axum::middleware::from_fn(protocol_observation::observe))
 }

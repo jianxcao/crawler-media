@@ -145,17 +145,17 @@ fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
             Err(_) => return None,
         };
         request.extend_from_slice(&buffer[..read]);
-        if expected.is_none() {
-            if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                });
-                expected = Some(end + 4 + length.unwrap_or(0));
-            }
+        if expected.is_none()
+            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            });
+            expected = Some(end + 4 + length.unwrap_or(0));
         }
         if expected.is_some_and(|length| request.len() >= length) {
             return Some(request);

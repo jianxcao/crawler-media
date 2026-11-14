@@ -11,7 +11,7 @@ import { imageUrl } from "@/lib/image-proxy";
 import { formatClock } from "@/lib/player/timeline";
 
 /**
- * 条目详情页的「章节」横排（docs/design/video-chapters.md §1.1）：每个章节一张
+ * 条目详情页的「章节」横排：每个章节一张
  * 16:9 章节图 + 时间戳角标 + 标题；点图进灯箱看大图，从灯箱或 hover 出现的
  * 播放键从那一帧起播。
  *

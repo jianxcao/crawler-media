@@ -1,3 +1,11 @@
+#![allow(dead_code, unused_imports, clippy::duplicated_attributes)]
+
+#[path = "scan_fixture.rs"]
+mod scan_fixture;
+pub(crate) use scan_fixture::finish_scan;
+#[path = "config_fixture.rs"]
+mod config_fixture;
+pub(crate) use self::config_fixture::{add_default_root, set_default_root, set_transfer_settings};
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -85,7 +93,6 @@ pub(crate) fn state(
         ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
-        root.join("library"),
     )
     .unwrap()
 }
@@ -103,20 +110,45 @@ pub(crate) fn site_payload() -> Value {
 }
 
 pub(crate) fn subscribe_payload(fetch_mode: &str) -> Value {
-    json!({
+    subscribe_payload_with_filter(fetch_mode, None)
+}
+
+pub(crate) fn subscribe_payload_with_filter(fetch_mode: &str, filter_id: Option<&str>) -> Value {
+    let mut body = json!({
         "media": { "kind": "movie", "title": "The Matrix" },
         "coverage": { "kind": "movie" },
         "fetch_mode": fetch_mode,
-        "filter": {
-            "name": "matrix-uhd",
-            "atoms": [
-                { "kind": "resolution", "value": "2160p", "priority": 100 },
-                { "kind": "title_match", "value": "Matrix", "priority": 80 }
-            ]
-        },
         "wash_cut": false,
         "full_season_pack": false
-    })
+    });
+    if let Some(filter_id) = filter_id {
+        body["filter_id"] = json!(filter_id);
+    }
+    body
+}
+
+pub(crate) async fn create_rule_set(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/rule-sets",
+            Some("management-secret"),
+            json!({
+                "name": "matrix-uhd",
+                "atoms": [
+                    { "kind": "resolution", "value": "2160p", "priority": 100 },
+                    { "kind": "title_match", "value": "Matrix", "priority": 80 }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    json_data(response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 pub(crate) async fn create_site(app: &axum::Router) -> Value {
@@ -135,13 +167,14 @@ pub(crate) async fn create_site(app: &axum::Router) -> Value {
 }
 
 pub(crate) async fn create_subscribe(app: &axum::Router, fetch_mode: &str) -> Value {
+    let filter_id = create_rule_set(app).await;
     let response = app
         .clone()
         .oneshot(request(
             "POST",
             "/api/v1/subscriptions",
             Some("management-secret"),
-            subscribe_payload(fetch_mode),
+            subscribe_payload_with_filter(fetch_mode, Some(&filter_id)),
         ))
         .await
         .unwrap();
@@ -221,9 +254,9 @@ pub(crate) async fn scan_and_wait(app: &axum::Router, lib_id: &str) -> Value {
     assert_eq!(scan.status(), StatusCode::ACCEPTED);
     let body = json_body(scan).await;
     let op_id = body["data"]["operation_id"].as_str().unwrap();
-    // 扫描是异步 coordinator 作业；全量并行跑测试时（workspace 一次拉起上百个二进制）
-    // 5 秒预算会被别的测试抢占 CPU 而误判超时，这里放宽到 30 秒。
-    for _ in 0..600 {
+    // 扫描是异步 coordinator 作业，同时最多跑两轮。同一进程里多个测试各自
+    // 排队时，固定 30 秒会把还在队列里的轮次误判成超时；预算按排队深度放宽。
+    for _ in 0..2400 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let poll = app
             .clone()
@@ -254,8 +287,8 @@ pub(crate) fn install_fake_ffprobe() {
         let dir = std::env::temp_dir().join(format!("crawler-media-e2e-bin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("ffprobe");
-        // Write under a temp name and rename into place so a concurrent
-        // fork/exec never sees the file open for writing (ETXTBSY).
+        // Rename-into-place alone does not prevent ETXTBSY (a forked sibling
+        // can still hold the inherited write fd); seal_executable does.
         let staging = dir.join("ffprobe.tmp");
         std::fs::write(
             &staging,
@@ -268,6 +301,7 @@ pub(crate) fn install_fake_ffprobe() {
             std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::rename(&staging, &script).unwrap();
+        seal_executable(&script);
         let path = std::env::var("PATH").unwrap_or_default();
         // SAFETY: test-only, executed once before the harness spawns workers.
         unsafe { std::env::set_var("PATH", format!("{}:{path}", dir.display())) };
@@ -294,4 +328,48 @@ pub(crate) fn probed_video(height: u32, codec: &str, hdr: bool) -> Vec<u8> {
 /// Bytes the fake ffprobe cannot read (probe failure).
 pub(crate) fn unprobeable_video() -> Vec<u8> {
     b"not-a-real-video".to_vec()
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
+}
+
+/// Client event numbers remain monotonic when a fixture loops over heartbeats.
+pub fn next_playback_sequence() -> i64 {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Seed the Media referenced by a directly inserted movie Subscribe.
+pub(crate) fn seed_subscribe_media(store: &Store, media_id: domain::MediaId) {
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Movie,
+            title: "Pending movie fixture".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
 }

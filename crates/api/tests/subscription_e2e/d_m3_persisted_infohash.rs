@@ -22,7 +22,7 @@ async fn unlabeled_transmission_collects_after_restart_via_stored_hash() {
     h.scheduled_search(id).await.unwrap();
     assert_eq!(mt.tasks.lock().len(), 1);
     let hash = mt.tasks.lock()[0].hash.clone();
-    let stored = h.state.store().lock().load_pending_info_hashes(id).unwrap();
+    let stored = h.state.store().load_pending_info_hashes(id).unwrap();
     assert_eq!(
         stored.get(&enclosure(1)),
         Some(&hash),

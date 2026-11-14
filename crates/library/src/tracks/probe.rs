@@ -16,10 +16,13 @@ struct ProbeOut {
 #[derive(Deserialize, Default)]
 struct ProbeFormat {
     duration: Option<String>,
+    start_time: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ProbeStream {
+    start_pts: Option<i64>,
+    time_base: Option<String>,
     index: Option<u32>,
     codec_type: Option<String>,
     codec_name: Option<String>,
@@ -70,6 +73,7 @@ pub fn probe_tracks_and_duration(path: &Path) -> Result<(Tracks, Option<i64>), L
     probe_tracks_and_duration_with_program(path, "ffprobe")
 }
 
+#[cfg(test)]
 fn probe_tracks_with_program(
     path: &Path,
     program: impl AsRef<std::ffi::OsStr>,
@@ -104,7 +108,7 @@ fn probe_tracks_controlled_program(
         "-v",
         "error",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,channels,channel_layout,width,height,r_frame_rate,avg_frame_rate,display_aspect_ratio,sample_aspect_ratio,pix_fmt,bits_per_raw_sample,bits_per_sample,color_space,color_transfer,color_primaries,field_order,bit_rate,duration,sample_rate:stream_tags=language,title:stream_disposition=default,forced:format=duration,bit_rate",
+        "stream=index,codec_type,codec_name,profile,channels,channel_layout,width,height,r_frame_rate,avg_frame_rate,display_aspect_ratio,sample_aspect_ratio,pix_fmt,bits_per_raw_sample,bits_per_sample,color_space,color_transfer,color_primaries,field_order,bit_rate,duration,sample_rate,start_pts,time_base:stream_tags=language,title:stream_disposition=default,forced:format=duration,bit_rate,start_time",
         "-of",
         "json",
     ]);
@@ -278,6 +282,25 @@ fn tracks_from_probe(parsed: ProbeOut) -> Tracks {
                 });
             }
             Some("audio") => tracks.audio.push(AudioTrack {
+                capture_source: stream
+                    .index
+                    .map(|audio_stream_index| marker::CaptureSourceFacts {
+                        audio_stream_index,
+                        format_start_time_us: parsed
+                            .format
+                            .start_time
+                            .as_deref()
+                            .and_then(marker::fingerprint::source_facts::decimal_seconds_us),
+                        stream_start_pts: stream.start_pts,
+                        stream_time_base: stream.time_base,
+                        codec_name: stream.codec_name.clone(),
+                        native_sample_rate: stream
+                            .sample_rate
+                            .as_deref()
+                            .and_then(|raw| raw.parse().ok()),
+                        audio_channels: stream.channels,
+                        provenance: "ffprobe_header_v2".into(),
+                    }),
                 stream_index: stream.index,
                 codec: stream.codec_name,
                 profile: stream.profile,

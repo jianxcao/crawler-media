@@ -47,15 +47,13 @@ fn parse_def_id(raw: &str) -> Result<JobDefId, Response> {
     JobDefId::from_str(raw).map_err(|_| err(StatusCode::BAD_REQUEST, "job.invalid", "任务 id 无效"))
 }
 
-fn load_def(state: &ApiState, id: JobDefId) -> Result<jobs::JobDef, Response> {
-    match state.jobs.lock().def(id) {
+async fn load_def(state: &ApiState, id: JobDefId) -> Result<jobs::JobDef, Response> {
+    match crate::jobs_readers::read_async(state.jobs_readers.clone(), move |queue| queue.def(id))
+        .await
+    {
         Ok(Some(def)) => Ok(def),
         Ok(None) => Err(err(StatusCode::NOT_FOUND, "job.missing", "任务不存在")),
-        Err(error) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        )),
+        Err(error) => Err(super::jobs::jobs_read_error(error)),
     }
 }
 
@@ -89,7 +87,7 @@ pub(crate) async fn update_maintenance_config(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let def = match load_def(&state, id) {
+    let def = match load_def(&state, id).await {
         Ok(def) => def,
         Err(response) => return response,
     };
@@ -99,10 +97,10 @@ pub(crate) async fn update_maintenance_config(
     if let Err(message) = parse_policy(def.kind, &body.payload) {
         return message;
     }
-    if let Some(secs) = body.interval_secs {
-        if let Err(message) = validate_maintenance_interval(secs) {
-            return err(StatusCode::BAD_REQUEST, "job.invalid_interval", &message);
-        }
+    if let Some(secs) = body.interval_secs
+        && let Err(message) = validate_maintenance_interval(secs)
+    {
+        return err(StatusCode::BAD_REQUEST, "job.invalid_interval", &message);
     }
 
     let Some(expected) = body.expected_payload.as_ref() else {
@@ -117,22 +115,44 @@ pub(crate) async fn update_maintenance_config(
     let new_schedule = body
         .interval_secs
         .map(|secs| jobs::Schedule::Interval { secs });
-    let schedule_ref = new_schedule.as_ref();
-    let new_schedule_param = body.interval_secs.map(|_| schedule_ref);
-
-    let outcome = match state
-        .jobs
-        .lock()
-        .update_def_config_cas(id, &expected, &new_payload, new_schedule_param)
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "job.payload_update_failed",
-                &error.to_string(),
-            );
-        }
+    let worker = state.clone();
+    let payload_for_write = new_payload.clone();
+    let outcome = state
+        .http_work
+        .run_to_completion(move || {
+            super::jobs::admitted_jobs_write(&worker, || {
+                let queue = match worker.jobs.acquire() {
+                    Ok(queue) => queue,
+                    Err(error) => return super::jobs::jobs_acquire_response(error),
+                };
+                match queue.update_def_config_cas(
+                    id,
+                    &expected,
+                    &payload_for_write,
+                    body.interval_secs.map(|_| new_schedule.as_ref()),
+                ) {
+                    Ok(jobs::PayloadUpdate::Updated) => ok(json!({"updated":true})).into_response(),
+                    Ok(jobs::PayloadUpdate::Missing) => {
+                        err(StatusCode::NOT_FOUND, "job.missing", "任务不存在")
+                    }
+                    Ok(jobs::PayloadUpdate::Conflict) => err(
+                        StatusCode::CONFLICT,
+                        "job.conflict",
+                        "维护配置已被其他请求修改，请刷新后重试",
+                    ),
+                    Err(error) => err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "job.payload_update_failed",
+                        &error.to_string(),
+                    ),
+                }
+            })
+        })
+        .await;
+    let outcome = match outcome {
+        Ok(response) if response.status().is_success() => jobs::PayloadUpdate::Updated,
+        Ok(response) => return response,
+        Err(error) => return super::jobs::jobs_budget_response(error),
     };
     match outcome {
         jobs::PayloadUpdate::Updated => {}
@@ -149,12 +169,10 @@ pub(crate) async fn update_maintenance_config(
     }
 
     // 重新从库中读取实际生效的 schedule，避免在未修改 interval_secs 时返回错误 null
-    let active_def = load_def(&state, id).ok();
-    let schedule = active_def
-        .and_then(|d| d.schedule)
-        .and_then(|s| match s {
-            jobs::Schedule::Interval { secs } => Some(json!({ "interval_secs": secs })),
-        });
+    let active_def = load_def(&state, id).await.ok();
+    let schedule = active_def.and_then(|d| d.schedule).map(|s| match s {
+        jobs::Schedule::Interval { secs } => json!({ "interval_secs": secs }),
+    });
     tracing::info!(
         job_def_id = %id,
         kind = def.kind.as_str(),
@@ -181,7 +199,7 @@ pub(crate) async fn preview_maintenance(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let def = match load_def(&state, id) {
+    let def = match load_def(&state, id).await {
         Ok(def) => def,
         Err(response) => return response,
     };
@@ -208,11 +226,11 @@ pub(crate) async fn preview_maintenance(
                     // 只是 dry_run 不写游标、不删行。旧实现用 `prune_terminal_jobs`
                     // 的过滤窗口，同一个数据会给出与实跑不同的候选/保护数字。
                     let cursor_key = def.id.to_string();
-                    let window = state_for_blocking
-                        .jobs
-                        .lock()
-                        .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, true)
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", e.to_string()))?;
+                    let window = crate::jobs_readers::read(
+                        &state_for_blocking.jobs_readers,
+                        |queue| queue.preview_terminal_window(&cursor_key, cutoff, BATCH_SIZE),
+                    )
+                        .map_err(super::jobs::jobs_read_error_parts)?;
                     Ok(json!({
                         "kind": def.kind.as_str(),
                         "policy_version": policy.version,
@@ -230,8 +248,7 @@ pub(crate) async fn preview_maintenance(
                     let cutoff = cutoff(now, policy.retention_days)
                         .map_err(|e| (StatusCode::BAD_REQUEST, "job.invalid_config", e))?;
                     let preview = state_for_blocking
-                        .store
-                        .lock()
+                        .store.as_ref()
                         .preview_playback_logs(cutoff, BATCH_SIZE)
                         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", e.to_string()))?;
                     Ok(json!({
@@ -266,15 +283,21 @@ pub(crate) async fn preview_maintenance(
     match preview_result {
         Ok(Ok(preview)) => ok(preview).into_response(),
         Ok(Err((code, err_code, msg))) => err(code, err_code, &msg),
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请稍后重试预览")
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            err(StatusCode::GATEWAY_TIMEOUT, "job.preview_timeout", "预览统计超时")
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(msg)) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", &msg)
-        }
+        Err(crate::blocking_budget::BlockingError::Busy) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请稍后重试预览",
+        ),
+        Err(crate::blocking_budget::BlockingError::Timeout) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "job.preview_timeout",
+            "预览统计超时",
+        ),
+        Err(crate::blocking_budget::BlockingError::Worker(msg)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "job.preview_failed",
+            &msg,
+        ),
     }
 }
 
@@ -292,16 +315,12 @@ fn preview_data_retention(
     let mut incomplete = false;
     let mut classes = Vec::new();
     for class in DATA_RETENTION_CLASSES {
-        let days = match class {
-            store::RetentionClass::Qoe => policy.qoe_days,
-            store::RetentionClass::TransientCatalog => policy.transient_cache_days,
-            store::RetentionClass::ProbeHistory => policy.probe_days,
-        };
+        let days = policy.days_for(class);
         let requested = cutoff_ms_for_days(now, days)?;
         // 预览与下一轮实跑同口径：读取已持久化游标（只读，不写回）。
         let (cutoff, cursor) = crate::maintenance::load_cursor(state, class, requested);
         let batch = {
-            let store = state.store.lock();
+            let store = state.store.as_ref();
             store
                 .prune_data_history(class, cutoff, cursor.as_ref(), BATCH_SIZE, true)
                 .map_err(|error| error.to_string())?
@@ -336,9 +355,7 @@ fn preview_data_retention(
 }
 
 fn cutoff(now: i64, retention_days: u32) -> Result<i64, String> {
-    if let Err(message) = validate_retention_days(retention_days) {
-        return Err(message);
-    }
+    validate_retention_days(retention_days)?;
     let seconds = i64::from(retention_days)
         .checked_mul(DAY_SECS)
         .ok_or("保留天数换算秒数溢出")?;

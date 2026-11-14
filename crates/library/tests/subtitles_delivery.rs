@@ -80,16 +80,15 @@ fn deliver_subtitle_with_source_extracts_embedded_subtitle_with_cache() {
 
     // 预先在缓存目录中写入提取好的文件，验证命中缓存逻辑
     std::fs::create_dir_all(&cache_dir).unwrap();
-    std::fs::write(cache_dir.join("sub_2.vtt"), b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCached Sub").unwrap();
-
-    let payload = library::deliver_subtitle_with_source(
-        &tracks,
-        2,
-        true,
-        Some(&media),
-        Some(&cache_dir),
+    std::fs::write(
+        cache_dir.join("sub_2.vtt"),
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCached Sub",
     )
     .unwrap();
+
+    let payload =
+        library::deliver_subtitle_with_source(&tracks, 2, true, Some(&media), Some(&cache_dir))
+            .unwrap();
 
     assert_eq!(payload.content_type, "text/vtt; charset=utf-8");
     assert_eq!(

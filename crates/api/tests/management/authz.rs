@@ -13,20 +13,18 @@ use std::sync::Arc;
 use api::{Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, User, UserId,
-    UserRole,
-};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError};
 use parking_lot::Mutex;
-use rusqlite::params;
 use serde_json::{Value, json};
 use std::str::FromStr;
-use tower::{Service, ServiceExt};
+use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, scan_and_wait, state as common_state};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
+#[allow(dead_code)]
 struct NoFetch;
 impl Fetcher for NoFetch {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
@@ -111,7 +109,7 @@ async fn member_is_forbidden_on_the_admin_surface() {
             "/api/v1/libraries",
             json!({ "kind": "movie", "name": "n", "root_paths": ["/tmp/x"] }),
         ),
-        ("PUT", "/api/v1/directory", json!({})),
+        ("PATCH", "/api/v1/settings/transfer", json!({})),
         ("POST", "/api/v1/jobs/tick", json!({})),
     ];
     for (method, uri, body) in admin_only {
@@ -128,6 +126,9 @@ async fn member_is_forbidden_on_the_admin_surface() {
     }
 
     // 对照组：管理员不受影响。
+    // The root must exist; never depend on host paths such as /tmp.
+    let movies = tmp.path().join("movies");
+    std::fs::create_dir_all(&movies).unwrap();
     let admin = login_token(&app, "admin", "management-secret").await;
     let response = app
         .clone()
@@ -135,7 +136,7 @@ async fn member_is_forbidden_on_the_admin_surface() {
             "POST",
             "/api/v1/libraries",
             Some(&admin),
-            json!({ "kind": "movie", "name": "电影", "root_paths": ["/tmp/movies"] }),
+            json!({ "kind": "movie", "name": "电影", "root_paths": [movies] }),
         ))
         .await
         .unwrap();
@@ -267,7 +268,7 @@ async fn create_scanned_video_library(
     )
     .await;
     let lib_id = created["data"]["id"].as_str().unwrap().to_string();
-    scan_and_wait(&app, &lib_id).await;
+    scan_and_wait(app, &lib_id).await;
     let items = json_body(
         app.clone()
             .oneshot(request(
@@ -345,7 +346,14 @@ async fn collections_hide_items_after_library_access_is_revoked() {
             .unwrap(),
     )
     .await;
-    assert!(collection_items["data"].as_array().unwrap().is_empty());
+    assert!(
+        collection_items["data"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(collection_items["data"]["total"], 0);
+    assert_eq!(collection_items["data"]["next_cursor"], Value::Null);
 }
 
 #[tokio::test]
@@ -513,9 +521,9 @@ fn tv_media() -> Media {
     }
 }
 
-fn ledger_row(media_id: MediaId, root: &Path, episode: u32) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn file_spec(media_id: MediaId, root: &Path, episode: u32) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: root
             .join(format!("E{episode:02}.mkv"))
@@ -524,11 +532,9 @@ fn ledger_row(media_id: MediaId, root: &Path, episode: u32) -> LedgerRow {
         season: Some(1),
         episode: Some(episode),
         resolution: Some("2160p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
         confidence: Confidence::Low,
         filter_score: Some(60),
+        ..Default::default()
     }
 }
 
@@ -553,9 +559,7 @@ fn setup_tv_show_and_subscribes(
         )
         .unwrap();
     for episode in 1..=3u32 {
-        store
-            .insert_ledger(&ledger_row(media_id, root, episode))
-            .unwrap();
+        publish_fixture_file(&store, &file_spec(media_id, root, episode)).unwrap();
     }
     let subscribe_for = |user_id: UserId| domain::Subscribe {
         id: domain::SubscribeId::new(),
@@ -707,7 +711,7 @@ fn facts_persist_same_score_wash_upgrade() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let sub_id = seed_facts_user_and_subscribe(&store);
 
-    use subscribe::{QualityFact, SubscribeFacts};
+    use domain::{QualityFact, SubscribeFacts};
     let mut facts = SubscribeFacts::default();
     facts.upsert(
         None,

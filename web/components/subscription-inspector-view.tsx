@@ -17,14 +17,13 @@ import {
   RefreshIcon,
   SearchIcon,
 } from "@/components/icons";
-import { MediaSourceAnnotationDialog } from "@/components/media-source-annotation-dialog";
 import { Modal } from "@/components/modal";
 import { NetflixBackButton } from "@/components/netflix/back-button";
 import { PageNav } from "@/components/page-nav";
 import { usePageTitle } from "@/lib/use-page-title";
 import { useBackNavigation } from "@/lib/back-navigation";
 import { PosterImage } from "@/components/poster-image";
-import { specSummary } from "@/components/rule-sets-panel";
+import { ruleSetSummary } from "@/components/rule-sets-panel";
 import { useSubscribeEntry } from "@/components/subscribe-entry";
 import { SubscriptionAdjustDialog } from "@/components/subscription-adjust-dialog";
 import { SubscriptionCancelDialog } from "@/components/subscription-cancel-dialog";
@@ -57,11 +56,9 @@ import {
 import { listUpNext, setPlaybackMarks, type UpNextItem } from "@/lib/api/playback";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 import { formatBytes, formatDuration } from "@/lib/format";
-import { seasonsWithIndeterminate } from "@/lib/media-source-annotation";
 import { shouldShowResourceTiming } from "@/lib/resource-timing";
 import { subscriptionStatus, subscriptionStatusMeta } from "@/lib/subscription-ui";
 import { targetLibraryNotice } from "@/lib/subscription-target-library";
-import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
 import { useJobs } from "@/lib/jobs";
 import { formatDateTime, formatRelativeTime } from "@/lib/time";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -91,8 +88,8 @@ export function SubscriptionInspectorView({
   id,
   autoOpenUpgradeRun = false,
 }: {
-  /** 订阅 id（新契约为字符串；路由层历史实现传数字，统一转字符串使用） */
-  id: string | number;
+  /** Canonical Subscribe UUID. */
+  id: string;
   /** 进入即打开「洗一轮版」弹层（库详情洗版入口跳转并轨到既有订阅，§13.4） */
   autoOpenUpgradeRun?: boolean;
 }) {
@@ -193,7 +190,9 @@ export function SubscriptionInspectorView({
     () => {
       if (downloadsPending.current) return;
       downloadsPending.current = true;
-      listActiveSubscriptionDownloads(String(id))
+      listActiveSubscriptionDownloads(
+        (detail?.wanted ?? []).flatMap((w) => (w.info_hash ? [w.info_hash] : [])),
+      )
         .then(setDownloads)
         .catch(() => undefined)
         .finally(() => {
@@ -429,13 +428,9 @@ export function SubscriptionInspectorView({
   const confirmRemoval = async (options: SubscriptionRemovalOptions) => {
     setBusy(true);
     try {
-      const { cleanup_job_id } = await deleteSubscriptionPermanently(detail.id, options);
+      await deleteSubscriptionPermanently(detail.id, options);
       setCancelling(false);
-      toast.success(
-        cleanup_job_id
-          ? "已取消订阅，正在后台清理关联内容（可在任务中心查看进度）"
-          : "已取消订阅",
-      );
+      toast.success("已取消订阅");
       afterRemoved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "取消订阅失败，请稍后重试");
@@ -669,7 +664,7 @@ export function SubscriptionInspectorView({
                   )}
                 </div>
                 <Link
-                  to={playHref(detail.media.id as unknown as number, {
+                  to={playHref(detail.media.id, {
                     season: upNext.season_number,
                     episode: upNext.episode_number,
                     tSeconds: upNext.position_ms > 0 ? Math.floor(upNext.position_ms / 1000) : undefined,
@@ -799,18 +794,6 @@ export function SubscriptionInspectorView({
           isMovie={isMovie}
           downloads={downloadByHash}
           failures={pendingFailures(activities)}
-          mediaItemId={detail.media.tmdb_id ?? null}
-          canAnnotate={isAdmin}
-          onAnnotated={async (message) => {
-            // 标注已刷新快照：顺手重跑一轮体检完成排期（幂等），再刷新详情
-            try {
-              await runSubscriptionUpgradeRound(String(id));
-              toast.success(`${message}，已重新体检并排期洗版`);
-            } catch {
-              toast.success(message);
-            }
-            reload();
-          }}
         />
         <ActivityLogSection activities={activities} />
       </div>
@@ -893,7 +876,7 @@ export function SubscriptionInspectorView({
           onClose={() => setSwitchingRule(false)}
           onPick={async (ruleSetId) => {
             await updateSubscription(detail.id, {
-              rule_set_id: String(ruleSetId),
+              filter_id: String(ruleSetId),
             });
             setSwitchingRule(false);
             reload();
@@ -1148,7 +1131,7 @@ function RuleSetSwitchDialog({
         )}
         <div className="mt-4 space-y-1.5">
           {ruleSets.map((rs) => {
-            const chips = specSummary(ruleSetSpecFromAtoms(rs.atoms));
+            const chips = ruleSetSummary(rs.atoms, { keepOldVersions: rs.keep_old_versions });
             const current = rs.id === currentId;
             return (
               <button
@@ -1524,9 +1507,6 @@ function WantedBreakdown({
   isMovie,
   downloads,
   failures,
-  mediaItemId,
-  canAnnotate,
-  onAnnotated,
 }: {
   wanted: WantedItem[];
   isMovie: boolean;
@@ -1534,15 +1514,7 @@ function WantedBreakdown({
   downloads: Map<string, SubscriptionDownload>;
   /** 工单 id → 仍未解决的失败活动（pendingFailures） */
   failures: Map<string, SubscriptionActivity>;
-  /** 片源标注的媒体引用（新契约用 TMDB 数字 id；非 TMDB 条目无值则隐藏入口） */
-  mediaItemId: string | null;
-  /** 片源标注是库数据纠错（管理员动作），与后端 require_admin 对齐 */
-  canAnnotate: boolean;
-  /** 片源标注成功后回调（父组件重跑体检 + 刷新 + toast） */
-  onAnnotated: (message: string) => void | Promise<void>;
 }) {
-  // 「无法确认档位」季的标注弹窗（docs/design/media-source-annotation.md §5.1）
-  const [annotateSeason, setAnnotateSeason] = useState<number | null>(null);
   // 惰性初始化只在挂载时算一次：详情每 30s 静默刷新一遍，若跟着 wanted 重算，
   // 用户手动展开的季会被刷回去。代价是自动续订新增的季不会自动展开——
   // 折叠行本身就写着进度，不算信息丢失。
@@ -1572,8 +1544,6 @@ function WantedBreakdown({
     list.push(w);
     seasons.set(w.season_number, list);
   }
-  const annotatable =
-    canAnnotate && mediaItemId != null ? seasonsWithIndeterminate(wanted) : new Set<number>();
   // 只有一组时折叠没有意义（电影、单季剧），维持原来的常展开形态
   const collapsible = !isMovie && seasons.size > 1;
 
@@ -1590,7 +1560,7 @@ function WantedBreakdown({
               key={season}
               className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] backdrop-blur-xl"
             >
-              {(!isMovie || annotatable.has(season)) && (
+              {!isMovie && (
                 /* 折叠热区用 role="button" 的 div 而不是 <button>：季头行里还有
                    「标注片源」按钮，button 套 button 是非法嵌套。与站点配置行
                    （site-config-section.tsx）同一套写法。 */
@@ -1657,19 +1627,6 @@ function WantedBreakdown({
                       />
                     </span>
                   )}
-                  {annotatable.has(season) && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        // 整行是折叠热区，标注按钮不能顺带把这一季折起来
-                        e.stopPropagation();
-                        setAnnotateSeason(season);
-                      }}
-                      className="shrink-0 rounded-md border border-white/[0.12] px-2 py-0.5 text-caption font-medium text-white/75 transition hover:bg-white/[0.07] hover:text-white"
-                    >
-                      标注片源
-                    </button>
-                  )}
                 </div>
               )}
               {open && (
@@ -1692,19 +1649,6 @@ function WantedBreakdown({
             </div>
           );
         })}
-
-      {annotateSeason !== null && mediaItemId != null && (
-        <MediaSourceAnnotationDialog
-          mediaItemId={mediaItemId}
-          seasonNumber={annotateSeason}
-          isMovie={isMovie}
-          onClose={() => setAnnotateSeason(null)}
-          onApplied={async (message) => {
-            setAnnotateSeason(null);
-            await onAnnotated(message);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -2162,15 +2106,14 @@ function downloadNote(d: SubscriptionDownload): string {
   if (d.state === "error") {
     // 下载器里这条任务坏了（多半是文件缺失），不是死种：说清原因，并交代
     // 换源判定已暂停、要去下载器里处理
-    return `${pct} · ${d.error_message || "下载器报告任务出错"}；换源判定已暂停，请在下载器中处理`;
+    return `${pct} · 下载器报告任务出错；换源判定已暂停，请在下载器中处理`;
   }
   if (d.state === "stalled") return `${pct} · 等待连接做种`;
-  // downloading / unknown：速度与 ETA 有则展示
+  // downloading / unknown：展示实际速度
   const parts = [pct];
   if (d.dlspeed_bytes != null && d.dlspeed_bytes > 0) {
     parts.push(`${formatBytes(d.dlspeed_bytes)}/s`);
   }
-  if (d.eta_seconds != null) parts.push(`剩余约 ${formatDuration(d.eta_seconds)}`);
   if (d.size_bytes != null && parts.length === 1) parts.push(formatBytes(d.size_bytes));
   return parts.filter(Boolean).join(" · ");
 }

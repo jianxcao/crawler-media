@@ -1,73 +1,197 @@
+//! Marker publication source checks.
+//!
+//! Disk observation never happens inside the store lock or a write transaction:
+//! callers take an owned [`SourceSnapshot`] under a short read, observe it with
+//! [`observe_sources`] outside every guard, and hand the resulting
+//! [`SourceObservation`]s to the checked publication. The transaction only
+//! compares ledger rows, versions, membership and job state against them.
+//! Filesystem and DB are not atomic: a file changed after the last observation
+//! is caught by the source-version barrier and the next reconcile, not here.
+
 use super::{MarkerResultReplacement, Store, StoreError};
-use rusqlite::{OptionalExtension, Transaction, params};
+use domain::{FilePresence, FileVersion, LedgerId};
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+/// Owned ledger snapshot of a source file, taken under a short store read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceSnapshot {
+    pub file_id: LedgerId,
+    pub version: FileVersion,
+    pub path: PathBuf,
+}
+
+/// Result of observing a [`SourceSnapshot`] on disk outside every store guard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceObservation {
+    pub file_id: LedgerId,
+    pub expected: FileVersion,
+    pub presence: FilePresence,
+}
+
+/// Observe sources on disk. Must be called without holding the store lock.
+pub fn observe_sources(snapshots: &[SourceSnapshot]) -> Vec<SourceObservation> {
+    observe_sources_with(snapshots, observe_path)
+}
+
+/// [`observe_sources`] with an injectable observer (tests gate slow IO with it).
+pub fn observe_sources_with(
+    snapshots: &[SourceSnapshot],
+    mut observe: impl FnMut(&Path) -> FilePresence,
+) -> Vec<SourceObservation> {
+    snapshots
+        .iter()
+        .map(|snapshot| SourceObservation {
+            file_id: snapshot.file_id,
+            expected: snapshot.version.clone(),
+            presence: observe(&snapshot.path),
+        })
+        .collect()
+}
+
+fn observe_path(path: &Path) -> FilePresence {
+    match path.try_exists() {
+        Ok(true) => FilePresence::Present,
+        Ok(false) => FilePresence::Missing,
+        Err(error) => {
+            tracing::error!(%error, path = %path.display(), "观察标记发布源文件失败");
+            FilePresence::Unknown
+        }
+    }
+}
 
 impl Store {
+    /// Owned ledger snapshots for `file_ids`; ids without a row are omitted.
+    pub fn source_snapshots(
+        &self,
+        file_ids: &[LedgerId],
+    ) -> Result<Vec<SourceSnapshot>, StoreError> {
+        self.with_library_read(|db| db.source_snapshots(file_ids))
+    }
+
     pub fn complete_marker_refresh_checked(
         &self,
         job_id: &str,
         replacements: &[MarkerResultReplacement],
+        members: &[SourceObservation],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, Some(job_id), true)
+        self.with_library_write(|db| {
+            db.complete_marker_refresh_checked(job_id, replacements, members)
+        })
     }
 
     pub fn replace_marker_results_batch_checked(
         &self,
         replacements: &[MarkerResultReplacement],
+        members: &[SourceObservation],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, None, true)
+        self.with_library_write(|db| db.replace_marker_results_batch_checked(replacements, members))
+    }
+}
+
+/// Compare one published file against its out-of-lock observation.
+pub(super) fn check_observed(
+    tx: &rusqlite::Connection,
+    file_id: &str,
+    members: &[SourceObservation],
+) -> Result<(), StoreError> {
+    let current: Option<(i64, String)> = tx
+        .prepare_cached(
+            "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1",
+        )?
+        .query_row([file_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    let Some((revision, source_version)) = current else {
+        return Err(StoreError::Missing(format!("file_deleted: {file_id}")));
+    };
+    let Some(observation) = members.iter().find(|m| m.file_id.to_string() == file_id) else {
+        return Err(StoreError::Missing(format!("source_unobserved: {file_id}")));
+    };
+    if observation.expected.revision != revision
+        || observation.expected.source_version != source_version
+    {
+        return Err(StoreError::Missing(format!("source_changed: {file_id}")));
+    }
+    match observation.presence {
+        FilePresence::Present => Ok(()),
+        FilePresence::Missing => Err(StoreError::Missing(format!("file_deleted: {file_id}"))),
+        FilePresence::Unknown => {
+            tracing::error!(file_id, "标记发布源文件状态未知，保留现有标记");
+            Err(StoreError::Missing(format!("source_unknown: {file_id}")))
+        }
     }
 }
 
 pub(super) fn validate_members(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacements: &[MarkerResultReplacement],
+    members: &[SourceObservation],
 ) -> Result<(), StoreError> {
+    for member in members {
+        check_observed(tx, &member.file_id.to_string(), members)?;
+    }
     for replacement in replacements {
-        let expected: BTreeSet<_> = replacement
-            .chapter_updates
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
         let mut statement = tx.prepare(
-            "SELECT id, path FROM ledger WHERE media_id = ?1 AND COALESCE(season, 1) = ?2",
+            "SELECT DISTINCT f.file_id
+             FROM library_files f
+             LEFT JOIN library_file_units u ON u.file_id = f.file_id
+             WHERE f.media_id = ?1 AND COALESCE(NULLIF(u.season, -1), 1) = ?2",
         )?;
-        let current = statement
+        let actual = statement
             .query_map(
                 params![replacement.media_id.to_string(), replacement.season],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, String>(0),
             )?
-            .collect::<Result<Vec<_>, _>>()?;
-        let actual: BTreeSet<_> = current.iter().map(|(id, _)| id.clone()).collect();
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let expected = members
+            .iter()
+            .filter(|member| actual.contains(&member.file_id.to_string()))
+            .map(|member| member.file_id.to_string())
+            .collect::<BTreeSet<_>>();
         if actual != expected {
             return Err(StoreError::Missing(
                 "file_deleted: season membership changed before publication".into(),
             ));
         }
-        for (id, path) in current {
-            match std::path::Path::new(&path).try_exists() {
-                Ok(true) => {}
-                Ok(false) => return Err(StoreError::Missing(format!("file_deleted: {id}"))),
-                Err(error) => {
-                    tracing::error!(%error, ledger_id = id, "检查标记发布源文件失败");
-                    return Err(error.into());
-                }
+        for (id, _) in &replacement.chapter_updates {
+            if !actual.contains(id) {
+                return Err(StoreError::Invalid(
+                    "marker_source_changed: publication outside season".into(),
+                ));
             }
+            check_observed(tx, id, members)?;
         }
     }
     Ok(())
 }
 
 pub(super) fn validate_job_members(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     job_id: &str,
     replacements: &[MarkerResultReplacement],
+    members: &[SourceObservation],
 ) -> Result<(), StoreError> {
+    // Chapter updates are a subset of the files compared. Every file the job leased
+    // must still match the observation pinned before comparison, whether or not it
+    // produced a chapter update.
+    let mut leased = tx.prepare("SELECT file_id FROM probe_job_units WHERE job_id = ?1")?;
+    let leased: Vec<String> = leased
+        .query_map([job_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in &leased {
+        check_observed(tx, id, members)?;
+    }
+    // A partial refresh can use cached samples outside its write lease. They
+    // remain dependencies of the result and must be checked in this transaction.
+    for observation in members {
+        check_observed(tx, &observation.file_id.to_string(), members)?;
+    }
     let published: BTreeSet<_> = replacements
         .iter()
         .flat_map(|replacement| replacement.chapter_updates.iter().map(|(id, _)| id.clone()))
         .collect();
-    let mut statement = tx.prepare("SELECT ledger_id FROM probe_job_units WHERE job_id = ?1")?;
+    let mut statement = tx.prepare("SELECT file_id FROM probe_job_units WHERE job_id = ?1")?;
     let original: BTreeSet<String> = statement
         .query_map([job_id], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
@@ -80,27 +204,39 @@ pub(super) fn validate_job_members(
 }
 
 pub(super) fn validate_published_rows(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     replacements: &[MarkerResultReplacement],
+    members: &[SourceObservation],
 ) -> Result<(), StoreError> {
-    let mut statement = tx.prepare("SELECT path FROM ledger WHERE id = ?1")?;
     for replacement in replacements {
         for (id, _) in &replacement.chapter_updates {
-            let path_opt: Option<String> = statement
-                .query_row(params![id], |row| row.get(0))
-                .optional()?;
-            let path = match path_opt {
-                Some(path) => path,
-                None => return Err(StoreError::Missing(format!("file_deleted: {id}"))),
-            };
-            match std::path::Path::new(&path).try_exists() {
-                Ok(true) => {}
-                Ok(false) => return Err(StoreError::Missing(format!("file_deleted: {id}"))),
-                Err(error) => {
-                    tracing::error!(%error, ledger_id = id, "检查标记发布源文件失败");
-                    return Err(error.into());
-                }
-            }
+            check_observed(tx, id, members)?;
+        }
+    }
+    Ok(())
+}
+
+#[path = "source_guard/connection.rs"]
+mod connection;
+
+/// A live job may publish only its own still-active leased file identities.
+pub(super) fn validate_live_job_targets(
+    tx: &rusqlite::Connection,
+    job_id: &str,
+    file_ids: impl Iterator<Item = String>,
+) -> Result<(), StoreError> {
+    for file_id in file_ids {
+        let allowed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM probe_jobs j
+            JOIN probe_job_units u ON u.job_id=j.id WHERE j.id=?1 AND u.file_id=?2
+              AND j.status IN ('queued','running') AND u.status NOT IN ('cancelled','failed'))",
+            params![job_id, file_id],
+            |row| row.get(0),
+        )?;
+        if !allowed {
+            return Err(StoreError::Missing(format!(
+                "file_deleted: marker target outside active job {job_id}: {file_id}"
+            )));
         }
     }
     Ok(())

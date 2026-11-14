@@ -21,7 +21,7 @@ import {
 import { useIsMobile } from "@/lib/use-media-query";
 
 /**
- * 单库墙的筛选条（docs/design/library-filtering.md 5.1）。
+ * 单库墙的筛选条。
  *
  * 静止态只留信息，不留控件——四个都写着「全部」的下拉不承载任何信息，
  * 它们只是把「什么都没选」这件事说了四遍。所以同一块地方有三种状态，
@@ -92,10 +92,10 @@ export function LibraryFilterBar({
   const toggle = useCallback(
     (dim: "genres" | "countries" | "decades", value: string) => {
       const current = (filter[dim] ?? []) as (string | number)[];
-      const typed = dim === "genres" ? Number(value) : value;
-      const next = current.includes(typed)
-        ? current.filter((v) => v !== typed)
-        : [...current, typed];
+      const exists = current.some((v) => String(v) === String(value));
+      const next = exists
+        ? current.filter((v) => String(v) !== String(value))
+        : [...current, value];
       onFilterChange({ ...filter, [dim]: next });
     },
     [filter, onFilterChange],
@@ -332,8 +332,7 @@ function ConditionRow({
     }
     const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = dim === "genres" ? Number(value) : value;
-    onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
+    onFilterChange({ ...filter, [key]: current.filter((v) => String(v) !== String(value)) });
   };
 
   const groups = DIMS.map(({ key, label }) => {
@@ -407,7 +406,6 @@ export const SORT_LABELS: Record<LibraryItemSort, string> = {
   runtime: "按片长",
   size: "按体积",
   last_played: "最近观看",
-  release_date_asc: "按上映正序",
   random: "随便看看",
 };
 
@@ -421,7 +419,7 @@ export const SORT_LABELS: Record<LibraryItemSort, string> = {
  * 「最近添加」在一屏之内都只是"某种顺序"），所以排序必须把当前值挂在外面。
  *
  * 这也是它从 ⋯ 菜单里被提出来的理由：埋在菜单里，用户根本不知道自己
- * 正按什么排（docs/design/library-filtering.md 5.1.1）。
+ * 正按什么排。
  */
 export function WallSortControl<T extends string>({
   value,
@@ -567,8 +565,7 @@ export function FilterEmptyState({
     }
     const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = dim === "genres" ? Number(value) : value;
-    onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
+    onFilterChange({ ...filter, [key]: current.filter((v) => String(v) !== String(value)) });
   };
 
   const suggestions = relax?.suggestions ?? [];
@@ -673,7 +670,7 @@ function PillGroup({
  * 分栏依据是**作用对象不同**：左栏问「作品是什么样的」（来自刮削档案），
  * 右栏问「文件是什么规格」（来自库存台账）。这是两种人格——"周五晚上想看
  * 点什么"和"我那些 4K 都在哪、哪些片缺集"——混在一行 chips 里会让两边都
- * 难用（docs/design/library-filtering.md 铁律 4）。
+ * 难用。
  *
  * 库存状态给语义色：要处理的事和不用处理的事，扫一眼就分得开。
  */
@@ -779,7 +776,7 @@ function MoreFiltersPanel({
 
 /**
  * 窄屏的筛选抽屉：点「筛选」直接拉起，一二级维度全在里面
- * （docs/design/library-filtering.md 5.2）。
+ *
  *
  * **每个维度直接平铺成胶囊**，不是一排下拉：点一下就是一个取值，取值和各自
  * 还剩几部一眼看全，没有「菜单里再弹菜单」。窄屏先后试过两种下拉摆法都别扭——

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
@@ -8,7 +9,7 @@ use domain::{
 use downloader::MemoryDownloader;
 use filter::ScoredTorrent;
 use library::{Ffprobe, TransferMode};
-use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed};
+use subscribe::{Added, RunInput, RunOutcome, collect_completed};
 
 fn movie_filter() -> Filter {
     Filter {
@@ -20,7 +21,7 @@ fn movie_filter() -> Filter {
             exclude: false,
         }],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -68,7 +69,7 @@ fn torrent(enclosure: &str) -> Torrent {
         size_bytes: Some(1_000),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -98,6 +99,9 @@ fn transfer_once(
         facts,
         downloader: dl,
         library_root,
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Hardlink),
         scrape: false,
         hooks: None,
@@ -117,8 +121,8 @@ fn transfer_once(
         rejected: vec![],
         outcome: RunOutcome {
             facts: SubscribeFacts::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],
@@ -157,9 +161,9 @@ fn deleted_library_file_is_not_auto_restored() {
         SubscribeFacts::default(),
         &library_root,
     );
-    assert_eq!(outcome.ledger.len(), 1);
-    let dest = outcome.ledger[0].path.clone();
-    assert!(Path::new(&dest).exists());
+    assert_eq!(outcome.files.len(), 1);
+    let dest = outcome.files[0].file.path.clone();
+    assert!(dest.exists());
 
     // 用户删除库文件。
     fs::remove_file(&dest).unwrap();
@@ -167,6 +171,6 @@ fn deleted_library_file_is_not_auto_restored() {
     // 同样的种子再次进入收集：facts 仍指向该路径 → 跳过，不自动恢复。
     let second = transfer_once(&dl, &filter, &media, &sub, &t, outcome.facts, &library_root);
     assert!(!Path::new(&dest).exists(), "删除的库文件不得被自动恢复");
-    assert!(second.ledger.is_empty(), "不得重新转存已删除的文件");
+    assert!(second.files.is_empty(), "不得重新转存已删除的文件");
     assert!(second.transferred_enclosures.is_empty());
 }

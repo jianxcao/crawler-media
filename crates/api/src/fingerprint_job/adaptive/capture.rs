@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 use marker::adaptive::{EpisodeEvidence, SegmentKind};
@@ -8,9 +7,10 @@ use marker::fingerprint::capture_types::{
 use store::{StoredFingerprintAttempt, StoredFingerprintSample};
 use uuid::Uuid;
 
-use super::cache::{find_reusable_sample, stored_sample_to_evidence};
+use super::cache::{find_reusable_sample_bounded, stored_sample_to_evidence};
 use super::types::{AdaptiveCaptureContext, EpisodeCaptureRequest};
-use crate::fingerprint_job::source::{ensure_source_available, is_file_deleted};
+use crate::fingerprint_job::episode_number;
+use crate::fingerprint_job::source::{ensure_source_recorded, is_file_deleted};
 
 pub async fn capture_or_reuse_segment_sample(
     ctx: &AdaptiveCaptureContext,
@@ -21,20 +21,96 @@ pub async fn capture_or_reuse_segment_sample(
     attempt_count: &mut usize,
     max_budget: usize,
 ) -> Result<EpisodeEvidence, String> {
-    {
-        let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row)?;
-        if let Some(cached) = find_reusable_sample(&store, request, kind, window) {
-            if let Some(timings) = &ctx.timings {
-                match kind {
-                    SegmentKind::Intro => timings.record_intro_cache_hit(Some(&request.job_id)),
-                    SegmentKind::Outro => timings.record_outro_cache_hit(Some(&request.job_id)),
-                }
+    capture_sample(
+        ctx,
+        request,
+        kind,
+        window,
+        attempt_count,
+        CaptureOptions {
+            phase: phase.into(),
+            max_budget,
+            max_window_ms: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn capture_bounded_sample(
+    ctx: &AdaptiveCaptureContext,
+    request: &EpisodeCaptureRequest,
+    kind: SegmentKind,
+    window: &SampleWindow,
+    attempt_count: &mut usize,
+) -> Result<EpisodeEvidence, String> {
+    if window.validate().is_err() || window.duration_ms() > 300_000 {
+        return Err("sampling_limit: capture exceeds independent window bound".into());
+    }
+    capture_sample(
+        ctx,
+        request,
+        kind,
+        window,
+        attempt_count,
+        CaptureOptions {
+            phase: "scheduled_capture".into(),
+            max_budget: request.policy.max_attempts_per_kind,
+            max_window_ms: Some(300_000),
+        },
+    )
+    .await
+}
+struct CaptureOptions {
+    phase: String,
+    max_budget: usize,
+    max_window_ms: Option<i64>,
+}
+async fn capture_sample(
+    ctx: &AdaptiveCaptureContext,
+    request: &EpisodeCaptureRequest,
+    kind: SegmentKind,
+    window: &SampleWindow,
+    attempt_count: &mut usize,
+    options: CaptureOptions,
+) -> Result<EpisodeEvidence, String> {
+    let max_budget = options.max_budget;
+    let max_window_ms = options.max_window_ms;
+    ctx.store.source_available_async(&request.row).await?;
+    let read_request = request.clone();
+    let read_window = window.clone();
+    let cached = ctx
+        .store
+        .read_async(move |store| {
+            ensure_source_recorded(store, &read_request.row)?;
+            if !store
+                .fingerprint_source_active(
+                    &read_request.job_id,
+                    &read_request.row.file.file_id.to_string(),
+                )
+                .map_err(|error| format!("source_check_failed: {error}"))?
+            {
+                return Err("file_deleted: probe source cancelled".to_string());
             }
-            tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id, ?kind,
-                "复用有效声纹缓存");
-            return Ok(cached);
+            Ok(find_reusable_sample_bounded(
+                store,
+                &read_request,
+                kind,
+                &read_window,
+                max_window_ms,
+            ))
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    if let Some(cached) = cached {
+        if let Some(timings) = &ctx.timings {
+            match kind {
+                SegmentKind::Intro => timings.record_intro_cache_hit(Some(&request.job_id)),
+                SegmentKind::Outro => timings.record_outro_cache_hit(Some(&request.job_id)),
+            }
         }
+        tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id, ?kind,
+            "复用有效声纹缓存");
+        return Ok(cached);
     }
     if *attempt_count >= max_budget {
         return Err(format!(
@@ -43,28 +119,42 @@ pub async fn capture_or_reuse_segment_sample(
         ));
     }
     *attempt_count += 1;
-    let mut attempt = begin_attempt(ctx, request, kind, window, phase)?;
+    let mut attempt = begin_attempt(ctx, request, kind, window, &options.phase).await?;
     ctx.gate.wait_before_capture().await;
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ctx.store.source_available_async(&request.row).await;
     if let Err(error) = availability {
-        return finish_error(ctx, request, &mut attempt, error);
+        return finish_error(ctx, request, &mut attempt, error).await;
     }
     let capture_req = CaptureRequest {
-        path: PathBuf::from(&request.row.path),
+        path: request.row.file.path.clone(),
         window: window.clone(),
         audio_stream_index: request.audio_stream_index,
         process_deadline_ms: request.policy.process_deadline_ms,
     };
     let capture = ctx.capture.clone();
-    let control = ctx.gate.work_control(&request.row);
-    let result = tokio::task::spawn_blocking(move || capture.capture_window_controlled(&capture_req, &control)).await;
+    let gate = ctx.gate.clone();
+    let row = request.row.clone();
+    let source_row = request.row.clone();
+    let selected = request.audio_stream_index;
+    let source = ctx
+        .store
+        .read_async(move |store| {
+            crate::fingerprint_job::source_for_file_selected(store, &source_row.file, selected)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = tokio::task::spawn_blocking(move || {
+        let control = gate.work_control(&row);
+        capture.capture_window_after_metadata_controlled(&capture_req, source.as_ref(), &control)
+    })
+    .await;
     // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ctx.store.source_available_async(&request.row).await;
     if let Err(error) = availability {
-        return finish_error(ctx, request, &mut attempt, error);
+        return finish_error(ctx, request, &mut attempt, error).await;
     }
     match result {
-        Ok(Ok(captured)) => finish_capture(ctx, request, kind, attempt, captured),
+        Ok(Ok(captured)) => finish_capture(ctx, request, kind, attempt, captured).await,
         Ok(Err(error)) => {
             attempt.error_kind = Some(capture_error_kind(&error.kind).into());
             attempt.metrics_json = serde_json::to_string(&error.metrics).unwrap_or_default();
@@ -74,17 +164,21 @@ pub async fn capture_or_reuse_segment_sample(
                 &mut attempt,
                 format!("Capture failed: {error}"),
             )
+            .await
         }
-        Err(error) => finish_error(
-            ctx,
-            request,
-            &mut attempt,
-            format!("Capture task failed: {error}"),
-        ),
+        Err(error) => {
+            finish_error(
+                ctx,
+                request,
+                &mut attempt,
+                format!("Capture task failed: {error}"),
+            )
+            .await
+        }
     }
 }
 
-fn begin_attempt(
+async fn begin_attempt(
     ctx: &AdaptiveCaptureContext,
     request: &EpisodeCaptureRequest,
     kind: SegmentKind,
@@ -94,7 +188,7 @@ fn begin_attempt(
     let attempt = StoredFingerprintAttempt {
         attempt_id: format!("att-{}", Uuid::new_v4()),
         job_id: request.job_id.clone(),
-        ledger_id: request.row.id.to_string(),
+        ledger_id: request.row.file.file_id.to_string(),
         kind: kind_name(kind).into(),
         window_start_ms: window.start_ms,
         window_end_ms: window.end_ms,
@@ -105,9 +199,10 @@ fn begin_attempt(
         error_kind: None,
         metrics_json: "{}".into(),
     };
+    let stored_attempt = attempt.clone();
     ctx.store
-        .lock()
-        .begin_fingerprint_attempt(&attempt)
+        .write_async(move |store| store.begin_fingerprint_attempt(&stored_attempt))
+        .await
         .map_err(|error| {
             tracing::error!(%error, job_id = %request.job_id, "声纹采集开始状态写入失败");
             format!("Store error beginning attempt: {error}")
@@ -115,7 +210,7 @@ fn begin_attempt(
     Ok(attempt)
 }
 
-fn finish_error(
+async fn finish_error(
     ctx: &AdaptiveCaptureContext,
     request: &EpisodeCaptureRequest,
     attempt: &mut StoredFingerprintAttempt,
@@ -128,21 +223,26 @@ fn finish_error(
         attempt.error_kind = Some("file_deleted".into());
     }
     let elapsed_ms = now_ms().saturating_sub(attempt.started_at_ms);
-    if let Err(store_error) = ctx.store.lock().complete_fingerprint_attempt(attempt, None) {
+    let stored_attempt = attempt.clone();
+    if let Err(store_error) = ctx
+        .store
+        .write_async(move |store| store.complete_fingerprint_attempt(&stored_attempt, None))
+        .await
+    {
         tracing::error!(%store_error, job_id = %request.job_id, "声纹采集结束状态写入失败");
     }
     if cancelled {
-        tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id,
-            path = %request.row.path, stage = %attempt.phase, elapsed_ms, reason = "file_deleted",
+        tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id,
+            path = %request.row.file.path.display(), stage = %attempt.phase, elapsed_ms, reason = "file_deleted",
             "文件已删除，取消声纹采集");
     } else {
-        tracing::error!(%error, job_id = %request.job_id, ledger_id = %request.row.id,
-            path = %request.row.path, stage = %attempt.phase, elapsed_ms, "声纹采集失败");
+        tracing::error!(%error, job_id = %request.job_id, file_id = %request.row.file.file_id,
+            path = %request.row.file.path.display(), stage = %attempt.phase, elapsed_ms, "声纹采集失败");
     }
     Err(error)
 }
 
-fn finish_capture(
+async fn finish_capture(
     ctx: &AdaptiveCaptureContext,
     request: &EpisodeCaptureRequest,
     kind: SegmentKind,
@@ -156,12 +256,12 @@ fn finish_capture(
     let metrics_json = serde_json::to_string(&metrics).map_err(|error| error.to_string())?;
     let sample = StoredFingerprintSample {
         sample_id: format!("samp-{}", Uuid::new_v4()),
-        ledger_id: request.row.id.to_string(),
+        ledger_id: request.row.file.file_id.to_string(),
         source_version: request.source_version.clone(),
         capture_profile_key: request.capture_profile_key.clone(),
         kind: kind_name(kind).into(),
-        window_start_ms: attempt.window_start_ms,
-        window_end_ms: attempt.window_end_ms,
+        window_start_ms: captured.window.start_ms,
+        window_end_ms: captured.window.end_ms,
         pcm_duration_ms: captured.pcm_duration_ms,
         fingerprint: captured.words,
         captured_job_id: request.job_id.clone(),
@@ -171,30 +271,44 @@ fn finish_capture(
     attempt.finished_at_ms = Some(sample.captured_at_ms);
     attempt.status = "succeeded".into();
     attempt.metrics_json = metrics_json;
-    let persisted = {
-        let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row).and_then(|()| {
-            store
-                .complete_fingerprint_attempt_for_source(&attempt, &sample, &request.row.path)
-                .map_err(|error| format!("Store error completing attempt: {error}"))
-                .and_then(|accepted| {
-                    if accepted {
-                        Ok(())
-                    } else {
-                        Err("file_deleted: source removed before commit".into())
-                    }
-                })
-        })
-    };
-    if let Err(error) = persisted {
-        return finish_error(ctx, request, &mut attempt, error);
+    if let Err(error) = ctx.store.source_available_async(&request.row).await {
+        return finish_error(ctx, request, &mut attempt, error).await;
     }
-    tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id, ?kind,
+    let row = request.row.clone();
+    let stored_attempt = attempt.clone();
+    let stored_sample = sample.clone();
+    let persisted = ctx
+        .store
+        .write_async(move |store| {
+            crate::fingerprint_job::source::ensure_source_recorded_on(store, &row)
+                .map_err(store::StoreError::Missing)?;
+            let accepted = store.complete_fingerprint_attempt_for_source(
+                &stored_attempt,
+                &stored_sample,
+                &row.file.path.to_string_lossy(),
+            )?;
+            if accepted {
+                Ok(())
+            } else {
+                Err(store::StoreError::Missing(
+                    "file_deleted: source removed before commit".into(),
+                ))
+            }
+        })
+        .await
+        .map_err(|error| match error {
+            store::StoreError::Missing(reason) if is_file_deleted(&reason) => reason,
+            error => error.to_string(),
+        });
+    if let Err(error) = persisted {
+        return finish_error(ctx, request, &mut attempt, error).await;
+    }
+    tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id, ?kind,
         stage = %attempt.phase, elapsed_ms = now_ms().saturating_sub(attempt.started_at_ms),
         "声纹采集成功并已写入数据库");
     Ok(stored_sample_to_evidence(
         &sample,
-        request.row.episode.unwrap_or(1),
+        episode_number(&request.row)?,
         kind,
         request.media_duration_ms,
     ))

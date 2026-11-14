@@ -14,15 +14,16 @@ use crate::http::subscriptions::{coverage_json, parse_upload_time};
 use crate::http::{err, ok_list};
 use crate::management::ApiState;
 
-use super::forecast::forecast_for_unit;
+use super::forecast::ForecastBasis;
 
 /// 锁内读到的 owned 快照；此后不再需要 Store 锁。
 pub(crate) struct ArrivalSnapshot {
     pub(crate) subscribe: domain::Subscribe,
     pub(crate) media: domain::Media,
     pub(crate) pending: Vec<(i32, crate::store::PendingDownload)>,
-    pub(crate) facts: subscribe::SubscribeFacts,
-    pub(crate) rows: Vec<domain::LedgerRow>,
+    pub(crate) facts: domain::SubscribeFacts,
+    pub(crate) rows: Vec<domain::FileCoverage>,
+    pub(crate) episodes: Vec<media::SeasonEpisode>,
 }
 
 /// 只在持有 Store 锁时读取/Clone；DB 错误向上传播（handler 记 500，不静默空集合）。
@@ -37,9 +38,13 @@ pub(crate) fn load_arrivals(
     } else {
         store.list_subscribes_for_user(user_id)?
     };
-    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::LedgerRow>> = HashMap::new();
-    for row in store.list_ledger()? {
-        rows_by_media.entry(row.media_id).or_default().push(row);
+    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
+    let media_ids: Vec<domain::MediaId> = subscribes.iter().map(|s| s.media_id).collect();
+    for coverage in store.file_coverage_for_media_batch(&media_ids)? {
+        rows_by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
     let mut snapshots = Vec::with_capacity(subscribes.len());
     for subscribe in subscribes {
@@ -50,13 +55,15 @@ pub(crate) fn load_arrivals(
         let facts = if media.kind == domain::MediaKind::Tv {
             store.load_subscribe_facts(subscribe.id)?
         } else {
-            subscribe::SubscribeFacts::default()
+            domain::SubscribeFacts::default()
         };
         let rows = rows_by_media
             .get(&subscribe.media_id)
             .cloned()
             .unwrap_or_default();
+        let episodes = super::catalog_facts::adopted_episodes(store, &subscribe, &rows)?;
         snapshots.push(ArrivalSnapshot {
+            episodes,
             subscribe,
             media,
             pending,
@@ -83,7 +90,9 @@ pub(crate) fn build_arrivals(
             pending,
             facts,
             rows,
+            episodes,
         } = snapshot;
+        let forecast_basis = ForecastBasis::new(&pending);
         // 在途（grabbing）：有 pending 种子的订阅，status=grabbed。
         for _ in &pending {
             items.push(json!({
@@ -96,10 +105,11 @@ pub(crate) fn build_arrivals(
                 "grabbed_at": Value::Null,
             }));
         }
-        // 当日入库：ledger 行文件修改时间在 24h 内的订阅，status=imported。
+        // 当日入库：ledger 文件修改时间在 24h 内的订阅，status=imported。
+        // 修改时间按文件取，同一文件的多个 unit 在旧读模型里是重复的同一答案。
         let imported_today = rows
             .iter()
-            .any(|row| modified_within_day(&row.path, now, day_secs));
+            .any(|coverage| modified_within_day(&coverage.file.path, now, day_secs));
         if imported_today && pending.is_empty() {
             items.push(json!({
                 "subscription_id": subscribe.id.to_string(),
@@ -115,14 +125,25 @@ pub(crate) fn build_arrivals(
         if media.kind != domain::MediaKind::Tv {
             continue;
         }
-        let Some(tmdb_id) = media.tmdb_id.as_deref() else {
-            continue;
-        };
         let season = match subscribe.coverage {
             domain::Coverage::Tv { season, .. } => season,
             _ => continue,
         };
-        for episode in episodes_for(catalog, &mut episodes_cache, tmdb_id, season) {
+        let mut available: std::collections::BTreeMap<u32, media::SeasonEpisode> = media
+            .tmdb_id
+            .as_deref()
+            .map(|tmdb_id| episodes_for(catalog, &mut episodes_cache, tmdb_id, season))
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .map(|episode| (episode.episode_number, episode))
+            .collect();
+        available.extend(
+            episodes
+                .into_iter()
+                .map(|episode| (episode.episode_number, episode)),
+        );
+        for episode in available.into_values() {
             if facts
                 .get(Some(season), Some(episode.episode_number))
                 .is_some()
@@ -138,7 +159,7 @@ pub(crate) fn build_arrivals(
             if air_unix < now - day_secs || air_unix > now + 7 * day_secs {
                 continue;
             }
-            let forecast = forecast_for_unit(&subscribe, &pending, air_date).unwrap_or(Value::Null);
+            let forecast = forecast_basis.for_date(air_date).unwrap_or(Value::Null);
             items.push(json!({
                 "subscription_id": subscribe.id.to_string(),
                 "title": media.title,
@@ -166,8 +187,8 @@ fn episodes_for<'a>(
 ) -> &'a [media::SeasonEpisode] {
     cache
         .entry((tmdb_id.to_string(), season))
-        .or_insert_with(|| match catalog.season_episodes(tmdb_id, season) {
-            Ok(episodes) => episodes,
+        .or_insert_with(|| match catalog.cached_season_episodes(tmdb_id, season) {
+            Ok(episodes) => episodes.unwrap_or_default(),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -181,7 +202,7 @@ fn episodes_for<'a>(
         .as_slice()
 }
 
-fn modified_within_day(path: &str, now: i64, day_secs: i64) -> bool {
+fn modified_within_day(path: &std::path::Path, now: i64, day_secs: i64) -> bool {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .map(|modified| {
@@ -198,9 +219,15 @@ pub(crate) async fn today_arrivals(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let snapshots = {
-        let store = state.store.lock();
-        load_arrivals(&store, user_id)
+    let snapshots = match crate::http::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| load_arrivals(store, user_id),
+    )
+    .await
+    {
+        Ok(snapshots) => snapshots,
+        Err(error) => return error.response(),
     };
     let snapshots = match snapshots {
         Ok(snapshots) => snapshots,

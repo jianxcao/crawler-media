@@ -12,6 +12,7 @@
 pub mod auth;
 pub mod dto;
 pub mod provider;
+pub mod query_metrics;
 pub mod routes;
 
 pub use auth::AuthUser;

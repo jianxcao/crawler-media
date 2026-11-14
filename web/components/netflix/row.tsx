@@ -25,7 +25,7 @@ import { imageUrl } from "@/lib/image-proxy";
 import { useIsMobile, useMediaQuery } from "@/lib/use-media-query";
 
 /**
- * Netflix 主题的内容行与卡片（docs/design/web-themes.md §5.4）。
+ * Netflix 主题的内容行与卡片。
  *
  * - PC（hover 设备）：16:9 横版剧照卡，hover 400ms 延迟后展开预览卡——
  *   原生横滚行的 overflow 必然裁切纵向溢出（CSS Overflow L3），展开画布

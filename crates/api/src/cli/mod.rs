@@ -6,6 +6,7 @@ mod filters;
 mod lists;
 mod parse;
 mod sites;
+mod storage;
 mod users;
 
 use serde_json::Value;
@@ -152,22 +153,23 @@ pub async fn run(command: Command, transport: &impl Transport) -> Result<String,
         Command::Library => lists::list_library(transport).await,
         Command::Ledger => lists::list_ledger(transport).await,
         Command::Directory => lists::list_directory(transport).await,
-        Command::DirectoryAddRoot { kind, path } => {
-            actions::add_library_root(transport, &kind, &path).await
+        Command::DirectoryAddRoot { id, path } => {
+            storage::update_root(transport, &id, &path, true).await
         }
-        Command::DirectoryRemoveRoot { id } => actions::remove_library_root(transport, &id).await,
+        Command::DirectoryRemoveRoot { id, path } => {
+            storage::update_root(transport, &id, &path, false).await
+        }
         Command::DirectoryWatchInplace { path } => {
-            actions::set_watch_inplace(transport, &path).await
+            storage::set_watch_inplace(transport, &path).await
         }
-        Command::DirectoryWatchIntake { path } => actions::set_watch_intake(transport, &path).await,
+        Command::DirectoryWatchIntake { path } => storage::set_watch_intake(transport, &path).await,
         Command::DirectoryTransferMode { mode } => {
-            actions::set_transfer_mode(transport, &mode).await
+            storage::set_transfer_mode(transport, &mode).await
         }
-        Command::DirectoryScrape { enabled } => actions::set_scrape(transport, enabled).await,
-        Command::DirectoryMovieNaming { pattern } => {
-            actions::set_movie_naming(transport, &pattern).await
+        Command::DirectoryScrape { enabled } => storage::set_scrape(transport, enabled).await,
+        Command::DirectoryNaming { field, pattern } => {
+            storage::set_naming(transport, &field, &pattern).await
         }
-        Command::DirectoryTvNaming { pattern } => actions::set_tv_naming(transport, &pattern).await,
         Command::Downloaders => lists::list_downloaders(transport).await,
         Command::DownloadersAdd {
             name,

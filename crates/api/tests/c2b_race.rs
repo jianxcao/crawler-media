@@ -9,6 +9,7 @@ use axum::http::Request;
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -31,7 +32,7 @@ fn request(method: &str, uri: &str, body: Value) -> Request<Body> {
 fn seed(root: &Path, state: &ApiState) -> String {
     let library_root = root.join("movies");
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard
         .create_library(
             domain::MediaKind::Movie,
@@ -63,9 +64,10 @@ fn seed(root: &Path, state: &ApiState) -> String {
             anilist_id: None,
         };
         guard.insert_media(&media).unwrap();
-        guard
-            .insert_ledger(&domain::LedgerRow {
-                id: domain::LedgerId::new(),
+        publish_fixture_file(
+            guard,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
                 media_id: media.id,
                 path: file.display().to_string(),
                 season: None,
@@ -76,8 +78,10 @@ fn seed(root: &Path, state: &ApiState) -> String {
                 quality_source: domain::QualitySource::Probe,
                 confidence: domain::Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     library.id
 }
@@ -91,7 +95,6 @@ async fn late_auto_generate_must_not_overwrite_manual_cover() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state.clone());

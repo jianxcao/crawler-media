@@ -15,16 +15,67 @@ import type { UiPreferences } from "@/lib/api/ui";
  * 三条约定：
  *   - **缓存只是首帧优化**，真实状态永远以 GET /ui/preferences 为准；缓存脏了
  *     （换了设备上改的顺序）也只是首帧短暂显示旧值，接口回来即纠正；
- *   - 读出来的内容不可信（用户可改、也可能是旧版本写的），必须过一遍
- *     `normalizeUiPreferences` 补齐缺项，因此这里只负责 JSON 解析；
+ *   - 读出来的内容不可信（用户可改、也可能被写坏）：不是对象字面量就当没有，
+ *     由调用方退回内置默认；
  *   - **账号切换时必须清除**，否则共享浏览器上换个账号登录会先闪出上一个人的
  *     导航顺序（清除点与背景缓存一致：登录成功、退出登录、401 跳登录页）。
  */
 export const UI_PREFS_CACHE_KEY = "crawler-media.ui-prefs";
 
-/** 读取上次缓存的偏好；无缓存 / 已损坏 / localStorage 不可用时返回 null。
- *  返回值是"生的"，调用方须自行补齐默认值。 */
-export function readUiPrefsCache(): Partial<UiPreferences> | null {
+const DEFAULT_CACHED_UI_PREFS: UiPreferences = {
+  theme: "silver",
+  sidebar: { transparency: 0.49, brightness: -0.36, depth: 28 },
+  scrim: { blur: 13, dark: 0.69 },
+  nav: { order: [] },
+  home: { rows: [] },
+};
+
+/**
+ * 补齐偏好对象中缺失的子字段（防御空对象 `{}`、旧版本缓存或损坏属性）。
+ */
+export function normalizeUiPrefs(parsed: unknown): UiPreferences {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return DEFAULT_CACHED_UI_PREFS;
+  }
+  const p = parsed as Partial<UiPreferences>;
+  return {
+    theme: typeof p.theme === "string" ? p.theme : DEFAULT_CACHED_UI_PREFS.theme,
+    sidebar: {
+      transparency:
+        typeof p.sidebar?.transparency === "number"
+          ? p.sidebar.transparency
+          : DEFAULT_CACHED_UI_PREFS.sidebar.transparency,
+      brightness:
+        typeof p.sidebar?.brightness === "number"
+          ? p.sidebar.brightness
+          : DEFAULT_CACHED_UI_PREFS.sidebar.brightness,
+      depth:
+        typeof p.sidebar?.depth === "number"
+          ? p.sidebar.depth
+          : DEFAULT_CACHED_UI_PREFS.sidebar.depth,
+    },
+    scrim: {
+      blur:
+        typeof p.scrim?.blur === "number"
+          ? p.scrim.blur
+          : DEFAULT_CACHED_UI_PREFS.scrim.blur,
+      dark:
+        typeof p.scrim?.dark === "number"
+          ? p.scrim.dark
+          : DEFAULT_CACHED_UI_PREFS.scrim.dark,
+    },
+    nav: {
+      order: Array.isArray(p.nav?.order) ? p.nav.order : DEFAULT_CACHED_UI_PREFS.nav.order,
+    },
+    home: {
+      rows: Array.isArray(p.home?.rows) ? p.home.rows : DEFAULT_CACHED_UI_PREFS.home.rows,
+    },
+  };
+}
+
+/** 读取上次缓存的偏好；无缓存 / 已损坏 / localStorage 不可用时返回 null
+ *  （调用方退回内置默认）。 */
+export function readUiPrefsCache(): UiPreferences | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(UI_PREFS_CACHE_KEY);
@@ -32,7 +83,7 @@ export function readUiPrefsCache(): Partial<UiPreferences> | null {
     const parsed: unknown = JSON.parse(raw);
     // 只接受对象字面量：数组、字符串、null 都是被写坏的缓存，直接当没有
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    return parsed as Partial<UiPreferences>;
+    return normalizeUiPrefs(parsed);
   } catch {
     return null;
   }

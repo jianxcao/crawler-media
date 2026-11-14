@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -9,15 +8,24 @@ use domain::{
 };
 
 use super::types::*;
-use super::views::subscription_json;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
 pub(crate) async fn create_subscription(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
-    Json(body): Json<CreateSubscriptionInput>,
+    crate::http::strict_json::StrictJson(body): crate::http::strict_json::StrictJson<
+        CreateSubscriptionInput,
+    >,
 ) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        create_blocking(state, user_id, body)
+    })
+    .await
+}
+
+fn create_blocking(state: ApiState, user_id: UserId, body: CreateSubscriptionInput) -> Response {
     let (media_input, kind_hint) = match resolve_media_input(&state, &body) {
         Ok(result) => result,
         Err(response) => return response,
@@ -80,14 +88,9 @@ fn media_from_title_ref(
     state: &ApiState,
     raw: &str,
 ) -> Result<(MediaInput, Option<MediaKind>), Response> {
-    if raw.trim().is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "subscription.invalid",
-            "title_ref 为空",
-        ));
-    }
-    match crate::http::title_ref::resolve_title(state, raw) {
+    let title = crate::http::title_ref::parse_title_ref(raw)
+        .map_err(|reason| crate::http::title_ref::invalid_title_ref(&reason))?;
+    match crate::http::title_ref::resolve_title(state, &title) {
         Ok(Some(media)) => {
             let kind = media.kind;
             let identity = crate::http::title_ref::media_identity(&media);
@@ -177,6 +180,14 @@ fn persist_subscription(
                     &format!("同一媒体库中已有覆盖重叠的订阅（{other}），请合并或调整集数范围"),
                 );
             }
+            Err(crate::subscribe_create::CreateError::Store(store::StoreError::WriteBusy)) => {
+                return crate::http::store_wait::busy_response();
+            }
+            Err(crate::subscribe_create::CreateError::Admission(
+                crate::jobs_writer::JobsMutationError::Acquire(error),
+            )) => {
+                return crate::http::jobs::jobs_acquire_response(error);
+            }
             Err(error) => {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -191,14 +202,23 @@ fn persist_subscription(
     if auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, true);
     }
-    let facts = {
-        let store = state.store.lock();
-        store.load_subscribe_facts(subscribe.id).unwrap_or_default()
+    let snapshot = {
+        let store = state.store.as_ref();
+        let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();
+        super::snapshot::load_single_subscription_view(&store, &subscribe, &media, &facts)
     };
-    let body = {
-        let store = state.store.lock();
-        subscription_json(&store, state.catalog.as_ref(), &subscribe, &media, &facts)
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, "Subscribe timestamp read failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
     };
+    let body = super::views::render_subscription_snapshot(&snapshot, state.file_stats.as_ref());
     (StatusCode::CREATED, ok(body)).into_response()
 }
 
@@ -210,7 +230,7 @@ fn subscribe_from_input(
     coverage: Coverage,
     body: &CreateSubscriptionInput,
 ) -> Result<Subscribe, Response> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let filter_id = resolve_filter_id(&store, body)?;
     let filter_keep_old = store
         .get_filter(filter_id)

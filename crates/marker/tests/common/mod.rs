@@ -19,11 +19,27 @@ pub struct MockVerificationEngine {
 }
 
 impl FingerprintEngine for MockVerificationEngine {
+    fn compare_fingerprints(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        min: f32,
+        max: f32,
+    ) -> marker::PairFingerprintDecision {
+        let candidates = self.find_common_segments(first, second, min, max);
+        if candidates.is_empty() {
+            marker::PairFingerprintDecision::NoMatch
+        } else {
+            marker::PairFingerprintDecision::Candidates(candidates)
+        }
+    }
+
     fn extract_at(
         &self,
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<Vec<u32>, String> {
         Ok(Vec::new())
     }
@@ -120,6 +136,7 @@ pub fn make_target_evidence(
                 ffmpeg_maxrss_kb: None,
                 ffmpeg_stderr_bytes: None,
                 ffmpeg_stderr_tail: None,
+                ..Default::default()
             },
         },
         duration_ms: Some(1_200_000),

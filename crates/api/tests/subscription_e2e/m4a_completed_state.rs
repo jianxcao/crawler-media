@@ -12,7 +12,6 @@ const E02: &str = "The.Long.Watch.S01E02.1080p.WEB-DL.x264-GRP";
 fn state_of(h: &Harness, id: domain::SubscribeId) -> String {
     h.state
         .store()
-        .lock()
         .get_subscribe(id)
         .unwrap()
         .unwrap()

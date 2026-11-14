@@ -243,10 +243,15 @@ impl GatedCatalog {
     fn search(&self) -> Result<Vec<media::CatalogHit>, String> {
         self.started.lock().unwrap().push(self.name);
         let (lock, cv) = &*self.gate;
-        let mut open = lock.lock().unwrap();
-        while !*open {
-            open = cv.wait(open).unwrap();
-        }
+        let released = *cv
+            .wait_timeout_while(
+                lock.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the catalog search gate");
         Ok(Vec::new())
     }
 }
@@ -281,8 +286,8 @@ struct OpenGate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
 
 impl Drop for OpenGate {
     fn drop(&mut self) {
-        *self.0 .0.lock().unwrap() = true;
-        self.0 .1.notify_all();
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
     }
 }
 
@@ -294,16 +299,17 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
     let started = Arc::new(std::sync::Mutex::new(Vec::new()));
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let _open = OpenGate(gate.clone());
-    let sources: Vec<Arc<dyn api::catalog::Catalog>> = ["tmdb", "douban", "tvdb", "bangumi", "anilist"]
-        .into_iter()
-        .map(|name| {
-            Arc::new(GatedCatalog {
-                name,
-                started: started.clone(),
-                gate: gate.clone(),
-            }) as Arc<dyn api::catalog::Catalog>
-        })
-        .collect();
+    let sources: Vec<Arc<dyn api::catalog::Catalog>> =
+        ["tmdb", "douban", "tvdb", "bangumi", "anilist"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(GatedCatalog {
+                    name,
+                    started: started.clone(),
+                    gate: gate.clone(),
+                }) as Arc<dyn api::catalog::Catalog>
+            })
+            .collect();
     let fanout = api::catalog::FanoutCatalog::new(sources);
     let app = router(
         state(
@@ -335,11 +341,12 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    // 先取快照再断言：在断言消息里再次 lock 会与第一个 guard 自锁。
+    let started_now = started.lock().unwrap().clone();
     assert_eq!(
-        started.lock().unwrap().len(),
+        started_now.len(),
         4,
-        "窗口内只应开始 4 个源: {:?}",
-        started.lock().unwrap()
+        "窗口内只应开始 4 个源: {started_now:?}"
     );
     // 放行：已完成 4 个之后，剩下 1 个必须补位；旧实现此时已把它判成过载。
     *gate.0.lock().unwrap() = true;
@@ -357,11 +364,11 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
         failed.is_empty(),
         "同一请求内的数据源不得互相饿死: {failed:?}"
     );
+    let started_all = started.lock().unwrap().clone();
     assert_eq!(
-        started.lock().unwrap().len(),
+        started_all.len(),
         5,
-        "5 个源都必须真的搜过: {:?}",
-        started.lock().unwrap()
+        "5 个源都必须真的搜过: {started_all:?}"
     );
 }
 
@@ -595,7 +602,7 @@ async fn title_search_snapshot_captures_results() {
 async fn assert_transient_search_not_saved(app: &axum::Router) {
     // 未明确请求保存时，空搜索结果不进入历史。
     let searched = send(
-        &app,
+        app,
         "GET",
         "/api/v1/search/torrents?keyword=transient",
         Some("management-secret"),
@@ -606,7 +613,7 @@ async fn assert_transient_search_not_saved(app: &axum::Router) {
 
     let empty_history = json_body(
         send(
-            &app,
+            app,
             "GET",
             "/api/v1/search/history",
             Some("management-secret"),
@@ -626,7 +633,7 @@ async fn assert_transient_search_not_saved(app: &axum::Router) {
 async fn save_empty_search(app: &axum::Router) -> String {
     // 无启用站点 → 空结果，但显式开启历史后仍记录历史与快照。
     let searched = send(
-        &app,
+        app,
         "GET",
         "/api/v1/search/torrents?keyword=matrix&save_history=true",
         Some("management-secret"),
@@ -637,7 +644,7 @@ async fn save_empty_search(app: &axum::Router) -> String {
 
     let history = json_body(
         send(
-            &app,
+            app,
             "GET",
             "/api/v1/search/history",
             Some("management-secret"),
@@ -658,7 +665,7 @@ async fn assert_empty_snapshot(app: &axum::Router, id: &str) {
     // 快照回放。
     let snapshot = json_body(
         send(
-            &app,
+            app,
             "GET",
             &format!("/api/v1/search/history/{id}?vertical=torrents"),
             Some("management-secret"),
@@ -675,7 +682,7 @@ async fn assert_empty_snapshot(app: &axum::Router, id: &str) {
 async fn assert_history_deletion(app: &axum::Router, id: &str) {
     // 删除单条：快照 404 + 历史消失。
     let deleted = send(
-        &app,
+        app,
         "DELETE",
         &format!("/api/v1/search/history/{id}"),
         Some("management-secret"),
@@ -684,7 +691,7 @@ async fn assert_history_deletion(app: &axum::Router, id: &str) {
     .await;
     assert_eq!(deleted.status(), StatusCode::OK);
     let gone = send(
-        &app,
+        app,
         "GET",
         &format!("/api/v1/search/history/{id}?vertical=torrents"),
         Some("management-secret"),
@@ -695,7 +702,7 @@ async fn assert_history_deletion(app: &axum::Router, id: &str) {
 
     // 清空。
     let cleared = send(
-        &app,
+        app,
         "DELETE",
         "/api/v1/search/history",
         Some("management-secret"),
@@ -705,7 +712,7 @@ async fn assert_history_deletion(app: &axum::Router, id: &str) {
     assert_eq!(cleared.status(), StatusCode::OK);
     let history = json_body(
         send(
-            &app,
+            app,
             "GET",
             "/api/v1/search/history",
             Some("management-secret"),

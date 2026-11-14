@@ -7,8 +7,8 @@ use axum::http::StatusCode;
 use crate::http::err;
 use crate::management::ApiState;
 
-use super::outcome::{ScanRunError, failed_response, presence_error};
 use super::super::scope::ScanScope;
+use super::outcome::{ScanRunError, failed_response, presence_error};
 
 /// 捕获 scope 并把它绑定到持久化 signature（P2-4）。
 pub(super) fn capture_and_verify_scope(
@@ -39,7 +39,7 @@ fn verify_captured_scope(
 ) -> Result<(), ScanRunError> {
     let Some(op_id) = op_id else { return Ok(()) };
     let persisted = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         store.scan_operation(op_id)
     };
     match persisted {
@@ -67,7 +67,11 @@ fn verify_captured_scope(
         Err(error) => {
             tracing::error!(%error, %op_id, "读取扫描 operation 失败，拒绝在无法对账的情况下发布");
             Err(failed_response(
-                err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                ),
                 format!("scan operation unreadable: {error}"),
             ))
         }

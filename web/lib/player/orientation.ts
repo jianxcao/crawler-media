@@ -13,7 +13,7 @@
  * - `fullscreen`：桌面，方向锁不可用，但全屏拿到了，画面就是横的，等于达成；
  * - `unsupported`：连全屏都进不去（典型是 iPhone Safari，元素级全屏 API
  *   不存在），此时退回让 `<video>` 走系统原生全屏——iOS 上本来就不硬撑
- *   自定义 UI（见 docs/design/web-player.md §6.4）。
+ *   自定义 UI。
  */
 
 export type LandscapeOutcome = "locked" | "fullscreen" | "unsupported";

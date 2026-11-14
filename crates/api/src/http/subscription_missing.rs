@@ -15,6 +15,14 @@ pub(crate) async fn run_missing_search(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
+    let blocking = state.clone();
+    super::subscriptions::guarded_blocking(&blocking, move || {
+        missing_search_blocking(state, user_id, id)
+    })
+    .await
+}
+
+fn missing_search_blocking(state: ApiState, user_id: domain::UserId, id: String) -> Response {
     let (initial, _) = match super::subscriptions::resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,
@@ -57,20 +65,23 @@ fn queue_missing_search(
             "订阅当前没有可搜索的缺失资源",
         );
     }
-    if let Err(error) = crate::jobs_api::seed_subscribe_search(
-        &state.jobs.lock(),
-        &subscribe.id.to_string(),
-        Some(&media.title),
-    ) {
+    let queue = match state.jobs.acquire() {
+        Ok(queue) => queue,
+        Err(error) => return crate::http::jobs::jobs_acquire_response(error),
+    };
+    if let Err(error) =
+        crate::jobs_api::seed_subscribe_search(&queue, subscribe.id, Some(&media.title))
+    {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "job.seed_failed",
             &error.to_string(),
         );
     }
+    drop(queue);
     let reset_count = match state
         .store
-        .lock()
+        .as_ref()
         .reset_wanted_search_cooldowns(subscribe.id, &missing)
     {
         Ok(count) => count,
@@ -97,7 +108,7 @@ fn missing_units(
     media: &domain::Media,
 ) -> Result<Vec<Unit>, crate::store::StoreError> {
     let cap = crate::air_gate::aired_cap(state, subscribe, media);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let facts = store.load_subscribe_facts(subscribe.id)?;
     let pending = store.load_pending(subscribe.id)?;
     let history = store.load_wanted_history(subscribe.id)?;

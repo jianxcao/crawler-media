@@ -1,3 +1,6 @@
+mod subject;
+pub use subject::DoubanSubject;
+
 use std::path::Path;
 
 use domain::{Media, MediaId, MediaKind};
@@ -23,6 +26,10 @@ impl<H: CatalogGet> Douban<H> {
             http,
             cache: CatalogCache::open_source(catalog_db, now, "douban")?,
         })
+    }
+
+    pub fn with_cache(http: H, cache: CatalogCache) -> Self {
+        Self { http, cache }
     }
 
     pub fn set_now(&self, now: i64) {
@@ -418,12 +425,10 @@ fn parse_subject_collection(kind: MediaKind, body: &str) -> Result<Vec<CatalogHi
 }
 
 fn matches_kind(kind: MediaKind, raw: Option<&str>) -> bool {
-    match (kind, raw) {
-        (MediaKind::Movie, Some("tv")) => false,
-        (MediaKind::Tv, Some("movie")) => false,
-        (MediaKind::Tv, None) => false,
-        _ => true,
-    }
+    !matches!(
+        (kind, raw),
+        (MediaKind::Movie, Some("tv")) | (MediaKind::Tv, Some("movie") | None)
+    )
 }
 
 fn to_hit(

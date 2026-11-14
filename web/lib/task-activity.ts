@@ -11,7 +11,7 @@
  *
  * 因此把分组与归类下沉到这里：谁要计数就调 `useTaskActivity()`，谁要渲染就
  * 拿同一份分组结果去画。本模块只做归类，不碰各领域的事实源——下载状态仍来自
- * 下载器快照，Job 状态仍来自 job 表（见 docs/design/activity.md）。
+ * 下载器快照，Job 状态仍来自 job 表。
  */
 
 import { useMemo } from "react";
@@ -36,7 +36,6 @@ import {
 import { useJobs } from "@/lib/jobs";
 
 export {
-  contentMissingLabel,
   downloadGroupNeedsAttention,
   downloadTaskNeedsAttention,
   groupDownloadTasks,

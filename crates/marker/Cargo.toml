@@ -9,7 +9,9 @@ rusty-chromaprint = "0.3"
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tracing.workspace = true
+ureq = "3"
 
 [dev-dependencies]
 tempfile.workspace = true

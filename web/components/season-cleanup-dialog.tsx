@@ -1,34 +1,12 @@
 "use client";
 
-/**
- * 减季后的清理追问弹窗（管理员）。
- *
- * 「调整订阅」里取消勾选某一季，保存本身不动任何内容——这是减季一直以来的语义，
- * 不能改。但用户此前想让那一季从机器上消失，得自己去下载器找到那几个种子、再去
- * 媒体库逐个删，两处都不好找。于是在减季保存成功之后追问一次，把两件事收成这里
- * 的两个显式勾选。
- *
- * 与「取消订阅」弹窗（subscription-cancel-dialog.tsx）共用同一套视觉与后果说明，
- * 三处有意不同：
- *
- * 1. **可逆性**：减季本身可逆（重新勾选会恢复追踪），删种子不可逆——种子那条必须
- *    写明"重新勾选需要重新下载"，不能照抄取消订阅的文案；
- * 2. **跨季种子**：整季包/全剧包只要还覆盖着保留的季就不会删，这件事要主动说出来
- *    ——否则用户以为"删了 N 个任务"就干净了，回头发现还在做种；
- * 3. **走开的按钮叫「保留内容」**：此刻季已经减完了，叫「取消」会被读成"撤销减季"，
- *    而那正是用户此刻最可能的误解。
- *
- * 数量由后端 removal-preview（带 seasons 参数）给出，调用方保存后先拉好再打开本
- * 弹窗；两条清单都为空时根本不该打开——没数字的勾选框等于让用户盲签。
- */
+/** 减季保存后的显式清理选择。当前预览没有按季计数，不显示全作品总数。 */
 
 import { useState } from "react";
 
 import { Modal } from "@/components/modal";
-import { formatBytes } from "@/lib/format";
 import type {
   SubscriptionRemovalOptions,
-  SubscriptionRemovalPreview,
 } from "@/lib/api/subscriptions";
 
 const CANCEL_BTN_CLS =
@@ -45,7 +23,6 @@ export function SeasonCleanupDialog({
   open,
   title,
   seasons,
-  preview,
   onClose,
   onConfirm,
 }: {
@@ -54,8 +31,6 @@ export function SeasonCleanupDialog({
   title: string;
   /** 本次移出订阅范围的季号 */
   seasons: number[];
-  /** 调用方保存成功后已拉好的预览（两条清单都为空时不应打开本弹窗） */
-  preview: SubscriptionRemovalPreview;
   /** 用户选择「保留内容」或关窗：什么都不清理 */
   onClose: () => void;
   /** 用户确认清理：带上两个开关的最终取值 */
@@ -77,9 +52,6 @@ export function SeasonCleanupDialog({
   const label = seasonText(seasons);
   // 多季一起减时「这一季」读不通；范围本身已由标题和每个开关点明
   const them = seasons.length > 1 ? "这几季" : "这一季";
-  const torrentCount = preview.torrent_count;
-  const fileCount = preview.library_file_count;
-  const retained = preview.retained_cross_season;
 
   return (
     <Modal open={open} onClose={busy ? () => {} : onClose} label={`清理${label}的内容`}>
@@ -93,54 +65,23 @@ export function SeasonCleanupDialog({
         <div className="mt-4 space-y-3">
           <CleanupToggle
             checked={deleteTorrents}
-            disabled={torrentCount === 0}
+            disabled={busy}
             onChange={setDeleteTorrents}
-            label={
-              torrentCount === 0
-                ? `同时删除${label}的下载任务（没有可单独删除的任务）`
-                : `同时删除${label}的下载任务（${torrentCount} 个）`
-            }
-            description={
-              torrentCount === 0
-                ? undefined
-                : `从下载器移除任务，并删除下载目录里的文件，不可恢复。以后重新勾选${them}需要重新下载。`
-            }
-            warning={
-              deleteTorrents && preview.hit_and_run_count > 0
-                ? `其中 ${preview.hit_and_run_count} 个种子仍在 H&R 考核或考核状态未知，删除后可能影响站点考核。`
-                : undefined
-            }
+            label={`同时删除季号匹配${label}的下载任务`}
+            description={`从下载器移除匹配任务并删除下载目录里的文件，不可恢复。跨季种子也可能被选中；以后重新勾选${them}可能需要重新下载。`}
           />
           <CleanupToggle
             checked={deleteLibraryFiles}
-            disabled={fileCount === 0}
+            disabled={busy}
             onChange={setDeleteLibraryFiles}
-            label={
-              fileCount === 0
-                ? `同时删除${label}在媒体库里的资源（媒体库中没有）`
-                : `同时删除${label}在媒体库里的资源（${fileCount} 个文件 · ${formatBytes(preview.library_bytes)}）`
-            }
-            description={
-              fileCount === 0
-                ? undefined
-                : `文件将直接从磁盘物理删除（包含 .strm 指针），无法从回收站恢复。`
-            }
+            label={`同时删除包含${label}内容的媒体库文件`}
+            description="文件将直接从磁盘物理删除（包含 .strm 指针），无法从回收站恢复。跨季共用的整个文件也会删除，其中其他季的内容会一并丢失。"
           />
         </div>
 
-        {/* 被保护的跨季种子：信息而非警告——系统正确地留下了别的季还要用的东西，
-            用户不需要处理它（全站口径：只有"要你处理"才配用警告色） */}
-        {retained.length > 0 && (
-          <p className="mt-3 rounded-lg border border-[var(--info)]/25 bg-[var(--info)]/[0.08] px-3 py-2 text-xs leading-5 text-[#bcd4ff]">
-            另有 {retained.length} 个跨季种子
-            {retained[0].seasons.length > 0 && `（如 ${seasonText(retained[0].seasons)}合集）`}
-            仍被保留的季使用，不会删除。
-          </p>
-        )}
-
         {(deleteTorrents || deleteLibraryFiles) && (
           <p className="mt-4 rounded-lg bg-white/[0.04] px-3 py-2.5 text-xs leading-5 text-[var(--text-muted)]">
-            清理在后台进行——可以在「任务中心」查看进度和结果。
+            确认后立即执行所选清理，请等待处理结果。
           </p>
         )}
 
@@ -169,14 +110,12 @@ function CleanupToggle({
   onChange,
   label,
   description,
-  warning,
 }: {
   checked: boolean;
   disabled: boolean;
   onChange: (value: boolean) => void;
   label: string;
   description?: string;
-  warning?: string;
 }) {
   return (
     <label
@@ -194,9 +133,7 @@ function CleanupToggle({
         {description && (
           <span className="block text-xs leading-5 text-[var(--text-muted)]">{description}</span>
         )}
-        {warning && (
-          <span className="mt-1 block text-xs leading-5 text-[var(--danger)]">{warning}</span>
-        )}
+
       </span>
     </label>
   );

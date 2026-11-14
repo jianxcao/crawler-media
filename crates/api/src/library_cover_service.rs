@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod refresh;
+
 use cover_generator::CoverOptions;
 
 use crate::ApiState;
@@ -16,16 +18,16 @@ use crate::ApiState;
 ///
 /// `MARKER_CHECKED` records that an automatic cover was published. `MARKER_RETRY`
 /// marks an attempt worth retrying, and is the only value a scan clears (see
-/// `clear_library_cover_checked`); clearing `checked-v2` on every scan would
+/// `clear_library_cover_checked`); clearing `checked` on every scan would
 /// re-render covers needlessly.
-pub const MARKER_CHECKED: &str = "checked-v2";
-pub const MARKER_MANUAL: &str = "manual-v2";
-pub const MARKER_RETRY: &str = "auto-v2";
+pub const MARKER_CHECKED: &str = "checked";
+pub const MARKER_MANUAL: &str = "manual";
+pub const MARKER_RETRY: &str = "auto";
 
 /// 锁内取到的 owned 事实快照；渲染/写盘全部在锁外进行。
 pub struct CoverSnapshot {
     pub library: crate::store::Library,
-    pub rows: Vec<domain::LedgerRow>,
+    pub files: Vec<domain::LibraryFile>,
     pub revision: i64,
     pub marker: Option<String>,
     pub target_dir: PathBuf,
@@ -35,7 +37,7 @@ pub trait CoverRenderer: Send + Sync {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String>;
 }
@@ -47,7 +49,7 @@ impl CoverRenderer for LocalCoverRenderer {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         crate::http::library::render_cover_jpeg(library, rows, options)
@@ -60,12 +62,16 @@ pub struct GeneratedCover {
 }
 
 pub struct LibraryCoverService {
+    refresh: refresh::RefreshQueue,
     renderer: Arc<dyn CoverRenderer>,
 }
 
 impl LibraryCoverService {
     pub fn new(renderer: Arc<dyn CoverRenderer>) -> Self {
-        Self { renderer }
+        Self {
+            renderer,
+            refresh: refresh::RefreshQueue::default(),
+        }
     }
 
     /// 生产默认服务（真实渲染器）。
@@ -73,66 +79,55 @@ impl LibraryCoverService {
         Self::new(Arc::new(LocalCoverRenderer))
     }
 
-    /// 自动封面：先取自身已存在的版本；没有才渲染并 CAS 发布。
     pub async fn ensure_cover(
         &self,
         state: &ApiState,
         id: &str,
     ) -> Result<Option<PathBuf>, String> {
-        // Registry → Store 锁序由 acquire_library_work 保证；lease 活到真实工作结束。
-        let lease = state.acquire_library_work(id)?;
-        let snapshot = snapshot(state, id)?;
-        // 显式删除（none/空串）后绝不自动回填。
+        let (lease, snapshot) = prepare(state, id).await?;
         if matches!(
             snapshot.library.cover_path.as_deref(),
             Some("none") | Some("")
         ) {
             return Ok(None);
         }
-        if let Some(existing) = existing_cover(&snapshot) {
-            if !needs_legacy_upgrade(&snapshot, &existing) {
-                return Ok(Some(existing));
-            }
-            // 兼容路径升级（F08）：同样使用不可变的新版本文件进行渲染和 CAS 发布！
-            // 只有当 CAS 发布成功后，新版本文件才生效；如果发布失败（例如并发修改或 DB 写入失败），
-            // 原有的旧 legacy 文件（包括内容）绝对不被就地覆盖破坏。未成功引用的新文件会被清除。
-            let options = crate::http::library::default_cover_options(&snapshot.library);
-            let rendered = render_off_lock(self.renderer.clone(), &snapshot, options).await?;
-            let Some(bytes) = rendered else {
-                mark(state, &snapshot.library.id, MARKER_RETRY);
-                return Ok(Some(existing));
-            };
-            let target = publish(state, &snapshot, &bytes, MARKER_CHECKED, &lease).await?;
-            mark(state, &snapshot.library.id, MARKER_CHECKED);
-            return Ok(Some(target));
+        if let Some(path) = existing_off_executor(state, snapshot.clone(), lease.clone()).await? {
+            return Ok(Some(path));
         }
-        if snapshot.marker.as_deref() == Some(MARKER_RETRY) {
+        if snapshot.marker.as_deref() == Some(MARKER_RETRY)
+            || state.require_writable().is_err()
+            || state.require_write_admitted().is_err()
+        {
             return Ok(None);
         }
         let options = crate::http::library::default_cover_options(&snapshot.library);
-        let rendered = render_off_lock(self.renderer.clone(), &snapshot, options).await?;
-        let Some(bytes) = rendered else {
-            mark(state, &snapshot.library.id, MARKER_RETRY);
+        let bytes = render_off_lock(
+            state,
+            self.renderer.clone(),
+            snapshot.clone(),
+            options,
+            lease.clone(),
+        )
+        .await?;
+        let Some(bytes) = bytes else {
+            mark_retry(state, snapshot).await;
             return Ok(None);
         };
-        let target = publish(state, &snapshot, &bytes, MARKER_CHECKED, &lease).await?;
-        mark(state, &snapshot.library.id, MARKER_CHECKED);
-        Ok(Some(target))
+        publish(state, snapshot, bytes, MARKER_CHECKED, lease)
+            .await
+            .map(Some)
     }
 
-    /// 手动上传：新版本文件 + CAS 发布，标记 manual。
     pub async fn replace_cover(
         &self,
         state: &ApiState,
         id: &str,
         bytes: Vec<u8>,
     ) -> Result<PathBuf, String> {
-        let lease = state.acquire_library_work(id)?;
-        let snapshot = snapshot(state, id)?;
-        publish(state, &snapshot, &bytes, MARKER_MANUAL, &lease).await
+        let (lease, snapshot) = prepare(state, id).await?;
+        publish(state, snapshot, bytes, MARKER_MANUAL, lease).await
     }
 
-    /// 手动/预览生成：`preview_only` 不落盘、不动 DB。
     pub async fn generate(
         &self,
         state: &ApiState,
@@ -140,70 +135,122 @@ impl LibraryCoverService {
         options: CoverOptions,
         preview_only: bool,
     ) -> Result<GeneratedCover, String> {
-        let lease = state.acquire_library_work(id)?;
-        let snapshot = snapshot(state, id)?;
-        let rendered = render_off_lock(self.renderer.clone(), &snapshot, options).await?;
-        let Some(bytes) = rendered else {
-            return Err("cover.empty: 媒体库内无可用海报图片".into());
-        };
+        let (lease, snapshot) = prepare(state, id).await?;
+        let bytes = render_off_lock(
+            state,
+            self.renderer.clone(),
+            snapshot.clone(),
+            options,
+            lease.clone(),
+        )
+        .await?
+        .ok_or_else(|| "cover.empty: 媒体库内无可用海报图片".to_string())?;
         if preview_only {
             return Ok(GeneratedCover {
                 bytes,
                 published_path: None,
             });
         }
-        let target = publish(state, &snapshot, &bytes, MARKER_MANUAL, &lease).await?;
+        let target = publish(state, snapshot, bytes.clone(), MARKER_MANUAL, lease).await?;
         Ok(GeneratedCover {
             bytes,
             published_path: Some(target),
         })
     }
 
-    /// 清空封面：CAS 到 `none` 并推进 revision，晚到的自动渲染因此 CAS 失败。
     pub async fn remove_cover(&self, state: &ApiState, id: &str) -> Result<(), String> {
-        let lease = state.acquire_library_work(id)?;
-        let snapshot = snapshot(state, id)?;
-        let marker = snapshot
-            .marker
-            .clone()
-            .unwrap_or_else(|| MARKER_CHECKED.into());
-        let previous = existing_cover(&snapshot);
-        let published = lease.publish(|| {
-            let store = state.store.lock();
-            store
-                .compare_set_library_cover(
-                    &snapshot.library.id,
-                    snapshot.revision,
-                    Some("none"),
-                    &marker,
-                )
-                .map_err(|error| error.to_string())
-        })?;
-        if !published {
-            return Err("cover.stale: 封面已被更新，请重试".into());
-        }
-        // 只清理我们发布的版本文件；legacy 固定路径保持只读、不 unlink。
-        if let Some(path) = previous {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&format!("library-{}-", snapshot.library.id)))
-            {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-        Ok(())
+        let (lease, snapshot) = prepare(state, id).await?;
+        let worker = state.clone();
+        state
+            .fs_work
+            .reserve(WORK_WAIT)
+            .await
+            .map_err(work_error)?
+            .run_to_completion(move || {
+                let previous = existing_cover(&snapshot);
+                let marker = snapshot.marker.as_deref().unwrap_or(MARKER_CHECKED);
+                let published = cas_publish(&worker, &snapshot, Some("none"), marker, &lease)?;
+                if !published {
+                    return Err("cover.stale: 封面已被更新，请重试".into());
+                }
+                if let Some(path) = previous
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with(&format!("library-{}-", snapshot.library.id))
+                        })
+                {
+                    discard_unreferenced(&path);
+                }
+                Ok(())
+            })
+            .await
+            .map_err(work_error)?
     }
+}
+
+const WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+type CoverLease = Arc<crate::library_lifecycle::LibraryWorkLease>;
+
+fn work_error(error: crate::blocking_budget::BlockingError) -> String {
+    match error {
+        crate::blocking_budget::BlockingError::Busy
+        | crate::blocking_budget::BlockingError::Timeout => "runtime.busy".into(),
+        error => format!("cover.worker: {error}"),
+    }
+}
+
+async fn prepare(state: &ApiState, id: &str) -> Result<(CoverLease, Arc<CoverSnapshot>), String> {
+    let worker = state.clone();
+    let id = id.to_string();
+    state
+        .http_work
+        .reserve(WORK_WAIT)
+        .await
+        .map_err(work_error)?
+        .run_to_completion(move || {
+            let lease = worker
+                .library_work()
+                .acquire_bounded(&worker.store, &id)
+                .map_err(|error| format!("cover.unavailable: {error}"))?;
+            let store = worker.store.clone();
+            Ok((Arc::new(lease), Arc::new(snapshot_from_store(&store, &id)?)))
+        })
+        .await
+        .map_err(work_error)?
+}
+
+async fn existing_off_executor(
+    state: &ApiState,
+    snapshot: Arc<CoverSnapshot>,
+    lease: CoverLease,
+) -> Result<Option<PathBuf>, String> {
+    state
+        .fs_work
+        .reserve(WORK_WAIT)
+        .await
+        .map_err(work_error)?
+        .run_to_completion(move || {
+            let _lease = lease;
+            existing_cover(&snapshot)
+        })
+        .await
+        .map_err(work_error)
 }
 
 /// 锁内只取 owned DB 事实。
 pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
-    let store = state.store.lock();
+    let store = state.store.clone();
+    snapshot_from_store(&store, id)
+}
+
+fn snapshot_from_store(store: &crate::Store, id: &str) -> Result<CoverSnapshot, String> {
     let library = store
         .get_library(id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "library.missing: 媒体库不存在".to_string())?;
-    let rows = crate::http::library::rows_in_library(&store, &library);
+    let files = crate::http::library::files_in_library(&store, &library);
     let marker = store
         .get_setting(&format!("library_cover_checked.{}", library.id))
         .ok()
@@ -213,7 +260,7 @@ pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
         marker,
         target_dir: store.library_covers_dir(),
         library,
-        rows,
+        files,
     })
 }
 
@@ -229,121 +276,119 @@ pub fn existing_cover(snapshot: &CoverSnapshot) -> Option<PathBuf> {
         }
         None => {}
     }
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    legacy.is_file().then_some(legacy)
+    None
 }
 
-/// 旧 release 把单张 fanart 复制成固定路径封面：只有这种形态才重渲染升级。
-fn needs_legacy_upgrade(snapshot: &CoverSnapshot, existing: &Path) -> bool {
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    existing == legacy
-        && snapshot.marker.as_deref() != Some(MARKER_CHECKED)
-        && !snapshot.rows.is_empty()
-        && crate::http::library::is_legacy_fanart_copy(&snapshot.rows, existing)
-}
-
-/// `lease.publish` 内只做 CAS；命中返回 true。
+/// The publication gate contains bounded SQL only. Filesystem writes run before it.
 fn cas_publish(
     state: &ApiState,
     snapshot: &CoverSnapshot,
-    target: &Path,
+    target: Option<&str>,
     marker: &str,
     lease: &crate::library_lifecycle::LibraryWorkLease,
 ) -> Result<bool, String> {
     lease.publish(|| {
-        let store = state.store.lock();
-        store
-            .compare_set_library_cover(
-                &snapshot.library.id,
-                snapshot.revision,
-                Some(&target.display().to_string()),
-                marker,
-            )
-            .map_err(|error| error.to_string())
+        crate::http::store_wait::with_foreground_store(state, |store| {
+            state
+                .require_writable()
+                .map_err(|_| "instance.read_only".to_string())?;
+            state
+                .require_write_admitted()
+                .map_err(|_| "runtime.busy".to_string())?;
+            store
+                .compare_set_library_cover(&snapshot.library.id, snapshot.revision, target, marker)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|response| format!("cover write rejected ({})", response.status()))?
     })
 }
 
 async fn render_off_lock(
+    state: &ApiState,
     renderer: Arc<dyn CoverRenderer>,
-    snapshot: &CoverSnapshot,
+    snapshot: Arc<CoverSnapshot>,
     options: CoverOptions,
+    lease: CoverLease,
 ) -> Result<Option<Vec<u8>>, String> {
-    let library = snapshot.library.clone();
-    let rows = snapshot.rows.clone();
-    tokio::task::spawn_blocking(move || renderer.render(&library, &rows, &options))
+    state
+        .fs_work
+        .reserve(WORK_WAIT)
         .await
-        .map_err(|error| format!("cover.render: {error}"))?
+        .map_err(work_error)?
+        .run_to_completion(move || {
+            let _lease = lease;
+            renderer.render(&snapshot.library, &snapshot.files, &options)
+        })
+        .await
+        .map_err(work_error)?
 }
 
-/// 写新的不可变版本文件，然后在 `lease.publish` 内做 CAS；未命中/失败即删除新版本。
+/// The worker retains the Library lease until bytes, CAS and failed-CAS cleanup
+/// finish, even when the request future is cancelled while it is running.
 async fn publish(
     state: &ApiState,
-    snapshot: &CoverSnapshot,
-    bytes: &[u8],
-    marker: &str,
-    lease: &crate::library_lifecycle::LibraryWorkLease,
+    snapshot: Arc<CoverSnapshot>,
+    bytes: Vec<u8>,
+    marker: &'static str,
+    lease: CoverLease,
 ) -> Result<PathBuf, String> {
-    let target = snapshot.target_dir.join(format!(
-        "library-{}-{}.jpg",
-        snapshot.library.id,
-        uuid::Uuid::new_v4()
-    ));
-    let write_target = target.clone();
-    let write_bytes = bytes.to_vec();
-    let dir = snapshot.target_dir.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&dir).map_err(|error| format!("cover.write: {error}"))?;
-        std::fs::write(&write_target, write_bytes).map_err(|error| format!("cover.write: {error}"))
-    })
-    .await
-    .map_err(|error| format!("cover.write: {error}"))??;
-
-    let published = cas_publish(state, snapshot, &target, marker, lease);
-    match published {
-        Ok(true) => {
-            tracing::info!(
-                library_id = %snapshot.library.id,
-                cover_path = %target.display(),
-                revision = snapshot.revision + 1,
-                "published library cover revision"
-            );
-            Ok(target)
+    let worker = state.clone();
+    state.fs_work.reserve(WORK_WAIT).await.map_err(work_error)?.run_to_completion(move || {
+        let target = snapshot.target_dir.join(format!("library-{}-{}.jpg", snapshot.library.id, uuid::Uuid::new_v4()));
+        worker.require_writable().map_err(|_| "instance.read_only".to_string())?;
+        worker.require_write_admitted().map_err(|_| "runtime.busy".to_string())?;
+        std::fs::create_dir_all(&snapshot.target_dir).map_err(|error| format!("cover.write: {error}"))?;
+        std::fs::write(&target, bytes).map_err(|error| format!("cover.write: {error}"))?;
+        match cas_publish(&worker, &snapshot, Some(&target.display().to_string()), marker, &lease) {
+            Ok(true) => {
+                tracing::info!(library_id=%snapshot.library.id, cover_path=%target.display(), revision=snapshot.revision+1,
+                    "published library cover revision");
+                Ok(target)
+            }
+            Ok(false) => {
+                discard_unreferenced(&target);
+                Err("cover.stale: 封面已被更新的修改覆盖，已丢弃本次结果".into())
+            }
+            Err(error) => { discard_unreferenced(&target); Err(error) }
         }
-        Ok(false) => {
-            discard_unreferenced(&target);
-            Err("cover.stale: 封面已被更新的修改覆盖，已丢弃本次结果".into())
-        }
-        Err(error) => {
-            discard_unreferenced(&target);
-            Err(error)
-        }
-    }
+    }).await.map_err(work_error)?
 }
 
 fn discard_unreferenced(target: &Path) {
-    if let Err(error) = std::fs::remove_file(target) {
-        tracing::warn!(%error, path = %target.display(), "failed to discard unreferenced cover version");
+    if let Err(error) = std::fs::remove_file(target)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path=%target.display(), "failed to discard unreferenced cover version");
     }
 }
 
-fn mark(state: &ApiState, library_id: &str, marker: &str) {
-    let store = state.store.lock();
-    if let Err(error) = store.put_setting(&format!("library_cover_checked.{library_id}"), marker) {
-        tracing::warn!(%error, library_id, "failed to mark library cover state");
+async fn mark_retry(state: &ApiState, snapshot: Arc<CoverSnapshot>) {
+    let id = snapshot.library.id.clone();
+    let logged_id = id.clone();
+    let result = crate::http::store_wait::store_write(state, move |store| {
+        if store.library_cover_revision(&id)? == Some(snapshot.revision)
+            && store.library_lifecycle_state(&id)? == "ready"
+        {
+            store.put_setting(&format!("library_cover_checked.{id}"), MARKER_RETRY)?;
+        }
+        Ok::<_, crate::store::StoreError>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, library_id=%logged_id, "failed to mark library cover retry")
+        }
+        Err(response) => {
+            tracing::warn!(status=%response.status(), library_id=%logged_id, "library cover retry marker was not admitted")
+        }
     }
 }
 
 /// Remove every on-disk cover artifact owned by `library_id`.
 ///
-/// Library removal is the one place where the "legacy `library-{id}.jpg` is
-/// read-only and never unlinked" rule is intentionally lifted: the Library row is
-/// gone, so nothing can read that file again. Returns the number of files removed.
+/// Returns the number of versioned cover files removed.
 pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize {
-    let legacy = format!("library-{library_id}.jpg");
     let versioned = format!("library-{library_id}-");
     let entries = match std::fs::read_dir(covers_dir) {
         Ok(entries) => entries,
@@ -357,7 +402,7 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name != legacy && !name.starts_with(&versioned) {
+        if !name.starts_with(&versioned) {
             continue;
         }
         match std::fs::remove_file(entry.path()) {
@@ -380,8 +425,11 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
 /// bytes behind forever; every startup retries, so the cleanup is idempotent.
 pub fn purge_removed_library_covers(state: &ApiState) {
     let (covers_dir, removals) = {
-        let store = state.store.lock();
-        (store.library_covers_dir(), store.succeeded_library_removals())
+        let store = state.store.clone();
+        (
+            store.library_covers_dir(),
+            store.succeeded_library_removals(),
+        )
     };
     let removals = match removals {
         Ok(removals) => removals,

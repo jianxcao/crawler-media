@@ -43,6 +43,7 @@ pub struct Job {
     pub id: JobId,
     pub def_id: Option<JobDefId>,
     pub kind: JobKind,
+    pub scope: crate::JobScope,
     pub payload: String,
     pub status: JobStatus,
     pub attempt: u32,
@@ -59,6 +60,7 @@ pub struct Job {
 pub struct JobDef {
     pub id: JobDefId,
     pub kind: JobKind,
+    pub scope: crate::JobScope,
     pub name: String,
     pub enabled: bool,
     pub schedule: Option<Schedule>,
@@ -69,10 +71,18 @@ pub struct JobDef {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
+    #[error("invalid Job identity: {0}")]
+    Identity(String),
+    #[error("Job definition already exists: {0}")]
+    Conflict(String),
+    #[error("invalid jobs database: {0}")]
+    Layout(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error("unknown Job {0}")]
     UnknownJob(JobId),
     #[error("invalid job kind: {0}")]

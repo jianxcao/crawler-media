@@ -33,10 +33,13 @@ async fn task_center_keeps_pending_found_by_info_hash() {
     };
     let store = h.state.store();
     store
-        .lock()
+        .as_ref()
         .set_pending_info_hash(id, &source, &hash)
         .unwrap();
-    assert_eq!(store.lock().load_pending_info_hashes(id).unwrap().len(), 1);
+    assert_eq!(
+        store.as_ref().load_pending_info_hashes(id).unwrap().len(),
+        1
+    );
     // The user stripped our tags; another owned task keeps tags visible.
     h.qb.tasks.lock()[0].tags.clear();
     h.qb.inject(other_owned_task());

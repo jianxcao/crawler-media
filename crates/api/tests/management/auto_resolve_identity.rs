@@ -23,9 +23,19 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
         fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
             Ok(Vec::new())
         }
-        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-        fn details(&self, _kind: domain::MediaKind, _id: &str) -> Result<Option<domain::Media>, String> { Ok(None) }
+        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn details(
+            &self,
+            _kind: domain::MediaKind,
+            _id: &str,
+        ) -> Result<Option<domain::Media>, String> {
+            Ok(None)
+        }
     }
     let hit = media::CatalogHit {
         media: domain::Media {
@@ -47,22 +57,22 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
         overview: None,
     };
     let catalog = Arc::new(OrbitCatalog(hit));
-    let state = state(
+    let startup_state = state(
         tmp.path(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-    )
-    .with_catalog(catalog);
+    );
+    let state = startup_state.clone().with_catalog(catalog);
 
     // 预存旧的 canonical Media
-    state.store().lock().insert_media(&old_canonical).unwrap();
+    state.store().insert_media(&old_canonical).unwrap();
 
     let (root, lib_id) = {
         let store_arc = state.store();
-        let store = store_arc.lock();
+        let store = store_arc.as_ref();
         let lib = store
             .list_libraries()
             .unwrap()
@@ -75,14 +85,18 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
     let video = root.join("Orbit.2022.1080p.mkv");
     std::fs::write(&video, b"fake video bytes").unwrap();
 
-    let app = router(state.clone());
+    // A startup task may still hold a clone made before catalog configuration.
+    let app = router(startup_state);
     scan_and_wait(&app, &lib_id).await;
 
     let store_arc = state.store();
-    let store = store_arc.lock();
-    let row = store
-        .ledger_by_path(&video.display().to_string())
+    let store = store_arc.as_ref();
+    let coverage = store
+        .file_coverage_by_path(&video.display().to_string())
         .unwrap()
         .expect("scanned ledger should exist");
-    assert_eq!(row.media_id, old_canonical.id, "新增台账必须重新绑定到已有 canonical Media");
+    assert_eq!(
+        coverage.file.media_id, old_canonical.id,
+        "新增台账必须重新绑定到已有 canonical Media"
+    );
 }

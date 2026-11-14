@@ -1,10 +1,10 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use domain::MediaId;
 use super::{PosterBytes, PosterError};
+use domain::MediaId;
 
 pub const POSITIVE_TTL: Duration = Duration::from_secs(24 * 3600);
 pub const NEGATIVE_TTL: Duration = Duration::from_secs(30);
@@ -42,15 +42,18 @@ impl DiskPosterCache {
 
     pub fn get(&self, media_id: MediaId) -> Option<PosterBytes> {
         let path = self.file_path(media_id);
-        let bytes = std::fs::read(&path).ok()?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .ok()?
+            .take((MAX_IMAGE_BYTES + MAX_META_BYTES + 3) as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
         if bytes.len() > MAX_IMAGE_BYTES + MAX_META_BYTES + 2 {
-            let _ = std::fs::remove_file(&path);
             return None;
         }
 
         let (meta, img) = split_cache_payload(&bytes)?;
         if img.len() > MAX_IMAGE_BYTES || meta.len() > MAX_META_BYTES {
-            let _ = std::fs::remove_file(&path);
             return None;
         }
         let mut lines = meta.lines();
@@ -59,7 +62,6 @@ impl DiskPosterCache {
 
         let age = Duration::from_secs(now_secs().saturating_sub(fetched_at));
         if age > POSITIVE_TTL {
-            let _ = std::fs::remove_file(&path);
             return None;
         }
 
@@ -69,7 +71,12 @@ impl DiskPosterCache {
         })
     }
 
-    pub fn put(&self, media_id: MediaId, content_type: &str, img: &[u8]) -> Result<(), PosterError> {
+    pub fn put(
+        &self,
+        media_id: MediaId,
+        content_type: &str,
+        img: &[u8],
+    ) -> Result<(), PosterError> {
         if img.len() > MAX_IMAGE_BYTES {
             return Err(PosterError::InvalidImage);
         }
@@ -82,13 +89,20 @@ impl DiskPosterCache {
         }
 
         let target = self.file_path(media_id);
-        let tmp = self.root.join(format!("{media_id}.tmp.{}.{:?}", std::process::id(), std::thread::current().id()));
+        let tmp = self.root.join(format!(
+            "{media_id}.tmp.{}.{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
 
         let meta = format!("{meta_prefix}\n");
         let mut file = std::fs::File::create(&tmp).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.write_all(meta.as_bytes()).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.write_all(img).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.sync_all().map_err(|e| PosterError::Io(e.to_string()))?;
+        file.write_all(meta.as_bytes())
+            .map_err(|e| PosterError::Io(e.to_string()))?;
+        file.write_all(img)
+            .map_err(|e| PosterError::Io(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| PosterError::Io(e.to_string()))?;
         drop(file);
 
         std::fs::rename(&tmp, &target).map_err(|e| PosterError::Io(e.to_string()))?;

@@ -1,17 +1,16 @@
-use domain::{LedgerId, LedgerRow, Media, MediaId, Subscribe, UserId};
+use domain::{FileCoverage, LedgerId, Media, MediaId, Subscribe, UserId};
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::Store;
 
 pub(crate) struct SubscriptionViewSnapshot {
     pub subscribe: Subscribe,
     pub media: Media,
-    pub facts: subscribe::SubscribeFacts,
+    pub facts: domain::SubscribeFacts,
     pub pending: Vec<(i32, crate::store::PendingDownload)>,
     pub created_at: String,
     pub updated_at: String,
-    pub library_poster_candidate: Option<LedgerId>,
+    pub library_poster_candidate: Option<(LedgerId, std::path::PathBuf)>,
     pub total: i64,
     pub imported: i64,
     pub target_library_status: &'static str,
@@ -72,31 +71,60 @@ pub(crate) fn load_visible_subscription_views(
         store.list_subscribes_for_user(user_id)?
     };
 
-    // 预批量提取所有相关 ledger rows，按 media_id 分组
-    let all_ledger = store.list_ledger().unwrap_or_default();
-    let mut ledger_by_media: HashMap<MediaId, Vec<LedgerRow>> = HashMap::new();
-    for row in all_ledger {
-        ledger_by_media.entry(row.media_id).or_default().push(row);
+    // 预批量提取所有相关 ledger 覆盖，按 media_id 分组
+    let media_ids: Vec<MediaId> = subscribes.iter().map(|sub| sub.media_id).collect();
+    let all_ledger = store
+        .file_coverage_for_media_batch(&media_ids)
+        .unwrap_or_default();
+    let mut ledger_by_media: HashMap<MediaId, Vec<FileCoverage>> = HashMap::new();
+    for coverage in all_ledger {
+        ledger_by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
+
+    let posters: HashMap<_, _> = ledger_by_media
+        .into_iter()
+        .map(|(media, rows)| (media, select_preferred_library_poster(&rows)))
+        .collect();
 
     // Two batched reads, independent of the number of subscriptions.
     let target_libraries = load_target_libraries(store)?;
     let mut snapshots = Vec::with_capacity(subscribes.len());
+    let media = store.media_for_ids(&media_ids)?;
+    let ids: Vec<_> = subscribes.iter().map(|sub| sub.id).collect();
+    let mut inputs = store.subscribe_view_inputs(&ids)?;
+    let counts = super::progress::load(
+        store,
+        subscribes
+            .iter()
+            .filter(|sub| {
+                matches!(
+                    sub.coverage,
+                    domain::Coverage::Tv {
+                        episode_to: None,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|sub| media.get(&sub.media_id)),
+    )?;
 
     for sub in subscribes {
-        let Some(media) = store.get_media(sub.media_id).ok().flatten() else {
+        let Some(media) = media.get(&sub.media_id).cloned() else {
             continue;
         };
+        let input = inputs.remove(&sub.id).ok_or_else(|| {
+            crate::store::StoreError::Missing(format!("Subscribe {} timestamps", sub.id))
+        })?;
+        let facts = input.facts;
+        let pending = input.pending;
+        let created_at = super::timestamps::format(input.created_at_ms)?;
+        let updated_at = super::timestamps::format(input.updated_at_ms)?;
+        let (total, imported) = super::progress::calculate(&sub, &media, &facts, &counts);
 
-        let facts = store.load_subscribe_facts(sub.id).unwrap_or_default();
-        let pending = store.load_pending(sub.id).unwrap_or_default();
-        let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();
-
-        let (total, imported) = super::views::progress(store, &sub, &media, &facts);
-
-        let library_poster_candidate = ledger_by_media
-            .get(&media.id)
-            .and_then(|rows| select_preferred_library_poster(rows));
+        let library_poster_candidate = posters.get(&media.id).cloned().flatten();
 
         let (target_library_status, target_library_error) =
             target_library_state(&sub, &target_libraries);
@@ -122,17 +150,17 @@ pub(crate) fn load_single_subscription_view(
     store: &Store,
     sub: &Subscribe,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
-) -> SubscriptionViewSnapshot {
+    facts: &domain::SubscribeFacts,
+) -> Result<SubscriptionViewSnapshot, crate::store::StoreError> {
     let pending = store.load_pending(sub.id).unwrap_or_default();
-    let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();
-    let (total, imported) = super::views::progress(store, sub, media, facts);
+    let (created_at, updated_at) = super::timestamps::load(store, sub.id)?;
+    let counts = super::progress::load(store, std::iter::once(media))?;
+    let (total, imported) = super::progress::calculate(sub, media, facts, &counts);
 
-    let rows: Vec<LedgerRow> = store
-        .list_ledger()
+    let rows: Vec<FileCoverage> = store
+        .file_coverage_for_media(media.id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| row.media_id == media.id)
         .collect();
 
     let library_poster_candidate = select_preferred_library_poster(&rows);
@@ -148,7 +176,7 @@ pub(crate) fn load_single_subscription_view(
         }
     };
 
-    SubscriptionViewSnapshot {
+    Ok(SubscriptionViewSnapshot {
         target_library_status,
         target_library_error,
         subscribe: sub.clone(),
@@ -160,24 +188,33 @@ pub(crate) fn load_single_subscription_view(
         library_poster_candidate,
         total,
         imported,
-    }
+    })
 }
 
-fn select_preferred_library_poster(rows: &[LedgerRow]) -> Option<LedgerId> {
-    let selected = rows.iter().max_by_key(|row| {
-        (
-            row.season.unwrap_or(0),
-            row.episode.unwrap_or(0),
-            row.path.clone(),
-        )
-    })?;
+/// 旧键 `(season.unwrap_or(0), episode.unwrap_or(0), path)` 是在 (file × unit) 的一行一行
+/// 上取的：整片读作 `(0, 0)`（`None`），多 unit 文件每个 unit 各是一行。这里把每个
+/// coverage 展开回它的 unit 再取最大，整片用 `WHOLE = (-1, -1)` 夹到 `(0, 0)`。
+/// 平局仍按旧 `row.path: String` 的**逐字节**序（`PathBuf` 是分量序，不能直接用），
+/// 选中后返回该文件自己的 `file_id`。
+fn select_preferred_library_poster(
+    rows: &[FileCoverage],
+) -> Option<(LedgerId, std::path::PathBuf)> {
+    let selected = rows
+        .iter()
+        .flat_map(|coverage| coverage.units.iter().map(move |unit| (coverage, unit)))
+        .max_by_key(|(coverage, unit)| {
+            (
+                unit.season.max(0) as u32,
+                unit.episode.max(0) as u32,
+                coverage.file.path.to_string_lossy().into_owned(),
+            )
+        })?;
 
-    let poster = Path::new(&selected.path)
+    let poster = selected
+        .0
+        .file
+        .path
         .parent()
         .map(|d| d.join("poster.jpg"))?;
-    if poster.is_file() {
-        Some(selected.id)
-    } else {
-        None
-    }
+    Some((selected.0.file.file_id, poster))
 }

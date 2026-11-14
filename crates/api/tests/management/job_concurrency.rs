@@ -50,7 +50,6 @@ async fn jobs_endpoint_stays_responsive_while_a_job_is_running() {
         ProfileSet::load(None).unwrap(),
         fetcher,
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap();
     let app = router(state.clone());
@@ -123,7 +122,6 @@ async fn retry_fixture(root: &Path) -> RetryFixture {
         ProfileSet::load(None).unwrap(),
         fetcher,
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     let app = router(state.clone());

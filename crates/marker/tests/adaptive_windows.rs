@@ -1,6 +1,6 @@
 use marker::{
-    EpisodeDescriptor, SamplingPolicy, SegmentKind, SourceCostSummary,
-    TemplateContext, TemplateModel, TemplateReference, WindowDecision, plan_episode_window,
+    EpisodeDescriptor, SamplingPolicy, SegmentKind, SourceCostSummary, TemplateContext,
+    TemplateModel, TemplateReference, WindowDecision, plan_episode_window,
 };
 
 #[test]
@@ -201,7 +201,174 @@ fn large_prediction_skips_fast_path() {
             );
         }
         WindowDecision::Verify { window, .. } => {
-            panic!("Expected Full window for large prediction, got Verify: {:?}", window);
+            panic!(
+                "Expected Full window for large prediction, got Verify: {:?}",
+                window
+            );
         }
     }
+}
+
+#[test]
+fn late_intro_prediction_keeps_its_bounded_context_despite_initial_cost() {
+    for (start, end) in [(330_000, 410_000), (300_000, 540_000)] {
+        let templates = TemplateContext {
+            models: vec![TemplateModel {
+                model_id: "late".into(),
+                version: 1,
+                kind: SegmentKind::Intro,
+                references: (1..=3)
+                    .map(|episode| TemplateReference {
+                        sample_id: format!("s{episode}"),
+                        ledger_id: format!("l{episode}"),
+                        episode,
+                        source_version: "v1".into(),
+                        match_interval_ms: (start, end),
+                        match_from_end_ms: None,
+                    })
+                    .collect(),
+                expected_duration_ms: end - start,
+                is_stable: true,
+            }],
+            ..Default::default()
+        };
+        for duration_ms in [0, 2_400_000] {
+            let target = EpisodeDescriptor {
+                ledger_id: "next".into(),
+                episode: 4,
+                source_version: "v1".into(),
+                duration_ms,
+            };
+            for measured_samples in [0, 3] {
+                let cost = SourceCostSummary {
+                    measured_samples,
+                    ..Default::default()
+                };
+                match plan_episode_window(
+                    &target,
+                    SegmentKind::Intro,
+                    &templates,
+                    &SamplingPolicy::default(),
+                    &cost,
+                ) {
+                    WindowDecision::Verify { window, .. } => assert_eq!(
+                        (window.start_ms, window.end_ms),
+                        (start - 10_000, end + 10_000)
+                    ),
+                    other => panic!("late model must predict relevant bounded window: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+fn mixed_position_templates() -> TemplateContext {
+    TemplateContext {
+        models: vec![TemplateModel {
+            model_id: "mixed".into(),
+            version: 1,
+            kind: SegmentKind::Intro,
+            references: [
+                (1, 330_000, 410_000),
+                (2, 30_000, 110_000),
+                (3, 180_000, 260_000),
+            ]
+            .into_iter()
+            .map(|(episode, start, end)| TemplateReference {
+                sample_id: format!("sample-{episode}"),
+                ledger_id: format!("ledger-{episode}"),
+                episode,
+                source_version: "current".into(),
+                match_interval_ms: (start, end),
+                match_from_end_ms: None,
+            })
+            .collect(),
+            expected_duration_ms: 80_000,
+            is_stable: true,
+        }],
+        ..Default::default()
+    }
+}
+#[test]
+fn mixed_position_reference_predicts_only_its_own_current_source_window() {
+    let mut templates = mixed_position_templates();
+    let mut unrelated = templates.models[0].clone();
+    unrelated.model_id = "unrelated".into();
+    for reference in &mut unrelated.references {
+        reference.ledger_id = format!("other-{}", reference.ledger_id);
+        reference.match_interval_ms = (30_000, 110_000);
+    }
+    templates.models.push(unrelated);
+    for (episode, expected) in [
+        (1, (320_000, 420_000)),
+        (2, (20_000, 120_000)),
+        (3, (170_000, 270_000)),
+    ] {
+        let target = EpisodeDescriptor {
+            ledger_id: format!("ledger-{episode}"),
+            episode,
+            source_version: "current".into(),
+            duration_ms: 2_400_000,
+        };
+        match plan_episode_window(
+            &target,
+            SegmentKind::Intro,
+            &templates,
+            &SamplingPolicy::default(),
+            &Default::default(),
+        ) {
+            WindowDecision::Verify { window, model_ids } => {
+                assert_eq!((window.start_ms, window.end_ms), expected);
+                assert_eq!(model_ids, vec!["mixed"]);
+            }
+            other => panic!("current reference must select its own bounded position: {other:?}"),
+        }
+    }
+}
+#[test]
+fn same_episode_other_ledger_or_old_source_has_no_reference_shortcut() {
+    let templates = mixed_position_templates();
+    for (ledger_id, source_version, episode) in [
+        ("ledger-1", "replacement", 1),
+        ("alternate-file", "current", 1),
+        ("new-file", "current", 4),
+    ] {
+        let target = EpisodeDescriptor {
+            ledger_id: ledger_id.into(),
+            episode,
+            source_version: source_version.into(),
+            duration_ms: 2_400_000,
+        };
+        assert!(
+            matches!(plan_episode_window(&target, SegmentKind::Intro, &templates,
+            &SamplingPolicy::default(), &Default::default()), WindowDecision::Full { window, .. }
+                if (window.start_ms, window.end_ms) == (0, 180_000))
+        );
+    }
+}
+#[test]
+fn own_reference_prediction_keeps_duration_and_capture_bounds() {
+    let mut templates = mixed_position_templates();
+    let target = EpisodeDescriptor {
+        ledger_id: "ledger-1".into(),
+        episode: 1,
+        source_version: "current".into(),
+        duration_ms: 415_000,
+    };
+    assert!(
+        matches!(plan_episode_window(&target, SegmentKind::Intro, &templates,
+        &SamplingPolicy::default(), &Default::default()), WindowDecision::Verify { window, .. }
+            if (window.start_ms, window.end_ms) == (320_000, 415_000))
+    );
+    templates.models[0].references[0].match_interval_ms = (0, 410_000);
+    assert!(matches!(
+        plan_episode_window(
+            &target,
+            SegmentKind::Intro,
+            &templates,
+            &SamplingPolicy::default(),
+            &Default::default()
+        ),
+        WindowDecision::Full { .. }
+    ));
 }

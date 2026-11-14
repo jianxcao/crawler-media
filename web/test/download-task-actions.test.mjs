@@ -34,14 +34,3 @@ test("尚未进入救援窗口时不提前展示立即换种", () => {
 test("没有任务 id 时不展示不可执行的换种按钮", () => {
   assert.equal(shouldOfferInlineReplacement({ state: "stalled" }), false);
 });
-
-test("旧形状仍按 can_replace 判断", () => {
-  assert.equal(
-    shouldOfferInlineReplacement({
-      id: "sub-1:https://pt/dl?id=1",
-      can_replace: true,
-      downloader_id: 3,
-    }),
-    true,
-  );
-});

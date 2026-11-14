@@ -1,10 +1,14 @@
 use serde_json::{Value, json};
 
 pub fn media_streams_json(tracks: &library::Tracks) -> Vec<Value> {
-    media_streams_with_item(tracks, None)
+    media_streams_with_item(tracks, None, None)
 }
 
-pub fn media_streams_with_item(tracks: &library::Tracks, item_id: Option<&str>) -> Vec<Value> {
+pub fn media_streams_with_item(
+    tracks: &library::Tracks,
+    item_id: Option<&str>,
+    source_id: Option<&str>,
+) -> Vec<Value> {
     let mut streams = Vec::new();
     if let Some(video) = &tracks.video {
         streams.push(json!({
@@ -52,10 +56,11 @@ pub fn media_streams_with_item(tracks: &library::Tracks, item_id: Option<&str>) 
         let stream_idx = library::subtitle_index(tracks, ordinal);
         let delivery_url = item_id.map(|id| {
             format!(
-                "/Videos/{}/Subtitles/{}/Stream.{}",
+                "/Videos/{}/Subtitles/{}/Stream.{}?MediaSourceId={}",
                 id,
                 stream_idx,
-                subtitle.codec.as_deref().unwrap_or("srt")
+                subtitle.codec.as_deref().unwrap_or("srt"),
+                source_id.unwrap_or_default()
             )
         });
         streams.push(json!({

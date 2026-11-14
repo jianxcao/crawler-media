@@ -8,15 +8,70 @@ async fn parent_library_scope_excludes_nested_library_items() {
     let parent_root = tmp.path().join("movies");
     let child_root = parent_root.join("child");
     std::fs::create_dir_all(&child_root).unwrap();
-    let parent = store.create_library(MediaKind::Movie, "Parent movies", &[parent_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    store.create_library(MediaKind::Movie, "Nested movies", &[child_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let parent = store
+        .create_library(
+            MediaKind::Movie,
+            "Parent movies",
+            &[parent_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Nested movies",
+            &[child_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let path = child_root.join("nested.mkv");
     std::fs::write(&path, b"nested").unwrap();
-    let movie = Media { id: MediaId::new(), kind: MediaKind::Movie, title: "Nested movie".into(), year: None, original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None };
+    let movie = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Nested movie".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
     store.insert_media(&movie).unwrap();
-    store.insert_ledger(&LedgerRow { id: LedgerId::new(), media_id: movie.id, path: path.display().to_string(), season: None, episode: None, resolution: None, codec: None, hdr: None, quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: None }).unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id: movie.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
     drop(store);
-    let response = app.oneshot(Request::builder().method("GET").uri(format!("/Items?ParentId={}&Recursive=true", parent.id)).header("authorization", "Bearer admin-token").body(Body::empty()).unwrap()).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items?ParentId={}&Recursive=true", parent.id))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let items = json(response).await;
     assert!(items["Items"].as_array().unwrap().is_empty());
@@ -26,51 +81,8 @@ async fn parent_library_scope_excludes_nested_library_items() {
 #[tokio::test]
 async fn selected_library_bytes_require_auth_and_visibility() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, _) = app(tmp.path());
-    let hidden_root = tmp.path().join("hidden");
-    std::fs::create_dir_all(&hidden_root).unwrap();
-    let hidden_file = hidden_root.join("secret.mkv");
-    std::fs::write(&hidden_file, b"secret media").unwrap();
-    std::fs::write(hidden_root.join("poster.jpg"), b"secret poster").unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .create_library(
-            MediaKind::Movie,
-            "仅管理员可见",
-            &[hidden_root.to_str().unwrap()],
-            "selected",
-            true,
-            &[],
-        )
-        .unwrap();
-    let hidden_media = Media {
-        id: MediaId::new(),
-        kind: MediaKind::Movie,
-        title: "Hidden Movie".into(),
-        year: None,
-        original_title: None, aliases: Vec::new(),
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    store.insert_media(&hidden_media).unwrap();
-    let hidden_row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: hidden_media.id,
-        path: hidden_file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&hidden_row).unwrap();
-    drop(store);
+    let (app, visible_media, visible_id) = app(tmp.path());
+    let hidden_media = seed_hidden_media(tmp.path());
     let created = app
         .clone()
         .oneshot(
@@ -111,8 +123,7 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         .unwrap()
         .unwrap()
         .id;
-    let hidden_id = hidden_row.id.to_string().replace('-', "");
-    let hidden_media_id = hidden_media.id.to_string().replace('-', "");
+    let hidden_id = work_id(hidden_media.id);
     let items = super::playback::items_for(&app, &token).await;
     assert!(
         items["Items"]
@@ -121,6 +132,351 @@ async fn selected_library_bytes_require_auth_and_visibility() {
             .iter()
             .all(|item| item["Id"] != hidden_id)
     );
+    assert_hidden_stream_and_artwork(&app, &token, &hidden_id).await;
+    assert_hidden_details_and_delete_scope(
+        &app,
+        &token,
+        member_id,
+        &hidden_id,
+        hidden_media.id,
+        &visible_id,
+        visible_media,
+        tmp.path(),
+    )
+    .await;
+    let hidden_mark = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/Users/{member_id}/FavoriteItems/{hidden_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hidden_mark.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        Store::open(tmp.path().join("data"))
+            .unwrap()
+            .playback_marks(member_id, hidden_media.id)
+            .unwrap(),
+        None
+    );
+    let stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Videos/{hidden_id}/stream?api_key=admin-token"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(stream.into_body(), usize::MAX).await.unwrap()[..],
+        b"secret media"
+    );
+    let poster = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/Items/{hidden_id}/Images/Primary?api_key=admin-token"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(poster.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(poster.into_body(), usize::MAX).await.unwrap()[..],
+        b"secret poster"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assert_hidden_details_and_delete_scope(
+    app: &axum::Router,
+    token: &str,
+    member_id: domain::UserId,
+    hidden_id: &str,
+    hidden_media: MediaId,
+    visible_id: &str,
+    visible_media: MediaId,
+    root: &Path,
+) {
+    let admin_id = Store::open(root.join("data"))
+        .unwrap()
+        .user_id_by_token("admin-token")
+        .unwrap()
+        .unwrap();
+    for mark in ["FavoriteItems", "PlayedItems"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/Users/{admin_id}/{mark}/{visible_id}"))
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    for prefix in ["", "/emby"] {
+        for (method, path) in [
+            ("GET", format!("/Items/{hidden_id}")),
+            ("GET", format!("/Users/{member_id}/Items/{hidden_id}")),
+            ("POST", format!("/Items/{hidden_id}/PlaybackInfo")),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("{prefix}{path}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{prefix}{path}");
+        }
+        for mark in ["FavoriteItems", "PlayedItems"] {
+            for path in [
+                format!("/Users/{member_id}/{mark}/{hidden_id}/Delete"),
+                format!("/Users/{admin_id}/{mark}/{visible_id}/Delete"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(format!("{prefix}{path}"))
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{prefix}{path}");
+            }
+        }
+    }
+    let store = Store::open(root.join("data")).unwrap();
+    assert_eq!(store.playback_marks(member_id, hidden_media).unwrap(), None);
+    let admin_marks = store
+        .playback_marks(admin_id, visible_media)
+        .unwrap()
+        .unwrap();
+    assert!(admin_marks.0 && admin_marks.1);
+}
+#[tokio::test]
+async fn items_series_counts_only_episodes_from_visible_libraries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    seed_shared_series(tmp.path(), &store);
+    drop(store);
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/users")
+                .header("authorization", "Bearer admin-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "login": "series-member", "password": "member-pass" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "Username": "series-member", "Pw": "member-pass" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let token = json(login).await["AccessToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let _member = store.user_by_token(&token).unwrap().unwrap();
+    store
+        .update_library(
+            &store
+                .list_libraries()
+                .unwrap()
+                .into_iter()
+                .find(|library| library.name == "Restricted shows")
+                .unwrap()
+                .id,
+            None,
+            None,
+            Some(("selected", true, &[])),
+        )
+        .unwrap();
+    drop(store);
+    let items = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/Items")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(items.status(), StatusCode::OK);
+    let items = json(items).await;
+    let series = items["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["Name"] == "Shared series")
+        .unwrap();
+    assert_eq!(series["RecursiveItemCount"], 1);
+}
+
+#[test]
+fn debug_store_open_creates_subscribes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let rows = store.list_all_subscribes().unwrap();
+    assert_eq!(rows.len(), 0);
+}
+
+fn seed_hidden_media(tmp: &std::path::Path) -> Media {
+    let hidden_root = tmp.join("hidden");
+    std::fs::create_dir_all(&hidden_root).unwrap();
+    let hidden_file = hidden_root.join("secret.mkv");
+    std::fs::write(&hidden_file, b"secret media").unwrap();
+    std::fs::write(hidden_root.join("poster.jpg"), b"secret poster").unwrap();
+    let store = Store::open(tmp.join("data")).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "仅管理员可见",
+            &[hidden_root.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+    let hidden_media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Hidden Movie".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&hidden_media).unwrap();
+    let hidden_spec = store::test_support::FixtureFile {
+        media_id: hidden_media.id,
+        path: hidden_file.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: Some("1080p".into()),
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(&store, &hidden_spec).unwrap();
+    drop(store);
+    hidden_media
+}
+
+fn seed_shared_series(tmp: &std::path::Path, store: &Store) {
+    let visible_root = tmp.join("visible-tv");
+    let hidden_root = tmp.join("hidden-tv");
+    std::fs::create_dir_all(&visible_root).unwrap();
+    std::fs::create_dir_all(&hidden_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Visible shows",
+            &[visible_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Restricted shows",
+            &[hidden_root.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+    let show = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Shared series".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&show).unwrap();
+    for (root, episode) in [(&visible_root, 1), (&hidden_root, 2)] {
+        let path = root.join(format!("episode-{episode}.mkv"));
+        std::fs::write(&path, b"episode").unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: show.id,
+            path: path.display().to_string(),
+            season: Some(1),
+            episode: Some(episode),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(store, &spec).unwrap();
+    }
+}
+
+async fn assert_hidden_stream_and_artwork(app: &axum::Router, token: &str, hidden_id: &str) {
     let anonymous = app
         .clone()
         .oneshot(
@@ -177,200 +533,4 @@ async fn selected_library_bytes_require_auth_and_visibility() {
             .unwrap()[..],
         b"secret poster"
     );
-    let hidden_mark = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/Users/{member_id}/FavoriteItems/{hidden_media_id}"
-                ))
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(hidden_mark.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        Store::open(tmp.path().join("data"))
-            .unwrap()
-            .playback_marks(member_id, hidden_media.id)
-            .unwrap(),
-        None
-    );
-    let stream = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/Videos/{hidden_id}/stream?api_key=admin-token"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(stream.status(), StatusCode::OK);
-    assert_eq!(
-        &to_bytes(stream.into_body(), usize::MAX).await.unwrap()[..],
-        b"secret media"
-    );
-    let poster = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/Items/{hidden_id}/Images/Primary?api_key=admin-token"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(poster.status(), StatusCode::OK);
-    assert_eq!(
-        &to_bytes(poster.into_body(), usize::MAX).await.unwrap()[..],
-        b"secret poster"
-    );
-}
-#[tokio::test]
-async fn items_series_counts_only_episodes_from_visible_libraries() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (app, _, _) = app(tmp.path());
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let visible_root = tmp.path().join("visible-tv");
-    let hidden_root = tmp.path().join("hidden-tv");
-    std::fs::create_dir_all(&visible_root).unwrap();
-    std::fs::create_dir_all(&hidden_root).unwrap();
-    store
-        .create_library(
-            MediaKind::Tv,
-            "Visible shows",
-            &[visible_root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    store
-        .create_library(
-            MediaKind::Tv,
-            "Restricted shows",
-            &[hidden_root.to_str().unwrap()],
-            "selected",
-            true,
-            &[],
-        )
-        .unwrap();
-    let show = Media {
-        id: MediaId::new(),
-        kind: MediaKind::Tv,
-        title: "Shared series".into(),
-        year: None,
-        original_title: None, aliases: Vec::new(),
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    store.insert_media(&show).unwrap();
-    for (root, episode) in [(&visible_root, 1), (&hidden_root, 2)] {
-        let path = root.join(format!("episode-{episode}.mkv"));
-        std::fs::write(&path, b"episode").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: show.id,
-                path: path.display().to_string(),
-                season: Some(1),
-                episode: Some(episode),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
-    }
-    drop(store);
-
-    let created = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/users")
-                .header("authorization", "Bearer admin-token")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "login": "series-member", "password": "member-pass" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let login = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/Users/AuthenticateByName")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "Username": "series-member", "Pw": "member-pass" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let token = json(login).await["AccessToken"].as_str().unwrap().to_string();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let member = store.user_by_token(&token).unwrap().unwrap();
-    store
-        .update_library(
-            &store
-                .list_libraries()
-                .unwrap()
-                .into_iter()
-                .find(|library| library.name == "Restricted shows")
-                .unwrap()
-                .id,
-            None,
-            None,
-            Some(("selected", true, &[])),
-        )
-        .unwrap();
-    drop(store);
-    let items = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/Items")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(items.status(), StatusCode::OK);
-    let items = json(items).await;
-    let series = items["Items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["Name"] == "Shared series")
-        .unwrap();
-    assert_eq!(series["RecursiveItemCount"], 1);
-}
-
-
-#[test]
-fn debug_store_open_creates_subscribes() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let rows = store.list_all_subscribes().unwrap();
-    assert_eq!(rows.len(), 0);
 }

@@ -108,7 +108,7 @@ impl ScanWalker {
                 continue;
             };
 
-            while let Some(entry_res) = entries.next() {
+            for entry_res in entries.by_ref() {
                 self.control.check()?;
                 visited += 1;
 
@@ -148,7 +148,8 @@ impl ScanWalker {
                 }
 
                 let reached_chunk = files.len() >= budget.chunk_files;
-                let reached_entry_or_time = visited >= budget.max_entries || start.elapsed() >= budget.max_elapsed;
+                let reached_entry_or_time =
+                    visited >= budget.max_entries || start.elapsed() >= budget.max_elapsed;
                 if reached_chunk || reached_entry_or_time {
                     return Ok(ScanChunk {
                         files,
@@ -184,7 +185,7 @@ fn file_entry(path: PathBuf, roots: &[PathBuf], kind: MediaKind) -> Option<Trans
         });
     }
     let (parsed, nfo_identity) = identify(&path, roots, kind);
-    (parsed.confidence != Confidence::Low).then(|| TransferredFile {
+    (parsed.confidence != Confidence::Low).then_some(TransferredFile {
         path,
         identified_release: Some(parsed),
         nfo_identity,

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use domain::JobId;
 use jobs::{JobKind, JobStatus, NewDef, Queue, Runner, Schedule};
+use parking_lot::Mutex;
 
 fn queue() -> (tempfile::TempDir, Queue) {
     let dir = tempfile::tempdir().unwrap();
@@ -38,7 +39,9 @@ impl Runner for CountingRunner {
 #[test]
 fn oneshot_claim_succeeds_and_second_claim_is_empty() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::Transfer, "{}", 100).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 100)
+        .unwrap();
     assert_eq!(job.status, JobStatus::Queued);
     assert_eq!(job.attempt, 0);
     assert!(job.def_id.is_none());
@@ -59,7 +62,8 @@ fn oneshot_claim_succeeds_and_second_claim_is_empty() {
 #[test]
 fn future_job_is_not_claimed() {
     let (_dir, q) = queue();
-    q.enqueue(JobKind::Transfer, "{}", 200).unwrap();
+    q.enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 200)
+        .unwrap();
     assert!(q.claim(100, 2).unwrap().is_empty());
 }
 
@@ -67,8 +71,9 @@ fn future_job_is_not_claimed() {
 fn startup_scheduling_does_not_promote_an_existing_future_child() {
     let (_dir, q) = queue();
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -91,8 +96,9 @@ fn startup_scheduling_does_not_promote_an_existing_future_child() {
 fn cancelling_a_definition_leaves_running_external_work_live() {
     let (_dir, q) = queue();
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -117,7 +123,9 @@ fn cancelling_a_definition_leaves_running_external_work_live() {
 #[test]
 fn failed_job_retry_is_delayed_with_bounded_backoff() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     let first = q.claim(0, 1).unwrap().remove(0);
     let retry = q.fail_claimed(&first, 10, "boom").unwrap().unwrap();
     assert_eq!(retry.run_after, 40);
@@ -133,7 +141,9 @@ fn failed_job_retry_is_delayed_with_bounded_backoff() {
 #[test]
 fn long_running_failure_starts_backoff_at_failure_time() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::Transfer, "{}", 1_000).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 1_000)
+        .unwrap();
     let claimed = q.claim(1_000, 1).unwrap().remove(0);
 
     let retry = q
@@ -149,7 +159,9 @@ fn long_running_failure_starts_backoff_at_failure_time() {
 #[test]
 fn runner_failure_retries_until_attempt_five_stays_failed() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::CheckIn, "{}", 0).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::CheckIn), "{}", 0)
+        .unwrap();
     let mut last = job;
     let mut now = 0;
     for expected in 1..=5 {
@@ -171,8 +183,9 @@ fn runner_failure_retries_until_attempt_five_stays_failed() {
 fn recover_requeues_stale_running_and_fails_at_five() {
     let (_dir, q) = queue();
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: None,
@@ -181,7 +194,9 @@ fn recover_requeues_stale_running_and_fails_at_five() {
             concurrency_key: None,
         })
         .unwrap();
-    let job = q.enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     q.claim(0, 1).unwrap();
 
     let recovered = q.recover(31).unwrap();
@@ -212,14 +227,29 @@ fn recover_requeues_stale_running_and_fails_at_five() {
 fn active_timed_out_execution_keeps_its_key_busy_but_does_not_block_other_keys() {
     let (_dir, q) = queue();
     let old_job = q
-        .enqueue_with_key(JobKind::Transfer, "old", 0, Some("transfer:a"))
+        .enqueue_with_key(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "old",
+            0,
+            Some("transfer:a"),
+        )
         .unwrap();
     let active = q.claim(0, 1).unwrap().remove(0);
     let same_key = q
-        .enqueue_with_key(JobKind::Transfer, "same", 0, Some("transfer:a"))
+        .enqueue_with_key(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "same",
+            0,
+            Some("transfer:a"),
+        )
         .unwrap();
     let unrelated = q
-        .enqueue_with_key(JobKind::Transfer, "other", 0, Some("transfer:b"))
+        .enqueue_with_key(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "other",
+            0,
+            Some("transfer:b"),
+        )
         .unwrap();
 
     assert!(
@@ -246,7 +276,9 @@ fn active_timed_out_execution_keeps_its_key_busy_but_does_not_block_other_keys()
 #[test]
 fn stale_execution_cannot_finish_or_fail_a_reclaimed_job() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::Transfer, "{}", 0).unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "{}", 0)
+        .unwrap();
     let first = q.claim(0, 1).unwrap().remove(0);
     q.recover(31).unwrap();
     let second = q.claim(61, 1).unwrap().remove(0);
@@ -270,10 +302,13 @@ fn stale_execution_cannot_finish_or_fail_a_reclaimed_job() {
 #[test]
 fn disabling_definition_cancels_already_queued_child() {
     let (_dir, q) = queue();
-    let payload = r#"{"subscribe_id":"paused"}"#;
+    let payload = r#"{"subscribe_id":"00000000-0000-0000-0000-000000000001"}"#;
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(
+                "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            ),
             name: "search".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -303,8 +338,9 @@ fn manually_triggering_disabled_definition_does_not_reactivate_queued_child() {
     let (_dir, q) = queue();
     let payload = r#"{}"#;
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Scrape,
+            scope: jobs::JobScope::Global,
             name: "Scrape".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -331,9 +367,10 @@ fn manually_triggering_disabled_definition_does_not_reactivate_queued_child() {
 #[test]
 fn disabled_def_is_not_scheduled() {
     let (_dir, q) = queue();
-    let payload = r#"{"subscribe_id":"paused"}"#;
-    q.upsert_def(NewDef {
+    let payload = r#"{"subscribe_id":"00000000-0000-0000-0000-000000000001"}"#;
+    q.create_def(NewDef {
         kind: JobKind::SubscribeSearch,
+        scope: jobs::JobScope::Subscribe("00000000-0000-0000-0000-000000000001".parse().unwrap()),
         name: "search".into(),
         enabled: true,
         schedule: Some(Schedule::Interval { secs: 30 }),
@@ -343,8 +380,22 @@ fn disabled_def_is_not_scheduled() {
     })
     .unwrap();
     assert_eq!(q.ensure_scheduled(1_000).unwrap().len(), 1);
-    assert_eq!(q.set_def_enabled(payload, false).unwrap(), 1);
-    let def = &q.defs_for_payload(payload).unwrap()[0];
+    assert_eq!(
+        q.set_def_enabled(
+            jobs::JobIdentity::subscribe_search(
+                "00000000-0000-0000-0000-000000000001".parse().unwrap()
+            ),
+            false
+        )
+        .unwrap(),
+        1
+    );
+    let def = &q
+        .def_for_identity(jobs::JobIdentity::subscribe_search(
+            "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        ))
+        .unwrap()
+        .unwrap();
     assert!(!def.enabled);
     q.cancel_def_children(def.id).unwrap();
     assert!(q.ensure_scheduled(2_000).unwrap().is_empty());
@@ -355,12 +406,15 @@ fn disabled_def_is_not_scheduled() {
 fn scheduled_def_inserts_follow_up_child_after_terminal() {
     let (_dir, q) = queue();
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(
+                "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            ),
             name: "search".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
-            payload: r#"{"subscribe_id":"1"}"#.into(),
+            payload: r#"{"subscribe_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: Some(60),
             concurrency_key: Some("subscribe:1".into()),
         })
@@ -386,8 +440,9 @@ fn scheduled_def_inserts_follow_up_child_after_terminal() {
 fn last_child_is_terminal_and_live_child_is_next() {
     let (_dir, q) = queue();
     let def = q
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -411,10 +466,20 @@ fn last_child_is_terminal_and_live_child_is_next() {
 #[test]
 fn same_concurrency_key_claims_only_one_while_running() {
     let (_dir, q) = queue();
-    q.enqueue_with_key(JobKind::CheckIn, "{}", 0, Some("site:a"))
-        .unwrap();
-    q.enqueue_with_key(JobKind::CheckIn, "{}", 0, Some("site:a"))
-        .unwrap();
+    q.enqueue_with_key(
+        jobs::JobIdentity::global(JobKind::CheckIn),
+        "{}",
+        0,
+        Some("site:a"),
+    )
+    .unwrap();
+    q.enqueue_with_key(
+        jobs::JobIdentity::global(JobKind::CheckIn),
+        "{}",
+        0,
+        Some("site:a"),
+    )
+    .unwrap();
     let claimed = q.claim(0, 2).unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].concurrency_key.as_deref(), Some("site:a"));
@@ -423,10 +488,20 @@ fn same_concurrency_key_claims_only_one_while_running() {
 #[test]
 fn different_concurrency_keys_claim_together() {
     let (_dir, q) = queue();
-    q.enqueue_with_key(JobKind::CheckIn, "{}", 0, Some("site:a"))
-        .unwrap();
-    q.enqueue_with_key(JobKind::CheckIn, "{}", 0, Some("site:b"))
-        .unwrap();
+    q.enqueue_with_key(
+        jobs::JobIdentity::global(JobKind::CheckIn),
+        "{}",
+        0,
+        Some("site:a"),
+    )
+    .unwrap();
+    q.enqueue_with_key(
+        jobs::JobIdentity::global(JobKind::CheckIn),
+        "{}",
+        0,
+        Some("site:b"),
+    )
+    .unwrap();
     let claimed = q.claim(0, 2).unwrap();
     assert_eq!(claimed.len(), 2);
 }
@@ -434,29 +509,41 @@ fn different_concurrency_keys_claim_together() {
 #[test]
 fn tick_runs_at_most_two_and_uses_injected_clock() {
     let (_dir, q) = queue();
-    q.enqueue(JobKind::Transfer, "1", 50).unwrap();
-    q.enqueue(JobKind::Transfer, "2", 50).unwrap();
-    q.enqueue(JobKind::Transfer, "3", 50).unwrap();
+    q.enqueue(jobs::JobIdentity::global(JobKind::Transfer), "1", 50)
+        .unwrap();
+    q.enqueue(jobs::JobIdentity::global(JobKind::Transfer), "2", 50)
+        .unwrap();
+    q.enqueue(jobs::JobIdentity::global(JobKind::Transfer), "3", 50)
+        .unwrap();
+    // `Queue::tick` 现在是对 Mutex 的自由函数：runner 在锁外执行（Review L6）。
+    let q = Mutex::new(q);
     let hits = Arc::new(AtomicUsize::new(0));
-    let finished = q.tick(50, &CountingRunner(hits.clone())).unwrap();
-    assert_eq!(finished.len(), 2);
+    let report = Queue::tick(&q, &CountingRunner(hits.clone()), 50);
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.finished.len(), 2);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(
-        finished
+        report
+            .finished
             .iter()
             .all(|job| job.status == JobStatus::Succeeded)
     );
 
-    let rest = q.tick(50, &OkRunner).unwrap();
-    assert_eq!(rest.len(), 1);
+    let rest = Queue::tick(&q, &OkRunner, 50);
+    assert!(rest.error.is_none(), "{:?}", rest.error);
+    assert_eq!(rest.finished.len(), 1);
 }
 
 #[test]
 fn tick_records_runner_error_without_sleeping() {
     let (_dir, q) = queue();
-    let job = q.enqueue(JobKind::Scrape, "{}", 0).unwrap();
-    q.tick(0, &FailRunner).unwrap();
-    let stored = q.get(job.id).unwrap().unwrap();
+    let job = q
+        .enqueue(jobs::JobIdentity::global(JobKind::Scrape), "{}", 0)
+        .unwrap();
+    let q = Mutex::new(q);
+    let report = Queue::tick(&q, &FailRunner, 0);
+    assert!(report.error.is_none(), "{:?}", report.error);
+    let stored = q.lock().get(job.id).unwrap().unwrap();
     assert_eq!(stored.status, JobStatus::Queued);
     assert_eq!(stored.attempt, 1);
     assert_eq!(stored.error.as_deref(), Some("boom"));
@@ -478,11 +565,12 @@ fn unknown_job_id_is_an_error() {
 }
 
 #[test]
-fn ensure_def_does_not_duplicate_same_kind_and_key() {
+fn ensure_def_does_not_duplicate_identity_when_runtime_key_changes() {
     let (_dir, q) = queue();
     let first = q
         .ensure_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
@@ -494,12 +582,13 @@ fn ensure_def_does_not_duplicate_same_kind_and_key() {
     let second = q
         .ensure_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 30 }),
             payload: "{}".into(),
             timeout_secs: Some(30),
-            concurrency_key: Some("transfer".into()),
+            concurrency_key: Some("different-runtime-key".into()),
         })
         .unwrap();
     assert_eq!(first.id, second.id);
@@ -507,48 +596,33 @@ fn ensure_def_does_not_duplicate_same_kind_and_key() {
 }
 
 #[test]
-fn ensure_scheduled_for_payload_only_touches_matching_defs() {
+fn ensure_scheduled_identity_only_touches_target() {
     let (_dir, q) = queue();
-    // 两个订阅 def + 一个全局 def，全部 enable 且有定时。
-    for payload in ["{\"subscribe_id\":\"a\"}", "{\"subscribe_id\":\"b\"}", "{}"] {
+    let a = domain::SubscribeId::new();
+    let b = domain::SubscribeId::new();
+    for id in [a, b] {
         q.ensure_def(NewDef {
             kind: JobKind::SubscribeSearch,
-            name: format!("search {payload}"),
+            scope: jobs::JobScope::Subscribe(id),
+            name: format!("search {id}"),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 1800 }),
-            payload: payload.to_string(),
-            timeout_secs: Some(120),
+            payload: format!(r#"{{"subscribe_id":"{id}"}}"#),
+            timeout_secs: None,
             concurrency_key: None,
         })
         .unwrap();
     }
-    // 先各排队一个远期任务（run_after=9999），确保手动触发前都有 live child。
     q.ensure_scheduled(9999).unwrap();
-    let live_before = q
-        .defs_for_payload("{\"subscribe_id\":\"a\"}")
-        .unwrap()
-        .into_iter()
-        .map(|d| q.get_live_child(d.id).unwrap().unwrap().run_after)
-        .collect::<Vec<_>>();
-    assert_eq!(live_before, vec![9999]);
-
-    // 手动触发只提前 a：b 与全局 def 的排队任务必须保持 run_after=9999。
-    q.ensure_scheduled_for_payload(0, "{\"subscribe_id\":\"a\"}")
+    q.ensure_scheduled_identity(0, jobs::JobIdentity::subscribe_search(a))
         .unwrap();
-    let live_a = q
-        .defs_for_payload("{\"subscribe_id\":\"a\"}")
-        .unwrap()
-        .into_iter()
-        .map(|d| q.get_live_child(d.id).unwrap().unwrap().run_after)
-        .collect::<Vec<_>>();
-    assert_eq!(live_a, vec![0], "目标 def 的排队任务应立即运行");
-    let untouched = ["{\"subscribe_id\":\"b\"}", "{}"].iter().all(|payload| {
-        q.defs_for_payload(payload)
+    for (id, time) in [(a, 0), (b, 9999)] {
+        let def = q
+            .def_for_identity(jobs::JobIdentity::subscribe_search(id))
             .unwrap()
-            .iter()
-            .all(|d| q.get_live_child(d.id).unwrap().unwrap().run_after == 9999)
-    });
-    assert!(untouched, "其他 def 的排队任务不能被提前");
+            .unwrap();
+        assert_eq!(q.get_live_child(def.id).unwrap().unwrap().run_after, time);
+    }
 }
 
 #[test]
@@ -557,6 +631,7 @@ fn disabled_definition_stops_automatic_retry_when_running_child_fails() {
     let def = q
         .ensure_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "test-transfer".into(),
             enabled: true,
             schedule: Some(Schedule::Interval { secs: 60 }),

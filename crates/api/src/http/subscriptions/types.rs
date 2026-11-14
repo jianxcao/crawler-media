@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateSubscriptionInput {
     /// 稳定引用（`tmdb:movie:603` / `tmdb:603` / 裸标题）。提供时后端解析出
     /// Media 身份，`media` 字段可省略。
@@ -26,8 +27,6 @@ pub(crate) struct CreateSubscriptionInput {
     pub(super) downloader_id: Option<String>,
     #[serde(default)]
     pub(super) library_id: Option<String>,
-    #[serde(default = "default_active")]
-    pub(super) tracking_state: String,
     #[serde(default)]
     pub(super) follow_future: bool,
     /// G-M3: create the next season's subscription once this one completes.
@@ -38,10 +37,6 @@ pub(crate) struct CreateSubscriptionInput {
     pub(super) pack_fallback_after_days: Option<u32>,
     #[serde(default)]
     pub(super) search_interval_secs: Option<u32>,
-}
-
-fn default_active() -> String {
-    "active".into()
 }
 
 fn default_fetch() -> String {
@@ -105,10 +100,9 @@ pub(crate) struct PatchSubscriptionInput {
     pub(super) pack_fallback_after_days: Option<u32>,
     #[serde(default)]
     pub(super) search_interval_secs: Option<u32>,
-    /// 调整订阅的季范围（前端 selected_seasons）：取最小季为 coverage 季，
-    /// 集窗口保持开放（episode_to=null）。空数组 = 不变。
+    /// 订阅范围（与创建同一 `coverage` 合同）；电影订阅不可改成剧集。
     #[serde(default)]
-    pub(super) selected_seasons: Option<Vec<u32>>,
+    pub(super) coverage: Option<CoverageInput>,
     /// 洗版时保留旧版本（新旧并存）。
     #[serde(default)]
     pub(super) keep_old_versions: Option<bool>,

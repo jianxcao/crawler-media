@@ -5,10 +5,11 @@ use crate::Tracks;
 /// 外挂轨（无 stream_index 或 is_external 为 true）分配高于所有已知视频/音频/内封字幕 stream_index 的稳定序号。
 pub fn subtitle_index(tracks: &Tracks, ordinal: usize) -> u32 {
     let sub = tracks.subtitles.get(ordinal);
-    if let Some(sub) = sub {
-        if !sub.is_external && sub.stream_index.is_some() {
-            return sub.stream_index.unwrap();
-        }
+    if let Some(sub) = sub
+        && !sub.is_external
+        && sub.stream_index.is_some()
+    {
+        return sub.stream_index.unwrap();
     }
     let max_stream_idx = tracks
         .video
@@ -39,7 +40,7 @@ pub fn subtitle_index(tracks: &Tracks, ordinal: usize) -> u32 {
 }
 
 /// 根据请求的 index 在 tracks.subtitles 中定位对应的字幕轨
-pub fn find_subtitle_by_index<'a>(tracks: &'a Tracks, index: u32) -> Option<&'a crate::SubtitleTrack> {
+pub fn find_subtitle_by_index(tracks: &Tracks, index: u32) -> Option<&crate::SubtitleTrack> {
     for (i, sub) in tracks.subtitles.iter().enumerate() {
         if subtitle_index(tracks, i) == index {
             return Some(sub);

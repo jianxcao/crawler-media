@@ -1,10 +1,17 @@
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use serde_json::json;
+use std::collections::HashMap;
 
-use crate::http::ok_list;
+use crate::http::ok;
 use crate::management::ApiState;
+
+struct MediaGalleryCandidate {
+    media: domain::Media,
+    library_id: String,
+    preferred_coverage: Option<domain::FileCoverage>,
+    owned_rows: Vec<domain::FileCoverage>,
+}
 
 /// GET /playback/favorites/gallery — 收藏图廊：每部作品的海报/背景/剧照，
 /// 形状对齐前端 LibraryGalleryGroup（listFavoritesGallery 直读）。
@@ -13,192 +20,149 @@ pub(crate) async fn favorites_gallery(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let limit = query
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
-        .clamp(1, 200);
-    let offset = query
-        .get("offset")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let query = match super::favorite_read::query(&query, user_id) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    for _ in 0..2 {
+        match page(&state, user_id, query.clone()).await {
+            Ok((response, true)) => return response,
+            Ok((_, false)) => continue,
+            Err(response) => return response,
+        }
+    }
+    super::favorite_read::changed()
+}
 
-    let sort_key = query
-        .get("sort")
-        .map(String::as_str)
-        .unwrap_or("updated_at");
-    let is_desc = query
-        .get("order")
-        .map(|o| o == "desc")
-        .unwrap_or_else(|| sort_key != "title");
-
-    // Phase 1: In-lock DB reads only (media, ledger rows, favorites)
-    struct MediaGalleryCandidate {
-        media: domain::Media,
-        library_id: String,
-        preferred_row: Option<domain::LedgerRow>,
-        owned_rows: Vec<domain::LedgerRow>,
+async fn page(
+    state: &ApiState,
+    user_id: domain::UserId,
+    query: store::PlaybackViewQuery,
+) -> Result<(Response, bool), Response> {
+    let selection = match crate::http::store_wait::store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        move |store| super::favorite_read::capture(store, query),
+    )
+    .await
+    {
+        Ok(Ok(selection)) => selection,
+        Ok(Err(error)) => return Err(super::favorite_read::store_error(error)),
+        Err(error) => return Err(error.response()),
+    };
+    let snapshot = selection.snapshot(selection.libraries.clone());
+    let total = selection.page.total;
+    let next_cursor = selection.page.next_cursor;
+    let mut candidates = Vec::with_capacity(selection.page.items.len());
+    let mut media = selection.media;
+    let mut coverages = selection.coverage;
+    for row in selection.page.items {
+        let Some(media) = media.remove(&row.media_id) else {
+            continue;
+        };
+        let owned = coverages.remove(&row.media_id).unwrap_or_default();
+        candidates.push(MediaGalleryCandidate {
+            media,
+            library_id: row.library_id.to_string(),
+            preferred_coverage: crate::http::library::preferred_coverage(&owned).cloned(),
+            owned_rows: owned,
+        });
     }
 
-    let candidates: Vec<MediaGalleryCandidate> = {
-        let store = state.store.lock();
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let media_ids: HashSet<domain::MediaId> = all_rows
-            .iter()
-            .filter_map(|row| {
-                let media = store.get_media(row.media_id).ok().flatten()?;
-                crate::http::library::row_visible_to_user(&store, row, &media, Some(user_id))
-                    .then_some(row.media_id)
-            })
-            .collect();
-        let mut by_media: HashMap<domain::MediaId, i64> = HashMap::new();
-        for media_id in media_ids {
-            for row in store.unit_rows(user_id, media_id).unwrap_or_default() {
-                if row.favorite {
-                    let favorited_at = row.favorite_at;
-                    let entry = by_media.entry(media_id).or_insert(0);
-                    if favorited_at > *entry {
-                        *entry = favorited_at;
-                    }
-                }
-            }
-        }
-
-        let mut list: Vec<(domain::MediaId, i64)> = by_media.into_iter().collect();
-        if sort_key == "title" {
-            list.sort_by(|(a_id, _), (b_id, _)| {
-                let a_title = store
-                    .get_media(*a_id)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.title)
-                    .unwrap_or_default();
-                let b_title = store
-                    .get_media(*b_id)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.title)
-                    .unwrap_or_default();
-                if is_desc {
-                    b_title.cmp(&a_title)
-                } else {
-                    a_title.cmp(&b_title)
-                }
-            });
-        } else {
-            list.sort_by(|(_, a_up), (_, b_up)| {
-                if is_desc {
-                    b_up.cmp(a_up)
-                } else {
-                    a_up.cmp(b_up)
-                }
-            });
-        }
-
-        list.into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|(media_id, _)| {
-                let media = store.get_media(media_id).ok().flatten()?;
-                let owned: Vec<domain::LedgerRow> = all_rows
-                    .iter()
-                    .filter(|r| r.media_id == media_id)
-                    .filter(|r| {
-                        crate::http::library::row_visible_to_user(&store, r, &media, Some(user_id))
-                    })
-                    .cloned()
-                    .collect();
-                if owned.is_empty() {
-                    return None;
-                }
-                let refs: Vec<&domain::LedgerRow> = owned.iter().collect();
-                let library_id = refs
-                    .first()
-                    .and_then(|row| crate::http::library::library_for_row(&store, row, &media))
-                    .map(|library| library.id)
-                    .unwrap_or_default();
-                let pref = crate::http::library::preferred_row(&refs).cloned();
-                Some(MediaGalleryCandidate {
-                    media,
-                    library_id,
-                    preferred_row: pref,
-                    owned_rows: owned,
-                })
-            })
-            .collect()
-    };
-
     // Phase 2: Out-of-lock filesystem observation under http_work budget
-    let files = state.browse_files.clone();
+    let files = state.file_stats.clone();
     let groups_res = state
         .http_work
         .run(std::time::Duration::from_secs(30), move || {
-            let mut groups = Vec::new();
-            for cand in candidates {
-                let mut images = Vec::new();
-                if let Some(ref row) = cand.preferred_row {
-                    let dir = std::path::Path::new(&row.path)
-                        .parent()
-                        .map(|p| p.to_path_buf());
-                    if let Some(dir) = dir {
-                        if files.is_file(&dir.join("poster.jpg")) {
-                            images.push(json!({
-                                "kind": "poster",
-                                "url": crate::http::library::artwork_url("posters", row.id),
-                                "aspect": 0.667,
-                                "label": "海报",
-                                "season": null,
-                                "episode": null,
-                                "t_seconds": null,
-                            }));
-                        }
-                        if files.is_file(&dir.join("fanart.jpg")) {
-                            images.push(json!({
-                                "kind": "backdrop",
-                                "url": crate::http::library::artwork_url("fanart", row.id),
-                                "aspect": 1.778,
-                                "label": "背景",
-                                "season": null,
-                                "episode": null,
-                                "t_seconds": null,
-                            }));
-                        }
-                        for row in &cand.owned_rows {
-                            if row.episode.is_some()
-                                && crate::episode_still::existing_with(
-                                    std::path::Path::new(&row.path),
-                                    files.as_ref(),
-                                )
-                                .is_some()
-                            {
-                                images.push(json!({
-                                    "kind": "still",
-                                    "url": crate::http::library::artwork_url("stills", row.id),
-                                    "aspect": 1.778,
-                                    "label": "剧照",
-                                    "season": row.season,
-                                    "episode": row.episode,
-                                    "t_seconds": null,
-                                }));
-                            }
-                        }
-                    }
-                }
-                groups.push(json!({
-                    "media_item_id": cand.media.id.to_string(),
-                    "library_id": cand.library_id,
-                    "kind": cand.media.kind.as_str(),
-                    "title": cand.media.title,
-                    "year": cand.media.year,
-                    "is_favorite": true,
-                    "images": images,
-                }));
-            }
-            groups
+            render_gallery(candidates, files.as_ref())
         })
         .await;
 
-    let groups = match groups_res {
+    let response = gallery_response(groups_res, total, next_cursor);
+    let valid = match crate::http::store_wait::store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        move |store| super::favorite_read::validate(store, user_id, &snapshot),
+    )
+    .await
+    {
+        Ok(Ok(valid)) => valid,
+        Ok(Err(error)) => return Err(super::favorite_read::store_error(error)),
+        Err(error) => return Err(error.response()),
+    };
+    Ok((response, valid))
+}
+
+fn render_gallery(
+    candidates: Vec<MediaGalleryCandidate>,
+    files: &dyn crate::file_stat_read::FileStatRead,
+) -> Vec<serde_json::Value> {
+    let mut groups = Vec::new();
+    for cand in candidates {
+        let mut images = Vec::new();
+        if let Some(ref cov) = cand.preferred_coverage {
+            let dir = cov.file.path.parent().map(|p| p.to_path_buf());
+            if let Some(dir) = dir {
+                if files.is_file(&dir.join("poster.jpg")) {
+                    images.push(json!({
+                        "kind": "poster",
+                        "url": crate::http::library::artwork_url("posters", cov.file.file_id),
+                        "aspect": 0.667,
+                        "label": "海报",
+                        "season": null,
+                        "episode": null,
+                        "t_seconds": null,
+                    }));
+                }
+                if files.is_file(&dir.join("fanart.jpg")) {
+                    images.push(json!({
+                        "kind": "backdrop",
+                        "url": crate::http::library::artwork_url("fanart", cov.file.file_id),
+                        "aspect": 1.778,
+                        "label": "背景",
+                        "season": null,
+                        "episode": null,
+                        "t_seconds": null,
+                    }));
+                }
+                for cov in &cand.owned_rows {
+                    for unit in &cov.units {
+                        if !unit.is_whole()
+                            && crate::episode_still::existing_with(&cov.file.path, files).is_some()
+                        {
+                            images.push(json!({
+                                "kind": "still",
+                                "url": crate::http::library::artwork_url("stills", cov.file.file_id),
+                                "aspect": 1.778,
+                                "label": "剧照",
+                                "season": unit.season,
+                                "episode": unit.episode,
+                                "t_seconds": null,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        groups.push(json!({
+            "media_item_id": cand.media.id.to_string(),
+            "library_id": cand.library_id,
+            "kind": cand.media.kind.as_str(),
+            "title": cand.media.title,
+            "year": cand.media.year,
+            "is_favorite": true,
+            "images": images,
+        }));
+    }
+    groups
+}
+
+fn gallery_response(
+    result: Result<Vec<serde_json::Value>, crate::blocking_budget::BlockingError>,
+    total: Option<usize>,
+    next_cursor: Option<String>,
+) -> Response {
+    let groups = match result {
         Ok(groups) => groups,
         Err(crate::blocking_budget::BlockingError::Busy) => {
             return crate::http::err(
@@ -222,5 +186,5 @@ pub(crate) async fn favorites_gallery(
             );
         }
     };
-    ok_list(groups).into_response()
+    ok(json!({"items": groups, "total": total, "next_cursor": next_cursor})).into_response()
 }

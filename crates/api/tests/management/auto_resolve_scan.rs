@@ -187,6 +187,7 @@ impl api::catalog::Catalog for AliasYearCatalog {
             origin_countries: vec!["US".into()],
             original_language: Some("en".into()),
             studios: vec!["Netflix".into()],
+            studio_logo: None,
             status: Some("Ended".into()),
             number_of_seasons: Some(1),
             number_of_episodes: Some(10),
@@ -240,7 +241,6 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
     .with_poster_fetch(Arc::new(StillBytes));
     let root = state
         .store()
-        .lock()
         .list_libraries()
         .unwrap()
         .into_iter()
@@ -289,7 +289,10 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
     let show_root = root.join("动灵守护者 (2022)");
     let season_nfo = show_root.join("season.nfo");
     let season_body = std::fs::read_to_string(&season_nfo).expect("season.nfo");
-    assert!(season_body.contains("<seasonnumber>1</seasonnumber>"), "{season_body}");
+    assert!(
+        season_body.contains("<seasonnumber>1</seasonnumber>"),
+        "{season_body}"
+    );
     assert!(season_body.contains("第一季简介"), "{season_body}");
     assert!(
         season_body.contains("https://image.tmdb.org/t/p/w780/season-1.jpg"),
@@ -302,106 +305,6 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
 #[test]
 fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     let tmp = tempfile::tempdir().unwrap();
-    struct NoStillCatalog;
-    impl api::catalog::Catalog for NoStillCatalog {
-        fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn search_tv_year(&self, _query: &str, _year: Option<u16>) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(vec![media::CatalogHit {
-                media: domain::Media {
-                    id: domain::MediaId::new(),
-                    kind: domain::MediaKind::Tv,
-                    title: "Spirit Rangers".into(),
-                    year: Some(2022),
-                    original_title: Some("Spirit Rangers".into()),
-                    aliases: Vec::new(),
-                    tmdb_id: Some("207890".into()),
-                    douban_id: None,
-                    tvdb_id: None,
-                    bangumi_id: None,
-                    anilist_id: None,
-                },
-                poster_path: None,
-                backdrop_path: None,
-                rating: None,
-                overview: None,
-            }])
-        }
-        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn top_rated_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn top_rated_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn now_playing_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn details(&self, _kind: domain::MediaKind, _id: &str) -> Result<Option<domain::Media>, String> {
-            Ok(None)
-        }
-        fn metadata_with_preferences(
-            &self,
-            _kind: domain::MediaKind,
-            _id: &str,
-            _lang_pref: &[String],
-            _country_pref: &[String],
-        ) -> Result<Option<media::ItemMeta>, String> {
-            Ok(Some(media::ItemMeta {
-                overview: Some("Spirit Rangers overview".into()),
-                rating: Some("8.5".into()),
-                runtime_minutes: Some("25".into()),
-                tagline: None,
-                release_date: Some("2022-10-10".into()),
-                last_air_date: None,
-                content_rating: None,
-                vote_count: Some(100),
-                origin_countries: vec!["US".into()],
-                original_language: Some("en".into()),
-                studios: vec!["Netflix".into()],
-                status: Some("Ended".into()),
-                number_of_seasons: Some(1),
-                number_of_episodes: Some(10),
-                directors: Vec::new(),
-                creators: Vec::new(),
-                genres: vec!["Animation".into()],
-                genre_ids: vec![16],
-                episode_run_time: vec![25],
-                cast: Vec::new(),
-            }))
-        }
-        fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
-            Ok(vec![media::EpisodeMeta {
-                episode_number: 1,
-                name: Some("Thunder Mountain".into()),
-                overview: Some("Episode 1 overview".into()),
-                air_date: Some("2022-10-10".into()),
-                rating: Some("8.0".into()),
-                vote_count: Some(50),
-                runtime_minutes: Some(25),
-                still_path: None,
-            }])
-        }
-        fn tv_seasons(&self, _id: &str) -> Result<Vec<media::TvSeason>, String> {
-            Ok(vec![media::TvSeason {
-                season_number: 1,
-                name: "第 1 季".into(),
-                episode_count: Some(1),
-                air_date: Some("2022-10-10".into()),
-                overview: Some("第一季简介".into()),
-                poster_path: Some("/season-1.jpg".into()),
-            }])
-        }
-    }
 
     let state = state(
         tmp.path(),
@@ -414,9 +317,19 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     .with_catalog(Arc::new(NoStillCatalog))
     .with_poster_fetch(Arc::new(StillBytes));
 
-    let show = tmp
-        .path()
-        .join("children/动灵守护者 (2022)/Spirit.Rangers.S01");
+    // Sidecars go beside files their Library recorded: the fixture must live under
+    // the TV library root, not in an arbitrary temp subdirectory (an unowned path
+    // has no Library to write into and is skipped by design).
+    let root = state
+        .store()
+        .list_libraries()
+        .unwrap()
+        .into_iter()
+        .find(|library| library.kind == domain::MediaKind::Tv)
+        .unwrap()
+        .root_paths[0]
+        .clone();
+    let show = root.join("动灵守护者 (2022)/Spirit.Rangers.S01");
     std::fs::create_dir_all(&show).unwrap();
     let episode = show.join("Spirit.Rangers.S01E01.1080p.strm");
     std::fs::write(&episode, b"https://cdn.example/ep.mkv").unwrap();
@@ -438,11 +351,14 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     let actual = api::auto_resolve::auto_resolve_media(&state, &wanted, &episode).unwrap();
     assert_eq!(actual.tmdb_id.as_deref(), Some("207890"));
 
-    let show_root = tmp.path().join("children/动灵守护者 (2022)");
+    let show_root = root.join("动灵守护者 (2022)");
     let season_nfo = show_root.join("season.nfo");
     assert!(season_nfo.is_file(), "season.nfo should exist");
     let still = show.join("Spirit.Rangers.S01E01.1080p-thumb.jpg");
-    assert!(!still.exists(), "thumb should not exist when still_path is None");
+    assert!(
+        !still.exists(),
+        "thumb should not exist when still_path is None"
+    );
 }
 
 #[test]
@@ -536,13 +452,12 @@ async fn library_scan_auto_resolves_tmdb_metadata() {
     scan_and_wait(&app, tv_lib_id).await;
 
     // Verify media was auto-recorded in ledger
-    let ledger = store.list_ledger().unwrap();
+    let ledger = store.list_file_coverage().unwrap();
     assert_eq!(ledger.len(), 1);
-    let row = &ledger[0];
-    assert_eq!(row.season, Some(1));
-    assert_eq!(row.episode, Some(1));
+    let coverage = &ledger[0];
+    assert_eq!(coverage.units, vec![domain::UnitKey::new(1, 1)]);
 
-    let media = store.get_media(row.media_id).unwrap().unwrap();
+    let media = store.get_media(coverage.file.media_id).unwrap().unwrap();
     assert_eq!(media.title, "葬送的芙莉莲");
 }
 
@@ -585,11 +500,11 @@ async fn scan_keeps_same_title_different_years_and_kinds_separate() {
             .unwrap();
         scan_and_wait(&app, id).await;
     }
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 3);
     let media: Vec<_> = rows
         .iter()
-        .map(|row| store.get_media(row.media_id).unwrap().unwrap())
+        .map(|coverage| store.get_media(coverage.file.media_id).unwrap().unwrap())
         .collect();
     assert_eq!(
         media
@@ -661,9 +576,9 @@ async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
         .as_str()
         .unwrap();
     scan_and_wait(&app, id).await;
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
-    let mut item = store.get_media(rows[0].media_id).unwrap().unwrap();
+    let mut item = store.get_media(rows[0].file.media_id).unwrap().unwrap();
     item.tmdb_id = Some("123".into());
     store.update_media(&item).unwrap();
     let refresh = app
@@ -689,3 +604,113 @@ async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
 
 #[path = "auto_resolve_identity.rs"]
 mod identity;
+
+struct NoStillCatalog;
+impl api::catalog::Catalog for NoStillCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv_year(
+        &self,
+        _query: &str,
+        _year: Option<u16>,
+    ) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![media::CatalogHit {
+            media: domain::Media {
+                id: domain::MediaId::new(),
+                kind: domain::MediaKind::Tv,
+                title: "Spirit Rangers".into(),
+                year: Some(2022),
+                original_title: Some("Spirit Rangers".into()),
+                aliases: Vec::new(),
+                tmdb_id: Some("207890".into()),
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            },
+            poster_path: None,
+            backdrop_path: None,
+            rating: None,
+            overview: None,
+        }])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn top_rated_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn top_rated_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn now_playing_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
+    fn metadata_with_preferences(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+        _lang_pref: &[String],
+        _country_pref: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        Ok(Some(media::ItemMeta {
+            overview: Some("Spirit Rangers overview".into()),
+            rating: Some("8.5".into()),
+            runtime_minutes: Some("25".into()),
+            tagline: None,
+            release_date: Some("2022-10-10".into()),
+            last_air_date: None,
+            content_rating: None,
+            vote_count: Some(100),
+            origin_countries: vec!["US".into()],
+            original_language: Some("en".into()),
+            studios: vec!["Netflix".into()],
+            studio_logo: None,
+            status: Some("Ended".into()),
+            number_of_seasons: Some(1),
+            number_of_episodes: Some(10),
+            directors: Vec::new(),
+            creators: Vec::new(),
+            genres: vec!["Animation".into()],
+            genre_ids: vec![16],
+            episode_run_time: vec![25],
+            cast: Vec::new(),
+        }))
+    }
+    fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        Ok(vec![media::EpisodeMeta {
+            episode_number: 1,
+            name: Some("Thunder Mountain".into()),
+            overview: Some("Episode 1 overview".into()),
+            air_date: Some("2022-10-10".into()),
+            rating: Some("8.0".into()),
+            vote_count: Some(50),
+            runtime_minutes: Some(25),
+            still_path: None,
+        }])
+    }
+    fn tv_seasons(&self, _id: &str) -> Result<Vec<media::TvSeason>, String> {
+        Ok(vec![media::TvSeason {
+            season_number: 1,
+            name: "第 1 季".into(),
+            episode_count: Some(1),
+            air_date: Some("2022-10-10".into()),
+            overview: Some("第一季简介".into()),
+            poster_path: Some("/season-1.jpg".into()),
+        }])
+    }
+}

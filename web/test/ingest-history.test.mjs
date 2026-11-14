@@ -69,22 +69,6 @@ test("同时保留本次新增与已在库文件的不同语义", () => {
   ]);
 });
 
-test("旧复制记录没有精确文件快照时不从候选列表猜测", () => {
-  const files = ["Show.S01E01.mkv", "Show.S01E03.mkv"];
-  const detail = buildIngestHistoryDetail(
-    ingestJob({
-      message: "入库完成，复制 1 个文件",
-      readyFiles: files,
-    }),
-  );
-
-  assert.equal(
-    detail?.summary,
-    "检查 S01E01、E03 · 复制 1 个文件（旧记录未保存具体文件名）",
-  );
-  assert.deepEqual(detail?.fileGroups, [{ label: "本次检查", files }]);
-});
-
 test("电影文件没有季集号时仍明确新增数量", () => {
   const file = "Dune.Part.Two.2024.2160p.mkv";
   const detail = buildIngestHistoryDetail(

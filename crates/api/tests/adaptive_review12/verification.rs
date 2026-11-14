@@ -8,37 +8,91 @@ fn control_raw_uniform_pipeline_succeeds() {
 }
 
 #[test]
-fn a_version_with_neither_segment_must_conflict_with_shared_episode_markers() {
+fn no_match_for_both_segments_clears_only_the_matching_file() {
     let f = setup("version-missing", &[1, 2, 3, 1]);
-    let result = raw_season(&f);
-    if let Ok(rep) = &result {
-        let b = &f.units[3].row;
-        let ch = &rep
-            .chapter_updates
+    let absent = &f.units[3].row;
+    f.store
+        .put_fixture_marker(&store::StoredFileMarker {
+            file_id: absent.file.file_id,
+            version: absent.file.version.clone(),
+            unit: absent.units[0],
+            intro_start_ms: Some(5_000),
+            intro_end_ms: Some(65_000),
+            outro_start_ms: Some(900_000),
+            outro_end_ms: Some(960_000),
+            source: "old".into(),
+            locked: false,
+            updated_at: 0,
+        })
+        .unwrap();
+    let replacement = raw_season(&f).unwrap();
+    let chapters = replacement.chapter_updates.clone();
+    let members = store::observe_sources(
+        &f.store
+            .source_snapshots(
+                &f.units
+                    .iter()
+                    .map(|unit| unit.row.file.file_id)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+    );
+    f.store
+        .complete_marker_refresh_checked("review9-job", &[replacement], &members)
+        .unwrap();
+    assert!(
+        f.store
+            .get_file_marker(absent.file.file_id, absent.units[0])
+            .unwrap()
+            .is_none()
+    );
+    let retained = &f.units[0].row;
+    let marker = f
+        .store
+        .get_file_marker(retained.file.file_id, retained.units[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (marker.intro_start_ms, marker.intro_end_ms),
+        (Some(10_000), Some(70_000))
+    );
+    assert_eq!(
+        (marker.outro_start_ms, marker.outro_end_ms),
+        (Some(830_000), Some(890_000))
+    );
+    for (file_id, expected_markers) in [(absent.file.file_id, 0), (retained.file.file_id, 2)] {
+        let output = &chapters
             .iter()
-            .find(|(id, _)| id == &b.id.to_string())
+            .find(|(id, _)| id == &file_id.to_string())
             .unwrap()
             .1;
-        println!(
-            "version B markers={:?}; shared E1={:?}",
-            ch.iter()
-                .filter(|c| c.marker_type.is_some())
-                .collect::<Vec<_>>(),
-            rep.markers.iter().find(|m| m.episode == 1)
+        assert_eq!(
+            output
+                .iter()
+                .filter(|chapter| chapter.marker_type.is_some())
+                .count(),
+            expected_markers
         );
     }
-    assert!(
-        result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.contains("episode_version_conflict")),
-        "NoMatch for both intro and outro must not bypass version-conflict validation: {result:?}"
+    assert_eq!(
+        f.store
+            .get_probe_job("review9-job")
+            .unwrap()
+            .unwrap()
+            .status,
+        "succeeded"
     );
 }
 
 struct ScoredEngine;
 impl FingerprintEngine for ScoredEngine {
-    fn extract_at(&self, _: &std::path::Path, _: u32, _: u32) -> Result<Vec<u32>, String> {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _control: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
         unreachable!()
     }
     fn find_common_segment(

@@ -3,6 +3,12 @@
 //! 注入阻塞 verify：闭包进入后主测试线程必须能立刻拿到 Store 锁；阻塞期间
 //! 改密 / 禁用 / 删除用户，release 后登录必须 401 且不泄露任何会话凭据。
 //! 另测并发上限触发 503，且 permit 直到 CAS 结束才释放。
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
@@ -58,17 +64,29 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the password gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the password gate");
     }
 
     fn release(&self) {
@@ -85,10 +103,6 @@ impl PasswordEngine for BlockingEngine {
     fn verify(&self, _password: &str, _stored: &str) -> bool {
         self.gate.enter_and_wait();
         true
-    }
-
-    fn hash(&self, password: &str) -> Result<String, String> {
-        store::password::hash_password(password)
     }
 }
 
@@ -109,7 +123,6 @@ fn setup(root: &Path, gate: Arc<Gate>, concurrency: usize) -> (ApiState, axum::R
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_password_login(Arc::new(PasswordLogin::new(
@@ -139,7 +152,7 @@ fn login_request(protocol: Protocol, username: &str, password: &str) -> Request<
         .unwrap()
 }
 
-fn apply_mutation(store: &mut Store, user_id: UserId, mutation: Mutation) {
+fn apply_mutation(store: &Store, user_id: UserId, mutation: Mutation) {
     match mutation {
         Mutation::ChangePassword => store.set_password(user_id, "changed-secret").unwrap(),
         Mutation::Disable => {
@@ -169,10 +182,15 @@ async fn assert_blocked_login_rejected(protocol: Protocol, mutation: Mutation) {
     gate.wait_entered();
     {
         let store = state.store();
-        let mut guard = store
-            .try_lock()
-            .expect("Store lock must stay free while the Argon2 verify blocks");
-        apply_mutation(&mut guard, member, mutation);
+        store
+            .writers()
+            .with_writer_timeout(
+                std::time::Duration::from_millis(100),
+                store::Db::App,
+                |_| Ok(()),
+            )
+            .expect("App writer must stay free while the Argon2 verify blocks");
+        apply_mutation(&store, member, mutation);
     }
     gate.release();
 
@@ -199,7 +217,6 @@ async fn assert_blocked_login_rejected(protocol: Protocol, mutation: Mutation) {
     assert!(
         state
             .store()
-            .lock()
             .latest_token_for_user(member)
             .unwrap()
             .is_none(),
@@ -315,4 +332,89 @@ async fn jellyfin_busy_maps_to_503_not_401() {
 
     gate.release();
     assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+}
+
+struct ImmediateEngine;
+impl PasswordEngine for ImmediateEngine {
+    fn verify(&self, _: &str, _: &str) -> bool {
+        true
+    }
+}
+
+#[test]
+fn both_password_protocols_keep_executor_responsive_while_waiting_for_store() {
+    for protocol in [Protocol::Rest, Protocol::Jellyfin] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _, _) = setup(tmp.path(), Arc::new(Gate::new()), 1);
+        let state =
+            state.with_password_login(Arc::new(PasswordLogin::new(Arc::new(ImmediateEngine), 1)));
+        let store = state.store();
+        let app = router(state);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held = std::thread::spawn(move || {
+            let _guard = crate::writer_hold::WriterHold::acquire(store.clone(), store::Db::App);
+            tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (response, elapsed) = runtime.block_on(async {
+            let started = std::time::Instant::now();
+            tokio::join!(
+                app.oneshot(login_request(protocol, "member", "original-secret")),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    started.elapsed()
+                }
+            )
+        });
+        held.join().unwrap();
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "{protocol:?} blocked timer: {elapsed:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_password_protocols_recheck_write_admission_after_verification() {
+    for protocol in [Protocol::Rest, Protocol::Jellyfin] {
+        for maintenance in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let gate = Arc::new(Gate::new());
+            let (state, app, member) = setup(tmp.path(), gate.clone(), 1);
+            let login = tokio::spawn(async move {
+                app.oneshot(login_request(protocol, "member", "original-secret"))
+                    .await
+                    .unwrap()
+            });
+            gate.wait_entered();
+            let write_gate = state.write_gate();
+            let closed = if maintenance {
+                Some(write_gate.close())
+            } else {
+                let _ = state.clone().with_instance_writable(false);
+                None
+            };
+            gate.release();
+            let response = login.await.unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                if maintenance { 503 } else { 409 },
+                "{protocol:?}"
+            );
+            assert!(
+                state
+                    .store()
+                    .latest_token_for_user(member)
+                    .unwrap()
+                    .is_none()
+            );
+            drop(closed);
+        }
+    }
 }

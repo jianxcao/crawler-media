@@ -20,6 +20,7 @@ JSON
     let mut permissions = std::fs::metadata(&program).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&program, permissions).unwrap();
+    seal_executable(&program);
     let media = tmp.path().join("episode.mkv");
     std::fs::write(&media, b"fixture").unwrap();
 
@@ -47,7 +48,7 @@ fn ffprobe_keeps_detailed_video_audio_and_subtitle_facts() {
         &program,
         r##"#!/bin/sh
 cat <<'JSON'
-{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10","width":3840,"height":1600,"r_frame_rate":"24/1","avg_frame_rate":"24000/1001","display_aspect_ratio":"12:5","sample_aspect_ratio":"1:1","pix_fmt":"yuv420p10le","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","bit_rate":"18000000","disposition":{"default":1}},{"index":1,"codec_type":"audio","codec_name":"eac3","profile":"Dolby Digital Plus","channels":6,"channel_layout":"5.1(side)","sample_rate":"48000","bit_rate":"768000","tags":{"language":"ja","title":"Japanese 5.1"},"disposition":{"default":1}},{"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"zh","title":"简体中文"},"disposition":{"forced":1}}],"format":{"duration":"7200"}}
+{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10","width":3840,"height":1600,"r_frame_rate":"24/1","avg_frame_rate":"24000/1001","display_aspect_ratio":"12:5","sample_aspect_ratio":"1:1","pix_fmt":"yuv420p10le","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","bit_rate":"18000000","disposition":{"default":1}},{"index":1,"codec_type":"audio","codec_name":"eac3","profile":"Dolby Digital Plus","channels":6,"channel_layout":"5.1(side)","sample_rate":"48000","start_pts":240000,"time_base":"1/48000","bit_rate":"768000","tags":{"language":"ja","title":"Japanese 5.1"},"disposition":{"default":1}},{"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"zh","title":"简体中文"},"disposition":{"forced":1}}],"format":{"duration":"7200","start_time":"-0.125001"}}
 JSON
 "##,
     )
@@ -55,6 +56,7 @@ JSON
     let mut permissions = std::fs::metadata(&program).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&program, permissions).unwrap();
+    seal_executable(&program);
     let media = tmp.path().join("movie.mkv");
     std::fs::write(&media, b"fixture").unwrap();
 
@@ -71,6 +73,15 @@ JSON
     assert_eq!(audio.title.as_deref(), Some("Japanese 5.1"));
     assert_eq!(audio.channel_layout.as_deref(), Some("5.1(side)"));
     assert_eq!(audio.bit_rate, Some(768000));
+    let source = audio.capture_source.as_ref().unwrap();
+    assert_eq!(source.audio_stream_index, 1);
+    assert_eq!(source.format_start_time_us, Some(-125001));
+    assert_eq!(source.stream_start_pts, Some(240000));
+    assert_eq!(source.stream_time_base.as_deref(), Some("1/48000"));
+    assert_eq!(source.provenance, "ffprobe_header_v2");
+    assert_eq!(source.codec_name, audio.codec);
+    assert_eq!(source.native_sample_rate, Some(48_000));
+    assert_eq!(source.audio_channels, Some(6));
     let subtitle = &tracks.subtitles[0];
     assert_eq!(subtitle.title.as_deref(), Some("简体中文"));
     assert!(subtitle.forced);
@@ -96,4 +107,23 @@ fn discovers_matching_external_subtitles_with_language_and_flags() {
         subtitles[0].path.as_deref(),
         Some(subtitle.to_str().unwrap())
     );
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }

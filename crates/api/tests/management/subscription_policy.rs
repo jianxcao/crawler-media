@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 use super::subscription_depth::{authed_app, fake_state};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn create_long_watch_sub(app: &axum::Router) -> String {
     let created = json_body(
@@ -32,7 +33,7 @@ async fn create_long_watch_sub(app: &axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn patch_selected_seasons_adjusts_tv_coverage() {
+async fn patch_coverage_adjusts_tv_season() {
     let tmp = tempfile::tempdir().unwrap();
     let app = authed_app(&tmp);
     let id = create_long_watch_sub(&app).await;
@@ -44,7 +45,7 @@ async fn patch_selected_seasons_adjusts_tv_coverage() {
                 "PATCH",
                 &format!("/api/v1/subscriptions/{id}"),
                 Some("management-secret"),
-                json!({ "selected_seasons": [2] }),
+                json!({ "coverage": {"kind": "tv", "season": 2, "episode_from": 1, "episode_to": null} }),
             ))
             .await
             .unwrap(),
@@ -76,7 +77,7 @@ async fn patch_selected_seasons_adjusts_tv_coverage() {
             "PATCH",
             &format!("/api/v1/subscriptions/{id}"),
             Some("management-secret"),
-            json!({ "selected_seasons": [2, 3] }),
+            json!({ "coverage": {"kind": "tv", "season": 0, "episode_from": 1, "episode_to": null} }),
         ))
         .await
         .unwrap();
@@ -302,6 +303,38 @@ async fn patch_keep_old_versions_flips_subscribe() {
     assert_eq!(detail["data"]["keep_old_versions"], true, "详情回读一致");
 }
 
+// Subscription reads consume adopted episode facts instead of synchronous origin.
+fn adopt_wanted_air_dates(store: &Store, media_id: domain::MediaId) {
+    for (episode, date) in [(1, "2024-01-01"), (2, "2024-01-02")] {
+        store
+            .adopt_metadata(
+                &domain::MetadataAdoption {
+                    media_id,
+                    scope: domain::EntityScope::Episode { season: 1, episode },
+                    locale: "zh-CN".into(),
+                    source: "tmdb".into(),
+                    provider_entity_id: format!("624860:1:{episode}"),
+                    provider_work_id: "624860".into(),
+                    fetched_at: 1,
+                    normalized: domain::NormalizedMetadata {
+                        fields: domain::MetadataFields {
+                            air_date: domain::FieldValue::Value(date.into()),
+                            ..Default::default()
+                        },
+                        field_origins: Default::default(),
+                    },
+                    expected_revision: Some(0),
+                    preferences: domain::MetadataPreferences {
+                        language_priority: vec!["zh-CN".into()],
+                        cert_country_priority: vec![],
+                    },
+                },
+                1,
+            )
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn wanted_tv_units_carry_air_date_and_forecast() {
     let tmp = tempfile::tempdir().unwrap();
@@ -322,6 +355,15 @@ async fn wanted_tv_units_carry_air_date_and_forecast() {
     )
     .await;
     let id = created["data"]["id"].as_str().unwrap().to_string();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    adopt_wanted_air_dates(
+        &store,
+        created["data"]["media"]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
 
     let detail = json_body(
         app.clone()
@@ -374,9 +416,10 @@ fn setup_ladder_and_old_ledger(tmp: &tempfile::TempDir, media_id: &str, sub_id: 
     std::fs::create_dir_all(old.parent().unwrap()).unwrap();
     std::fs::write(&old, b"old-1080p").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: media_id.parse().unwrap(),
             path: old.display().to_string(),
             season: None,
@@ -387,13 +430,15 @@ fn setup_ladder_and_old_ledger(tmp: &tempfile::TempDir, media_id: &str, sub_id: 
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: Some(200),
-        })
-        .unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut facts = domain::SubscribeFacts::default();
     facts.upsert(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 200,
             path: Some(old.display().to_string()),
         },
@@ -563,15 +608,7 @@ async fn manual_grab_with_subscribe_id_enters_subscription_pipeline() {
 }
 
 fn make_today_arrivals_app(tmp: &tempfile::TempDir) -> axum::Router {
-    let today = api::store::now_rfc3339();
-    let tomorrow = {
-        let mut parts: Vec<i64> = today
-            .split(['-', 'T'])
-            .filter_map(|p| p.parse().ok())
-            .collect();
-        parts[2] += 1;
-        format!("{:04}-{:02}-{:02}", parts[0], parts[1], parts[2])
-    };
+    let tomorrow = store::rfc3339_from_secs(store::unix_now() + 86_400)[..10].to_string();
     struct TodayCatalog {
         air_date: String,
     }
@@ -595,11 +632,18 @@ fn make_today_arrivals_app(tmp: &tempfile::TempDir) -> axum::Router {
         ) -> Result<Option<domain::Media>, String> {
             Ok(None)
         }
-        fn season_episodes(&self, _i: &str, _s: u32) -> Result<Vec<media::SeasonEpisode>, String> {
-            Ok(vec![media::SeasonEpisode {
+        fn cached_season_episodes(
+            &self,
+            _i: &str,
+            _s: u32,
+        ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+            Ok(Some(vec![media::SeasonEpisode {
                 episode_number: 1,
                 air_date: Some(self.air_date.clone()),
-            }])
+            }]))
+        }
+        fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
+            panic!("arrivals must not request origin for optional air dates")
         }
     }
     let catalog = Arc::new(TodayCatalog { air_date: tomorrow });
@@ -656,7 +700,10 @@ async fn today_arrivals_carry_release_forecast_for_upcoming_episodes() {
         with_forecast.is_some(),
         "应有带 release_forecast 的 arrival: {items:?}"
     );
-    assert!(with_forecast.unwrap()["release_forecast"]["target_air_date"].is_string());
+    assert_eq!(
+        with_forecast.unwrap()["release_forecast"]["target_air_date"],
+        store::rfc3339_from_secs(store::unix_now() + 86_400)[..10]
+    );
 }
 
 #[tokio::test]

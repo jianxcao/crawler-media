@@ -13,7 +13,7 @@
  *   3. 下载器默认目录兜底：不指定路径，由下载器自行决定。
  * 底部小字引导去「设置 → 下载器」配置路径映射。
  *
- * 保存位置记忆（docs/design/download-target-memory.md）：按种子分类
+ * 保存位置记忆：按种子分类
  * （TorrentCategory）记住选择，下次点该分类的「下载」先弹确认条
  * （本文件的 DownloadTargetConfirmBar），看得见落点再确认。
  *
@@ -37,7 +37,7 @@ import { Modal } from "@/components/modal";
 import {
   listDownloaders,
   submitTorrentDownload,
-  type ConfiguredDownloader,
+  type Downloader,
   type DownloadSubmitResult,
   type DownloadTargetPref,
   type ManualDownloadTarget,
@@ -196,7 +196,7 @@ function DialogContent({
     request.identity === null ||
     (rememberedTarget !== null && rememberedTarget.kind !== "smart");
   // 可用（验证通过）的全部下载器：≥2 台时出现下载器选择
-  const [downloaders, setDownloaders] = useState<ConfiguredDownloader[]>([]);
+  const [downloaders, setDownloaders] = useState<Downloader[]>([]);
   const [downloaderId, setDownloaderId] = useState<string | null>(
     rememberedTarget?.kind === "smart" ? rememberedTarget.downloader_id : null,
   );
@@ -296,7 +296,7 @@ function DialogContent({
     void listDownloaders()
       // 新契约 Downloader 无 usable 字段，可用 = 连接验证通过（active）
       .then((rows) => rows.filter((d) => d.status === "active"))
-      .catch(() => [] as ConfiguredDownloader[])
+      .catch(() => [] as Downloader[])
       .then((usable) => {
         if (cancelled) return;
         const current = usable.find((d) => d.id === downloaderId);

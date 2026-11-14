@@ -4,11 +4,16 @@ mod probe;
 
 use serde::{Deserialize, Serialize};
 
-pub use probe::{external_subtitle_tracks, probe_tracks, probe_tracks_and_duration, probe_tracks_and_duration_controlled};
+pub use probe::{
+    external_subtitle_tracks, probe_tracks, probe_tracks_and_duration,
+    probe_tracks_and_duration_controlled,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioTrack {
+    /// Versioned header facts. This is not decoded-sample chronology.
+    pub capture_source: Option<marker::CaptureSourceFacts>,
     pub stream_index: Option<u32>,
     pub codec: Option<String>,
     pub profile: Option<String>,

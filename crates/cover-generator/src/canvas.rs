@@ -57,8 +57,10 @@ impl CanvasUtils {
             Transform::identity(),
         );
 
-        let mut paint = PixmapPaint::default();
-        paint.quality = tiny_skia::FilterQuality::Bicubic;
+        let paint = PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bicubic,
+            ..Default::default()
+        };
         dest.draw_pixmap(
             0,
             0,
@@ -122,8 +124,10 @@ impl CanvasUtils {
             .post_rotate(rotation_deg)
             .post_translate(center_x + shadow_offset_x, center_y + shadow_offset_y);
 
-        let mut pixmap_paint = PixmapPaint::default();
-        pixmap_paint.quality = tiny_skia::FilterQuality::Bicubic;
+        let pixmap_paint = PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bicubic,
+            ..Default::default()
+        };
         dest.draw_pixmap(
             0,
             0,

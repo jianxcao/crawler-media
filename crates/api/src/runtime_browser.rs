@@ -2,7 +2,6 @@
 use std::sync::Arc;
 
 use indexer::{Browser, BrowserConfig, IndexerError};
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::{Store, settings_keys as keys};
@@ -73,14 +72,16 @@ impl BrowserSettings {
 
     fn apply(&mut self, body: &Value) -> Result<(), BrowserSettingsError> {
         apply_route(body.get("cdp"), &mut self.cdp_enabled, &mut self.cdp_url)?;
-        if let Some(obs) = body.get("obscura") {
-            if let Some(install) = obs.get("install").and_then(Value::as_str) {
-                let inst = install.trim();
-                if inst != "preinstalled" && inst != "download" {
-                    return Err(invalid("obscura.install must be 'preinstalled' or 'download'"));
-                }
-                self.obscura_install = inst.to_string();
+        if let Some(obs) = body.get("obscura")
+            && let Some(install) = obs.get("install").and_then(Value::as_str)
+        {
+            let inst = install.trim();
+            if inst != "preinstalled" && inst != "download" {
+                return Err(invalid(
+                    "obscura.install must be 'preinstalled' or 'download'",
+                ));
             }
+            self.obscura_install = inst.to_string();
         }
         if let Some(ua) = body.get("user_agent") {
             self.user_agent = ua
@@ -148,7 +149,11 @@ impl BrowserSettings {
                     managed_browser_sites += 1;
                 }
             }
-            let has_cdp = s.cdp_url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false);
+            let has_cdp = s
+                .cdp_url
+                .as_deref()
+                .map(|u| !u.trim().is_empty())
+                .unwrap_or(false);
             if (!self.cdp_enabled || s.maintenance_via == domain::MaintenanceVia::Http) && has_cdp {
                 ignored_site_endpoints += 1;
             }
@@ -243,46 +248,30 @@ fn apply_route(
 }
 
 /// Shared startup and request-time configuration path, also usable with an injected transport.
-pub fn configure(
-    browser: Browser,
-    store: Arc<Mutex<Store>>,
-    managed: bool,
-) -> Result<Browser, IndexerError> {
-    if managed {
-        // legacy flag
-    }
+pub fn configure(browser: Browser, store: Arc<Store>) -> Result<Browser, IndexerError> {
     browser.validate_timing()?;
-    load_config(&store.lock())?;
-    Ok(browser.with_config_provider(move || load_config(&store.lock())))
+    load_config(&store.as_ref())?;
+    Ok(browser.with_config_provider(move || load_config(&store.as_ref())))
 }
 
 /// Startup path: never silently swap in a permanently disabled Browser. A bad
 /// initial config is logged and returned as an error string for status; the
 /// returned Browser still reads settings on every use, so fixing them in the
 /// UI takes effect without a restart.
-pub fn startup_browser(store: Arc<Mutex<Store>>) -> (Browser, Option<String>) {
-    if store.lock().get_setting("cdp.sync.enabled").ok().flatten().is_some() {
-        tracing::warn!(
-            "Legacy setting cdp.sync.enabled is ignored; enable the Browser switch in settings \
-             and choose maintenance_via=browser per Site if needed"
-        );
-    }
-    match production_browser(store.clone(), false) {
+pub fn startup_browser(store: Arc<Store>) -> (Browser, Option<String>) {
+    match production_browser(store.clone()) {
         Ok(browser) => (browser, None),
         Err(error) => {
             tracing::error!(%error, "Browser construction failed at startup; settings will be re-read on use");
             let browser = Browser::new(BrowserConfig::disabled())
-                .with_config_provider(move || load_config(&store.lock()));
+                .with_config_provider(move || load_config(&store.as_ref()));
             (browser, Some(format!("Browser 初始化失败: {error}")))
         }
     }
 }
 
-pub fn production_browser(
-    store: Arc<Mutex<Store>>,
-    managed: bool,
-) -> Result<Browser, IndexerError> {
-    configure(Browser::new(BrowserConfig::disabled()), store, managed)
+pub fn production_browser(store: Arc<Store>) -> Result<Browser, IndexerError> {
+    configure(Browser::new(BrowserConfig::disabled()), store)
 }
 
 fn load_config(store: &Store) -> Result<BrowserConfig, IndexerError> {

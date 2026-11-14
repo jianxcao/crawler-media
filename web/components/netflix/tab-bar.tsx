@@ -17,7 +17,7 @@ import { usePageChrome } from "@/lib/page-chrome";
 import { usePermissions } from "@/lib/permissions";
 
 /**
- * Netflix 主题的移动端底部标签栏（<768px，docs/design/web-themes.md §5.2）。
+ * Netflix 主题的移动端底部标签栏。
  *
  * 参照 Netflix App 的内容消费动线映射为 4 个**路由**页签：发现 / 媒体库 /
  * 订阅 / 我的（2026-09 修订：移除「首页」——内容首页与媒体库合并，/ 改由

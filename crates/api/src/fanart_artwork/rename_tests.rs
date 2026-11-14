@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use media::fanart::FanartSet;
+use std::path::PathBuf;
 
 struct RenameDuringFetch {
     old: PathBuf,
@@ -61,7 +61,10 @@ fn rename_grace_fanart_download_does_not_recreate_parent() {
     };
 
     let written = super::save_fanart_files(&fetch, &old, &[row], &set);
-    assert_eq!(written, 0, "no files should be written to renamed away root");
+    assert_eq!(
+        written, 0,
+        "no files should be written to renamed away root"
+    );
     assert!(!old.exists(), "old root must not be recreated by fanart");
 }
 
@@ -88,9 +91,15 @@ fn movie_fanart_writes_when_movie_root_exists() {
     };
 
     let written = super::save_fanart_files(&SimpleFetch, &movie_root, &[], &set);
-    assert!(written >= 1, "movie fanart must write when movie root exists, got {written}");
+    assert!(
+        written >= 1,
+        "movie fanart must write when movie root exists, got {written}"
+    );
     assert!(movie_root.join("logo.png").is_file());
-    assert_eq!(std::fs::read(movie_root.join("logo.png")).unwrap(), b"movie_logo");
+    assert_eq!(
+        std::fs::read(movie_root.join("logo.png")).unwrap(),
+        b"movie_logo"
+    );
 }
 
 #[test]
@@ -128,15 +137,24 @@ fn season_poster_checks_its_own_season_rows() {
         logo: None,
         banner: None,
         thumb: None,
-        season_posters: vec![season_image("https://example.test/s1.jpg", 1), season_image("https://example.test/s2.jpg", 2)],
+        season_posters: vec![
+            season_image("https://example.test/s1.jpg", 1),
+            season_image("https://example.test/s2.jpg", 2),
+        ],
         season_thumbs: Vec::new(),
         season_banners: Vec::new(),
     };
 
     let written = super::save_fanart_files(&SimpleFetch, &show, &[s1_row, s2_row], &set);
     // Only season 2 should be written
-    assert!(!show.join("season01-poster.jpg").exists(), "season 1 poster should NOT be written");
-    assert!(show.join("season02-poster.jpg").is_file(), "season 2 poster should be written");
+    assert!(
+        !show.join("season01-poster.jpg").exists(),
+        "season 1 poster should NOT be written"
+    );
+    assert!(
+        show.join("season02-poster.jpg").is_file(),
+        "season 2 poster should be written"
+    );
     assert_eq!(written, 2); // show root season02-poster.jpg + season2/poster.jpg
 }
 
@@ -186,12 +204,17 @@ fn season_poster_rename_during_fetch_does_not_write_vanished_season() {
         season_banners: Vec::new(),
     };
     let written = super::save_fanart_files(
-        &MoveSeason { season: season1.clone() },
+        &MoveSeason {
+            season: season1.clone(),
+        },
         &show,
         &[s1_row, s2_row],
         &set,
     );
-    assert!(!season1.exists(), "vanished season directory must stay gone");
+    assert!(
+        !season1.exists(),
+        "vanished season directory must stay gone"
+    );
     assert!(!show.join("season01-poster.jpg").exists());
     assert!(show.join("season02-poster.jpg").is_file());
     assert!(season2.join("poster.jpg").is_file());

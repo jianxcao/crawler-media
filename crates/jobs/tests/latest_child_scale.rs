@@ -8,8 +8,9 @@ fn corrupted_historical_job_payload_does_not_break_latest_child_query() {
     let queue = Queue::open(tmp.path().join("jobs.db")).unwrap();
 
     let def_id = queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Scrape,
+            scope: jobs::JobScope::Global,
             name: "test_def".into(),
             enabled: true,
             schedule: None,
@@ -30,16 +31,16 @@ fn corrupted_historical_job_payload_does_not_break_latest_child_query() {
         let latest_id = domain::JobId::new().to_string();
 
         conn.execute(
-            "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-             VALUES (?1, ?2, 'invalid_kind_corrupted', 'bad', 'succeeded', 0, 100, 100, 100)",
+            "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+             VALUES ('global', ?1, ?2, 'invalid_kind_corrupted', 'bad', 'succeeded', 0, 100, 100, 100)",
             rusqlite::params![old_id, def_id.to_string()],
         )
         .unwrap();
 
         // 最新的有效终态
         conn.execute(
-            "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
-             VALUES (?1, ?2, 'scrape', '{}', 'succeeded', 0, 200, 200, 200)",
+            "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at)
+             VALUES ('global', ?1, ?2, 'scrape', '{}', 'succeeded', 0, 200, 200, 200)",
             rusqlite::params![latest_id, def_id.to_string()],
         )
         .unwrap();

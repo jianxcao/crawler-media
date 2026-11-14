@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["vendor/libsqlite3-sys-0.35.0"]
 members = [
     "crates/domain",
     "crates/store",
@@ -25,6 +26,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+unicode-normalization = "0.1"
 domain = { path = "crates/domain" }
 store = { path = "crates/store" }
 indexer = { path = "crates/indexer" }
@@ -52,6 +54,7 @@ parking_lot = "0.12"
 # 数据库维护的 VACUUM 磁盘准入需要可用空间；std 没有跨平台 API（已在依赖树中）。
 libc = "0.2"
 base64 = "0.22"
+tokio = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 notify-debouncer-mini = "0.5"
 notify = "7.0"
@@ -62,3 +65,9 @@ roxmltree = "0.21"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 tracing-appender = "0.2"
 sha2 = "0.10"
+time = "0.3.55"
+httpdate = "1"
+
+# SQLite's mutex initialization read-barrier fix; provenance: vendor/README.md.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.35.0" }

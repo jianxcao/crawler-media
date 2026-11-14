@@ -1,5 +1,5 @@
 /**
- * 长按倍速（docs/design/player-feel.md §2.B2）。
+ * 长按倍速。
  *
  * 按住画面一小会儿 → 二倍速播放，松手还原。手机播放器的通行手势
  * （B 站、抖音、ArtPlayer 的 fastForward 插件都是这一套）。

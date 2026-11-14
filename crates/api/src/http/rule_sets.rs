@@ -4,14 +4,16 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use domain::{AtomRule, Filter, FilterAtom, FilterId};
+use domain::{AtomRule, Filter, FilterAtom, FilterId, UnknownHrPolicy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
+use crate::http::strict_json::StrictJson;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::settings_keys;
+use store::StoreError;
 
 #[derive(Deserialize)]
 pub(crate) struct RuleSetInput {
@@ -27,9 +29,11 @@ pub(crate) struct AtomInput {
     #[serde(default)]
     value: Option<String>,
     priority: i32,
-    /// 黑名单原子：命中即排除（platforms_block / hdr_block / release_group_block）。
+    /// 当前原子命中时排除该 Torrent。
     #[serde(default)]
     exclude: bool,
+    #[serde(default)]
+    unknown: Option<UnknownHrPolicy>,
 }
 
 fn atom_from_input(input: AtomInput) -> Result<FilterAtom, String> {
@@ -44,9 +48,15 @@ fn atom_from_input(input: AtomInput) -> Result<FilterAtom, String> {
         "resolution" => AtomRule::Resolution(value()?),
         "source" => AtomRule::Source(value()?),
         "free" => AtomRule::Free,
-        "hr" => AtomRule::Hr,
+        "hr" => AtomRule::Hr {
+            unknown: input
+                .unknown
+                .ok_or_else(|| "hr atom 需要 unknown（exclude/allow）".to_string())?,
+        },
         "video_codec" => AtomRule::Codec(value()?),
         "title_match" => AtomRule::TitleMatch(value()?),
+        "platform" => AtomRule::Platform(value()?),
+        "team" => AtomRule::Team(value()?),
         "hdr" => AtomRule::Hdr(value()?),
         "size" => parse_size_atom(&input.kind, &input.value)?,
         "min_seeders" => AtomRule::MinSeeders(
@@ -70,13 +80,6 @@ fn atom_from_input(input: AtomInput) -> Result<FilterAtom, String> {
                 ));
             }
             AtomRule::UpgradeLadder(ladder)
-        }
-        // 黑名单原子：命中即排除（平台/制作组标记通常可见于标题）。
-        "platforms_block" | "hdr_block" | "release_group_block" => {
-            if !input.exclude {
-                return Err(format!("{} 是排除原子，必须 exclude=true", input.kind));
-            }
-            AtomRule::TitleMatch(value()?)
         }
         other => return Err(format!("未知的 Filter atom {other}")),
     };
@@ -111,9 +114,11 @@ fn atom_json(atom: &FilterAtom) -> Value {
         AtomRule::Resolution(v) => ("resolution", Some(v.clone())),
         AtomRule::Source(v) => ("source", Some(v.clone())),
         AtomRule::Free => ("free", None),
-        AtomRule::Hr => ("hr", None),
+        AtomRule::Hr { .. } => ("hr", None),
         AtomRule::Codec(v) => ("video_codec", Some(v.clone())),
         AtomRule::TitleMatch(v) => ("title_match", Some(v.clone())),
+        AtomRule::Platform(v) => ("platform", Some(v.clone())),
+        AtomRule::Team(v) => ("team", Some(v.clone())),
         AtomRule::Hdr(v) => ("hdr", Some(v.clone())),
         AtomRule::Size { min_mb, max_mb } => (
             "size",
@@ -130,12 +135,16 @@ fn atom_json(atom: &FilterAtom) -> Value {
         AtomRule::WashTarget(v) => ("wash_target", Some(v.clone())),
         AtomRule::UpgradeLadder(v) => ("upgrade_ladder", Some(v.clone())),
     };
-    json!({
+    let mut value = json!({
         "kind": kind,
         "value": value,
         "priority": atom.priority,
         "exclude": atom.exclude,
-    })
+    });
+    if let AtomRule::Hr { unknown } = atom.rule {
+        value["unknown"] = json!(unknown);
+    }
+    value
 }
 
 fn rule_set_json(filter: &Filter, is_default: bool) -> Value {
@@ -149,35 +158,40 @@ fn rule_set_json(filter: &Filter, is_default: bool) -> Value {
 }
 
 pub(crate) async fn list_rule_sets(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let filters = match store.list_filters() {
-        Ok(filters) => filters,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    let default = store
-        .get_setting(settings_keys::DEFAULT_FILTER_ID)
-        .ok()
-        .flatten()
-        .map(|id| FilterId::from_str(&id).ok())
-        .flatten();
-    ok_list(
-        filters
-            .iter()
-            .map(|f| rule_set_json(f, default == Some(f.id)))
-            .collect(),
-    )
-    .into_response()
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
+        let filters = match store.list_filters() {
+            Ok(filters) => filters,
+            Err(StoreError::Invalid(message)) => {
+                return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
+            }
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        let default = store
+            .get_setting(settings_keys::DEFAULT_FILTER_ID)
+            .ok()
+            .flatten()
+            .and_then(|id| FilterId::from_str(&id).ok());
+        ok_list(
+            filters
+                .iter()
+                .map(|f| rule_set_json(f, default == Some(f.id)))
+                .collect(),
+        )
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 pub(crate) async fn create_rule_set(
     State(state): State<ApiState>,
-    Json(body): Json<RuleSetInput>,
+    StrictJson(body): StrictJson<RuleSetInput>,
 ) -> Response {
     if body.name.trim().is_empty() {
         return err(
@@ -208,15 +222,18 @@ pub(crate) async fn create_rule_set(
         atoms,
         keep_old_versions: body.keep_old_versions.unwrap_or(false),
     };
-    let store = state.store.lock();
-    if let Err(error) = store.insert_filter(&filter) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    (StatusCode::CREATED, ok(rule_set_json(&filter, false))).into_response()
+    super::store_wait::store_write(&state, move |store| {
+        if let Err(error) = store.insert_filter(&filter) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        (StatusCode::CREATED, ok(rule_set_json(&filter, false))).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn get_rule_set(
@@ -233,23 +250,39 @@ pub(crate) async fn get_rule_set(
             );
         }
     };
-    let store = state.store.lock();
-    let Some(filter) = store.get_filter(id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
-    };
-    let is_default = store
-        .get_setting(settings_keys::DEFAULT_FILTER_ID)
-        .ok()
-        .flatten()
-        .map(|raw| raw == id.to_string())
-        .unwrap_or(false);
-    ok(rule_set_json(&filter, is_default)).into_response()
+    super::store_wait::store_read(&state, &[store::Db::App], move |store| {
+        let filter = match store.get_filter(id) {
+            Ok(Some(filter)) => filter,
+            Ok(None) => {
+                return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
+            }
+            Err(StoreError::Invalid(message)) => {
+                return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
+            }
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        let is_default = store
+            .get_setting(settings_keys::DEFAULT_FILTER_ID)
+            .ok()
+            .flatten()
+            .map(|raw| raw == id.to_string())
+            .unwrap_or(false);
+        ok(rule_set_json(&filter, is_default)).into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 pub(crate) async fn patch_rule_set(
     State(state): State<ApiState>,
     Path(id): Path<String>,
-    Json(body): Json<RuleSetInput>,
+    StrictJson(body): StrictJson<RuleSetInput>,
 ) -> Response {
     let id = match FilterId::from_str(&id) {
         Ok(id) => id,
@@ -277,43 +310,46 @@ pub(crate) async fn patch_rule_set(
         }
         Err(message) => return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message),
     };
-    let store = state.store.lock();
-    let existing = match store.get_filter(id) {
-        Ok(Some(f)) => f,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &e.to_string(),
-            );
-        }
-    };
-    let filter = Filter {
-        id,
-        name: body.name,
-        atoms,
-        keep_old_versions: body.keep_old_versions.unwrap_or(existing.keep_old_versions),
-    };
-    if let Err(error) = store.save_filter(&filter) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    let expected = id.to_string();
-    let is_default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
-        Ok(raw) => raw.as_deref() == Some(expected.as_str()),
-        Err(error) => {
+    super::store_wait::store_write(&state, move |store| {
+        let existing = match store.get_filter(id) {
+            Ok(Some(f)) => f,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &e.to_string(),
+                );
+            }
+        };
+        let filter = Filter {
+            id,
+            name: body.name,
+            atoms,
+            keep_old_versions: body.keep_old_versions.unwrap_or(existing.keep_old_versions),
+        };
+        if let Err(error) = store.save_filter(&filter) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    };
-    ok(rule_set_json(&filter, is_default)).into_response()
+        let expected = id.to_string();
+        let is_default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
+            Ok(raw) => raw.as_deref() == Some(expected.as_str()),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        ok(rule_set_json(&filter, is_default)).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn delete_rule_set(
@@ -330,24 +366,27 @@ pub(crate) async fn delete_rule_set(
             );
         }
     };
-    let store = state.store.lock();
-    let is_default = store
-        .get_setting(settings_keys::DEFAULT_FILTER_ID)
-        .ok()
-        .flatten()
-        .map(|raw| raw == id.to_string())
-        .unwrap_or(false);
-    if is_default {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "rule_set.protected",
-            "不能删除默认规则组",
-        );
-    }
-    match store.delete_filter(id) {
-        Ok(true) => ok(json!({ "deleted": true })).into_response(),
-        _ => err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
-    }
+    super::store_wait::store_write(&state, move |store| {
+        let is_default = store
+            .get_setting(settings_keys::DEFAULT_FILTER_ID)
+            .ok()
+            .flatten()
+            .map(|raw| raw == id.to_string())
+            .unwrap_or(false);
+        if is_default {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "rule_set.protected",
+                "不能删除默认规则组",
+            );
+        }
+        match store.delete_filter(id) {
+            Ok(true) => ok(json!({ "deleted": true })).into_response(),
+            _ => err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
+        }
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }
 
 pub(crate) async fn put_default_rule_set(
@@ -365,16 +404,19 @@ pub(crate) async fn put_default_rule_set(
             );
         }
     };
-    let store = state.store.lock();
-    if store.get_filter(id).ok().flatten().is_none() {
-        return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
-    }
-    if let Err(error) = store.put_setting(settings_keys::DEFAULT_FILTER_ID, &id.to_string()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(json!({ "default_rule_set_id": id.to_string() })).into_response()
+    super::store_wait::store_write(&state, move |store| {
+        if store.get_filter(id).ok().flatten().is_none() {
+            return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
+        }
+        if let Err(error) = store.put_setting(settings_keys::DEFAULT_FILTER_ID, &id.to_string()) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(json!({ "default_rule_set_id": id.to_string() })).into_response()
+    })
+    .await
+    .unwrap_or_else(|response| response)
 }

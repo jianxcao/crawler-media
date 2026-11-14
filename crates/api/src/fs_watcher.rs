@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -9,8 +9,10 @@ use notify_debouncer_mini::{DebouncedEvent, new_debouncer};
 use parking_lot::Mutex;
 
 use crate::management::ApiState;
+use crate::media_server_provider::items::unit_columns;
 
 mod directory;
+mod lifecycle;
 pub(crate) mod presence;
 /// STRM 延迟删除条目：记录删除时间戳与删除前的流媒体 URL。
 #[derive(Clone, Debug)]
@@ -27,6 +29,21 @@ pub struct StrmGraceTracker {
     known_urls: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// 测试注入的当前时间。0 表示使用系统时间。
     now_override: AtomicI64,
+    scan_retry: Mutex<ScanRetry>,
+}
+
+#[derive(Default)]
+struct ScanRetry {
+    libraries: VecDeque<String>,
+    running: bool,
+}
+
+impl ScanRetry {
+    fn push(&mut self, library_id: String) {
+        if !self.libraries.contains(&library_id) {
+            self.libraries.push_back(library_id);
+        }
+    }
 }
 
 impl StrmGraceTracker {
@@ -35,6 +52,7 @@ impl StrmGraceTracker {
             pending: Arc::new(Mutex::new(HashMap::new())),
             known_urls: Arc::new(Mutex::new(HashMap::new())),
             now_override: AtomicI64::new(0),
+            scan_retry: Mutex::new(ScanRetry::default()),
         }
     }
 
@@ -100,10 +118,10 @@ impl StrmGraceTracker {
             }
         }
         // 如果文件一直在磁盘上且 URL 未曾变化（如仅更新文件时间戳或写同 URL），不应触发标记失效与重刮削
-        if let (Some(prev), Some(curr)) = (prev_url, current_url) {
-            if prev.trim() == curr.trim() {
-                return false;
-            }
+        if let (Some(prev), Some(curr)) = (prev_url, current_url)
+            && prev.trim() == curr.trim()
+        {
+            return false;
         }
         true
     }
@@ -122,15 +140,18 @@ impl StrmGraceTracker {
         let mut expired = Vec::new();
         map.retain(|path, item| {
             if now - item.deleted_at >= grace_secs {
-                // 超时后确认磁盘上是否真不存在
-                if !path.exists() {
-                    expired.push(path.clone());
-                }
+                expired.push(path.clone());
                 false
             } else {
                 true
             }
         });
+        if map.is_empty() {
+            *map = HashMap::new();
+        }
+        drop(map);
+        // Filesystem observation must not block tracker state changes.
+        expired.retain(|path| !path.exists());
         expired
     }
 }
@@ -139,16 +160,15 @@ impl StrmGraceTracker {
 pub fn spawn_fs_watcher(state: ApiState) {
     tokio::spawn(async move {
         let tracker = Arc::new(StrmGraceTracker::new());
-        if let Ok(rows) = state.store.lock().list_ledger() {
+        if let Ok(rows) = state.store.as_ref().list_file_coverage() {
             for row in rows {
-                let path = Path::new(&row.path);
+                let path = row.file.path.as_path();
                 if path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+                    && let Some(url) = library::read_strm_url(path)
                 {
-                    if let Some(url) = library::read_strm_url(path) {
-                        tracker.on_created_or_modified(path, Some(&url));
-                    }
+                    tracker.on_created_or_modified(path, Some(&url));
                 }
             }
         }
@@ -191,7 +211,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     dirs = ?desired.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "fs_watcher 初始化监听目录列表"
                 );
-                watcher_state.reconcile(&mut debouncer, &desired);
+                watcher_state.reconcile(&mut debouncer, &desired, &tracker);
             }
             Err(error) => {
                 tracing::error!(%error, "初始化获取监听目录配置失败");
@@ -205,7 +225,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                 _ = refresh_interval.tick() => {
                     match current_dirs_to_watch(&state) {
                         Ok(desired) => {
-                            watcher_state.reconcile(&mut debouncer, &desired);
+                            watcher_state.reconcile(&mut debouncer, &desired, &tracker);
                         }
                         Err(error) => {
                             tracing::warn!(%error, "刷新监听目录配置失败，保留当前已有监听状态并待重试");
@@ -213,7 +233,7 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     }
                 }
                 Some(events) = rx.recv() => {
-                    let events = relevant_fs_events(&events);
+                    let events = watcher_state.relevant_events(&events);
                     if events.is_empty() {
                         continue;
                     }
@@ -222,7 +242,13 @@ pub fn spawn_fs_watcher(state: ApiState) {
                         paths = ?events.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
                         "fs_watcher 接收到底层文件系统事件"
                     );
-                    handle_fs_events(&state, &tracker, events);
+                    let worker = state.clone();
+                    let worker_tracker = tracker.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        handle_fs_events(&worker, &worker_tracker, events);
+                    }).await {
+                        tracing::error!(%error, "文件系统事件处理失败");
+                    }
                 }
             }
         }
@@ -230,17 +256,17 @@ pub fn spawn_fs_watcher(state: ApiState) {
 }
 
 fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::StoreError> {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let mut dirs = HashSet::new();
-    if let Some(intake) = store.watch_intake()? {
-        if !intake.is_empty() {
-            dirs.insert(PathBuf::from(intake));
-        }
+    if let Some(intake) = store.watch_intake()?
+        && !intake.is_empty()
+    {
+        dirs.insert(PathBuf::from(intake));
     }
-    if let Some(inplace) = store.watch_inplace()? {
-        if !inplace.is_empty() {
-            dirs.insert(PathBuf::from(inplace));
-        }
+    if let Some(inplace) = store.watch_inplace()?
+        && !inplace.is_empty()
+    {
+        dirs.insert(PathBuf::from(inplace));
     }
     let libraries = store.list_libraries()?;
     for lib in libraries {
@@ -254,7 +280,7 @@ fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::St
 }
 
 fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
-    let Ok(Some(intake)) = state.store.lock().watch_intake() else {
+    let Ok(Some(intake)) = state.store.as_ref().watch_intake() else {
         return false;
     };
     if intake.is_empty() {
@@ -268,11 +294,8 @@ fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
 
 pub(crate) fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathBuf> {
     let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    state
-        .store
-        .lock()
-        .list_libraries()
-        .ok()?
+    let libraries = { state.store.as_ref().list_libraries().ok()? };
+    libraries
         .into_iter()
         .filter(|library| library.realtime_watch)
         .flat_map(|library| library.root_paths)
@@ -287,7 +310,7 @@ pub(crate) fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> O
 pub(crate) fn realtime_library_id_for_root(state: &ApiState, root: &Path) -> Option<String> {
     state
         .store
-        .lock()
+        .as_ref()
         .list_libraries()
         .ok()?
         .into_iter()
@@ -302,7 +325,8 @@ pub(crate) fn realtime_library_id_for_root(state: &ApiState, root: &Path) -> Opt
 /// 若直接平铺在 `<root>` 下，则返回 `<root>` 本身。
 pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let resolved_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
+    let resolved_path =
+        std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
     let rel_opt = resolved_path
         .strip_prefix(&resolved_root)
         .ok()
@@ -382,7 +406,10 @@ pub fn handle_fs_events(
     let mut has_scrape_needed = false;
     let mut library_scan_targets = HashSet::new();
 
-    tracing::debug!(event_count = events.len(), "fs_watcher 收到文件系统变动事件批次");
+    tracing::debug!(
+        event_count = events.len(),
+        "fs_watcher 收到文件系统变动事件批次"
+    );
 
     for event in events {
         let path = event.path;
@@ -436,10 +463,10 @@ pub fn handle_fs_events(
             );
             continue;
         };
-        match state
+        let result = state
             .scan_coordinator
-            .enqueue(state, &library_id, vec![target_dir.clone()])
-        {
+            .enqueue(state, &library_id, vec![target_dir.clone()]);
+        match result {
             Ok(op) => tracing::info!(
                 library_id = %library_id,
                 op_id = %op.id,
@@ -447,6 +474,12 @@ pub fn handle_fs_events(
                 target_dir = %target_dir.display(),
                 "增量扫描目标已并入扫描 operation"
             ),
+            Err(crate::scan_operations::ScanEnqueueError::Busy) => {
+                retry_library_scan(state, tracker, library_id);
+            }
+            Err(crate::scan_operations::ScanEnqueueError::Reconfiguring) => {
+                retry_library_scan(state, tracker, library_id);
+            }
             Err(error) => tracing::error!(
                 library_id = %library_id,
                 root = %root.display(),
@@ -457,29 +490,79 @@ pub fn handle_fs_events(
         }
     }
 
-    // 目录有新入库/下载文件完成，主动提前调度任务，不必等待 30 秒
-    if has_intake_or_download_change {
-        tracing::info!("文件系统事件触发即时转移与入站入库");
-        let queue = state.jobs.lock();
-        if let Ok(defs) = queue.list_defs() {
-            for def in defs {
-                if def.kind == jobs::JobKind::Transfer || def.kind == jobs::JobKind::WatchIntake {
-                    let _ = queue.ensure_scheduled_for(0, def.id);
+    if has_intake_or_download_change || has_scrape_needed {
+        let result = (|| -> Result<(), crate::jobs_writer::JobsMutationError> {
+            let queue = state.jobs.acquire()?;
+            for def in queue.list_defs()? {
+                if (has_intake_or_download_change
+                    && matches!(
+                        def.kind,
+                        jobs::JobKind::Transfer | jobs::JobKind::WatchIntake
+                    ))
+                    || (has_scrape_needed && def.kind == jobs::JobKind::Scrape)
+                {
+                    queue.ensure_scheduled_for(0, def.id)?;
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error, has_intake_or_download_change, has_scrape_needed,
+                "filesystem immediate Jobs scheduling deferred; periodic scheduling will retry");
         }
     }
+}
 
-    if has_scrape_needed {
-        tracing::info!("文件系统事件触发即时元数据刮削");
-        let queue = state.jobs.lock();
-        if let Ok(defs) = queue.list_defs() {
-            for def in defs {
-                if def.kind == jobs::JobKind::Scrape {
-                    let _ = queue.ensure_scheduled_for(0, def.id);
+pub(crate) fn retry_library_scan(
+    state: &ApiState,
+    tracker: &Arc<StrmGraceTracker>,
+    library_id: String,
+) {
+    {
+        let mut retry = tracker.scan_retry.lock();
+        retry.push(library_id);
+        if retry.running {
+            return;
+        }
+        retry.running = true;
+    }
+    let tracker_ref = Arc::downgrade(tracker);
+    let worker_state = state.clone();
+    let worker_tracker = tracker_ref.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("watch-scan-retry".into())
+        .spawn(move || {
+            while let Some(tracker) = worker_tracker.upgrade() {
+                let library_id = {
+                    let mut retry = tracker.scan_retry.lock();
+                    let Some(library_id) = retry.libraries.pop_front() else {
+                        retry.running = false;
+                        return;
+                    };
+                    library_id
+                };
+                match worker_state
+                    .scan_coordinator
+                    .enqueue(&worker_state, &library_id, vec![])
+                {
+                    Ok(_) => {}
+                    Err(crate::scan_operations::ScanEnqueueError::Busy) => {
+                        tracker.scan_retry.lock().push(library_id);
+                        drop(tracker);
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(crate::scan_operations::ScanEnqueueError::Reconfiguring) => {
+                        tracker.scan_retry.lock().push(library_id);
+                        drop(tracker);
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => tracing::error!(%library_id, ?error, "Watcher 扫描重试失败"),
                 }
             }
-        }
+        })
+    {
+        tracker.scan_retry.lock().running = false;
+        tracing::error!(%error, "无法启动 Watcher 扫描重试线程");
     }
 }
 
@@ -562,27 +645,20 @@ fn note_present_path_presence(state: &ApiState, path: &Path) {
     }
 }
 
-/// 事件路径不存在时，只删除同样已经不在磁盘上的台账行。
-/// 父目录事件在处理瞬间可能 `exists()==false`，但其下仍在的 strm 不能被级联删掉。
-fn ledger_path_is_gone(event_path: &Path, ledger_path: &str) -> bool {
-    let row_path = Path::new(ledger_path);
-    let under_event = ledger_path == event_path.display().to_string()
-        || row_path.starts_with(event_path);
-    under_event && !row_path.exists()
-}
-
 /// strm 文件内容（远程 URL）变化时，清掉旧 URL 的派生缓存：
 /// - file_meta（视频/音轨/字幕流信息，探测缓存）
 /// - cached chapters（内嵌章节缓存）
-/// - media_markers（片头片尾标记）
+/// - file_markers（片头片尾标记）
+///
 /// 这些缓存按 ledger 行挂载，清理后下次访问详情页/播放时会按新 URL 重新探测。
 fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
     let path_str = path.display().to_string();
-    let store = state.store.lock();
-    let Ok(Some(row)) = store.ledger_by_path(&path_str) else {
+    let store = state.store.as_ref();
+    let Ok(Some(coverage)) = store.file_coverage_by_path(&path_str) else {
         return;
     };
-    let ledger_id = row.id.to_string();
+    let ledger_id = coverage.file.file_id.to_string();
+    let file_id = coverage.file.file_id;
     let mut cleared = 0;
     if store.delete_file_meta_by_ledger_id(&ledger_id).is_ok() {
         cleared += 1;
@@ -590,27 +666,34 @@ fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
     if store.clear_cached_chapters(&ledger_id).is_ok() {
         cleared += 1;
     }
-    // 只清当前行对应季集未锁定的标记：电视剧各集共用 media_id，绝不能删整部剧；用户手动锁定标记保留。
-    let is_locked = store
-        .get_media_marker(row.media_id, row.season, row.episode)
-        .ok()
-        .flatten()
-        .map(|m| m.locked)
-        .unwrap_or(false);
-    if !is_locked
-        && store
-            .delete_media_marker(row.media_id, row.season, row.episode)
-            .is_ok()
-    {
+    // 只清当前文件各单元未锁定的标记：电视剧各集共用 media_id，绝不能删整部剧；用户手动锁定标记保留。
+    // 旧实现只覆盖按路径取到的那一条 (file, unit) 行；现在按该文件的全部单元扇出，
+    // 单单元文件（121 文件 / 121 单元）逐字等价，多单元文件清得更全。
+    let mut units = coverage.units.clone();
+    units.sort_by_key(|unit| (unit.season, unit.episode));
+    for unit in units {
+        let (season, episode) = unit_columns((unit.season, unit.episode));
+        let is_locked = store
+            .get_file_marker(file_id, unit)
+            .ok()
+            .flatten()
+            .map(|m| m.locked)
+            .unwrap_or(false);
+        if is_locked || store.delete_file_marker(file_id, unit).is_err() {
+            continue;
+        }
         cleared += 1;
+        tracing::info!(
+            path = %path_str,
+            season = ?season,
+            episode = ?episode,
+            cleared,
+            "【STRM】检测到 strm 内容变化，已清空该集旧探测缓存（流信息/章节/片头片尾），下次访问将按新 URL 重新探测"
+        );
     }
-    tracing::info!(
-        path = %path_str,
-        season = row.season,
-        episode = row.episode,
-        cleared,
-        "【STRM】检测到 strm 内容变化，已清空该集旧探测缓存（流信息/章节/片头片尾），下次访问将按新 URL 重新探测"
-    );
+    if cleared == 0 {
+        tracing::debug!(path = %path_str, "【STRM】内容变化但没有可清理的探测缓存");
+    }
 }
 
 /// 抽象文件系统 Watcher 行为，方便单元测试注入 fake/mock
@@ -655,7 +738,9 @@ impl FsWatcherState {
         &mut self,
         watcher: &mut W,
         desired: &HashSet<PathBuf>,
+        tracker: &StrmGraceTracker,
     ) {
+        let mut roots_changed = false;
         // 新增监听：desired - active
         let to_add: Vec<PathBuf> = desired.difference(&self.active).cloned().collect();
         for dir in to_add {
@@ -667,6 +752,7 @@ impl FsWatcherState {
                 Ok(()) => {
                     tracing::info!(dir = %dir.display(), "成功注册目录监听");
                     self.active.insert(dir);
+                    roots_changed = true;
                 }
                 Err(error) => {
                     tracing::error!(dir = %dir.display(), %error, "注册目录监听失败，保留待重试");
@@ -681,12 +767,17 @@ impl FsWatcherState {
                 Ok(()) => {
                     tracing::info!(dir = %dir.display(), "成功注销目录监听");
                     self.active.remove(&dir);
+                    roots_changed = true;
                 }
                 Err(error) => {
                     tracing::warn!(dir = %dir.display(), %error, "注销目录监听失败，保留在 active 待重试");
                 }
             }
         }
+        // Failed unwatch calls stay active; overlapping roots retain their
+        // observations until the last successful watch has been removed.
+        if roots_changed || self.active.is_empty() {
+            tracker.retain_roots(&self.active);
+        }
     }
 }
-

@@ -1,5 +1,5 @@
 /**
- * 海报墙筛选条件的纯逻辑（docs/design/library-filtering.md 3.1/3.4）。
+ * 海报墙筛选条件的纯逻辑。
  *
  * 单独成模块而不是塞进 lib/api/libraries.ts：那个文件带 `@/` 路径别名，
  * node --test 解析不了，逻辑就测不到。与 lib/discovery-filters.ts 同一惯例。
@@ -11,15 +11,15 @@
 export type WatchFilter = "unwatched" | "watching" | "played" | "favorite" | "seen";
 
 /**
- * 海报墙的筛选条件（docs/design/library-filtering.md 3.1）。
+ * 海报墙的筛选条件。
  *
  * 维内 OR、维间 AND。**筛选态的唯一事实源是 URL**，不进 localStorage——
  * 上次筛的条件在下次打开时还在，是本类产品最经典的困惑来源
  * （"我的片怎么少了一半"）。排序是偏好该记，筛选是意图不该记。
  */
 export interface LibraryFilter {
-  /** 类型：TMDB genre id（语言无关） */
-  genres?: number[];
+  /** 类型：TMDB genre id 或规范名称键（语言无关） */
+  genres?: (string | number)[];
   /** 地区：ISO 3166-1 二字码 */
   countries?: string[];
   /** 年代档：2020s / 2010s / 2000s / 1990s / earlier */
@@ -137,7 +137,7 @@ export function rulesToFilter(rules: FilterRule[] | undefined): LibraryFilter {
     const values = rule?.values ?? [];
     switch (rule?.field) {
       case "genres":
-        filter.genres = values.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+        filter.genres = values.map((v) => String(v));
         break;
       case "origin_countries":
       case "countries":

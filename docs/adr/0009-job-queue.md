@@ -1,6 +1,6 @@
 # 搜索、订阅、转移与维护共用一个 Job 队列
 
-实例能排队、运行、重试或检查的每个工作单元都是 **Job** 行。搜索、**Subscribe** 填充、**Transfer**、**Scrape**、**Check-in**、catalog 刷新，以及以后的 Watch-directory 扫描都进同一张表。不存在带私有内存映射的第二个“scheduler 模块”。
+实例能排队、运行、重试或检查的每个工作单元都是 **Job** 行。搜索、**Subscribe** 填充、**Transfer**、**Scrape**、**Check-in**、catalog 刷新和 Watch-directory 扫描都进同一张表。不存在带私有内存映射的第二个“scheduler 模块”。
 
 MoviePilot 拆分：APScheduler 进程内任务（`subscribe_search`、`transfer`、`sitedata_refresh`、…）外加独立的 `JobManager` 管理单个媒体的 transfer 任务。重启会丢失运行中的 APScheduler 状态；transfer 任务又是另一个 dict。那是两套 UI 和两套重试故事。我们只有一个 NAS 进程和 SQLite——一个队列就够了。
 
@@ -8,15 +8,16 @@ MoviePilot 拆分：APScheduler 进程内任务（`subscribe_search`、`transfer
 
 ## 位置
 
-Store 四文件之外的队列文件：`{data}/jobs.db`。它不是可随意清空的cache：清空会丢用户修改的def策略／开关／周期、queued/running工作、重试和历史。Media身份留在app，catalog是缓存，ledger在library，Subscribe事实在subscribe（[ADR-0008](<0008-sqlite-system-of-record.md>)）。终态历史可按明确的latest/tie保护规则分批删；不得据“不丢Media身份”推断整个jobs.db可丢。
+Store 四文件之外的队列文件：`{data}/jobs.db`。它不是可随意清空的 cache：清空会丢用户修改的 def 策略／开关／周期、queued/running 工作、重试和历史。当前 Media/别名、Library 文件与 Playback 在 `library.db`，Metadata source HTTP 响应在 `cache.db`，Subscribe 在 `subscribe.db`，实例配置在 `app.db`（`crates/store/src/open.rs`、`schema/v1/*.sql`；[ADR-0008](<0008-sqlite-system-of-record.md>)）。终态历史可按明确的 latest/tie 保护规则分批删；不得据“不丢 Media 身份”推断整个 `jobs.db` 可丢。
 
-两张表：
+两张核心表（下面是字段摘要，不是完整 DDL；另有 `retention_cursors`、`job_change_state` 与变更 triggers，见 `crates/jobs/src/store.rs`、`retention_cursor.rs`、`change_state.rs`）：
 
 ```
 job_defs (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,            -- subscribe_search | subscribe_rss | transfer
                                  -- | scrape | check_in | catalog_refresh | watch_intake
+  scope_key TEXT NOT NULL,       -- 与 kind 构成唯一结构化身份
   name TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   schedule TEXT,                 -- null = 仅按需；现行仅 interval:<secs>，未实现 cron
@@ -29,6 +30,7 @@ jobs (
   id TEXT PRIMARY KEY,
   def_id TEXT,                   -- null 表示一次性（手动搜索）
   kind TEXT NOT NULL,
+  scope_key TEXT NOT NULL,       -- 继承任务身份；payload 仅保存参数
   payload TEXT NOT NULL,
   status TEXT NOT NULL,          -- queued | running | succeeded | failed | cancelled
   attempt INTEGER NOT NULL DEFAULT 0,
@@ -42,11 +44,13 @@ jobs (
 )
 ```
 
-WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。
+API 查询通过 `jobs_readers` 的容量 2 严格只读 `ReaderPool` 和 `jobs::QueueRead` 执行，不获取 Queue writer。
+
+WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单写线程**。API进程就是worker；正式循环claim时持锁、StateRunner执行离锁、落结果短锁，无Redis或独立worker服务。Jobs mutation 有界准入，前台共享写期限。执行结果遇 writer 或 SQLite Busy/Locked 时保留原 attempt 和进程内活动 fence，离锁退避重试结果落库，不重新执行工作。进程崩溃或非 Busy 持久化错误仍可能触发恢复；这不是持久结果 spool 或跨进程 exactly-once 保证。
 
 ## 运行时
 
-每秒一次循环：`SELECT … FROM jobs WHERE status='queued' AND run_after<=now ORDER BY run_after LIMIT N`。用 `UPDATE … SET status='running' WHERE status='queued'` 认领，崩溃不会双跑同一行。进程启动时，超过 `timeout_secs` 的 `running` 变为 `queued` 且 `attempt+1`。`attempt` 达到 5 后置为 `failed` 并停止。
+每秒一次循环：`SELECT … FROM jobs WHERE status='queued' AND run_after<=now ORDER BY run_after LIMIT N`。条件更新使同一 queued 状态不能被同时成功认领；超时或崩溃恢复可能重新执行 attempt，不保证 exactly-once。进程启动时，超过 `timeout_secs` 的 `running` 变为 `queued` 且 `attempt+1`。`attempt` 达到 5 后置为 `failed` 并停止。
 
 带schedule的def在完成时spawn follow-up（run_after=完成时间＋interval）；缺live child时ensure_scheduled也可立即补首个子任务。这里只是Interval循环，不是已支持cron表达式。UI 列出 `job_defs`（能跑什么）与近期 `jobs`（跑了什么）。手动搜索 POST 一个 `def_id` 为 null 的一次性 `jobs` 行。
 
@@ -59,12 +63,12 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 | `subscribe_search` | `subscribe_id` | Indexer.search + Filter + subscribe::run |
 | `subscribe_rss` | （无 / site 列表） | Indexer.rss，然后对每个匹配 **Subscribe** 跑同一 run |
 | `transfer` | `downloader_id` 可选 | 轮询已完成文件、**Naming template**、ledger |
-| `scrape` | `ledger_id` 或 path | scrape_beside |
+| `scrape` | runner 不使用 Job payload | `watch_scrape::run(&state)` |
 | `check_in` | `site_id` | Check-in **Plugin** |
-| `catalog_refresh` | `media_id` | TMDB（等）经 `catalog.db`，upsert **Media** |
-| `watch_intake` | `root_id` | 以后 |
+| `catalog_refresh` | `media_id` | TMDB（等）经 `cache.db` 的来源表缓存，更新 Media/采用元数据 |
+| `watch_intake` | runner 不使用 Job payload | `watch_intake::run(&state)` |
 
-`subscribe::run` 今天一次性做 search-admit-add-poll-transfer。在 Job 边界拆分：`subscribe_search` Job **加**到 Downloader 即结束；`transfer` Job 之后看到已完成文件。在搜索 Job 内轮询 qB 正是 live harness 卡在 `ledger=0` 的原因。Downloader 是外部的；完成是更晚的 Job。
+`subscribe_search` 将 Torrent 加入 Downloader 后结束；独立的 `transfer` Job 读取已完成文件并发布 Library 文件事实。两个阶段各自持久化状态与结果。
 
 手动关键词搜索是没有 **Subscribe** 的 `subscribe_search` 一次性 Job（payload 有 `query` + `filter_id`）。同一 runner，同一 UI 日志行。
 
@@ -76,13 +80,13 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 - 每个启用 **Site** 一个 `check_in`，间隔 12 小时，`concurrency_key=site:<id>`。
 - 每个被 **Subscribe** 指向的 **Media** 一个 `catalog_refresh`，间隔 24 小时。
 
-创建 **Subscribe** 会插入其 `job_defs` 行。删除它会取消 queued 子行并禁用该 def。
+Subscribe 创建及影响搜索策略的更新在 subscribe.db 保存 generation、lifecycle epoch、revision 和待同步意图；jobs.db 在自身事务应用配置及 receipt，再按 generation/revision 确认。已应用 revision 的重放不覆盖后续手动 Jobs 编辑。删除在 Subscribe 事务记录清理意图，按 incarnation 关闭 lifecycle fence，删除该身份定义及子任务，包括 defless 历史；恢复按窗口重试。旧 epoch 或已关闭 incarnation 的迟到投递不能覆盖新 incarnation。新 incarnation 投递前可短暂看到旧配置；runner 重读当前 Subscribe，Library 引用安全不依赖 Jobs 投影。孤儿 definition-backed Search 禁用定义并允许正在运行的 Job 完成。跨库提交不是原子事务。
 
-## 维护任务（2026-10-13 状态）
+## 维护任务
 
-已注册database_maintenance、jobs_retention、playback_history_retention；默认开关／周期／payload、latest/tie保护与剩余控制缺陷见 [DB8合同](<../superpowers/plans/2026-10-12-db8-maintenance-retention.md>)。保留参数只在job_defs.payload，schema version不是配置并发revision。
+注册 `database_maintenance`、`jobs_retention`、`playback_history_retention`、`data_retention` 四类；默认只开启前两类，保留参数仅在 `job_defs.payload`（`crates/api/src/maintenance/mod.rs`）。schema version 不是配置并发 revision。
 
-当前关闭只取消queued，running retention尚未在批边界检查def.enabled；保存新策略未刷新future queued快照。这两条是已确认待修项，不是本ADR许可继续删除的合同。`/jobs/tick`的开发skip会取消queued维护子任务，也不是无副作用的“观察”。详见 [总复核](<../audits/2026-10-13-database-api-review.md>)。
+runner 在批/库边界检查禁用、取消、停机；配置 CAS 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照。令牌仅覆盖 payload，不能检测仅改周期冲突。Jobs 预览与实跑走含保护行的原始 keyset 窗口，预览经 blocking budget 执行；批间 2 秒预算不是 SQL 硬执行上限。开发 `/jobs/tick` 跳过维护并将已 claim 的维护无惩罚放回 queued。依据 `maintenance/runner.rs`、`http/job_maintenance.rs`、`jobs/src/store.rs`、`job_loop.rs`；验证方法见[性能测试方法](../testing/storage-performance.md)。
 
 ## 不做这些
 

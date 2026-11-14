@@ -1,38 +1,10 @@
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 
+/// Content token of `path`: the one shared encoder, [`library::current_source_version`].
 pub fn media_source_version(path: &Path) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"crawler-media-source-v1\0");
-    digest.update(path.to_string_lossy().as_bytes());
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
-        && let Ok(contents) = std::fs::read(path)
-    {
-        // strm 没有本地媒体字节。URL 文本不变就视为同一文件，
-        // 同步或目录操作改掉 mtime/inode 不能让已有媒体信息和声纹失效。
-        digest.update(b"\0strm-target\0");
-        digest.update(contents);
-        return digest_hex(digest.finalize());
-    }
-    if let Ok(metadata) = std::fs::metadata(path) {
-        digest.update(metadata.len().to_le_bytes());
-        if let Ok(modified) = metadata.modified()
-            && let Ok(age) = modified.duration_since(UNIX_EPOCH)
-        {
-            digest.update(age.as_nanos().to_le_bytes());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            digest.update(metadata.dev().to_le_bytes());
-            digest.update(metadata.ino().to_le_bytes());
-        }
-    }
-    digest_hex(digest.finalize())
+    library::current_source_version(path)
 }
 
 pub fn fingerprint_cache_key(
@@ -40,61 +12,43 @@ pub fn fingerprint_cache_key(
     sample_duration_secs: u32,
     media_duration_ms: Option<i64>,
 ) -> String {
+    fingerprint_cache_key_with_profile(
+        source_version,
+        sample_duration_secs,
+        media_duration_ms,
+        &FingerprintCaptureProfile::default(),
+    )
+}
+
+pub fn fingerprint_cache_key_with_profile(
+    source_version: &str,
+    sample_duration_secs: u32,
+    _media_duration_ms: Option<i64>,
+    profile: &FingerprintCaptureProfile,
+) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"crawler-media-fingerprint-profile-v1\0");
+    digest.update(b"crawler-media-fingerprint-profile-v3\0");
+    digest.update(capture_profile_key(profile).as_bytes());
     digest.update(source_version.as_bytes());
     digest.update(marker::FINGERPRINT_ALGORITHM_VERSION.to_le_bytes());
     digest.update(sample_duration_secs.to_le_bytes());
-    digest.update(media_duration_ms.unwrap_or_default().to_le_bytes());
-    digest.update(marker::MIN_MATCH_DURATION_SECS.to_le_bytes());
-    digest.update(marker::MAX_MATCH_DURATION_SECS.to_le_bytes());
     digest_hex(digest.finalize())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FingerprintCaptureProfile {
-    pub algorithm_version: u32,
-    pub preset: String,
-    pub pcm_sample_rate: u32,
-    pub pcm_channels: u32,
-    pub pcm_format: String,
-    pub audio_stream_index: Option<u32>,
-    pub audio_selection_version: u32,
-    pub time_mapping_version: u32,
-}
-
-impl Default for FingerprintCaptureProfile {
-    fn default() -> Self {
-        Self {
-            algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
-            preset: "chromaprint_default".into(),
-            pcm_sample_rate: 16000,
-            pcm_channels: 1,
-            pcm_format: "s16le".into(),
-            audio_stream_index: None,
-            audio_selection_version: 1,
-            time_mapping_version: 1,
-        }
-    }
-}
-
-pub fn capture_profile_key(profile: &FingerprintCaptureProfile) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"crawler-media-capture-profile-v1\0");
-    digest.update(profile.algorithm_version.to_le_bytes());
-    digest.update(profile.preset.as_bytes());
-    digest.update(profile.pcm_sample_rate.to_le_bytes());
-    digest.update(profile.pcm_channels.to_le_bytes());
-    digest.update(profile.pcm_format.as_bytes());
-    digest.update(profile.audio_stream_index.unwrap_or(u32::MAX).to_le_bytes());
-    digest.update(profile.audio_selection_version.to_le_bytes());
-    digest.update(profile.time_mapping_version.to_le_bytes());
-    digest_hex(digest.finalize())
-}
+pub use marker::capture_profile::{FingerprintCaptureProfile, capture_profile_key};
 
 pub fn analysis_policy_key(policy: &marker::adaptive::SamplingPolicy) -> String {
     let mut digest = Sha256::new();
     digest.update(b"crawler-media-analysis-policy-v1\0");
+    digest.update(marker::boundary::EVIDENCE_POLICY_VERSION.to_le_bytes());
+    digest.update(policy.boundary.pcm_frame_ms.to_le_bytes());
+    digest.update(policy.boundary.silence_dbfs.to_le_bytes());
+    digest.update(policy.boundary.silence_duration_ms.to_le_bytes());
+    digest.update(policy.boundary.transition_db.to_le_bytes());
+    digest.update(policy.boundary.transition_window_ms.to_le_bytes());
+    digest.update(policy.boundary.context_ms.to_le_bytes());
+    digest.update(policy.boundary.agreement_ms.to_le_bytes());
+    digest.update(policy.boundary.min_guard_ms.to_le_bytes());
     digest.update(policy.seed_count.to_le_bytes());
     digest.update(policy.max_seed_count.to_le_bytes());
     digest.update(policy.max_templates_per_kind.to_le_bytes());
@@ -158,7 +112,7 @@ mod tests {
             first,
             fingerprint_cache_key(&first_source, 181, Some(2_700_000))
         );
-        assert_ne!(
+        assert_eq!(
             first,
             fingerprint_cache_key(&first_source, 180, Some(2_701_000))
         );

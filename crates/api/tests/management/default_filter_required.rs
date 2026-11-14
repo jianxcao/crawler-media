@@ -55,7 +55,7 @@ async fn missing_default_filter_is_rejected_before_writes_but_explicit_filter_wo
         .unwrap()
         .execute("DELETE FROM settings WHERE key = 'default_filter_id'", [])
         .unwrap();
-    let before_media = rows(&tmp, "app.db", "media");
+    let before_media = rows(&tmp, "library.db", "media");
     let before_filters = rows(&tmp, "app.db", "filters");
     let before_subscribes = rows(&tmp, "subscribe.db", "subscribes");
     let before_jobs = rows(&tmp, "jobs.db", "job_defs");
@@ -75,7 +75,7 @@ async fn missing_default_filter_is_rejected_before_writes_but_explicit_filter_wo
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), before_media);
+    assert_eq!(rows(&tmp, "library.db", "media"), before_media);
     assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), before_subscribes);
     assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);
@@ -100,7 +100,7 @@ async fn missing_default_filter_is_rejected_before_writes_but_explicit_filter_wo
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), before_media);
+    assert_eq!(rows(&tmp, "library.db", "media"), before_media);
     assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), before_subscribes);
     assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);

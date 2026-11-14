@@ -1,6 +1,6 @@
-//! 终止态 Jobs 历史的按龄分批保留（DB8 Task 2）。
+//! 终止态 Jobs 历史的按龄分批保留。
 //!
-//! 规则见 `docs/superpowers/plans/2026-10-12-db8-maintenance-retention.md` 第 3.3 / 5.1 节：
+//! 保留规则（数据字典见 `docs/database/jobs.md`）：
 //!
 //! - 只有 `succeeded / failed / cancelled` 且 `finished_at IS NOT NULL AND finished_at < cutoff`
 //!   才是候选；`finished_at` 为 NULL 或等于 `cutoff` 一律保留。
@@ -11,7 +11,7 @@
 //! - 不删除 `job_defs`；单次最多检视/处理 `batch_size` 行；每批一个事务；`dry_run` 零写入。
 //!
 //! 统计口径：候选窗口**只含可删行**（被 last-child 保护的行不进窗口，否则最旧一批
-//! 全是受保护行时清理会永久失效并报成功——DB8 复核 C1）。因此 `scanned` 与
+//! 全是受保护行时清理会永久失效并报成功）。因此 `scanned` 与
 //! `candidates` 都是本批可删行数（≤ `batch_size`），`protected` 是同时间范围内被
 //! last-child 规则保留的行数（报告用诊断，不参与删除），`deleted` 是真正删除的行数
 //! （`dry_run` 恒为 0）。`has_more` 表示窗口之外仍有**可删**候选。
@@ -46,7 +46,7 @@ pub(crate) fn prune_terminal_jobs(
     if batch_size == 0 {
         return Ok(RetentionBatch::default());
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let window = candidate_window(&tx, cutoff, batch_size)?;
     let has_more = window.len() > batch_size;
     let candidates: Vec<&str> = window.iter().take(batch_size).map(String::as_str).collect();
@@ -86,7 +86,7 @@ pub(crate) fn prune_terminal_jobs(
 ///
 /// 它必须出现在**候选窗口**里，而不是只用于事后过滤：否则当最旧的一批恰好全是各自
 /// def 的最新终态行时，窗口永远只含被保护行 → `deleted` 恒为 0 → 调用方按"没有可删
-/// 候选"停止，清理永久失效却报告成功（DB8 复核 C1）。
+/// 候选"停止，清理永久失效却报告成功。
 fn deletable_predicate() -> String {
     format!(
         "def_id IS NULL OR EXISTS (

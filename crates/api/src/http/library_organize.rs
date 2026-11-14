@@ -11,10 +11,8 @@ use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 
 use crate::blocking_budget::BlockingError;
-use crate::http::library::{
-    library_for_row, preferred_row, require_visible_library, rows_in_library,
-};
-use crate::http::{err, ok, ok_list};
+use crate::http::library::{coverages_in_library, preferred_coverage, require_visible_library};
+use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 
@@ -40,15 +38,17 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
     }
 }
 
-fn release_for(row: &domain::LedgerRow) -> domain::Release {
-    let name = FsPath::new(&row.path)
+fn release_for(coverage: &domain::FileCoverage) -> domain::Release {
+    let name = coverage
+        .file
+        .path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let mut parsed = release::parse(name);
-    parsed.resolution = row.resolution.clone().or(parsed.resolution);
-    parsed.codec = row.codec.clone().or(parsed.codec);
-    parsed.hdr = row.hdr.clone().or(parsed.hdr);
+    parsed.resolution = coverage.file.resolution.clone().or(parsed.resolution);
+    parsed.codec = coverage.file.codec.clone().or(parsed.codec);
+    parsed.hdr = coverage.file.hdr.clone().or(parsed.hdr);
     parsed
 }
 
@@ -72,7 +72,7 @@ pub(crate) async fn preview_organize(
 }
 
 fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -90,11 +90,12 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
     let mut renames = Vec::new();
     let mut already_ok = 0usize;
     let mut skips = 0usize;
-    for row in rows_in_library(&store, &library) {
+    for coverage in coverages_in_library(&store, &library) {
+        let row = &coverage.file;
         let Some(media) = store.get_media(row.media_id).ok().flatten() else {
             continue;
         };
-        let release = release_for(&row);
+        let release = release_for(&coverage);
         let target = match library::render_path(
             &primary,
             &pattern,
@@ -108,7 +109,7 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
                 continue;
             }
         };
-        if target.to_string_lossy() == row.path {
+        if target.to_string_lossy() == row.path.to_string_lossy() {
             already_ok += 1;
             continue;
         }
@@ -129,7 +130,9 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
 }
 
 /// POST /libraries/{id}/organize — apply the previewed renames. Body:
-/// `{"renames": [{"from","to"}, ...]}`.
+/// `{"renames": [{"from","to","to_library_id"?}, ...]}`. `from` must belong to
+/// `{id}`; `to` must belong to `{id}` unless the entry names another Library of the
+/// same kind in `to_library_id` (admin-only route; durable cross-Library re-parent).
 pub(crate) async fn organize(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -138,157 +141,14 @@ pub(crate) async fn organize(
     let state_for_work = state.clone();
     let work = state
         .http_work
-        .run_to_completion(move || organize_inner(&state_for_work, &id, &body))
+        .run_to_completion(move || {
+            super::library_organize_apply::organize_inner(&state_for_work, &id, &body)
+        })
         .await;
     match work {
         Ok(response) => response,
         Err(error) => blocking_error(error, "organize.worker"),
     }
-}
-
-/// 整个同步整理用例（lease → 校验 → 落盘）都在 blocking 闭包内，
-/// LibraryLease 持有到真实工作结束。
-fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
-    let lease = match state.acquire_library_work(id) {
-        Ok(lease) => lease,
-        Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
-    };
-    let store = state.store.lock();
-    let Some(library) = store.get_library(id).ok().flatten() else {
-        return missing_library();
-    };
-    let Some(renames) = body["renames"].as_array() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "organize.invalid",
-            "缺少 renames 列表",
-        );
-    };
-    match lease
-        .control()
-        .signal()
-        .publish(|| Ok(apply_organize(&store, &library, renames)))
-    {
-        Ok(response) => {
-            drop(store);
-            // 重命名/移动会改写 ledger path 与 NFO：该 Library 的投影必须重建。
-            state.projection.mark_dirty(id);
-            response
-        }
-        Err(error) => err(StatusCode::CONFLICT, "library.frozen", &error),
-    }
-}
-
-fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Value]) -> Response {
-    let mut applied = 0usize;
-    let mut skipped = Vec::new();
-    let mut errors = Vec::new();
-    for entry in renames {
-        let (Some(from), Some(to)) = (entry["from"].as_str(), entry["to"].as_str()) else {
-            continue;
-        };
-        let to_path = FsPath::new(to);
-        if to_path == FsPath::new(from) {
-            applied += 1;
-            continue;
-        }
-        let from_path = FsPath::new(from);
-        let from_owner = store
-            .library_for_path_strict(from_path, library.kind)
-            .ok()
-            .flatten();
-        if from_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
-            errors.push(format!("{from}: 源文件不属于当前媒体库"));
-            continue;
-        }
-        let to_owner = store
-            .library_for_path_strict(to_path, library.kind)
-            .ok()
-            .flatten();
-        if to_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
-            errors.push(format!("{to}: 目标路径不属于当前媒体库范围"));
-            continue;
-        }
-        if !from_path.is_file() {
-            skipped.push(format!("源文件不存在 {from}"));
-            continue;
-        }
-        if to_path.exists() {
-            skipped.push(format!("目标已存在 {to}"));
-            continue;
-        }
-        // 预检目标路径在 ledger 中是否已被占用（避免改名后因 UNIQUE 约束造成 ledger 记录孤立和归属错乱）
-        if store.ledger_by_path(to).ok().flatten().is_some() {
-            errors.push(format!("{to}: 目标路径已在台账中存在"));
-            continue;
-        }
-        // 源文件必须已登记在当前媒体库的台账中，防止整理未登记的任意宿主机文件
-        let Some(source_ledger) = store.ledger_by_path(from).ok().flatten() else {
-            errors.push(format!("{from}: 源文件未登记在台账中"));
-            continue;
-        };
-        let Some(source_media) = store.get_media(source_ledger.media_id).ok().flatten() else {
-            errors.push(format!("{from}: 关联媒体信息不存在"));
-            continue;
-        };
-        if crate::http::library::library_for_row(&store, &source_ledger, &source_media)
-            .as_ref()
-            .map(|l| &l.id)
-            != Some(&library.id)
-        {
-            errors.push(format!("{from}: 台账记录不属于当前媒体库"));
-            continue;
-        }
-        if let Some(parent) = to_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                tracing::error!(from, to, %error, "创建整理目标目录失败");
-                errors.push(format!("{from}: {error}"));
-                continue;
-            }
-        }
-        if let Err(error) = std::fs::rename(from, to) {
-            tracing::error!(from, to, %error, "整理文件重命名失败");
-            errors.push(format!("{from} 重命名失败: {error}"));
-            continue;
-        }
-        if let Err(err) = store.rename_ledger_path(from, to) {
-            tracing::error!(%err, from, to, "整理文件更新台账失败，尝试回滚磁盘");
-            if let Err(rollback_err) = std::fs::rename(to, from) {
-                tracing::error!(%rollback_err, from, to, "整理文件回滚重命名失败");
-            }
-            errors.push(format!("{from} -> {to}: 台账记录更新失败: {err}"));
-            continue;
-        }
-        // 重命名后重写分集 NFO（新 stem）：扫描只给新文件写 NFO，已入台账的
-        // 文件整理后必须跟着换名，否则 .nfo 变成孤儿。
-        if let Ok(Some(ledger_row)) = store.ledger_by_path(to) {
-            if let Ok(Some(media_row)) = store.get_media(ledger_row.media_id) {
-                if let Some(new_stem) = FsPath::new(to).file_stem().and_then(|n| n.to_str()) {
-                    let nfo_path = FsPath::new(to).with_file_name(format!("{new_stem}.nfo"));
-                    if !nfo_path.is_file() {
-                        let _ = library::write_nfo(&nfo_path, &media_row, None);
-                    }
-                }
-            }
-        }
-        // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
-        if let Some(row) = store
-            .list_ledger()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|row| row.path == to)
-        {
-            let _ = store.rewrite_fact_paths(row.media_id, from, to);
-        }
-        applied += 1;
-    }
-    let _ = library;
-    ok(json!({
-        "applied": applied,
-        "skipped": skipped,
-        "errors": errors,
-    }))
-    .into_response()
 }
 
 /// POST /libraries/{id}/items/{item_id}/metadata/refresh — single item:
@@ -300,9 +160,7 @@ pub(crate) async fn refresh_item_metadata(
     let state_for_work = state.clone();
     let work = state
         .http_work
-        .run_to_completion(move || {
-            refresh_item_metadata_inner(&state_for_work, &id, &item_id)
-        })
+        .run_to_completion(move || refresh_item_metadata_inner(&state_for_work, &id, &item_id))
         .await;
     match work {
         Ok(response) => response,
@@ -317,7 +175,7 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
     };
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -328,19 +186,18 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let rows: Vec<domain::LedgerRow> = rows_in_library(&store, &library)
+    let rows: Vec<domain::FileCoverage> = coverages_in_library(&store, &library)
         .into_iter()
-        .filter(|row| row.media_id == media_id)
+        .filter(|row| row.file.media_id == media_id)
         .collect();
-    let Some(row) = preferred_row(&rows).cloned() else {
+    let Some(row) = preferred_coverage(&rows).cloned() else {
         return err(
             StatusCode::NOT_FOUND,
             "library.item_missing",
             "条目没有在位文件",
         );
     };
-    drop(store);
-    let path = FsPath::new(&row.path).to_path_buf();
+    let path = row.file.path.clone();
     // 剧集级目录：模板整理后是 `<show>/Season N/file`，show 根 = 文件父目录的上一级；
     // 平铺时 = 文件所在目录。poster/fanart/tvshow.nfo 落在 show 根。
     let file_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -364,20 +221,41 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
     if let Some(tmdb_id) = media.tmdb_id.as_deref() {
         match crate::scrape_metadata::fetch_tmdb_metadata(&state, media.kind, tmdb_id) {
             Ok(Some(meta)) => {
+                let meta_service = crate::metadata_service::MetadataService::new(
+                    std::sync::Arc::new(state.clone()),
+                );
+                let _ = meta_service.refresh_media_metadata(&media);
+
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(&media, &meta);
                 if media.kind == domain::MediaKind::Tv {
-                    crate::scrape_metadata::scrape_tv_sidecars(
-                        &state,
-                        &media,
-                        &show_root,
-                        &rows,
-                    );
+                    crate::scrape_metadata::scrape_tv_sidecars(&state, &media, &show_root, &rows);
                 } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                     let target = path.with_file_name(format!("{stem}.nfo"));
-                    let _ = lease.control().signal().publish(|| {
-                        crate::scrape_metadata::write_nfo(&target, &media, &nfo);
-                        Ok(())
-                    });
+                    // 同 library_scan：先捕获用户在 NFO 里的改动，write_nfo 之后再把生效
+                    // 元数据整体导回，用户改的那一项才不会在刷新时被 provider 覆盖掉。
+                    let export = crate::scrape_metadata::export::begin_sidecar_export(
+                        &state,
+                        &media,
+                        &path,
+                        domain::EntityScope::Work,
+                    );
+                    // Ledgered videos go through the guarded export driver only; no
+                    // second, unguarded write of the same sidecar.
+                    match export {
+                        Ok(crate::scrape_metadata::export::ExportPreparation::Ledgered(
+                            request,
+                        )) => {
+                            crate::scrape_metadata::export::finish_sidecar_export(&state, request)
+                        }
+                        // Preparation failed: already logged; this file's sidecar stays as is.
+                        Err(_) => {}
+                        Ok(crate::scrape_metadata::export::ExportPreparation::NotLedgered) => {
+                            let _ = lease.control().signal().publish(|| {
+                                crate::scrape_metadata::write_nfo(&target, &media, &nfo);
+                                Ok(())
+                            });
+                        }
+                    }
                     let movie_root = path.parent().unwrap_or(&path);
                     crate::scrape_metadata::scrape_movie_fanart(&state, &media, movie_root);
                 }
@@ -390,8 +268,6 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
             }
         }
     }
-    // 条目级 NFO/海报/背景已重写：文件事实变化，标脏。
-    state.projection.mark_dirty(&id);
     ok(json!({ "refreshed": refreshed })).into_response()
 }
 
@@ -417,7 +293,7 @@ pub(crate) async fn relax_filter(
 }
 
 fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
@@ -430,10 +306,13 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
         })
         .unwrap_or_default();
     let want_hdr: Option<bool> = body["hdr"].as_bool();
-    let mut by_media: std::collections::HashMap<domain::MediaId, Vec<domain::LedgerRow>> =
+    let mut by_media: std::collections::HashMap<domain::MediaId, Vec<domain::FileCoverage>> =
         std::collections::HashMap::new();
-    for row in rows_in_library(&store, &library) {
-        by_media.entry(row.media_id).or_default().push(row);
+    for coverage in coverages_in_library(&store, &library) {
+        by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
     let count_with = |drop_resolutions: &[String], drop_hdr: bool| -> usize {
         by_media
@@ -441,7 +320,8 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
             .filter(|rows| {
                 let keeps_res = drop_resolutions.is_empty()
                     || rows.iter().any(|row| {
-                        row.resolution
+                        row.file
+                            .resolution
                             .as_deref()
                             .is_some_and(|r| drop_resolutions.iter().any(|w| w == r))
                     });
@@ -451,7 +331,7 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
                 if !drop_hdr {
                     return true;
                 }
-                let has_hdr = rows.iter().any(|row| row.hdr.is_some());
+                let has_hdr = rows.iter().any(|row| row.file.hdr.is_some());
                 has_hdr == want_hdr.unwrap_or(false) || want_hdr.is_none()
             })
             .count()
@@ -516,33 +396,58 @@ fn similar_inner(
     item_id: &str,
     user_id: Option<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let library = match require_visible_library(&store, id, user_id) {
-        Ok(library) => library,
+    let target = match similar_target(state, id, item_id, user_id) {
+        Ok(target) => target,
         Err(response) => return response,
     };
-    let media_id = match domain::MediaId::from_str(item_id) {
-        Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
+    let selected = match &target {
+        Some((kind, tmdb_id)) => {
+            state
+                .similar_reads
+                .read(state.catalog.clone(), *kind, tmdb_id.clone())
+        }
+        None => crate::similar_reads::SimilarRead::Ready(Vec::new()),
     };
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-    };
-    let belongs_to_library = store.list_ledger().unwrap_or_default().iter().any(|row| {
-        row.media_id == media_id
-            && library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-    });
-    if !belongs_to_library {
-        return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
+    // Local cache reads may block on their own DB; authorize the actual target
+    // again after that work, outside both read snapshots and registry locks.
+    match similar_target(state, id, item_id, user_id) {
+        Ok(current) if current == target => {}
+        Ok(_) => {
+            return err(
+                StatusCode::CONFLICT,
+                "similar.changed",
+                "推荐来源已变化，请刷新",
+            );
+        }
+        Err(response) => return response,
     }
-    let Some(tmdb_id) = media.tmdb_id.clone() else {
-        return ok_list(Vec::new()).into_response();
+    let hits = match selected {
+        crate::similar_reads::SimilarRead::Ready(hits) => hits,
+        crate::similar_reads::SimilarRead::Pending => {
+            let mut response = ok(json!({"state":"pending", "retry_after_ms":100})).into_response();
+            *response.status_mut() = StatusCode::ACCEPTED;
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+            return response;
+        }
+        crate::similar_reads::SimilarRead::Failed(error) => {
+            tracing::warn!(%error, %item_id, "similar catalog request failed");
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "catalog.unavailable",
+                "相似推荐数据源暂不可用",
+            );
+        }
+        crate::similar_reads::SimilarRead::Busy => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "similar.busy",
+                "相似推荐刷新繁忙，请稍后重试",
+            );
+        }
     };
-    drop(store);
-    let hits = state
-        .catalog
-        .similar(media.kind, &tmdb_id)
-        .unwrap_or_default();
     let items: Vec<Value> = hits
         .into_iter()
         .map(|hit| {
@@ -557,5 +462,50 @@ fn similar_inner(
             })
         })
         .collect();
-    ok_list(items).into_response()
+    ok(json!({"state":"ready", "items":items})).into_response()
+}
+
+fn similar_target(
+    state: &ApiState,
+    id: &str,
+    item_id: &str,
+    user_id: Option<domain::UserId>,
+) -> Result<Option<(domain::MediaKind, String)>, Response> {
+    crate::http::store_wait::with_store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| {
+            let library = require_visible_library(store, id, user_id)?;
+            let media_id = domain::MediaId::from_str(item_id)
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"))?;
+            let media = store
+                .get_media(media_id)
+                .map_err(|error| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &error.to_string(),
+                    )
+                })?
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"))?;
+            let rows = store.file_coverage_for_media(media_id).map_err(|error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                )
+            })?;
+            if !rows.iter().any(|row| {
+                row.file.library_id.to_string() == library.id
+                    && row.file.publication == domain::FilePublication::Published
+            }) {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
+            Ok(media.tmdb_id.map(|id| (media.kind, id)))
+        },
+    )?
 }

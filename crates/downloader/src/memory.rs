@@ -113,9 +113,7 @@ impl Downloader for MemoryDownloader {
     }
 
     fn remove(&self, torrent: &Torrent, _delete_files: bool) -> Result<(), DownloaderError> {
-        self.removed
-            .lock()
-            .push(format!("legacy:{}", torrent.title));
+        self.removed.lock().push(torrent.title.clone());
         Ok(())
     }
 
@@ -168,7 +166,7 @@ impl Downloader for MemoryDownloader {
             .lock()
             .iter()
             .map(|torrent| TaskSnapshot {
-                tag: crate::ownership_tag(&torrent.enclosure),
+                tag: crate::TASK_TAG.to_string(),
                 name: torrent.title.clone(),
                 progress: 0.0,
                 state: "queued".into(),

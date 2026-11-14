@@ -15,7 +15,6 @@ async fn season_less_files_in_s02_pack_keep_missing_episodes() {
     let h = Harness::new();
     h.state
         .store()
-        .lock()
         .put_setting(api::settings_keys::SUBSCRIBE_SELECTIVE_FILES, "true")
         .unwrap();
     h.create_site().await;

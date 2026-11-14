@@ -1,9 +1,10 @@
 import { request } from "@/lib/http";
 import type { MediaType } from "@/lib/media-types";
+import type { DownloadTask } from "./downloaders";
 
 /** 后端统一响应信封 */
 interface ApiEnvelope<T> {
-  success: boolean;
+  ok: boolean;
   code: string;
   message: string;
   data: T;
@@ -242,63 +243,20 @@ export interface WantedItem {
   upgrade: WantedUpgrade | null;
 }
 
-/** 订阅详情 = 订阅 + 工单明细（新契约详情接口不再带 wanted 列表，兼容字段为空数组）。 */
+/** 订阅详情 = 订阅 + 工单明细（GET /subscriptions/{id} 现算的 wanted）。 */
 export interface SubscriptionDetail extends Subscription {
   wanted: WantedItem[];
 }
 
-/** 规则组过滤条件（见后端匹配器 RuleSetSpec）：全部键可缺省=不限。 */
-export interface RuleSetSpec {
-  /** 允许的分辨率；列表顺序即偏好顺序（排前面的评分更高） */
-  resolutions?: string[];
-  /** 允许的片源档（remux/blu-ray/web-dl/rip/tv）；顺序即偏好，与分辨率一样参与选优 */
-  media_sources?: string[];
-  video_codecs?: string[];
-  /** 流媒体平台白名单（规范值，见 lib/platforms.ts）；空=不限。与制作组各自独立生效 */
-  platforms?: string[];
-  /** 流媒体平台黑名单（规范值）；命中即排除，优先于白名单 */
-  platforms_block?: string[];
-  release_groups_allow?: string[];
-  release_groups_block?: string[];
-  /** HDR 白名单兼偏好序（DV/HDR10+/HDR10/HLG/SDR，SDR=未标注）；任一命中即过 */
-  hdr_levels?: string[];
-  /** HDR 黑名单：资源带其中任一格式即排除 */
-  hdr_block?: string[];
-  /** [兼容层] 旧的 HDR 三态；hdr_levels/hdr_block 为空时后端才消费它 */
-  hdr?: "any" | "require" | "forbid";
-  /** [兼容层] 旧的 DV 三态；同上 */
-  dv?: "any" | "require" | "forbid";
-  free_only?: boolean;
-  min_seeders?: number | null;
-  /** 体积区间按「每集均摊」评估：整季包用总体积 ÷ 集数比较 */
-  size_min_mb?: number | null;
-  size_max_mb?: number | null;
-  exclude_hr?: boolean;
-  hr_unknown_policy?: "lenient" | "strict";
-  /** 要求的字幕语言（BCP 47，任一命中即过；"zh" 含简/繁/未标简繁）；空=不限 */
-  subtitle_languages_require?: string[];
-  /** 要求的音轨语言（cmn=国语、yue=粤语…）；空=不限 */
-  audio_languages_require?: string[];
-  /** 洗版目标片源档；缺省=不洗版（docs/design/quality-upgrade.md §3.2） */
-  upgrade_source?: "web-dl" | "blu-ray" | "remux" | null;
-  /** 洗版目标分辨率；缺省=分辨率偏好首选（都缺省则 1080p），须在 resolutions 内 */
-  cutoff_resolution?: string | null;
-  /** 洗到新版本后保留旧版本（多版本共存，收藏家模式）；缺省=旧版本进回收站 */
-  upgrade_keep_old?: boolean;
-  /** 参与洗版比较的维度及优先级（顺序即位次）；缺省 ["resolution","source"] */
-  upgrade_ladder?: string[];
-  /** 按优先级排列的首选站点；首选站点资源优先，同站点内仍按质量评分。 */
-  sites?: string[];
-}
-
 /** 规则组原子（见 self.md RuleSet.atoms；exclude 黑名单原子命中即排除）。 */
-export interface RuleSetAtom {
+interface RuleSetAtomFields {
   kind:
     | "resolution"
     | "source"
     | "video_codec"
     | "free"
-    | "hr"
+    | "platform"
+    | "team"
     | "title_match"
     | "hdr"
     | "size"
@@ -312,6 +270,14 @@ export interface RuleSetAtom {
   priority: number;
   exclude?: boolean;
 }
+
+export type RuleSetAtom = RuleSetAtomFields | {
+  kind: "hr";
+  value: null;
+  priority: number;
+  exclude?: boolean;
+  unknown: "exclude" | "allow";
+};
 
 /** 规则组（见 self.md RuleSet；旧 spec 对象已折叠为 atoms 原子列表）。 */
 export interface RuleSet {
@@ -332,13 +298,14 @@ export interface CreateSubscriptionPayload {
   title_ref: string;
   /** 从豆瓣候选改选 TMDB 条目时保留原始豆瓣身份 */
   source_title_ref?: string | null;
-  selected_seasons?: number[];
+  /** 剧集订阅范围；电影省略。一季一条订阅。 */
+  coverage?: { kind: "tv"; season: number; episode_from: number };
   follow_future?: boolean;
-  rule_set_id?: number | null;
+  filter_id?: string | null;
   /** 入库目标库；缺省用该类型的默认库 */
-  library_id?: string | number | null;
+  library_id?: string | null;
   wash_cut?: boolean;
-  wash_cut_filter_id?: string | number | null;
+  wash_cut_filter_id?: string | null;
   keep_old_versions?: boolean;
 }
 
@@ -363,7 +330,7 @@ export interface DispatchPreview {
   /** 命中自定义目录规则时的整理落点：完成后整理到该目录（不直接入库），外部流转回库根后入账 */
   staging_path: string | null;
   /** 解析出的目标库（未选库时=收藏范围路由的结论，弹窗据此预选） */
-  library_id: number | null;
+  library_id: string | null;
   library_name: string | null;
   downloader_name: string | null;
   /** 收藏范围路由结论：true=命中声明库 / false=默认库兜底；未走路由为 null */
@@ -386,7 +353,7 @@ export interface DispatchPreview {
  */
 export function previewSubscriptionDownloadRouting(
   kind: string,
-  libraryId: number | null,
+  libraryId: string | null,
   tmdbId?: string | null,
   identity?: { title?: string | null; year?: number | null },
 ): Promise<DispatchPreview> {
@@ -419,10 +386,8 @@ export interface PipelineCheck {
 
 /** 一个库的完整入库链路结论。 */
 export interface LibraryPipeline {
-  library_id: number;
-  /** 新版响应字段；旧的 automation-readiness 响应使用 name。 */
-  library_name?: string;
-  name?: string;
+  library_id: string;
+  name: string;
   kind: "movie" | "tv";
   is_default: boolean;
   /** watch=投监听目录 / inplace=直下库根 / downloader_default=下载器默认目录 */
@@ -495,8 +460,8 @@ export function checkSubscriptionAutomationReadiness(
 }
 
 /**
- * 订阅预检：按 title_ref（tmdb:movie:603 / 裸标题）解析媒体、季集、已有订阅。
- * 后端真实实现（POST /subscriptions/title-preview）；douban 引用暂无法解析。
+ * 订阅预检：按严格 title_ref（tmdb:movie|tv:<id> / douban:<id>）解析媒体、季集、已有订阅。
+ * 后端真实实现（POST /subscriptions/title-preview）；其他形状返回 400 title_ref.invalid。
  */
 export function previewSubscriptionTitle(
   payload: SubscriptionTargetPreviewPayload,
@@ -514,14 +479,14 @@ import { createSubscriptionBody } from "../subscription-form";
 /** 创建订阅（同条目重复订阅幂等返回已有）。后端接受 title_ref 直接解析。 */
 export function createSubscription(
   payload: CreateSubscriptionPayload,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   const body = createSubscriptionBody(payload);
   return unwrap(
     request<ApiEnvelope<Subscription>>("/subscriptions", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 订阅列表（含工单进度）。kind 缺省返回全部。 */
@@ -578,27 +543,23 @@ interface TodayArrivalItem {
 
 /** 订阅详情（含工单明细 wanted：单元状态 + 履历，后端现算）。 */
 export function getSubscription(id: string): Promise<SubscriptionDetail> {
-  return unwrap(request<ApiEnvelope<Subscription & { wanted?: WantedItem[] }>>(`/subscriptions/${id}`)).then(
-    (sub) => ({ ...sub, wanted: sub.wanted ?? [] }),
-  );
+  return unwrap(request<ApiEnvelope<SubscriptionDetail>>(`/subscriptions/${id}`));
 }
 
-/** 修改订阅（季选择/自动续订/规则组，后端 diff 重算工单）。
- *  新契约 PATCH 只接受 fetch_mode/wash_cut/full_season_pack/downloader_id；
- *  旧字段按语义映射（rule_set_id→filter_id），其余被后端忽略。 */
+/** 修改订阅。PATCH 只接受当前合同字段；旧的 selected_seasons / rule_set_id 不再发送。 */
 export function updateSubscription(
   id: string,
   payload: {
-    selected_seasons?: number[];
+    coverage?: { kind: "tv"; season: number; episode_from: number };
     follow_future?: boolean;
-    rule_set_id?: string | number | null;
+    filter_id?: string | null;
     /** 换入库目标库；显式传 null=清除指定、改回按默认库路由；缺省不变 */
-    library_id?: string | number | null;
+    library_id?: string | null;
   },
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   const body: Record<string, unknown> = {};
-  if (payload.selected_seasons) body.selected_seasons = payload.selected_seasons;
-  if (payload.rule_set_id != null) body.filter_id = String(payload.rule_set_id);
+  if (payload.coverage) body.coverage = payload.coverage;
+  if (payload.filter_id != null) body.filter_id = String(payload.filter_id);
   if (payload.follow_future !== undefined) body.follow_future = payload.follow_future;
   if (payload.library_id !== undefined) {
     body.library_id = payload.library_id === null ? null : String(payload.library_id);
@@ -608,7 +569,7 @@ export function updateSubscription(
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 立即搜索：缺口工单跳过冷却重新排队（暂停中/无可搜缺口时后端报可读错误）。 */
@@ -637,7 +598,7 @@ export interface UpgradeRunUnit {
 /** 一轮洗版的体检报告（见 schemas.subscription.UpgradeRunView）。 */
 export interface UpgradeRunReport {
   target_label: string;
-  rule_set_id: number;
+  filter_id: string | null;
   /** 中文整句摘要，直接展示 */
   summary: string;
   counts: Record<UpgradeRunUnit["state"], number>;
@@ -650,26 +611,14 @@ export interface UpgradeRunReport {
  */
 export function runSubscriptionUpgradeRound(
   id: string,
-  ruleSetId?: number | null,
+  ruleSetId?: string | null,
 ): Promise<UpgradeRunReport> {
   return unwrap(
     request<ApiEnvelope<UpgradeRunReport>>(`/subscriptions/${id}/upgrade-runs`, {
       method: "POST",
-      body: JSON.stringify(ruleSetId != null ? { rule_set_id: ruleSetId } : {}),
+      body: JSON.stringify(ruleSetId != null ? { filter_id: ruleSetId } : {}),
     }),
-  ).then((report) => ({
-    target_label: report.target_label ?? "",
-    rule_set_id: Number(report.rule_set_id ?? 0) || 0,
-    summary: report.summary ?? "洗版轮已排队执行",
-    counts: {
-      upgradable: report.counts?.upgradable ?? 0,
-      at_cutoff: report.counts?.at_cutoff ?? 0,
-      in_flight: report.counts?.in_flight ?? 0,
-      not_comparable: report.counts?.not_comparable ?? 0,
-      missing: report.counts?.missing ?? 0,
-    },
-    units: report.units ?? [],
-  }));
+  );
 }
 
 /** 手动选种的种子字段（搜索结果行原样回传，attrs 即搜索链路的服务端解析）。 */
@@ -722,37 +671,37 @@ export function downloadSelectedTorrentForSubscription(
 export function setSubscriptionTrackingState(
   id: string,
   state: "active" | "paused",
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ tracking_state: state }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 export function setSubscriptionFetchMode(
   id: string,
   fetch_mode: FetchMode,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ fetch_mode }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 export function setSubscriptionSearchInterval(
   id: string,
   search_interval_secs: number,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ search_interval_secs }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /**
@@ -761,26 +710,26 @@ export function setSubscriptionSearchInterval(
 export function setSubscriptionKeepOldVersions(
   id: string,
   enabled: boolean,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ keep_old_versions: enabled }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 剧集自动续订：PATCH /subscriptions/{id} `{follow_future}`。 */
 export function setSubscriptionFollowFuture(
   id: string,
   enabled: boolean,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ follow_future: enabled }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /**
@@ -795,22 +744,13 @@ export function unsubscribeFromSubscription(id: string): Promise<Record<string, 
   ).then(() => ({}));
 }
 
-/** 按季清理时被有意保留的跨季种子（整季包仍被保留的季使用）。 */
-export interface RetainedCrossSeasonTorrent {
-  title: string;
-  /** 该种子覆盖到的季号；空 = 无从按季定位的存量数据 */
-  seasons: number[];
-}
-
-/** 可一并清理的内容（见 schemas.subscription.SubscriptionRemovalPreviewView）。 */
+/** 整个 Media 的文件数量，以及该订阅的待下载或推断 Torrent 数量。 */
 export interface SubscriptionRemovalPreview {
-  torrent_count: number;
-  torrent_titles: string[];
-  hit_and_run_count: number;
   library_file_count: number;
   library_bytes: number;
-  recycle_retention_days: number;
-  retained_cross_season: RetainedCrossSeasonTorrent[];
+  torrent_count: number;
+  torrent_count_inferred: boolean;
+  torrent_titles: string[];
 }
 
 /** 联动清理选项；两项都不勾 = 什么都不删（默认）。 */
@@ -819,47 +759,24 @@ export interface SubscriptionRemovalOptions {
   deleteLibraryFiles: boolean;
 }
 
-/**
- * 确认弹窗打开时拉取：能一起删掉多少种子与媒体库文件。
- *
- * `seasons`：只看这几季（减季后的按季清理）；不传 = 整条退订的范围——后端按
- * 「这条订阅覆盖过的季」收口，不是条目下的一切。
- * 新契约只回 `{library_file_count, library_bytes, torrent_count}`，其余字段补默认。
- */
-export function getSubscriptionRemovalPreview(
-  id: string,
-  seasons?: number[],
-): Promise<SubscriptionRemovalPreview> {
-  const query = seasons?.length
-    ? `?${new URLSearchParams(seasons.map((s) => ["seasons", String(s)]))}`
-    : "";
+/** 取消订阅时读取全作品文件与该订阅 Torrent 预览；不支持按季过滤。 */
+export function getSubscriptionRemovalPreview(id: string): Promise<SubscriptionRemovalPreview> {
   return unwrap(
-    request<ApiEnvelope<SubscriptionRemovalPreview>>(
-      `/subscriptions/${id}/removal-preview${query}`,
-    ),
-  ).then((preview) => ({
-    torrent_count: preview.torrent_count ?? 0,
-    torrent_titles: preview.torrent_titles ?? [],
-    hit_and_run_count: preview.hit_and_run_count ?? 0,
-    library_file_count: preview.library_file_count ?? 0,
-    library_bytes: preview.library_bytes ?? 0,
-    recycle_retention_days: preview.recycle_retention_days ?? 0,
-    retained_cross_season: preview.retained_cross_season ?? [],
-  }));
+    request<ApiEnvelope<SubscriptionRemovalPreview>>(`/subscriptions/${id}/removal-preview`),
+  );
 }
 
 /**
  * 清理已移出订阅范围的那几季的内容（减季后的可选收尾）。
  *
- * 订阅不会被删——它还在追别的季。后端会拒绝仍在范围内的季，并把退出那几季
- * 已入库的单元退回缺口（以后重新勾选该季会重新下载）。
- * 新契约只回执 `{queued}`，旧 cleanup_job_id 兼容字段置 null。
+ * 按文件覆盖单元和 Torrent 的季号选择清理范围，订阅本身保留。
+ * 请求返回时清理已执行；回执中的 queued 不表示存在后台 Job。
  */
 export function cleanupSubscriptionSeasons(
   id: string,
   seasons: number[],
   options: SubscriptionRemovalOptions,
-): Promise<{ cleanup_job_id: string | null }> {
+): Promise<{ queued: boolean }> {
   return unwrap(
     request<ApiEnvelope<{ queued: boolean }>>(`/subscriptions/${id}/season-cleanup`, {
       method: "POST",
@@ -869,20 +786,18 @@ export function cleanupSubscriptionSeasons(
         delete_library_files: options.deleteLibraryFiles,
       }),
     }),
-  ).then(() => ({ cleanup_job_id: null }));
+  );
 }
 
 /**
  * 管理员永久删除订阅与追踪工单。
  *
- * 默认不动任何已有内容；勾了联动清理时后端立刻返回并把删种子/回收文件交给
- * 后台任务（cleanup_job_id 可在任务中心查看进度）。
- * 新契约 DELETE 只回 `{deleted}`，无清理任务概念，cleanup_job_id 恒为 null。
+ * 默认不动任何已有内容；勾了联动清理时由服务端同一请求完成。回执即 `{deleted}`。
  */
 export function deleteSubscriptionPermanently(
   id: string,
   options?: SubscriptionRemovalOptions,
-): Promise<{ cleanup_job_id: string | null }> {
+): Promise<{ deleted: boolean }> {
   const query = new URLSearchParams({
     delete_torrents: String(options?.deleteTorrents ?? false),
     delete_library_files: String(options?.deleteLibraryFiles ?? false),
@@ -891,7 +806,7 @@ export function deleteSubscriptionPermanently(
     request<ApiEnvelope<{ deleted: boolean }>>(`/subscriptions/${id}?${query}`, {
       method: "DELETE",
     }),
-  ).then(() => ({ cleanup_job_id: null }));
+  );
 }
 
 /** 订阅在途种子的实时下载快照（详情页轮询展示进度/速度/ETA）。 */
@@ -903,53 +818,35 @@ export interface SubscriptionDownload {
   progress: number | null;
   size_bytes: number | null;
   dlspeed_bytes: number | null;
-  eta_seconds: number | null;
   /** missing = 种子已不在任何可用下载器中（救援巡检稍后会退回工单重找） */
   state: "downloading" | "stalled" | "paused" | "completed" | "error" | "missing" | "unknown";
-  /** state 为 error 时下载器给出的可读原因（文件缺失 / 出错详情）；其余为 null */
-  error_message: string | null;
   downloader_name: string | null;
-  units: { season_number: number; episode_number: number }[];
 }
 
 /**
- * 订阅在途种子的实时下载进度（纯读快照，逐个查询下载器）。
- * 旧端点 `/subscriptions/{id}/active-downloads` 已下线，改读 `/downloaders/tasks`
- * 的待投递快照作为近似。
+ * 订阅在途种子的实时下载进度：读全局 `/downloaders/tasks`（DownloadTask DTO），
+ * 只保留该订阅 wanted 单元锚定的 info_hash。没有在途 hash 时不发请求。
  */
-export function listActiveSubscriptionDownloads(
-  id: string,
+export async function listActiveSubscriptionDownloads(
+  wantedHashes: readonly string[],
   init?: RequestInit,
 ): Promise<SubscriptionDownload[]> {
-  void id;
-  return unwrap(
-    request<ApiEnvelope<{ items: DownloadTaskShim[] }>>("/downloaders/tasks", init),
-  ).then((snapshot) =>
-    (snapshot.items ?? []).map((task) => ({
-      info_hash: task.info_hash ?? "",
+  const wanted = new Set(wantedHashes.filter((hash) => hash.length > 0));
+  if (wanted.size === 0) return [];
+  const snapshot = await unwrap(
+    request<ApiEnvelope<{ items: DownloadTask[] }>>("/downloaders/tasks", init),
+  );
+  return snapshot.items
+    .filter((task) => task.info_hash != null && wanted.has(task.info_hash))
+    .map((task) => ({
+      info_hash: task.info_hash as string,
       name: task.name,
       progress: task.progress,
       size_bytes: task.size_bytes,
       dlspeed_bytes: task.dlspeed_bytes,
-      eta_seconds: null,
-      state: (task.state ?? "unknown") as SubscriptionDownload["state"],
-      error_message: task.error_message ?? null,
+      state: task.state as SubscriptionDownload["state"],
       downloader_name: task.downloader_name,
-      units: [],
-    })),
-  );
-}
-
-/** /downloaders/tasks 条目的最小切片（避免与 downloaders.ts 类型耦合）。 */
-interface DownloadTaskShim {
-  info_hash?: string | null;
-  name: string | null;
-  progress: number | null;
-  size_bytes: number | null;
-  dlspeed_bytes: number | null;
-  state: string | null;
-  error_message?: string | null;
-  downloader_name: string | null;
+    }));
 }
 
 /** 订阅活动记录：message 是完整中文句子，时间线直接展示。 */
@@ -1027,158 +924,29 @@ export function listRuleSets(init?: RequestInit): Promise<RuleSet[]> {
   return unwrap(request<ApiEnvelope<RuleSet[]>>("/rule-sets", init));
 }
 
-/** 把旧 RuleSetSpec（偏好列表/布尔）折叠为新契约的 atoms 原子列表。 */
-export function specToAtoms(spec: RuleSetSpec): RuleSetAtom[] {
-  const atoms: RuleSetAtom[] = [];
-
-  // 分辨率按画质梯队赋有业务意义的分数（2160p=100, 1080p=70, 720p=50），绝对不能从 0 起算！
-  const resolutionWeights: Record<string, number> = {
-    "2160p": 100,
-    "4k": 100,
-    "1080p": 70,
-    "1080i": 65,
-    "720p": 50,
-    "480p": 30,
-  };
-  for (const resolution of spec.resolutions ?? []) {
-    const p = resolutionWeights[resolution.toLowerCase()] ?? 60;
-    atoms.push({ kind: "resolution", value: resolution, priority: p });
-  }
-
-  // 来源档位权重（Remux / BluRay 优先于 WEB-DL）
-  const sourceWeights: Record<string, number> = {
-    remux: 90,
-    bluray: 85,
-    "blu-ray": 85,
-    "web-dl": 70,
-    webrip: 60,
-    hdtv: 50,
-  };
-  for (const source of spec.media_sources ?? []) {
-    const p = sourceWeights[source.toLowerCase()] ?? 50;
-    atoms.push({ kind: "source", value: source, priority: p });
-  }
-
-  if (spec.free_only) atoms.push({ kind: "free", value: null, priority: 50 });
-  if (spec.exclude_hr) atoms.push({ kind: "hr", value: null, priority: 100, exclude: true });
-
-  // 视频编码白名单（按画质阶梯赋优先级）
-  const codecWeights: Record<string, number> = {
-    av1: 95,
-    hevc: 90,
-    "h.265": 90,
-    h265: 90,
-    x265: 90,
-    avc: 70,
-    "h.264": 70,
-    h264: 70,
-    x264: 70,
-  };
-  for (const codec of spec.video_codecs ?? []) {
-    const p = codecWeights[codec.toLowerCase()] ?? 60;
-    atoms.push({ kind: "video_codec", value: codec, priority: p });
-  }
-
-  // 平台白名单（作为 title_match 包含匹配）
-  for (const platform of spec.platforms ?? []) {
-    atoms.push({ kind: "title_match", value: platform, priority: 60 });
-  }
-
-  // 制作组白名单
-  for (const group of spec.release_groups_allow ?? []) {
-    atoms.push({ kind: "title_match", value: group, priority: 60 });
-  }
-
-  // HDR 白名单（兼偏好序）
-  const hdrWeights: Record<string, number> = {
-    dovi: 100,
-    dv: 100,
-    "dolby vision": 100,
-    "hdr10+": 90,
-    hdr10: 80,
-    hdr: 70,
-  };
-  for (const level of spec.hdr_levels ?? []) {
-    const p = hdrWeights[level.toLowerCase()] ?? 60;
-    atoms.push({ kind: "hdr", value: level, priority: p });
-  }
-
-  // 体积区间：单边缺省用 0（无下限）/ 空（无上限）
-  if (spec.size_min_mb != null || spec.size_max_mb != null) {
-    atoms.push({
-      kind: "size",
-      value: `${spec.size_min_mb ?? 0}-${spec.size_max_mb ?? ""}`,
-      priority: 50,
-    });
-  }
-  if (spec.min_seeders != null) {
-    atoms.push({ kind: "min_seeders", value: String(spec.min_seeders), priority: 50 });
-  }
-  for (const lang of spec.subtitle_languages_require ?? []) {
-    atoms.push({ kind: "subtitle_language", value: lang, priority: 50 });
-  }
-  for (const lang of spec.audio_languages_require ?? []) {
-    atoms.push({ kind: "audio_language", value: lang, priority: 50 });
-  }
-  const preferredSites = spec.sites ?? [];
-  preferredSites.forEach((site, index) => {
-    // Atom priority encodes the tier: earlier sites must strictly outrank later ones.
-    atoms.push({ kind: "site", value: site, priority: (preferredSites.length - index) * 50 });
-  });
-  // 洗版目标档位（规则面板「洗到哪一档」）：cutoff_resolution + upgrade_source → wash_target
-  const upgradeParts: string[] = [];
-  if (spec.cutoff_resolution) upgradeParts.push(spec.cutoff_resolution);
-  if (spec.upgrade_source) upgradeParts.push(spec.upgrade_source);
-  if (upgradeParts.length > 0) {
-    atoms.push({ kind: "wash_target", value: upgradeParts.join(" "), priority: 50 });
-  }
-  // 洗版比较维度顺序（顺序即位次）
-  if ((spec.upgrade_ladder ?? []).length > 0) {
-    atoms.push({ kind: "upgrade_ladder", value: spec.upgrade_ladder!.join(","), priority: 50 });
-  }
-  // 黑名单 → exclude 原子（命中即排除；平台/制作组标记通常可见于标题）
-  for (const block of spec.platforms_block ?? []) {
-    atoms.push({ kind: "title_match", value: block, priority: 100, exclude: true });
-  }
-  for (const block of spec.release_groups_block ?? []) {
-    atoms.push({ kind: "title_match", value: block, priority: 100, exclude: true });
-  }
-  for (const block of spec.hdr_block ?? []) {
-    atoms.push({ kind: "hdr", value: block, priority: 100, exclude: true });
-  }
-  return atoms;
+/** 创建规则组，原样保存原子条件。 */
+export function createRuleSet(
+  name: string,
+  atoms: RuleSetAtom[],
+  keepOldVersions = false,
+): Promise<RuleSet> {
+  return unwrap(request<ApiEnvelope<RuleSet>>("/rule-sets", {
+    method: "POST",
+    body: JSON.stringify({ name, atoms, keep_old_versions: keepOldVersions }),
+  }));
 }
 
-export function createRuleSet(name: string, spec: RuleSetSpec): Promise<RuleSet> {
-  return unwrap(
-    request<ApiEnvelope<RuleSet>>("/rule-sets", {
-      method: "POST",
-      body: JSON.stringify({
-        name,
-        atoms: specToAtoms(spec),
-        keep_old_versions: spec.upgrade_keep_old ?? false,
-      }),
-    }),
-  );
-}
-
-/** 更新规则组（只影响之后的匹配评估，不追溯已投递的工单）。 */
+/** 更新规则组（只影响之后的匹配评估）。 */
 export function updateRuleSet(
   id: string,
   name: string,
-  spec: RuleSetSpec,
-  overrideAtoms?: RuleSetAtom[],
+  atoms: RuleSetAtom[],
+  keepOldVersions = false,
 ): Promise<RuleSet> {
-  return unwrap(
-    request<ApiEnvelope<RuleSet>>(`/rule-sets/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        name,
-        atoms: overrideAtoms ?? specToAtoms(spec),
-        keep_old_versions: spec.upgrade_keep_old ?? false,
-      }),
-    }),
-  );
+  return unwrap(request<ApiEnvelope<RuleSet>>(`/rule-sets/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, atoms, keep_old_versions: keepOldVersions }),
+  }));
 }
 
 /** 设为默认规则组（新订阅未指定规则组时使用；不改已有订阅的挂靠）。 */

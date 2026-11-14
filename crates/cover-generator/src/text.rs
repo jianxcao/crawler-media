@@ -5,6 +5,14 @@ use tiny_skia::{Color, Pixmap};
 /// 文字渲染工具（中文主标题 + 英文副标题）
 pub struct TextRenderer;
 
+/// Center and font sizes for the two title lines.
+pub struct TextLayout {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub zh_size: f32,
+    pub en_size: f32,
+}
+
 impl TextRenderer {
     /// 测量单行文字的像素宽度
     pub fn measure_line<F: Font>(text: &str, font: &F, size: f32) -> f32 {
@@ -23,11 +31,14 @@ impl TextRenderer {
         title_en: Option<&str>,
         font_bytes_zh: &[u8],
         font_bytes_en: Option<&[u8]>,
-        center_x: f32,
-        center_y: f32,
-        zh_size: f32,
-        en_size: f32,
+        layout: TextLayout,
     ) -> Result<(), CoverError> {
+        let TextLayout {
+            center_x,
+            center_y,
+            zh_size,
+            en_size,
+        } = layout;
         let font_zh = FontRef::try_from_slice(font_bytes_zh)
             .map_err(|e| CoverError::FontError(e.to_string()))?;
 
@@ -69,38 +80,25 @@ impl TextRenderer {
         )?;
 
         // 2. 绘制英文副标题（如果提供）
-        if let Some(en) = title_en {
-            if !en.trim().is_empty() {
-                let en_top_y = top_y + zh_cap_height + spacing;
-                if let Some(en_bytes) = font_bytes_en {
-                    if let Ok(font_en) = FontRef::try_from_slice(en_bytes) {
-                        let scaled_en = font_en.as_scaled(PxScale::from(en_size));
-                        let en_baseline_y = en_top_y + scaled_en.ascent();
-                        let en_width = Self::measure_line(en, &font_en, en_size);
-                        let en_x = center_x - (en_width / 2.0);
-                        Self::draw_bold_line(
-                            pixmap,
-                            en,
-                            &font_en,
-                            en_x,
-                            en_baseline_y,
-                            en_size,
-                            Color::from_rgba8(255, 255, 255, 190),
-                        )?;
-                    } else {
-                        let en_baseline_y = en_top_y + scaled_zh.ascent() * (en_size / zh_size);
-                        let en_width = Self::measure_line(en, &font_zh, en_size);
-                        let en_x = center_x - (en_width / 2.0);
-                        Self::draw_bold_line(
-                            pixmap,
-                            en,
-                            &font_zh,
-                            en_x,
-                            en_baseline_y,
-                            en_size,
-                            Color::from_rgba8(255, 255, 255, 190),
-                        )?;
-                    }
+        if let Some(en) = title_en
+            && !en.trim().is_empty()
+        {
+            let en_top_y = top_y + zh_cap_height + spacing;
+            if let Some(en_bytes) = font_bytes_en {
+                if let Ok(font_en) = FontRef::try_from_slice(en_bytes) {
+                    let scaled_en = font_en.as_scaled(PxScale::from(en_size));
+                    let en_baseline_y = en_top_y + scaled_en.ascent();
+                    let en_width = Self::measure_line(en, &font_en, en_size);
+                    let en_x = center_x - (en_width / 2.0);
+                    Self::draw_bold_line(
+                        pixmap,
+                        en,
+                        &font_en,
+                        en_x,
+                        en_baseline_y,
+                        en_size,
+                        Color::from_rgba8(255, 255, 255, 190),
+                    )?;
                 } else {
                     let en_baseline_y = en_top_y + scaled_zh.ascent() * (en_size / zh_size);
                     let en_width = Self::measure_line(en, &font_zh, en_size);
@@ -115,6 +113,19 @@ impl TextRenderer {
                         Color::from_rgba8(255, 255, 255, 190),
                     )?;
                 }
+            } else {
+                let en_baseline_y = en_top_y + scaled_zh.ascent() * (en_size / zh_size);
+                let en_width = Self::measure_line(en, &font_zh, en_size);
+                let en_x = center_x - (en_width / 2.0);
+                Self::draw_bold_line(
+                    pixmap,
+                    en,
+                    &font_zh,
+                    en_x,
+                    en_baseline_y,
+                    en_size,
+                    Color::from_rgba8(255, 255, 255, 190),
+                )?;
             }
         }
 

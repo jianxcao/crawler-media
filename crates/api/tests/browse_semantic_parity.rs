@@ -2,8 +2,6 @@
 mod support;
 
 use axum::http::StatusCode;
-use domain::MediaKind;
-use serde_json::Value;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
@@ -11,8 +9,8 @@ async fn browse_semantic_parity_smoke() {
     let fix = PresenceFixture::new();
 
     // Insert deterministic test items
-    let (_m1, r1) = fix.insert_media_and_ledger("Alpha (2020).mkv");
-    let (_m2, r2) = fix.insert_media_and_ledger("Beta (2024).mkv");
+    let (_m1, _r1) = fix.insert_media_and_ledger("Alpha (2020).mkv");
+    let (_m2, _r2) = fix.insert_media_and_ledger("Beta (2024).mkv");
 
     // Fetch items listing
     let (status, res) = fix

@@ -1,8 +1,8 @@
 //! Jellyfin/Emby per-item user data: favorite and played marks.
 
+use axum::Json;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde_json::Value;
 
 use crate::auth::AuthUser;
@@ -37,7 +37,7 @@ pub(super) async fn mark_favorite(
         .provider
         .set_user_marks(user.id, &id, None, Some(true))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -60,7 +60,7 @@ pub(super) async fn unmark_favorite(
         .provider
         .set_user_marks(user.id, &id, None, Some(false))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -83,7 +83,7 @@ pub(super) async fn mark_played(
         .provider
         .set_user_marks(user.id, &id, Some(true), None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -106,7 +106,7 @@ pub(super) async fn unmark_played(
         .provider
         .set_user_marks(user.id, &id, Some(false), None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     if !updated {
         return Err(StatusCode::NOT_FOUND);
     }

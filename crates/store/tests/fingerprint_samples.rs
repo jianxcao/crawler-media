@@ -1,8 +1,8 @@
-use store::{
-    FingerprintSampleQuery, Store, StoredFingerprintModel, StoredFingerprintModelMember,
-    StoredFingerprintSample,
-};
+use store::{FingerprintSampleQuery, Store, StoredFingerprintSample};
+#[path = "support/model_bundle.rs"]
+mod model_bundle;
 
+#[allow(clippy::too_many_arguments)]
 fn sample(
     sample_id: &str,
     ledger_id: &str,
@@ -36,14 +36,7 @@ fn samples_survive_reopen_and_preserve_absolute_windows() {
 
     let store = Store::open(&data).unwrap();
     let s = sample(
-        "sample-1",
-        "ledger-1",
-        "src-v1",
-        "prof-1",
-        "intro",
-        100_000,
-        140_000,
-        "job-1",
+        "sample-1", "ledger-1", "src-v1", "prof-1", "intro", 100_000, 140_000, "job-1",
     );
     let attempt = store::StoredFingerprintAttempt {
         attempt_id: "attempt-1".into(),
@@ -99,17 +92,10 @@ fn samples_survive_reopen_and_preserve_absolute_windows() {
 #[test]
 fn covering_sample_requires_same_source_profile_kind_and_job() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
     let s = sample(
-        "sample-1",
-        "ledger-1",
-        "src-v1",
-        "prof-1",
-        "intro",
-        0,
-        180_000,
-        "job-1",
+        "sample-1", "ledger-1", "src-v1", "prof-1", "intro", 0, 180_000, "job-1",
     );
     let attempt = store::StoredFingerprintAttempt {
         attempt_id: "attempt-1".into(),
@@ -185,18 +171,23 @@ fn covering_sample_requires_same_source_profile_kind_and_job() {
 #[test]
 fn deleting_file_metadata_invalidates_samples_and_referencing_models() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
+    let (media, files) = model_files(&store);
+    let ledger1 = files[0].file_id.to_string();
+    let ledger2 = files[1].file_id.to_string();
+    let source1 = &files[0].version.source_version;
+    let source2 = &files[1].version.source_version;
     let s1 = sample(
-        "s-1", "ledger-1", "src-1", "p-1", "intro", 0, 180_000, "job-1",
+        "s-1", &ledger1, source1, "p-1", "intro", 0, 180_000, "job-1",
     );
     let s2 = sample(
-        "s-2", "ledger-2", "src-1", "p-1", "intro", 0, 180_000, "job-1",
+        "s-2", &ledger2, source2, "p-1", "intro", 0, 180_000, "job-1",
     );
     let attempt1 = store::StoredFingerprintAttempt {
         attempt_id: "att-1".into(),
         job_id: "job-1".into(),
-        ledger_id: "ledger-1".into(),
+        ledger_id: ledger1.clone(),
         kind: "intro".into(),
         window_start_ms: 0,
         window_end_ms: 180_000,
@@ -209,7 +200,7 @@ fn deleting_file_metadata_invalidates_samples_and_referencing_models() {
     };
     let attempt2 = store::StoredFingerprintAttempt {
         attempt_id: "att-2".into(),
-        ledger_id: "ledger-2".into(),
+        ledger_id: ledger2.clone(),
         ..attempt1.clone()
     };
     store.begin_fingerprint_attempt(&attempt1).unwrap();
@@ -221,42 +212,26 @@ fn deleting_file_metadata_invalidates_samples_and_referencing_models() {
         .complete_fingerprint_attempt(&attempt2, Some(&s2))
         .unwrap();
 
-    let model = StoredFingerprintModel {
-        model_id: "model-1".into(),
-        media_id: "media-1".into(),
-        season: 1,
-        kind: "intro".into(),
-        model_version: 1,
-        membership_key: "key-1".into(),
-        policy_key: "pol-1".into(),
-        model_json: "{}".into(),
-        created_at_ms: 2000,
-    };
-    let members = [
-        StoredFingerprintModelMember {
-            model_id: "model-1".into(),
-            sample_id: "s-1".into(),
-            ledger_id: "ledger-1".into(),
-            source_version: "src-1".into(),
-        },
-        StoredFingerprintModelMember {
-            model_id: "model-1".into(),
-            sample_id: "s-2".into(),
-            ledger_id: "ledger-2".into(),
-            source_version: "src-1".into(),
-        },
+    let valid = vec![
+        model_bundle::capture(&store, &files[0], 1),
+        model_bundle::capture(&store, &files[1], 2),
     ];
-    store.put_fingerprint_model(&model, &members).unwrap();
+    let bundle = model_bundle::bundle(media, &valid);
+    store
+        .put_fingerprint_model(&bundle.model, &bundle.members)
+        .unwrap();
 
-    let models = store.list_fingerprint_models("media-1", 1).unwrap();
+    let models = store
+        .list_fingerprint_models(&media.to_string(), 1)
+        .unwrap();
     assert_eq!(models.len(), 1);
 
     // Delete file meta of ledger-1 -> should invalidate sample s-1 and referencing model-1
-    store.delete_file_meta_by_ledger_id("ledger-1").unwrap();
+    store.delete_file_meta_by_ledger_id(&ledger1).unwrap();
 
     let q = FingerprintSampleQuery {
-        ledger_id: "ledger-1".into(),
-        source_version: "src-1".into(),
+        ledger_id: ledger1.clone(),
+        source_version: source1.clone(),
         capture_profile_key: "p-1".into(),
         kind: "intro".into(),
         window_start_ms: 0,
@@ -270,6 +245,50 @@ fn deleting_file_metadata_invalidates_samples_and_referencing_models() {
             .is_empty()
     );
 
-    let remaining_models = store.list_fingerprint_models("media-1", 1).unwrap();
+    let remaining_models = store
+        .list_fingerprint_models(&media.to_string(), 1)
+        .unwrap();
     assert!(remaining_models.is_empty());
+}
+
+fn model_files(store: &Store) -> (domain::MediaId, Vec<domain::LibraryFile>) {
+    let media = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media,
+            kind: domain::MediaKind::Tv,
+            title: "Models".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap();
+    let files = (1..=2)
+        .map(|episode| {
+            store::test_support::publish_fixture_file(
+                store,
+                &store::test_support::FixtureFile {
+                    media_id: media,
+                    path: library.root_paths[0]
+                        .join(format!("{episode}.mkv"))
+                        .display()
+                        .to_string(),
+                    season: Some(1),
+                    episode: Some(episode),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    (media, files)
 }

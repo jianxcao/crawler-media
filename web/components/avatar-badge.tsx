@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { initialsOf } from "@/lib/session";
 
 /**
@@ -30,7 +31,7 @@ export function AvatarBadge({
       style={style}
     >
       {avatarUrl ? (
-        <img
+        <ArtworkImage
           src={avatarUrl}
           alt={`${nickname} 的头像`}
           decoding="async"

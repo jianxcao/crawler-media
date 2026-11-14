@@ -9,7 +9,6 @@ use axum::response::{IntoResponse, Response};
 use domain::{Media, MediaId, MediaKind, Release};
 use serde_json::{Value, json};
 
-use crate::catalog::Catalog;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::scrape_config::{ScrapeConfigSetting, compose_config};
@@ -37,10 +36,10 @@ fn validate(setting: &ScrapeConfigSetting) -> Result<(), String> {
     if !matches!(setting.poster_mode.as_str(), "" | "default" | "language") {
         return Err("海报模式必须是 default 或 language".into());
     }
-    if let Some(secs) = setting.fingerprint_duration_secs {
-        if secs < 30 || secs > 3600 {
-            return Err("声纹采样时长需要在 30~3600 秒之间".into());
-        }
+    if let Some(secs) = setting.fingerprint_duration_secs
+        && !(30..=3600).contains(&secs)
+    {
+        return Err("声纹采样时长需要在 30~3600 秒之间".into());
     }
     if let Some(mode) = &setting.fingerprint_sampling_mode {
         let trimmed = mode.trim();
@@ -110,25 +109,32 @@ pub(crate) async fn get_scrape_settings(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let is_admin = store
-        .user_role(user_id)
-        .map(|role| role == "admin")
-        .unwrap_or(false);
-    match store.get_scrape_config() {
-        Ok(mut config) => {
-            if !is_admin {
-                config.setting.theintrodb_api_key = None;
-                config.setting.fanart_api_key = None;
+    super::store_wait::store_read(
+        &state,
+        &[store::Db::Library, store::Db::App],
+        move |store| {
+            let is_admin = store
+                .user_role(user_id)
+                .map(|role| role == "admin")
+                .unwrap_or(false);
+            match store.get_scrape_config() {
+                Ok(mut config) => {
+                    if !is_admin {
+                        config.setting.theintrodb_api_key = None;
+                        config.setting.fanart_api_key = None;
+                    }
+                    ok(scrape_json(&config)).into_response()
+                }
+                Err(error) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                ),
             }
-            ok(scrape_json(&config)).into_response()
-        }
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+        },
+    )
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 /// PUT /settings/scrape — save + validate; unknown fields are dropped.
@@ -143,53 +149,59 @@ pub(crate) async fn put_scrape_settings(
     if let Err(message) = validate(&setting) {
         return bad("scrape.invalid", &message);
     }
-    let store = state.store.lock();
-    match store.save_scrape_config(&setting) {
-        Ok(config) => ok(scrape_json(&config)).into_response(),
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    super::store_wait::store_write(&state, move |store| {
+        match store.save_scrape_config(&setting) {
+            Ok(config) => ok(scrape_json(&config)).into_response(),
+            Err(error) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| error)
 }
 
 /// POST /settings/scrape/preview-naming — render both composed patterns with a
 /// sample movie + sample episode so the UI can preview before saving.
 pub(crate) async fn preview_naming(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let config = match store.get_scrape_config() {
-        Ok(config) => config,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    let movie_media = sample_media(MediaKind::Movie);
-    let tv_media = sample_media(MediaKind::Tv);
-    let movie_release = sample_release(MediaKind::Movie);
-    let tv_release = sample_release(MediaKind::Tv);
-    let render = |pattern: &str, media: &Media, release: &Release| {
-        library::render_path(
-            std::path::Path::new(""),
-            pattern,
-            media,
-            release,
-            std::path::Path::new("dummy.mkv"),
-        )
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-    };
-    ok(json!({
+    super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
+        let config = match store.get_scrape_config() {
+            Ok(config) => config,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        let movie_media = sample_media(MediaKind::Movie);
+        let tv_media = sample_media(MediaKind::Tv);
+        let movie_release = sample_release(MediaKind::Movie);
+        let tv_release = sample_release(MediaKind::Tv);
+        let render = |pattern: &str, media: &Media, release: &Release| {
+            library::render_path(
+                std::path::Path::new(""),
+                pattern,
+                media,
+                release,
+                std::path::Path::new("dummy.mkv"),
+            )
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+        };
+        ok(json!({
         "movie": render(&config.effective.compose_movie_pattern(), &movie_media, &movie_release),
         "tv": render(&config.effective.compose_tv_pattern(), &tv_media, &tv_release),
         "movie_media_title": movie_media.title,
         "tv_media_title": tv_media.title,
     }))
     .into_response()
+    })
+    .await
+    .unwrap_or_else(|error| error.response())
 }
 
 fn scrape_json(config: &crate::scrape_config::ScrapeConfig) -> Value {
@@ -256,36 +268,88 @@ fn sample_release(kind: MediaKind) -> Release {
     }
 }
 
-/// GET /settings/languages — TMDB configuration 语种全表（设置页「更多语言」）。
+/// GET /settings/languages — complete catalog language configuration.
 pub(crate) async fn languages(State(state): State<ApiState>) -> Response {
-    let catalog: &dyn Catalog = state.catalog.as_ref();
-    let rows = catalog.configuration_languages().unwrap_or_default();
-    let languages: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "code": row.code,
-                "name": row.name,
-                "english_name": row.english_name,
-            })
-        })
-        .collect();
-    ok(json!({ "languages": languages })).into_response()
+    configuration(&state, Configuration::Languages).await
 }
 
-/// GET /settings/countries — TMDB configuration 地区全表（设置页「更多地区」）。
+/// GET /settings/countries — complete catalog country configuration.
 pub(crate) async fn countries(State(state): State<ApiState>) -> Response {
-    let catalog: &dyn Catalog = state.catalog.as_ref();
-    let rows = catalog.configuration_countries().unwrap_or_default();
-    let countries: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "code": row.code,
-                "name": row.native_name,
-                "english_name": row.english_name,
-            })
+    configuration(&state, Configuration::Countries).await
+}
+
+#[derive(Clone, Copy)]
+enum Configuration {
+    Languages,
+    Countries,
+}
+
+fn languages_body(rows: &[media::LanguageRow]) -> serde_json::Value {
+    json!({"languages": rows.iter().map(|row| json!({
+        "code": row.code, "name": row.name, "english_name": row.english_name,
+    })).collect::<Vec<_>>()})
+}
+
+fn countries_body(rows: &[media::CountryRow]) -> serde_json::Value {
+    json!({"countries": rows.iter().map(|row| json!({
+        "code": row.code, "name": row.native_name, "english_name": row.english_name,
+    })).collect::<Vec<_>>()})
+}
+
+fn cached_configuration(
+    memory: &crate::configuration_memory::ConfigurationMemory,
+    kind: Configuration,
+) -> Option<serde_json::Value> {
+    match kind {
+        Configuration::Languages => memory.languages().map(|rows| languages_body(&rows)),
+        Configuration::Countries => memory.countries().map(|rows| countries_body(&rows)),
+    }
+}
+
+async fn configuration(state: &ApiState, kind: Configuration) -> Response {
+    if let Some(value) = cached_configuration(&state.configuration_memory, kind) {
+        return ok(value).into_response();
+    }
+    let catalog = state.catalog.clone();
+    let memory = state.configuration_memory.clone();
+    let result = state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || match kind {
+            Configuration::Languages => catalog.configuration_languages().map(|rows| {
+                let value = languages_body(&rows);
+                memory.store_languages(rows);
+                value
+            }),
+            Configuration::Countries => catalog.configuration_countries().map(|rows| {
+                let value = countries_body(&rows);
+                memory.store_countries(rows);
+                value
+            }),
         })
-        .collect();
-    ok(json!({ "countries": countries })).into_response()
+        .await;
+    match result {
+        Ok(Ok(value)) => ok(value).into_response(),
+        Ok(Err(error)) => {
+            let configuration = match kind {
+                Configuration::Languages => "languages",
+                Configuration::Countries => "countries",
+            };
+            tracing::warn!(%error, configuration, "catalog configuration read failed");
+            err(StatusCode::BAD_GATEWAY, "catalog.upstream", &error)
+        }
+        Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
+        Err(crate::blocking_budget::BlockingError::Timeout) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "catalog.timeout",
+            "目录配置读取超时",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "catalog configuration worker failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                &error.to_string(),
+            )
+        }
+    }
 }

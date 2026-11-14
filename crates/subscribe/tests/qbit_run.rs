@@ -2,13 +2,14 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use downloader::{QbitConfig, QbitDownloader};
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, run};
 
 fn read_request(stream: &mut TcpStream) -> String {
     let mut request = Vec::new();
@@ -123,7 +124,7 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),
@@ -148,7 +149,7 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
         size_bytes: Some(1000),
         seeders: Some(1),
         free: true,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -170,6 +171,9 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
         facts: SubscribeFacts::default(),
         downloader: &qbit,
         library_root: &library_root,
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -180,8 +184,8 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
     })
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 1);
-    assert!(std::path::Path::new(&outcome.ledger[0].path).is_file());
-    assert_eq!(outcome.ledger[0].media_id, media.id);
-    assert_eq!(outcome.ledger[0].resolution.as_deref(), Some("2160p"));
+    assert_eq!(outcome.files.len(), 1);
+    assert!(outcome.files[0].file.path.is_file());
+    assert_eq!(outcome.files[0].file.media_id, media.id);
+    assert_eq!(outcome.files[0].file.resolution.as_deref(), Some("2160p"));
 }

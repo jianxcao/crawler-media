@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind,
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use downloader::{Downloader, DownloaderError};
-use subscribe::{RunInput, SubscribeFacts, admit_and_add};
+use subscribe::{RunInput, admit_and_add};
 
 struct FailsOne;
 
@@ -30,7 +31,7 @@ fn torrent(title: &str, suffix: &str) -> Torrent {
         size_bytes: None,
         seeders: None,
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -66,7 +67,7 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),
@@ -109,6 +110,9 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
         facts: SubscribeFacts::default(),
         downloader: &downloader,
         library_root: std::path::Path::new("/tmp/library"),
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: None,
         scrape: false,
         hooks: None,

@@ -25,7 +25,7 @@ function trimLeadingSlash(value: string): string {
 
 /**
  * 把 API 相对路径解析成完整请求地址。
- * `VITE_API_BASE_URL` 默认 `/api/v1`，因此 `request("/libraries")` 打的是
+ * API 使用同源 `/api/v1`，因此 `request("/libraries")` 打的是
  * `/api/v1/libraries`。后端历史遗留根路径已全部移除，自有接口统一前缀 `/api/v1`。
  */
 export function resolveRequestUrl(path: string): string {
@@ -98,7 +98,7 @@ function classifyRequestAbort(lease: { isLocalTimeout: () => boolean }, error: u
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   // 兜底超时：后端异常/负载过高时不让页面无限「正在连接服务…」。
-  // 调用方传了自己的 signal（AbortController）时不覆盖，由调用方决定。
+  // 调用方的取消信号与超时同时生效，避免带 signal 的请求无限占用连接。
   // The lease deliberately covers response-body consumption so external cancellation
   // works while the body streams. This also means fallback timeout covers the body read,
   // unlike the previous headers-only boundary.
@@ -146,9 +146,13 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       throw new HttpError(message || `Request failed with status ${response.status}`, response.status, payload);
     }
 
-    // Success: return the full envelope; callers unwrap `.data` themselves
-    // (both the legacy `{success, code, message, data}` and the self API
-    // `{ok, data}` shapes carry `data`, so existing unwrap() calls keep working).
+    if (!isJson || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new HttpError("响应不是 {ok:true, data} 信封", response.status, payload);
+    }
+    const envelope = payload as { ok?: unknown; data?: unknown };
+    if (envelope.ok !== true || !("data" in envelope)) {
+      throw new HttpError("响应不是 {ok:true, data} 信封", response.status, payload);
+    }
     return payload as T;
   } finally {
     lease.release();

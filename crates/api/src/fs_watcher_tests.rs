@@ -1,13 +1,177 @@
 use super::fs_watcher::{
-    entry_scan_target_dir, is_relevant_media_entry, realtime_library_root_for_path,
-    FsWatcherSession, FsWatcherState,
+    FsWatcherSession, FsWatcherState, entry_scan_target_dir, is_relevant_media_entry,
+    realtime_library_root_for_path,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct EmptyFetcher;
+
+#[test]
+fn watcher_retry_scans_other_library_while_one_is_frozen() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let movie_root = temp.path().join("movies");
+    let tv_root = temp.path().join("shows");
+    std::fs::create_dir_all(&movie_root).unwrap();
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let path = tv_root.join("Show S01E01.mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &movie_root)
+        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &tv_root).unwrap();
+    let frozen = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let ready = store
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    state.library_work.block(&frozen, "operation");
+    crate::fs_watcher::retry_library_scan(&state, &tracker, frozen.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    crate::fs_watcher::retry_library_scan(&state, &tracker, ready);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if state
+            .store()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "frozen Library starved another Library"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    state.library_work.release(&frozen, "operation");
+}
+
+#[test]
+fn watcher_retry_scans_after_reconfiguration_releases_library() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("movie");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("Movie (2024).mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &root).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_string();
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    state.library_work.block(&library, "operation");
+    crate::fs_watcher::retry_library_scan(&state, &tracker, library.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    state.library_work.release(&library, "operation");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if state
+            .store()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher retry did not ingest the file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn watcher_retry_eventually_scans_after_store_contention() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("movie");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("Movie (2024).mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &root).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+    )
+    .unwrap();
+    let tracker = Arc::new(crate::fs_watcher::StrmGraceTracker::new());
+    let handle = state.store();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        handle
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    crate::fs_watcher::retry_library_scan(&state, &tracker, library.to_string());
+    std::thread::sleep(Duration::from_millis(1200));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if state
+            .store()
+            .file_coverage_by_path(path.to_str().unwrap())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher retry did not ingest the file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 impl indexer::Fetcher for EmptyFetcher {
     fn fetch(&self, _request: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
@@ -23,6 +187,57 @@ struct FakeWatcher {
     unwatch_calls: Arc<AtomicUsize>,
 }
 
+#[test]
+fn watcher_releases_strm_observations_only_after_the_last_covering_root_is_removed() {
+    use super::fs_watcher::StrmGraceTracker;
+    let temp = tempfile::tempdir().unwrap();
+    let removed = temp.path().join("removed");
+    let retained = temp.path().join("retained");
+    let nested = removed.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&retained).unwrap();
+    let removed_file = removed.join("movie.strm");
+    let retained_file = retained.join("movie.strm");
+    let nested_file = nested.join("movie.strm");
+    let pending_file = removed.join("pending.strm");
+    let url = "https://example.invalid/movie.mkv";
+    let tracker = StrmGraceTracker::new();
+    let mut watcher = FakeWatcher::new();
+    let mut state = FsWatcherState::new();
+    let mut desired = HashSet::from([removed.clone(), retained.clone(), nested.clone()]);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    for path in [&removed_file, &retained_file, &nested_file] {
+        assert!(tracker.on_created_or_modified(path, Some(url)));
+    }
+    tracker.mark_deleted(pending_file.clone(), Some(url.into()), 1_000);
+
+    desired.remove(&removed);
+    watcher.fail_unwatch_paths.insert(removed.clone());
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(
+        !tracker.on_created_or_modified(&removed_file, Some(url)),
+        "failed unwatch must retain active-root observations"
+    );
+    watcher.fail_unwatch_paths.clear();
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(!tracker.on_created_or_modified(&retained_file, Some(url)));
+    assert!(
+        !tracker.on_created_or_modified(&nested_file, Some(url)),
+        "overlapping active root must retain its observations"
+    );
+    assert!(
+        tracker.sweep_expired(1_100, 45).is_empty(),
+        "removed root must release its pending deletions"
+    );
+
+    desired.insert(removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert!(
+        tracker.on_created_or_modified(&removed_file, Some(url)),
+        "re-added root must start with a fresh observation"
+    );
+}
+
 impl FakeWatcher {
     fn new() -> Self {
         Self {
@@ -33,6 +248,43 @@ impl FakeWatcher {
             unwatch_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
+
+#[test]
+fn watcher_discards_queued_events_from_retired_roots_until_the_root_is_watched_again() {
+    use super::fs_watcher::StrmGraceTracker;
+    use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
+    let temp = tempfile::tempdir().unwrap();
+    let removed = temp.path().join("removed");
+    let retained = temp.path().join("retained");
+    std::fs::create_dir(&removed).unwrap();
+    std::fs::create_dir(&retained).unwrap();
+    let removed_file = removed.join("movie.strm");
+    let retained_file = retained.join("movie.strm");
+    let queued = vec![
+        DebouncedEvent::new(removed_file.clone(), DebouncedEventKind::Any),
+        DebouncedEvent::new(retained_file.clone(), DebouncedEventKind::Any),
+    ];
+    let mut watcher = FakeWatcher::new();
+    let mut state = FsWatcherState::new();
+    let tracker = StrmGraceTracker::new();
+    let mut desired = HashSet::from([removed.clone(), retained]);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert_eq!(state.relevant_events(&queued).len(), 2);
+
+    desired.remove(&removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    let delivered = state.relevant_events(&queued);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "retired-root queued event must be discarded"
+    );
+    assert_eq!(delivered[0].path, retained_file);
+
+    desired.insert(removed);
+    state.reconcile(&mut watcher, &desired, &tracker);
+    assert_eq!(state.relevant_events(&queued).len(), 2);
 }
 
 impl FsWatcherSession for FakeWatcher {
@@ -65,16 +317,13 @@ fn realtime_library_root_matches_nested_strm_path() {
     std::fs::write(&episode, "https://example.test/episode.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
 
@@ -86,12 +335,19 @@ fn realtime_library_root_matches_nested_strm_path() {
     assert_eq!(entry_scan_target_dir(&root, &episode), show_dir);
 
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let rows = state.store.lock().list_ledger().unwrap();
+    let rows = state.store.as_ref().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, episode.display().to_string());
-    assert_eq!(rows[0].season, Some(1));
-    assert_eq!(rows[0].episode, Some(1));
-    assert!(state.probe.is_queued(&rows[0].id.to_string()));
+    assert_eq!(
+        rows[0].file.path.display().to_string(),
+        episode.display().to_string()
+    );
+    assert!(
+        rows[0]
+            .units
+            .iter()
+            .any(|u| !u.is_whole() && u.season == 1 && u.episode == 1)
+    );
+    assert!(state.probe.is_queued(&rows[0].file.file_id.to_string()));
 }
 
 #[test]
@@ -104,38 +360,35 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     std::fs::write(&episode_one, "https://example.test/e01.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
     let show_dir = root.join("喜剧之王 (2026)");
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let first = state.store.lock().list_ledger().unwrap();
-    let first_id = first[0].id.to_string();
+    let first = state.store.as_ref().list_file_coverage().unwrap();
+    let first_id = first[0].file.file_id.to_string();
     while state.probe.take_queued_for_test().is_some() {}
     let job_id = state
         .store
-        .lock()
+        .as_ref()
         .active_probe_unit_for_ledger(&first_id)
         .unwrap()
         .unwrap()
         .job_id;
     state
         .store
-        .lock()
+        .as_ref()
         .finish_probe_unit(&job_id, &first_id, true, None)
         .unwrap();
     state
         .store
-        .lock()
+        .as_ref()
         .finish_probe_job(&job_id, true, None)
         .unwrap();
     assert!(!state.probe.is_queued(&first_id));
@@ -144,11 +397,14 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     std::fs::write(&episode_two, "https://example.test/e02.mkv").unwrap();
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
 
-    let rows = state.store.lock().list_ledger().unwrap();
+    let rows = state.store.as_ref().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(!state.probe.is_queued(&first_id), "已有 E01 不能再次入队");
-    let second = rows.iter().find(|row| row.episode == Some(2)).unwrap();
-    assert!(state.probe.is_queued(&second.id.to_string()));
+    let second = rows
+        .iter()
+        .find(|row| row.units.iter().any(|u| !u.is_whole() && u.episode == 2))
+        .unwrap();
+    assert!(state.probe.is_queued(&second.file.file_id.to_string()));
 }
 
 #[test]
@@ -194,7 +450,11 @@ fn test_watch_failure_retried_on_next_reconcile() {
     desired.insert(dir2.clone());
 
     // 第一轮：dir1 失败，dir2 成功
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(!state.active().contains(&dir1), "dir1 失败后不能在 active");
     assert!(state.active().contains(&dir2), "dir2 成功后必须在 active");
 
@@ -202,7 +462,11 @@ fn test_watch_failure_retried_on_next_reconcile() {
     watcher.fail_watch_paths.remove(&dir1);
 
     // 第二轮：重试 dir1
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir1), "重试后 dir1 必须在 active");
     assert!(state.active().contains(&dir2), "dir2 保持在 active");
 }
@@ -218,13 +482,21 @@ fn test_missing_directory_not_active_until_created() {
     desired.insert(dir.clone());
 
     // 第一次：目录不存在，不进入 active 也不调 watcher.watch
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(!state.active().contains(&dir));
     assert_eq!(watcher.watch_calls.load(Ordering::SeqCst), 0);
 
     // 创建目录后再次 reconcile
     std::fs::create_dir(&dir).unwrap();
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
     assert_eq!(watcher.watch_calls.load(Ordering::SeqCst), 1);
 }
@@ -241,18 +513,30 @@ fn test_unwatch_failure_keeps_active_and_retries() {
     desired.insert(dir.clone());
 
     // 成功加入
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
 
     // 从 desired 移除，但 unwatch 失败
     watcher.fail_unwatch_paths.insert(dir.clone());
     desired.remove(&dir);
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir), "unwatch 失败保留在 active");
 
     // 下一轮 unwatch 恢复成功
     watcher.fail_unwatch_paths.remove(&dir);
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(
         !state.active().contains(&dir),
         "unwatch 成功后从 active 移除"
@@ -271,13 +555,21 @@ fn test_config_error_preserves_active_set() {
     desired.insert(dir.clone());
 
     // 初始化注册
-    state.reconcile(&mut watcher, &desired);
+    state.reconcile(
+        &mut watcher,
+        &desired,
+        &super::fs_watcher::StrmGraceTracker::new(),
+    );
     assert!(state.active().contains(&dir));
 
     // 模拟配置读取失败时的逻辑：不调用 reconcile（或者不传入空 desired），保持 active 不变
     let config_result: Result<HashSet<PathBuf>, &'static str> = Err("db error");
     match config_result {
-        Ok(new_desired) => state.reconcile(&mut watcher, &new_desired),
+        Ok(new_desired) => state.reconcile(
+            &mut watcher,
+            &new_desired,
+            &super::fs_watcher::StrmGraceTracker::new(),
+        ),
         Err(_) => {
             // 不执行 reconcile，保留 active
         }
@@ -364,9 +656,7 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
     std::fs::write(&episode, "https://example.test/e01.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let library_id = store.list_libraries().unwrap()[0].id.clone();
     let state = crate::management::ApiState::new(
         store,
@@ -374,7 +664,6 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
         indexer::ProfileSet::load(None).unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap();
 
@@ -390,7 +679,6 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
 
     let ops = state
         .store()
-        .lock()
         .scan_operations_for_library(&library_id)
         .unwrap();
     assert_eq!(ops.len(), 1, "watch 事件必须提交一个扫描 operation");
@@ -402,10 +690,17 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
 
     // 定向扫描真的跑完（走 ScanWalker 的 targets 模式）：剧集入账。
     for _ in 0..200 {
-        let rows = state.store().lock().list_ledger().unwrap();
+        let rows = state.store().list_file_coverage().unwrap();
         if let Some(row) = rows.first() {
-            assert_eq!(row.path, episode.display().to_string());
-            assert_eq!((row.season, row.episode), (Some(1), Some(1)));
+            assert_eq!(
+                row.file.path.display().to_string(),
+                episode.display().to_string()
+            );
+            assert!(
+                row.units
+                    .iter()
+                    .any(|u| !u.is_whole() && u.season == 1 && u.episode == 1)
+            );
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;

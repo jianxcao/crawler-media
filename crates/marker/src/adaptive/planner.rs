@@ -22,11 +22,7 @@ pub fn plan_episode_window(
     }
 
     // Filter relevant models for this kind (must be stable model)
-    let models: Vec<_> = templates
-        .models
-        .iter()
-        .filter(|m| m.kind == kind && m.is_stable && !m.references.is_empty())
-        .collect();
+    let models = prediction_models(episode, kind, templates);
 
     if models.is_empty() {
         return WindowDecision::Full {
@@ -35,6 +31,13 @@ pub fn plan_episode_window(
         };
     }
 
+    let late_prediction = kind == SegmentKind::Intro
+        && models.iter().any(|model| {
+            model
+                .references
+                .iter()
+                .any(|reference| reference.match_interval_ms.1 > full_window.end_ms)
+        });
     // Calculate predicted envelopes for all models
     let mut predicted_ranges = Vec::new();
     let mut used_model_ids = Vec::new();
@@ -43,7 +46,8 @@ pub fn plan_episode_window(
         if let Some((start_pred, end_pred)) = predict_interval_for_episode(model, episode) {
             // Apply context margins
             let window_start = (start_pred - policy.context_margin_ms).max(0);
-            let window_end = (end_pred + policy.context_margin_ms).min(episode.duration_ms);
+            let window_end =
+                (end_pred + policy.context_margin_ms).min(prediction_bound(episode, kind));
 
             if window_end > window_start {
                 predicted_ranges.push((window_start, window_end));
@@ -69,7 +73,11 @@ pub fn plan_episode_window(
 
     // Clamp within default search range
     let clamped_start = min_start.max(full_window.start_ms);
-    let clamped_end = max_end.min(full_window.end_ms);
+    let clamped_end = if late_prediction {
+        max_end
+    } else {
+        max_end.min(full_window.end_ms)
+    };
 
     let verify_window = SampleWindow {
         start_ms: clamped_start,
@@ -83,6 +91,87 @@ pub fn plan_episode_window(
         };
     }
 
+    if verify_window.duration_ms() > 300_000 {
+        return WindowDecision::Full {
+            window: full_window,
+            reason: "prediction_exceeds_capture_bound".into(),
+        };
+    }
+    // The initial window cannot discover a late prediction, so its cost is irrelevant.
+    if late_prediction && verify_window.end_ms > full_window.end_ms {
+        return WindowDecision::Verify {
+            window: verify_window,
+            model_ids: used_model_ids,
+        };
+    }
+    if let Some(reason) = cost_fallback(&full_window, &verify_window, policy, cost) {
+        return WindowDecision::Full {
+            window: full_window,
+            reason: reason.into(),
+        };
+    }
+
+    WindowDecision::Verify {
+        window: verify_window,
+        model_ids: used_model_ids,
+    }
+}
+
+fn prediction_models<'a>(
+    episode: &EpisodeDescriptor,
+    kind: SegmentKind,
+    templates: &'a TemplateContext,
+) -> Vec<&'a super::types::TemplateModel> {
+    let mut models = templates
+        .models
+        .iter()
+        .filter(|model| model.kind == kind && model.is_stable && !model.references.is_empty())
+        .collect::<Vec<_>>();
+    // A validated current target reference is more precise than other episodes'
+    // positions. Keep all matching models so conflicting predictions stay bounded.
+    if kind == SegmentKind::Intro
+        && models.iter().any(|model| {
+            model
+                .references
+                .iter()
+                .any(|reference| target_reference(reference, episode))
+        })
+    {
+        models.retain(|model| {
+            model
+                .references
+                .iter()
+                .any(|reference| target_reference(reference, episode))
+        });
+    }
+    models
+}
+
+fn target_reference(
+    reference: &super::types::TemplateReference,
+    episode: &EpisodeDescriptor,
+) -> bool {
+    reference.ledger_id == episode.ledger_id && reference.source_version == episode.source_version
+}
+
+fn prediction_bound(episode: &EpisodeDescriptor, kind: SegmentKind) -> i64 {
+    if kind == SegmentKind::Intro {
+        if episode.duration_ms > 0 {
+            episode.duration_ms.min(600_000)
+        } else {
+            600_000
+        }
+    } else {
+        episode.duration_ms
+    }
+}
+
+fn cost_fallback(
+    full_window: &SampleWindow,
+    verify_window: &SampleWindow,
+    policy: &SamplingPolicy,
+    cost: &SourceCostSummary,
+) -> Option<&'static str> {
     let full_duration_ms = full_window.duration_ms();
     let verify_duration_ms = verify_window.duration_ms();
 
@@ -103,22 +192,13 @@ pub fn plan_episode_window(
         let c_adaptive = h + (verify_duration_ms as f64 / r) + (p * c_full);
 
         if c_adaptive > 0.90 * c_full {
-            return WindowDecision::Full {
-                window: full_window,
-                reason: "cost_saving_below_threshold".to_string(),
-            };
+            return Some("cost_saving_below_threshold");
         }
     } else if savings_ratio < policy.min_window_saving_ratio {
-        return WindowDecision::Full {
-            window: full_window,
-            reason: "window_saving_below_threshold".to_string(),
-        };
+        return Some("window_saving_below_threshold");
     }
 
-    WindowDecision::Verify {
-        window: verify_window,
-        model_ids: used_model_ids,
-    }
+    None
 }
 
 pub fn default_full_window(
@@ -160,10 +240,19 @@ fn predict_interval_for_episode(
 ) -> Option<(i64, i64)> {
     match model.kind {
         SegmentKind::Intro => {
-            // Absolute start and end positions
+            // Use the current file's own interval when available; a new file still
+            // needs the conservative envelope across independent references.
+            let has_own = model
+                .references
+                .iter()
+                .any(|r| target_reference(r, episode));
             let mut starts = Vec::new();
             let mut ends = Vec::new();
-            for r in &model.references {
+            for r in model
+                .references
+                .iter()
+                .filter(|r| !has_own || target_reference(r, episode))
+            {
                 starts.push(r.match_interval_ms.0);
                 ends.push(r.match_interval_ms.1);
             }

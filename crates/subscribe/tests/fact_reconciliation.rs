@@ -1,8 +1,9 @@
 use domain::{Coverage, FetchMode, Media, MediaId, MediaKind, Torrent};
+use domain::{QualityFact, SubscribeFacts};
 use downloader::{Downloader, DownloaderError};
 use std::path::PathBuf;
 use subscribe::{
-    Added, QualityFact, RunInput, SubscribeFacts, collect_completed_with_destinations,
+    Added, RunInput, collect_completed_with_destinations,
     collection_destinations::DestinationMapping,
 };
 
@@ -66,7 +67,7 @@ fn tv_fixtures() -> (Media, domain::Subscribe, domain::Filter, Torrent) {
         size_bytes: Some(1024),
         seeders: Some(10),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -113,6 +114,9 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
         search_keywords: vec![],
         downloader: &dl,
         library_root: &library,
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: Some(library::TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -133,8 +137,8 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
         rejected: vec![],
         outcome: subscribe::RunOutcome {
             facts: Default::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             collection_errors: vec![],
             transferred_enclosures: vec![],
@@ -147,11 +151,19 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
         broken: Vec::new(),
     };
 
-    let outcome = collect_completed_with_destinations(added, &library::Ffprobe::default(), &existing_mappings).unwrap();
+    let outcome = collect_completed_with_destinations(
+        added,
+        &library::Ffprobe::default(),
+        &existing_mappings,
+    )
+    .unwrap();
 
     // E01 事实恢复，E02 绝不能被凭空赋予相同路径或事实！
     assert_eq!(
-        outcome.facts.get(Some(1), Some(1)).and_then(|f| f.path.clone()),
+        outcome
+            .facts
+            .get(Some(1), Some(1))
+            .and_then(|f| f.path.clone()),
         Some(dest1.display().to_string())
     );
     assert!(outcome.facts.get(Some(1), Some(2)).is_none());
@@ -203,6 +215,9 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
         search_keywords: vec![],
         downloader: &dl,
         library_root: &library,
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: Some(library::TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -223,8 +238,8 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
         rejected: vec![],
         outcome: subscribe::RunOutcome {
             facts: Default::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             collection_errors: vec![],
             transferred_enclosures: vec![],
@@ -237,7 +252,12 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
         broken: Vec::new(),
     };
 
-    let outcome = collect_completed_with_destinations(added, &library::Ffprobe::default(), &existing_mappings).unwrap();
+    let outcome = collect_completed_with_destinations(
+        added,
+        &library::Ffprobe::default(),
+        &existing_mappings,
+    )
+    .unwrap();
 
     // 陈旧的 facts 必须被修复指向 new_dest，分值提升为 100
     let fact = outcome.facts.get(Some(1), Some(1)).unwrap();

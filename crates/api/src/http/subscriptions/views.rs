@@ -40,19 +40,9 @@ pub(crate) fn coverage_json(coverage: &Coverage) -> Value {
     }
 }
 
-pub(crate) fn subscription_json(
-    store: &crate::Store,
-    _catalog: &dyn crate::catalog::Catalog,
-    subscribe: &Subscribe,
-    media: &Media,
-    facts: &subscribe::SubscribeFacts,
-) -> Value {
-    let snapshot = super::snapshot::load_single_subscription_view(store, subscribe, media, facts);
-    render_subscription_snapshot(&snapshot)
-}
-
 pub(crate) fn render_subscription_snapshot(
     snapshot: &super::snapshot::SubscriptionViewSnapshot,
+    files: &dyn crate::file_stat_read::FileStatRead,
 ) -> Value {
     let subscribe = &snapshot.subscribe;
     let media = &snapshot.media;
@@ -64,20 +54,16 @@ pub(crate) fn render_subscription_snapshot(
     let grabbing = count_pipeline_units(subscribe, pending, facts);
     let downloaded = (imported + grabbing).min(total);
 
-    let created_at = if snapshot.created_at.is_empty() {
-        "1970-01-01T00:00:00Z"
-    } else {
-        &snapshot.created_at
-    };
-    let updated_at = if snapshot.updated_at.is_empty() {
-        "1970-01-01T00:00:00Z"
-    } else {
-        &snapshot.updated_at
-    };
+    let created_at = &snapshot.created_at;
+    let updated_at = &snapshot.updated_at;
 
     let poster_choice = super::poster_view::determine_poster_from_candidate(
         media,
-        snapshot.library_poster_candidate,
+        snapshot
+            .library_poster_candidate
+            .as_ref()
+            .filter(|(_, path)| files.is_file(path))
+            .map(|(file, _)| *file),
     );
     let poster_url = super::poster_view::poster_url(poster_choice);
 
@@ -114,7 +100,7 @@ pub(crate) fn render_subscription_snapshot(
 pub(crate) fn count_pipeline_units(
     subscribe: &Subscribe,
     pending: &[(i32, crate::store::PendingDownload)],
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
 ) -> i64 {
     if pending.is_empty() {
         return 0;
@@ -155,123 +141,44 @@ pub(crate) fn count_pipeline_units(
     }
 }
 
-pub(super) fn progress(
-    store: &crate::Store,
-    subscribe: &Subscribe,
-    media: &Media,
-    facts: &subscribe::SubscribeFacts,
-) -> (i64, i64) {
-    match subscribe.coverage {
-        Coverage::Movie => (1, if facts.movie().is_some() { 1 } else { 0 }),
-        Coverage::Tv {
-            episode_to: Some(_),
-            ..
-        } => {
-            let units = subscribe.coverage.units();
-            let total = units.len() as i64;
-            let imported = units
-                .iter()
-                .filter(|(s, ep)| facts.get(*s, *ep).is_some())
-                .count() as i64;
-            (total, imported)
-        }
-        Coverage::Tv {
-            season,
-            episode_from,
-            episode_to: None,
-        } => open_season_progress(store, media, facts, season, episode_from),
-    }
-}
-
-fn open_season_progress(
-    store: &crate::Store,
-    media: &Media,
-    facts: &subscribe::SubscribeFacts,
-    season: u32,
-    episode_from: u32,
-) -> (i64, i64) {
-    if let Some(count) = cached_season_episode_count(store, media, season).filter(|c| *c > 0) {
-        let to = (count as u32)
-            .max(episode_from)
-            .min(episode_from.saturating_add(domain::Coverage::MAX_EPISODES.saturating_sub(1)));
-        let total = i64::from(to.saturating_sub(episode_from)) + 1;
-        let imported = (episode_from..=to)
-            .filter(|ep| facts.get(Some(season), Some(*ep)).is_some())
-            .count() as i64;
-        return (total, imported);
-    }
-    let imported = facts
-        .entries()
-        .filter(|((s, e), _)| *s == Some(season) && e.is_some())
-        .count() as i64;
-    (imported.max(1), imported)
-}
-
-fn cached_season_episode_count(store: &crate::Store, media: &Media, season: u32) -> Option<i64> {
-    let tmdb_id = media.tmdb_id.as_deref()?;
-    let cached = store
-        .get_catalog_cache("tmdb", &format!("/tv/{tmdb_id}?language=zh-CN"))
-        .ok()
-        .flatten()
-        .or_else(|| {
-            store
-                .get_catalog_cache("tmdb", &format!("/tv/{tmdb_id}"))
-                .ok()
-                .flatten()
-        })
-        .or_else(|| cached_show_body(store, tmdb_id))?;
-    let val: serde_json::Value = serde_json::from_str(&cached).ok()?;
-    val.get("seasons")?
-        .as_array()?
-        .iter()
-        .find(|s| s.get("season_number").and_then(Value::as_i64) == Some(i64::from(season)))?
-        .get("episode_count")?
-        .as_i64()
-}
-
-fn cached_show_body(store: &crate::Store, tmdb_id: &str) -> Option<String> {
-    store
-        .list_catalog_cache()
-        .ok()?
-        .into_iter()
-        .find_map(|row| {
-            (row.cache_key.contains(tmdb_id)
-                && (row.cache_key.contains("language=zh-CN") || row.cache_key.ends_with(tmdb_id)))
-            .then_some(row.body)
-        })
-}
-
 pub(crate) async fn list_subscriptions(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
 ) -> Response {
-    let state_for_read = state.clone();
-    let snapshots = match tokio::task::spawn_blocking(move || {
-        let store = state_for_read.store.lock();
-        super::snapshot::load_visible_subscription_views(&store, user_id)
-    })
+    let snapshots = match crate::http::store_wait::store_read(
+        &state,
+        &[
+            store::Db::Library,
+            store::Db::App,
+            store::Db::Subscribe,
+            store::Db::Cache,
+        ],
+        move |store| super::snapshot::load_visible_subscription_views(store, user_id),
+    )
     .await
     {
-        Ok(Ok(views)) => views,
-        Ok(Err(err_msg)) => {
+        Ok(Ok(snapshots)) => snapshots,
+        Ok(Err(error)) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
-                &err_msg.to_string(),
+                &error.to_string(),
             );
         }
-        Err(join_err) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.join",
-                &join_err.to_string(),
-            );
-        }
+        Err(error) => return error.response(),
     };
-
-    let mut rows = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
-        rows.push(render_subscription_snapshot(&snapshot));
+    let files = state.file_stats.clone();
+    match state
+        .http_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            snapshots
+                .iter()
+                .map(|snapshot| render_subscription_snapshot(snapshot, files.as_ref()))
+                .collect()
+        })
+        .await
+    {
+        Ok(rows) => ok_list(rows).into_response(),
+        Err(error) => crate::http::library::browse_work_error(error),
     }
-    ok_list(rows).into_response()
 }

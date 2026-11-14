@@ -9,6 +9,7 @@ import { publicEnv } from "@/lib/env";
 import { HttpError } from "@/lib/http";
 import { SessionProvider } from "@/lib/session";
 import { accessiblePathFor } from "@/lib/permissions";
+import { retryStartupTimeout } from "@/lib/startup-retry.mjs";
 
 interface StartupFailure {
   endpoint: string;
@@ -58,11 +59,18 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setFailure(null);
     (async () => {
       try {
         // 未登录时 getSession 抛 401，http.ts 拦截并整页跳 /login
-        const view = await getSession();
+        const view = await retryStartupTimeout(
+          () => {
+            if (cancelled) throw new DOMException("Aborted", "AbortError");
+            return getSession(controller.signal);
+          },
+          (error) => !cancelled && error instanceof HttpError && error.status === 0,
+        );
         if (cancelled) return;
         cachedSession = view;
         const allowedPath = accessiblePathFor(view, pathname);
@@ -84,6 +92,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     })();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [pathname, retryKey, navigate]);
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+// Serialization fixtures only: the production runner does not yet export this contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkRun {
     pub baseline_commit: String,
@@ -15,9 +16,7 @@ pub struct BenchmarkRun {
     pub attempts: Vec<BenchmarkAttempt>,
     pub input_bytes: Option<u64>,
     pub measurement_complete: bool,
-    pub episode_intervals: Vec<BenchmarkInterval>,
-    pub ground_truth: Vec<BenchmarkInterval>,
-    pub accuracy_errors: Vec<AccuracyError>,
+    pub predictions: Vec<BenchmarkPrediction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,18 +27,13 @@ pub struct BenchmarkAttempt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BenchmarkInterval {
-    pub episode: u32,
-    pub marker_type: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccuracyError {
-    pub episode: u32,
-    pub marker_type: String,
-    pub boundary_error_ms: u64,
+pub struct BenchmarkPrediction {
+    pub case_id: String,
+    pub source_hash: String,
+    pub state: String,
+    pub interval_ms: Option<[u64; 2]>,
+    pub reason: String,
+    pub run_id: String,
 }
 
 #[test]
@@ -62,9 +56,14 @@ fn benchmark_run_serialization_and_measurement_completeness() {
         }],
         input_bytes: Some(102400),
         measurement_complete: true,
-        episode_intervals: vec![],
-        ground_truth: vec![],
-        accuracy_errors: vec![],
+        predictions: vec![BenchmarkPrediction {
+            case_id: "m1-e1-intro".into(),
+            source_hash: "sha256:fixture".into(),
+            state: "matched".into(),
+            interval_ms: Some([20000, 90000]),
+            reason: "verified".into(),
+            run_id: "test-run-1".into(),
+        }],
     };
 
     let json_str = serde_json::to_string(&run).expect("serialize");
@@ -72,6 +71,13 @@ fn benchmark_run_serialization_and_measurement_completeness() {
     assert_eq!(deser.run_id, "test-run-1");
     assert!(deser.measurement_complete);
     assert_eq!(deser.input_bytes, Some(102400));
+    let value: serde_json::Value = serde_json::from_str(&json_str).expect("json value");
+    assert!(value.get("accuracy_errors").is_none());
+    assert!(value.get("ground_truth").is_none());
+    assert_eq!(
+        value["predictions"][0]["interval_ms"],
+        serde_json::json!([20000, 90000])
+    );
 }
 
 #[test]
@@ -90,11 +96,19 @@ fn unknown_network_bytes_preserves_incomplete_metrics() {
         attempts: vec![],
         input_bytes: None,
         measurement_complete: false,
-        episode_intervals: vec![],
-        ground_truth: vec![],
-        accuracy_errors: vec![],
+        predictions: vec![BenchmarkPrediction {
+            case_id: "m1-e1-outro".into(),
+            source_hash: "sha256:fixture".into(),
+            state: "uncertain".into(),
+            interval_ms: None,
+            reason: "insufficient_evidence".into(),
+            run_id: "test-run-2".into(),
+        }],
     };
 
     assert!(!run.measurement_complete);
     assert!(run.input_bytes.is_none());
+    let value = serde_json::to_value(&run).expect("serialize");
+    assert!(value["input_bytes"].is_null());
+    assert!(value["predictions"][0]["interval_ms"].is_null());
 }

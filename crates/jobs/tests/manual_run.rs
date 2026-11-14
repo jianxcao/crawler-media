@@ -5,8 +5,9 @@ fn manual_run_links_an_unscheduled_job_to_its_definition() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Queue::open(dir.path().join("jobs.db")).unwrap();
     let def = queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::Transfer,
+            scope: jobs::JobScope::Global,
             name: "manual transfer".into(),
             enabled: true,
             schedule: None,
@@ -29,12 +30,15 @@ fn manual_run_queues_one_follow_up_behind_a_running_child() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Queue::open(dir.path().join("jobs.db")).unwrap();
     let def = queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(
+                "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            ),
             name: "search".into(),
             enabled: true,
             schedule: Some(jobs::Schedule::Interval { secs: 1800 }),
-            payload: r#"{"subscribe_id":"sub-1"}"#.into(),
+            payload: r#"{"subscribe_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: Some(120),
             concurrency_key: None,
         })
@@ -61,12 +65,15 @@ fn failed_running_child_does_not_conflict_with_queued_follow_up() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Queue::open(dir.path().join("jobs.db")).unwrap();
     let def = queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::SubscribeSearch,
+            scope: jobs::JobScope::Subscribe(
+                "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            ),
             name: "search".into(),
             enabled: true,
             schedule: Some(jobs::Schedule::Interval { secs: 1800 }),
-            payload: r#"{"subscribe_id":"sub-1"}"#.into(),
+            payload: r#"{"subscribe_id":"00000000-0000-0000-0000-000000000001"}"#.into(),
             timeout_secs: Some(120),
             concurrency_key: None,
         })
@@ -97,8 +104,9 @@ fn manual_run_while_running_does_not_add_another_child() {
     let dir = tempfile::tempdir().unwrap();
     let queue = Queue::open(dir.path().join("jobs.db")).unwrap();
     let def = queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::JobsRetention,
+            scope: jobs::JobScope::Global,
             name: "jobs retention".into(),
             enabled: true,
             schedule: Some(jobs::Schedule::Interval { secs: 86_400 }),

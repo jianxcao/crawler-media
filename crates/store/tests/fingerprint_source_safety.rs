@@ -1,13 +1,58 @@
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, QualitySource};
+use store::test_support::FixtureFile;
 use store::{
-    MarkerResultReplacement, ProbeJobUnitSpec, Store, StoredFingerprintAttempt,
-    StoredFingerprintSample, StoredMediaMarker,
+    ProbeJobUnitSpec, Store, StoredFileMarker, StoredFingerprintAttempt, StoredFingerprintSample,
 };
 
-fn row(root: &std::path::Path) -> LedgerRow {
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: MediaId::new(),
+fn ensure_media(store: &Store, media_id: MediaId) -> MediaId {
+    if store.get_media(media_id).unwrap().is_none() {
+        store
+            .insert_media(&domain::Media {
+                id: media_id,
+                kind: domain::MediaKind::Movie,
+                title: format!("Fixture {media_id}"),
+                year: None,
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+    }
+    media_id
+}
+
+fn ensure_root(store: &Store, root: &std::path::Path) {
+    if store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root)
+    {
+        return;
+    }
+    let name = format!("lib-{}", root.display());
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            &name,
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+}
+
+fn row(store: &Store, root: &std::path::Path, media_id: MediaId) -> FixtureFile {
+    std::fs::create_dir_all(root).unwrap();
+    ensure_root(store, root);
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id: ensure_media(store, media_id),
         path: root.join("episode.mkv").to_string_lossy().into_owned(),
         season: Some(1),
         episode: Some(1),
@@ -17,16 +62,14 @@ fn row(root: &std::path::Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
     std::fs::write(&row.path, b"fixture").unwrap();
     row
 }
 
-fn marker(row: &LedgerRow, source: &str) -> StoredMediaMarker {
-    StoredMediaMarker {
-        media_id: row.media_id,
-        season: 1,
-        episode: 1,
+fn marker(store: &Store, row: &FixtureFile, source: &str) -> StoredFileMarker {
+    StoredFileMarker {
         intro_start_ms: Some(10_000),
         intro_end_ms: Some(70_000),
         outro_start_ms: None,
@@ -34,6 +77,14 @@ fn marker(row: &LedgerRow, source: &str) -> StoredMediaMarker {
         source: source.into(),
         locked: false,
         updated_at: 0,
+        file_id: row.file_id.unwrap(),
+        version: store
+            .file_coverage_by_id(row.file_id.unwrap())
+            .unwrap()
+            .unwrap()
+            .file
+            .version,
+        unit: domain::UnitKey::new(1, 1),
     }
 }
 
@@ -41,24 +92,30 @@ fn marker(row: &LedgerRow, source: &str) -> StoredMediaMarker {
 fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
-    store.insert_ledger(&row).unwrap();
-    store.put_media_marker(&marker(&row, "old")).unwrap();
-    let replacement = MarkerResultReplacement {
-        media_id: row.media_id,
-        season: 1,
-        markers: vec![marker(&row, "new")],
-        chapter_updates: vec![(row.id.to_string(), vec![])],
-    };
+    let row = row(&store, temp.path(), MediaId::new());
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
+    store
+        .put_fixture_marker(&marker(&store, &row, "old"))
+        .unwrap();
+    let replacement = store::test_support::fixture_marker_replacement(
+        &store,
+        row.media_id,
+        1,
+        vec![marker(&store, &row, "new")],
+        vec![(row.file_id.expect("fixture file id").to_string(), vec![])],
+    );
     std::fs::remove_file(&row.path).unwrap();
     assert!(
         store
-            .replace_marker_results_batch_checked(std::slice::from_ref(&replacement))
+            .replace_marker_results_batch_checked(
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
     assert_eq!(
         store
-            .get_media_marker(row.media_id, Some(1), Some(1))
+            .get_fixture_marker(row.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()
             .source,
@@ -66,26 +123,31 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     );
     assert!(
         store
-            .get_cached_chapters(&row.id.to_string())
+            .get_cached_chapters(&row.file_id.expect("fixture file id").to_string())
             .unwrap()
             .is_none()
     );
-    // A valid source still commits markers and chapters together.
+    // A valid source commits markers without creating a physical chapter cache.
     std::fs::write(&row.path, b"restored").unwrap();
     store
-        .replace_marker_results_batch_checked(&[replacement])
+        .replace_marker_results_batch_checked(
+            std::slice::from_ref(&replacement),
+            &observed(&store, std::slice::from_ref(&replacement)),
+        )
         .unwrap();
     assert_eq!(
         store
-            .get_media_marker(row.media_id, Some(1), Some(1))
+            .get_fixture_marker(row.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()
             .source,
         "new"
     );
     assert_eq!(
-        store.get_cached_chapters(&row.id.to_string()).unwrap(),
-        Some(vec![])
+        store
+            .get_cached_chapters(&row.file_id.expect("fixture file id").to_string())
+            .unwrap(),
+        None
     );
 }
 
@@ -93,8 +155,8 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
 fn guarded_sample_commit_never_recreates_deleted_ledger_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
-    store.insert_ledger(&row).unwrap();
+    let row = row(&store, temp.path(), MediaId::new());
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
     let (attempt, sample) = capture_result(&row);
     store.begin_fingerprint_attempt(&attempt).unwrap();
     assert!(
@@ -137,7 +199,26 @@ fn guarded_sample_commit_never_recreates_deleted_ledger_samples() {
 fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let units: Vec<_> = ["first", "deleted", "pending"]
+    let template = row(&store, temp.path(), MediaId::new());
+    let ids: Vec<String> = ["first", "deleted", "pending"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut file = template.clone();
+            file.file_id = Some(LedgerId::new());
+            file.path = temp
+                .path()
+                .join(format!("{name}.mkv"))
+                .display()
+                .to_string();
+            file.episode = Some(index as u32 + 1);
+            store::test_support::publish_fixture_file(&store, &file)
+                .unwrap()
+                .file_id
+                .to_string()
+        })
+        .collect();
+    let units: Vec<_> = ids
         .iter()
         .map(|id| ProbeJobUnitSpec {
             ledger_id: id,
@@ -149,11 +230,18 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
         })
         .collect();
     store
-        .create_probe_job("job", "marker_refresh", "media", Some(1), "scope", &units)
+        .create_probe_job(
+            "job",
+            "marker_refresh",
+            &template.media_id.to_string(),
+            Some(1),
+            "scope",
+            &units,
+        )
         .unwrap();
-    store.start_probe_unit("job", "first").unwrap();
-    store.finish_probe_unit("job", "first", true, None).unwrap();
-    store.start_probe_unit("job", "deleted").unwrap();
+    store.start_probe_unit("job", &ids[0]).unwrap();
+    store.finish_probe_unit("job", &ids[0], true, None).unwrap();
+    store.start_probe_unit("job", &ids[1]).unwrap();
     store.cancel_probe_job("job", "file_deleted").unwrap();
     let job = store.get_probe_job("job").unwrap().unwrap();
     assert_eq!(job.status, "cancelled");
@@ -169,14 +257,14 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
         persisted.iter().filter(|u| u.status == "cancelled").count(),
         2
     );
-    assert!(!store.start_probe_unit("job", "pending").unwrap());
+    assert!(!store.start_probe_unit("job", &ids[2]).unwrap());
     assert!(store.active_probe_job_for_scope("scope").unwrap().is_none());
     assert!(
         store
             .create_probe_job(
                 "retry",
                 "marker_refresh",
-                "media",
+                &template.media_id.to_string(),
                 Some(1),
                 "scope",
                 &units[..1]
@@ -201,11 +289,25 @@ fn sample_query(sample: &StoredFingerprintSample) -> store::FingerprintSampleQue
 fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
-    store.insert_ledger(&row).unwrap();
-    store.put_media_marker(&marker(&row, "old")).unwrap();
-    let id = row.id.to_string();
-    let units: Vec<_> = [id.as_str(), "deleted-before-snapshot"]
+    let row = row(&store, temp.path(), MediaId::new());
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
+    store
+        .put_fixture_marker(&marker(&store, &row, "old"))
+        .unwrap();
+    let id = row.file_id.expect("fixture file id").to_string();
+    let mut removed = row.clone();
+    removed.file_id = Some(LedgerId::new());
+    removed.path = temp
+        .path()
+        .join("deleted-before-snapshot.mkv")
+        .display()
+        .to_string();
+    removed.episode = Some(2);
+    let deleted_id = store::test_support::publish_fixture_file(&store, &removed)
+        .unwrap()
+        .file_id
+        .to_string();
+    let units: Vec<_> = [id.as_str(), deleted_id.as_str()]
         .iter()
         .map(|id| ProbeJobUnitSpec {
             ledger_id: id,
@@ -232,20 +334,50 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
             .finish_probe_unit("job", unit.ledger_id, true, None)
             .unwrap();
     }
-    let replacement = MarkerResultReplacement {
-        media_id: row.media_id,
-        season: 1,
-        markers: vec![marker(&row, "new")],
-        chapter_updates: vec![(id, vec![])],
-    };
+    // Remove dependent projections with foreign keys enabled, simulating
+    // cleanup interrupted before reconciliation of the admitted job receipt.
+    let database = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let mut connection = rusqlite::Connection::open(database).unwrap();
+    let cleanup = connection.transaction().unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_items WHERE preferred_file_id=?1",
+            [&deleted_id],
+        )
+        .unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM library_units WHERE preferred_file_id=?1",
+            [&deleted_id],
+        )
+        .unwrap();
+    cleanup
+        .execute("DELETE FROM library_files WHERE file_id=?1", [&deleted_id])
+        .unwrap();
+    cleanup.commit().unwrap();
+    let replacement = store::test_support::fixture_marker_replacement(
+        &store,
+        row.media_id,
+        1,
+        vec![marker(&store, &row, "new")],
+        vec![(id, vec![])],
+    );
     assert!(
         store
-            .complete_marker_refresh_checked("job", &[replacement])
+            .complete_marker_refresh_checked(
+                "job",
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
     assert_eq!(
         store
-            .get_media_marker(row.media_id, Some(1), Some(1))
+            .get_fixture_marker(row.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()
             .source,
@@ -257,23 +389,23 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
 #[test]
 fn job_scoped_publication_publishes_rows_the_job_covers() {
     let temp_a = tempfile::tempdir().unwrap();
-    let temp_b = tempfile::tempdir().unwrap();
     let store = Store::open(temp_a.path()).unwrap();
     let media_id = MediaId::new();
 
-    let mut row_a = row(temp_a.path());
+    let mut row_a = row(&store, temp_a.path(), media_id);
     row_a.media_id = media_id;
     row_a.season = Some(1);
     row_a.episode = Some(1);
-    store.insert_ledger(&row_a).unwrap();
+    store::test_support::publish_fixture_file(&store, &row_a).unwrap();
 
-    let mut row_b = row(temp_b.path());
+    let second_root = temp_a.path().join("second");
+    let mut row_b = row(&store, &second_root, media_id);
     row_b.media_id = media_id;
     row_b.season = Some(1);
     row_b.episode = Some(2);
-    store.insert_ledger(&row_b).unwrap();
+    store::test_support::publish_fixture_file(&store, &row_b).unwrap();
 
-    let id_a = row_a.id.to_string();
+    let id_a = row_a.file_id.expect("fixture file id").to_string();
     let units = [ProbeJobUnitSpec {
         ledger_id: &id_a,
         kind: "tv",
@@ -306,30 +438,124 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         marker_type: None,
         synthetic: false,
     }];
-    let replacement = MarkerResultReplacement {
+    store
+        .put_cached_chapters(&id_a, &expected_chapters_a)
+        .unwrap();
+    let replacement = store::test_support::fixture_marker_replacement(
+        &store,
         media_id,
-        season: 1,
-        markers: vec![marker(&row_a, "job_covered")],
-        chapter_updates: vec![(id_a.clone(), expected_chapters_a.clone())],
-    };
+        1,
+        vec![marker(&store, &row_a, "job_covered")],
+        vec![(id_a.clone(), vec![])],
+    );
 
-    let result = store.complete_marker_refresh_checked("job", &[replacement]);
+    let result = store.complete_marker_refresh_checked(
+        "job",
+        std::slice::from_ref(&replacement),
+        &observed(&store, std::slice::from_ref(&replacement)),
+    );
     assert!(result.is_ok());
+    assert_eq!(
+        store
+            .get_fixture_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap()
+            .source,
+        "job_covered"
+    );
     assert_eq!(
         store.get_cached_chapters(&id_a).unwrap(),
         Some(expected_chapters_a)
     );
     assert_eq!(
-        store.get_cached_chapters(&row_b.id.to_string()).unwrap(),
+        store
+            .get_cached_chapters(&row_b.file_id.expect("fixture file id").to_string())
+            .unwrap(),
         None
     );
 }
 
-fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerprintSample) {
+#[test]
+fn partial_refresh_rejects_a_changed_comparison_source_outside_its_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let media_id = MediaId::new();
+    let first = row(&store, temp.path(), media_id);
+    let first_file = store::test_support::publish_fixture_file(&store, &first).unwrap();
+    let mut other = row(&store, &temp.path().join("other"), media_id);
+    other.episode = Some(2);
+    let other_file = store::test_support::publish_fixture_file(&store, &other).unwrap();
+    store
+        .put_fixture_marker(&marker(&store, &first, "old"))
+        .unwrap();
+    let id = first_file.file_id.to_string();
+    store
+        .create_probe_job(
+            "job",
+            "marker_refresh",
+            &media_id.to_string(),
+            Some(1),
+            "scope",
+            &[ProbeJobUnitSpec {
+                ledger_id: &id,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: true,
+            }],
+        )
+        .unwrap();
+    store.start_probe_unit("job", &id).unwrap();
+    store.finish_probe_unit("job", &id, true, None).unwrap();
+    let snapshots = store
+        .source_snapshots(&[first_file.file_id, other_file.file_id])
+        .unwrap();
+    let members = store::observe_sources(&snapshots);
+    let conn = rusqlite::Connection::open(
+        store
+            .db_paths()
+            .into_iter()
+            .find(|path| path.ends_with("library.db"))
+            .unwrap(),
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE library_files SET file_revision = file_revision + 1 WHERE file_id = ?1",
+        [other_file.file_id.to_string()],
+    )
+    .unwrap();
+    let result = store.complete_marker_refresh_checked(
+        "job",
+        &[store::test_support::fixture_marker_replacement(
+            &store,
+            media_id,
+            1,
+            vec![marker(&store, &first, "new")],
+            vec![(id, vec![])],
+        )],
+        &members,
+    );
+    assert!(
+        result.is_err(),
+        "every comparison dependency must keep its original version"
+    );
+    assert_eq!(
+        store
+            .get_fixture_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap()
+            .source,
+        "old"
+    );
+    assert!(store.get_probe_job("job").unwrap().unwrap().is_active());
+}
+
+fn capture_result(row: &FixtureFile) -> (StoredFingerprintAttempt, StoredFingerprintSample) {
     let mut attempt = StoredFingerprintAttempt {
-        attempt_id: format!("capture-{}", row.id),
+        attempt_id: format!("capture-{}", row.file_id.expect("fixture file id")),
         job_id: "job".into(),
-        ledger_id: row.id.to_string(),
+        ledger_id: row.file_id.expect("fixture file id").to_string(),
         kind: "intro".into(),
         window_start_ms: 0,
         window_end_ms: 60_000,
@@ -343,8 +569,8 @@ fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerpri
     attempt.status = "succeeded".into();
     attempt.finished_at_ms = Some(2);
     let sample = StoredFingerprintSample {
-        sample_id: format!("sample-{}", row.id),
-        ledger_id: row.id.to_string(),
+        sample_id: format!("sample-{}", row.file_id.expect("fixture file id")),
+        ledger_id: row.file_id.expect("fixture file id").to_string(),
         source_version: "v1".into(),
         capture_profile_key: "profile".into(),
         kind: "intro".into(),
@@ -363,8 +589,8 @@ fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerpri
 fn deleting_all_media_ledgers_also_removes_their_fingerprint_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
-    store.insert_ledger(&row).unwrap();
+    let row = row(&store, temp.path(), MediaId::new());
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
     let (attempt, sample) = capture_result(&row);
     assert!(
         store
@@ -396,10 +622,12 @@ fn deleting_all_media_ledgers_also_removes_their_fingerprint_samples() {
 fn cancelled_refresh_unit_cannot_be_published_as_success() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
-    store.insert_ledger(&row).unwrap();
-    store.put_media_marker(&marker(&row, "old")).unwrap();
-    let id = row.id.to_string();
+    let row = row(&store, temp.path(), MediaId::new());
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
+    store
+        .put_fixture_marker(&marker(&store, &row, "old"))
+        .unwrap();
+    let id = row.file_id.expect("fixture file id").to_string();
     let unit = ProbeJobUnitSpec {
         ledger_id: &id,
         kind: "tv",
@@ -419,21 +647,29 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
         )
         .unwrap();
     store.cancel_probe_unit("job", &id, "file_deleted").unwrap();
-    let replacement = MarkerResultReplacement {
-        media_id: row.media_id,
-        season: 1,
-        markers: vec![marker(&row, "new")],
-        chapter_updates: vec![(id.clone(), vec![])],
-    };
+    let replacement = store::test_support::fixture_marker_replacement(
+        &store,
+        row.media_id,
+        1,
+        vec![marker(&store, &row, "new")],
+        vec![(id.clone(), vec![])],
+    );
     assert!(
         store
-            .complete_marker_refresh_checked("job", &[replacement])
+            .complete_marker_refresh_checked(
+                "job",
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
-    assert!(store.get_probe_job("job").unwrap().unwrap().is_active());
+    assert_eq!(
+        store.get_probe_job("job").unwrap().unwrap().status,
+        "cancelled"
+    );
     assert_eq!(
         store
-            .get_media_marker(row.media_id, Some(1), Some(1))
+            .get_fixture_marker(row.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap()
             .source,
@@ -442,54 +678,101 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
     assert!(store.get_cached_chapters(&id).unwrap().is_none());
 }
 
-#[test]
-fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
-    use std::sync::{Arc, Barrier};
-    let temp = tempfile::tempdir().unwrap();
-    let deleting = Store::open(temp.path()).unwrap();
-    let capturing = Store::open(temp.path()).unwrap();
-    let rows: Vec<_> = (0..32)
-        .map(|index| {
-            let mut row = row(temp.path());
-            row.path = temp
-                .path()
-                .join(format!("episode-{index}.mkv"))
-                .to_string_lossy()
-                .into_owned();
-            std::fs::write(&row.path, b"fixture").unwrap();
-            deleting.insert_ledger(&row).unwrap();
-            row
-        })
+#[path = "fingerprint_source_safety/rendezvous.rs"]
+mod rendezvous;
+
+fn observed(
+    store: &store::Store,
+    replacements: &[store::MarkerResultReplacement],
+) -> Vec<store::SourceObservation> {
+    let ids: Vec<domain::LedgerId> = replacements
+        .iter()
+        .flat_map(|r| r.chapter_updates.iter().map(|(id, _)| id.parse().unwrap()))
         .collect();
-    let gate = Arc::new(Barrier::new(2));
-    std::thread::scope(|scope| {
-        let capture_gate = gate.clone();
-        let rows = &rows;
-        scope.spawn(move || {
-            for row in rows {
-                let (attempt, sample) = capture_result(row);
-                capture_gate.wait();
-                // A concurrent deletion may reject the write or invalidate a SQLite read
-                // snapshot. Either result must leave no sample once deletion commits.
-                let _ =
-                    capturing.complete_fingerprint_attempt_for_source(&attempt, &sample, &row.path);
-                capture_gate.wait();
-            }
-        });
-        for row in rows {
-            gate.wait();
-            deleting.delete_ledger_path(&row.path).unwrap();
-            gate.wait();
-        }
-    });
-    for row in rows {
-        let (_, sample) = capture_result(&row);
-        assert!(deleting.ledger_by_path(&row.path).unwrap().is_none());
-        assert!(
-            deleting
-                .find_covering_fingerprint_samples(&sample_query(&sample))
-                .unwrap()
-                .is_empty()
-        );
-    }
+    store::observe_sources(&store.source_snapshots(&ids).unwrap())
+}
+
+#[test]
+fn automatic_marker_merge_rejects_a_second_connections_new_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let fixture = row(&store, temp.path(), MediaId::new());
+    let file = store::test_support::publish_fixture_file(&store, &fixture).unwrap();
+    let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    let members = store::observe_sources(&store.source_snapshots(&[file.file_id]).unwrap());
+    let conn = rusqlite::Connection::open(temp.path().join("library.db")).unwrap();
+    conn.execute(
+        "UPDATE library_files SET file_revision=file_revision+1,source_version='replacement'
+        WHERE file_id=?1",
+        [file.file_id.to_string()],
+    )
+    .unwrap();
+    let result = store.merge_marker_results_checked(
+        &[coverage],
+        &members,
+        &[marker(&store, &fixture, "stale")],
+        false,
+    );
+    assert!(result.is_err());
+    assert!(
+        store
+            .get_fixture_marker(file.media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn automatic_marker_merge_does_not_publish_an_uncovered_unit() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let fixture = row(&store, temp.path(), MediaId::new());
+    let file = store::test_support::publish_fixture_file(&store, &fixture).unwrap();
+    let scope = store::library_write::WriteScope {
+        library_id: file.library_id,
+        config_revision: store
+            .library_config_revision(&file.library_id.to_string())
+            .unwrap(),
+    };
+    store
+        .publish_files(
+            &scope,
+            &[store::library_write::FilePublication {
+                file: &file,
+                units: &[domain::UnitKey::WHOLE, domain::UnitKey::new(2, 3)],
+                expected_version: Some(&file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            0,
+        )
+        .unwrap();
+    let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(coverage.units.first(), Some(&domain::UnitKey::WHOLE));
+    let members = store::observe_sources(&store.source_snapshots(&[file.file_id]).unwrap());
+    let result = store.merge_marker_results_checked(
+        &[coverage],
+        &members,
+        &[marker(&store, &fixture, "fresh")],
+        false,
+    );
+    assert!(result.is_err(), "uncovered E1 publication must be rejected");
+    assert!(
+        store
+            .get_cached_chapters(&file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_fixture_marker(file.media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
 }

@@ -1,7 +1,5 @@
-//! today-arrivals 运行时回归：预测计算必须在 Store 锁之外、且在 blocking 预算内完成。
-//!
-//! 关键复现：catalog 的 `CatalogGet` 实现（如 `TmdbHttp`）需要同一个 Store 读取
-//! `tmdb.api_key`。旧实现全程持有 Store 锁，冷缓存时 `try_lock` 失败 → 预测整体消失。
+//! today-arrivals uses adopted or cached facts only. Cache reads and rendering
+//! run outside the Store read lease and never hold the Library writer.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,14 +14,12 @@ use domain::{
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::{CatalogGet, Tmdb, TmdbError};
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const TOKEN: &str = "management-secret";
 const MEMBER_TOKEN: &str = "member-token";
 const ARRIVALS: &str = "/api/v1/subscriptions/today-arrivals";
-const SEASON_ONE_KEY: &str = "/tv/100/season/1?language=zh-CN";
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -39,7 +35,6 @@ fn make_state(root: &Path) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
 }
@@ -58,90 +53,85 @@ fn season_payload(date: &str) -> String {
     .to_string()
 }
 
-/// 模拟 `TmdbHttp`：必须拿到同一个 Store 才能读取配置。
-fn store_api_key(store: &Mutex<Store>) -> Result<(), TmdbError> {
-    for _ in 0..50 {
-        if let Some(guard) = store.try_lock() {
-            let key = guard
-                .get_setting("tmdb.api_key")
-                .map_err(|error| TmdbError::Http(error.to_string()))?;
-            if key.is_none() {
-                return Err(TmdbError::Http("tmdb api key not configured".into()));
-            }
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    Err(TmdbError::Http("Store lock is held while arrivals resolves".into()))
-}
-
-/// 冷缓存路径：返回 body 前必须成功借用 Store。
-struct LockAwareGet {
-    store: Arc<Mutex<Store>>,
-    body: String,
-}
-
-impl CatalogGet for LockAwareGet {
-    fn get(&self, _path: &str) -> Result<String, TmdbError> {
-        store_api_key(&self.store)?;
-        Ok(self.body.clone())
-    }
-}
-
 /// 永不走网络；只有缓存命中才可能成功。
 struct NeverGet;
 
 impl CatalogGet for NeverGet {
     fn get(&self, _path: &str) -> Result<String, TmdbError> {
-        Err(TmdbError::Http("offline: no network in tests".into()))
+        panic!("arrivals must use cached facts without requesting origin")
     }
 }
 
-/// 按路径选择性成功：用于验证部分源失败不影响其余 items。
-struct SelectiveGet {
-    store: Arc<Mutex<Store>>,
-    ok_path_marker: &'static str,
-    ok_body: String,
-}
-
-impl CatalogGet for SelectiveGet {
-    fn get(&self, path: &str) -> Result<String, TmdbError> {
-        store_api_key(&self.store)?;
-        if path.contains(self.ok_path_marker) {
-            Ok(self.ok_body.clone())
-        } else {
-            Err(TmdbError::Http("upstream 503 for this source".into()))
-        }
-    }
-}
-
-/// 统计 catalog 调用次数：同一请求内同 (tmdb_id, season) 只应查询一次。
-struct CountingGet {
-    store: Arc<Mutex<Store>>,
+/// 只用于把响应写进 Tmdb 自己的响应缓存，之后用 `NeverGet` 验证离线命中。
+struct StaticGet {
     body: String,
+}
+
+impl CatalogGet for StaticGet {
+    fn get(&self, _path: &str) -> Result<String, TmdbError> {
+        Ok(self.body.clone())
+    }
+}
+
+/// 用 Tmdb 客户端的公开路径写入它自己的响应缓存。
+///
+/// `now` 为 0 时使用实时时钟（新鲜）；非 0 时钉住写入时刻，用来制造已过期条目。
+fn seed_tmdb_cache(path: &Path, body: &str, now: i64) {
+    seed_tmdb_cache_for(path, body, now, "100");
+}
+
+fn seed_tmdb_cache_for(path: &Path, body: &str, now: i64, tmdb_id: &str) {
+    let get = StaticGet {
+        body: body.to_string(),
+    };
+    let tmdb = if now == 0 {
+        Tmdb::new(get, path).unwrap()
+    } else {
+        Tmdb::new_at(get, path, now).unwrap()
+    };
+    tmdb.season_episodes(tmdb_id, 1)
+        .expect("seeding the Tmdb cache must succeed");
+}
+
+/// Local cached facts may need another Store reader. The gate models a finite
+/// cache DB read, never an optional origin request.
+struct CachedFacts {
+    store: Arc<Store>,
+    gate: Option<Arc<Gate>>,
     calls: Arc<AtomicUsize>,
 }
-
-impl CatalogGet for CountingGet {
-    fn get(&self, _path: &str) -> Result<String, TmdbError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        store_api_key(&self.store)?;
-        Ok(self.body.clone())
+impl api::catalog::Catalog for CachedFacts {
+    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
     }
-}
-
-/// 让 catalog 调用阻塞，便于观察阻塞期间 Store 锁是否空闲。
-struct GatedGet {
-    store: Arc<Mutex<Store>>,
-    gate: Arc<Gate>,
-    body: String,
-}
-
-impl CatalogGet for GatedGet {
-    fn get(&self, _path: &str) -> Result<String, TmdbError> {
-        self.gate.enter_and_wait();
-        store_api_key(&self.store)?;
-        Ok(self.body.clone())
+    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
+        panic!("arrivals must not request catalog origin")
+    }
+    fn cached_season_episodes(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.enter_and_wait();
+        }
+        self.store
+            .get_setting("tmdb.api_key")
+            .map_err(|error| error.to_string())?;
+        Ok(Some(vec![media::SeasonEpisode {
+            episode_number: 1,
+            air_date: Some(today()),
+        }]))
     }
 }
 
@@ -165,17 +155,29 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the arrivals gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the arrivals gate");
     }
 
     fn release(&self) {
@@ -193,8 +195,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &str) -> SubscribeId {
-    let filter_id = store.list_filters().unwrap()[0].id;
+fn insert_tv_media(store: &Store, title: &str, tmdb_id: &str) -> MediaId {
     let media_id = MediaId::new();
     store
         .insert_media(&Media {
@@ -211,6 +212,11 @@ fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &st
             anilist_id: None,
         })
         .unwrap();
+    media_id
+}
+
+fn insert_tv_subscribe_for_media(store: &Store, user_id: UserId, media_id: MediaId) -> SubscribeId {
+    let filter_id = store.list_filters().unwrap()[0].id;
     let subscribe_id = SubscribeId::new();
     store
         .insert_subscribe(&Subscribe {
@@ -238,19 +244,34 @@ fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &st
     subscribe_id
 }
 
+fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &str) -> SubscribeId {
+    let media_id = insert_tv_media(store, title, tmdb_id);
+    insert_tv_subscribe_for_media(store, user_id, media_id)
+}
+
 fn seed_admin_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
+    seed_admin_tv_with_media(state, title, tmdb_id).0
+}
+
+fn seed_admin_tv_with_media(
+    state: &ApiState,
+    title: &str,
+    tmdb_id: &str,
+) -> (SubscribeId, MediaId) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
     guard
         .put_setting("tmdb.api_key", "offline-never-sent")
         .unwrap();
-    insert_tv_subscribe(&guard, user_id, title, tmdb_id)
+    let media_id = insert_tv_media(guard, title, tmdb_id);
+    let subscribe_id = insert_tv_subscribe_for_media(guard, user_id, media_id);
+    (subscribe_id, media_id)
 }
 
 fn seed_member_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let user_id = UserId::new();
     guard
         .insert_user_with_password(
@@ -264,7 +285,7 @@ fn seed_member_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
         )
         .unwrap();
     guard.set_user_token(user_id, MEMBER_TOKEN).unwrap();
-    insert_tv_subscribe(&guard, user_id, title, tmdb_id)
+    insert_tv_subscribe(guard, user_id, title, tmdb_id)
 }
 
 fn arrivals_request(token: &str) -> Request<Body> {
@@ -293,23 +314,19 @@ fn has_wanted(rows: &Value, subscription_id: SubscribeId) -> bool {
 }
 
 #[tokio::test]
-async fn arrivals_cold_catalog_can_read_store() {
+async fn arrivals_cold_catalog_does_not_predict_unknown_dates() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let subscribe = seed_admin_tv(&state, "Cold Show", "100");
-    let get = LockAwareGet {
-        store: state.store(),
-        body: season_payload(&today()),
-    };
-    let tmdb = Tmdb::new(get, &tmp.path().join("data/catalog.db")).unwrap();
+    let tmdb = Tmdb::new(NeverGet, &tmp.path().join("data/catalog.db")).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
     let response = app.oneshot(arrivals_request(TOKEN)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let rows = json_data(response).await;
     assert!(
-        has_wanted(&rows, subscribe),
-        "cold-cache arrivals lost the forecast: {rows}"
+        !has_wanted(&rows, subscribe) && rows.as_array().unwrap().is_empty(),
+        "cold-cache arrivals must not fabricate air dates: {rows}"
     );
 }
 
@@ -318,18 +335,11 @@ async fn arrivals_fresh_cache_returns_forecast_without_network() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let subscribe = seed_admin_tv(&state, "Warm Show", "100");
-    let now = store::unix_now();
-    state
-        .store()
-        .lock()
-        .put_catalog_cache(
-            "tmdb",
-            SEASON_ONE_KEY,
-            &season_payload(&today()),
-            now,
-            Some(now + 3600),
-        )
-        .unwrap();
+    seed_tmdb_cache(
+        &tmp.path().join("data/catalog.db"),
+        &season_payload(&today()),
+        0,
+    );
     let tmdb = Tmdb::new(NeverGet, &tmp.path().join("data/catalog.db")).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
@@ -347,18 +357,11 @@ async fn arrivals_expired_cache_falls_back_to_stale_on_network_failure() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let subscribe = seed_admin_tv(&state, "Stale Show", "100");
-    let now = store::unix_now();
-    state
-        .store()
-        .lock()
-        .put_catalog_cache(
-            "tmdb",
-            SEASON_ONE_KEY,
-            &season_payload(&today()),
-            now - 7200,
-            Some(now - 60),
-        )
-        .unwrap();
+    seed_tmdb_cache(
+        &tmp.path().join("data/catalog.db"),
+        &season_payload(&today()),
+        store::unix_now() - 8 * 86_400,
+    );
     let tmdb = Tmdb::new(NeverGet, &tmp.path().join("data/catalog.db")).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
@@ -376,12 +379,12 @@ async fn arrivals_isolate_users() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let admin_subscribe = seed_admin_tv(&state, "Admin Show", "100");
-    let member_subscribe = seed_member_tv(&state, "Member Show", "100");
-    let get = LockAwareGet {
-        store: state.store(),
-        body: season_payload(&today()),
-    };
-    let tmdb = Tmdb::new(get, &tmp.path().join("data/catalog.db")).unwrap();
+    let member_subscribe = seed_member_tv(&state, "Member Show", "200");
+    let cache = tmp.path().join("data/catalog.db");
+    for tmdb_id in ["100", "200"] {
+        seed_tmdb_cache_for(&cache, &season_payload(&today()), 0, tmdb_id);
+    }
+    let tmdb = Tmdb::new(NeverGet, &cache).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
     let admin_rows = json_data(app.clone().oneshot(arrivals_request(TOKEN)).await.unwrap()).await;
@@ -405,17 +408,14 @@ async fn arrivals_isolate_users() {
 }
 
 #[tokio::test]
-async fn arrivals_partial_source_failure_keeps_other_items() {
+async fn arrivals_missing_cached_source_keeps_other_items() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let ok_subscribe = seed_admin_tv(&state, "Reachable Show", "100");
     let failing_subscribe = seed_admin_tv(&state, "Unreachable Show", "200");
-    let get = SelectiveGet {
-        store: state.store(),
-        ok_path_marker: "/tv/100/",
-        ok_body: season_payload(&today()),
-    };
-    let tmdb = Tmdb::new(get, &tmp.path().join("data/catalog.db")).unwrap();
+    let cache = tmp.path().join("data/catalog.db");
+    seed_tmdb_cache(&cache, &season_payload(&today()), 0);
+    let tmdb = Tmdb::new(NeverGet, &cache).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
     let response = app.oneshot(arrivals_request(TOKEN)).await.unwrap();
@@ -435,16 +435,20 @@ async fn arrivals_partial_source_failure_keeps_other_items() {
 async fn arrivals_query_each_season_once_per_request() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
-    let first = seed_admin_tv(&state, "Show A", "100");
-    let second = seed_admin_tv(&state, "Show B", "100");
+    let (first, media_id) = seed_admin_tv_with_media(&state, "Show A", "100");
+    let second = {
+        let store = state.store();
+        let guard = store.as_ref();
+        let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
+        insert_tv_subscribe_for_media(guard, user_id, media_id)
+    };
     let calls = Arc::new(AtomicUsize::new(0));
-    let get = CountingGet {
+    let catalog = CachedFacts {
         store: state.store(),
-        body: season_payload(&today()),
+        gate: None,
         calls: calls.clone(),
     };
-    let tmdb = Tmdb::new(get, &tmp.path().join("data/catalog.db")).unwrap();
-    let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
+    let app = router(state.with_catalog(Arc::new(catalog)));
 
     let rows = json_data(app.oneshot(arrivals_request(TOKEN)).await.unwrap()).await;
     assert!(
@@ -459,22 +463,17 @@ async fn arrivals_query_each_season_once_per_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn blocked_catalog_call_does_not_hold_store_lock() {
+async fn blocked_cached_read_does_not_hold_store_writer() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     seed_admin_tv(&state, "Blocked Show", "100");
     let gate = Arc::new(Gate::new());
-    let get = GatedGet {
+    let catalog = CachedFacts {
         store: state.store(),
-        gate: gate.clone(),
-        body: season_payload(&today()),
+        gate: Some(gate.clone()),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
-    let tmdb = Tmdb::new(get, &tmp.path().join("data/catalog.db")).unwrap();
-    let app = router(
-        state
-            .clone()
-            .with_catalog(api::catalog::TmdbCatalog::new(tmdb)),
-    );
+    let app = router(state.clone().with_catalog(Arc::new(catalog)));
 
     let handle = tokio::spawn({
         let app = app.clone();
@@ -485,8 +484,11 @@ async fn blocked_catalog_call_does_not_hold_store_lock() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
-            "arrivals must not hold the Store lock while the catalog call blocks"
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()),)
+                .is_ok(),
+            "arrivals must not hold the Library writer while the catalog call blocks"
         );
     }
     gate.release();

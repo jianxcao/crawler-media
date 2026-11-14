@@ -4,43 +4,67 @@
 //! worker 先提取并持久化媒体流信息，再将可选的片头片尾声纹投递到后台队列。
 //! 详情页 / Jellyfin 请求不等待探测，结果写入数据库供前端轮询。
 
+use domain::{FileCoverage, MediaId, MediaKind};
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use domain::{LedgerRow, MediaId, MediaKind};
-use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc};
 
 use marker::fingerprint::capture_types::FingerprintCaptureEngine;
 use marker::{ChromaprintEngine, FingerprintEngine};
 
-use crate::scrape_store::ScrapeStoreExt;
 use crate::Store;
 
+pub(crate) use projection::{
+    covers_season, ledger_id, require_episode_coordinates, require_single_unit, single_episode,
+    single_season, single_season_opt,
+};
+#[cfg(test)]
+pub(crate) use projection::{single_episode_opt, synthetic_coverage};
+
 mod admission;
+mod analysis;
 pub mod clock;
 mod dispatch;
-mod marker_jobs;
+mod lifecycle;
 mod markers;
 pub mod policy;
-mod retry;
+mod presence;
 mod probe;
 pub mod progress;
+mod projection;
+mod query;
 mod queue;
 pub mod recovery;
+mod refresh;
+mod retry;
 pub mod season;
+pub mod season_schedule;
 pub mod stages;
+mod store_access;
+mod store_lease;
 pub(crate) mod timings;
+mod tracks;
+mod uncertainty;
 mod worker;
+pub use store_access::ProbeStoreAccess;
+pub use tracks::TracksProbe;
 
 #[cfg(test)]
+mod library_removal_worker_tests;
+#[cfg(test)]
 mod locking_tests;
+#[cfg(test)]
+mod publish_version_tests;
+#[cfg(test)]
+mod test_support;
 
-/// 一个待探测单元（对应一条 ledger 行）。
+/// 一个待探测单元（对应一个文件的覆盖事实 `FileCoverage`：文件 + 单元）。
 #[derive(Clone)]
 pub struct ProbeUnit {
-    pub row: LedgerRow,
+    pub row: FileCoverage,
     pub kind: MediaKind,
     pub force_fingerprint: bool,
     pub reuse_fingerprint_cache: bool,
@@ -56,14 +80,20 @@ pub struct ProbeUnit {
 pub(crate) enum ProbeEnqueueError {
     AlreadyRunning,
     Persistence,
+    Admission(axum::response::Response),
 }
 
 pub struct ProbeManager {
-    store: Arc<Mutex<Store>>,
+    audio_selections: Arc<Mutex<HashMap<std::path::PathBuf, u32>>>,
+    store: Arc<Store>,
+    store_key: std::path::PathBuf,
+    store_lease: Mutex<Option<store_lease::Lease>>,
+    recovery_deferred: AtomicBool,
     library_work: Mutex<Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>>,
     chapter_frames: Mutex<Option<Arc<crate::chapter_frame_service::ChapterFrameService>>>,
-    fingerprint_engine: Arc<dyn FingerprintEngine>,
+    fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
     capture_engine: Arc<dyn FingerprintCaptureEngine>,
+    tracks_probe: Arc<dyn TracksProbe>,
     metadata_tx: mpsc::Sender<store::ProbeDispatchId>,
     fingerprint_tx: mpsc::Sender<(store::ProbeDispatchId, probe::FingerprintWork)>,
     /// 幂等去重：窗口内或执行中的 ledger_id，不是全量积压。
@@ -75,21 +105,26 @@ pub struct ProbeManager {
     pub(crate) metadata_idle_generation: AtomicUsize,
     pub(crate) timings: timings::ProbeTimingLedger,
     metadata_rx: Mutex<Option<mpsc::Receiver<store::ProbeDispatchId>>>,
+    metadata_receiver: tokio::sync::Mutex<()>,
+    dispatch_work: crate::blocking_budget::BlockingBudget,
     fingerprint_rx: Mutex<Option<mpsc::Receiver<(store::ProbeDispatchId, probe::FingerprintWork)>>>,
-    pub(crate) recovered_marker_refreshes: Mutex<Vec<(crate::store::ProbeJob, ProbeUnit)>>,
     clock: Mutex<Arc<dyn clock::ProbeClock>>,
     pub comparison_runs: std::sync::atomic::AtomicUsize,
+    analysis_schedule: Mutex<season_schedule::SeasonAnalysisSchedule>,
     /// Times `request_probe` assessed a row. Selection must not assess rows
     /// that are not on the selected page.
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
-    shutting_down: AtomicBool,
+    shutting_down: Arc<AtomicBool>,
+    shutdown_signal: tokio::sync::watch::Sender<bool>,
+    shutdown_lock: tokio::sync::Mutex<()>,
+    shutdown_drain: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     wake: Notify,
 }
 
 impl ProbeManager {
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
+    pub fn new(store: Arc<Store>) -> Result<Self, store::StoreError> {
         Self::with_engines(
             store,
             Arc::new(ChromaprintEngine),
@@ -97,25 +132,44 @@ impl ProbeManager {
         )
     }
 
-    pub fn with_fingerprint_engine(
-        store: Arc<Mutex<Store>>,
-        fingerprint_engine: Arc<dyn FingerprintEngine>,
-    ) -> Self {
-        Self::with_engines(store, fingerprint_engine, Arc::new(ChromaprintEngine))
-    }
-
     pub fn with_engines(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
-    ) -> Self {
-        let channels = dispatch::channels();
-        let manager = Self {
+    ) -> Result<Self, store::StoreError> {
+        Self::with_comparison_session(
             store,
+            Arc::new(marker::matcher::session::SeasonMatchSession::new(
+                fingerprint_engine,
+                marker::matcher::session::DEFAULT_MAX_PAIRS,
+                marker::matcher::session::DEFAULT_MAX_BYTES,
+            )),
+            capture_engine,
+        )
+    }
+
+    /// Inject one immutable comparison owner while keeping natural durable job,
+    /// capture and publication behavior. Zero bounds select uncached comparison.
+    pub fn with_comparison_session(
+        store: Arc<Store>,
+        fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
+        capture_engine: Arc<dyn FingerprintCaptureEngine>,
+    ) -> Result<Self, store::StoreError> {
+        let channels = dispatch::channels();
+        let (shutdown_signal, _) = tokio::sync::watch::channel(false);
+        let data_dir = store.data_dir().to_path_buf();
+        let store_key = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
+        let manager = Self {
+            audio_selections: Arc::new(Mutex::new(HashMap::new())),
+            store,
+            store_key,
+            store_lease: Mutex::new(None),
+            recovery_deferred: AtomicBool::new(false),
             library_work: Mutex::new(None),
             chapter_frames: Mutex::new(None),
             fingerprint_engine,
             capture_engine,
+            tracks_probe: Arc::new(tracks::FfprobeTracks),
             metadata_tx: channels.metadata_tx,
             fingerprint_tx: channels.fingerprint_tx,
             seen: Mutex::new(HashSet::new()),
@@ -126,21 +180,53 @@ impl ProbeManager {
             metadata_idle_generation: AtomicUsize::new(0),
             timings: timings::ProbeTimingLedger::default(),
             metadata_rx: Mutex::new(Some(channels.metadata_rx)),
+            metadata_receiver: tokio::sync::Mutex::new(()),
+            dispatch_work: crate::blocking_budget::BlockingBudget::new(12),
             fingerprint_rx: Mutex::new(Some(channels.fingerprint_rx)),
-            recovered_marker_refreshes: Mutex::new(Vec::new()),
             clock: Mutex::new(Arc::new(clock::SystemClock)),
             comparison_runs: std::sync::atomic::AtomicUsize::new(0),
+            analysis_schedule: Mutex::new(season_schedule::SeasonAnalysisSchedule::new(
+                2_000, 10_000,
+            )),
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            shutdown_signal,
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            shutdown_drain: Mutex::new(None),
             workers: Mutex::new(Vec::new()),
             wake: Notify::new(),
         };
-        manager.recover_pending_jobs();
-        manager
+        if !store_lease::recover_if_idle(&manager) {
+            manager.recovery_deferred.store(true, Ordering::SeqCst);
+        }
+        Ok(manager)
     }
 
-    pub(crate) fn set_library_registry(&self, registry: Arc<crate::library_lifecycle::LibraryWorkRegistry>) {
+    /// Replace stream IO while retaining the same queue and publication pipeline.
+    pub fn with_tracks_probe(mut self, probe: Arc<dyn TracksProbe>) -> Self {
+        self.tracks_probe = probe;
+        self
+    }
+
+    /// Explicit capture selection; the existing source-versioned inventory validates it.
+    pub fn select_capture_audio(&self, path: std::path::PathBuf, global_index: u32) {
+        self.audio_selections.lock().insert(path, global_index);
+    }
+
+    fn capture_source(&self, file: &domain::LibraryFile) -> Option<marker::CaptureSourceFacts> {
+        let selected = self.audio_selections.lock().get(&file.path).copied();
+        crate::fingerprint_job::source_for_file_selected(&self.store, file, selected)
+    }
+
+    pub fn timing_snapshot(&self, job_id: &str) -> Option<timings::ProbeTimingSummary> {
+        self.timings.snapshot(job_id)
+    }
+
+    pub(crate) fn set_library_registry(
+        &self,
+        registry: Arc<crate::library_lifecycle::LibraryWorkRegistry>,
+    ) {
         *self.library_work.lock() = Some(registry);
     }
 
@@ -161,479 +247,12 @@ impl ProbeManager {
         Arc::new(progress::MetadataPriorityGate::from_manager(self))
     }
 
-    /// Force a complete season refresh while leaving its current markers and
-    /// chapter caches visible. Results replace the old markers only after all
-    /// episodes finish successfully.
-    pub fn enqueue_marker_refresh(&self, mut units: Vec<ProbeUnit>) -> usize {
-        let Some(first) = units.first() else {
-            return 0;
-        };
-        let media_id = first.row.media_id;
-        let season = first.row.season.unwrap_or(1);
-        if units
-            .iter()
-            .any(|unit| unit.row.media_id != media_id || unit.row.season.unwrap_or(1) != season)
-        {
-            tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
-            return 0;
-        }
-
-        let id = self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed);
-        let episode_count = units.len();
-        let started_at = Instant::now();
-        let job_id = uuid::Uuid::new_v4().to_string();
-        let scope = marker_refresh_scope(media_id, season);
-        let ledger_ids = units
-            .iter()
-            .map(|unit| unit.row.id.to_string())
-            .collect::<Vec<_>>();
-        let specs = units
-            .iter()
-            .zip(&ledger_ids)
-            .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
-                ledger_id,
-                kind: unit.kind.as_str(),
-                force_fingerprint: true,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: true,
-                reuse_media_info_cache: true,
-            })
-            .collect::<Vec<_>>();
-        match self.store.lock().create_probe_job(
-            &job_id,
-            "marker_refresh",
-            &media_id.to_string(),
-            Some(season),
-            &scope,
-            &specs,
-        ) {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(%media_id, season, "该剧该季已有片头片尾刷新任务，拒绝重复入队");
-                return 0;
-            }
-            Err(error) => {
-                tracing::error!(%error, %media_id, season, "创建持久化片头片尾刷新任务失败");
-                return 0;
-            }
-        }
-
-        let mut queued = 0;
-        for unit in &mut units {
-            unit.force_fingerprint = true;
-            unit.reuse_fingerprint_cache = false;
-            unit.reuse_media_info_cache = true;
-            unit.overwrite_markers = true;
-            unit.marker_refresh_id = Some(id);
-            unit.job_id = Some(job_id.clone());
-            self.seen.lock().insert(unit.row.id.to_string());
-            if self.queue_metadata(unit.clone()).is_ok() {
-                queued += 1;
-            } else {
-                self.seen.lock().remove(&unit.row.id.to_string());
-                tracing::info!(job_id, ledger_id = %unit.row.id, "刷新窗口已满，单元保持数据库排队");
-            }
-        }
-        tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "【片头片尾】已启动强制刷新，旧标记保持可见直到整季探测完成");
-        queued
-    }
-
-    /// Reserve every file for a manual item refresh in one database transaction.
-    /// For TV, retain old markers until all files finish and compare each season once.
-    pub(crate) fn enqueue_forced_item_refresh(
-        &self,
-        mut units: Vec<ProbeUnit>,
-    ) -> Result<usize, ProbeEnqueueError> {
-        let Some(first) = units.first() else {
-            return Ok(0);
-        };
-        let media_id = first.row.media_id;
-        let kind = first.kind;
-        if units
-            .iter()
-            .any(|unit| unit.row.media_id != media_id || unit.kind != kind)
-        {
-            tracing::error!(%media_id, "拒绝创建跨媒体或媒体类型不一致的手动探测任务");
-            return Err(ProbeEnqueueError::Persistence);
-        }
-
-        let is_tv = kind == MediaKind::Tv;
-        let job_kind = if is_tv {
-            "marker_refresh"
-        } else {
-            "media_probe"
-        };
-        let scope = if is_tv {
-            format!("marker-refresh:{media_id}:all")
-        } else {
-            format!("manual-probe:{media_id}")
-        };
-        let seasons = units
-            .iter()
-            .map(|unit| unit.row.season.unwrap_or(1))
-            .collect::<HashSet<_>>();
-        let season = (seasons.len() == 1).then(|| *seasons.iter().next().unwrap_or(&1));
-        let job_id = uuid::Uuid::new_v4().to_string();
-        let ledger_ids = units
-            .iter()
-            .map(|unit| unit.row.id.to_string())
-            .collect::<Vec<_>>();
-        let specs = units
-            .iter()
-            .zip(&ledger_ids)
-            .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
-                ledger_id,
-                kind: unit.kind.as_str(),
-                force_fingerprint: is_tv,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: is_tv,
-                reuse_media_info_cache: false,
-            })
-            .collect::<Vec<_>>();
-        let created = self.store.lock().create_probe_job(
-            &job_id,
-            job_kind,
-            &media_id.to_string(),
-            season,
-            &scope,
-            &specs,
-        );
-        match created {
-            Ok(true) => {}
-            Ok(false) => {
-                let conflict = ledger_ids.iter().any(|ledger_id| {
-                    self.store
-                        .lock()
-                        .active_probe_unit_for_ledger(ledger_id)
-                        .ok()
-                        .flatten()
-                        .is_some()
-                });
-                return Err(if conflict {
-                    ProbeEnqueueError::AlreadyRunning
-                } else {
-                    ProbeEnqueueError::Persistence
-                });
-            }
-            Err(error) => {
-                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                return Err(ProbeEnqueueError::Persistence);
-            }
-        }
-
-        let refresh_id = is_tv.then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed));
-        let mut queued = 0;
-        for unit in &mut units {
-            unit.force_fingerprint = is_tv;
-            unit.reuse_fingerprint_cache = false;
-            unit.reuse_media_info_cache = false;
-            unit.overwrite_markers = is_tv;
-            unit.marker_refresh_id = refresh_id;
-            unit.job_id = Some(job_id.clone());
-            self.seen.lock().insert(unit.row.id.to_string());
-            if self.queue_metadata(unit.clone()).is_ok() {
-                queued += 1;
-            } else {
-                self.seen.lock().remove(&unit.row.id.to_string());
-                tracing::info!(job_id, ledger_id = %unit.row.id, "整条目窗口已满，单元保持数据库排队");
-            }
-        }
-        tracing::info!(
-            %media_id,
-            job_id,
-            seasons = seasons.len(),
-            queued,
-            total = units.len(),
-            "【媒体探测】手动整条目刷新已持久化入队，旧结果保持可见"
-        );
-        Ok(queued)
-    }
-
-    pub fn cancel_ledger_work(&self, ledger_ids: &[String], reason: &str) -> Result<(), store::StoreError> {
-        for ledger_id in ledger_ids {
-            let unit = self.store.lock().active_probe_unit_for_ledger(ledger_id)?;
-            if let Some(unit) = unit {
-                {
-                    let store = self.store.lock();
-                    let job = store.get_probe_job(&unit.job_id)?;
-                    if job.as_ref().is_some_and(|job| job.kind == "marker_refresh") {
-                        store.cancel_probe_job(&unit.job_id, reason)?;
-                    } else {
-                        store.cancel_probe_unit(&unit.job_id, ledger_id, reason)?;
-                    }
-                }
-                let units = self.store.lock().probe_job_units(&unit.job_id)?;
-                let mut seen = self.seen.lock();
-                for unit in units { seen.remove(&unit.ledger_id); }
-            }
-        }
-        Ok(())
-    }
-
-    /// 是否已在排队/执行（前端「探测中」状态用）。
-    pub fn is_queued(&self, ledger_id: &str) -> bool {
-        let queued = self.store.lock().is_probe_queued(ledger_id);
-        match queued {
-            Ok(queued) => queued,
-            Err(_) => self.seen.lock().contains(ledger_id),
-        }
-    }
-
-    /// True only while this ledger sits in the in-memory dispatch window.
-    pub fn holds_dispatch_id(&self, ledger_id: &str) -> bool {
-        self.seen.lock().contains(ledger_id)
-    }
-
-    pub(crate) fn marker_refresh_job(
-        &self,
-        media_id: MediaId,
-        season: u32,
-    ) -> Result<Option<crate::store::ProbeJob>, crate::store::StoreError> {
-        self.store
-            .lock()
-            .latest_marker_refresh_for_season(&media_id.to_string(), season)
-    }
-
-    pub(super) fn active_probe_job_id(&self, ledger_id: &str) -> Option<String> {
-        self.store
-            .lock()
-            .active_probe_unit_for_ledger(ledger_id)
-            .ok()
-            .flatten()
-            .map(|unit| unit.job_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_queued_for_test(&self) -> Option<ProbeUnit> {
-        let id = self.metadata_rx.lock().as_mut()?.try_recv().ok()?;
-        self.seen.lock().remove(&id.ledger_id);
-
-        if let Some((unit, _)) = self.load_dispatch_unit_inner(&id, false) {
-            return Some(unit);
-        }
-        Some(ProbeUnit {
-            row: domain::LedgerRow {
-                id: id.ledger_id.parse().expect("dispatch ledger id"),
-                media_id: domain::MediaId::new(),
-                path: String::new(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            },
-            kind: domain::MediaKind::Movie,
-            force_fingerprint: false,
-            reuse_fingerprint_cache: true,
-            overwrite_markers: false,
-            reuse_media_info_cache: true,
-            marker_refresh_id: None,
-            job_id: Some(id.job_id),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_fingerprint_for_test(&self) -> Option<ProbeUnit> {
-        let (id, _work) = self.fingerprint_rx.lock().as_mut()?.try_recv().ok()?;
-        if let Some((unit, _)) = self.load_dispatch_unit_inner(&id, false) {
-            return Some(unit);
-        }
-        Some(ProbeUnit {
-            row: domain::LedgerRow {
-                id: id.ledger_id.parse().expect("dispatch ledger id"),
-                media_id: domain::MediaId::new(),
-                path: String::new(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            },
-            kind: domain::MediaKind::Movie,
-            force_fingerprint: true,
-            reuse_fingerprint_cache: true,
-            overwrite_markers: false,
-            reuse_media_info_cache: true,
-            marker_refresh_id: None,
-            job_id: Some(id.job_id),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_fingerprint_queued_for_test(&self) -> bool {
-        self.fingerprint_rx
-            .lock()
-            .as_mut()
-            .and_then(|rx| rx.try_recv().ok().map(|(id, _)| id))
-            .is_some()
-    }
-
-
-
-    fn finish(&self, unit: &ProbeUnit, succeeded: bool) {
-        let status = if succeeded { "succeeded" } else { "failed" };
-        self.finish_with_status(unit, status, None, (!succeeded).then_some("探测单元执行失败"));
-    }
-
-    pub(crate) fn finish_with_status(
-        &self,
-        unit: &ProbeUnit,
-        status: &str,
-        error_kind: Option<&str>,
-        error: Option<&str>,
-    ) {
-        let ledger_id = unit.row.id.to_string();
-        let cancelled = unit
-            .job_id
-            .as_deref()
-            .and_then(|id| self.store.lock().get_probe_job(id).ok().flatten())
-            .is_some_and(|job| job.status == "cancelled");
-        if cancelled {
-            self.seen.lock().remove(&ledger_id);
-            return;
-        }
-        self.finish_persisted_unit_with_status(unit, status, error_kind, error);
-        self.seen.lock().remove(&ledger_id);
-        if status == "failed" {
-            self.mark_failed(&ledger_id);
-        }
-    }
-
-    pub(crate) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
-        let ledger_id = unit.row.id.to_string();
-        self.seen.lock().remove(&ledger_id);
-        let Some(job_id) = unit.job_id.as_deref() else {
-            return;
-        };
-        let result = {
-            let store = self.store.lock();
-            store
-                .cancel_probe_unit(job_id, &ledger_id, reason)
-                .and_then(|(job, _, all_done)| {
-                    // A refresh is published atomically; membership changes cancel the entire batch.
-                    if job.kind == "marker_refresh" || all_done {
-                        store.cancel_probe_job(job_id, reason)?;
-                    }
-                    store.get_probe_job(job_id)
-                })
-        };
-        match result {
-            Ok(Some(job)) => {
-                if !job.is_active() {
-                    // Enqueue holds seen before Store. Never retain the Store
-                    // temporary guard while acquiring seen (including in if let).
-                    let units = self.store.lock().probe_job_units(job_id);
-                    if let Ok(units) = units {
-                        let mut seen = self.seen.lock();
-                        for pending in units {
-                            seen.remove(&pending.ledger_id);
-                        }
-                    }
-                    timings::log_terminal_job(&self.store, &self.timings, &job);
-                }
-                tracing::info!(job_id, ledger_id, reason, status = %job.status,
-                    elapsed_ms = job.elapsed_ms(now_ms()), "【媒体探测】任务已取消");
-            }
-            Ok(None) => tracing::error!(job_id, ledger_id, "取消时探测任务不存在"),
-            Err(error) => tracing::error!(%error, job_id, ledger_id, "持久化探测任务取消状态失败"),
-        }
-    }
-
-    fn finish_persisted_unit(&self, unit: &ProbeUnit, succeeded: bool) {
-        let status = if succeeded { "succeeded" } else { "failed" };
-        self.finish_persisted_unit_with_status(unit, status, None, (!succeeded).then_some("探测单元执行失败"));
-    }
-
-    pub(crate) fn finish_persisted_unit_with_status(
-        &self,
-        unit: &ProbeUnit,
-        status: &str,
-        error_kind: Option<&str>,
-        error: Option<&str>,
-    ) {
-        let ledger_id = unit.row.id.to_string();
-        let Some(job_id) = unit.job_id.as_deref() else {
-            tracing::error!(ledger_id, "探测队列项缺少持久化任务 ID，拒绝写入结果");
-            return;
-        };
-        let result = self.store.lock().finish_probe_unit_with_status(
-            job_id,
-            &ledger_id,
-            status,
-            error_kind,
-            error,
-        );
-        let (job, accepted, all_done) = match result {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::error!(%error, ledger_id, job_id, "持久化探测任务结果失败");
-                return;
-            }
-        };
-        if !accepted {
-            tracing::warn!(job_id, ledger_id, "忽略已结束或重复提交的探测单元结果");
-            return;
-        }
-        tracing::info!(
-            job_id = %job.id,
-            media_id = %job.media_id,
-            season = job.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            completed = job.completed,
-            total = job.total,
-            status,
-            "【媒体探测】任务单元结果已写入数据库"
-        );
-        if !all_done {
-            return;
-        }
-        if job.failed > 0 {
-            if let Err(error) = self.store.lock().finish_probe_job(
-                &job.id,
-                false,
-                job.error.as_deref().or(Some("一个或多个探测单元失败")),
-            ) {
-                tracing::error!(%error, job_id = %job.id, "持久化探测任务失败状态失败");
-            }
-            tracing::warn!(
-                job_id = %job.id,
-                media_id = %job.media_id,
-                completed = job.completed,
-                total = job.total,
-                elapsed_ms = job.elapsed_ms(now_ms()),
-                "【探测任务】部分单元失败，保留现有片头片尾结果"
-            );
-            timings::log_terminal_job(&self.store, &self.timings, &job);
-        } else if job.kind == "marker_refresh" {
-            marker_jobs::apply_marker_refresh(self, &job, unit);
-            timings::log_terminal_job(&self.store, &self.timings, &job);
-        } else {
-            let final_succeeded = job.status == "succeeded";
-            let job_final_status = job.status.clone();
-            match self.store.lock().finish_probe_job(&job.id, final_succeeded, job.error.as_deref()) {
-                Ok(()) => tracing::info!(
-                    job_id = %job.id,
-                    media_id = %job.media_id,
-                    completed = job.completed,
-                    total = job.total,
-                    status = %job_final_status,
-                    elapsed_ms = job.elapsed_ms(now_ms()),
-                    "【媒体探测】持久化任务完成"
-                ),
-                Err(error) => {
-                    tracing::error!(%error, job_id = %job.id, "持久化探测任务成功状态失败")
-                }
-            }
-            timings::log_terminal_job(&self.store, &self.timings, &job);
-        }
+    /// When a recent failure still holds this file back, the time it may run again.
+    fn failure_backoff_until_ms(&self, ledger_id: &str, now_ms: i64) -> Option<i64> {
+        let failures = self.last_failure.lock();
+        let elapsed = failures.get(ledger_id)?.elapsed();
+        let window = Duration::from_secs(60);
+        (elapsed < window).then(|| now_ms + (window - elapsed).as_millis() as i64)
     }
 
     fn mark_failed(&self, ledger_id: &str) {
@@ -652,6 +271,9 @@ impl ProbeManager {
     pub fn set_clock(&self, clock: Arc<dyn clock::ProbeClock>) {
         *self.clock.lock() = clock;
     }
+    pub fn wake_dispatch(&self) {
+        self.wake.notify_waiters();
+    }
 }
 
 pub(crate) fn marker_refresh_scope(media_id: MediaId, season: u32) -> String {
@@ -662,15 +284,12 @@ fn now_ms() -> i64 {
     clock::ProbeClock::now_ms(&clock::SystemClock)
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::markers::persist_marker;
-    use super::probe::fingerprint_duration;
+    use super::probe::fingerprint_duration_for_store;
     use super::*;
-    use domain::{Confidence, LedgerId, MediaId, QualitySource};
-    use std::path::PathBuf;
+    use domain::{LedgerId, MediaId};
 
     mod queue {
         use super::*;
@@ -685,7 +304,9 @@ mod tests {
     mod marker_refresh_lifecycle {
         use super::*;
         include!("probe_manager/marker_refresh_lifecycle_tests.rs");
+        include!("probe_manager/marker_refresh_cross_library_tests.rs");
         include!("probe_manager/marker_refresh_lifecycle_worker_tests.rs");
+        include!("probe_manager/optional_capture_cancellation_tests.rs");
     }
 
     mod marker_persist {

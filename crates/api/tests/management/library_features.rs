@@ -21,7 +21,7 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(tmp.path(), fetcher, downloader))
 }
 
-async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String) {
+async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String, String) {
     let movie = tmp.path().join("data/library/movies");
     std::fs::create_dir_all(&movie).unwrap();
     std::fs::write(movie.join("The.Matrix.1999.2160p.mkv"), b"m").unwrap();
@@ -47,7 +47,7 @@ async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String) {
         .as_str()
         .unwrap()
         .to_string();
-    scan_and_wait(&app, &movie_id).await;
+    scan_and_wait(app, &movie_id).await;
     let ledger = json_body(
         app.clone()
             .oneshot(request(
@@ -63,6 +63,7 @@ async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String) {
     (
         movie_id,
         ledger["data"][0]["media_id"].as_str().unwrap().to_string(),
+        ledger["data"][0]["id"].as_str().unwrap().to_string(),
     )
 }
 
@@ -70,12 +71,14 @@ async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String) {
 async fn chapters_endpoints_respond_without_embedded_chapters() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
-    let (movie_id, media_id) = seed(&tmp, &app).await;
+    let (movie_id, media_id, file_id) = seed(&tmp, &app).await;
     let chapters = json_body(
         app.clone()
             .oneshot(request(
                 "GET",
-                &format!("/api/v1/libraries/{movie_id}/items/{media_id}/chapters"),
+                &format!(
+                    "/api/v1/libraries/{movie_id}/items/{media_id}/chapters?file_id={file_id}"
+                ),
                 Some("management-secret"),
                 Value::Null,
             ))
@@ -91,22 +94,18 @@ async fn chapters_endpoints_respond_without_embedded_chapters() {
         .clone()
         .oneshot(request(
             "POST",
-            &format!("/api/v1/libraries/{movie_id}/items/{media_id}/chapters/generate"),
+            &format!(
+                "/api/v1/libraries/{movie_id}/items/{media_id}/chapters/generate?file_id={file_id}"
+            ),
             Some("management-secret"),
-            Value::Null,
+            json!({"retry_failed": false}),
         ))
         .await
         .unwrap();
+    assert_eq!(generate.status(), StatusCode::OK);
     assert_eq!(
-        generate.status(),
-        StatusCode::BAD_REQUEST,
-        "no chapters → 400"
-    );
-    let error_body = json_body(generate).await;
-    assert_eq!(
-        error_body["error"]["code"],
-        "chapters.none",
-        "error code should be chapters.none"
+        json_body(generate).await["data"],
+        json!({"task":null,"empty":true})
     );
 }
 
@@ -121,34 +120,36 @@ async fn chapters_generate_with_voiceprint_markers() {
     let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
     let api_state = state(tmp.path(), fetcher, downloader);
     let app = router(api_state.clone());
-    let (movie_id, media_id) = seed(&tmp, &app).await;
+    let (movie_id, media_id, file_id) = seed(&tmp, &app).await;
 
     // 预置片头片尾标记
     let m_id = domain::MediaId::from_str(&media_id).unwrap();
     {
         let store_arc = api_state.store();
-        let store = store_arc.lock();
-        store.put_media_marker(&api::store::StoredMediaMarker {
-            media_id: m_id,
-            season: 1,
-            episode: 1,
-            intro_start_ms: Some(10_000),
-            intro_end_ms: Some(90_000),
-            outro_start_ms: Some(1_200_000),
-            outro_end_ms: Some(1_300_000),
-            source: "voiceprint".into(),
-            locked: false,
-            updated_at: 1,
-        }).unwrap();
+        let store = store_arc.as_ref();
+        store
+            .put_fixture_marker(&api::store::StoredFileMarker {
+                intro_start_ms: Some(10_000),
+                intro_end_ms: Some(90_000),
+                outro_start_ms: Some(1_200_000),
+                outro_end_ms: Some(1_300_000),
+                source: "voiceprint".into(),
+                locked: false,
+                updated_at: 1,
+                ..store::test_support::fixture_marker(store, m_id, domain::UnitKey::WHOLE)
+            })
+            .unwrap();
     }
 
     let generate = app
         .clone()
         .oneshot(request(
             "POST",
-            &format!("/api/v1/libraries/{movie_id}/items/{media_id}/chapters/generate"),
+            &format!(
+                "/api/v1/libraries/{movie_id}/items/{media_id}/chapters/generate?file_id={file_id}"
+            ),
             Some("management-secret"),
-            Value::Null,
+            json!({"retry_failed": false}),
         ))
         .await
         .unwrap();
@@ -157,14 +158,14 @@ async fn chapters_generate_with_voiceprint_markers() {
     let res = json_body(generate).await;
     assert_eq!(res["ok"], true);
     // marker::build_complete_timeline_chapters 拆分成4段（序幕、片头、正片、片尾）
-    assert_eq!(res["data"]["total"], 4);
+    assert_eq!(res["data"]["task"]["total"], 4);
 }
 
 #[tokio::test]
 async fn wall_filter_and_relax_use_resolutions() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
-    let (movie_id, _media_id) = seed(&tmp, &app).await;
+    let (movie_id, _media_id, _file_id) = seed(&tmp, &app).await;
 
     let all = json_body(
         app.clone()
@@ -184,7 +185,7 @@ async fn wall_filter_and_relax_use_resolutions() {
         app.clone()
             .oneshot(request(
                 "GET",
-                &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+                &format!("/api/v1/libraries/{movie_id}/items?res=2160p"),
                 Some("management-secret"),
                 Value::Null,
             ))
@@ -198,6 +199,22 @@ async fn wall_filter_and_relax_use_resolutions() {
         "resolution filter applies"
     );
     assert_eq!(filtered["data"][0]["title"], "The Matrix");
+
+    let long_name = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        long_name.status(),
+        axum::http::StatusCode::BAD_REQUEST,
+        "long filter synonyms are not part of the contract"
+    );
 
     let relax = json_body(
         app.clone()

@@ -10,15 +10,15 @@ mod database;
 mod report;
 mod runner;
 
+pub(crate) use data_retention::load_cursor;
+pub use data_retention::{DATA_RETENTION_CLASSES, cutoff_ms_for_days, run_data_retention};
 pub use database::{
     ConfiguredSqliteExecutor, DatabaseExecutor, DatabaseName, DatabaseTarget, MaintenanceContext,
     PER_DATABASE_LIMIT, SqliteExecutor, SqliteLimits, VACUUM_DISK_HEADROOM_BYTES, database_targets,
 };
-pub use data_retention::{DATA_RETENTION_CLASSES, cutoff_ms_for_days, run_data_retention};
-pub(crate) use data_retention::load_cursor;
 pub use policy::{
-    BATCH_SIZE, DEFAULT_DATABASE_INTERVAL_SECS, DEFAULT_DATA_RETENTION_DAYS,
-    DEFAULT_DATA_RETENTION_INTERVAL_SECS, DEFAULT_JOBS_INTERVAL_SECS,
+    BATCH_SIZE, DEFAULT_DATA_RETENTION_DAYS, DEFAULT_DATA_RETENTION_INTERVAL_SECS,
+    DEFAULT_DATABASE_INTERVAL_SECS, DEFAULT_JOBS_INTERVAL_SECS, DEFAULT_OPERATIONS_RETENTION_DAYS,
     DEFAULT_PLAYBACK_INTERVAL_SECS, DEFAULT_RETENTION_DAYS, DataRetentionPolicy,
     DatabaseMaintenancePolicy, JobsRetentionPolicy, MAINTENANCE_TIMEOUT_SECS, MAX_BATCHES,
     MAX_MAINTENANCE_INTERVAL_SECS, MAX_RETENTION_DAYS, MIN_MAINTENANCE_INTERVAL_SECS,
@@ -27,7 +27,7 @@ pub use policy::{
     validate_maintenance_interval, validate_retention_days,
 };
 pub use report::{DatabaseOutcome, DatabaseReport, MaintenanceReport};
-pub use runner::{check_maintenance_stop, run, MaintenanceStop};
+pub use runner::{MaintenanceStop, check_maintenance_stop, run};
 
 use jobs::{JobKind, NewDef, Queue, Schedule};
 
@@ -92,6 +92,7 @@ pub fn default_payload(kind: JobKind) -> Option<String> {
             "qoe_days": DEFAULT_DATA_RETENTION_DAYS,
             "transient_cache_days": DEFAULT_DATA_RETENTION_DAYS,
             "probe_days": DEFAULT_DATA_RETENTION_DAYS,
+            "operations_days": DEFAULT_OPERATIONS_RETENTION_DAYS,
         }),
         _ => return None,
     };
@@ -106,6 +107,7 @@ pub fn seed_maintenance_defs(queue: &Queue) -> Result<(), jobs::JobError> {
         };
         queue.ensure_def(NewDef {
             kind: spec.kind,
+            scope: jobs::JobScope::Global,
             name: spec.name.to_string(),
             enabled: spec.enabled,
             // 关闭的任务也保留非空 schedule：现有定时任务页只显示 schedule 非空的 def。

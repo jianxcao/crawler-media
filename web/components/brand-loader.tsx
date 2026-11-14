@@ -1,3 +1,4 @@
+import { ArtworkImage } from "@/components/artwork-image";
 import { CrawlerMark } from "@/components/netflix/brand";
 
 /**
@@ -18,7 +19,7 @@ import { CrawlerMark } from "@/components/netflix/brand";
 export function BrandLoader({ className = "size-5" }: { className?: string }) {
   return (
     <span aria-hidden="true" className={`brand-loader inline-block shrink-0 ${className}`}>
-      <img
+      <ArtworkImage
         src="/logo-mark.svg"
         alt=""
         draggable={false}

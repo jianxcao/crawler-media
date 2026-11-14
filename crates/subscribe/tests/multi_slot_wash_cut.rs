@@ -1,7 +1,8 @@
 use domain::{Coverage, MediaKind};
+use domain::{QualityFact, SubscribeFacts};
 use library::TransferMode;
 use std::fs;
-use subscribe::{QualityFact, RunInput, SubscribeFacts};
+use subscribe::RunInput;
 
 fn mock_probed_file(path: &std::path::Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -57,7 +58,7 @@ fn create_multi_ep_torrent() -> domain::Torrent {
         size_bytes: Some(500),
         seeders: Some(5),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -87,6 +88,9 @@ fn run_wash_cut_test(
         facts,
         downloader: dl,
         library_root: lib_root,
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -214,7 +218,7 @@ fn wash_cut_does_not_delete_merged_file_still_referenced_by_other_slots() {
         size_bytes: Some(400),
         seeders: Some(8),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -227,24 +231,30 @@ fn wash_cut_does_not_delete_merged_file_still_referenced_by_other_slots() {
     mock_probed_file(&e1_src);
     let dl = downloader::MemoryDownloader::new(tmp.path().join("stage"));
     dl.map_enclosure_files(&e1.enclosure, vec![e1_src]);
-    let outcome = subscribe::run_with_probe(RunInput {
-        subscribe: &sub,
-        media: &media,
-        filter: &filter,
-        wash_filter: None,
-        torrents: vec![e1],
-        search_keywords: vec![],
-        facts,
-        downloader: &dl,
-        library_root: &tmp.path().join("lib"),
-        transfer_mode: Some(TransferMode::Copy),
-        scrape: false,
-        hooks: None,
-        naming: None,
-        preserve_removed: false,
-        overlap: Default::default(),
-        absolute: None,
-    }, &Probed1080)
+    let outcome = subscribe::run_with_probe(
+        RunInput {
+            subscribe: &sub,
+            media: &media,
+            filter: &filter,
+            wash_filter: None,
+            torrents: vec![e1],
+            search_keywords: vec![],
+            facts,
+            downloader: &dl,
+            library_root: &tmp.path().join("lib"),
+            library_id: Some(domain::LibraryId::new()),
+            root_id: Some("test-root".into()),
+            config_revision: None,
+            transfer_mode: Some(TransferMode::Copy),
+            scrape: false,
+            hooks: None,
+            naming: None,
+            preserve_removed: false,
+            overlap: Default::default(),
+            absolute: None,
+        },
+        &Probed1080,
+    )
     .unwrap();
     assert!(
         merged.exists(),

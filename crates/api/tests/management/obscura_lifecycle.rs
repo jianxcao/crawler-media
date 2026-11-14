@@ -39,13 +39,21 @@ struct FakeInstaller {
     called: AtomicBool,
 }
 impl ObscuraInstaller for FakeInstaller {
-    fn ensure_installed(&self, bin_dir: &Path, _policy: InstallPolicy) -> Result<PathBuf, InstallError> {
+    fn ensure_installed(
+        &self,
+        bin_dir: &Path,
+        _policy: InstallPolicy,
+    ) -> Result<PathBuf, InstallError> {
         self.called.store(true, Ordering::SeqCst);
         if !self.succeed {
             return Err(InstallError::Download("network error".into()));
         }
         let _ = fs::create_dir_all(bin_dir);
-        let bin = bin_dir.join(if cfg!(windows) { "obscura.exe" } else { "obscura" });
+        let bin = bin_dir.join(if cfg!(windows) {
+            "obscura.exe"
+        } else {
+            "obscura"
+        });
         let _ = fs::write(&bin, b"#!/bin/sh\n");
         let _ = fs::write(bin_dir.join(".obscura.sha256"), "valid_hash");
         Ok(bin)
@@ -59,8 +67,12 @@ struct FakeChild {
     listener_stop: Arc<AtomicBool>,
 }
 impl DaemonHandle for FakeChild {
-    fn pid(&self) -> u32 { self.pid }
-    fn try_alive(&self) -> bool { self.alive.load(Ordering::SeqCst) }
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn try_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
     fn kill(&self) {
         self.alive.store(false, Ordering::SeqCst);
         self.killed.store(true, Ordering::SeqCst);
@@ -342,7 +354,10 @@ fn real_obscura_managed_start_survives_spawn_thread_and_stops() {
     assert_eq!(status.reported_version.as_deref(), Some("obscura 0.2.3"));
     assert!(status.last_error.is_none(), "{status:?}");
     std::thread::sleep(std::time::Duration::from_secs(12));
-    assert!(manager.owns_live_daemon(), "daemon must outlive the spawning thread");
+    assert!(
+        manager.owns_live_daemon(),
+        "daemon must outlive the spawning thread"
+    );
     let url = manager.cdp_url().expect("cdp url");
     assert!(url.starts_with("http://127.0.0.1:"));
     manager.stop();

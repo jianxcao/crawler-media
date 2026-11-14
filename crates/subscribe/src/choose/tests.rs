@@ -172,7 +172,7 @@ fn scored(title: &str, from: u32, to: u32, score: i32) -> ScoredTorrent {
             size_bytes: Some(1),
             seeders: Some(1),
             free: true,
-            hr: false,
+            hr: Some(false),
             imdb_id: None,
             id: None,
             leechers: None,
@@ -281,7 +281,7 @@ fn ladder_uses_probed_quality_not_renamed_filename() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 50,
             path: Some(path.display().to_string()),
         },
@@ -320,7 +320,7 @@ fn unknown_source_blocks_resolution_first_destructive_wash_cut() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 40,
             path: Some(owned_path.into()),
         },
@@ -362,7 +362,7 @@ fn unknown_quality_does_not_authorize_destructive_wash_cut() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 10,
             path: Some("/library/Show.S01E01.mkv".into()),
         },
@@ -409,7 +409,7 @@ fn both_unknown_ladder_dimension_blocks_later_resolution_upgrade() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 10,
             path: Some(path.into()),
         },
@@ -440,7 +440,7 @@ fn known_quality_score_upgrade_still_works_without_ladder() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 10,
             path: Some(path.into()),
         },
@@ -462,7 +462,7 @@ fn cutoff_and_ladder_share_filename_fallback_without_overwriting_probe() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 10,
             path: Some(path.into()),
         },
@@ -497,7 +497,7 @@ fn highest_scoring_candidate_not_matching_ladder_allows_eligible_candidate() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 80,
             path: Some(owned_path.into()),
         },
@@ -535,7 +535,7 @@ fn wash_target_cutoff_prevents_further_upgrades_when_target_reached() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 100,
             path: Some(owned_path.into()),
         },
@@ -652,7 +652,7 @@ fn m9_scanned_2160p_is_not_replaced_by_high_scoring_1080p_without_ladder() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 0, // scanned into the library: no filter score
             path: Some(path.into()),
         },
@@ -674,7 +674,7 @@ fn m9_same_quality_falls_back_to_score_tie_break() {
     facts.replace(
         Some(1),
         Some(1),
-        crate::QualityFact {
+        domain::QualityFact {
             score: 10,
             path: Some(path.into()),
         },

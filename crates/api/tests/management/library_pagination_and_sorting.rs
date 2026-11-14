@@ -103,7 +103,7 @@ async fn library_manage_scope_shows_admin_hidden_libraries() {
 }
 
 #[tokio::test]
-async fn library_items_respect_limit_and_offset() {
+async fn library_items_respect_limit_and_cursor() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
 
@@ -153,13 +153,31 @@ async fn library_items_respect_limit_and_offset() {
     .await;
     assert_eq!(all.as_array().unwrap().len(), 3);
 
-    // limit=1, offset=1 应只返回 1 个（且是第二个元素 Beta）
-    let paged = json_data(
+    // limit=1 的第二页（游标续页）应只返回 1 个，且是第二个元素 Beta
+    let first = envelope(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/libraries/{movie_id}/items?sort=title&order=asc&limit=1"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    assert_eq!(first["data"][0]["title"], "Alpha");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("limit=1 且还有条目时必须给出游标");
+    let second = envelope(
         app.clone()
             .oneshot(request(
                 "GET",
                 &format!(
-                    "/api/v1/libraries/{movie_id}/items?sort=title&order=asc&limit=1&offset=1"
+                    "/api/v1/libraries/{movie_id}/items?sort=title&order=asc&limit=1&cursor={}",
+                    urlencode(cursor)
                 ),
                 Some("management-secret"),
                 Value::Null,
@@ -168,7 +186,26 @@ async fn library_items_respect_limit_and_offset() {
             .unwrap(),
     )
     .await;
-    let paged_items = paged.as_array().unwrap();
+    let paged_items = second["data"].as_array().unwrap();
     assert_eq!(paged_items.len(), 1, "limit=1 应该只返回 1 个元素");
     assert_eq!(paged_items[0]["title"], "Beta");
+}
+
+/// 整个信封（含 `next_cursor`/`total`），`json_data` 只取 `data`。
+async fn envelope(response: axum::response::Response) -> Value {
+    json_body(response).await
+}
+
+/// 游标是 JSON，必须整体转义后再拼进查询串。
+fn urlencode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }

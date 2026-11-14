@@ -57,18 +57,29 @@ mod tests {
     #[test]
     fn played_goes_last_and_keeps_the_inner_order() {
         // 段内顺序（这里是调用方排好的入库时间倒序）不能被这一步打乱
-        let items = vec![("new-unplayed", false), ("new-played", true), ("old-unplayed", false)];
+        let items = vec![
+            ("new-unplayed", false),
+            ("new-played", true),
+            ("old-unplayed", false),
+        ];
         let ordered = played_last(items, |(_, played)| *played);
         assert_eq!(
             ordered,
-            vec![("new-unplayed", false), ("old-unplayed", false), ("new-played", true)]
+            vec![
+                ("new-unplayed", false),
+                ("old-unplayed", false),
+                ("new-played", true)
+            ]
         );
     }
 
     #[test]
     fn all_played_keeps_the_original_order() {
         let items = vec![("a", true), ("b", true)];
-        assert_eq!(played_last(items, |(_, played)| *played), vec![("a", true), ("b", true)]);
+        assert_eq!(
+            played_last(items, |(_, played)| *played),
+            vec![("a", true), ("b", true)]
+        );
     }
 
     #[test]

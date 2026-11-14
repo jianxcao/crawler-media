@@ -8,7 +8,7 @@ fn torrent(site_id: SiteId, title: &str) -> Torrent {
         size_bytes: Some(1_000_000_000),
         seeders: Some(100),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -52,8 +52,14 @@ fn preferred_site_beats_quality_score_on_other_site() {
     ]);
     let result = filter::admit_scored(
         vec![
-            (torrent(preferred, "Movie.1080p.WEB-DL"), Some(release::parse("Movie.1080p.WEB-DL"))),
-            (torrent(other, "Movie.2160p.Remux"), Some(release::parse("Movie.2160p.Remux"))),
+            (
+                torrent(preferred, "Movie.1080p.WEB-DL"),
+                Some(release::parse("Movie.1080p.WEB-DL")),
+            ),
+            (
+                torrent(other, "Movie.2160p.Remux"),
+                Some(release::parse("Movie.2160p.Remux")),
+            ),
         ],
         &f,
     );

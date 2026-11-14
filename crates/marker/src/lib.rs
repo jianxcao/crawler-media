@@ -1,8 +1,16 @@
+// CaptureFailure carries in-depth diagnostic CaptureMetrics; boxed variants are deferred
+// to prevent breaking serialized telemetry across crate boundaries.
+#![allow(clippy::result_large_err)]
+
 pub mod adaptive;
+pub mod boundary;
+mod candidate_quality;
+pub mod capture_profile;
 pub mod chapter;
 pub mod fingerprint;
 pub mod matcher;
 pub mod media_read;
+pub mod redirect;
 pub mod target;
 pub mod types;
 mod work_control;
@@ -16,12 +24,14 @@ pub use adaptive::{
 };
 
 pub use chapter::{
-    annotate_chapters, build_complete_timeline_chapters, classify_chapter_title, probe_chapters, probe_chapters_controlled,
+    annotate_chapters, build_complete_timeline_chapters, classify_chapter_title, probe_chapters,
+    probe_chapters_controlled,
 };
 pub use fingerprint::{
     AudioFingerprint, CaptureFailure, CaptureFailureKind, CaptureMetrics, CaptureRequest,
-    CapturedFingerprint, ChromaprintEngine, FINGERPRINT_ALGORITHM_VERSION, FingerprintCaptureEngine,
-    FingerprintEngine, InputBytesSource, MAX_MATCH_DURATION_SECS, MIN_MATCH_DURATION_SECS,
+    CaptureSourceFacts, CapturedFingerprint, ChromaprintEngine, FINGERPRINT_ALGORITHM_VERSION,
+    FingerprintCaptureEngine, FingerprintEngine, InputBytesSource, MAX_MATCH_DURATION_SECS,
+    MIN_MATCH_DURATION_SECS, PairFingerprintDecision, PcmTimeline, QuantizedPcmMapping,
     SampleWindow, extract_audio_fingerprint, extract_audio_fingerprint_at,
     extract_audio_fingerprint_at_with, find_common_segment, find_common_segment_with,
 };

@@ -65,6 +65,7 @@ async fn member_only_sees_visible_libraries() {
                 "root_paths": [tmp.path().join("kids").display().to_string()],
                 "access_mode": "selected",
                 "admin_visible": true,
+                "detect_intros": false,
                 "member_ids": [member_id],
             }),
         ))
@@ -76,36 +77,7 @@ async fn member_only_sees_visible_libraries() {
         .unwrap()
         .to_string();
 
-    // A one-field PATCH must retain both the selected-member restriction and
-    // omitted intro settings.
-    let patched = app
-        .clone()
-        .oneshot(request(
-            "PATCH",
-            &format!("/api/v1/libraries/{library_id}"),
-            Some("management-secret"),
-            json!({
-                "member_ids": [member_id],
-                "enable_fingerprint": true,
-                "realtime_watch": false,
-                "exclude_from_home": true,
-                "generate_thumbnails": false,
-                "extract_chapter_images": false,
-                "auto_series_collections": false,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(patched.status(), StatusCode::OK);
-    let patched = json_body(patched).await;
-    assert_eq!(patched["data"]["access_mode"], "selected");
-    assert_eq!(patched["data"]["detect_intros"], false);
-    assert_eq!(patched["data"]["enable_fingerprint"], true);
-    assert_eq!(patched["data"]["realtime_watch"], false);
-    assert_eq!(patched["data"]["exclude_from_home"], true);
-    assert_eq!(patched["data"]["generate_thumbnails"], false);
-    assert_eq!(patched["data"]["extract_chapter_images"], false);
-    assert_eq!(patched["data"]["auto_series_collections"], false);
+    assert_library_patch_preserves_visibility(&app, &library_id, &member_id).await;
 
     // 管理 token 建一个成员 token 直接访问：先用 admin 登录拿成员凭据。
     let login = app
@@ -158,6 +130,57 @@ async fn member_only_sees_visible_libraries() {
     );
     assert!(names.contains(&"电影库"));
 
+    assert_unlisted_member_cannot_see_library(&app).await;
+
+    // 管理员仍看到全部。
+    let admin_libs = admin_json(&app, "/api/v1/libraries").await;
+    let names: Vec<&str> = admin_libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"儿童区"));
+}
+
+async fn assert_library_patch_preserves_visibility(
+    app: &axum::Router,
+    library_id: &str,
+    member_id: &str,
+) {
+    // A one-field PATCH must retain both the selected-member restriction and
+    // omitted intro settings.
+    let patched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/libraries/{library_id}"),
+            Some("management-secret"),
+            json!({
+                "member_ids": [member_id],
+                "enable_fingerprint": true,
+                "realtime_watch": false,
+                "exclude_from_home": true,
+                "generate_thumbnails": false,
+                "extract_chapter_images": false,
+                "auto_series_collections": false,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched = json_body(patched).await;
+    assert_eq!(patched["data"]["access_mode"], "selected");
+    assert_eq!(patched["data"]["detect_intros"], false);
+    assert_eq!(patched["data"]["enable_fingerprint"], true);
+    assert_eq!(patched["data"]["realtime_watch"], false);
+    assert_eq!(patched["data"]["exclude_from_home"], true);
+    assert_eq!(patched["data"]["generate_thumbnails"], false);
+    assert_eq!(patched["data"]["extract_chapter_images"], false);
+    assert_eq!(patched["data"]["auto_series_collections"], false);
+}
+
+async fn assert_unlisted_member_cannot_see_library(app: &axum::Router) {
     // 第三个成员（不在 member_ids）看不到「儿童区」。
     let created = app
         .clone()
@@ -206,14 +229,4 @@ async fn member_only_sees_visible_libraries() {
         !names.contains(&"儿童区"),
         "unlisted member hidden: {names:?}"
     );
-
-    // 管理员仍看到全部。
-    let admin_libs = admin_json(&app, "/api/v1/libraries").await;
-    let names: Vec<&str> = admin_libs["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l["name"].as_str().unwrap())
-        .collect();
-    assert!(names.contains(&"儿童区"));
 }

@@ -1,12 +1,12 @@
-//! Watcher presence reconciliation: marks ledger rows missing instead of
-//! automatically deleting ledger/Media/Playback facts.
+//! Watcher presence reconciliation: marks files missing instead of
+//! automatically deleting file/Media/Playback facts.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use store::{
     FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult,
-    LibraryPathScope, StrictOwner,
+    LibraryPathScope,
 };
 
 use crate::library_presence::{PresenceError, PresencePublishError, publish_presence};
@@ -16,44 +16,38 @@ fn collect_event_observations(
     state: &ApiState,
     path: &Path,
     scope: &LibraryPathScope,
-    candidate_rows: Vec<domain::LedgerRow>,
-    missing_map: &HashMap<String, i64>,
-    media_kinds: &HashMap<domain::MediaId, domain::MediaKind>,
+    candidates: Vec<LedgerPresenceObservation>,
 ) -> HashMap<String, Vec<LedgerPresenceObservation>> {
     let mut observations_by_lib: HashMap<String, Vec<LedgerPresenceObservation>> = HashMap::new();
 
-    for row in candidate_rows {
-        let row_p = Path::new(&row.path);
-        let matches_event = row_p == path || row_p.starts_with(path);
+    for mut observation in candidates {
+        let file_path = observation.file.file.path.as_path();
+        let matches_event = file_path == path || file_path.starts_with(path);
         if !matches_event {
             continue;
         }
 
-        let Some(&real_kind) = media_kinds.get(&row.media_id) else {
+        // A published file belongs to its recorded Library. The event path only
+        // decides which rows moved, never who owns them.
+        let Some(owner_lib) = scope
+            .libraries()
+            .find(|library| library.id == observation.file.file.library_id.to_string())
+        else {
             continue;
         };
 
-        let Ok(resolved) = LibraryPathScope::resolve_path(row_p) else {
+        let Ok(resolved) = LibraryPathScope::resolve_path(file_path) else {
             continue;
-        };
-
-        let owner_lib = match scope.owner(&resolved, real_kind) {
-            StrictOwner::Owned(lib) => lib,
-            _ => continue,
         };
 
         if !owner_lib.realtime_watch || !scope.accepts_work(&owner_lib.id) {
             continue;
         }
 
-        let matching_root = owner_lib
-            .root_paths
-            .iter()
-            .find(|r| {
-                resolved.starts_with(r)
-                    || LibraryPathScope::resolve_path(r)
-                        .is_ok_and(|res_r| resolved.starts_with(&res_r))
-            });
+        let matching_root = owner_lib.root_paths.iter().find(|r| {
+            resolved.starts_with(r)
+                || LibraryPathScope::resolve_path(r).is_ok_and(|res_r| resolved.starts_with(&res_r))
+        });
         let Some(root) = matching_root else {
             continue;
         };
@@ -62,11 +56,11 @@ fn collect_event_observations(
             continue;
         }
 
-        let presence = match state.library_files.presence(row_p) {
+        observation.presence = match state.library_files.presence(file_path) {
             Ok(true) => FilePresence::Present,
             Ok(false) => FilePresence::Missing,
             Err(e) => {
-                tracing::warn!(path = %row.path, error = %e, "Watcher file presence failed");
+                tracing::warn!(path = %file_path.display(), error = %e, "Watcher file presence failed");
                 FilePresence::Unknown
             }
         };
@@ -74,11 +68,7 @@ fn collect_event_observations(
         observations_by_lib
             .entry(owner_lib.id.clone())
             .or_default()
-            .push(LedgerPresenceObservation {
-                row: row.clone(),
-                missing_at: missing_map.get(&row.path).copied(),
-                presence,
-            });
+            .push(observation);
     }
 
     observations_by_lib
@@ -103,7 +93,7 @@ fn publish_event_observations(
 
         let sub_res = publish_presence(&lease, || {
             let store_arc = state.store();
-            let guard = store_arc.lock();
+            let guard = &store_arc;
             let current_snapshot = guard.library_ownership()?;
             if !current_snapshot.accepts_work(&lib_id) {
                 return Err(PresencePublishError::LibraryDeleting);
@@ -118,6 +108,7 @@ fn publish_event_observations(
 
         match sub_res {
             Ok(res) => {
+                state.probe.presence_committed(&res.applied);
                 total_result.missing += res.missing;
                 total_result.restored += res.restored;
                 total_result.deleted += res.deleted;
@@ -149,36 +140,33 @@ pub(crate) fn observe_event(
     state: &ApiState,
     path: &Path,
 ) -> Result<LedgerPresenceResult, PresenceError> {
-    let (snapshot, candidate_rows, missing_map, media_kinds) = {
+    let snapshot = {
         let store_arc = state.store();
-        let guard = store_arc.lock();
-        let snapshot = guard.library_ownership()?;
-        let rows = guard.list_ledger()?;
-        let missing_map = guard.missing_at_by_path()?;
-        let media_ids: Vec<domain::MediaId> = rows.iter().map(|r| r.media_id).collect();
-        let media_map = guard.media_batch(&media_ids)?;
-        let media_kinds: HashMap<domain::MediaId, domain::MediaKind> = media_map
-            .into_iter()
-            .map(|(mid, m)| (mid, m.kind))
-            .collect();
-        (snapshot, rows, missing_map, media_kinds)
+        let guard = &store_arc;
+        guard.library_ownership()?
     };
 
     let scope = LibraryPathScope::resolve(snapshot)?;
-    let observations_by_lib = collect_event_observations(
-        state,
-        path,
-        &scope,
-        candidate_rows,
-        &missing_map,
-        &media_kinds,
-    );
-
-    if observations_by_lib.is_empty() {
-        return Ok(LedgerPresenceResult::default());
+    let mut total = LedgerPresenceResult::default();
+    let mut cursor = None;
+    loop {
+        let candidates = {
+            let store = state.store();
+            let guard = &store;
+            guard.watcher_presence_page(&path.to_string_lossy(), cursor.as_deref(), 100)?
+        };
+        let Some(last) = candidates.last() else {
+            break;
+        };
+        cursor = Some(last.path_key.clone());
+        let observations = collect_event_observations(state, path, &scope, candidates);
+        let result = publish_event_observations(state, &scope, observations);
+        total.missing += result.missing;
+        total.restored += result.restored;
+        total.deleted += result.deleted;
+        total.skipped += result.skipped;
     }
-
-    Ok(publish_event_observations(state, &scope, observations_by_lib))
+    Ok(total)
 }
 
 #[cfg(test)]

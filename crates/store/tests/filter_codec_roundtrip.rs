@@ -21,5 +21,5 @@ fn codec_filter_survives_database_reopen() {
     let reopened = Store::open(tmp.path()).unwrap();
     let saved = reopened.get_filter(id).unwrap().unwrap();
     assert_eq!(saved.atoms, filter.atoms);
-    assert_eq!(saved.keep_old_versions, true);
+    assert!(saved.keep_old_versions);
 }

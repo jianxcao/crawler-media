@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::router;
-use axum::http::StatusCode;
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -47,7 +46,7 @@ async fn seed_tv(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String
         .as_str()
         .unwrap()
         .to_string();
-    scan_and_wait(&app, &tv_id).await;
+    scan_and_wait(app, &tv_id).await;
     let ledger = json_body(
         app.clone()
             .oneshot(request(
@@ -182,7 +181,8 @@ async fn similar_and_gallery_and_forecast_respond() {
     )
     .await;
     assert!(
-        similar["data"].as_array().unwrap().is_empty(),
+        similar["data"]["state"] == "ready"
+            && similar["data"]["items"].as_array().unwrap().is_empty(),
         "no catalog → empty"
     );
 
@@ -198,7 +198,7 @@ async fn similar_and_gallery_and_forecast_respond() {
         .unwrap();
     let gallery = json_body(gallery_resp).await;
     assert!(
-        gallery["data"].as_array().unwrap().is_empty(),
+        gallery["data"]["items"].as_array().unwrap().is_empty(),
         "no favorites yet"
     );
 

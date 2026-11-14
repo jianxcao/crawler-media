@@ -36,35 +36,32 @@ fn parse_html(site: &Site, profile: &Profile, body: &str) -> Result<Vec<Torrent>
     // 登录态探测：如果配置了 login_success_css（例如 a[href*='logout.php']），页面缺失该元素时
     // 说明 Cookie 失效并被重定向到了登录页，明确报出认证失效，而不是静默返回 0 条。
     if let Some(login_css) = &profile.login_success_css {
-        if let Ok(login_sel) = Selector::parse(login_css) {
-            if document.select(&login_sel).next().is_none() {
-                // 进一步检查页面是否包含登录特征
-                let is_login_page = body.contains("login.php")
-                    || body.contains("登录")
-                    || body.contains("登入")
-                    || body.contains("password")
-                    || body.contains("two_step_code");
-                if is_login_page {
-                    return Err(IndexerError::Parse(
-                        "站点 Cookie 已过期或失效，请重新登录并更新 Cookie".into(),
-                    ));
-                }
+        if let Ok(login_sel) = Selector::parse(login_css)
+            && document.select(&login_sel).next().is_none()
+        {
+            // 进一步检查页面是否包含登录特征
+            let is_login_page = body.contains("login.php")
+                || body.contains("登录")
+                || body.contains("登入")
+                || body.contains("password")
+                || body.contains("two_step_code");
+            if is_login_page {
+                return Err(IndexerError::Parse(
+                    "站点 Cookie 已过期或失效，请重新登录并更新 Cookie".into(),
+                ));
             }
         }
     } else {
         // 通用兜底探测：如果标题包含登录且完全找不到退出链接
         if (body.contains("login.php") || body.contains("登录") || body.contains("登入"))
             && !body.contains("logout.php")
-        {
-            if let Ok(login_form_sel) =
+            && let Ok(login_form_sel) =
                 Selector::parse("form[action*='login'], form[action*='takelogin']")
-            {
-                if document.select(&login_form_sel).next().is_some() {
-                    return Err(IndexerError::Parse(
-                        "站点 Cookie 已过期或失效，请重新登录并更新 Cookie".into(),
-                    ));
-                }
-            }
+            && document.select(&login_form_sel).next().is_some()
+        {
+            return Err(IndexerError::Parse(
+                "站点 Cookie 已过期或失效，请重新登录并更新 Cookie".into(),
+            ));
         }
     }
 
@@ -97,7 +94,7 @@ fn parse_html(site: &Site, profile: &Profile, body: &str) -> Result<Vec<Torrent>
             seeders: optional_text(item, profile.fields.seeders.as_ref())
                 .and_then(|s| s.parse().ok()),
             free: present(item, profile.fields.free.as_ref()),
-            hr: present(item, profile.fields.hr.as_ref()),
+            hr: hr_present(item, profile.fields.hr.as_ref()),
             imdb_id: None,
             id: extract_id(&enclosure_url).or_else(|| detail_url.as_deref().and_then(extract_id)),
             leechers: optional_text(item, profile.fields.leechers.as_ref())
@@ -118,13 +115,13 @@ pub(crate) fn parse_mteam_items(body: &str) -> Result<Vec<MTeamItem>, IndexerErr
         serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
     // M-Team signals rate limits and bad keys in the envelope rather than the
     // HTTP status; surface its own message instead of an empty result list.
-    if let Some(code) = parsed.code.as_deref() {
-        if code != "0" {
-            return Err(IndexerError::Parse(format!(
-                "M-Team 返回错误 {code}：{}",
-                parsed.message.unwrap_or_else(|| "无描述".into())
-            )));
-        }
+    if let Some(code) = parsed.code.as_deref()
+        && code != "0"
+    {
+        return Err(IndexerError::Parse(format!(
+            "M-Team 返回错误 {code}：{}",
+            parsed.message.unwrap_or_else(|| "无描述".into())
+        )));
     }
     Ok(parsed.data.map(|payload| payload.data).unwrap_or_default())
 }
@@ -159,7 +156,7 @@ impl MTeamItem {
             size_bytes: self.size.as_deref().and_then(parse_size),
             seeders: status.seeders.as_deref().and_then(|s| s.parse().ok()),
             free,
-            hr: status.hr.unwrap_or(false),
+            hr: status.hr,
             imdb_id: None,
             id,
             leechers: status.leechers.as_deref().and_then(|s| s.parse().ok()),
@@ -189,7 +186,7 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
             .id
             .as_ref()
             .and_then(|f| xml_field(item, f))
-            .and_then(|raw| extract_id(&raw).or_else(|| Some(raw)))
+            .and_then(|raw| extract_id(&raw).or(Some(raw)))
             .or_else(|| extract_id(&enclosure_url));
         let detail_url = id.as_deref().map(|raw| join_url(&site.url, raw));
         torrents.push(Torrent {
@@ -215,7 +212,7 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
                 .hr
                 .as_ref()
                 .and_then(|f| xml_field(item, f))
-                .is_some_and(|s| truthy(&s)),
+                .and_then(|s| hr_flag(&s)),
             imdb_id: None,
             id,
             leechers: rss
@@ -275,6 +272,26 @@ fn present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> bool {
         return false;
     };
     root.select(&sel).next().is_some()
+}
+
+fn hr_present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> Option<bool> {
+    let field = field?;
+    let selector = match Selector::parse(&field.selector) {
+        Ok(selector) => selector,
+        Err(error) => {
+            tracing::warn!(selector = %field.selector, ?error, "H&R selector 无效，状态未知");
+            return None;
+        }
+    };
+    Some(root.select(&selector).next().is_some())
+}
+
+fn hr_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" => Some(true),
+        "0" | "false" | "no" | "n" => Some(false),
+        _ => None,
+    }
 }
 
 fn xml_field(item: roxmltree::Node<'_, '_>, field: &Field) -> Option<String> {

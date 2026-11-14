@@ -23,51 +23,7 @@ async fn global_rss_job_fetches_once_and_routes_to_each_subscribe() {
     let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
     let app = router(state(tmp.path(), fetcher.clone(), downloader.clone()));
     create_site(&app).await;
-    let mut ids = Vec::new();
-    for i in 0..2 {
-        let filter = json_data(
-            app.clone()
-                .oneshot(request(
-                    "POST",
-                    "/api/v1/rule-sets",
-                    Some("management-secret"),
-                    json!({
-                        "name": format!("arrival-filter-{i}"),
-                        "atoms": [
-                            { "kind": "resolution", "value": "1080p", "priority": 100 },
-                            { "kind": "title_match", "value": "Arrival", "priority": 80 }
-                        ]
-                    }),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        let filter_id = filter["id"].as_str().unwrap();
-
-        let mut body = subscribe_payload("rss");
-        body["media"]["title"] = json!("Arrival");
-        body["filter_id"] = json!(filter_id);
-        let response = app
-            .clone()
-            .oneshot(request(
-                "POST",
-                "/api/v1/subscriptions",
-                Some("management-secret"),
-                body,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let created = json_data(response).await;
-        ids.push(
-            created["id"]
-                .as_str()
-                .unwrap()
-                .parse::<SubscribeId>()
-                .unwrap(),
-        );
-    }
+    let ids = create_rss_subscribes(&app).await;
     let jobs = Connection::open(tmp.path().join("data/jobs.db")).unwrap();
     jobs.execute("DELETE FROM jobs WHERE kind <> 'subscribe_rss'", [])
         .unwrap();
@@ -591,3 +547,55 @@ async fn job_stream_emits_ready_and_initial_job_count_immediately() {
         start.elapsed()
     );
 }
+
+async fn create_rss_subscribes(app: &axum::Router) -> Vec<SubscribeId> {
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let filter = json_data(
+            app.clone()
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/rule-sets",
+                    Some("management-secret"),
+                    json!({
+                        "name": format!("arrival-filter-{i}"),
+                        "atoms": [
+                            { "kind": "resolution", "value": "1080p", "priority": 100 },
+                            { "kind": "title_match", "value": "Arrival", "priority": 80 }
+                        ]
+                    }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let filter_id = filter["id"].as_str().unwrap();
+
+        let mut body = subscribe_payload("rss");
+        body["media"]["title"] = json!("Arrival");
+        body["filter_id"] = json!(filter_id);
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_data(response).await;
+        ids.push(
+            created["id"]
+                .as_str()
+                .unwrap()
+                .parse::<SubscribeId>()
+                .unwrap(),
+        );
+    }
+    ids
+}
+
+#[path = "jobs_identity.rs"]
+mod identity;

@@ -76,7 +76,7 @@ fn flag(query: &HashMap<String, String>, name: &str) -> bool {
 struct SubscriptionDeleteSnapshot {
     subscribe: Subscribe,
     pending: Vec<(i32, crate::store::PendingDownload)>,
-    rows: Vec<domain::LedgerRow>,
+    rows: Vec<domain::FileCoverage>,
     delete_torrents: bool,
     _reservation: crate::management::SubscribeDeletionReservation,
 }
@@ -88,20 +88,29 @@ async fn start_subscription_deletion(
     delete_torrents: bool,
     delete_library_files: bool,
 ) -> Result<SubscriptionDeleteSnapshot, Response> {
-    let state = state.clone();
-    match tokio::task::spawn_blocking(move || {
-        begin_subscription_deletion(&state, id, user_id, delete_torrents, delete_library_files)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::error!(subscribe_id = %id, %error, "开始删除订阅失败");
-            Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "subscription.delete_failed",
-                &error.to_string(),
-            ))
+    loop {
+        // Register before checking the active marker: a round may finish while
+        // the blocking decision is queued, and its wakeup must not be lost.
+        let finished = state.subscribe_round_finished.notified();
+        tokio::pin!(finished);
+        finished.as_mut().enable();
+        let worker = state.clone();
+        match tokio::task::spawn_blocking(move || {
+            begin_subscription_deletion(&worker, id, user_id, delete_torrents, delete_library_files)
+        })
+        .await
+        {
+            Ok(Ok(Some(snapshot))) => return Ok(snapshot),
+            Ok(Ok(None)) => finished.await,
+            Ok(Err(response)) => return Err(response),
+            Err(error) => {
+                tracing::error!(subscribe_id = %id, %error, "开始删除订阅失败");
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subscription.delete_failed",
+                    &error.to_string(),
+                ));
+            }
         }
     }
 }
@@ -110,7 +119,7 @@ async fn cleanup_subscription(
     state: &ApiState,
     subscribe_id: SubscribeId,
     pending: Vec<(i32, crate::store::PendingDownload)>,
-    rows: Vec<domain::LedgerRow>,
+    rows: Vec<domain::FileCoverage>,
     delete_torrents: bool,
 ) -> Result<(Vec<domain::Torrent>, usize), Response> {
     let torrents = if delete_torrents {
@@ -204,18 +213,7 @@ async fn finalize_subscription_deletion(
             ));
         }
     }
-    state
-        .jobs
-        .lock()
-        .delete_defs_for_payload(&format!("{{\"subscribe_id\":\"{id}\"}}"))
-        .map(|_| ())
-        .map_err(|error| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "subscription.job_cleanup_failed",
-                &error.to_string(),
-            )
-        })
+    Ok(())
 }
 
 fn begin_subscription_deletion(
@@ -224,7 +222,7 @@ fn begin_subscription_deletion(
     user_id: UserId,
     delete_torrents: bool,
     delete_library_files: bool,
-) -> Result<SubscriptionDeleteSnapshot, Response> {
+) -> Result<Option<SubscriptionDeleteSnapshot>, Response> {
     let guard = state.subscribe_guard(id);
     let _guard = guard.lock();
     if state.subscribe_is_deleting(id) {
@@ -234,7 +232,7 @@ fn begin_subscription_deletion(
             "订阅正在删除",
         ));
     }
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let Some(subscribe) = store.get_subscribe(id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -248,33 +246,40 @@ fn begin_subscription_deletion(
         user_id,
         delete_torrents || delete_library_files,
     )?;
+    // The admitted round records every successful add and publication before
+    // clearing its marker. Wait without retaining this decision guard, then
+    // capture cleanup facts and fence new rounds in the same guarded section.
+    if (delete_torrents || delete_library_files) && state.active_transfers.lock().contains(&id) {
+        return Ok(None);
+    }
     let pending = if delete_torrents {
         exclusively_owned_pending(&store, id)?
     } else {
         Vec::new()
     };
+    state.mark_subscribe_deleting(id);
+    drop(_guard);
+    let reservation = crate::management::SubscribeDeletionReservation::new(state.clone(), id);
+    // The deletion fence keeps new rounds out while strict root/path checks
+    // inspect the filesystem. An error drops the reservation and clears the fence.
     let rows = if delete_library_files {
         deletable_library_rows(&store, &subscribe)?
     } else {
         Vec::new()
     };
-    state.mark_subscribe_deleting(id);
-    drop(store);
-    drop(_guard);
-    let reservation = crate::management::SubscribeDeletionReservation::new(state.clone(), id);
-    Ok(SubscriptionDeleteSnapshot {
+    Ok(Some(SubscriptionDeleteSnapshot {
         subscribe,
         pending,
         rows,
         delete_torrents,
         _reservation: reservation,
-    })
+    }))
 }
 
 fn deletable_library_rows(
     store: &crate::Store,
     subscribe: &Subscribe,
-) -> Result<Vec<domain::LedgerRow>, Response> {
+) -> Result<Vec<domain::FileCoverage>, Response> {
     let media = store
         .get_media(subscribe.media_id)
         .ok()
@@ -299,34 +304,38 @@ fn deletable_library_rows(
         .filter(|other| other.id != subscribe.id && other.media_id == subscribe.media_id)
         .collect::<Vec<_>>();
     Ok(store
-        .ledger_for_media(subscribe.media_id)
+        .file_coverage_for_media(subscribe.media_id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| row_owned_by_subscribe(store, subscribe, &media, row, &others))
+        .filter(|coverage| coverage_owned_by_subscribe(store, subscribe, &media, coverage, &others))
         .collect())
 }
 
-fn row_owned_by_subscribe(
+/// 旧语义是逐 `(file × unit)` 行判定的：只要这个文件有**某个 unit** 属于本订阅、且没有
+/// 别的订阅认领**同一个 unit**，该行（也就是这个文件）就要删。文件级的库归属检查对同一
+/// 文件的所有 unit 是同一个布尔值，所以提到 unit 判定之外只做一次。
+fn coverage_owned_by_subscribe(
     store: &crate::Store,
     subscribe: &Subscribe,
     media: &domain::Media,
-    row: &domain::LedgerRow,
+    coverage: &domain::FileCoverage,
     others: &[Subscribe],
 ) -> bool {
-    if !coverage_owns_row(&subscribe.coverage, row) {
-        return false;
-    }
-    if others
-        .iter()
-        .any(|other| coverage_owns_row(&other.coverage, row))
-    {
+    let owned = coverage.units.iter().any(|unit| {
+        unit_owned_by(&subscribe.coverage, unit)
+            && !others
+                .iter()
+                .any(|other| unit_owned_by(&other.coverage, unit))
+    });
+    if !owned {
         return false;
     }
     // 物理删除不能走「不在任何根下就回退默认库」的展示归属。库外路径
     // （手工 claim、根目录变更后的旧行）一律不删。
-    let Some(owner) = crate::http::library::library_for_row_strict(store, row, media) else {
+    let Some(owner) = crate::http::library::library_for_file_strict(store, &coverage.file, media)
+    else {
         tracing::warn!(
-            path = %row.path,
+            path = %coverage.file.path.display(),
             subscribe_id = %subscribe.id,
             "订阅删除跳过不属于任何媒体库根的文件"
         );
@@ -338,21 +347,23 @@ fn row_owned_by_subscribe(
     }
 }
 
-fn coverage_owns_row(coverage: &domain::Coverage, row: &domain::LedgerRow) -> bool {
+/// 旧 `coverage_owns_row` 的逐 unit 版本：整片（旧 `season.is_none() && episode.is_none()`）
+/// 只归 Movie；`Tv` 的旧「季匹配、集缺失即认领」分支在新读模型里不可达（unit 的两坐标
+/// 同有同无），因此 `Tv` 只匹配非整片且落在季/集区间内的 unit。
+fn unit_owned_by(coverage: &domain::Coverage, unit: &domain::UnitKey) -> bool {
     match coverage {
-        domain::Coverage::Movie => row.season.is_none() && row.episode.is_none(),
+        domain::Coverage::Movie => unit.is_whole(),
         domain::Coverage::Tv {
             season,
             episode_from,
             episode_to,
         } => {
-            if row.season != Some(*season) {
-                return false;
-            }
-            let Some(episode) = row.episode else {
-                return true;
-            };
-            episode >= *episode_from && episode_to.map(|to| episode <= to).unwrap_or(true)
+            !unit.is_whole()
+                && unit.season as u32 == *season
+                && unit.episode as u32 >= *episode_from
+                && episode_to
+                    .map(|to| unit.episode as u32 <= to)
+                    .unwrap_or(true)
         }
     }
 }
@@ -381,7 +392,7 @@ fn finish_subscription_deletion(
 ) -> Result<(), Response> {
     let guard = state.subscribe_guard(id);
     let _guard = guard.lock();
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let current = store.get_subscribe(id).ok().flatten();
     if current.as_ref().map(|row| row.user_id) != Some(user_id) {
         return Err(err(
@@ -402,5 +413,17 @@ fn finish_subscription_deletion(
             "store.error",
             &error.to_string(),
         )),
+    }?;
+    match store.subscribe_jobs_cleanup(id) {
+        Ok(Some(generation)) => {
+            if let Err(error) = crate::subscribe_job_sync::cleanup_deleted(state, id, &generation) {
+                tracing::warn!(subscribe_id=%id,%error,"Subscribe deleted; Jobs cleanup durably pending");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(subscribe_id=%id,%error,"Subscribe deleted; cleanup intent read deferred to recovery")
+        }
     }
+    Ok(())
 }

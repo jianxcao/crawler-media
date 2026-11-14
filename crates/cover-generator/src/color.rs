@@ -138,13 +138,9 @@ pub fn extract_dominant_color(img: &image::DynamicImage) -> RgbColor {
         }
     }
 
-    if count == 0 {
-        RgbColor(80, 100, 140)
+    if let Some(r) = r_acc.checked_div(count) {
+        RgbColor(r as u8, (g_acc / count) as u8, (b_acc / count) as u8)
     } else {
-        RgbColor(
-            (r_acc / count) as u8,
-            (g_acc / count) as u8,
-            (b_acc / count) as u8,
-        )
+        RgbColor(80, 100, 140)
     }
 }

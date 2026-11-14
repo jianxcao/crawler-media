@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; media-src blob:; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Marker 本地盲标复核</title>
+<style>
+body{font:16px/1.6 system-ui,sans-serif;max-width:1000px;margin:24px auto;padding:0 20px;background:#f5f7fa;color:#172434}h1{font-size:28px}h2{font-size:20px}section{background:white;padding:20px;margin:16px 0;border:1px solid #ccd5df;border-radius:10px}label{display:block;margin:12px 0}input,select,button{font:inherit;max-width:100%}input[type=text]{width:95%;padding:6px}button{padding:6px 12px;margin:4px;border:1px solid #536b85;border-radius:5px;background:#eef5ff;color:#172434}button:disabled{opacity:.45}video{width:100%;max-height:480px;background:#10151d}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f6;padding:12px}.note{color:#445367}#error{color:#9c1d14;background:#fff0ed;padding:12px;white-space:pre-wrap}#error:empty{display:none}.row{display:flex;flex-wrap:wrap;gap:12px}.warning{border-left:4px solid #a56700;padding-left:12px}[hidden]{display:none!important}
+</style>
+<script defer src="annotation-review.js"></script>
+<script defer src="annotation-review-page.js"></script>
+</head>
+<body>
+<h1>Marker 本地盲标复核</h1>
+<p>文件仅在本机读取，不上传、不联网、不写生产标记。先独立听看与复核标签，再显式揭示预测。</p>
+<p class="note">此页复核已保存的 A1 标签，不生成标注、reviewer 或裁定记录。首次独立标注应只加载 manifest，在外部记录时间与判断；第二位标注者不要加载第一位的标签。</p>
+<p><a href="../../docs/testing/marker-accuracy-runbook.md">查看本地 runbook</a></p>
+<div id="error" role="alert" aria-live="assertive"></div>
+<section>
+<h2>1. 加载 A1 JSON</h2>
+<label>Manifest（必选）<input id="manifest-file" type="file" accept=".json,application/json"></label>
+<label>独立标签 Labels（可暂缺，缺失为 insufficient）<input id="labels-file" type="file" accept=".json,application/json"></label>
+<label>Predictions（可暂缺，默认隐藏）<input id="predictions-file" type="file" accept=".json,application/json"></label>
+<button id="load">加载并重置复核</button>
+<label>Case <select id="cases" disabled></select></label>
+<pre id="identity">尚未加载。</pre>
+</section>
+<section>
+<h2>2. 绑定本地视频与音轨事实</h2>
+<label>原时间线完整本地视频 <input id="video-file" type="file" accept="video/*,.mkv,.mp4,.webm,.mov"></label>
+<p id="source-status">尚未选择视频。</p>
+<p class="note">不超过 128 MiB 时计算完整 SHA-256；大文件或 WebCrypto 不可用时在本机执行 <code>shasum -a 256 '/绝对路径/视频'</code>，核对同一所选文件后使用下方声明。文件名和 STRM 文本哈希均不能代替完整视频哈希。</p>
+<label>外部计算的完整文件哈希（sha256: + 64 位小写十六进制）<input id="external-hash" type="text" autocomplete="off" spellcheck="false"></label>
+<label><input id="external-confirm" type="checkbox"> 我在本机计算并核对了当前所选完整文件的哈希（这是人工外部核验声明）</label>
+<button id="external-verify" disabled>使用外部核验声明绑定</button>
+<label>评测指定音轨与校验记录（填写 sources.json 的全局 audio_stream_index、单音轨核验依据）<input id="audio-note" type="text" placeholder="例如：audio_stream_index=1；ffprobe 确认仅一个音轨；原始时间线已验证"></label>
+<label><input id="audio-confirm" type="checkbox"> 已在外部确认当前文件仅有评测音轨，且起点、时长、边界时间坐标与评测一致</label>
+<p class="warning">浏览器实际选中的音轨：未知，本页不能可靠选择或证明它。多音轨请先按 runbook 生成并校验固定单音轨评测副本，以副本的完整 hash 重新固定评测输入；也可在本地播放器显式选轨后外部复核。不要勾选未经核验的事实。</p>
+<video id="video" controls preload="metadata" playsinline></video>
+<p id="clock">原始媒体时间：0.000 秒</p>
+</section>
+<section>
+<h2>3. 独立听看与标签复核</h2>
+<pre id="label">标签未加载：insufficient。</pre>
+<p>定位范围为允许边界区间前后各 10 秒，保留原媒体时间；到范围末端暂停，可通过原生播放器继续查看。</p>
+<div class="row"><button id="label-start" disabled>听看标签起点 ±10 秒</button><button id="label-end" disabled>听看标签终点 ±10 秒</button></div>
+<label><input id="review-confirm" type="checkbox"> 已听看并完成当前 case 的标签复核，独立原始记录与裁定已另行保留</label>
+<button id="complete" disabled>确认完成当前 case 复核</button>
+<button id="reveal" disabled>揭示当前 case 预测</button>
+<p id="review-status">预测隐藏。</p>
+</section>
+<section id="prediction-panel" hidden>
+<h2>4. 复核后对照</h2>
+<pre id="prediction"></pre>
+<p id="errors"></p>
+<div class="row"><button id="prediction-start" disabled>听看预测起点 ±10 秒</button><button id="prediction-end" disabled>听看预测终点 ±10 秒</button></div>
+<p>有符号误差相对人工允许区间：区间内为 0，提前为负，滞后为正。无可比边界时为 N/A；不是准确率验收结论。</p>
+</section>
+</body>
+</html>

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use domain::MediaId;
+use std::sync::Arc;
 
 pub mod cache;
 pub mod http;
@@ -40,5 +40,8 @@ pub enum PosterError {
 
 #[async_trait::async_trait]
 pub trait MediaPosterSource: Send + Sync {
+    /// Bounded local cache lookup; never reads a catalog or waits for remote IO.
+    async fn cached(&self, media_id: MediaId) -> Result<Option<PosterBytes>, PosterError>;
+    /// Join bounded shared delivery and await its terminal result.
     async fn get(&self, media_id: MediaId) -> Result<PosterBytes, PosterError>;
 }

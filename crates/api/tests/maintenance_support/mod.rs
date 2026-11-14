@@ -17,6 +17,7 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use jobs::{Job, JobKind};
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub const TOKEN: &str = "maintenance-secret";
 pub const DAY: i64 = 86_400;
@@ -40,13 +41,12 @@ pub fn build_state(root: &Path, store: Store, executor: Arc<dyn DatabaseExecutor
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
     .with_maintenance_executor(executor);
     // 只留维护任务：实例默认 def 在注册时就会补一个 queued 子任务，会把 claim 抢走。
     let queue = state.jobs();
-    let guard = queue.lock();
+    let guard = queue.acquire().unwrap();
     for def in guard.list_defs().unwrap() {
         if !def.kind.is_maintenance() {
             guard.set_def_enabled_by_id(def.id, false).unwrap();
@@ -64,18 +64,67 @@ pub fn temp_state(executor: Arc<dyn DatabaseExecutor>) -> (tempfile::TempDir, Ap
 }
 
 pub fn data_dir(state: &ApiState) -> PathBuf {
-    state.store().lock().data_dir().to_path_buf()
+    state.store().data_dir().to_path_buf()
 }
 
 pub fn unix_now() -> i64 {
     api::store::unix_now()
 }
 
+/// 为一个已登记的 Media 发布真实文件，返回可用于签发会话的 file id。
+///
+/// 维护测试原本用合成 `LedgerId` 签发会话；现在签发要求文件真实存在且已发布。
+pub fn seed_published_file(store: &Store, root: &Path, media: domain::MediaId) -> domain::LedgerId {
+    let library_root = root.join("fixture-library");
+    std::fs::create_dir_all(&library_root).unwrap();
+    if store
+        .list_libraries()
+        .unwrap()
+        .iter()
+        .all(|library| library.name != "Fixture")
+    {
+        store
+            .create_library(
+                domain::MediaKind::Movie,
+                "Fixture",
+                &[library_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let path = library_root.join(format!("{media}.mkv"));
+    std::fs::write(&path, b"x").unwrap();
+    let id = domain::LedgerId::new();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(id),
+            media_id: media,
+            path: path.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Release,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    id
+}
+
 /// 入队并领取，返回处于 running 的 Job（`maintenance::run` 需要它仍在库里）。
 pub fn enqueue_claim(state: &ApiState, kind: JobKind, payload: &str, now: i64) -> Job {
     let queue = state.jobs();
-    let guard = queue.lock();
-    let job = guard.enqueue(kind, payload, 0).unwrap();
+    let guard = queue.acquire().unwrap();
+    let job = guard
+        .enqueue(jobs::JobIdentity::global(kind), payload, 0)
+        .unwrap();
     let claimed = guard.claim(now, 1).unwrap();
     assert_eq!(
         claimed.len(),
@@ -93,7 +142,8 @@ pub fn enqueue_claim(state: &ApiState, kind: JobKind, payload: &str, now: i64) -
 pub fn progress_of(state: &ApiState, job: &Job) -> Value {
     let raw = state
         .jobs()
-        .lock()
+        .acquire()
+        .unwrap()
         .get(job.id)
         .unwrap()
         .unwrap()
@@ -126,6 +176,7 @@ impl Recorder {
 impl DatabaseExecutor for Recorder {
     fn execute(
         &self,
+        _conn: &rusqlite::Connection,
         target: &DatabaseTarget,
         vacuum_enabled: bool,
         _context: &MaintenanceContext<'_>,

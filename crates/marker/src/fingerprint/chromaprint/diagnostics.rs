@@ -15,12 +15,17 @@ pub(crate) struct CapturedStderr {
     pub(crate) text: String,
     pub(crate) total_bytes: u64,
     pub(crate) truncated: bool,
+    pub(crate) timeline: crate::fingerprint::timeline::TimelineObserver,
+    pub(crate) benchmark: Option<FfmpegBenchmark>,
 }
 
 pub(crate) fn read_stderr_tail(mut stderr: impl Read) -> Result<CapturedStderr, String> {
     let mut tail = Vec::with_capacity(MAX_STDERR_TAIL_BYTES);
     let mut buffer = [0u8; 4096];
     let mut total_bytes = 0u64;
+    let mut timeline = crate::fingerprint::timeline::TimelineObserver::default();
+    let mut bench_lines = String::new();
+    let mut partial = Vec::new();
 
     loop {
         let length = stderr
@@ -31,37 +36,55 @@ pub(crate) fn read_stderr_tail(mut stderr: impl Read) -> Result<CapturedStderr, 
         }
         total_bytes = total_bytes.saturating_add(length as u64);
         append_tail(&mut tail, &buffer[..length]);
+        timeline.consume(&buffer[..length]);
+        for &byte in &buffer[..length] {
+            if byte == b'\n' {
+                if partial.starts_with(b"bench:") && bench_lines.len() < 4096 {
+                    bench_lines.push_str(&String::from_utf8_lossy(&partial));
+                    bench_lines.push('\n');
+                }
+                partial.clear();
+            } else if partial.len() < 4096 {
+                partial.push(byte);
+            }
+        }
     }
 
     let truncated = total_bytes > tail.len() as u64;
+    timeline.finish();
     Ok(CapturedStderr {
         text: String::from_utf8_lossy(&tail).into_owned(),
         total_bytes,
         truncated,
+        timeline,
+        benchmark: parse_benchmark(&bench_lines),
     })
 }
 
 pub(crate) fn parse_benchmark(stderr: &str) -> Option<FfmpegBenchmark> {
-    let line = stderr
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with("bench:"))?;
     let mut benchmark = FfmpegBenchmark::default();
-    for field in line.split_whitespace().skip(1) {
-        let Some((name, value)) = field.split_once('=') else {
-            continue;
-        };
-        match name {
-            "utime" => benchmark.user_cpu_ms = parse_seconds(value),
-            "stime" => benchmark.system_cpu_ms = parse_seconds(value),
-            "rtime" => benchmark.real_ms = parse_seconds(value),
-            "maxrss" => {
-                benchmark.max_rss_kb = value.strip_suffix("kB").and_then(|rss| rss.parse().ok())
+    let mut found = false;
+    for line in stderr
+        .lines()
+        .filter(|line| line.trim_start().starts_with("bench:"))
+    {
+        found = true;
+        for field in line.split_whitespace().skip(1) {
+            let Some((name, value)) = field.split_once('=') else {
+                continue;
+            };
+            match name {
+                "utime" => benchmark.user_cpu_ms = parse_seconds(value),
+                "stime" => benchmark.system_cpu_ms = parse_seconds(value),
+                "rtime" => benchmark.real_ms = parse_seconds(value),
+                "maxrss" => {
+                    benchmark.max_rss_kb = value.strip_suffix("kB").and_then(|rss| rss.parse().ok())
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
-    Some(benchmark)
+    found.then_some(benchmark)
 }
 
 pub fn sanitized_excerpt(stderr: &str) -> String {

@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -104,7 +105,7 @@ export function CollectionsPage() {
               <Link to={`/collections/${collection.id}`} className="block">
                 <div className="aspect-[2/3] overflow-hidden rounded-2xl border border-white/[0.07] bg-white/[0.04]">
                   {collection.cover_url ? (
-                    <img
+                    <ArtworkImage
                       src={imageUrl(collection.cover_url)}
                       alt=""
                       className="h-full w-full object-cover"

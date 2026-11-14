@@ -25,17 +25,27 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(30), |open| {
+                !*open
+            })
+            .unwrap()
+            .0;
+        assert!(released, "test must release the blocking budget gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the blocking budget gate");
     }
 
     fn release(&self) {

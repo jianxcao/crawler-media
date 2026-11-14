@@ -1,4 +1,4 @@
-//! Centralized settings KV key constants.
+//! Centralized configuration key constants.
 //!
 //! All keys used in the `settings` table should be defined here to prevent
 //! typos and enable IDE navigation. Use these constants instead of string
@@ -12,9 +12,7 @@ pub const TVDB_API_KEY: &str = "tvdb.api_key";
 pub const DEFAULT_FILTER_ID: &str = "default_filter_id";
 /// Transfer mode (hardlink / copy / move).
 pub const TRANSFER_MODE: &str = "transfer_mode";
-/// Metadata language preference (e.g. "zh-CN").
-pub const METADATA_LANGUAGE: &str = "metadata.language";
-/// Scrape configuration JSON.
+/// Scrape configuration namespace; its raw authority is library.db, not App KV.
 pub const METADATA_SCRAPE: &str = "metadata.scrape";
 /// Revoked playback devices JSON.
 pub const PLAYBACK_REVOKED_DEVICES: &str = "playback.revoked_devices";

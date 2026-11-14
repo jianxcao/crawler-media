@@ -82,7 +82,7 @@ export function GlassPanel({
 
   // Netflix 主题（纯色平铺设计）整体停用 WebGL：不挂 canvas、按 flat 预设渲染
   // （实色卡面 + 实线描边，见 globals.css 的 .glass-panel--flat）。调用方零改动，
-  // 顺带省下 GPU 与移动端的 WebGL 上下文配额（docs/design/web-themes.md §3.5）。
+  // 顺带省下 GPU 与移动端的 WebGL 上下文配额。
   const theme = useTheme();
 
   // 最新配置的引用：apply 从这里取值而非闭包捕获，保证参数热更新时

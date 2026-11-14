@@ -51,17 +51,29 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the HTTP gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the HTTP gate");
     }
 
     fn entered(&self) -> bool {
@@ -154,6 +166,25 @@ impl Downloader for NoopDownloader {
     }
 }
 
+struct UnavailableDownloader;
+
+impl Downloader for UnavailableDownloader {
+    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
+        Err(DownloaderError::Message("qBittorrent is offline".into()))
+    }
+
+    fn completed_files(
+        &self,
+        _torrent: &Torrent,
+    ) -> Result<Vec<std::path::PathBuf>, DownloaderError> {
+        Err(DownloaderError::Message("qBittorrent is offline".into()))
+    }
+
+    fn get_speed_limits(&self) -> Result<(u64, u64), DownloaderError> {
+        Err(DownloaderError::Message("qBittorrent is offline".into()))
+    }
+}
+
 struct NoopTransport;
 
 impl NotifyTransport for NoopTransport {
@@ -185,7 +216,6 @@ fn make_state(
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         downloader,
-        root.join("library"),
     )
     .unwrap()
     .with_notify_transport(transport)
@@ -194,7 +224,7 @@ fn make_state(
 
 fn configure_notify(state: &ApiState) {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     guard
         .put_setting("notify_url", "http://127.0.0.1:9/hook/system_alerts")
         .unwrap();
@@ -240,6 +270,88 @@ fn health_request() -> Request<Body> {
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn limits_report_unavailable_downloader_without_failing_the_request() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = make_state(
+        tmp.path(),
+        Arc::new(UnavailableDownloader),
+        Arc::new(NoopTransport),
+        8,
+    );
+    let app = router(state);
+    let response = app.oneshot(limits_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["data"]["status"], "unavailable");
+    assert!(body["data"]["error"].as_str().unwrap().contains("offline"));
+    assert_eq!(body["data"]["download_limit_bytes"], Value::Null);
+    assert_eq!(body["data"]["upload_limit_bytes"], Value::Null);
+}
+
+#[tokio::test]
+async fn limits_report_available_downloader_and_unlimited_values() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = make_state(
+        tmp.path(),
+        Arc::new(NoopDownloader),
+        Arc::new(NoopTransport),
+        8,
+    );
+    let app = router(state);
+    let response = app.oneshot(limits_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["status"], "available");
+    assert_eq!(body["data"]["error"], Value::Null);
+    assert_eq!(body["data"]["download_limit_bytes"], Value::Null);
+    assert_eq!(body["data"]["upload_limit_bytes"], Value::Null);
+}
+
+#[tokio::test]
+async fn limits_keep_unavailable_and_available_downloader_statuses_independent() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = make_state(
+        tmp.path(),
+        Arc::new(NoopDownloader),
+        Arc::new(NoopTransport),
+        8,
+    );
+    let id = domain::DownloaderId::new();
+    state
+        .store()
+        .insert_downloader(&api::store::DownloaderRow {
+            id,
+            name: "unconfigured-qb".into(),
+            kind: "qbittorrent".into(),
+            url: "http://unused.invalid".into(),
+            username: None,
+            password: None,
+            category: None,
+            path_maps: Vec::new(),
+            is_default: false,
+            enabled: true,
+        })
+        .unwrap();
+    let app = router(state);
+    let selected = authed(
+        Request::builder()
+            .method("GET")
+            .uri(format!("{LIMITS}?id={id}")),
+    )
+    .body(Body::empty())
+    .unwrap();
+    let response = app.clone().oneshot(selected).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let unavailable = json_body(response).await;
+    assert_eq!(unavailable["data"]["status"], "unavailable");
+    assert!(unavailable["data"]["error"].is_string());
+    let response = app.oneshot(limits_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["data"]["status"], "available");
 }
 
 /// 发一个会阻塞在 downloader telemetry 的请求，并等它真的进入闭包。
@@ -427,7 +539,7 @@ async fn notify_test_unconfigured_returns_400() {
 }
 
 #[tokio::test]
-async fn unknown_downloader_id_is_bad_gateway() {
+async fn unknown_downloader_id_is_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(
         tmp.path(),
@@ -446,7 +558,7 @@ async fn unknown_downloader_id_is_bad_gateway() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

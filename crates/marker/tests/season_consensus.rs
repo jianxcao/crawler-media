@@ -8,12 +8,41 @@ struct PairwiseEngine {
     matches: HashMap<(u32, u32), CommonSegment>,
 }
 
+#[test]
+fn extra_cuts_of_one_episode_do_not_satisfy_season_support() {
+    let mut matches = HashMap::new();
+    for (first, second) in [(1, 2), (1, 3), (2, 3), (2, 1), (3, 1)] {
+        matches.insert(
+            (first, second),
+            CommonSegment {
+                start1_sec: 10.0,
+                end1_sec: 70.0,
+                start2_sec: 10.0,
+                end2_sec: 70.0,
+                duration_sec: 60.0,
+                score: 0.0,
+            },
+        );
+    }
+    let engine = PairwiseEngine { matches };
+    let mut episodes = (1..=20)
+        .map(|episode| (episode, vec![episode, episode + 100]))
+        .collect::<Vec<_>>();
+    assert!(match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0).is_empty());
+    episodes.extend((0..10).map(|_| (1, vec![1, 101])));
+    assert!(
+        match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0).is_empty(),
+        "three actual episodes still fall short of 20% season support"
+    );
+}
+
 impl FingerprintEngine for PairwiseEngine {
     fn extract_at(
         &self,
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         Ok(Vec::new())
     }
@@ -63,7 +92,7 @@ fn season_consensus_rejects_an_isolated_long_match_in_favor_of_the_recurring_int
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=34)
-        .map(|episode| (episode, vec![episode]))
+        .map(|episode| (episode, vec![episode, episode + 100]))
         .collect::<Vec<_>>();
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
@@ -108,7 +137,7 @@ fn season_consensus_keeps_a_two_pair_intro_variant_supported_by_three_episodes()
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=15)
-        .map(|episode| (episode, vec![episode]))
+        .map(|episode| (episode, vec![episode, episode + 100]))
         .collect::<Vec<_>>();
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
@@ -144,7 +173,7 @@ fn season_consensus_keeps_a_three_pair_intro_variant_in_a_large_season() {
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=15)
-        .map(|episode| (episode, vec![episode]))
+        .map(|episode| (episode, vec![episode, episode + 100]))
         .collect::<Vec<_>>();
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
@@ -184,7 +213,7 @@ fn season_consensus_keeps_two_recurring_intro_variants() {
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=10)
-        .map(|episode| (episode, vec![episode]))
+        .map(|episode| (episode, vec![episode, episode + 100]))
         .collect::<Vec<_>>();
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
@@ -221,7 +250,7 @@ fn season_consensus_preserves_a_supported_longer_variant_nested_in_the_majority_
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=10)
-        .map(|episode| (episode, vec![episode]))
+        .map(|episode| (episode, vec![episode, episode + 100]))
         .collect::<Vec<_>>();
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
@@ -261,7 +290,13 @@ fn season_consensus_preserves_outro_offsets_for_two_recurring_variants() {
     }
     let engine = PairwiseEngine { matches };
     let episodes = (1..=6)
-        .map(|episode| (episode, vec![episode], 600_000 + i64::from(episode) * 1000))
+        .map(|episode| {
+            (
+                episode,
+                vec![episode, episode + 100],
+                600_000 + i64::from(episode) * 1000,
+            )
+        })
         .collect::<Vec<_>>();
 
     let detected = match_episodes_outros_with(&engine, &episodes, 15.0, 240.0);

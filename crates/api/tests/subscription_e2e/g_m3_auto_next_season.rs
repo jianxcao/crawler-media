@@ -22,7 +22,6 @@ async fn run(auto: bool) -> Vec<domain::Subscribe> {
     h.transfer(id).await.unwrap(); // idempotent
     h.state
         .store()
-        .lock()
         .list_all_subscribes()
         .unwrap()
         .into_iter()

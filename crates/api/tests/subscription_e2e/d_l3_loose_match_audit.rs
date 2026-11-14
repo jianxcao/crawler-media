@@ -17,8 +17,8 @@ fn loose_matchers_are_only_used_by_display_code() {
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     // Display-only call sites, plus the definitions themselves.
     let allowed = [
-        "api/src/http/subscription_depth.rs",
-        "downloader/src/lib.rs",
+        "api/src/http/subscription_depth/removal_preview.rs",
+        "downloader/src/name_matching.rs",
         "downloader/src/identity.rs",
     ];
     let mut files = Vec::new();

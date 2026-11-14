@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import { waitForLibraryRemoval, removalLabel } from "../lib/library-removal.ts";
 
-const operation = (state) => ({ operation_id: "op", library_id: "lib", state, removed_ledger_count: 0, error: null });
+const operation = (state) => ({ operation_id: "op", library_id: "lib", state, error: null });
 
 test("accepted removal stays pending through draining and cleaning until success", async () => {
   const states = ["draining", "cleaning", "succeeded"];
@@ -62,7 +62,11 @@ async function loadApi(request) {
   new Function("require", "module", "exports", js)((name) => {
     if (name === "@/lib/http") return { request };
     if (name === "@/lib/library-removal") return { waitForLibraryRemoval };
+    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async (op) => op };
     if (name === "@/lib/library-filter") return {};
+    if (name === "@/lib/library-file-pages") {
+      return { collectAllFilePages: async (firstPage) => firstPage.files };
+    }
     throw new Error(`Unexpected import ${name}`);
   }, module, module.exports);
   return module.exports;
@@ -111,4 +115,12 @@ test("both views wire lifecycle status and persistent retry UI", async () => {
 test("removal states have visible deleting and failed copy", () => {
   assert.match(removalLabel(operation("draining")), /正在删除/);
   assert.match(removalLabel({ ...operation("failed"), error: "busy" }), /删除失败.*busy/);
+});
+
+test("draining label surfaces the backend wait/retry note", () => {
+  assert.equal(removalLabel(operation("draining")), "正在删除媒体库 · 正在等待任务结束");
+  assert.equal(
+    removalLabel({ ...operation("draining"), error: "waiting for active Library work to stop (60s)" }),
+    "正在删除媒体库 · 正在等待任务结束（waiting for active Library work to stop (60s)）",
+  );
 });

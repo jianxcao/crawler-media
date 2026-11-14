@@ -152,25 +152,41 @@ async fn default_library_cannot_delete_or_retransfer_orphaned_outside_root() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: outside.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger_with_source(&row, &source).unwrap();
+    let legacy_file_id = domain::LedgerId::new();
+    let legacy_path = outside.display().to_string();
     let default_lib = store
         .default_library(domain::MediaKind::Movie)
         .unwrap()
         .expect("default movie library");
+    // 旧库可能遗留库外台账行；publication API 现在拒绝这种行，用原始 SQL 复现
+    // 该不一致状态，断言删除/重传路径仍然拒绝触碰库外文件。
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id.as_str() == default_lib.id.as_str())
+        .expect("default movie root")
+        .id;
     drop(store);
+    rusqlite::Connection::open(tmp.path().join("data/library.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO library_files
+                (file_id, library_id, root_id, media_id, kind, path_key, display_path,
+                 presence_state, publication_state, file_revision, source_version,
+                 source_path, quality_source, confidence)
+             VALUES (?1, ?2, ?3, ?4, 'movie', ?5, ?5, 'present', 'published', 1, 'legacy',
+                     ?6, 'release', 'high')",
+            rusqlite::params![
+                legacy_file_id.to_string(),
+                default_lib.id,
+                root_id,
+                media.id.to_string(),
+                legacy_path,
+                source.display().to_string(),
+            ],
+        )
+        .unwrap();
 
     let deleted = app
         .clone()
@@ -189,7 +205,7 @@ async fn default_library_cannot_delete_or_retransfer_orphaned_outside_root() {
         .clone()
         .oneshot(request(
             "DELETE",
-            &format!("/api/v1/ledger/{}?delete_file=true", row.id),
+            &format!("/api/v1/ledger/{}?delete_file=true", legacy_file_id),
             Some("management-secret"),
             Value::Null,
         ))
@@ -202,7 +218,7 @@ async fn default_library_cannot_delete_or_retransfer_orphaned_outside_root() {
     let retransfer = app
         .oneshot(request(
             "POST",
-            &format!("/api/v1/ledger/{}/retransfer", row.id),
+            &format!("/api/v1/ledger/{}/retransfer", legacy_file_id),
             Some("management-secret"),
             Value::Null,
         ))

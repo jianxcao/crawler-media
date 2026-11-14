@@ -56,7 +56,7 @@ interface DragState {
  */
 function toHomeLibraryLike(libraries: MediaLibrary[]): HomeLibraryLike[] {
   return libraries.map((lib) => ({
-    id: lib.id as unknown as number,
+    id: lib.id,
     name: lib.name,
     kind: lib.kind,
     viewer_access: true,
@@ -68,7 +68,7 @@ function toHomeLibraryLike(libraries: MediaLibrary[]): HomeLibraryLike[] {
  * 自定义媒体库首页（/library/customize）。
  *
  * 首页 = 一份有序的行清单，每一行 = 来源 × 排序 × 名字
- * （docs/design/library-home-perspective.md）。本页是它唯一的配置面：首页上没有任何
+ * 本页是它唯一的配置面：首页上没有任何
  * 排序细节与行菜单，调整全部收在这里。
  *
  * - **独立页面，不是抽屉**：桌面与移动端同一份实现；纯列表、不放海报，效果回首页看。

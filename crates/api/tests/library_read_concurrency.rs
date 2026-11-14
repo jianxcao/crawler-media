@@ -1,0 +1,784 @@
+//! Router-level proof that a paused Library page does not retain the writer Store mutex.
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
+
+use api::{ApiState, Store, router};
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use downloader::MemoryDownloader;
+use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use media_server::provider::QueryTiming;
+use tower::ServiceExt;
+
+struct NoFetch;
+impl Fetcher for NoFetch {
+    fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
+        Err(IndexerError::Fetch("unused".into()))
+    }
+}
+
+fn request(device: &'static str) -> Request<Body> {
+    Request::get("/Items?Limit=0")
+        .header("Authorization", "Bearer management-secret")
+        .header("X-Emby-Device-Id", device)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[test]
+fn paused_protocol_cold_stage_does_not_hold_writer_store_mutex() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let first = Arc::new(AtomicBool::new(true));
+    let state = ApiState::new(
+        Store::open(dir.path().join("data")).unwrap(),
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_protocol_selection_barrier(Arc::new(move |_| {
+        if first.swap(false, Ordering::SeqCst) {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    }));
+    runtime.block_on(async {
+        let app = router(state);
+        let reader = tokio::spawn(app.clone().oneshot(request("reader")));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        let writer = app.clone().oneshot(request("writer"));
+        let result = tokio::time::timeout(Duration::from_millis(500), writer).await;
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            result
+                .expect("binding must complete while reader is paused")
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(reader.await.unwrap().unwrap().status(), StatusCode::OK);
+    });
+}
+
+#[test]
+fn slow_facet_reader_does_not_hold_writer_store_mutex() {
+    slow_library_reader_does_not_hold_writer_store_mutex("facets");
+}
+
+#[test]
+fn slow_item_index_does_not_hold_writer_store_mutex() {
+    slow_library_reader_does_not_hold_writer_store_mutex("item-index");
+}
+
+#[test]
+fn item_index_revalidates_revoked_credentials_and_library_access() {
+    for revoke_token in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("data")).unwrap();
+        let library = store
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id;
+        let user = domain::UserId::new();
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: "index-member".into(),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        store.set_user_token(user, "index-token").unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let state = ApiState::new(
+            store,
+            "management-secret".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+        )
+        .unwrap()
+        .with_library_read_stage_barrier(Arc::new(move |stage| {
+            if stage == "validate" {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        }));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let request = Request::get(format!("/api/v1/libraries/{library}/item-index"))
+                .header("authorization", "Bearer index-token").body(Body::empty()).unwrap();
+            let reader = tokio::spawn(router(state.clone()).oneshot(request));
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()).await.unwrap();
+            if revoke_token {
+                state.store().revoke_user_tokens(user).unwrap();
+            } else {
+                let conn = rusqlite::Connection::open(dir.path().join("data/library.db")).unwrap();
+                conn.execute("UPDATE libraries SET access_mode='selected', member_ids_json='[]' WHERE library_id=?1", [library.to_string()]).unwrap();
+            }
+            release_tx.send(()).unwrap();
+            let response = reader.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "revoked token: {revoke_token}");
+        });
+    }
+}
+
+fn slow_library_reader_does_not_hold_writer_store_mutex(endpoint: &str) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let first = Arc::new(AtomicBool::new(true));
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap();
+    let wait = Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    });
+    let state = if endpoint == "item-index" {
+        state.with_library_read_stage_barrier(Arc::new(move |stage| {
+            if stage == "validate" {
+                wait();
+            }
+        }))
+    } else {
+        state.with_library_read_progress_observer(wait)
+    };
+    runtime.block_on(async {
+        let app = router(state);
+        let path = format!("/api/v1/libraries/{library}/{endpoint}");
+        let reader_request = Request::get(path)
+            .header("Authorization", "Bearer management-secret")
+            .body(Body::empty())
+            .unwrap();
+        let mut reader = tokio::spawn(app.clone().oneshot(reader_request));
+        if endpoint == "item-index" {
+            tokio::select! {
+                response = &mut reader => {
+                    let response = response.unwrap().unwrap();
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    panic!("index returned before validation: {status} {}", String::from_utf8_lossy(&body));
+                },
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        let writer = tokio::time::timeout(
+            Duration::from_millis(500),
+            app.clone().oneshot(request("writer")),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            writer
+                .expect("binding must finish during facet SQL")
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(reader.await.unwrap().unwrap().status(), StatusCode::OK);
+    });
+}
+
+#[test]
+fn dropping_api_state_preserves_a_shared_store_for_reads_and_new_state() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
+    let make_state = || {
+        ApiState::new_arc(
+            store.clone(),
+            "management-secret".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+        )
+        .unwrap()
+    };
+    let state = make_state();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap();
+    drop(state);
+    assert_eq!(
+        store
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
+        library.id,
+        "dropping an API owner must not close a Store still owned by another caller"
+    );
+    let rebuilt = make_state();
+    assert!(Arc::ptr_eq(&store, &rebuilt.store()));
+    assert_eq!(
+        rebuilt
+            .store()
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
+        library.id
+    );
+}
+
+#[test]
+fn pool_closes_on_shutdown_and_releases_after_final_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = ApiState::new(
+        Store::open(dir.path().join("data")).unwrap(),
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap();
+    let weak = state.library_read_pool_weak();
+    let clone = state.clone();
+    drop(state);
+    assert!(weak.upgrade().is_some());
+    clone.close_library_reads();
+    assert!(matches!(
+        weak.upgrade().unwrap().try_checkout(),
+        Err(store::LibraryReadError::Closed)
+    ));
+    drop(clone);
+    assert!(weak.upgrade().is_none());
+}
+
+fn one_reader_fixture(
+    dir: &std::path::Path,
+) -> (ApiState, String, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let store = Store::open(dir.join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let first = Arc::new(AtomicBool::new(true));
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.join("stage"))),
+    )
+    .unwrap()
+    .with_library_read_pool_size(std::num::NonZeroUsize::new(1).unwrap())
+    .unwrap()
+    .with_library_read_progress_observer(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    }));
+    (state, library, entered_rx, release_tx)
+}
+
+fn facets_request(library: &str) -> Request<Body> {
+    Request::get(format!("/api/v1/libraries/{library}/facets"))
+        .header("Authorization", "Bearer management-secret")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// T4: a full reader pool queues a normal concurrent read (outside the blocking
+/// worker) until a connection is returned, instead of failing it immediately.
+#[test]
+fn full_one_reader_pool_queues_reader_until_lease_returns() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (state, library, entered_rx, release_tx) = one_reader_fixture(dir.path());
+    runtime.block_on(async {
+        let app = router(state);
+        let first_reader = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        let queued = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!queued.is_finished(), "queued reader must wait, not fail");
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            first_reader.await.unwrap().unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(queued.await.unwrap().unwrap().status(), StatusCode::OK);
+    });
+}
+
+/// T4: the wait queue is bounded; once it is full a read fails fast with 503,
+/// and the pool recovers after the lease returns.
+#[test]
+fn saturated_reader_queue_returns_503_and_recovers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (state, library, entered_rx, release_tx) = one_reader_fixture(dir.path());
+    runtime.block_on(async {
+        let app = router(state);
+        let first_reader = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        let mut waiters = Vec::new();
+        let mut busy = None;
+        for _ in 0..64 {
+            let task = tokio::spawn(app.clone().oneshot(facets_request(&library)));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if task.is_finished() {
+                busy = Some(task.await.unwrap().unwrap());
+                break;
+            }
+            waiters.push(task);
+        }
+        let busy = busy.expect("bounded queue must reject once full");
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!waiters.is_empty(), "some readers must have queued");
+        release_tx.send(()).unwrap();
+        assert_read_error_body(busy).await;
+        assert_eq!(
+            first_reader.await.unwrap().unwrap().status(),
+            StatusCode::OK
+        );
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap().unwrap().status(), StatusCode::OK);
+        }
+        assert_eq!(
+            app.oneshot(facets_request(&library))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    });
+}
+
+fn paused_stage_expires_at_deadline(target: &'static str) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (stage_release_tx, stage_release_rx) = mpsc::channel();
+    let stage_release_rx = Mutex::new(stage_release_rx);
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_library_read_stage_barrier(Arc::new(move |stage| {
+        if stage == target {
+            entered_tx.send(()).unwrap();
+            stage_release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    }));
+    runtime.block_on(async {
+        let app = router(state.clone());
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(250);
+        let mut request = Request::get(format!("/api/v1/libraries/{library}/facets"))
+            .header("Authorization", "Bearer management-secret")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(QueryTiming { started, deadline });
+        let reader = tokio::spawn(app.oneshot(request));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        // A named stage paused past the shared deadline must not run late SQL,
+        // even when its reader was already acquired before the pause.
+        let progressed = Arc::new(AtomicBool::new(false));
+        let task_progress = progressed.clone();
+        tokio::spawn(async move {
+            task_progress.store(true, Ordering::SeqCst);
+        });
+        let response = tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{target}"
+        );
+        assert!(progressed.load(Ordering::SeqCst));
+        stage_release_tx.send(()).unwrap();
+        assert_read_error_body(response).await;
+    });
+}
+
+async fn assert_read_error_body(response: axum::response::Response) {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "library.read");
+}
+
+#[test]
+fn paused_prepare_uses_request_deadline() {
+    paused_stage_expires_at_deadline("prepare");
+}
+
+#[test]
+fn paused_validate_uses_same_request_deadline() {
+    paused_stage_expires_at_deadline("validate");
+}
+
+#[test]
+fn read_only_instance_serves_leased_reads_and_rejects_explicit_write() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_instance_writable(false);
+    runtime.block_on(async {
+        let app = router(state);
+        let read = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/libraries/{library}/facets"))
+                    .header("Authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::OK);
+        let write = app
+            .oneshot(
+                Request::post(format!("/api/v1/libraries/{library}/scan"))
+                    .header("Authorization", "Bearer management-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write.status(), StatusCode::CONFLICT);
+    });
+}
+
+#[test]
+fn dropped_caller_retains_worker_permit_and_lease_until_exit() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap()
+        .id;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let first = Arc::new(AtomicBool::new(true));
+    let budget = Arc::new(api::blocking_budget::BlockingBudget::new(1));
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_http_work(budget.clone())
+    .with_library_read_pool_size(std::num::NonZeroUsize::new(1).unwrap())
+    .unwrap()
+    .with_library_read_progress_observer(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    }));
+    let pool = state.library_read_pool_weak().upgrade().unwrap();
+    runtime.block_on(async {
+        let app = router(state);
+        let request = || {
+            Request::get(format!("/api/v1/libraries/{library}/facets"))
+                .header("Authorization", "Bearer management-secret")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let reader = tokio::spawn(app.clone().oneshot(request()));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        reader.abort();
+        let _ = reader.await;
+        assert_eq!(budget.available_permits(), 0);
+        let started = Instant::now();
+        let mut competing = request();
+        competing.extensions_mut().insert(QueryTiming {
+            started,
+            deadline: started + Duration::from_millis(200),
+        });
+        assert_eq!(
+            app.clone().oneshot(competing).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(budget.available_permits(), 0);
+        assert!(matches!(
+            pool.try_checkout(),
+            Err(store::LibraryReadError::Busy)
+        ));
+        release_tx.send(()).unwrap();
+        let mut recovered = false;
+        for _ in 0..20 {
+            if budget.available_permits() == 1 {
+                let response = app.clone().oneshot(request()).await.unwrap();
+                if response.status() == StatusCode::OK {
+                    recovered = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            recovered,
+            "aborted worker must clean up before capacity returns"
+        );
+    });
+}
+
+#[test]
+fn selected_page_cold_stage_timeout_never_publishes_stale_success() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let root = dir.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap()
+        .id;
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "One".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let path = root.join("one.mkv");
+    std::fs::write(&path, b"fixture").unwrap();
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media.id,
+            path: path.display().to_string(),
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let entered = Arc::new(AtomicBool::new(false));
+    let entered_hook = entered.clone();
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_protocol_selection_barrier(Arc::new(move |page| {
+        assert_eq!(page.items.len(), 1);
+        entered_hook.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(400));
+    }));
+    runtime.block_on(async {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        let mut request = Request::get(format!("/Items?ParentId={library}&Limit=1"))
+            .header("Authorization", "Bearer management-secret")
+            .header("X-Emby-Device-Id", "device-1")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(QueryTiming { started, deadline });
+        let response = router(state).oneshot(request).await.unwrap();
+        assert!(entered.load(Ordering::SeqCst));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    });
+}
+
+#[test]
+fn shutdown_during_protocol_cold_stage_cannot_publish_page() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let state = ApiState::new(
+        Store::open(dir.path().join("data")).unwrap(),
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap()
+    .with_protocol_selection_barrier(Arc::new(move |_| {
+        entered_tx.send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }));
+    runtime.block_on(async {
+        let app = router(state.clone());
+        let reader = tokio::spawn(app.oneshot(request("device-1")));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap()
+        })
+        .await
+        .unwrap();
+        state.close_library_reads();
+        release_tx.send(()).unwrap();
+        let response = reader.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    });
+}

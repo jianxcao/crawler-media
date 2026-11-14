@@ -1,3 +1,5 @@
+mod decision;
+
 use subscribe::{RunInput, admit_and_add};
 
 use super::{notify, notify_subscription_complete, record_wanted_round};
@@ -12,23 +14,24 @@ pub(super) fn finish_search(
     mut torrents: Vec<domain::Torrent>,
     search_keywords: Vec<String>,
 ) -> Result<(), String> {
-    let guard = state.subscribe_guard(initial_subscribe.id);
-    let _guard = guard.lock();
-    if state.subscribe_is_deleting(initial_subscribe.id)
-        || !subscribe_is_active(state, initial_subscribe.id)?
-    {
-        tracing::info!(subscribe_id = %initial_subscribe.id, "订阅在搜索期间已暂停或删除，跳过下载提交");
-        return Ok(());
-    }
-
-    // Reload authoritative Subscribe, Media, and Filter within the critical section
-    let (subscribe, media, filter) = {
-        let store = state.store.lock();
+    let (subscribe, media, filter, _active) = {
+        let guard = state.subscribe_guard(initial_subscribe.id);
+        let _guard = guard.lock();
+        if state.subscribe_is_deleting(initial_subscribe.id)
+            || !subscribe_is_active(state, initial_subscribe.id)?
+        {
+            tracing::info!(subscribe_id = %initial_subscribe.id, "订阅在搜索期间已暂停或删除，跳过下载提交");
+            return Ok(());
+        }
+        let Some(active) = decision::ActiveSearch::begin(state, initial_subscribe.id) else {
+            tracing::debug!(subscribe_id = %initial_subscribe.id, "Subscribe round already active");
+            return Ok(());
+        };
+        let store = state.store.as_ref();
         let Some(subscribe) = store
             .get_subscribe(initial_subscribe.id)
             .map_err(|e| e.to_string())?
         else {
-            tracing::info!(subscribe_id = %initial_subscribe.id, "订阅已不存在，跳过下载提交");
             return Ok(());
         };
         let media = store
@@ -39,29 +42,12 @@ pub(super) fn finish_search(
             .get_filter(subscribe.filter_id)
             .map_err(|e| e.to_string())?
             .ok_or("Filter not found")?;
-        (subscribe, media, filter)
+        (subscribe, media, filter, active)
     };
 
     let context = load_search_context(state, &subscribe, &media)?;
     let library_lease = state.acquire_library_work(&context.library_id)?;
     library_lease.control().check().map_err(|e| e.to_string())?;
-
-    // Re-validate observation against current DB state before side effect
-    {
-        let store = state.store.lock();
-        if !store
-            .library_accepts_work(&context.library_id)
-            .map_err(|e| e.to_string())?
-        {
-            return Err("目标 Library 正在删除或已不存在".into());
-        }
-        let current_revisions = store.read_revisions().map_err(|e| e.to_string())?;
-        if current_revisions.library != context.observation_revisions.library
-            || current_revisions.app != context.observation_revisions.app
-        {
-            return Err("Library 配置或台账在观察期间已变更，放弃本轮提交".into());
-        }
-    }
 
     tracing::info!(
         subscribe_id = %subscribe.id,
@@ -73,11 +59,27 @@ pub(super) fn finish_search(
     // H2: never auto-pick an enclosure whose probed quality already vetoed it.
     let rejected = state
         .store
-        .lock()
+        .as_ref()
         .load_rejected_enclosures(subscribe.id)
         .map_err(|e| e.to_string())?;
     if !rejected.is_empty() {
         torrents.retain(|torrent| !rejected.contains(&torrent.enclosure));
+    }
+
+    {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        decision::ensure_current(state, &subscribe)?;
+        let store = state.store.as_ref();
+        if !store
+            .library_accepts_work(&context.library_id)
+            .map_err(|e| e.to_string())?
+            || !store
+                .subscribe_snapshot_is_current(&context.snapshot, &Default::default())
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Library 配置或订阅事实在观察期间已变更，放弃本轮提交".into());
+        }
     }
 
     let add_errors = admit_candidates(
@@ -88,8 +90,9 @@ pub(super) fn finish_search(
         &context,
         torrents,
         search_keywords,
+        library_lease.control(),
     )?;
-    drop(_guard);
+    notify_subscription_complete(state, &subscribe, &media)?;
     if !add_errors.is_empty() {
         return Err(format!(
             "{} torrent submission failure(s): {}",
@@ -101,7 +104,7 @@ pub(super) fn finish_search(
 }
 
 struct SearchContext {
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     wash_filter: Option<domain::Filter>,
     existing: Vec<(i32, crate::store::PendingDownload)>,
     library_id: String,
@@ -109,7 +112,7 @@ struct SearchContext {
     transfer_mode: Option<library::TransferMode>,
     scrape: bool,
     naming: String,
-    observation_revisions: store::ReadRevisions,
+    snapshot: store::SubscribeLibrarySnapshot,
 }
 
 fn load_search_context(
@@ -118,22 +121,20 @@ fn load_search_context(
     media: &domain::Media,
 ) -> Result<SearchContext, String> {
     let obs = crate::subscribe_library_read::observe_subscribe_library_facts(
-        state,
-        subscribe,
-        media.kind,
+        state, subscribe, media.kind,
     )?;
     let facts = obs.facts;
     let library_id = obs.library_id;
-    let observation_revisions = obs.revisions;
+    let snapshot = obs.snapshot;
     let wash_filter = {
-        let store = state.store.lock();
+        let store = state.store.as_ref();
         subscribe
             .wash_cut_filter_id
             .and_then(|id| store.get_filter(id).ok().flatten())
             .or_else(|| store.get_filter(subscribe.filter_id).ok().flatten())
     };
     let (library_root, transfer_mode, scrape) = crate::directory::transfer_plan_for_library(
-        &state.store.lock(),
+        &state.store.as_ref(),
         media.kind,
         subscribe
             .library_id
@@ -144,12 +145,12 @@ fn load_search_context(
     .map_err(|error| error.to_string())?;
     let naming = state
         .store
-        .lock()
+        .as_ref()
         .naming_pattern(media.kind)
         .map_err(|error| error.to_string())?;
     let existing = state
         .store
-        .lock()
+        .as_ref()
         .load_pending(subscribe.id)
         .map_err(|error| error.to_string())?;
     Ok(SearchContext {
@@ -161,7 +162,7 @@ fn load_search_context(
         transfer_mode,
         scrape,
         naming,
-        observation_revisions,
+        snapshot,
     })
 }
 
@@ -184,7 +185,7 @@ fn remove_pending_candidates(
 fn subscribe_is_active(state: &ApiState, id: domain::SubscribeId) -> Result<bool, String> {
     Ok(state
         .store
-        .lock()
+        .as_ref()
         .get_subscribe(id)
         .map_err(|error| error.to_string())?
         .is_some_and(|subscribe| subscribe.tracking_state != "paused"))
@@ -198,6 +199,7 @@ fn admit_candidates(
     context: &SearchContext,
     torrents: Vec<domain::Torrent>,
     search_keywords: Vec<String>,
+    control: &library::WorkControl,
 ) -> Result<Vec<String>, String> {
     let routed =
         crate::delivery::RoutedDownloader::with_pending(state, subscribe, &context.existing);
@@ -207,6 +209,12 @@ fn admit_candidates(
         crate::season_check::absolute_map(state, media, torrents.iter().map(|t| t.title.as_str()));
     let selective = crate::selective_files::enabled(state).then(|| facts.clone());
     let chooser = crate::pack_fallback::effective(state, subscribe);
+    let downloader = decision::AdmittedDownloader {
+        state,
+        expected: subscribe,
+        routed: &routed,
+        control,
+    };
     let added = admit_and_add(RunInput {
         subscribe: &chooser,
         media,
@@ -215,8 +223,11 @@ fn admit_candidates(
         torrents,
         search_keywords,
         facts,
-        downloader: &routed,
+        downloader: &downloader,
         library_root: &context.library_root,
+        library_id: subscribe.library_id,
+        root_id: None,
+        config_revision: None,
         transfer_mode: context.transfer_mode,
         scrape: context.scrape,
         hooks: None,
@@ -229,21 +240,58 @@ fn admit_candidates(
         tracing::error!(subscribe_id = %subscribe.id, media = %media.title, error = %e, "收录并添加种子失败");
         e.to_string()
     })?;
+    {
+        // An accepted external add remains tracked even if paused while it was
+        // in flight. A late response must never recreate a deleted Subscribe.
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        if state.subscribe_is_deleting(subscribe.id)
+            || state
+                .store
+                .get_subscribe(subscribe.id)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        {
+            return Err("Search Subscribe deleted during submission".into());
+        }
+        merge_added_pending(state, subscribe, &added, &routed)?;
+        decision::ensure_current(state, subscribe)?;
+        control.check().map_err(|error| error.to_string())?;
+    }
     let deferred = selective
         .as_ref()
-        .map(|before| crate::selective_files::apply(&routed, subscribe, &added.chosen, before, absolute.as_ref()))
+        .map(|before| {
+            crate::selective_files::apply(
+                &routed,
+                subscribe,
+                &added.chosen,
+                before,
+                absolute.as_ref(),
+            )
+        })
         .unwrap_or_default();
-    notify_search_additions(state, subscribe, media, &added);
-    merge_added_pending(state, subscribe, &added, &routed)?;
-    for (enclosure, missing) in &deferred {
-        state
-            .store
-            .lock()
-            .set_pending_selective(subscribe.id, enclosure, Some(missing))
-            .map_err(|error| error.to_string())?;
+    // Catalog requests are observations, outside the Subscribe decision guard.
+    let catalog_max = crate::air_gate::catalog_aired_max(state, subscribe, media);
+    let cap = if subscribe.follow_future {
+        None
+    } else {
+        catalog_max
+    };
+    {
+        let guard = state.subscribe_guard(subscribe.id);
+        let _guard = guard.lock();
+        decision::ensure_current(state, subscribe)?;
+        for (enclosure, missing) in &deferred {
+            state
+                .store
+                .set_pending_selective(subscribe.id, enclosure, Some(missing))
+                .map_err(|error| error.to_string())?;
+        }
+        control.check().map_err(|error| error.to_string())?;
+        record_wanted_round(state, subscribe, &added, cap, catalog_max)?;
     }
-    record_wanted_round(state, subscribe, &added)?;
-    notify_subscription_complete(state, subscribe, media)?;
+    notify_search_additions(state, subscribe, media, &added);
+
     Ok(added.add_errors)
 }
 
@@ -299,7 +347,7 @@ fn merge_added_pending<D: downloader::Downloader + ?Sized>(
             )
         })
         .collect();
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     // D-M3: the same torrent reached through another enclosure (other site /
     // link) is one download: keep a single pending row per info hash.
     let known = store
@@ -362,11 +410,11 @@ fn merge_added_pending<D: downloader::Downloader + ?Sized>(
 }
 
 fn facts_with_pending(
-    facts: subscribe::SubscribeFacts,
+    facts: domain::SubscribeFacts,
     existing: &[(i32, crate::store::PendingDownload)],
     subscribe: &domain::Subscribe,
     media: &domain::Media,
-) -> subscribe::SubscribeFacts {
+) -> domain::SubscribeFacts {
     let releases = pending_releases(existing);
     subscribe::facts_with_pending(facts, &releases, subscribe, media)
 }
@@ -389,7 +437,7 @@ pub(crate) fn pending_releases(
 pub(crate) fn overlap_policy(state: &ApiState) -> subscribe::OverlapPolicy {
     state
         .store
-        .lock()
+        .as_ref()
         .get_setting(crate::settings_keys::SUBSCRIBE_OVERLAP_POLICY)
         .ok()
         .flatten()

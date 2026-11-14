@@ -19,10 +19,14 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
     // 创建一个正式 def
     let def_id = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         guard
-            .upsert_def(NewDef {
+            .delete_def(jobs::JobIdentity::global(JobKind::JobsRetention))
+            .unwrap();
+        guard
+            .create_def(NewDef {
                 kind: JobKind::JobsRetention,
+                scope: jobs::JobScope::Global,
                 name: "jobs_retention_test".into(),
                 enabled: true,
                 schedule: Some(jobs::Schedule::Interval { secs: 86400 }),
@@ -34,30 +38,12 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
             .id
     };
 
-    // 塞入 10000 条超龄终态（每批 500，总共 20 批）
-    {
-        let data = support::data_dir(&state);
-        let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
-        conn.execute_batch("BEGIN").unwrap();
-        {
-            let mut stmt = conn
-                .prepare(
-                    "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
-                     VALUES (?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
-                )
-                .unwrap();
-            for i in 0..10000 {
-                let ts = now - 10 * DAY;
-                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts]).unwrap();
-            }
-        }
-        conn.execute_batch("COMMIT").unwrap();
-    }
+    seed_expired_jobs(&state, now);
 
     // 领取该任务作为属于 def_id 的 running job
     let job = {
         let queue = state.jobs();
-        let guard = queue.lock();
+        let guard = queue.acquire().unwrap();
         let enqueued = guard.ensure_scheduled_for(0, def_id).unwrap().remove(0);
         let claimed = guard.claim(now, 1).unwrap();
         assert_eq!(claimed[0].id, enqueued.id);
@@ -78,9 +64,20 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
         let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
         // 轮询直到看到至少已经执行了删除（count < 10000）
         for _ in 0..1000 {
-            let count: i64 = conn.query_row("SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'", [], |r| r.get(0)).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             if count < 10000 {
-                state_clone.jobs().lock().set_def_enabled_by_id(def_id, false).unwrap();
+                state_clone
+                    .jobs()
+                    .acquire()
+                    .unwrap()
+                    .set_def_enabled_by_id(def_id, false)
+                    .unwrap();
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -91,25 +88,37 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
     monitor.join().unwrap();
 
     let report = progress_of(&state, &job);
-    assert!(report["batches"].as_u64().unwrap() < 20, "禁用后必须提前停止，绝不得跑完全部批次: {report}");
-    assert!(report["batches"].as_u64().unwrap() >= 1, "至少跑完了第一批: {report}");
+    assert!(
+        report["batches"].as_u64().unwrap() < 20,
+        "禁用后必须提前停止，绝不得跑完全部批次: {report}"
+    );
+    assert!(
+        report["batches"].as_u64().unwrap() >= 1,
+        "至少跑完了第一批: {report}"
+    );
     assert_eq!(
         report["deleted"].as_u64().unwrap(),
         report["batches"].as_u64().unwrap() * 500,
         "已提交批次的删除数量一致"
     );
     assert!(
-        report["note"]
-            .as_str()
-            .unwrap_or("")
-            .contains("禁用"),
+        report["note"].as_str().unwrap_or("").contains("禁用"),
         "报告中需说明因为任务定义禁用而停止: {report}"
     );
 
     let data = support::data_dir(&state);
     let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
-    let remaining: i64 = conn.query_row("SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'", [], |r| r.get(0)).unwrap();
-    assert!(remaining > 0, "必须有剩余超龄行未被删除: remaining={remaining}");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        remaining > 0,
+        "必须有剩余超龄行未被删除: remaining={remaining}"
+    );
 }
 
 #[tokio::test]
@@ -132,4 +141,27 @@ async fn shutdown_stops_claims_and_drains_real_blocking_work() {
         .await
         .expect("shutdown 必须正常返回并退出")
         .expect("shutdown 执行无错误");
+}
+
+fn seed_expired_jobs(state: &api::management::ApiState, now: i64) {
+    // 塞入 10000 条超龄终态（每批 500，总共 20 批）
+    {
+        let data = support::data_dir(state);
+        let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, error, progress, concurrency_key, timeout_secs)
+                     VALUES ('global', ?1, NULL, 'jobs_retention', '{}', 'succeeded', 0, ?2, ?2, ?2, NULL, NULL, NULL, NULL)"
+                )
+                .unwrap();
+            for i in 0..10000 {
+                let ts = now - 10 * DAY;
+                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts])
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+    }
 }

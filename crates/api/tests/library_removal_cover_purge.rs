@@ -20,7 +20,6 @@ fn new_state(temp: &tempfile::TempDir, data_dir: &std::path::Path) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
     )
     .unwrap()
 }
@@ -29,7 +28,6 @@ fn tv_library(state: &ApiState, name: &str, root: &std::path::Path) -> String {
     std::fs::create_dir_all(root).unwrap();
     state
         .store()
-        .lock()
         .create_library(
             domain::MediaKind::Tv,
             name,
@@ -47,7 +45,6 @@ async fn wait_succeeded(state: &ApiState, operation_id: &str) {
         loop {
             let operation = state
                 .store()
-                .lock()
                 .library_removal(operation_id)
                 .unwrap()
                 .unwrap();
@@ -63,27 +60,22 @@ async fn wait_succeeded(state: &ApiState, operation_id: &str) {
 }
 
 #[tokio::test]
-async fn removal_deletes_legacy_and_versioned_covers_of_the_removed_library_only() {
+async fn removal_deletes_versioned_covers_of_the_removed_library_only() {
     let temp = tempfile::tempdir().unwrap();
     let state = new_state(&temp, &temp.path().join("data"));
     let removed = tv_library(&state, "Removed", &temp.path().join("tv_removed"));
     let kept = tv_library(&state, "Kept", &temp.path().join("tv_kept"));
-    let covers = state.store().lock().library_covers_dir();
+    let covers = state.store().library_covers_dir();
     std::fs::create_dir_all(&covers).unwrap();
-    let legacy = covers.join(format!("library-{removed}.jpg"));
     let versioned = covers.join(format!("library-{removed}-7c1f.jpg"));
-    let untouched = covers.join(format!("library-{kept}.jpg"));
-    for path in [&legacy, &versioned, &untouched] {
+    let untouched = covers.join(format!("library-{kept}-9d2a.jpg"));
+    for path in [&versioned, &untouched] {
         std::fs::write(path, b"cover").unwrap();
     }
 
     let removal = start_library_removal(&state, &removed).unwrap();
     wait_succeeded(&state, &removal.operation_id).await;
 
-    assert!(
-        !legacy.exists(),
-        "legacy cover must be removed with the Library"
-    );
     assert!(
         !versioned.exists(),
         "versioned cover must be removed with the Library"
@@ -98,9 +90,9 @@ async fn startup_reconciles_covers_left_by_an_interrupted_removal() {
     let state = new_state(&temp, &data_dir);
     let removed = tv_library(&state, "Removed", &temp.path().join("tv_removed"));
     let _kept = tv_library(&state, "Kept", &temp.path().join("tv_kept"));
-    let covers = state.store().lock().library_covers_dir();
+    let covers = state.store().library_covers_dir();
     std::fs::create_dir_all(&covers).unwrap();
-    let cover = covers.join(format!("library-{removed}.jpg"));
+    let cover = covers.join(format!("library-{removed}-7c1f.jpg"));
     std::fs::write(&cover, b"cover").unwrap();
 
     let removal = start_library_removal(&state, &removed).unwrap();
@@ -116,10 +108,5 @@ async fn startup_reconciles_covers_left_by_an_interrupted_removal() {
         !cover.exists(),
         "startup reconciliation must finish the interrupted cleanup"
     );
-    assert!(restarted
-        .store()
-        .lock()
-        .get_library(&removed)
-        .unwrap()
-        .is_none());
+    assert!(restarted.store().get_library(&removed).unwrap().is_none());
 }

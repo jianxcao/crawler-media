@@ -15,7 +15,10 @@ pub fn ensure_scheduled(conn: &Connection, now: i64) -> Result<Vec<Job>, JobErro
             created.push(insert_job(
                 conn,
                 Some(def.id),
-                def.kind,
+                crate::JobIdentity {
+                    kind: def.kind,
+                    scope: def.scope,
+                },
                 &def.payload,
                 now,
                 def.concurrency_key.as_deref(),
@@ -70,7 +73,10 @@ pub fn ensure_scheduled_def(
             created.push(insert_job(
                 conn,
                 Some(def.id),
-                def.kind,
+                crate::JobIdentity {
+                    kind: def.kind,
+                    scope: def.scope,
+                },
                 &def.payload,
                 0,
                 def.concurrency_key.as_deref(),
@@ -84,7 +90,10 @@ pub fn ensure_scheduled_def(
     created.push(insert_job(
         conn,
         Some(def.id),
-        def.kind,
+        crate::JobIdentity {
+            kind: def.kind,
+            scope: def.scope,
+        },
         &def.payload,
         now,
         def.concurrency_key.as_deref(),
@@ -149,7 +158,10 @@ pub fn spawn_follow_up(conn: &Connection, job: &Job, now: i64) -> Result<(), Job
     insert_job(
         conn,
         Some(def.id),
-        def.kind,
+        crate::JobIdentity {
+            kind: def.kind,
+            scope: def.scope,
+        },
         &def.payload,
         schedule.next_after(now),
         def.concurrency_key.as_deref(),
@@ -160,7 +172,7 @@ pub fn spawn_follow_up(conn: &Connection, job: &Job, now: i64) -> Result<(), Job
 
 pub fn list_defs(conn: &Connection) -> Result<Vec<JobDef>, JobError> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key
+        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key, scope_key
          FROM job_defs",
     )?;
     let rows = stmt.query_map([], map_def)?;
@@ -169,25 +181,25 @@ pub fn list_defs(conn: &Connection) -> Result<Vec<JobDef>, JobError> {
 
 pub(crate) fn list_enabled_defs(conn: &Connection) -> Result<Vec<JobDef>, JobError> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key
+        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key, scope_key
          FROM job_defs WHERE enabled = 1",
     )?;
     let rows = stmt.query_map([], map_def)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn defs_for_payload(conn: &Connection, payload: &str) -> Result<Vec<JobDef>, JobError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key
-         FROM job_defs WHERE payload = ?1",
-    )?;
-    let rows = stmt.query_map(params![payload], map_def)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+pub fn def_for_identity(
+    conn: &Connection,
+    identity: crate::JobIdentity,
+) -> Result<Option<JobDef>, JobError> {
+    identity.validate()?;
+    conn.query_row("SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key, scope_key FROM job_defs WHERE kind=?1 AND scope_key=?2",
+        params![identity.kind.as_str(), identity.scope.to_string()], map_def).optional().map_err(Into::into)
 }
 
 pub(crate) fn get_def(conn: &Connection, id: JobDefId) -> Result<Option<JobDef>, JobError> {
     conn.query_row(
-        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key
+        "SELECT id, kind, name, enabled, schedule, payload, timeout_secs, concurrency_key, scope_key
          FROM job_defs WHERE id = ?1",
         params![id.to_string()],
         map_def,

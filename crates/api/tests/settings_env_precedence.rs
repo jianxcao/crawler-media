@@ -9,7 +9,6 @@
 //! 同时覆盖 DB10 的代理 env 语义（空串不算 override、`_FILE` 在兜底路径生效）。
 
 use std::fs::File;
-use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -319,8 +318,10 @@ fn empty_proxy_env_is_not_an_override() {
     );
 
     // 空串同样不是 pin：UI 写入必须被接受。
-    let (status, body) =
-        server.put_json("/api/v1/settings/proxy", json!({ "proxy_url": "http://127.0.0.1:8080" }));
+    let (status, body) = server.put_json(
+        "/api/v1/settings/proxy",
+        json!({ "proxy_url": "http://127.0.0.1:8080" }),
+    );
     assert_eq!(status, 200, "空串 env 不得固定该 key: {body}");
 }
 

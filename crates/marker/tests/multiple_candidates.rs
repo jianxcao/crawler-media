@@ -13,6 +13,7 @@ impl FingerprintEngine for MultiCandidateEngine {
         _path: &Path,
         _start_secs: u32,
         _duration_secs: u32,
+        _control: &marker::WorkControl,
     ) -> Result<AudioFingerprint, String> {
         unreachable!("this matcher only compares cached fingerprints")
     }
@@ -67,7 +68,7 @@ fn season_consensus_uses_a_shorter_candidate_recurring_across_more_episodes() {
 
     let markers = match_episodes_fingerprints_with(
         &engine,
-        &[(1, vec![1]), (2, vec![2]), (3, vec![3])],
+        &[(1, vec![1, 11]), (2, vec![2, 12]), (3, vec![3, 13])],
         15.0,
         240.0,
     );

@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useEffect, useState } from "react";
 
 import {
@@ -94,7 +95,7 @@ export function ClaimConfirmPanel({
     <div className="mt-2.5 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3">
       <div className="flex gap-3">
         {posterUrl ? (
-          <img
+          <ArtworkImage
             src={posterUrl}
             alt={title}
             loading="lazy"
@@ -273,7 +274,7 @@ export function ClaimSearchPanel({
                 className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.06]"
               >
                 {it.posterUrl ? (
-                  <img
+                  <ArtworkImage
                     src={it.posterUrl}
                     alt={it.title}
                     loading="lazy"

@@ -24,7 +24,7 @@ import {
 import { type TrickplayIndex, tileAt } from "@/lib/player/trickplay";
 
 /**
- * 播放器控制条（docs/design/web-player.md §6.1 / §6.5）。
+ * 播放器控制条。
  *
  * **进度条为什么是自建的**：Media Chrome 的 `<media-time-range>` 直接读
  * `video.currentTime` 与 `video.duration`，而转码会话的时间轴零点在文件的
@@ -42,8 +42,7 @@ import { type TrickplayIndex, tileAt } from "@/lib/player/trickplay";
  *   放这里——顶栏已经有了，重复只会让静止画面更吵。音量条也去掉了：网页
  *   播放器上调音量的人远比想象中少（系统音量、耳机、键盘 M 与上下键都能
  *   管），留着只是让静止画面多一件东西。
- * - **进度条**：贴播放器**最底边**，与控制条同显同隐（Netflix 派全出全收，
- *   取舍记录见 docs/design/web-player.md §6）。
+ * - **进度条**：贴播放器**最底边**，与控制条同显同隐（Netflix 派全出全收）。
  *
  * **图标与尺寸对齐全站**（见 components/page-nav.tsx 的 `PAGE_NAV_BUTTON_CLASS`
  * 与 components/icons.tsx）：功能键的命中区 36px / 移动 44px，图标 18px / 22px，
@@ -352,7 +351,7 @@ export function PlayerControls(props: PlayerControlsProps) {
   const [hover, setHover] = useState<{ ms: number; x: number } | null>(null);
 
   // ---------------------------------------------------------------------
-  // 指针输入合帧（docs/design/player-feel.md §2.C4）
+  // 指针输入合帧
   //
   // pointermove 的频率跟硬件走：手机触屏 120Hz、数位笔 240Hz，而这条路上
   // 原本挂着**两次** setState——悬停气泡的 `hover`（外层那一格）和拖动值
@@ -504,7 +503,7 @@ export function PlayerControls(props: PlayerControlsProps) {
     durationMs && bufferedEndMs ? Math.min(100, (bufferedEndMs / durationMs) * 100) : 0;
 
   // ---------------------------------------------------------------------
-  // 进度条自绘（docs/design/player-feel.md §2.A1）
+  // 进度条自绘
   //
   // 已播段的宽度与圆点的位置**不走 React**：位置的唯一状态来源 `timeupdate`
   // 只有约 4Hz 且间隔不均，跟着它渲染就是「圆点每 250 毫秒跳一格」——这是

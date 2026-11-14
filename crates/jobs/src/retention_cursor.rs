@@ -14,19 +14,6 @@ pub struct RetentionWindow {
     pub cycle_complete: bool,
 }
 
-pub fn migrate_retention_cursors(conn: &Connection) -> Result<(), JobError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS retention_cursors (
-             def_id TEXT PRIMARY KEY,
-             cutoff INTEGER NOT NULL,
-             finished_at INTEGER NOT NULL,
-             last_rowid INTEGER NOT NULL,
-             cycle_started_at INTEGER NOT NULL
-         );",
-    )?;
-    Ok(())
-}
-
 struct RawRow {
     rowid: i64,
     id: String,
@@ -36,7 +23,7 @@ struct RawRow {
 }
 
 fn fetch_candidate_rows(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     cutoff: i64,
     cur_finished_at: i64,
     cur_rowid: i64,
@@ -52,20 +39,23 @@ fn fetch_candidate_rows(
          ORDER BY finished_at ASC, rowid ASC
          LIMIT ?4",
     )?;
-    let rows_iter = stmt.query_map(params![cutoff, cur_finished_at, cur_rowid, limit + 1], |r| {
-        Ok(RawRow {
-            rowid: r.get(0)?,
-            id: r.get(1)?,
-            def_id: r.get(2)?,
-            finished_at: r.get(3)?,
-            run_after: r.get(4)?,
-        })
-    })?;
+    let rows_iter = stmt.query_map(
+        params![cutoff, cur_finished_at, cur_rowid, limit + 1],
+        |r| {
+            Ok(RawRow {
+                rowid: r.get(0)?,
+                id: r.get(1)?,
+                def_id: r.get(2)?,
+                finished_at: r.get(3)?,
+                run_after: r.get(4)?,
+            })
+        },
+    )?;
     rows_iter.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 fn process_window_deletion(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     window_rows: &[&RawRow],
     dry_run: bool,
 ) -> Result<(usize, usize, usize), JobError> {
@@ -120,28 +110,9 @@ pub fn prune_terminal_window(
     dry_run: bool,
 ) -> Result<RetentionWindow, JobError> {
     let limit = limit.clamp(1, 500);
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
 
-    let cursor_opt: Option<(i64, i64, i64)> = match tx.query_row(
-        "SELECT finished_at, last_rowid, cutoff FROM retention_cursors WHERE def_id = ?1",
-        params![cursor_key],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ) {
-        Ok(cursor) => Some(cursor),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => {
-            tracing::warn!(%error, cursor_key, "读取 retention 游标失败，本轮按新周期重新开始");
-            None
-        }
-    };
-
-    // Fixed cycle cutoff: continue cycle if current cutoff is at least stored cutoff
-    let (cur_finished_at, cur_rowid, active_cutoff) = match cursor_opt {
-        Some((f, r, c)) if cutoff >= c => (f, r, c),
-        _ => (0, 0, cutoff),
-    };
-
-    let rows = fetch_candidate_rows(&tx, active_cutoff, cur_finished_at, cur_rowid, limit)?;
+    let (rows, active_cutoff) = select_window(&tx, cursor_key, cutoff, limit)?;
     let window_has_more = rows.len() > limit;
     let window_rows: Vec<&RawRow> = rows.iter().take(limit).collect();
     let scanned = window_rows.len();
@@ -182,4 +153,55 @@ pub fn prune_terminal_window(
         window_has_more,
         cycle_complete,
     })
+}
+
+/// A snapshot-only preview: no transaction upgrade, cursor update or DELETE.
+pub(crate) fn preview_terminal_window(
+    conn: &Connection,
+    cursor_key: &str,
+    cutoff: i64,
+    limit: usize,
+) -> Result<RetentionWindow, JobError> {
+    let limit = limit.clamp(1, 500);
+    let (rows, _) = select_window(conn, cursor_key, cutoff, limit)?;
+    let window_has_more = rows.len() > limit;
+    let window_rows: Vec<_> = rows.iter().take(limit).collect();
+    let (candidates, protected, deleted) = process_window_deletion(conn, &window_rows, true)?;
+    Ok(RetentionWindow {
+        scanned: window_rows.len(),
+        candidates,
+        protected,
+        deleted,
+        window_has_more,
+        cycle_complete: !window_has_more,
+    })
+}
+
+fn select_window(
+    conn: &Connection,
+    cursor_key: &str,
+    cutoff: i64,
+    limit: usize,
+) -> Result<(Vec<RawRow>, i64), JobError> {
+    let cursor_opt: Option<(i64, i64, i64)> = match conn.query_row(
+        "SELECT finished_at, last_rowid, cutoff FROM retention_cursors WHERE def_id = ?1",
+        params![cursor_key],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ) {
+        Ok(cursor) => Some(cursor),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => {
+            tracing::warn!(%error, cursor_key, "读取 retention 游标失败，本轮按新周期重新开始");
+            None
+        }
+    };
+
+    // Fixed cycle cutoff: continue cycle if current cutoff is at least stored cutoff
+    let (cur_finished_at, cur_rowid, active_cutoff) = match cursor_opt {
+        Some((f, r, c)) if cutoff >= c => (f, r, c),
+        _ => (0, 0, cutoff),
+    };
+
+    let rows = fetch_candidate_rows(conn, active_cutoff, cur_finished_at, cur_rowid, limit)?;
+    Ok((rows, active_cutoff))
 }

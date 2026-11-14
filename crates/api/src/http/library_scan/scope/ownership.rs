@@ -37,33 +37,3 @@ pub(super) fn relevant_snapshot(
     }
     Ok(LibraryOwnership::from_parts(libraries, blocked))
 }
-
-/// Pure configuration CAS for the ownership snapshot resolved outside locks.
-/// Changes to other kinds cannot affect the strict same-kind owner decision.
-pub(super) fn same_kind_snapshot_matches(
-    observed: &LibraryOwnership,
-    current: &LibraryOwnership,
-    kind: MediaKind,
-) -> bool {
-    let relevant = |snapshot: &LibraryOwnership| {
-        snapshot
-            .libraries()
-            .iter()
-            .filter(|library| library.kind == kind)
-            .count()
-    };
-    if relevant(observed) != relevant(current) {
-        return false;
-    }
-    observed
-        .libraries()
-        .iter()
-        .filter(|library| library.kind == kind)
-        .all(|library| {
-            current.library(&library.id).is_some_and(|now| {
-                now.kind == library.kind
-                    && now.root_paths == library.root_paths
-                    && current.accepts_work(&now.id) == observed.accepts_work(&library.id)
-            })
-        })
-}

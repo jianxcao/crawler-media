@@ -17,7 +17,11 @@ pub fn select_seed_episodes(
 
     // Sort by (episode, ledger_id)
     let mut sorted = episodes.to_vec();
-    sorted.sort_by(|a, b| a.episode.cmp(&b.episode).then_with(|| a.ledger_id.cmp(&b.ledger_id)));
+    sorted.sort_by(|a, b| {
+        a.episode
+            .cmp(&b.episode)
+            .then_with(|| a.ledger_id.cmp(&b.ledger_id))
+    });
 
     // De-duplicate by episode number: take first ledger_id for each episode
     let mut unique_episodes: Vec<&EpisodeDescriptor> = Vec::new();
@@ -101,23 +105,11 @@ pub fn build_season_models(
         let kind_evidence: Vec<&EpisodeEvidence> = evidence
             .iter()
             .filter(|e| {
-                if e.kind != kind || is_constant_or_silent(&e.capture.words) {
-                    return false;
-                }
-                // Disallow truncated audio captures that did not decode sufficient audio for the requested window.
-                // A modeling sample must have decoded substantially the entire requested sample window
-                // (allowing at most 1 sec delta for EOF/padding) to prevent incomplete captures from being mistaken for stable templates.
-                // If PCM coverage is unknown (None), it cannot be trusted for template modeling.
-                match e.capture.pcm_duration_ms {
-                    Some(pcm_ms) => {
-                        let req_ms = e.capture.window.duration_ms();
-                        if pcm_ms + 1000 < req_ms {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-                true
+                e.kind == kind
+                    && !is_constant_or_silent(&e.capture.words)
+                    // Input eligibility is not final verification: every selected
+                    // candidate still needs complete bounded target/reference guards.
+                    && crate::boundary::evidence::candidate_pcm_coverage(&e.capture).is_some()
             })
             .collect();
 
@@ -136,6 +128,8 @@ struct PairCandidate {
     first_idx: usize,
     second_idx: usize,
     segment: CommonSegment,
+    first_interval: crate::boundary::Interval,
+    second_interval: crate::boundary::Interval,
 }
 
 fn build_models_for_kind(
@@ -144,36 +138,7 @@ fn build_models_for_kind(
     kind: SegmentKind,
     policy: &SamplingPolicy,
 ) -> Vec<TemplateModel> {
-    let mut matches = Vec::new();
-    for i in 0..evidence.len() {
-        for j in i + 1..evidence.len() {
-            // Distinct episodes required for templates
-            if evidence[i].episode == evidence[j].episode {
-                continue;
-            }
-
-            let segments = engine.find_common_segments(
-                &evidence[i].capture.words,
-                &evidence[j].capture.words,
-                (policy.min_match_duration_ms as f32) / 1000.0,
-                (policy.max_match_duration_ms as f32) / 1000.0,
-            );
-
-            for seg in segments {
-                let duration_ms = (seg.duration_sec * 1000.0) as i64;
-                if duration_ms >= policy.min_match_duration_ms
-                    && duration_ms <= policy.max_match_duration_ms
-                    && (seg.score as f64) <= policy.max_score
-                {
-                    matches.push(PairCandidate {
-                        first_idx: i,
-                        second_idx: j,
-                        segment: seg,
-                    });
-                }
-            }
-        }
-    }
+    let matches = collect_pair_candidates(engine, evidence, policy);
 
     if matches.is_empty() {
         return Vec::new();
@@ -193,11 +158,8 @@ fn build_models_for_kind(
             let ev1 = evidence[m.first_idx];
             let ev2 = evidence[m.second_idx];
 
-            let start1_ms = ev1.capture.window.start_ms + (m.segment.start1_sec * 1000.0) as i64;
-            let end1_ms = ev1.capture.window.start_ms + (m.segment.end1_sec * 1000.0) as i64;
-
-            let start2_ms = ev2.capture.window.start_ms + (m.segment.start2_sec * 1000.0) as i64;
-            let end2_ms = ev2.capture.window.start_ms + (m.segment.end2_sec * 1000.0) as i64;
+            let (start1_ms, end1_ms) = (m.first_interval.start_ms, m.first_interval.end_ms);
+            let (start2_ms, end2_ms) = (m.second_interval.start_ms, m.second_interval.end_ms);
 
             durations.push((m.segment.duration_sec * 1000.0) as i64);
 
@@ -212,23 +174,27 @@ fn build_models_for_kind(
                 None
             };
 
-            ep_refs.entry(ev1.sample_id.clone()).or_insert_with(|| TemplateReference {
-                sample_id: ev1.sample_id.clone(),
-                ledger_id: ev1.ledger_id.clone(),
-                episode: ev1.episode,
-                source_version: ev1.source_version.clone(),
-                match_interval_ms: (start1_ms, end1_ms),
-                match_from_end_ms: from_end1,
-            });
+            ep_refs
+                .entry(ev1.sample_id.clone())
+                .or_insert_with(|| TemplateReference {
+                    sample_id: ev1.sample_id.clone(),
+                    ledger_id: ev1.ledger_id.clone(),
+                    episode: ev1.episode,
+                    source_version: ev1.source_version.clone(),
+                    match_interval_ms: (start1_ms, end1_ms),
+                    match_from_end_ms: from_end1,
+                });
 
-            ep_refs.entry(ev2.sample_id.clone()).or_insert_with(|| TemplateReference {
-                sample_id: ev2.sample_id.clone(),
-                ledger_id: ev2.ledger_id.clone(),
-                episode: ev2.episode,
-                source_version: ev2.source_version.clone(),
-                match_interval_ms: (start2_ms, end2_ms),
-                match_from_end_ms: from_end2,
-            });
+            ep_refs
+                .entry(ev2.sample_id.clone())
+                .or_insert_with(|| TemplateReference {
+                    sample_id: ev2.sample_id.clone(),
+                    ledger_id: ev2.ledger_id.clone(),
+                    episode: ev2.episode,
+                    source_version: ev2.source_version.clone(),
+                    match_interval_ms: (start2_ms, end2_ms),
+                    match_from_end_ms: from_end2,
+                });
         }
 
         let references: Vec<TemplateReference> = ep_refs.into_values().collect();
@@ -246,11 +212,16 @@ fn build_models_for_kind(
         let is_stable = unique_episodes >= 3;
 
         template_models.push(TemplateModel {
-            model_id: format!("{}-{}-{}", match kind {
-                SegmentKind::Intro => "intro",
-                SegmentKind::Outro => "outro",
-            }, expected_duration_ms / 1000, idx),
-            version: 1,
+            model_id: format!(
+                "{}-{}-{}",
+                match kind {
+                    SegmentKind::Intro => "intro",
+                    SegmentKind::Outro => "outro",
+                },
+                expected_duration_ms / 1000,
+                idx
+            ),
+            version: super::TEMPLATE_MODEL_VERSION,
             kind,
             references,
             expected_duration_ms,
@@ -263,6 +234,71 @@ fn build_models_for_kind(
     }
 
     template_models
+}
+
+fn collect_pair_candidates(
+    engine: &dyn FingerprintEngine,
+    evidence: &[&EpisodeEvidence],
+    policy: &SamplingPolicy,
+) -> Vec<PairCandidate> {
+    let mut matches = Vec::new();
+    for i in 0..evidence.len() {
+        for j in i + 1..evidence.len() {
+            // Distinct episodes required for templates
+            if evidence[i].episode == evidence[j].episode {
+                continue;
+            }
+
+            let decision = engine.compare_evidence(
+                evidence[i],
+                evidence[j],
+                (policy.min_match_duration_ms as f32) / 1000.0,
+                (policy.max_match_duration_ms as f32) / 1000.0,
+            );
+
+            let crate::PairFingerprintDecision::Candidates(segments) = decision else {
+                continue;
+            };
+            for seg in segments {
+                // Preserve model truncation; only the shared checked window
+                // conversion is new. Verification separately preserves rounding.
+                let relative = |start: f32, end: f32| crate::boundary::Interval {
+                    start_ms: (start * 1000.0) as i64,
+                    end_ms: (end * 1000.0) as i64,
+                };
+                let (Ok(first_interval), Ok(second_interval)) = (
+                    crate::boundary::normalize_capture_interval(
+                        &evidence[i].capture,
+                        relative(seg.start1_sec, seg.end1_sec),
+                    ),
+                    crate::boundary::normalize_capture_interval(
+                        &evidence[j].capture,
+                        relative(seg.start2_sec, seg.end2_sec),
+                    ),
+                ) else {
+                    continue;
+                };
+                if crate::candidate_quality::acceptable_segment(
+                    &seg,
+                    policy.min_match_duration_ms as f32 / 1000.0,
+                    policy.max_match_duration_ms as f32 / 1000.0,
+                    policy.max_score,
+                ) {
+                    matches.push(PairCandidate {
+                        first_idx: i,
+                        second_idx: j,
+                        segment: seg,
+                        first_interval,
+                        second_interval,
+                    });
+                } else {
+                    tracing::debug!(score = seg.score, "模板建模拒绝低质量或无效区间候选");
+                }
+            }
+        }
+    }
+
+    matches
 }
 
 fn cluster_matches(matches: &[PairCandidate], evidence: &[&EpisodeEvidence]) -> Vec<Vec<usize>> {

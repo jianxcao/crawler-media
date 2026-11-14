@@ -4,8 +4,8 @@
 mod common;
 
 use common::{
-    common_segment, intro_template_model, make_target_evidence, template_reference,
-    MockVerificationEngine,
+    MockVerificationEngine, common_segment, intro_template_model, make_target_evidence,
+    template_reference,
 };
 use marker::{
     CommonSegment, SamplingPolicy, SegmentKind, TemplateContext, TemplateModel, TemplateReference,
@@ -219,7 +219,10 @@ fn conflicting_third_reference_excluded_from_support_and_order_independent() {
             assert_eq!(v.start_ms, 5_000);
             assert_eq!(v.end_ms, 95_000);
         }
-        other => panic!("Expected verified with 2 supporting episodes, got: {:?}", other),
+        other => panic!(
+            "Expected verified with 2 supporting episodes, got: {:?}",
+            other
+        ),
     }
 
     // Now reverse the model references order so the conflicting one is first
@@ -296,8 +299,12 @@ fn review_greedy_clusters_cannot_hide_best_valid_five_reference_consensus() {
     templates.models[0].references.rotate_left(2);
     let low_score_first = verify_template_window(&engine, &target, &templates, &policy);
 
-    assert!(matches!(high_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6));
-    assert!(matches!(low_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6));
+    assert!(
+        matches!(high_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6)
+    );
+    assert!(
+        matches!(low_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6)
+    );
 }
 
 /// One template cannot align two independent references, another template has no candidate at
@@ -369,7 +376,13 @@ fn multi_template_all_zero_candidates_reports_no_match() {
 /// Two intro models on a complete 180s PCM window. `zero_engine` selects, per model in model
 /// order, whether the model's references produce no engine segments at all; the other model
 /// always aligns exactly one of its two references and stays inconclusive.
-fn multi_template_fixture(zero_engine: [bool; 2]) -> (MockVerificationEngine, TemplateContext, marker::EpisodeEvidence) {
+fn multi_template_fixture(
+    zero_engine: [bool; 2],
+) -> (
+    MockVerificationEngine,
+    TemplateContext,
+    marker::EpisodeEvidence,
+) {
     let mut engine = MockVerificationEngine::default();
     let mut templates = TemplateContext::default();
 
@@ -392,7 +405,14 @@ fn multi_template_fixture(zero_engine: [bool; 2]) -> (MockVerificationEngine, Te
         let second_tag = first_tag + 1000;
         templates.references.insert(
             first.clone(),
-            make_target_evidence(&first, first_episode, SegmentKind::Intro, first_tag, 0, 180_000),
+            make_target_evidence(
+                &first,
+                first_episode,
+                SegmentKind::Intro,
+                first_tag,
+                0,
+                180_000,
+            ),
         );
         templates.references.insert(
             second.clone(),

@@ -3,58 +3,24 @@ use domain::{Filter, Media, Subscribe};
 use crate::management::ApiState;
 use crate::store::StoreError;
 
+#[cfg(test)]
+#[path = "subscribe_create_tests.rs"]
+mod tests;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CreateError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
+    Admission(#[from] crate::jobs_writer::JobsMutationError),
+    #[error(transparent)]
     Job(#[from] jobs::JobError),
+    #[error("{0}")]
+    Compensation(String),
     /// G-M1: another subscription of this media in the same library already
     /// covers some of these units.
     #[error("同一媒体库中已有覆盖重叠的订阅 {0}")]
     Overlap(domain::SubscribeId),
-}
-
-/// G-M1: whether two coverages share at least one unit.
-pub(crate) fn coverages_overlap(a: &domain::Coverage, b: &domain::Coverage) -> bool {
-    use domain::Coverage;
-    match (a, b) {
-        (Coverage::Movie, Coverage::Movie) => true,
-        (
-            Coverage::Tv {
-                season: sa,
-                episode_from: fa,
-                episode_to: ta,
-            },
-            Coverage::Tv {
-                season: sb,
-                episode_from: fb,
-                episode_to: tb,
-            },
-        ) => {
-            let end = |to: &Option<u32>| to.unwrap_or(u32::MAX);
-            sa == sb && *fa <= end(tb) && *fb <= end(ta)
-        }
-        _ => false,
-    }
-}
-
-/// G-M1: an existing subscription of `media` in the same library whose
-/// coverage overlaps `subscribe` (excluding `subscribe` itself).
-pub(crate) fn overlapping_subscription(
-    store: &crate::Store,
-    subscribe: &Subscribe,
-) -> Result<Option<domain::SubscribeId>, StoreError> {
-    Ok(store
-        .list_all_subscribes()?
-        .into_iter()
-        .find(|other| {
-            other.id != subscribe.id
-                && other.media_id == subscribe.media_id
-                && other.library_id == subscribe.library_id
-                && coverages_overlap(&other.coverage, &subscribe.coverage)
-        })
-        .map(|other| other.id))
 }
 
 /// Persist a Subscribe and its scheduled Jobs as one logical operation.
@@ -65,125 +31,112 @@ pub(crate) fn create(
     mut subscribe: Subscribe,
     filter: Option<&Filter>,
 ) -> Result<(Media, Subscribe), CreateError> {
-    let (media, previous) = {
-        let store = state.store.lock();
+    let guard = state.subscribe_guard(subscribe.id);
+    let _guard = guard.lock();
+    let reservation = state
+        .jobs
+        .reserve()
+        .map_err(crate::jobs_writer::JobsMutationError::Acquire)?;
+    let (media, creation) = {
+        let store = state.store.as_ref();
         let (media, previous) = store.ensure_media_with_previous(incoming)?;
         subscribe.media_id = media.id;
-        match overlapping_subscription(&store, &subscribe) {
-            Ok(Some(other)) => {
-                rollback_store(&store, &media, previous.as_ref(), &subscribe, None);
-                return Err(CreateError::Overlap(other));
-            }
-            Ok(None) => {}
+        let creation = match store.begin_compensatable_subscribe_creation(
+            &subscribe,
+            &media,
+            previous.as_ref(),
+        ) {
+            Ok(creation) => creation,
             Err(error) => {
-                rollback_store(&store, &media, previous.as_ref(), &subscribe, None);
+                store.undo_ensured_media(&media, previous.as_ref())?;
                 return Err(error.into());
             }
-        }
+        };
         let inserted = (|| -> Result<(), StoreError> {
             if let Some(filter) = filter {
                 store.insert_filter(filter)?;
             }
-            store.insert_subscribe(&subscribe)
+            store.retain_subscribe_creation(&creation)?;
+            store.commit_subscribe_creation(&creation, &subscribe, true)
         })();
         if let Err(error) = inserted {
-            rollback_store(&store, &media, previous.as_ref(), &subscribe, filter);
-            return Err(error.into());
+            if let Err(rollback) = rollback_store(&store, &creation, &subscribe, filter) {
+                return Err(CreateError::Compensation(format!(
+                    "{error}; compensation incomplete: {rollback}"
+                )));
+            }
+            return Err(match error {
+                StoreError::SubscribeOverlap { subscribe_id } => CreateError::Overlap(subscribe_id),
+                error => error.into(),
+            });
         }
-        (media, previous)
+        (media, creation)
     };
 
-    if let Err(error) = seed_jobs(state, &media, &subscribe) {
+    let intent = state.store.subscribe_job_sync(subscribe.id)?;
+    if let Err(error) = seed_jobs(&reservation, &media, &subscribe, intent.as_ref()) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "创建订阅任务失败");
-        rollback_store(
-            &state.store.lock(),
-            &media,
-            previous.as_ref(),
-            &subscribe,
-            filter,
-        );
+        if let Err(rollback) = rollback_store(&state.store.as_ref(), &creation, &subscribe, filter)
+        {
+            return Err(CreateError::Compensation(format!(
+                "{error}; compensation incomplete; Jobs sync intent retained if Subscribe exists: {rollback}"
+            )));
+        }
         return Err(error.into());
     }
+    if let Some(intent) = intent {
+        state
+            .store
+            .acknowledge_subscribe_job_sync(subscribe.id, &intent.generation, intent.revision)
+            .map_err(|error| {
+                CreateError::Compensation(format!(
+                    "Subscribe and Jobs created; acknowledgment pending: {error}"
+                ))
+            })?;
+    }
+    state
+        .store
+        .finalize_subscribe_creation(&creation)
+        .map_err(|error| {
+            CreateError::Compensation(format!(
+                "Subscribe and Jobs created; finalization pending: {error}"
+            ))
+        })?;
     tracing::info!(subscribe_id = %subscribe.id, media = %media.title, "已创建新订阅");
     Ok((media, subscribe))
 }
 
-fn seed_jobs(state: &ApiState, media: &Media, subscribe: &Subscribe) -> Result<(), jobs::JobError> {
-    let search_payload =
-        serde_json::json!({ "subscribe_id": subscribe.id.to_string() }).to_string();
-    let catalog_payload = serde_json::json!({ "media_id": media.id.to_string() }).to_string();
-    let jobs = state.jobs.lock();
-    let mut catalog_existed = true;
-    let result = jobs.defs_for_payload(&catalog_payload).and_then(|defs| {
-        catalog_existed = !defs.is_empty();
-        crate::jobs_api::seed_subscribe_search_every(
-            &jobs,
-            &subscribe.id.to_string(),
-            subscribe.search_interval_secs,
-            Some(&media.title),
-        )
-        .and_then(|()| {
-            crate::jobs_api::seed_catalog_refresh(&jobs, &media.id.to_string(), Some(&media.title))
-        })
-    });
-    if result.is_err() {
-        if let Err(error) = jobs.delete_defs_for_payload(&search_payload) {
-            tracing::error!(subscribe_id = %subscribe.id, error = %error, "回滚搜索任务失败");
-        }
-        if !catalog_existed {
-            if let Err(error) = jobs.delete_defs_for_payload(&catalog_payload) {
-                tracing::error!(media_id = %media.id, error = %error, "回滚目录刷新任务失败");
-            }
-        }
-    }
-    result
+fn seed_jobs(
+    reservation: &crate::JobsReservation<'_>,
+    media: &Media,
+    subscribe: &Subscribe,
+    intent: Option<&store::SubscribeJobSync>,
+) -> Result<(), crate::jobs_writer::JobsMutationError> {
+    let intent = intent
+        .ok_or_else(|| StoreError::Missing(format!("Subscribe Jobs intent {}", subscribe.id)))?;
+    crate::subscribe_job_sync::publish(reservation, intent, &media.title)
 }
 
 fn rollback_store(
     store: &crate::Store,
-    media: &Media,
-    previous: Option<&Media>,
+    creation: &store::SubscribeCreation,
     subscribe: &Subscribe,
     filter: Option<&Filter>,
-) {
-    if let Err(error) = store.delete_subscribe(subscribe.id) {
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    if let Err(error) = store.rollback_subscribe_creation(creation) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "回滚订阅失败");
+        return Err(error.to_string());
     }
-    if let Some(filter) = filter {
-        if let Err(error) = store.delete_filter(filter.id) {
-            tracing::error!(filter_id = %filter.id, error = %error, "回滚规则组失败");
-        }
+    if let Some(filter) = filter
+        && let Err(error) = store.delete_filter(filter.id)
+    {
+        tracing::error!(filter_id = %filter.id, error = %error, "回滚规则组失败");
+        failures.push(error.to_string());
     }
-    match store.undo_ensured_media(media, previous) {
-        Ok(true) => {}
-        Ok(false) => {
-            // `false` 有两种含义，都不能盲目回滚：
-            // (a) 这行仍被 Subscribe/ledger 引用；(b) 身份已被并发请求改写（CAS 拒绝）。
-            tracing::warn!(
-                media_id = %media.id,
-                "回滚 Media 被拒绝（仍被引用或身份已被并发改写），保留当前内容"
-            );
-        }
-        Err(error) => {
-            tracing::error!(media_id = %media.id, error = %error, "回滚 Media 失败");
-        }
-    }
-}
-
-#[cfg(test)]
-mod overlap_tests {
-    use domain::Coverage;
-
-    #[test]
-    fn ranges_overlap() {
-        let tv = |from, to| Coverage::Tv {
-            season: 1,
-            episode_from: from,
-            episode_to: to,
-        };
-        assert!(super::coverages_overlap(&tv(1, Some(5)), &tv(5, Some(8))));
-        assert!(!super::coverages_overlap(&tv(1, Some(5)), &tv(6, Some(8))));
-        assert!(super::coverages_overlap(&tv(1, None), &tv(9, Some(9))));
-        assert!(super::coverages_overlap(&Coverage::Movie, &Coverage::Movie));
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
     }
 }

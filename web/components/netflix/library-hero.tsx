@@ -1,5 +1,7 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-loading";
+import { ArtworkImage } from "@/components/artwork-image";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -12,7 +14,7 @@ import { imageUrl, upgradedTmdbOriginalUrl, cardVariantFor } from "@/lib/image-p
 /**
  * Netflix 主题媒体库页（/library）顶部的全出血 Billboard——即原「内容首页」
  * 的首屏（2026-09 修订：首页概念退役、与媒体库合并成页，/ 在该主题下 replace
- * 到 /library，见 docs/design/web-themes.md §5.3）。
+ * 到 /library）。
  *
  * 选片规则不变（确定性两档）：「接下来继续」第一项（/playback/up-next）→
  * 否则「最近入库」第一项（跨可见库聚合）。只喂 Billboard 一张卡，每库取数
@@ -44,7 +46,8 @@ export function NetflixLibraryHero() {
         const entries = await Promise.all(
           visible.map(async (lib) => {
             try {
-              return [lib.id, await listLibraryItems(lib.id, { sort: "added_at", limit: 1 })] as const;
+              const page = await listLibraryItems(lib.id, { sort: "added_at", limit: 1 });
+              return [lib.id, page.items] as const;
             } catch {
               return [lib.id, [] as LibraryItem[]] as const;
             }
@@ -159,7 +162,8 @@ function NetflixBillboard({
     }
     setArtState("pending");
     let cancelled = false;
-    const img = new Image();
+    const preload = new AbortController();
+    const { image: img, load: loadImage } = createArtworkImage(preload.signal);
     const settle = () => {
       img
         .decode()
@@ -172,9 +176,10 @@ function NetflixBillboard({
     img.onerror = () => {
       if (!cancelled) setArtState("failed");
     };
-    img.src = hdUrl;
+    loadImage(hdUrl);
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, [hdUrl, fallbackSrc]);
   const artSrc = artState === "ok" ? hdUrl : artState === "failed" ? fallbackSrc : "";
@@ -232,7 +237,7 @@ function NetflixBillboard({
       <div className="absolute inset-0 overflow-hidden bg-black">
         {artSrc ? (
           <div className="nf-billboard-art absolute inset-0">
-            <img src={artSrc} alt="" className="size-full object-cover" />
+            <ArtworkImage src={artSrc} alt="" className="size-full object-cover" />
           </div>
         ) : artworkUrl ? null : libraryItem?.poster_url ? (
           <PosterFallbackFill url={libraryItem.poster_url} aspect={2 / 3} />
@@ -299,7 +304,7 @@ function PosterFallbackFill({ url, aspect }: { url: string; aspect: number }) {
   const src = imageUrl(url, cardVariantFor(aspect));
   return (
     <>
-      <img src={src} alt="" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
+      <ArtworkImage src={src} alt="" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
       <div className="absolute inset-0 flex items-center justify-center">
         <div
           style={{ aspectRatio: aspect, height: "86%" }}

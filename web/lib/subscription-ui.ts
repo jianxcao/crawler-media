@@ -1,95 +1,9 @@
 import type { DownloadTask } from "@/lib/api/downloaders";
 import type {
-  RuleSetAtom,
-  RuleSetSpec,
   Subscription,
   SubscriptionStatus,
   TodaySubscriptionArrival,
 } from "@/lib/api/subscriptions";
-
-/**
- * 新契约 RuleSet.atoms → 旧 spec 形状（规则摘要芯片 / 洗版目标标签复用）。
- * 原子只含 resolution/source/free/hr/title_match，旧 spec 的体积、做种数、
- * 洗版目标等维度在转换后自然缺省。
- */
-export function ruleSetSpecFromAtoms(atoms: RuleSetAtom[]): RuleSetSpec {
-  const spec: RuleSetSpec = {};
-  const ordered = [...atoms].sort((a, b) => {
-    if (a.kind === "site" && b.kind === "site") return b.priority - a.priority;
-    if (a.kind === "site") return 1;
-    if (b.kind === "site") return -1;
-    return a.priority - b.priority;
-  });
-  const resolutions: string[] = [];
-  const mediaSources: string[] = [];
-  const videoCodecs: string[] = [];
-  const platformsAllow: string[] = [];
-  const platformsBlock: string[] = [];
-  const groupsAllow: string[] = [];
-  const groupsBlock: string[] = [];
-  const hdrLevels: string[] = [];
-  const hdrBlock: string[] = [];
-  const subLangs: string[] = [];
-  const audioLangs: string[] = [];
-  const sites: string[] = [];
-
-  for (const atom of ordered) {
-    if (atom.kind === "resolution" && atom.value) {
-      resolutions.push(atom.value);
-    } else if (atom.kind === "source" && atom.value) {
-      mediaSources.push(atom.value);
-    } else if (atom.kind === "video_codec" && atom.value) {
-      videoCodecs.push(atom.value);
-    } else if (atom.kind === "free") {
-      spec.free_only = true;
-    } else if (atom.kind === "hr") {
-      spec.exclude_hr = true;
-    } else if (atom.kind === "hdr" && atom.value) {
-      if (atom.exclude) hdrBlock.push(atom.value);
-      else hdrLevels.push(atom.value);
-    } else if (atom.kind === "size" && atom.value) {
-      const [minStr, maxStr] = atom.value.split("-");
-      const min = parseInt(minStr, 10);
-      const max = parseInt(maxStr, 10);
-      if (!isNaN(min) && min > 0) spec.size_min_mb = min;
-      if (!isNaN(max) && max > 0) spec.size_max_mb = max;
-    } else if (atom.kind === "min_seeders" && atom.value) {
-      const seeders = parseInt(atom.value, 10);
-      if (!isNaN(seeders) && seeders > 0) spec.min_seeders = seeders;
-    } else if (atom.kind === "subtitle_language" && atom.value) {
-      subLangs.push(atom.value);
-    } else if (atom.kind === "audio_language" && atom.value) {
-      audioLangs.push(atom.value);
-    } else if (atom.kind === "site" && atom.value) {
-      sites.push(atom.value);
-    } else if (atom.kind === "wash_target" && atom.value) {
-      const parts = atom.value.split(" ");
-      if (parts[0]) spec.cutoff_resolution = parts[0];
-      if (parts[1]) spec.upgrade_source = parts[1] as RuleSetSpec["upgrade_source"];
-    } else if (atom.kind === "upgrade_ladder" && atom.value) {
-      spec.upgrade_ladder = atom.value.split(",").filter(Boolean);
-    } else if (atom.kind === "title_match" && atom.value) {
-      if (atom.exclude) {
-        platformsBlock.push(atom.value);
-      } else {
-        platformsAllow.push(atom.value);
-      }
-    }
-  }
-
-  if (resolutions.length) spec.resolutions = resolutions;
-  if (mediaSources.length) spec.media_sources = mediaSources;
-  if (videoCodecs.length) spec.video_codecs = videoCodecs;
-  if (platformsAllow.length) spec.platforms = platformsAllow;
-  if (platformsBlock.length) spec.platforms_block = platformsBlock;
-  if (hdrLevels.length) spec.hdr_levels = hdrLevels;
-  if (hdrBlock.length) spec.hdr_block = hdrBlock;
-  if (subLangs.length) spec.subtitle_languages_require = subLangs;
-  if (audioLangs.length) spec.audio_languages_require = audioLangs;
-  if (sites.length) spec.sites = sites;
-
-  return spec;
-}
 
 /**
  * 订阅状态的展示元数据与进度文案（订阅页海报墙、详情页操作区共用）。

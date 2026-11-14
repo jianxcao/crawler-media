@@ -1,4 +1,6 @@
+use crate::http::store_wait::{busy_response, store_read, with_foreground_store, with_store_read};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -11,19 +13,28 @@ use crate::management::ApiState;
 use crate::pending_reconcile::{absence_is_provable, snapshot_matches_pending};
 
 fn prune_orphan_pending(
+    store: &crate::Store,
     state: &ApiState,
 ) -> (
     Vec<(domain::SubscribeId, i32, store::PendingDownload)>,
     HashSet<Option<DownloaderId>>,
 ) {
-    let store = state.store.lock();
     let rows = store.list_all_pending_routed().unwrap_or_default();
     let mut kept = Vec::with_capacity(rows.len());
     for (subscribe_id, score, item) in rows {
         match store.get_subscribe(subscribe_id) {
             Ok(Some(_)) => kept.push((subscribe_id, score, item)),
             Ok(None) => {
-                if let Err(error) = store.delete_pending(subscribe_id, &item.torrent.enclosure) {
+                if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+                    tracing::debug!(%subscribe_id, "Protected task read skips orphan cleanup");
+                    continue;
+                }
+                if let Err(error) = with_foreground_store(state, |store| {
+                    store.delete_pending(subscribe_id, &item.torrent.enclosure)
+                })
+                .map_err(|response| format!("pending cleanup rejected ({})", response.status()))
+                .and_then(|result| result.map_err(|error| error.to_string()))
+                {
                     tracing::error!(%subscribe_id, %error, "清理孤儿 pending 失败");
                 } else {
                     tracing::info!(%subscribe_id, torrent = %item.torrent.title, "清理孤儿 pending：订阅已删除");
@@ -48,7 +59,7 @@ async fn load_task_snapshots(
     HashSet<Option<DownloaderId>>,
 ) {
     let snapshot_state = state.clone();
-    tokio::task::spawn_blocking(move || {
+    state.http_work.run(std::time::Duration::from_secs(12), move || {
         let mut by_dl: HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>> = HashMap::new();
         let mut reachable = HashSet::new();
         for id in targets {
@@ -67,7 +78,10 @@ async fn load_task_snapshots(
         (by_dl, reachable)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "Downloader task snapshots unavailable; pending rows retained");
+        Default::default()
+    })
 }
 
 fn prune_absent_pending(
@@ -75,7 +89,7 @@ fn prune_absent_pending(
     pending: Vec<(domain::SubscribeId, i32, store::PendingDownload)>,
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
-) -> Vec<(domain::SubscribeId, i32, store::PendingDownload)> {
+) -> Result<Vec<(domain::SubscribeId, i32, store::PendingDownload)>, Response> {
     let now = crate::job_loop::unix_now();
     let mut hashes: HashMap<domain::SubscribeId, HashMap<String, String>> = HashMap::new();
     let mut kept = Vec::with_capacity(pending.len());
@@ -86,13 +100,15 @@ fn prune_absent_pending(
             .unwrap_or(&[]);
         // Review M-1: same rule as the background reconcile, including the
         // persisted info hash (D-M3).
-        let sub_hashes = hashes.entry(subscribe_id).or_insert_with(|| {
-            state
-                .store
-                .lock()
-                .load_pending_info_hashes(subscribe_id)
-                .unwrap_or_default()
-        });
+        if let std::collections::hash_map::Entry::Vacant(entry) = hashes.entry(subscribe_id) {
+            let rows = with_store_read(state, &[store::Db::Subscribe], |store| {
+                store
+                    .load_pending_info_hashes(subscribe_id)
+                    .unwrap_or_default()
+            })?;
+            entry.insert(rows);
+        }
+        let sub_hashes = &hashes[&subscribe_id];
         let hash = sub_hashes.get(&item.torrent.enclosure).map(String::as_str);
         let reachable_list = reachable.contains(&item.downloader_id).then_some(snapshots);
         let matched = snapshots.iter().any(|s| {
@@ -108,12 +124,12 @@ fn prune_absent_pending(
             reachable_list,
             now,
         );
-        if absent && delete_absent_pending(state, subscribe_id, &item) {
+        if absent && delete_absent_pending(state, subscribe_id, &item)? {
             continue;
         }
         kept.push((subscribe_id, score, item));
     }
-    kept
+    Ok(kept)
 }
 
 /// Delete one absent pending row under its Subscribe guard (lock order:
@@ -123,34 +139,39 @@ fn delete_absent_pending(
     state: &ApiState,
     subscribe_id: domain::SubscribeId,
     item: &store::PendingDownload,
-) -> bool {
+) -> Result<bool, Response> {
     let guard = state.subscribe_guard(subscribe_id);
     let Some(_held) = guard.try_lock() else {
         tracing::debug!(%subscribe_id, "订阅正在搜索/转存，本轮跳过缺失任务清理");
-        return false;
+        return Ok(false);
     };
-    let store = state.store.lock();
-    // Re-check under the guard: Transfer may have imported it meanwhile.
-    let still_active = store
-        .load_pending(subscribe_id)
-        .map(|rows| {
-            rows.iter()
-                .any(|(_, p)| p.torrent.enclosure == item.torrent.enclosure)
-        })
-        .unwrap_or(false);
-    if !still_active {
-        return true;
-    }
-    match store.delete_pending(subscribe_id, &item.torrent.enclosure) {
-        Ok(()) => {
-            tracing::info!(%subscribe_id, torrent = %item.torrent.title, "自动清理：种子已不在下载器且超过宽限期");
-            true
+    with_foreground_store(state, |store| {
+        if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+            tracing::debug!(%subscribe_id, "Protected task read skips absent pending cleanup");
+            return false;
         }
-        Err(error) => {
-            tracing::error!(%subscribe_id, %error, "自动清理缺失任务失败");
-            false
+        // Re-check under the guard: Transfer may have imported it meanwhile.
+        let still_active = store
+            .load_pending(subscribe_id)
+            .map(|rows| {
+                rows.iter()
+                    .any(|(_, p)| p.torrent.enclosure == item.torrent.enclosure)
+            })
+            .unwrap_or(false);
+        if !still_active {
+            return true;
         }
-    }
+        match store.delete_pending(subscribe_id, &item.torrent.enclosure) {
+            Ok(()) => {
+                tracing::info!(%subscribe_id, torrent = %item.torrent.title, "自动清理：种子已不在下载器且超过宽限期");
+                true
+            }
+            Err(error) => {
+                tracing::error!(%subscribe_id, %error, "自动清理缺失任务失败");
+                false
+            }
+        }
+    })
 }
 
 fn subscribe_media_index(
@@ -163,17 +184,17 @@ fn subscribe_media_index(
         if subscribe_media.contains_key(&key) {
             continue;
         }
-        if let Ok(Some(subscribe)) = store.get_subscribe(*subscribe_id) {
-            if let Ok(Some(media)) = store.get_media(subscribe.media_id) {
-                subscribe_media.insert(
-                    key,
-                    (
-                        media.title,
-                        media.kind.as_str().to_string(),
-                        media.id.to_string(),
-                    ),
-                );
-            }
+        if let Ok(Some(subscribe)) = store.get_subscribe(*subscribe_id)
+            && let Ok(Some(media)) = store.get_media(subscribe.media_id)
+        {
+            subscribe_media.insert(
+                key,
+                (
+                    media.title,
+                    media.kind.as_str().to_string(),
+                    media.id.to_string(),
+                ),
+            );
         }
     }
     subscribe_media
@@ -214,10 +235,7 @@ fn task_row_json(
         "uploaded_bytes": snapshot.map(|s| s.uploaded_bytes),
         "completed_bytes": snapshot.map(|s| s.downloaded_bytes),
         "state": state,
-        "error_message": null,
         "site_id": torrent.site_id.to_string(),
-        "site_name": null,
-        "resolution": null,
         "media_item_id": if subscribed { Some(media_item_id.clone()) } else { None },
         "media_title": if subscribed { Some(media_title.clone()) } else { None },
         "media_kind": if subscribed { Some(media_kind.clone()) } else { None },
@@ -232,12 +250,11 @@ fn task_row_json(
 }
 
 fn map_task_rows(
-    state: &ApiState,
+    store: &crate::Store,
     kept: &[(domain::SubscribeId, i32, store::PendingDownload)],
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
 ) -> Vec<Value> {
-    let store = state.store.lock();
     let subscribe_media = subscribe_media_index(&store, kept);
     kept.iter()
         .map(|(subscribe_id, score, pending)| {
@@ -256,11 +273,58 @@ fn map_task_rows(
 }
 
 pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
-    let (pending, targets) = prune_orphan_pending(&state);
-    let (snapshots_by_downloader, reachable) = load_task_snapshots(&state, targets).await;
-    let kept = prune_absent_pending(&state, pending, &snapshots_by_downloader, &reachable);
-    let items = map_task_rows(&state, &kept, &snapshots_by_downloader, &reachable);
-    ok(json!({ "items": items, "sources": [] })).into_response()
+    let initial_state = state.clone();
+    // This GET may reconcile orphan rows. Keep that whole conditional mutation
+    // owned to completion rather than hiding a late write behind a read timeout.
+    let (pending, targets) = match state
+        .http_work
+        .run_to_completion(move || {
+            with_store_read(&initial_state, &[store::Db::Subscribe], |store| {
+                prune_orphan_pending(store, &initial_state)
+            })
+        })
+        .await
+    {
+        Ok(Ok(inputs)) => inputs,
+        Ok(Err(response)) => return response,
+        Err(crate::blocking_budget::BlockingError::Busy) => return busy_response(),
+        Err(error) => {
+            tracing::error!(%error, "Downloader pending capture worker failed");
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "读取失败",
+            );
+        }
+    };
+    let (snapshots, reachable) = load_task_snapshots(&state, targets).await;
+    let snapshots = Arc::new(snapshots);
+    let reachable = Arc::new(reachable);
+    let worker = state.clone();
+    let observed = snapshots.clone();
+    let contacted = reachable.clone();
+    let kept = match state
+        .http_work
+        .run_to_completion(move || prune_absent_pending(&worker, pending, &observed, &contacted))
+        .await
+    {
+        Ok(Ok(kept)) => kept,
+        Ok(Err(response)) => return response,
+        Err(error) => {
+            tracing::warn!(%error, "Downloader pending reconciliation worker unavailable");
+            return busy_response();
+        }
+    };
+    match store_read(
+        &state,
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        move |store| map_task_rows(store, &kept, &snapshots, &reachable),
+    )
+    .await
+    {
+        Ok(items) => ok(json!({ "items": items })).into_response(),
+        Err(error) => error.response(),
+    }
 }
 
 #[cfg(test)]
@@ -275,7 +339,7 @@ mod tests {
             size_bytes: None,
             seeders: None,
             free: false,
-            hr: false,
+            hr: None,
             imdb_id: None,
             id: None,
             leechers: None,
@@ -304,6 +368,26 @@ mod tests {
         let other = downloader::ownership_tag("https://pt.example/download.php?id=2");
         assert!(!snapshot_matches_pending(&t, &snapshot(&[other])));
         assert!(!snapshot_matches_pending(&t, &snapshot(&[])));
+    }
+
+    #[test]
+    fn a_per_torrent_tag_spelling_never_proves_ownership() {
+        let t = torrent("https://pt.example/download.php?id=1");
+        let owned = downloader::ownership_tag(&t.enclosure);
+        // Old clients wrote `crawler-media-<hash>` per-torrent tags and some
+        // fixtures carried them in `tag`; neither spelling is our marker today.
+        let per_torrent_tagged = downloader::TaskSnapshot {
+            tag: "crawler-media-0f1e2d3c4b5a".into(),
+            owned_tags: vec![],
+            info_hash: "aaaa".into(),
+            ..Default::default()
+        };
+        assert!(!snapshot_matches_pending(&t, &per_torrent_tagged));
+        assert!(!snapshot_matches_pending(
+            &t,
+            &snapshot(std::slice::from_ref(&per_torrent_tagged.tag))
+        ));
+        assert!(snapshot_matches_pending(&t, &snapshot(&[owned])));
     }
 
     #[test]

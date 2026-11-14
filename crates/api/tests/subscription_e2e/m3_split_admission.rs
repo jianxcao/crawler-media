@@ -30,8 +30,8 @@ async fn missing_episode_uses_main_filter_owned_episode_uses_wash_filter() {
         "wash-2160p",
         vec![atom(domain::AtomRule::Resolution("2160p".into()), 200)],
     );
-    h.state.store().lock().insert_filter(&main).unwrap();
-    h.state.store().lock().insert_filter(&wash).unwrap();
+    h.state.store().insert_filter(&main).unwrap();
+    h.state.store().insert_filter(&wash).unwrap();
     let window = json!({ "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 3 });
     let id = tv_subscribe(&h, window, json!({ "filter_id": main.id.to_string() })).await;
 
@@ -45,7 +45,7 @@ async fn missing_episode_uses_main_filter_owned_episode_uses_wash_filter() {
     // Turn wash-cut on with the 2160p-only wash Filter.
     {
         let store = h.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         let mut sub = store.get_subscribe(id).unwrap().unwrap();
         sub.wash_cut = true;
         sub.wash_cut_filter_id = Some(wash.id);
@@ -76,7 +76,7 @@ async fn missing_episode_uses_main_filter_owned_episode_uses_wash_filter() {
         &[(&format!("{E03_1080}.mkv"), &video)],
     );
     h.transfer(id).await.unwrap();
-    let facts = h.state.store().lock().load_subscribe_facts(id).unwrap();
+    let facts = h.state.store().load_subscribe_facts(id).unwrap();
     let e01 = facts
         .get(Some(1), Some(1))
         .and_then(|f| f.path.clone())

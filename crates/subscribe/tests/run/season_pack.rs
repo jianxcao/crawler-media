@@ -70,9 +70,13 @@ fn full_season_pack_transfers_each_episode_file_to_its_own_ledger_slot() {
     ))
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 3);
-    let mut episodes: Vec<Option<u32>> = outcome.ledger.iter().map(|row| row.episode).collect();
+    assert_eq!(outcome.files.len(), 3);
+    let mut episodes: Vec<i32> = outcome
+        .files
+        .iter()
+        .flat_map(|coverage| coverage.units.iter().map(|unit| unit.episode))
+        .collect();
     episodes.sort_unstable();
-    assert_eq!(episodes, vec![Some(1), Some(2), Some(3)]);
+    assert_eq!(episodes, vec![1, 2, 3]);
     assert!(outcome.completed);
 }

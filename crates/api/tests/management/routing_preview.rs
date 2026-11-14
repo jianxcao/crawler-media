@@ -13,7 +13,7 @@ use tower::ServiceExt;
 use super::common::*;
 
 struct StoreLockingCatalog {
-    store: Arc<parking_lot::Mutex<Store>>,
+    store: Arc<Store>,
 }
 
 impl Catalog for StoreLockingCatalog {
@@ -36,12 +36,11 @@ impl Catalog for StoreLockingCatalog {
         if tmdb_id != "603" {
             return Ok(None);
         }
-        // 生产路径会在已持有 Store 锁时再读 scrape 配置。try_lock 失败即证明嵌套锁。
-        let guard = self
-            .store
-            .try_lock()
-            .ok_or_else(|| "nested store.lock while fetching metadata".to_string())?;
-        let _config = guard.get_scrape_config().ok();
+        // Detect a writer inherited on this thread. Background writers on
+        // other threads are legitimate and do not prevent catalog IO.
+        store::WriterRankGuard::ensure_unheld(store::WriterRank::Library)
+            .map_err(|error| format!("Writer inherited while fetching metadata: {error}"))?;
+        let _config = self.store.get_scrape_config().ok();
         Ok(Some(media::ItemMeta {
             genre_ids: vec![16],
             origin_countries: vec!["JP".into()],
@@ -51,9 +50,7 @@ impl Catalog for StoreLockingCatalog {
 }
 
 fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
-    let store = Arc::new(parking_lot::Mutex::new(
-        Store::open(tmp.path().join("data")).unwrap(),
-    ));
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let catalog = Arc::new(StoreLockingCatalog {
         store: store.clone(),
     });
@@ -66,7 +63,6 @@ fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
     )
     .unwrap()
     .with_catalog(catalog);
@@ -131,4 +127,45 @@ async fn tmdb_routing_preview_does_not_deadlock_on_store_lock() {
         "matched library should be named in the reason: {}",
         body["data"]["route_reason"]
     );
+}
+
+#[test]
+fn catalog_metadata_accepts_an_independent_library_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    let catalog = StoreLockingCatalog {
+        store: store.clone(),
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer_store = store.clone();
+    let writer = std::thread::spawn(move || {
+        writer_store
+            .with_writer(store::Db::Library, |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv().unwrap();
+    let result = catalog.metadata(MediaKind::Movie, "603");
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    assert_eq!(result.unwrap().unwrap().genre_ids, vec![16]);
+}
+
+#[test]
+fn catalog_metadata_rejects_an_inherited_library_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    let catalog = StoreLockingCatalog {
+        store: store.clone(),
+    };
+    store
+        .with_writer(store::Db::Library, |_| {
+            assert!(catalog.metadata(MediaKind::Movie, "603").is_err());
+            Ok(())
+        })
+        .unwrap();
 }

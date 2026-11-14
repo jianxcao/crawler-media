@@ -1,5 +1,4 @@
 use downloader::{PathMap, QbitConfig, TransmissionConfig, parse_path_maps};
-use serde::Deserialize;
 
 use crate::store::{Store, StoreError};
 
@@ -82,12 +81,8 @@ pub fn choose_downloader(
     if let Some(row) = store.default_downloader()? {
         return Ok(from_row(row, env));
     }
-    let Some(raw) = store.get_setting("downloader")? else {
-        tracing::error!("生产环境没有可用的默认 Downloader，拒绝内存假下载");
-        return Err(StoreError::Missing("default Downloader".into()));
-    };
-    let saved: SavedDownloader = serde_json::from_str(&raw)?;
-    Ok(from_saved(saved, env))
+    tracing::error!("生产环境没有可用的默认 Downloader");
+    Err(StoreError::Missing("default Downloader".into()))
 }
 
 /// Convert a stored downloader row to a ChosenDownloader config using env overrides.
@@ -143,52 +138,6 @@ fn from_row(row: crate::store::DownloaderRow, env: &DownloaderEnv) -> ChosenDown
     }
 }
 
-fn from_saved(saved: SavedDownloader, env: &DownloaderEnv) -> ChosenDownloader {
-    match saved.kind.as_str() {
-        "qbittorrent" => {
-            let username = saved.username.unwrap_or_default();
-            let password = saved.password.unwrap_or_default();
-            if saved.url.is_empty() || username.is_empty() || password.is_empty() {
-                tracing::error!("旧 Downloader 设置不完整，拒绝内存假下载");
-                return ChosenDownloader::Unavailable;
-            }
-            ChosenDownloader::Qbittorrent(QbitConfig {
-                url: saved.url,
-                username,
-                password,
-                category: saved.category,
-                path_maps: env.qb_path_maps.clone(),
-            })
-        }
-        "transmission" => {
-            if saved.url.is_empty() {
-                tracing::error!("旧 Transmission 设置不完整，拒绝内存假下载");
-                return ChosenDownloader::Unavailable;
-            }
-            ChosenDownloader::Transmission(TransmissionConfig {
-                url: saved.url,
-                username: saved.username,
-                password: saved.password,
-                path_maps: env.tr_path_maps.clone(),
-            })
-        }
-        _ => {
-            tracing::error!(kind = %saved.kind, "旧 Downloader 设置类型未知，拒绝内存假下载");
-            ChosenDownloader::Unavailable
-        }
-    }
-}
-
 fn nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-#[derive(Deserialize)]
-struct SavedDownloader {
-    kind: String,
-    url: String,
-    username: Option<String>,
-    password: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
 }

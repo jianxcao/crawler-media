@@ -4,58 +4,53 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use domain::{Confidence, LedgerId, LedgerRow, QualitySource, SubscribeId};
+use domain::{LedgerId, QualitySource, SubscribeId};
 
 use super::harness::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn wash_owning_locked_1080p(h: &Harness) -> (SubscribeId, std::path::PathBuf) {
     h.create_site().await;
     let id = h
         .create_movie_subscribe(serde_json::json!({ "wash_cut": true }))
         .await;
-    let media_id = h
-        .state
-        .store()
-        .lock()
-        .get_subscribe(id)
-        .unwrap()
-        .unwrap()
-        .media_id;
+    let media_id = h.state.store().get_subscribe(id).unwrap().unwrap().media_id;
     let owned = h
         .movie_library_root()
         .join("locked")
         .join("The Matrix (1999) - 1080p.mkv");
     std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
     std::fs::write(&owned, probed_video(1080, "h264", false)).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: owned.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(1),
-    };
-    let mut facts = subscribe::SubscribeFacts::default();
+    let owned_path = owned.display().to_string();
+    let mut facts = domain::SubscribeFacts::default();
     facts.replace(
         None,
         None,
-        subscribe::QualityFact {
+        domain::QualityFact {
             score: 1,
-            path: Some(row.path.clone()),
+            path: Some(owned_path.clone()),
         },
     );
     facts.set_quality(
-        row.path.clone(),
+        owned_path.clone(),
         release::parse("The.Matrix.1999.1080p.WEB-DL.x264"),
     );
     let store = h.state.store();
-    let store = store.lock();
-    store.insert_ledger(&row).unwrap();
+    let store = store.as_ref();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id,
+            path: owned_path,
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            quality_source: QualitySource::Probe,
+            filter_score: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     store.save_subscribe_facts(id, &facts).unwrap();
     (id, owned)
 }
@@ -87,12 +82,7 @@ async fn failed_delete_is_queued_and_retried_on_next_transfer() {
         0,
         "pending committed as imported"
     );
-    let queued = h
-        .state
-        .store()
-        .lock()
-        .list_pending_file_deletions()
-        .unwrap();
+    let queued = h.state.store().list_pending_file_deletions().unwrap();
     assert_eq!(queued, vec![owned_s.clone()]);
 
     // Review M-3: inside the backoff window the row is not retried.
@@ -101,7 +91,6 @@ async fn failed_delete_is_queued_and_retried_on_next_transfer() {
     // Backoff expired: the next Transfer job finishes the deletion.
     h.state
         .store()
-        .lock()
         .reset_file_deletion_backoff(&owned_s)
         .unwrap();
     h.transfer(id).await.unwrap();
@@ -110,7 +99,6 @@ async fn failed_delete_is_queued_and_retried_on_next_transfer() {
     assert!(
         h.state
             .store()
-            .lock()
             .list_pending_file_deletions()
             .unwrap()
             .is_empty()
@@ -130,11 +118,7 @@ async fn queued_deletion_never_removes_a_new_file_at_the_same_path() {
     set_mode(&locked, 0o755);
     let owned_s = owned.display().to_string();
     assert_eq!(
-        h.state
-            .store()
-            .lock()
-            .list_pending_file_deletions()
-            .unwrap(),
+        h.state.store().list_pending_file_deletions().unwrap(),
         vec![owned_s.clone()]
     );
 
@@ -143,7 +127,6 @@ async fn queued_deletion_never_removes_a_new_file_at_the_same_path() {
     std::fs::write(&owned, b"a different, user-provided file").unwrap();
     h.state
         .store()
-        .lock()
         .reset_file_deletion_backoff(&owned_s)
         .unwrap();
     h.transfer(id).await.unwrap();
@@ -151,7 +134,6 @@ async fn queued_deletion_never_removes_a_new_file_at_the_same_path() {
     assert!(
         h.state
             .store()
-            .lock()
             .list_pending_file_deletions()
             .unwrap()
             .is_empty(),
@@ -165,13 +147,19 @@ async fn stuck_deletions_are_listed() {
     let h = Harness::new();
     {
         let store = h.state.store();
-        let store = store.lock();
+        let store = store.as_ref();
         store
-            .enqueue_file_deletion("/nowhere/x.mkv", "wash_replaced")
+            .enqueue_file_deletion_observed("/nowhere/x.mkv", "wash_replaced", None)
+            .unwrap();
+        let intent = store
+            .list_due_file_deletions(0)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == "/nowhere/x.mkv")
             .unwrap();
         for _ in 0..store::MAX_FILE_DELETION_ATTEMPTS {
             store
-                .record_file_deletion_failure("/nowhere/x.mkv", 0, "EACCES")
+                .record_file_deletion_failure(&intent, 0, "EACCES")
                 .unwrap();
         }
     }

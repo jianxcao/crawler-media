@@ -58,10 +58,6 @@ impl PageSession for FakePage {
         Ok(self.read_cookies.clone().unwrap_or_default())
     }
 
-    fn set_cookie_header(&self, _header: &str) -> Result<(), IndexerError> {
-        Ok(())
-    }
-
     fn content(&self) -> Result<String, IndexerError> {
         Ok(r#"<html><body><p>签到成功</p><a href="logout.php">Logout</a></body></html>"#.into())
     }

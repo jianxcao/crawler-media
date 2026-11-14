@@ -9,15 +9,13 @@ import {
   deleteRuleSet,
   listRuleSets,
   setDefaultRuleSet,
-  specToAtoms,
   updateRuleSet,
   type RuleSet,
-  type RuleSetSpec,
+  type RuleSetAtom,
 } from "@/lib/api/subscriptions";
-import { type ConfiguredSite, listConfiguredSites } from "@/lib/api/sites";
+import { type Site, listConfiguredSites } from "@/lib/api/sites";
 import { PLATFORM_OPTIONS, platformLabel } from "@/lib/platforms";
-import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
-import { ruleSetEditAtoms } from "@/lib/rule-set-edit";
+import { ruleSetEditAtoms, ruleAtomValues, ruleAtomValue } from "@/lib/rule-set-edit";
 import {
   CODEC_FAMILIES,
   DEFAULT_LADDER,
@@ -31,24 +29,24 @@ import {
  * 规则组管理（设置 → 订阅规则 → 规则组）：Web 端唯一的规则组配置入口。
  *
  * 设计原则：
- * - **表单化，不让用户手写 JSON**——spec 的每个维度铺成对应控件；
+ * - **表单化，不让用户手写 JSON**——原子的每个维度铺成对应控件；
  * - **列表顺序即偏好**：分辨率按点击顺序入列（与后端评分语义一致），
  *   选中的芯片上标序号，先选的优先；
- * - **摘要芯片**：清单里把 spec 翻译成人话（"2160p > 1080p · 仅免费"），
+ * - **摘要芯片**：清单里把原子翻译成人话（"2160p > 1080p · 仅免费"），
  *   看一眼就知道每个组在过滤什么；
  * - **复制微调**：订阅不做 per-订阅 override，"想微调就复制一个规则组"是
  *   既定产品哲学——复制按钮预填原组条件，改名保存即成新组；
  * - **删除保护前置**：默认组与被订阅引用的组直接禁用删除按钮并说明原因，
  *   不让用户点了再吃后端 409。
  *
- * specSummary 与 RuleSetEditorDialog 导出复用：订阅弹窗（选组时看清内容、
+ * ruleSetSummary 与 RuleSetEditorDialog 导出复用：订阅弹窗（选组时看清内容、
  * 快捷新建）与订阅详情页（换组）共用同一套摘要与编辑器。
  */
 
 /** 编辑器打开参数：ruleSet 有值=编辑；null=新建，template 提供预填（复制场景）。 */
 interface EditorTarget {
   ruleSet: RuleSet | null;
-  template: { name: string; spec: RuleSetSpec } | null;
+  template: { name: string; atoms: RuleSetAtom[]; keepOldVersions?: boolean } | null;
 }
 
 export function RuleSetsPanel() {
@@ -128,7 +126,7 @@ export function RuleSetsPanel() {
       ) : (
         <div className="space-y-1.5">
           {ruleSets.map((rs) => {
-            const chips = specSummary(ruleSetSpecFromAtoms(rs.atoms));
+            const chips = ruleSetSummary(rs.atoms, { keepOldVersions: rs.keep_old_versions });
             // 新契约不再下发被引用数：删除保护只剩「默认组不可删」
             const deleteBlock = rs.is_default ? "默认规则组不可删除" : null;
             return (
@@ -185,7 +183,7 @@ export function RuleSetsPanel() {
                   onClick={() =>
                     setEditing({
                       ruleSet: null,
-                      template: { name: `${rs.name} 副本`, spec: ruleSetSpecFromAtoms(rs.atoms) },
+                      template: { name: `${rs.name} 副本`, atoms: rs.atoms, keepOldVersions: rs.keep_old_versions },
                     })
                   }
                   className="btn-glass shrink-0 px-3 py-1.5 text-sub font-medium"
@@ -223,7 +221,7 @@ export function RuleSetsPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// spec → 摘要芯片
+// atoms → 摘要芯片
 // ---------------------------------------------------------------------------
 
 /** 分辨率可选项（词表归一值里的常用档；其余档位罕见，需要时再扩）。 */
@@ -245,11 +243,11 @@ const AUDIO_LANG_OPTIONS: [string, string][] = [
 ];
 
 /**
- * 洗版目标片源档的三个选项就是全部预设（docs/design/quality-upgrade.md §8.2）
+ * 洗版目标片源档的三个选项就是全部预设
  * ——没有需要照抄的社区配置。目标分辨率缺省取分辨率偏好的第一位。
  */
 const UPGRADE_OPTIONS: [
-  NonNullable<RuleSetSpec["upgrade_source"]> & string,
+  string,
   string,
 ][] = [
   ["web-dl", "洗到 WEB-DL"],
@@ -273,26 +271,6 @@ const mediaSourceLabel = (value: string): string =>
 const HDR_OPTIONS = ["DV", "HDR10+", "HDR10", "HLG", "SDR"];
 
 /**
- * 旧三态字段 → (白名单, 黑名单)。与后端 models._hdr_from_legacy 同一张表，
- * 属兼容层：存量规则组保存过一次后就带上新键了，旧键退休时这段一起删。
- */
-function hdrFromLegacy(spec: RuleSetSpec): { levels: string[]; block: string[] } {
-  if (spec.hdr_levels?.length || spec.hdr_block?.length) {
-    return { levels: spec.hdr_levels ?? [], block: spec.hdr_block ?? [] };
-  }
-  const family = HDR_OPTIONS.filter((v) => v !== "SDR");
-  if (spec.hdr === "forbid") return { levels: ["SDR"], block: [] };
-  if (spec.dv === "require") return { levels: ["DV"], block: [] };
-  if (spec.hdr === "require") {
-    return spec.dv === "forbid"
-      ? { levels: family.filter((v) => v !== "DV"), block: ["DV"] }
-      : { levels: family, block: [] };
-  }
-  if (spec.dv === "forbid") return { levels: [], block: ["DV"] };
-  return { levels: [], block: [] };
-}
-
-/**
  * HDR 白名单 → 摘要文案。整族与纯 SDR 这两种最常见的配置（也是旧 hdr 三态
  * 换算出来的形态）说人话，避免清单里出现 "HDR DV/HDR10+/HDR10/HLG" 这种
  * 又长又没信息量的芯片。
@@ -310,45 +288,44 @@ const sameLadder = (a: string[], b: string[]) =>
   a.length === b.length && a.every((v, i) => v === b[i]);
 
 /** 洗版目标的人话标签（摘要芯片 / 订阅详情页规则组 fact 复用）。 */
-export function upgradeTargetLabel(spec: RuleSetSpec): string | null {
-  if (!spec.upgrade_source) return null;
-  const resolution = spec.cutoff_resolution || spec.resolutions?.[0] || "1080p";
-  const parts = [
-    `${resolution} ${UPGRADE_SOURCE_LABEL[spec.upgrade_source] ?? spec.upgrade_source}`,
-  ];
+export function upgradeTargetLabel(atoms: RuleSetAtom[]): string | null {
+  const target = ruleAtomValue(atoms, "wash_target")?.split(" ");
+  if (!target?.[1]) return null;
+  const resolution = target[0] || ruleAtomValues(atoms, "resolution")[0] || "1080p";
+  const parts = [`${resolution} ${UPGRADE_SOURCE_LABEL[target[1]] ?? target[1]}`];
   // 与后端 decision.upgrade_target_label 同一口径：只渲染"进了阶梯且配了偏好"
   // 的维度（偏好为空的位后端会自动跳过）
-  const ladder = spec.upgrade_ladder ?? DEFAULT_LADDER;
-  if (ladder.includes("hdr") && spec.hdr_levels?.length) {
-    parts.push(spec.hdr_levels[0]);
+  const ladder = ruleAtomValue(atoms, "upgrade_ladder")?.split(",") ?? DEFAULT_LADDER;
+  if (ladder.includes("hdr") && ruleAtomValues(atoms, "hdr").length) {
+    parts.push(ruleAtomValues(atoms, "hdr")[0]);
   }
-  if (ladder.includes("video_codec") && spec.video_codecs?.length) {
-    parts.push(spec.video_codecs[0]);
+  if (ladder.includes("video_codec") && ruleAtomValues(atoms, "video_codec").length) {
+    parts.push(ruleAtomValues(atoms, "video_codec")[0]);
   }
-  if (ladder.includes("platform") && spec.platforms?.length) {
-    parts.push(platformLabel(spec.platforms[0]));
+  if (ladder.includes("platform") && ruleAtomValues(atoms, "platform").length) {
+    parts.push(platformLabel(ruleAtomValues(atoms, "platform")[0]));
   }
   return parts.join(" · ");
 }
 
-/** spec → 人话芯片列表（清单摘要 / 订阅弹窗与详情页复用；空数组=全不限）。
+/** atoms → 人话芯片列表（清单摘要 / 订阅弹窗与详情页复用；空数组=全不限）。
  *  `withoutUpgrade`：编辑器底部把洗版单独渲染成阶梯，那里不再要这枚芯片。 */
-export function specSummary(
-  spec: RuleSetSpec,
-  { withoutUpgrade = false }: { withoutUpgrade?: boolean } = {},
+export function ruleSetSummary(
+  atoms: RuleSetAtom[],
+  { withoutUpgrade = false, keepOldVersions = false }: { withoutUpgrade?: boolean; keepOldVersions?: boolean } = {},
 ): string[] {
   const chips: string[] = [];
-  if (spec.sites?.length) chips.push(`首选站点 ${spec.sites.join(" > ")}`);
-  if (spec.resolutions?.length) chips.push(spec.resolutions.join(" > "));
-  if (spec.media_sources?.length) {
-    chips.push(spec.media_sources.map(mediaSourceLabel).join(" > "));
+  if (ruleAtomValues(atoms, "site").length) chips.push(`首选站点 ${ruleAtomValues(atoms, "site").join(" > ")}`);
+  if (ruleAtomValues(atoms, "resolution").length) chips.push(ruleAtomValues(atoms, "resolution").join(" > "));
+  if (ruleAtomValues(atoms, "source").length) {
+    chips.push(ruleAtomValues(atoms, "source").map(mediaSourceLabel).join(" > "));
   }
-  const upgradeTarget = withoutUpgrade ? null : upgradeTargetLabel(spec);
+  const upgradeTarget = withoutUpgrade ? null : upgradeTargetLabel(atoms);
   if (upgradeTarget) {
-    chips.push(`洗到 ${upgradeTarget}${spec.upgrade_keep_old ? "（保留旧版）" : ""}`);
+    chips.push(`洗到 ${upgradeTarget}${keepOldVersions ? "（保留旧版）" : ""}`);
   }
-  if (spec.video_codecs?.length) {
-    const rest = new Set(spec.video_codecs);
+  if (ruleAtomValues(atoms, "video_codec").length) {
+    const rest = new Set(ruleAtomValues(atoms, "video_codec"));
     const labels: string[] = [];
     for (const family of CODEC_FAMILIES) {
       if (family.values.some((v) => rest.has(v))) {
@@ -359,36 +336,38 @@ export function specSummary(
     labels.push(...rest);
     chips.push(labels.join("/"));
   }
-  if (spec.platforms?.length) {
-    chips.push(`平台: ${spec.platforms.map(platformLabel).join("/")}`);
+  if (ruleAtomValues(atoms, "platform").length) {
+    chips.push(`平台: ${ruleAtomValues(atoms, "platform").map(platformLabel).join("/")}`);
   }
-  if (spec.platforms_block?.length) {
-    chips.push(`排除平台: ${spec.platforms_block.map(platformLabel).join("/")}`);
+  if (ruleAtomValues(atoms, "platform", true).length) {
+    chips.push(`排除平台: ${ruleAtomValues(atoms, "platform", true).map(platformLabel).join("/")}`);
   }
-  const { levels: hdrLevels, block: hdrBlock } = hdrFromLegacy(spec);
+  const hdrLevels = ruleAtomValues(atoms, "hdr");
+  const hdrBlock = ruleAtomValues(atoms, "hdr", true);
   if (hdrLevels.length) chips.push(hdrChipText(hdrLevels));
   if (hdrBlock.length) chips.push(`排除 ${hdrBlock.join("/")}`);
-  if (spec.subtitle_languages_require?.length)
+  if (ruleAtomValues(atoms, "subtitle_language").length)
     chips.push(
-      `字幕: ${spec.subtitle_languages_require.map((v) => SUB_LANG_OPTIONS.find(([code]) => code === v)?.[1] ?? v).join("/")}`,
+      `字幕: ${ruleAtomValues(atoms, "subtitle_language").map((v) => SUB_LANG_OPTIONS.find(([code]) => code === v)?.[1] ?? v).join("/")}`,
     );
-  if (spec.audio_languages_require?.length)
+  if (ruleAtomValues(atoms, "audio_language").length)
     chips.push(
-      `音轨: ${spec.audio_languages_require.map((v) => AUDIO_LANG_OPTIONS.find(([code]) => code === v)?.[1] ?? v).join("/")}`,
+      `音轨: ${ruleAtomValues(atoms, "audio_language").map((v) => AUDIO_LANG_OPTIONS.find(([code]) => code === v)?.[1] ?? v).join("/")}`,
     );
-  if (spec.free_only) chips.push("仅免费");
-  if (spec.min_seeders != null) chips.push(`做种 ≥ ${spec.min_seeders}`);
-  if (spec.size_min_mb != null || spec.size_max_mb != null) {
-    const min = spec.size_min_mb != null ? `${spec.size_min_mb}` : "";
-    const max = spec.size_max_mb != null ? `${spec.size_max_mb}` : "";
-    chips.push(min && max ? `单集 ${min}–${max}MB` : min ? `单集 ≥ ${min}MB` : `单集 ≤ ${max}MB`);
+  if (atoms.some((atom) => atom.kind === "free" && !atom.exclude)) chips.push("仅免费");
+  const seeders = ruleAtomValue(atoms, "min_seeders");
+  if (seeders != null) chips.push(`做种 ≥ ${seeders}`);
+  const size = ruleAtomValue(atoms, "size");
+  if (size) {
+    const [min, max] = size.split("-");
+    chips.push(min && min !== "0" && max ? `单集 ${min}–${max}MB` : max ? `单集 ≤ ${max}MB` : `单集 ≥ ${min}MB`);
   }
-  if (spec.exclude_hr)
-    chips.push(spec.hr_unknown_policy === "strict" ? "排除 H&R（未知也排）" : "排除 H&R");
-  if (spec.release_groups_allow?.length)
-    chips.push(`制作组白名单 ${spec.release_groups_allow.length} 个`);
-  if (spec.release_groups_block?.length)
-    chips.push(`制作组黑名单 ${spec.release_groups_block.length} 个`);
+  const hr = atoms.find((atom) => atom.kind === "hr" && atom.exclude);
+  if (hr?.kind === "hr") chips.push(hr.unknown === "exclude" ? "排除 H&R（未知也排）" : "排除 H&R");
+  if (ruleAtomValues(atoms, "team").length)
+    chips.push(`制作组白名单 ${ruleAtomValues(atoms, "team").length} 个`);
+  if (ruleAtomValues(atoms, "team", true).length)
+    chips.push(`制作组黑名单 ${ruleAtomValues(atoms, "team", true).length} 个`);
   return chips;
 }
 
@@ -406,44 +385,36 @@ export function RuleSetEditorDialog({
   /** null = 新建 */
   ruleSet: RuleSet | null;
   /** 新建时的预填内容（复制场景）；编辑时忽略 */
-  template?: { name: string; spec: RuleSetSpec };
+  template?: { name: string; atoms: RuleSetAtom[]; keepOldVersions?: boolean };
   /** 叠在其他弹窗之上时置 true（如订阅弹窗里快捷新建） */
   raised?: boolean;
   onClose: () => void;
   /** 保存成功回调，参数是后端返回的最新规则组（快捷新建场景要选中它） */
   onSaved: (saved: RuleSet) => void;
 }) {
-  const spec = useMemo<RuleSetSpec>(
-    () => {
-      const s = ruleSet ? ruleSetSpecFromAtoms(ruleSet.atoms) : template?.spec ?? {};
-      if (ruleSet?.keep_old_versions !== undefined) {
-        s.upgrade_keep_old = ruleSet.keep_old_versions;
-      }
-      return s;
-    },
-    [ruleSet, template],
-  );
+  const atoms = useMemo(() => ruleSet?.atoms ?? template?.atoms ?? [], [ruleSet, template]);
+  const keepOldVersions = ruleSet?.keep_old_versions ?? template?.keepOldVersions ?? false;
 
   const [name, setName] = useState(ruleSet?.name ?? template?.name ?? "");
-  const [resolutions, setResolutions] = useState<string[]>(spec.resolutions ?? []);
+  const [resolutions, setResolutions] = useState<string[]>(ruleAtomValues(atoms, "resolution"));
   const [codecFamilies, setCodecFamilies] = useState<Set<string>>(
     () =>
       new Set(
         CODEC_FAMILIES.filter((f) =>
-          f.values.some((v) => (spec.video_codecs ?? []).includes(v)),
+          f.values.some((v) => ruleAtomValues(atoms, "video_codec").includes(v)),
         ).map((f) => f.label),
       ),
   );
   // 平台白/黑名单：界面只维护"常驻选项"部分，其余值走 platformExtras 透传
   const [platformsAllow, setPlatformsAllow] = useState<string[]>(() =>
-    (spec.platforms ?? []).filter((v) => PLATFORM_OPTIONS.includes(v)),
+    ruleAtomValues(atoms, "platform").filter((v) => PLATFORM_OPTIONS.includes(v)),
   );
   const [platformsBlock, setPlatformsBlock] = useState<string[]>(() =>
-    (spec.platforms_block ?? []).filter((v) => PLATFORM_OPTIONS.includes(v)),
+    ruleAtomValues(atoms, "platform", true).filter((v) => PLATFORM_OPTIONS.includes(v)),
   );
-  const [mediaSources, setMediaSources] = useState<string[]>(spec.media_sources ?? []);
-  const [configuredSites, setConfiguredSites] = useState<ConfiguredSite[]>([]);
-  const [preferredSites, setPreferredSites] = useState<string[]>(spec.sites ?? []);
+  const [mediaSources, setMediaSources] = useState<string[]>(ruleAtomValues(atoms, "source"));
+  const [configuredSites, setConfiguredSites] = useState<Site[]>([]);
+  const [preferredSites, setPreferredSites] = useState<string[]>(ruleAtomValues(atoms, "site"));
   useEffect(() => {
     listConfiguredSites().then(setConfiguredSites).catch(() => setConfiguredSites([]));
   }, []);
@@ -463,29 +434,29 @@ export function RuleSetEditorDialog({
     });
   const [draggingPreferredSite, setDraggingPreferredSite] = useState<number | null>(null);
   const [upgradeLadder, setUpgradeLadder] = useState<string[]>(
-    () => spec.upgrade_ladder ?? [...DEFAULT_LADDER],
+    () => ruleAtomValue(atoms, "upgrade_ladder")?.split(",") ?? [...DEFAULT_LADDER],
   );
-  const [hdrLevels, setHdrLevels] = useState<string[]>(() => hdrFromLegacy(spec).levels);
-  const [hdrBlock, setHdrBlock] = useState<string[]>(() => hdrFromLegacy(spec).block);
+  const [hdrLevels, setHdrLevels] = useState<string[]>(() => ruleAtomValues(atoms, "hdr"));
+  const [hdrBlock, setHdrBlock] = useState<string[]>(() => ruleAtomValues(atoms, "hdr", true));
   const [subLangs, setSubLangs] = useState<string[]>(
-    spec.subtitle_languages_require ?? [],
+    ruleAtomValues(atoms, "subtitle_language"),
   );
   const [audioLangs, setAudioLangs] = useState<string[]>(
-    spec.audio_languages_require ?? [],
+    ruleAtomValues(atoms, "audio_language"),
   );
-  const [freeOnly, setFreeOnly] = useState(spec.free_only ?? false);
-  const [excludeHr, setExcludeHr] = useState(spec.exclude_hr ?? false);
-  const [hrStrict, setHrStrict] = useState(spec.hr_unknown_policy === "strict");
-  const [minSeeders, setMinSeeders] = useState(spec.min_seeders?.toString() ?? "");
-  const [sizeMin, setSizeMin] = useState(spec.size_min_mb?.toString() ?? "");
-  const [sizeMax, setSizeMax] = useState(spec.size_max_mb?.toString() ?? "");
-  const [groupsAllow, setGroupsAllow] = useState((spec.release_groups_allow ?? []).join(", "));
-  const [groupsBlock, setGroupsBlock] = useState((spec.release_groups_block ?? []).join(", "));
-  // 洗版目标：""=不洗版（唯一的洗版配置点，docs/design/quality-upgrade.md §8.2）
-  const [upgradeSource, setUpgradeSource] = useState<string>(spec.upgrade_source ?? "");
-  const [upgradeKeepOld, setUpgradeKeepOld] = useState<boolean>(spec.upgrade_keep_old ?? false);
+  const [freeOnly, setFreeOnly] = useState(atoms.some((atom) => atom.kind === "free" && !atom.exclude));
+  const [excludeHr, setExcludeHr] = useState(atoms.some((atom) => atom.kind === "hr" && atom.exclude));
+  const [hrStrict, setHrStrict] = useState(atoms.some((atom) => atom.kind === "hr" && atom.exclude && atom.unknown === "exclude"));
+  const [minSeeders, setMinSeeders] = useState(ruleAtomValue(atoms, "min_seeders")?.toString() ?? "");
+  const [sizeMin, setSizeMin] = useState(ruleAtomValue(atoms, "size")?.split("-")[0]?.toString() ?? "");
+  const [sizeMax, setSizeMax] = useState(ruleAtomValue(atoms, "size")?.split("-")[1]?.toString() ?? "");
+  const [groupsAllow, setGroupsAllow] = useState(ruleAtomValues(atoms, "team").join(", "));
+  const [groupsBlock, setGroupsBlock] = useState(ruleAtomValues(atoms, "team", true).join(", "));
+  // 洗版目标：""=不洗版
+  const [upgradeSource, setUpgradeSource] = useState<string>(ruleAtomValue(atoms, "wash_target")?.split(" ")[1] ?? "");
+  const [upgradeKeepOld, setUpgradeKeepOld] = useState<boolean>(keepOldVersions);
   const [cutoffResolution, setCutoffResolution] = useState<string>(
-    spec.cutoff_resolution ?? "",
+    ruleAtomValue(atoms, "wash_target")?.split(" ")[0] ?? "",
   );
   // 洗版优先级默认收起：只想"洗到 Remux"的人不该被维度排序打断，
   // 但也不能藏起来——折叠头直接显示当前顺序，需要时一点就开
@@ -496,19 +467,19 @@ export function RuleSetEditorDialog({
   // 编码族之外的原有值（手工经 API 写入的自定义编码）：编辑时不丢
   const codecExtras = useMemo(
     () =>
-      (spec.video_codecs ?? []).filter(
+      ruleAtomValues(atoms, "video_codec").filter(
         (v) => !CODEC_FAMILIES.some((f) => f.values.includes(v)),
       ),
-    [spec],
+    [atoms],
   );
 
   // 常驻选项之外的既有平台值（经 API 配置的小众平台）：编辑时不丢
   const platformExtras = useMemo(
     () => ({
-      allow: (spec.platforms ?? []).filter((v) => !PLATFORM_OPTIONS.includes(v)),
-      block: (spec.platforms_block ?? []).filter((v) => !PLATFORM_OPTIONS.includes(v)),
+      allow: ruleAtomValues(atoms, "platform").filter((v) => !PLATFORM_OPTIONS.includes(v)),
+      block: ruleAtomValues(atoms, "platform", true).filter((v) => !PLATFORM_OPTIONS.includes(v)),
     }),
-    [spec],
+    [atoms],
   );
 
   const platformState = (value: string): "off" | "include" | "exclude" =>
@@ -632,116 +603,59 @@ export function RuleSetEditorDialog({
     });
 
   /**
-   * 表单状态 → spec 的**唯一**构造点：保存与底部"这条规则会这样筛选"共用它，
+   * 表单状态 → atoms 的**唯一**构造点：保存与底部"这条规则会这样筛选"共用它，
    * 保证用户看到的摘要就是将要存下去的东西。校验错误随返回值给出——memo 里
    * 不能 setState，也正好把校验变成纯函数。
    */
-  const draft = useMemo<{ spec: RuleSetSpec; error: string | null }>(() => {
-    const parseInt_ = (text: string): number | undefined => {
-      const n = Number.parseInt(text.trim(), 10);
-      return Number.isFinite(n) && n >= 0 ? n : undefined;
+  const draft = useMemo<{ atoms: RuleSetAtom[]; error: string | null }>(() => {
+    const next: RuleSetAtom[] = [];
+    const add = (kind: Exclude<RuleSetAtom["kind"], "hr">, values: string[], exclude = false) => {
+      values.forEach((value, index) => next.push({ kind, value, exclude, priority: (values.length - index) * 50 }));
     };
-    const parseGroups = (text: string): string[] =>
-      text
-        .split(/[,，、\s]+/)
-        .map((g) => g.trim())
-        .filter(Boolean);
-
-    const next: RuleSetSpec = {};
-    if (resolutions.length) next.resolutions = resolutions;
-    if (mediaSources.length) next.media_sources = mediaSources;
-    const codecs = [
-      ...CODEC_FAMILIES.filter((f) => codecFamilies.has(f.label)).flatMap((f) => f.values),
-      ...codecExtras,
-    ];
-    if (codecs.length) next.video_codecs = codecs;
-    // 与缺省一致就不写进 spec——spec 只记录用户真的改过的东西
-    if (upgradeSource !== "" && !sameLadder(upgradeLadder, DEFAULT_LADDER)) {
-      next.upgrade_ladder = upgradeLadder;
-    }
-    const allowPlatforms = [...platformsAllow, ...platformExtras.allow];
-    if (allowPlatforms.length) next.platforms = allowPlatforms;
-    const blockPlatforms = [...platformsBlock, ...platformExtras.block];
-    if (blockPlatforms.length) next.platforms_block = blockPlatforms;
-    // 只写新键：旧的 hdr/dv 由后端在校验层反向回填（回退兼容），前端不掺和
-    if (hdrLevels.length) next.hdr_levels = hdrLevels;
-    if (hdrBlock.length) next.hdr_block = hdrBlock;
-    if (subLangs.length) next.subtitle_languages_require = subLangs;
-    if (audioLangs.length) next.audio_languages_require = audioLangs;
-    if (freeOnly) next.free_only = true;
-    if (excludeHr) {
-      next.exclude_hr = true;
-      if (hrStrict) next.hr_unknown_policy = "strict";
-    }
-    const seeders = parseInt_(minSeeders);
-    if (seeders !== undefined && seeders > 0) next.min_seeders = seeders;
-    const min = parseInt_(sizeMin);
-    const max = parseInt_(sizeMax);
-    if (min !== undefined && min > 0) next.size_min_mb = min;
-    if (max !== undefined && max > 0) next.size_max_mb = max;
-    if (min !== undefined && max !== undefined && min > 0 && max > 0 && min > max) {
-      return { spec: next, error: "体积下限不能大于上限" };
-    }
-    const allow = parseGroups(groupsAllow);
-    const block = parseGroups(groupsBlock);
-    if (allow.length) next.release_groups_allow = allow;
-    if (block.length) next.release_groups_block = block;
+    const parseGroups = (text: string) => text.split(/[,，、\s]+/).map((value) => value.trim()).filter(Boolean);
+    const number = (text: string) => { const value = Number.parseInt(text, 10); return value > 0 ? value : undefined; };
+    add("resolution", resolutions);
+    add("source", mediaSources);
+    add("video_codec", [...CODEC_FAMILIES.filter((family) => codecFamilies.has(family.label)).flatMap((family) => family.values), ...codecExtras]);
+    add("platform", [...platformsAllow, ...platformExtras.allow]);
+    add("platform", [...platformsBlock, ...platformExtras.block], true);
+    add("team", parseGroups(groupsAllow));
+    add("team", parseGroups(groupsBlock), true);
+    add("hdr", hdrLevels);
+    add("hdr", hdrBlock, true);
+    add("subtitle_language", subLangs);
+    add("audio_language", audioLangs);
+    add("site", preferredSites);
+    if (freeOnly) next.push({ kind: "free", value: null, priority: 50 });
+    if (excludeHr) next.push({ kind: "hr", value: null, priority: 100, exclude: true, unknown: hrStrict ? "exclude" : "allow" });
+    const seeders = number(minSeeders);
+    if (seeders) add("min_seeders", [String(seeders)]);
+    const min = number(sizeMin), max = number(sizeMax);
+    if (min || max) add("size", [`${min ?? 0}-${max ?? ""}`]);
+    if (min && max && min > max) return { atoms: next, error: "体积下限不能大于上限" };
     if (upgradeSource) {
-      if (mediaSources.length && !mediaSources.includes(upgradeSource)) {
-        return { spec: next, error: "洗版目标片源必须在允许的片源范围内" };
-      }
-      next.upgrade_source = upgradeSource as RuleSetSpec["upgrade_source"];
-      // 目标分辨率仅在偏离缺省（分辨率偏好首选）时写入；限定了分辨率时
-      // 目标必须落在允许范围内（后端同样校验）
-      if (cutoffResolution && cutoffResolution !== (resolutions[0] ?? "")) {
-        if (resolutions.length && !resolutions.includes(cutoffResolution)) {
-          return { spec: next, error: "洗版目标分辨率必须在允许的分辨率范围内" };
-        }
-        next.cutoff_resolution = cutoffResolution;
-      }
-      if (upgradeKeepOld) next.upgrade_keep_old = true;
+      if (mediaSources.length && !mediaSources.includes(upgradeSource)) return { atoms: next, error: "洗版目标片源必须在允许的片源范围内" };
+      if (cutoffResolution && resolutions.length && !resolutions.includes(cutoffResolution)) return { atoms: next, error: "洗版目标分辨率必须在允许的分辨率范围内" };
+      add("wash_target", [`${cutoffResolution || resolutions[0] || "1080p"} ${upgradeSource}`]);
+      if (!sameLadder(upgradeLadder, DEFAULT_LADDER)) add("upgrade_ladder", [upgradeLadder.join(",")]);
     }
-    if (preferredSites.length) next.sites = preferredSites;
-    return { spec: next, error: null };
-  }, [
-    resolutions,
-    mediaSources,
-    codecFamilies,
-    codecExtras,
-    upgradeSource,
-    upgradeLadder,
-    platformsAllow,
-    platformsBlock,
-    platformExtras,
-    hdrLevels,
-    hdrBlock,
-    subLangs,
-    audioLangs,
-    freeOnly,
-    excludeHr,
-    hrStrict,
-    minSeeders,
-    sizeMin,
-    sizeMax,
-    groupsAllow,
-    groupsBlock,
-    cutoffResolution,
-    upgradeKeepOld,
-    preferredSites,
-  ]);
+    return { atoms: next, error: null };
+  }, [resolutions, mediaSources, codecFamilies, codecExtras, platformsAllow, platformsBlock, platformExtras,
+    groupsAllow, groupsBlock, hdrLevels, hdrBlock, subLangs, audioLangs, preferredSites, freeOnly,
+    excludeHr, hrStrict, minSeeders, sizeMin, sizeMax, upgradeSource, cutoffResolution, upgradeLadder]);
 
   // Compare against the initial editor projection, including codec-family and
-  // default-control normalization, rather than reconstructing the stored spec.
-  const [initialDraftAtoms] = useState(() => specToAtoms(draft.spec));
+  // default-control normalization, rather than reconstructing the stored atoms.
+  const [initialDraftAtoms] = useState(() => draft.atoms);
 
   // 底部回执分两段：硬性筛选走芯片，洗版走阶梯（洗版开着时芯片里不再重复目标）
   const ladderPreview = useMemo(
-    () => upgradeLadderPreview(draft.spec, platformLabel),
-    [draft.spec],
+    () => upgradeLadderPreview(draft.atoms, platformLabel),
+    [draft.atoms],
   );
   const draftChips = useMemo(
-    () => specSummary(draft.spec, { withoutUpgrade: ladderPreview !== null }),
-    [draft.spec, ladderPreview],
+    () => ruleSetSummary(draft.atoms, { withoutUpgrade: ladderPreview !== null, keepOldVersions: upgradeKeepOld }),
+    [draft.atoms, ladderPreview, upgradeKeepOld],
   );
 
   const submit = async () => {
@@ -749,17 +663,16 @@ export function RuleSetEditorDialog({
       setError(draft.error);
       return;
     }
-    const next = draft.spec;
+    const next = ruleSetEditAtoms(atoms, initialDraftAtoms, draft.atoms);
     setBusy(true);
     setError(null);
     try {
       let saved: RuleSet;
       if (ruleSet === null) {
-        saved = await createRuleSet(name.trim(), next);
+        saved = await createRuleSet(name.trim(), next, upgradeKeepOld);
       } else {
         // 未修改的维度保留原始 priority/exclude；实际修改的值必须进入请求。
-        const atoms = ruleSetEditAtoms(ruleSet.atoms, initialDraftAtoms, specToAtoms(next));
-        saved = await updateRuleSet(ruleSet.id, name.trim(), next, atoms);
+        saved = await updateRuleSet(ruleSet.id, name.trim(), next, upgradeKeepOld);
       }
       onSaved(saved);
     } catch (e) {
@@ -1218,7 +1131,7 @@ export function RuleSetEditorDialog({
           </Field>
 
           {/* 配完给一句人话回执：新用户最缺的就是"我配的到底是什么"的确认。
-              内容来自与保存同一个 draft.spec，不会出现"看到的和存下去的不一样" */}
+              内容来自与保存同一个 draft.atoms，不会出现"看到的和存下去的不一样" */}
           <div className="rounded-xl bg-white/[0.03] px-4 py-3">
             <p className="text-caption text-[var(--text-faint)]">
               {ladderPreview ? "先这样筛掉不要的" : "这条规则会这样筛选"}
@@ -1263,7 +1176,7 @@ export function RuleSetEditorDialog({
  * 洗版阶梯预览：把"洗到哪一档"从一句话摊成一条**看得见的路**。
  *
  * 一句"洗到 1080p 蓝光 · DV"读不出洗版真正的两个后果，而它们恰恰是用户
- * 最该在按下保存之前知道的（docs/design/quality-upgrade.md §2.1 / §14.6）：
+ * 最该在按下保存之前知道的：
  *
  * - **终点之下还有多少档**：每上一档就是一次重复下载，多加一维阶梯的代价
  *   在这里才具体；

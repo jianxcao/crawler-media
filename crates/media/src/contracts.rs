@@ -6,6 +6,15 @@ use crate::client::TmdbError;
 
 pub(crate) fn json(body: &str) -> Result<Value, TmdbError> {
     let value: Value = serde_json::from_str(body)?;
+    if value.get("status_code").and_then(Value::as_i64) == Some(34) {
+        return Err(TmdbError::NotFound(
+            value
+                .get("status_message")
+                .and_then(Value::as_str)
+                .unwrap_or("Metadata resource does not exist")
+                .to_string(),
+        ));
+    }
     let rejected = match &value {
         Value::Array(rows) => rows.iter().any(error_envelope),
         _ => error_envelope(&value),

@@ -1,7 +1,6 @@
 use api::router;
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
-use image::{Rgba, RgbaImage};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::HashMap;

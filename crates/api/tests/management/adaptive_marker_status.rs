@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{LedgerId, Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
     let fetcher = Arc::new(Fixtures {
@@ -18,7 +19,10 @@ fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
     });
     let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
     let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let st = state(tmp.path(), fetcher, downloader);
+    let root = tmp.path().to_path_buf();
+    let st = std::thread::spawn(move || state(&root, fetcher, downloader))
+        .join()
+        .unwrap();
     (router(st), store)
 }
 
@@ -31,7 +35,7 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
     std::fs::create_dir_all(&tv_dir).unwrap();
 
     let strm_file = tv_dir.join("TestTV.S01E01.strm");
-    std::fs::write(&strm_file, "https://cdn.example.com/test/ep01.mkv\n").unwrap();
+    std::fs::write(&strm_file, "http://[invalid/test/ep01.mkv\n").unwrap();
 
     let media_id = MediaId::new();
     let media = Media {
@@ -49,20 +53,18 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
     };
     let media = store.ensure_media(media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: strm_file.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: media.id,
+            path: strm_file.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let libs = json_body(
         app.clone()
@@ -86,8 +88,8 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
         .unwrap();
 
     let refresh_url = format!(
-        "/api/v1/libraries/{tv_lib_id}/items/{}/chapters/refresh?season=1&episode=1",
-        media.id
+        "/api/v1/libraries/{tv_lib_id}/items/{}/chapters/refresh?file_id={}&season=1&episode=1",
+        media.id, file.file_id
     );
 
     let res1 = app
@@ -96,7 +98,7 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
             "POST",
             &refresh_url,
             Some("management-secret"),
-            Value::Null,
+            serde_json::json!({"capture_policy":"reuse_valid"}),
         ))
         .await
         .unwrap();
@@ -109,7 +111,7 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
             "POST",
             &refresh_url,
             Some("management-secret"),
-            Value::Null,
+            serde_json::json!({"capture_policy":"reuse_valid"}),
         ))
         .await
         .unwrap();

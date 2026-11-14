@@ -99,94 +99,8 @@ pub fn render_cover(
 
     // 2. 根据排版风格绘制卡片
     match options.style {
-        CoverStyle::MacaronCardSingle => {
-            // 支持三张海报叠加（多剧融合）；如果只有 1 部剧，底层自动生成半透明色调阴影卡片增强层次感
-            let card_size = (options.height as f32 * 0.72) as u32; // 正方形卡片（MoviePilot 经典 70% 高度）
-            let center_x = options.width as f32 * 0.72;
-            let center_y = options.height as f32 * 0.50;
-
-            // 裁切为正方形卡片并加圆角
-            let make_square_card = |img: &DynamicImage| -> Result<tiny_skia::Pixmap, CoverError> {
-                let (w, h) = (img.width(), img.height());
-                let min_side = w.min(h);
-                let cropped =
-                    img.crop_imm((w - min_side) / 2, (h - min_side) / 2, min_side, min_side);
-                let resized = cropped.resize_exact(
-                    card_size,
-                    card_size,
-                    image::imageops::FilterType::Lanczos3,
-                );
-                let raw_card = CanvasUtils::image_to_pixmap(&resized)?;
-                CanvasUtils::clip_rounded_rect(&raw_card, card_size as f32 * 0.16)
-            };
-
-            // 如果有至少 3 部作品海报，取前 3 部的海报；否则复用主海报
-            let p0 = &sources[0];
-            let p1 = sources.get(1).unwrap_or(p0);
-            let p2 = sources.get(2).unwrap_or(p1);
-
-            let card0 = make_square_card(p0)?; // 顶层主卡
-            let card1 = make_square_card(p1)?; // 中间层卡
-            let card2 = make_square_card(p2)?; // 底层卡
-
-            // 按照 MoviePilot 旋转与层叠顺序：底层 (36°)、中间层 (18°)、顶层 (0°)
-            CanvasUtils::draw_card_with_shadow(
-                &mut canvas,
-                &card2,
-                center_x,
-                center_y,
-                36.0,
-                16.0,
-                0.35,
-            )?;
-
-            CanvasUtils::draw_card_with_shadow(
-                &mut canvas,
-                &card1,
-                center_x,
-                center_y,
-                18.0,
-                18.0,
-                0.40,
-            )?;
-
-            CanvasUtils::draw_card_with_shadow(
-                &mut canvas,
-                &card0,
-                center_x,
-                center_y,
-                0.0,
-                24.0,
-                0.55,
-            )?;
-        }
-        CoverStyle::MultiPosterPile => {
-            // 最多取 3 张海报错落排列
-            let count = sources.len().min(3);
-            let card_w = (options.width as f32 * 0.26) as u32;
-            let card_h = (card_w as f32 * 1.45) as u32;
-
-            let offsets = [(0.60, 0.55, -12.0), (0.78, 0.56, 10.0), (0.69, 0.48, -2.0)];
-
-            for i in 0..count {
-                let img = &sources[i];
-                let resized =
-                    img.resize_exact(card_w, card_h, image::imageops::FilterType::Lanczos3);
-                let raw_card = CanvasUtils::image_to_pixmap(&resized)?;
-                let rounded_card = CanvasUtils::clip_rounded_rect(&raw_card, 22.0)?;
-
-                let (x_ratio, y_ratio, angle) = offsets[i % offsets.len()];
-                CanvasUtils::draw_card_with_shadow(
-                    &mut canvas,
-                    &rounded_card,
-                    options.width as f32 * x_ratio,
-                    options.height as f32 * y_ratio,
-                    angle,
-                    20.0,
-                    0.4,
-                )?;
-            }
-        }
+        CoverStyle::MacaronCardSingle => render_macaron_cards(&mut canvas, sources, options)?,
+        CoverStyle::MultiPosterPile => render_poster_pile(&mut canvas, sources, options)?,
     }
 
     // 3. 绘制文字排版（在左侧区域宽度的四分之一处水平垂直居中）
@@ -201,10 +115,12 @@ pub fn render_cover(
         options.title_en.as_deref(),
         font_bytes_zh,
         font_bytes_en,
-        left_center_x,
-        left_center_y,
-        zh_size,
-        en_size,
+        crate::text::TextLayout {
+            center_x: left_center_x,
+            center_y: left_center_y,
+            zh_size,
+            en_size,
+        },
     )?;
 
     // 4. 将最终画布转回 DynamicImage (RgbImage 用于 JPEG 输出兼容性)
@@ -215,4 +131,75 @@ pub fn render_cover(
             })?;
     let dyn_rgba = DynamicImage::ImageRgba8(rgba_buffer);
     Ok(DynamicImage::ImageRgb8(dyn_rgba.to_rgb8()))
+}
+
+fn render_macaron_cards(
+    canvas: &mut tiny_skia::Pixmap,
+    sources: &[DynamicImage],
+    options: &CoverOptions,
+) -> Result<(), CoverError> {
+    // 支持三张海报叠加（多剧融合）；如果只有 1 部剧，底层自动生成半透明色调阴影卡片增强层次感
+    let card_size = (options.height as f32 * 0.72) as u32; // 正方形卡片（MoviePilot 经典 70% 高度）
+    let center_x = options.width as f32 * 0.72;
+    let center_y = options.height as f32 * 0.50;
+
+    // 裁切为正方形卡片并加圆角
+    let make_square_card = |img: &DynamicImage| -> Result<tiny_skia::Pixmap, CoverError> {
+        let (w, h) = (img.width(), img.height());
+        let min_side = w.min(h);
+        let cropped = img.crop_imm((w - min_side) / 2, (h - min_side) / 2, min_side, min_side);
+        let resized =
+            cropped.resize_exact(card_size, card_size, image::imageops::FilterType::Lanczos3);
+        let raw_card = CanvasUtils::image_to_pixmap(&resized)?;
+        CanvasUtils::clip_rounded_rect(&raw_card, card_size as f32 * 0.16)
+    };
+
+    // 如果有至少 3 部作品海报，取前 3 部的海报；否则复用主海报
+    let p0 = &sources[0];
+    let p1 = sources.get(1).unwrap_or(p0);
+    let p2 = sources.get(2).unwrap_or(p1);
+
+    let card0 = make_square_card(p0)?; // 顶层主卡
+    let card1 = make_square_card(p1)?; // 中间层卡
+    let card2 = make_square_card(p2)?; // 底层卡
+
+    // 按照 MoviePilot 旋转与层叠顺序：底层 (36°)、中间层 (18°)、顶层 (0°)
+    CanvasUtils::draw_card_with_shadow(canvas, &card2, center_x, center_y, 36.0, 16.0, 0.35)?;
+
+    CanvasUtils::draw_card_with_shadow(canvas, &card1, center_x, center_y, 18.0, 18.0, 0.40)?;
+
+    CanvasUtils::draw_card_with_shadow(canvas, &card0, center_x, center_y, 0.0, 24.0, 0.55)?;
+    Ok(())
+}
+
+fn render_poster_pile(
+    canvas: &mut tiny_skia::Pixmap,
+    sources: &[DynamicImage],
+    options: &CoverOptions,
+) -> Result<(), CoverError> {
+    // 最多取 3 张海报错落排列
+    let count = sources.len().min(3);
+    let card_w = (options.width as f32 * 0.26) as u32;
+    let card_h = (card_w as f32 * 1.45) as u32;
+
+    let offsets = [(0.60, 0.55, -12.0), (0.78, 0.56, 10.0), (0.69, 0.48, -2.0)];
+
+    for i in 0..count {
+        let img = &sources[i];
+        let resized = img.resize_exact(card_w, card_h, image::imageops::FilterType::Lanczos3);
+        let raw_card = CanvasUtils::image_to_pixmap(&resized)?;
+        let rounded_card = CanvasUtils::clip_rounded_rect(&raw_card, 22.0)?;
+
+        let (x_ratio, y_ratio, angle) = offsets[i % offsets.len()];
+        CanvasUtils::draw_card_with_shadow(
+            canvas,
+            &rounded_card,
+            options.width as f32 * x_ratio,
+            options.height as f32 * y_ratio,
+            angle,
+            20.0,
+            0.4,
+        )?;
+    }
+    Ok(())
 }

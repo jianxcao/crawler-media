@@ -29,7 +29,6 @@ fn app(root: &std::path::Path) -> (axum::Router, ApiState) {
             bodies: HashMap::new(),
         }),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap();
     (router(state.clone()), state)
@@ -152,7 +151,6 @@ async fn actual_http_login_and_check_in_reject_login_forms_without_mutating_cred
         assert_eq!(
             state
                 .store()
-                .lock()
                 .get_site(id)
                 .unwrap()
                 .unwrap()
@@ -177,14 +175,7 @@ async fn actual_http_check_in_confirms_success_and_preserves_all_rotated_cookie_
     assert!(request.starts_with("POST /attendance.php"));
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(common::json_data(response).await["ok"], true);
-    let cookie = state
-        .store()
-        .lock()
-        .get_site(id)
-        .unwrap()
-        .unwrap()
-        .cookie
-        .unwrap();
+    let cookie = state.store().get_site(id).unwrap().unwrap().cookie.unwrap();
     for expected in ["uid=old", "pass=secret", "session=fresh", "token=fresh"] {
         assert!(cookie.contains(expected), "{cookie} lacks {expected}");
     }
@@ -206,7 +197,6 @@ async fn actual_http_login_verifies_existing_session_using_profile_success_selec
     assert_eq!(
         state
             .store()
-            .lock()
             .get_site(id)
             .unwrap()
             .unwrap()

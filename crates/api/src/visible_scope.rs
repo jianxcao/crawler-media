@@ -1,51 +1,74 @@
 //! Scoped visible media batch resolution.
 
-use std::collections::HashSet;
+use domain::{LibraryId, MediaId, UserId};
+use store::{Store, StoreError};
 
-use domain::{MediaId, UserId};
-use store::{LibraryPathScope, Store, StoreError, StrictOwner};
-
-pub struct VisibleScope {
-    pub media_ids: Vec<MediaId>,
+/// Libraries `user_id` may read, by persisted id.
+pub fn visible_library_ids(store: &Store, user_id: UserId) -> Result<Vec<LibraryId>, StoreError> {
+    Ok(store
+        .list_libraries()?
+        .iter()
+        .filter(|lib| crate::http::library::library_visible(store, lib, Some(user_id)))
+        .filter_map(|lib| lib.id.parse().ok())
+        .collect())
 }
 
-impl VisibleScope {
-    pub fn load(store: &Store, user_id: UserId) -> Result<Self, StoreError> {
-        let snapshot = store.library_ownership()?;
-        let visible_libs: HashSet<String> = snapshot
-            .libraries()
-            .iter()
-            .filter(|lib| crate::http::library::library_visible(store, lib, Some(user_id)))
-            .map(|lib| lib.id.clone())
+/// Libraries a user may read, keyed by persisted id, loaded once per request.
+#[derive(Default)]
+pub struct VisibleLibraries {
+    libraries: std::collections::HashMap<LibraryId, store::Library>,
+}
+
+impl VisibleLibraries {
+    pub(crate) fn load_on(
+        store: &store::LibraryConnection<'_>,
+        user: Option<UserId>,
+        is_admin: bool,
+    ) -> Result<Self, StoreError> {
+        let libraries = store
+            .list_libraries()?
+            .into_iter()
+            .filter(|library| {
+                crate::http::library::library_visible_on(store, library, user, is_admin)
+            })
+            .filter_map(|library| Some((library.id.parse().ok()?, library)))
             .collect();
-
-        let scope = LibraryPathScope::resolve(snapshot)?;
-        let rows = store.list_ledger()?;
-        let media_ids: Vec<MediaId> = rows.iter().map(|r| r.media_id).collect();
-        let media_map = store.media_batch(&media_ids)?;
-
-        let mut media_set = HashSet::new();
-        for row in rows {
-            let Some(media) = media_map.get(&row.media_id) else {
-                continue;
-            };
-            let Ok(resolved) = LibraryPathScope::resolve_path(std::path::Path::new(&row.path)) else {
-                continue;
-            };
-            match scope.owner(&resolved, media.kind) {
-                StrictOwner::Owned(owner) if visible_libs.contains(&owner.id) => {
-                    media_set.insert(row.media_id);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(Self {
-            media_ids: media_set.into_iter().collect(),
-        })
+        Ok(Self { libraries })
     }
 
-    pub fn media_ids(&self) -> &[MediaId] {
-        &self.media_ids
+    pub fn load(store: &Store, user_id: Option<UserId>) -> Result<Self, StoreError> {
+        let libraries = store
+            .list_libraries()?
+            .into_iter()
+            .filter(|lib| crate::http::library::library_visible(store, lib, user_id))
+            .filter_map(|lib| Some((lib.id.parse().ok()?, lib)))
+            .collect();
+        Ok(Self { libraries })
+    }
+
+    pub fn ids(&self) -> Vec<LibraryId> {
+        let mut ids: Vec<LibraryId> = self.libraries.keys().copied().collect();
+        ids.sort_by_key(LibraryId::to_string);
+        ids
+    }
+
+    pub fn get(&self, id: &LibraryId) -> Option<&store::Library> {
+        self.libraries.get(id)
+    }
+
+    /// Published files of `media` owned (persisted `library_id`) by a visible library
+    /// that `keep` accepts. One indexed read by Media, never a whole-ledger scan.
+    pub fn media_coverage(
+        &self,
+        store: &Store,
+        media: MediaId,
+        keep: impl Fn(&store::Library) -> bool,
+    ) -> Result<Vec<domain::FileCoverage>, StoreError> {
+        Ok(store
+            .file_coverage_for_media(media)?
+            .into_iter()
+            .filter(|cov| cov.file.publication == domain::FilePublication::Published)
+            .filter(|cov| self.get(&cov.file.library_id).is_some_and(&keep))
+            .collect())
     }
 }

@@ -138,11 +138,15 @@ pub async fn create_filter(
         "atoms": atoms
             .iter()
             .map(|atom| {
-                json!({
+                let mut value = json!({
                     "kind": atom.kind,
                     "value": atom.value,
                     "priority": atom.priority,
-                })
+                });
+                if atom.kind == "hr" {
+                    value["unknown"] = json!("allow");
+                }
+                value
             })
             .collect::<Vec<Value>>(),
     });

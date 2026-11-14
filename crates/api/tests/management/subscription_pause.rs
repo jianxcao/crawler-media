@@ -33,7 +33,6 @@ async fn pausing_during_site_search_prevents_the_search_from_adding_torrents() {
             ProfileSet::load(None).unwrap(),
             fetcher,
             downloader.clone(),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );
@@ -125,7 +124,6 @@ async fn manual_search_rejects_a_paused_subscription() {
             ProfileSet::load(None).unwrap(),
             fetcher,
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );
@@ -239,7 +237,6 @@ async fn deletion_fixture(root: &Path) -> DeletionFixture {
             ProfileSet::load(None).unwrap(),
             fetcher,
             downloader.clone(),
-            root.join("library"),
         )
         .unwrap(),
     );
@@ -293,9 +290,13 @@ struct GatedDownloader {
 
 impl Downloader for GatedDownloader {
     fn add(&self, torrent: &domain::Torrent) -> Result<(), DownloaderError> {
-        if let Some(started) = self.started.lock().take() {
+        let started = { self.started.lock().take() };
+        if let Some(started) = started {
+            let resume = { self.resume.lock().take().unwrap() };
             started.send(()).unwrap();
-            self.resume.lock().take().unwrap().recv().unwrap();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the gated downloader");
         }
         self.inner.add(torrent)
     }
@@ -335,9 +336,12 @@ struct PauseGateFetcher {
 
 impl Fetcher for PauseGateFetcher {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
-        if let Some(resume) = self.resume.lock().take() {
+        let resume = { self.resume.lock().take() };
+        if let Some(resume) = resume {
             self.started.lock().take().unwrap().send(()).unwrap();
-            resume.recv().unwrap();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the gated fetcher");
         }
         Ok(super::common::nexusphp().to_string())
     }

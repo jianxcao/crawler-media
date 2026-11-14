@@ -15,7 +15,7 @@ async fn completion_marker_resets_and_is_deleted_with_subscription() {
     let window = json!({ "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 1 });
     let id = tv_subscribe(&h, window, json!({})).await;
     let key = format!("subscribe.completed:{id}");
-    let marker = |h: &Harness| h.state.store().lock().get_setting(&key).unwrap();
+    let marker = |h: &Harness| h.state.store().get_setting(&key).unwrap();
     h.set_search_rows(&[(E01, 1)]);
     h.scheduled_search(id).await.unwrap();
     let video = probed_video(1080, "h264", false);
@@ -32,7 +32,7 @@ async fn completion_marker_resets_and_is_deleted_with_subscription() {
     h.scheduled_search(id).await.unwrap();
     assert!(marker(&h).is_none(), "marker reset when an episode is gone");
 
-    h.state.store().lock().put_setting(&key, "1").unwrap();
-    assert!(h.state.store().lock().delete_subscribe(id).unwrap());
+    h.state.store().put_setting(&key, "1").unwrap();
+    assert!(h.state.store().delete_subscribe(id).unwrap());
     assert!(marker(&h).is_none(), "no marker left after delete");
 }

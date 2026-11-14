@@ -1,10 +1,10 @@
 use domain::UserId;
 use rusqlite::{OptionalExtension, params};
 
-use super::{Store, StoreError};
+use super::StoreError;
 use crate::users::SETTING_CLI_TOKEN;
 
-impl Store {
+impl crate::writers::App<'_> {
     fn revoked_list(&self) -> Result<Vec<String>, StoreError> {
         Ok(self
             .get_setting("playback.revoked_devices")?
@@ -15,10 +15,40 @@ impl Store {
     fn revoked_device_key(user_id: UserId, device_id: &str) -> String {
         format!("{user_id}:{device_id}")
     }
+}
 
+fn valid_device_identity(device_id: &str) -> bool {
+    !device_id.trim().is_empty()
+        && device_id != "jellyfin-client"
+        && !device_id.starts_with("unidentified:")
+}
+
+impl crate::writers::App<'_> {
     pub fn is_device_revoked(&self, user_id: UserId, device_id: &str) -> Result<bool, StoreError> {
         let key = Self::revoked_device_key(user_id, device_id);
         Ok(self.revoked_list()?.iter().any(|id| id == &key))
+    }
+
+    /// Whether this authenticated device has a new ordinary credential to record.
+    /// This read also keeps CLI and already observed requests off the writer.
+    pub fn playback_credential_needs_binding(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        token: &str,
+    ) -> Result<bool, StoreError> {
+        if !valid_device_identity(device_id) {
+            return Ok(false);
+        }
+        Ok(self.app.query_row(
+            "SELECT EXISTS(SELECT 1 FROM user_tokens t
+             WHERE t.user_id=?1 AND t.token=?3
+             AND t.token <> COALESCE((SELECT value FROM settings WHERE key=?4), '')
+             AND NOT EXISTS(SELECT 1 FROM playback_device_credentials c
+                 WHERE c.user_id=t.user_id AND c.device_id=?2 AND c.token=t.token))",
+            params![user_id.to_string(), device_id, token, SETTING_CLI_TOKEN],
+            |row| row.get(0),
+        )?)
     }
 
     /// Record an observed authenticated protocol credential, never a CLI token.
@@ -44,7 +74,7 @@ impl Store {
     }
 
     pub fn revoke_device(&self, user_id: UserId, device_id: &str) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(self.app)?;
         let tokens = {
             let mut stmt = tx.prepare(
                 "SELECT c.token FROM playback_device_credentials c JOIN user_tokens t
@@ -118,8 +148,4 @@ impl Store {
     }
 }
 
-fn valid_device_identity(device_id: &str) -> bool {
-    !device_id.trim().is_empty()
-        && device_id != "jellyfin-client"
-        && !device_id.starts_with("unidentified:")
-}
+mod app_access;

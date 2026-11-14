@@ -37,7 +37,8 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let unavailable = self.status == StatusCode::SERVICE_UNAVAILABLE;
+        let mut response = (
             self.status,
             Json(json!({
                 "ok": false,
@@ -47,16 +48,34 @@ impl IntoResponse for ApiError {
                 }
             })),
         )
-            .into_response()
+            .into_response();
+        if unavailable {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "store.error",
-            message: error.to_string(),
+        match error {
+            StoreError::WriteBusy
+            | StoreError::ReadBusy
+            | StoreError::ReadClosed
+            | StoreError::ReadDeadline
+            | StoreError::ReadCancelled => Self::with(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请稍后重试".into(),
+            ),
+            error => Self::with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                error.to_string(),
+            ),
         }
     }
 }

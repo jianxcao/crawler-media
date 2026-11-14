@@ -8,6 +8,7 @@
 
 use jobs::JobKind;
 use serde::Deserialize;
+use store::RetentionClass;
 
 /// 维护 payload 的 schema 版本。升版本时必须同时提供旧版本读取路径。
 pub const POLICY_VERSION: u32 = 1;
@@ -23,6 +24,9 @@ pub const DEFAULT_DATA_RETENTION_INTERVAL_SECS: u64 = 86_400;
 
 /// DB-05 三类历史的默认窗口（设计固定 90 天）。
 pub const DEFAULT_DATA_RETENTION_DAYS: u32 = 90;
+/// operation 历史行（扫描/重配置/合并/删除作业）默认保留 30 天：它们只用于审计与本轮
+/// 收敛，超过一个月就没有读者，却持续占据 browse 读取的热表表头。
+pub const DEFAULT_OPERATIONS_RETENTION_DAYS: u32 = 30;
 
 /// 维护任务的执行周期范围（只对维护任务生效，其他任务契约不变）。
 pub const MIN_MAINTENANCE_INTERVAL_SECS: u64 = 3_600;
@@ -65,7 +69,7 @@ pub struct PlaybackHistoryRetentionPolicy {
     pub dry_run: bool,
 }
 
-/// DB-05：分类历史保留。三个窗口各自独立；策略只存这份 payload。
+/// DB-05：分类历史保留。每个窗口各自独立；策略只存这份 payload。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataRetentionPolicy {
     pub version: u32,
@@ -73,6 +77,22 @@ pub struct DataRetentionPolicy {
     pub qoe_days: u32,
     pub transient_cache_days: u32,
     pub probe_days: u32,
+    pub operations_days: u32,
+}
+
+impl DataRetentionPolicy {
+    /// 该类别生效的保留天数。
+    ///
+    /// 映射属于策略本身（字段就在这个结构里），所以它是方法而不是自由函数：新增类别时
+    /// 编译器会在这里报缺分支，而不是让某个调用方悄悄少算一类。
+    pub fn days_for(&self, class: RetentionClass) -> u32 {
+        match class {
+            RetentionClass::Qoe => self.qoe_days,
+            RetentionClass::TransientCatalog => self.transient_cache_days,
+            RetentionClass::ProbeHistory => self.probe_days,
+            RetentionClass::Operations => self.operations_days,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,8 +106,8 @@ pub enum MaintenancePolicy {
 impl MaintenancePolicy {
     /// 按任务类型解析并校验 payload。
     pub fn parse(kind: JobKind, json: &str) -> Result<Self, String> {
-        let value: serde_json::Value =
-            serde_json::from_str(json).map_err(|error| format!("维护配置不是合法 JSON: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("维护配置不是合法 JSON: {error}"))?;
         let version = value
             .get("version")
             .and_then(serde_json::Value::as_u64)
@@ -128,12 +148,14 @@ impl MaintenancePolicy {
                 validate_retention_days(raw.qoe_days)?;
                 validate_retention_days(raw.transient_cache_days)?;
                 validate_retention_days(raw.probe_days)?;
+                validate_retention_days(raw.operations_days)?;
                 Ok(Self::DataRetention(DataRetentionPolicy {
                     version: POLICY_VERSION,
                     dry_run: raw.dry_run,
                     qoe_days: raw.qoe_days,
                     transient_cache_days: raw.transient_cache_days,
                     probe_days: raw.probe_days,
+                    operations_days: raw.operations_days,
                 }))
             }
             other => Err(format!("{} 不是维护任务", other.as_str())),
@@ -180,6 +202,14 @@ struct RawDataRetention {
     qoe_days: u32,
     transient_cache_days: u32,
     probe_days: u32,
+    /// 缺省即 30 天：已经落库的 payload 没有这个字段，必须继续可用（NDJSON/DB 里的
+    /// def 是持久数据，不是本轮进程的写法）。
+    #[serde(default = "default_operations_days")]
+    operations_days: u32,
+}
+
+fn default_operations_days() -> u32 {
+    DEFAULT_OPERATIONS_RETENTION_DAYS
 }
 
 #[derive(Deserialize)]

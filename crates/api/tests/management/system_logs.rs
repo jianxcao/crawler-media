@@ -44,6 +44,17 @@ async fn system_logs_flow() {
         .unwrap();
     assert_eq!(unauthed.status(), StatusCode::UNAUTHORIZED);
 
+    // Legacy aliases are gone: only target/q filter the log view.
+    for legacy in ["module=indexer", "keyword=cookie"] {
+        let req = Request::builder()
+            .uri(format!("/api/v1/system/logs?{legacy}"))
+            .header(header::AUTHORIZATION, "Bearer management-secret")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{legacy}");
+    }
+
     // 2. Authenticated as Admin -> 200 list
     let list_req = Request::builder()
         .uri("/api/v1/system/logs")
@@ -89,18 +100,7 @@ async fn system_logs_flow() {
             .contains("cookie")
     );
 
-    // 5. Export plain text
-    let export_req = Request::builder()
-        .uri("/api/v1/system/logs/export")
-        .header(header::AUTHORIZATION, "Bearer management-secret")
-        .body(Body::empty())
-        .unwrap();
-    let res = app.clone().oneshot(export_req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(text.contains("Scanning subscriptions"));
-    assert!(text.contains("Site login cookie expired"));
+    assert_log_export(&app).await;
 
     // 6. Clear logs
     let clear_req = Request::builder()
@@ -122,4 +122,19 @@ async fn system_logs_flow() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = json_body(res).await;
     assert_eq!(body["data"]["total"], 0);
+}
+
+async fn assert_log_export(app: &axum::Router) {
+    // 5. Export plain text
+    let export_req = Request::builder()
+        .uri("/api/v1/system/logs/export")
+        .header(header::AUTHORIZATION, "Bearer management-secret")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(export_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("Scanning subscriptions"));
+    assert!(text.contains("Site login cookie expired"));
 }

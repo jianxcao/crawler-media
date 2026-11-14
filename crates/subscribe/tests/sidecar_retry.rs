@@ -1,7 +1,8 @@
+use domain::SubscribeFacts;
 use domain::{Media, MediaId, MediaKind, Torrent};
 use downloader::{Downloader, DownloaderError};
 use std::path::PathBuf;
-use subscribe::{Added, RunInput, SubscribeFacts, collect_completed_with_destinations};
+use subscribe::{Added, RunInput, collect_completed_with_destinations};
 
 struct MockDownloader {
     files: Vec<PathBuf>,
@@ -67,7 +68,7 @@ fn make_movie_fixtures() -> (Media, domain::Subscribe, domain::Filter, Torrent) 
         size_bytes: Some(1024),
         seeders: Some(10),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -95,8 +96,8 @@ fn make_added<'a>(
         rejected: vec![],
         outcome: subscribe::RunOutcome {
             facts: Default::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],

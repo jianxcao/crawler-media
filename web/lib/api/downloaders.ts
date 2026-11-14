@@ -2,9 +2,7 @@ import { request } from "@/lib/http";
 
 /** 后端统一响应信封 */
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 
@@ -41,9 +39,6 @@ export interface Downloader {
   last_error?: string | null;
 }
 
-/** 兼容导出名：组件 import type { ConfiguredDownloader }。 */
-export type ConfiguredDownloader = Downloader;
-
 /**
  * 一条路径映射（表单编辑用）：本机视角的目录前缀 → 下载器视角的对应前缀。
  * 提交时由 API 层反向转成 PathMap（{local, remote} → {from: remote, to: local}）。
@@ -75,63 +70,18 @@ export type DownloadTaskState =
   | "missing"
   | "unknown";
 
-/** 追踪单元的工单状态；分批入库时同一个种子里各集会停在不同状态。 */
-export type DownloadTaskUnitStatus = "wanted" | "grabbed" | "downloaded" | "imported";
-
-/** 任务关联的订阅引用（新契约恒为数组，可为空；元素形状由组件适配阶段收敛）。 */
+/** 任务关联的订阅身份；只包含服务端实际返回的字段。 */
 export interface DownloadTaskSubscription {
   id: string;
-  media_item_id: number;
+  media_item_id: string;
   media_title: string;
   media_kind: string;
-  poster_url: string | null;
-  /**
-   * 投递目的。洗版（upgrade）任务要洗的集在投递前就已入库，"已入库"是前提
-   * 而不是成果——进度必须改用 `units[].replaced` 的替换口径讲，否则会出现
-   * 「有 16 集已入库」配 0% 进度的自相矛盾。
-   */
-  purpose: "download" | "upgrade";
-  /**
-   * 洗版成功后是否保留旧版本共存（规则组的收藏家模式）。
-   * false=旧版本移入回收站、保留期满自动清理——替换发生前就要说清楚。
-   */
-  upgrade_keep_old: boolean;
-  /** 种子声明覆盖的**全集**（含已入库的集），不是"还欠哪些集"。 */
-  units: {
-    season_number: number;
-    episode_number: number;
-    status: DownloadTaskUnitStatus;
-    /** 洗版任务专用：该集是否已被本种子替换完成；补缺下载恒为 false。 */
-    replaced: boolean;
-    /**
-     * 内容核验证明种子里没有这一集（声明的覆盖范围与实际文件不符）。这一集
-     * 已退回重新寻找资源，等这个种子永远等不到——卡片要显示为需关注。
-     */
-    content_missing: boolean;
-  }[];
-}
-
-/**
- * 下载完成后**还没发生**的那段路，由后端按当前媒体库与监听导入配置推导。
- * 任务中心据此把「等待入库 · 下一步」换成真实步骤链；推不出时整体为 null。
- */
-export interface DownloadTaskPlan {
-  /** watch=监听导入搬运；inplace=已在库内目录，扫描即入账；downloader_default=不会自动入库 */
-  mode: "watch" | "inplace" | "downloader_default";
-  /** 搬运策略；mode=watch 才有 */
-  strategy: "hardlink" | "copy" | null;
-  /** 目标库名；库未定或不进库时为 null */
-  library_name: string | null;
-  /** 落点目录 */
-  dest_path: string | null;
-  /** 整理后是否进入媒体库（自定义目录规则为 false） */
-  enters_library: boolean;
 }
 
 /** 下载器实时任务（见 self.md Task）。subscriptions 恒为数组（可为空）。 */
 export interface DownloadTask {
   id: string;
-  info_hash?: string | null;
+  info_hash: string | null;
   name: string | null;
   downloader_id: string | null;
   downloader_name: string | null;
@@ -145,30 +95,16 @@ export interface DownloadTask {
   /** 已完成字节；刷流分组汇总用，未知为 null */
   completed_bytes: number | null;
   state: DownloadTaskState;
-  /** state 为 error 时下载器给出的可读原因（文件缺失 / 出错详情）；其余为 null */
-  error_message?: string | null;
-  /** 来源站点 ID；投递的任务才有，外部任务为 null */
-  site_id?: string | null;
-  site_name?: string | null;
-  /** 投递时快照的画面规格（如 2160p）；未知为 null */
-  resolution?: string | null;
-  media_title?: string | null;
-  media_kind?: string | null;
+  site_id: string;
+  media_item_id: string | null;
+  media_title: string | null;
+  media_kind: string | null;
+  score: number;
   subscriptions: DownloadTaskSubscription[];
-}
-
-export interface DownloadTaskSource {
-  id: string;
-  name: string;
-  client_type: DownloaderClientType;
-  status: "active" | "disabled" | "unavailable" | "error";
-  message: string | null;
-  task_count: number;
 }
 
 export interface DownloadTaskSnapshot {
   items: DownloadTask[];
-  sources: DownloadTaskSource[];
 }
 
 /** 新增/更新下载器的请求体（表单形状；API 层转成 self.md DownloaderInput）。 */
@@ -198,7 +134,7 @@ function toDownloaderInput(payload: DownloaderPayload): Record<string, unknown> 
 }
 
 /** 列出所有已配置的下载器及连接状态。 */
-export function listDownloaders(init?: RequestInit): Promise<ConfiguredDownloader[]> {
+export function listDownloaders(init?: RequestInit): Promise<Downloader[]> {
   return unwrap(request<ApiEnvelope<Downloader[]>>("/downloaders", init));
 }
 
@@ -258,12 +194,12 @@ export function replaceDownloadTask(
 }
 
 /** 获取保存的下载器配置；GET 不执行测试，也不持久化手动测试结果。 */
-export function getDownloader(id: string, init?: RequestInit): Promise<ConfiguredDownloader> {
+function getDownloader(id: string, init?: RequestInit): Promise<Downloader> {
   return unwrap(request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, init));
 }
 
 /** 添加下载器配置，不自动测试连接。 */
-export function createDownloader(payload: DownloaderPayload): Promise<ConfiguredDownloader> {
+export function createDownloader(payload: DownloaderPayload): Promise<Downloader> {
   return unwrap(
     request<ApiEnvelope<Downloader>>("/downloaders", {
       method: "POST",
@@ -276,7 +212,7 @@ export function createDownloader(payload: DownloaderPayload): Promise<Configured
 export function updateDownloader(
   id: string,
   payload: DownloaderPayload,
-): Promise<ConfiguredDownloader> {
+): Promise<Downloader> {
   return unwrap(
     request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
       method: "PATCH",
@@ -285,54 +221,39 @@ export function updateDownloader(
   );
 }
 
-/** 下载器全局限制（见 schemas.downloader.DownloaderLimitsView）。
- *  限速单位字节/秒，null=不限；max_active_torrents 为 qBittorrent 独有。 */
+/** 下载器实际支持的全局限速，单位字节/秒；null 为不限。 */
 export interface DownloaderLimits {
   download_limit_bytes: number | null;
   upload_limit_bytes: number | null;
-  alt_speed_enabled: boolean | null;
-  queue_enabled: boolean | null;
-  max_active_downloads: number | null;
-  max_active_uploads: number | null;
-  max_active_torrents: number | null;
 }
 
-const UNLIMITED_LIMITS: DownloaderLimits = {
-  download_limit_bytes: null,
-  upload_limit_bytes: null,
-  alt_speed_enabled: null,
-  queue_enabled: null,
-  max_active_downloads: null,
-  max_active_uploads: null,
-  max_active_torrents: null,
-};
+export interface DownloaderLimitsSnapshot extends DownloaderLimits {
+  status: "available" | "unavailable";
+  error: string | null;
+}
 
 /**
- * 实时读取下载器的全局限速与任务队列上限。
+ * 实时读取下载器的全局限速。
  */
-export function getDownloaderLimits(id: string): Promise<DownloaderLimits> {
+export function getDownloaderLimits(id: string): Promise<DownloaderLimitsSnapshot> {
   const query = id ? `?id=${encodeURIComponent(id)}` : "";
   return unwrap(
-    request<ApiEnvelope<{ download_limit_bytes: number | null; upload_limit_bytes: number | null }>>(
+    request<ApiEnvelope<DownloaderLimitsSnapshot>>(
       `/downloaders/limits${query}`,
     ),
-  ).then((data) => ({
-    ...UNLIMITED_LIMITS,
-    download_limit_bytes: data.download_limit_bytes,
-    upload_limit_bytes: data.upload_limit_bytes,
-  }));
+  );
 }
 
 /**
- * 写入下载器全局限制，返回回读的生效值。限速 null=取消；其余 null=不改。
+ * 写入下载器全局限速，返回回读的生效值；null=取消限速。
  */
 export function setDownloaderLimits(
   id: string,
   limits: DownloaderLimits,
-): Promise<DownloaderLimits> {
+): Promise<DownloaderLimitsSnapshot> {
   const query = id ? `?id=${encodeURIComponent(id)}` : "";
   return unwrap(
-    request<ApiEnvelope<{ download_limit_bytes: number | null; upload_limit_bytes: number | null }>>(
+    request<ApiEnvelope<DownloaderLimitsSnapshot>>(
       `/downloaders/limits${query}`,
       {
         method: "PUT",
@@ -342,37 +263,11 @@ export function setDownloaderLimits(
         }),
       },
     ),
-  ).then((data) => ({
-    ...UNLIMITED_LIMITS,
-    download_limit_bytes: data.download_limit_bytes,
-    upload_limit_bytes: data.upload_limit_bytes,
-  }));
-}
-
-/**
- * 启用 / 停用下载器。停用后该下载器不再参与自动投递（手动提交仍可用）。
- */
-export function setDownloaderEnabled(id: string, enabled: boolean): Promise<ConfiguredDownloader> {
-  return getDownloader(id).then((downloader) =>
-    unwrap(
-      request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: downloader.name,
-          kind: downloader.kind,
-          url: downloader.url,
-          ...(downloader.username ? { username: downloader.username } : {}),
-          ...(downloader.category ? { category: downloader.category } : {}),
-          path_maps: downloader.path_maps,
-          enabled,
-        }),
-      }),
-    ),
   );
 }
 
 /** 设为默认下载器。注意：其他条目的 is_default 会随之变化，调用后应整体刷新列表。 */
-export function setDefaultDownloader(id: string): Promise<ConfiguredDownloader> {
+export function setDefaultDownloader(id: string): Promise<Downloader> {
   return getDownloader(id).then((downloader) =>
     unwrap(
       request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
@@ -396,8 +291,8 @@ import { verificationState } from "../downloader-verification";
 /** 手动测试已保存配置。结果仅用于当前页面，不能用 GET 的未测试状态回读覆盖。 */
 export async function reverifyDownloader(
   id: string,
-  downloader: ConfiguredDownloader,
-): Promise<ConfiguredDownloader> {
+  downloader: Downloader,
+): Promise<Downloader> {
   try {
     const result = await unwrap(
       request<ApiEnvelope<{ ok: boolean; error?: string | null }>>(`/downloaders/${id}/verify`, {
@@ -433,7 +328,7 @@ export interface DownloadSubmitPayload {
   /** 站点内种子 ID（TorrentHit.torrent_id）：任务中心据此提供「打开种子页」 */
   torrent_id?: string | null;
   /** 入库目标库（可选）：带上后保存目录由库推导（主根/标题 (年份)） */
-  library_id?: number | null;
+  library_id?: string | null;
   /** 种子体积（字节）；新契约 submit 接受，用于投递端展示/分流 */
   size_bytes?: number | null;
   /** 条目标题（推导条目子目录用；身份未确认时不要带） */
@@ -473,7 +368,7 @@ export interface ManualDownloadTarget {
   status: "ready" | "ambiguous" | "not_found";
   tmdb_id: number | null;
   candidates: ManualDownloadTargetCandidate[];
-  library_id: number | null;
+  library_id: string | null;
   library_name: string | null;
   mode: "watch" | "inplace" | "downloader_default" | null;
   path: string | null;
@@ -536,7 +431,7 @@ export function resolveManualDownloadTarget(payload: {
     status: data.ok ? ("ready" as const) : ("not_found" as const),
     tmdb_id: payload.selected_tmdb_id ?? null,
     candidates: [],
-    library_id: data.library_id != null ? Number(data.library_id) : null,
+    library_id: data.library_id,
     library_name: data.library_name,
     mode: data.mode,
     path: data.path,

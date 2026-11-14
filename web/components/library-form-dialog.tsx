@@ -16,21 +16,23 @@ import { Modal } from "@/components/modal";
 import { Tooltip } from "@/components/tooltip";
 import {
   type LibraryPayload,
+  type LibraryUpdatePayload,
   type MatchRule,
   type MediaLibrary,
   type RoutingOptions,
   createLibrary,
   listLibraryRoutingOptions,
-  updateLibrary,
+  updateLibraryAndWait,
   type LibraryAccessMode,
 } from "@/lib/api/libraries";
+import { operationLabel } from "@/lib/library-operations";
 import { listMembers, type MemberView } from "@/lib/api/members";
 import { listRuleSets, type RuleSet } from "@/lib/api/subscriptions";
 import type { LibraryKind } from "@/lib/media-types";
 
 /**
  * 媒体库表单弹窗（新建向导 / 编辑分区），从 library-view.tsx 拆出：
- * 首页只做浏览入口，建库与编辑落在管理页（docs/design/library-manage.md），
+ * 首页只做浏览入口，建库与编辑落在管理页，
  * 单库页头部的「编辑库」也用这里的 LibraryFormDialog。
  */
 /** 收藏范围可选项的模块级缓存：这是后端静态常量，但 useRoutingOptions 被
@@ -98,7 +100,7 @@ function regionLabels(regions: string[], options: RoutingOptions): string[] {
  * 新建只问必答题——类型、名称与目录、（影视库）收藏范围；四个扫描开关全有
  * 安全默认值，刮削偏好覆盖是少数人的精调，都放到编辑里。编辑按用途分区折叠，
  * 折叠态的摘要行先回答"这个库配成了什么样"，改哪项点哪项。
- * 设计稿：docs/design/library-other-kind.md 4.3 的表单节。 */
+ */
 
 const INPUT_CLASS =
   "w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-ui " +
@@ -149,6 +151,20 @@ function kindIsScraped(kind: LibraryKind): boolean {
  *  「最近添加」刷满；建好后可在编辑里打开。 */
 function kindExcludedFromHome(_kind: LibraryKind): boolean {
   return false;
+}
+
+/** 去掉尾部斜杠（保留根 `/`）：`/media/` 与 `/media` 是同一个目录，不该触发换根。 */
+function normalizeRoots(roots: string[]): string[] {
+  return roots.map((root) => {
+    const trimmed = root.trim().replace(/\/+$/, "");
+    return trimmed === "" ? "/" : trimmed;
+  });
+}
+
+/** 换根与否只比较规范化后的路径列表，顺序即优先级，顺序变了也是换根。 */
+function sameRoots(left: string[], right: string[]): boolean {
+  const normalized = normalizeRoots(right);
+  return left.length === normalized.length && left.every((root, index) => root === normalized[index]);
 }
 
 /** 根目录列表：第一项为主根；行内可原位更改、设为主根、移除。 */
@@ -511,14 +527,12 @@ function CreateLibraryDialog({
       match_rules: hasScope ? buildMatchRules(validGenres(kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,
       // 开关全按推荐值：监控开、自动清理关、封面开、场景图开、首页展示；建好后在编辑里调
-      auto_clear_missing: false,
       realtime_watch: true,
       generate_thumbnails: true,
       extract_chapter_images: true,
       exclude_from_home: kindExcludedFromHome(kind),
       detect_intros: false,
       enable_fingerprint: false,
-      scrape_overrides: {},
       access_mode: accessMode,
       admin_visible: adminVisible,
       member_ids: accessMode === "selected" ? memberIds : [],
@@ -752,7 +766,7 @@ function CreateLibraryDialog({
 type EditSectionId = "basic" | "scan" | "access" | "scope";
 
 /**
- * 可见范围编辑器（docs/design/library-access.md 2.1）：
+ * 可见范围编辑器：
  * 「所有成员」= 对全部成员自动开放（含以后新建的）；「指定成员」= 只对勾选的
  * 成员开放，名单第一项固定是「超管（我自己）」——超管不是成员，进不了白名单，
  * 单独一位存在 admin_visible 上，但对用户就是同一份名单。
@@ -1073,7 +1087,6 @@ function EditLibraryDialog({
   const [roots, setRoots] = useState<string[]>(library.root_paths);
   const [pickerTarget, setPickerTarget] = useState<"add" | number | null>(null);
   const [realtimeWatch, setRealtimeWatch] = useState(library.realtime_watch ?? true);
-  const [autoClearMissing, setAutoClearMissing] = useState(false);
   const [generateThumbnails, setGenerateThumbnails] = useState(library.generate_thumbnails ?? true);
   const [extractChapterImages, setExtractChapterImages] = useState(library.extract_chapter_images ?? true);
   const [excludeFromHome, setExcludeFromHome] = useState(library.exclude_from_home ?? kindExcludedFromHome(library.kind));
@@ -1091,6 +1104,7 @@ function EditLibraryDialog({
   // 展开的分区（同时只开一个）；默认全收起——摘要行已经把现状说清
   const [open, setOpen] = useState<EditSectionId | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const routingOptions = useRoutingOptions();
 
@@ -1109,13 +1123,16 @@ function EditLibraryDialog({
     if (!ready || busy) return;
     setBusy(true);
     setError(null);
-    const payload: LibraryPayload = {
+    setPending(null);
+    // 换目录是异步操作（202 + operation_id）：只有 root_paths 真的变了才带上这个字段，
+    // 否则后端会把「改名」也冻结整库去迁移文件归属。
+    const nextRoots = normalizeRoots(roots);
+    const rootsChanged = !sameRoots(nextRoots, library.root_paths);
+    const payload: LibraryUpdatePayload = {
       name: name.trim(),
-      kind: library.kind,
-      root_paths: roots,
+      ...(rootsChanged ? { root_paths: nextRoots } : {}),
       match_rules: scraped ? buildMatchRules(validGenres(library.kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,
-      auto_clear_missing: autoClearMissing,
       realtime_watch: realtimeWatch,
       generate_thumbnails: generateThumbnails,
       extract_chapter_images: extractChapterImages,
@@ -1127,10 +1144,15 @@ function EditLibraryDialog({
       detect_intros: detectIntros,
       enable_fingerprint: enableFingerprint,
     };
-    void updateLibrary(library.id, payload)
+    void updateLibraryAndWait(library.id, payload, {
+      onProgress: (operation) => setPending(operationLabel(operation)),
+    })
       .then(onSaved)
       .catch((e) => setError((e as Error).message))
-      .finally(() => setBusy(false));
+      .finally(() => {
+        setBusy(false);
+        setPending(null);
+      });
   };
 
   const dot = (on: boolean, text: string) => (
@@ -1177,7 +1199,6 @@ function EditLibraryDialog({
       summary: (
         <>
           {dot(realtimeWatch, "实时监控")}
-          {dot(autoClearMissing, "自动清理丢失")}
           {dot(
             generateThumbnails,
             scraped ? "抓帧补图" : playable ? "抓帧封面" : "缩略图",
@@ -1197,12 +1218,7 @@ function EditLibraryDialog({
               "新文件落盘后自动增量扫描入库。SMB/NFS 等网络挂载收不到远端变化通知、建立监听还很慢，建议关闭；关闭后由定期对账和手动扫描发现新文件，不实时但不会缺失。"
             }
           />
-          <SwitchRow
-            title="扫描后自动清理丢失记录"
-            checked={autoClearMissing}
-            onChange={setAutoClearMissing}
-            detail="自己在磁盘上删了片子后，扫描结束即把这些记录清出台账。只删记录、不动磁盘，但记录删了不可恢复——「缺失」清单里的「重新下载」也会随之消失。关闭时记录保留，文件回归自动恢复；目录读不动的那一轮不会清理。"
-          />
+
           <SwitchRow
             title={
               scraped
@@ -1394,7 +1410,7 @@ function EditLibraryDialog({
                 disabled={!ready || busy}
                 className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
               >
-                {busy ? "保存中…" : "保存"}
+                {busy ? (pending ?? "保存中…") : "保存"}
               </button>
             </div>
           </div>

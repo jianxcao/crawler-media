@@ -133,6 +133,7 @@ export function SystemLogsSection() {
       const url = exportLogsUrl();
       const token = typeof window !== "undefined" ? window.localStorage.getItem("mc_token") : null;
       const res = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!res.ok) throw new Error(`导出失败 (${res.status})`);

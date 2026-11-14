@@ -4,6 +4,6 @@ function readPublicEnv(key: string, fallback: string): string {
 }
 
 export const publicEnv = {
-  apiBaseUrl: readPublicEnv("VITE_API_BASE_URL", "/api/v1"),
+  apiBaseUrl: "/api/v1",
   appName: readPublicEnv("VITE_APP_NAME", "crawler-media console"),
 } as const;

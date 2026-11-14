@@ -6,12 +6,13 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use api::browse_file_read::BrowseFileRead;
+use api::file_stat_read::FileStatRead;
 use api::{ApiState, Store};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media_server::provider::MediaServerProvider;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -40,10 +41,16 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the listing gate");
     }
 
     fn entered(&self) -> bool {
@@ -71,7 +78,7 @@ struct BlockingFiles {
     gate: Arc<Gate>,
 }
 
-impl BrowseFileRead for BlockingFiles {
+impl FileStatRead for BlockingFiles {
     fn read_nfo(&self, path: &Path) -> Option<library::NfoMeta> {
         library::read_nfo(path)
     }
@@ -93,16 +100,15 @@ fn make_state(root: &Path, gate: Arc<Gate>) -> ApiState {
         ProfileSet::load(None).unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
     )
     .unwrap()
-    .with_browse_file_read(Arc::new(BlockingFiles { gate }))
+    .with_file_stat_read(Arc::new(BlockingFiles { gate }))
 }
 
 /// 默认 movie 库下写一个真实视频 + NFO + ledger 行；返回 admin 用户。
 fn seed(state: &ApiState, root: &Path) -> domain::UserId {
     let store = state.store();
-    let guard = store.lock();
+    let guard = store.as_ref();
     let library = guard
         .list_libraries()
         .unwrap()
@@ -138,9 +144,10 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
         anilist_id: None,
     };
     guard.insert_media(&media).unwrap();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        guard,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -151,8 +158,10 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     guard
         .user_id_by_token("management-secret")
         .unwrap()
@@ -161,7 +170,7 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(tmp.path(), gate.clone());
     let user_id = seed(&state, tmp.path());
@@ -181,7 +190,10 @@ async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
     {
         let store = state.store();
         assert!(
-            store.try_lock().is_some(),
+            store
+                .writers()
+                .with_writer_timeout(std::time::Duration::ZERO, store::Db::Library, |_| Ok(()))
+                .is_ok(),
             "metadata file IO must not run while the Store lock is held"
         );
     }
@@ -199,7 +211,7 @@ async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jellyfin_metadata_gate_does_not_block_async_worker() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let gate = Arc::new(Gate::new());
     let state = make_state(tmp.path(), gate.clone());
     let user_id = seed(&state, tmp.path());
@@ -216,10 +228,13 @@ async fn jellyfin_metadata_gate_does_not_block_async_worker() {
     let _release = ReleaseOnDrop(gate.clone());
 
     let user_provider = api::media_server_provider::ApiServerProvider::new(state);
-    let unrelated = tokio::time::timeout(Duration::from_secs(1), user_provider.get_user(user_id)).await;
-    assert!(unrelated.is_ok(), "unrelated provider request stalled behind metadata IO");
+    let unrelated =
+        tokio::time::timeout(Duration::from_secs(1), user_provider.get_user(user_id)).await;
+    assert!(
+        unrelated.is_ok(),
+        "unrelated provider request stalled behind metadata IO"
+    );
     assert!(unrelated.unwrap().unwrap().is_some());
     gate.release();
     assert_eq!(listing.await.unwrap().unwrap().len(), 1);
 }
-

@@ -2,9 +2,9 @@ use domain::DownloaderId;
 use downloader::PathMap;
 use rusqlite::{OptionalExtension, params};
 
-use super::{Store, StoreError};
+use super::StoreError;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DownloaderRow {
     pub id: DownloaderId,
     pub name: String,
@@ -39,36 +39,6 @@ impl std::fmt::Debug for DownloaderRow {
             .field("is_default", &self.is_default)
             .field("enabled", &self.enabled)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod debug_tests {
-    use super::DownloaderRow;
-    use domain::DownloaderId;
-
-    #[test]
-    fn debug_never_prints_the_password() {
-        let row = DownloaderRow {
-            id: DownloaderId::new(),
-            name: "qbit".into(),
-            kind: "qbittorrent".into(),
-            url: "http://127.0.0.1:8080".into(),
-            username: Some("admin".into()),
-            password: Some("downloader-password-secret".into()),
-            category: Some("movies".into()),
-            path_maps: Vec::new(),
-            is_default: true,
-            enabled: true,
-        };
-        let rendered = format!("{row:?}");
-        assert!(
-            !rendered.contains("downloader-password-secret"),
-            "Debug 不得输出 password: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
-        assert!(rendered.contains("qbit"), "{rendered}");
     }
 }
 
@@ -112,7 +82,64 @@ fn maps_json(maps: &[PathMap]) -> String {
     .to_string()
 }
 
-impl Store {
+#[cfg(test)]
+mod debug_tests {
+    use super::DownloaderRow;
+    use domain::DownloaderId;
+
+    #[test]
+    fn debug_never_prints_the_password() {
+        let row = DownloaderRow {
+            id: DownloaderId::new(),
+            name: "qbit".into(),
+            kind: "qbittorrent".into(),
+            url: "http://127.0.0.1:8080".into(),
+            username: Some("admin".into()),
+            password: Some("downloader-password-secret".into()),
+            category: Some("movies".into()),
+            path_maps: Vec::new(),
+            is_default: true,
+            enabled: true,
+        };
+        let rendered = format!("{row:?}");
+        assert!(
+            !rendered.contains("downloader-password-secret"),
+            "Debug 不得输出 password: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
+        assert!(rendered.contains("qbit"), "{rendered}");
+    }
+}
+
+impl crate::writers::App<'_> {
+    /// Verify status and error are one result of one exact observed configuration.
+    /// An IMMEDIATE transaction prevents another connection changing config between
+    /// the comparison and status publication; any second-statement failure rolls back.
+    pub fn record_downloader_verification(
+        &self,
+        expected: &DownloaderRow,
+        outcome: Result<(), &str>,
+    ) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.app)?;
+        if self.get_downloader(expected.id)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.put_setting(
+            &format!("downloader.{}.verified", expected.id),
+            if outcome.is_ok() { "true" } else { "false" },
+        )?;
+        let error_key = format!("downloader.{}.last_error", expected.id);
+        match outcome {
+            Ok(()) => {
+                self.delete_setting(&error_key)?;
+            }
+            Err(error) => self.put_setting(&error_key, error)?,
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn insert_downloader(&self, row: &DownloaderRow) -> Result<(), StoreError> {
         if row.is_default {
             self.app
@@ -232,3 +259,5 @@ impl Store {
         Ok(true)
     }
 }
+
+mod app_access;

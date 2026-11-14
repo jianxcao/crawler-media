@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useState } from "react";
 
 import { Link } from "react-router-dom";
@@ -221,7 +222,7 @@ function LibraryThumb({ library, Icon }: { library: MediaLibrary; Icon: typeof M
   return (
     <div className="relative h-11 w-[72px] shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0c0f17]">
       {showImage ? (
-        <img
+        <ArtworkImage
           src={coverSrc}
           alt=""
           loading="lazy"

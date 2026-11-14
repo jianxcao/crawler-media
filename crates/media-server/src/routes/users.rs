@@ -1,9 +1,9 @@
 //! Jellyfin/Emby user profile, views, folders and display preferences.
 
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,7 +23,13 @@ pub(super) async fn user_profile(
     Extension(user): Extension<AuthUser>,
     Path(path): Path<UserPath>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
     let user_row = state
         .provider
         .get_user(user.id)
@@ -42,7 +48,13 @@ pub(super) async fn user_views(
     Path(path): Path<UserPath>,
     Query(query): Query<ViewsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
     let libraries = state
         .provider
         .list_visible_libraries(user.id)
@@ -120,32 +132,24 @@ pub(super) async fn item_counts(
     Extension(user): Extension<AuthUser>,
     Path(path): Path<UserPath>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
-    let items = state
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
+    let counts = state
         .provider
-        .list_visible_items(user.id, None)
+        .query_item_counts(user.id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut movie_count = 0;
-    let mut series_count = 0;
-    for item in &items {
-        if item.media.kind == domain::MediaKind::Movie {
-            movie_count += 1;
-        } else if item.is_series {
-            series_count += 1;
-        }
-    }
-    let episode_count: usize = items
-        .iter()
-        .filter(|item| item.is_series)
-        .map(|series| series.metadata.child_count.or(series.metadata.number_of_episodes.map(|n| n as usize)).unwrap_or(0))
-        .sum();
-    Ok(Json(json!({
-        "MovieCount": movie_count,
-        "SeriesCount": series_count,
-        "EpisodeCount": episode_count,
-        "ItemCount": items.len(),
-    })))
+        .map_err(|error| {
+            tracing::error!(%error,user_id=%user.id,"Jellyfin item counts failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(
+        json!({"MovieCount":counts.movies,"SeriesCount":counts.series,"EpisodeCount":counts.episodes,"ItemCount":counts.items}),
+    ))
 }
 pub(super) async fn display_preferences(Path(id): Path<String>) -> Json<Value> {
     Json(json!({

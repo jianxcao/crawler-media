@@ -1,5 +1,5 @@
 /**
- * 播放引擎抽象（docs/design/web-player.md §6.1）。
+ * 播放引擎抽象。
  *
  * 上层（播放器组件）只认这个接口，不认 hls.js 也不认 `<video src>`。这一层
  * 不可省的原因是 2026 年这块正在剧烈洗牌：Vidstack / Media Chrome / Plyr /
@@ -121,7 +121,7 @@ export interface EngineOptions {
    *
    * `cause` 只在停顿看门狗判死时带上（缺粮 / 解码卡死）：上层要区分「转码
    * 追不上」与「线路不够」——后者按带宽同档重开就够，降档白白掉画质
-   * （docs/design/player-pipeline-optimization.md §C）。
+   *
    */
   onFailed: (reason: string, cause?: Exclude<StallVerdict, "ok">) => void;
   /**
@@ -499,8 +499,7 @@ class HlsEngine implements PlaybackEngine {
         return;
       }
       if (data.type === HlsCtor.ErrorTypes.MEDIA_ERROR) {
-        // 解码类致命错误先就地自救，救不回来才判失败（docs/design/player-feel.md
-        // §2.D1）。直接判失败的代价是走降档回路：画质掉一级 + 几秒黑屏重开
+        // 解码类致命错误先就地自救，救不回来才判失败。直接判失败的代价是走降档回路：画质掉一级 + 几秒黑屏重开
         // 会话；而这类错误（buffer append error、解码器抽风）hls.js 自己
         // 往往一秒内就能救回来——最贵的手段不该是第一反应。
         // 阶梯与冷却的判定在 media-recover.ts（纯函数，带单测）。
@@ -581,7 +580,7 @@ class HlsEngine implements PlaybackEngine {
   seek(seconds: number): void {
     const target = Math.max(0, seconds);
     const { video } = this.options;
-    // **落点已经在缓冲里就只写 currentTime**（docs/design/player-feel.md §2.G1）。
+    // **落点已经在缓冲里就只写 currentTime**。
     // stopLoad + startLoad 是给「跳到没缓冲的地方」准备的重手段：它把在途的
     // 分片请求整个掐掉重来，外网上那是已经下了一大半的几百 KB 白扔，而且
     // 重新装载会先清缓冲，画面跟着黑一下。

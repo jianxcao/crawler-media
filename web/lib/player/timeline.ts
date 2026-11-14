@@ -1,5 +1,5 @@
 /**
- * 会话时间轴 ↔ 文件时间轴的换算（docs/design/web-player.md §4.3）。
+ * 会话时间轴 ↔ 文件时间轴的换算。
  *
  * **转码会话的时间轴恒从 0 起**：ffmpeg 用 `-ss` 从文件中间起转，产出的
  * HLS 里第一帧就是 0 秒。所以播放器里到处都要做一次
@@ -110,7 +110,7 @@ export function planSeek(
  *
  * **这个顺序只能写在这里一处。** 2026-09-08 的真机反馈就是它被写了两遍的
  * 后果：画面正中的胶囊报 9:58、底下的进度条停在 19:00，两个读数各说各话
- * （docs/design/player-feel.md §2.A0、§13）。
+ *
  */
 export function shownPositionMs(input: {
   draggingMs: number | null;

@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Link } from "react-router-dom";
@@ -133,7 +134,7 @@ export function libraryStatsSummary(libraries: MediaLibrary[] | null): string {
  * 每张卡是一个库：封面用库内作品的海报做「货架」展示（最多 4 张站立海报
  * 带底部倒影，纯前端 CSS 合成、零后端开销），叠库名/类型/统计；
  * 点击进入单库海报墙（/library/[id]）。库的增删改/设默认/扫描/排序全部在
- * 管理页（/library/manage）完成，见 docs/design/library-manage.md——卡片上只留
+ * 管理页（/library/manage）完成，卡片上只留
  * 预告"马上会看到新内容"的信息：扫描进度环与「入库中」徽标。
  *
  * 数据源是 library_file 台账的**真实库存**（L3 起）：入库管线与存量扫描
@@ -208,28 +209,22 @@ export function LibraryView({ hero }: { hero?: ReactNode }) {
             ? listUpNext(UP_NEXT_COUNT).catch(() => null)
             : Promise.resolve(null),
           favoritesRow && favoritesRow.kind === "favorites"
-            ? listFavorites(
-                FAVORITES_COUNT,
-                0,
-                // 「未看优先」是首页这一行的默认：没看完的提前（全量页不传，保持收藏时间序）
-                favoritesRow.sort === "unwatched_first",
-                {
-                  sort:
-                    favoritesRow.sort === "unwatched_first" ? "favorited_at" : favoritesRow.sort,
-                  // 反转了自然方向才带 order，与海报墙同一条规矩
-                  order: orderParamFor(
-                    FAVORITES_SORT_PRESETS[favoritesRow.sort].direction,
-                    favoritesRow.reversed,
-                  ),
-                },
-              ).catch(() => null)
+            ? listFavorites({
+                limit: FAVORITES_COUNT,
+                unwatched_first: favoritesRow.sort === "unwatched_first",
+                sort: favoritesRow.sort === "unwatched_first" ? "favorited_at" : favoritesRow.sort,
+                order: orderParamFor(
+                  FAVORITES_SORT_PRESETS[favoritesRow.sort].direction,
+                  favoritesRow.reversed,
+                ),
+              }).catch(() => null)
             : Promise.resolve(null),
         ]);
         if (seq !== reloadSeq.current) return;
         if (latestUpNext !== null) setUpNext(latestUpNext);
         else setUpNext((previous) => previous ?? []);
         if (latestFavorites !== null) setFavorites(latestFavorites);
-        else setFavorites((previous) => previous ?? { items: [], total: 0 });
+        else setFavorites((previous) => previous ?? { items: [], total: 0, next_cursor: null });
 
         const fetches = rowFetches(
           rows,
@@ -272,7 +267,7 @@ export function LibraryView({ hero }: { hero?: ReactNode }) {
     lastLoadedHome = {
       libraries,
       upNext: upNext ?? [],
-      favorites: favorites ?? { items: [], total: 0 },
+      favorites: favorites ?? { items: [], total: 0, next_cursor: null },
       itemsByKey,
     };
   }, [libraries, upNext, favorites, itemsByKey]);
@@ -532,14 +527,18 @@ function rowFetches(
   for (const row of rows) {
     if (row.kind === "library") {
       fetches.set(rowFetchKey(row), () =>
-        listLibraryItems(String(row.library.id), rowItemQuery(row, RECENT_COUNT)),
+        listLibraryItems(String(row.library.id), rowItemQuery(row, RECENT_COUNT)).then(
+          (page) => page.items,
+        ),
       );
     } else if (row.kind === "libraries") {
       for (const library of libraries) {
         const key = coverFetchKey(library.id);
         if (!fetches.has(key)) {
           fetches.set(key, () =>
-            listLibraryItems(library.id, { sort: "added_at", limit: RECENT_COUNT }),
+            listLibraryItems(library.id, { sort: "added_at", limit: RECENT_COUNT }).then(
+              (page) => page.items,
+            ),
           );
         }
       }
@@ -597,9 +596,7 @@ function favoriteItemToMediaItem(item: FavoriteItem): MediaItem {
     item.favorite_episode_number,
   );
   return {
-    // FavoriteItem 的 library_id 在 lib/api/playback 里仍按旧 number 声明，
-    // 与新 LibraryItem 的 string 不一致——这里只借用库存字段，断言到 LibraryItem
-    ...libraryItemToMediaItem(item as unknown as LibraryItem),
+    ...libraryItemToMediaItem(item),
     overlayDetails: level ? { primary: level } : undefined,
   };
 }
@@ -664,7 +661,7 @@ function LibraryCover({
   if (candidateUrl && !collageFailed) {
     return (
       <div className="absolute inset-0 overflow-hidden">
-        <img
+        <ArtworkImage
           src={candidateUrl}
           alt=""
           loading="lazy"
@@ -683,7 +680,7 @@ function LibraryCover({
   if (backdropUrl) {
     return (
       <div className="absolute inset-0 overflow-hidden bg-[#0a0c12]">
-        <img
+        <ArtworkImage
           src={imageUrl(backdropUrl, "landscape-card")}
           alt=""
           loading="lazy"

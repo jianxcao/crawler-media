@@ -1,6 +1,5 @@
 use domain::{Site, SiteId};
-use hooks::{Bus, CheckInPlugin, HttpPost, NexusPhpPolicy, PluginError, SiteCredentials};
-use parking_lot::Mutex;
+use hooks::{Bus, HttpPost, NexusPhpPolicy, PluginError, SiteCredentials};
 use serde_json::{Value, json};
 
 use crate::Store;
@@ -9,7 +8,6 @@ use crate::management::ApiState;
 pub fn run(state: &ApiState) -> Result<(), String> {
     let sites = state
         .store
-        .lock()
         .list_enabled_sites()
         .map_err(|e| e.to_string())?;
     tracing::info!(
@@ -18,15 +16,15 @@ pub fn run(state: &ApiState) -> Result<(), String> {
     );
     let bus = Bus::new();
     let creds = StoreSites(&state.store);
-    let http = AttendanceHttp;
+    let _http = AttendanceHttp;
     let mut failures = Vec::new();
     for site in sites {
         // 判断站点类型：纯 API 架构站点（如新版 M-Team）无 attendance.php，无需也不支持传统打卡保活
-        if let Some(profile) = state.indexer.profile(&site.profile_id) {
-            if profile.framework == indexer::Framework::Api {
-                tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】API 令牌架构站点，跳过页面打卡签到");
-                continue;
-            }
+        if let Some(profile) = state.indexer.profile(&site.profile_id)
+            && profile.framework == indexer::Framework::Api
+        {
+            tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】API 令牌架构站点，跳过页面打卡签到");
+            continue;
         }
 
         tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】正在执行站点签到/保活请求");
@@ -58,7 +56,6 @@ pub fn run(state: &ApiState) -> Result<(), String> {
 fn boost_check(state: &ApiState) -> Result<(), String> {
     let category = state
         .store
-        .lock()
         .default_downloader()
         .ok()
         .flatten()
@@ -68,7 +65,7 @@ fn boost_check(state: &ApiState) -> Result<(), String> {
         .downloader
         .uploaded_by_category(&category)
         .unwrap_or(0);
-    let store = state.store.lock();
+    let store = state.store.as_ref();
     let sites = store.list_enabled_sites().map_err(|e| e.to_string())?;
     for site in sites {
         let key = format!("boost.{}", site.id);
@@ -92,10 +89,6 @@ fn boost_check(state: &ApiState) -> Result<(), String> {
 
 pub(crate) fn attendance_http() -> AttendanceHttp {
     AttendanceHttp
-}
-
-pub(crate) fn store_sites(store: &Mutex<Store>) -> StoreSites<'_> {
-    StoreSites(store)
 }
 
 pub(crate) struct AttendanceHttp;
@@ -202,12 +195,11 @@ fn attendance_request(
     Ok(format!("{}{text}", cookies.concat()))
 }
 
-pub(crate) struct StoreSites<'a>(&'a Mutex<Store>);
+pub(crate) struct StoreSites<'a>(&'a Store);
 
 impl SiteCredentials for StoreSites<'_> {
     fn load(&self, id: SiteId) -> Result<Site, PluginError> {
         self.0
-            .lock()
             .get_site(id)
             .map_err(|e| PluginError::Fetch(e.to_string()))?
             .ok_or(PluginError::NotFound)
@@ -216,7 +208,6 @@ impl SiteCredentials for StoreSites<'_> {
     fn save(&self, site: &Site) -> Result<(), PluginError> {
         if self
             .0
-            .lock()
             .save_site(site)
             .map_err(|e| PluginError::Fetch(e.to_string()))?
         {

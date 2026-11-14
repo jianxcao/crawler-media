@@ -31,7 +31,7 @@ pub async fn run(port: u16, device_id: String) {
     if socket.set_multicast_loop_v4(true).is_err() {
         return;
     }
-    let host = local_ip().unwrap_or_else(|| Ipv4Addr::LOCALHOST);
+    let host = local_ip().unwrap_or(Ipv4Addr::LOCALHOST);
     let location = format!("http://{host}:{port}/jellyfin");
     let mut buf = [0u8; 4096];
     loop {

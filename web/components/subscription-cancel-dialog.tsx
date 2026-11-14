@@ -8,8 +8,7 @@
  * 分头去下载器删任务、去媒体库删文件，用户根本找不到。于是把两件事收成这里
  * 的两个显式勾选，并在勾之前就把后果与数量讲清楚：
  *
- * - 种子：连同下载目录里的数据文件一起删，**不可恢复**；有 H&R 考核风险时
- *   额外给一行警示（PT 站点的考核不该由我们替用户静默牺牲）；
+ * - 种子：连同下载目录里的数据文件一起删，**不可恢复**；
  * - 媒体库文件：直接从磁盘物理删除（包含 .strm 指针），无法从回收站恢复。
  *
  * 数量由后端 removal-preview 给出；预览还没回来时两个开关先禁用——没数字的
@@ -86,7 +85,6 @@ export function SubscriptionCancelDialog({
 
   const torrentCount = preview?.torrent_count ?? 0;
   const fileCount = preview?.library_file_count ?? 0;
-  const retention = preview?.recycle_retention_days ?? 7;
 
   return (
     <Modal
@@ -111,18 +109,14 @@ export function SubscriptionCancelDialog({
                 ? "同时删除相关的下载任务"
                 : torrentCount === 0
                   ? "同时删除相关的下载任务（没有可删除的任务）"
-                  : `同时删除相关的下载任务（${torrentCount} 个）`
+                  : `同时删除相关的下载任务（${preview.torrent_count_inferred ? "估算 " : ""}${torrentCount} 个）`
             }
             description={
               torrentCount === 0
                 ? undefined
                 : "从下载器移除任务，并删除下载目录里的文件，不可恢复。"
             }
-            warning={
-              deleteTorrents && (preview?.hit_and_run_count ?? 0) > 0
-                ? `其中 ${preview?.hit_and_run_count} 个种子仍在 H&R 考核或考核状态未知，删除后可能影响站点考核。`
-                : undefined
-            }
+
           />
           <CleanupToggle
             checked={deleteLibraryFiles}
@@ -145,7 +139,7 @@ export function SubscriptionCancelDialog({
 
         {(deleteTorrents || deleteLibraryFiles) && (
           <p className="mt-4 rounded-lg bg-white/[0.04] px-3 py-2.5 text-xs leading-5 text-[var(--text-muted)]">
-            订阅会立刻取消，清理在后台进行——可以在「任务中心」查看进度和结果。
+            确认后立即执行所选清理并取消订阅，请等待处理结果。
           </p>
         )}
 
@@ -169,14 +163,12 @@ function CleanupToggle({
   onChange,
   label,
   description,
-  warning,
 }: {
   checked: boolean;
   disabled: boolean;
   onChange: (value: boolean) => void;
   label: string;
   description?: string;
-  warning?: string;
 }) {
   return (
     <label
@@ -194,9 +186,7 @@ function CleanupToggle({
         {description && (
           <span className="block text-xs leading-5 text-[var(--text-muted)]">{description}</span>
         )}
-        {warning && (
-          <span className="mt-1 block text-xs leading-5 text-[var(--danger)]">{warning}</span>
-        )}
+
       </span>
     </label>
   );

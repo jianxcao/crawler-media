@@ -9,12 +9,8 @@ pub(crate) enum SubscriptionPoster {
 
 pub(crate) fn poster_url(poster: SubscriptionPoster) -> Option<String> {
     match poster {
-        SubscriptionPoster::Library(id) => {
-            Some(crate::http::library::artwork_url("posters", id))
-        }
-        SubscriptionPoster::Catalog(id) => {
-            Some(format!("/media/{id}/poster"))
-        }
+        SubscriptionPoster::Library(id) => Some(crate::http::library::artwork_url("posters", id)),
+        SubscriptionPoster::Catalog(id) => Some(format!("/media/{id}/poster")),
         SubscriptionPoster::None => None,
     }
 }

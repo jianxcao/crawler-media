@@ -5,13 +5,11 @@
 //! lease publication barrier, Store checks, and probe cancellation.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use domain::MediaId;
-use store::{
-    FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult,
-    LibraryPathScope, StoreError, StrictOwner,
-};
+mod reconcile;
+use reconcile::reconcile_presence;
+use store::{LedgerPresenceMode, LedgerPresenceResult, StoreError};
 
 use crate::management::ApiState;
 
@@ -177,176 +175,14 @@ pub(crate) fn prune(
     reconcile_presence(state, library_id, media_id, LedgerPresenceMode::Prune)
 }
 
-fn collect_presence_observations(
+/// End of a full scan: every ledger row whose source the walk proved gone is
+/// removed now (with its orphan Media and disk sidecars), not just flagged.
+pub(crate) fn purge_vanished(
     state: &ApiState,
     library_id: &str,
-    target_media_id: Option<MediaId>,
-    candidate_scope: &LibraryPathScope,
-    candidate_rows: Vec<domain::LedgerRow>,
-    missing_map: &std::collections::HashMap<String, i64>,
-    media_kinds: &std::collections::HashMap<MediaId, domain::MediaKind>,
-) -> Result<Vec<LedgerPresenceObservation>, PresenceError> {
-    let mut observations = Vec::new();
-
-    for row in candidate_rows {
-        if let Some(mid) = target_media_id {
-            if row.media_id != mid {
-                continue;
-            }
-        }
-
-        let Some(&real_kind) = media_kinds.get(&row.media_id) else {
-            // Missing media identity: skip conservatively
-            continue;
-        };
-
-        let Ok(resolved) = LibraryPathScope::resolve_path(Path::new(&row.path)) else {
-            observations.push(LedgerPresenceObservation {
-                row: row.clone(),
-                missing_at: missing_map.get(&row.path).copied(),
-                presence: FilePresence::Unknown,
-            });
-            continue;
-        };
-
-        match candidate_scope.owner(&resolved, real_kind) {
-            StrictOwner::Owned(owner) if owner.id == library_id => {
-                // Eligible row
-            }
-            StrictOwner::Ambiguous => return Err(PresenceError::Ambiguous),
-            _ => continue,
-        }
-
-        let presence = match state.library_files.presence(Path::new(&row.path)) {
-            Ok(true) => FilePresence::Present,
-            Ok(false) => FilePresence::Missing,
-            Err(e) => {
-                tracing::warn!(path = %row.path, error = %e, "Observing file presence failed");
-                FilePresence::Unknown
-            }
-        };
-
-        observations.push(LedgerPresenceObservation {
-            row: row.clone(),
-            missing_at: missing_map.get(&row.path).copied(),
-            presence,
-        });
-    }
-
-    Ok(observations)
-}
-
-fn reconcile_presence(
-    state: &ApiState,
-    library_id: &str,
-    target_media_id: Option<MediaId>,
-    mode: LedgerPresenceMode,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
 ) -> Result<LedgerPresenceResult, PresenceError> {
-    // 1. In Store lock, take Library configuration, removal state, and snapshot.
-    let (target_lib, snapshot, missing_map) = {
-        let guard = state.store.lock();
-        let snapshot = guard.library_ownership()?;
-        let lib = snapshot
-            .library(library_id)
-            .cloned()
-            .ok_or(PresenceError::Missing)?;
-        if !snapshot.accepts_work(library_id) {
-            return Err(PresenceError::Deleting);
-        }
-        let missing_map = guard.missing_at_by_path()?;
-        (lib, snapshot, missing_map)
-    };
-
-    // 2. Resolve scope out of lock
-    let scope = LibraryPathScope::resolve(snapshot)?;
-    if !scope.accepts_work(library_id) {
-        return Err(PresenceError::Deleting);
-    }
-
-    // Check roots readability
-    for root in &target_lib.root_paths {
-        if let Err(e) = state.library_files.readable_root(root) {
-            tracing::warn!(root = %root.display(), error = %e, "Library root unavailable");
-            return Err(PresenceError::RootUnavailable);
-        }
-    }
-
-    // Collect candidates for this library and batch load their media kinds
-    let (candidate_rows, media_kinds, candidate_scope) = {
-        let guard = state.store.lock();
-        let rows = guard.list_ledger()?;
-        let media_ids: Vec<MediaId> = rows.iter().map(|r| r.media_id).collect();
-        let media_map = guard.media_batch(&media_ids)?;
-        let kinds: std::collections::HashMap<MediaId, domain::MediaKind> = media_map
-            .into_iter()
-            .map(|(mid, m)| (mid, m.kind))
-            .collect();
-        (rows, kinds, scope.clone())
-    };
-
-    let mut observations = collect_presence_observations(
-        state,
-        library_id,
-        target_media_id,
-        &candidate_scope,
-        candidate_rows,
-        &missing_map,
-        &media_kinds,
-    )?;
-
-    // If in Prune mode: verify presence one last time and cancel probe work
-    if mode == LedgerPresenceMode::Prune {
-        for obs in &mut observations {
-            if obs.presence == FilePresence::Missing && obs.missing_at.is_some() {
-                // Re-verify immediately before pruning
-                match state.library_files.presence(Path::new(&obs.row.path)) {
-                    Ok(true) => obs.presence = FilePresence::Present,
-                    Ok(false) => obs.presence = FilePresence::Missing,
-                    Err(e) => {
-                        tracing::warn!(path = %obs.row.path, error = %e, "Re-verifying file presence returned error, skipping deletion");
-                        obs.presence = FilePresence::Unknown;
-                    }
-                }
-            }
-        }
-
-        let ids_to_cancel: Vec<String> = observations
-            .iter()
-            .filter(|obs| obs.presence == FilePresence::Missing && obs.missing_at.is_some())
-            .map(|obs| obs.row.id.to_string())
-            .collect();
-        if !ids_to_cancel.is_empty() {
-            state
-                .probe
-                .cancel_ledger_work(&ids_to_cancel, "pruning missing files")?;
-        }
-    }
-
-    // 3. Acquire lease: Registry -> Store
-    let lease = match state.acquire_library_work(library_id) {
-        Ok(lease) => lease,
-        Err(_) => {
-            return Err(PresenceError::Deleting);
-        }
-    };
-
-    // 4. In publication barrier, check scope matches and apply presence in a single Immediate transaction.
-    //    失败按 `PresencePublishError` 的类型分类，不再匹配错误文案。
-    publish_presence(&lease, || {
-        let guard = state.store.lock();
-        let current_snapshot = guard.library_ownership()?;
-        if !current_snapshot.accepts_work(library_id) {
-            return Err(PresencePublishError::LibraryDeleting);
-        }
-        if !candidate_scope.matches(&current_snapshot) {
-            return Err(PresencePublishError::ScopeChanged);
-        }
-
-        let now = crate::job_loop::unix_now();
-        guard
-            .apply_ledger_presence(&observations, mode, now)
-            .map_err(PresencePublishError::from)
-    })
+    reconcile::reconcile_presence_leased(state, library_id, LedgerPresenceMode::Purge, lease)
 }
 
 #[cfg(test)]

@@ -1,8 +1,5 @@
-//! Scrape & organize configuration, aligned with the upstream
-//! scrape-customization design (metadata.scrape namespace). Stored as JSON in
-//! the settings KV; **empty fields mean "follow default"** — effective values
-//! merge at read time, so the defaults always equal the pre-config behavior
-//! (zero-migration promise).
+//! Scrape configuration is raw JSON in library.db; empty fields follow defaults.
+//! API composes effective values without rewriting the stored input.
 
 use serde::{Deserialize, Serialize};
 
@@ -71,8 +68,6 @@ pub struct EffectiveScrapeConfig {
     pub naming_customized: bool,
     /// Per-segment "explicitly set" flags (the effective values are defaulted,
     /// so composition must know which came from the user).
-    pub naming_entry_set: bool,
-    pub naming_season_set: bool,
     pub language_priority: Vec<String>,
     pub cert_country_priority: Vec<String>,
     pub poster_mode: String,
@@ -145,9 +140,9 @@ impl EffectiveScrapeConfig {
     }
 
     /// Compose the full movie pattern. With no customized naming, the built-in
-    /// default applies byte-for-byte; once any field is set, empty entry dir
-    /// means the file pattern is the whole path (legacy single-segment
-    /// templates round-trip exactly).
+    /// default applies byte-for-byte; once any field is set, the pattern is
+    /// always `<entry dir>/<file>` — one shape, so a pattern cannot round-trip
+    /// through two different layouts.
     pub fn compose_movie_pattern(&self) -> String {
         if !self.naming_customized {
             return format!(
@@ -157,11 +152,7 @@ impl EffectiveScrapeConfig {
             );
         }
         let file = non_empty(&self.naming_movie_file, default_naming_movie_file());
-        if !self.naming_entry_set {
-            file.to_string()
-        } else {
-            format!("{}/{}", self.naming_entry_dir.trim(), file)
-        }
+        format!("{}/{}", self.naming_entry_dir.trim(), file)
     }
 
     /// Compose the full TV pattern with the same rules.
@@ -176,15 +167,7 @@ impl EffectiveScrapeConfig {
         }
         let season = non_empty(&self.naming_season_dir, default_naming_season_dir());
         let file = non_empty(&self.naming_episode_file, default_naming_episode_file());
-        if !self.naming_entry_set {
-            if !self.naming_season_set {
-                file.to_string()
-            } else {
-                format!("{season}/{file}")
-            }
-        } else {
-            format!("{}/{season}/{file}", self.naming_entry_dir.trim())
-        }
+        format!("{}/{season}/{file}", self.naming_entry_dir.trim())
     }
 }
 
@@ -220,8 +203,6 @@ pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
             || !setting.naming_movie_file.is_empty()
             || !setting.naming_season_dir.is_empty()
             || !setting.naming_episode_file.is_empty(),
-        naming_entry_set: !setting.naming_entry_dir.is_empty(),
-        naming_season_set: !setting.naming_season_dir.is_empty(),
         language_priority,
         cert_country_priority,
         poster_mode,

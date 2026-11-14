@@ -40,7 +40,7 @@ import { NotFound } from "@/src/not-found";
 /**
  * Next App Router 路由表 → react-router 对照:
  * 目录组 (app) 即 <Route element={<AppLayout/>}> 下的所有路由;
- * /play 独立外壳不套工作台;动态段 [x] 变 :x;[[...unit]] 变 :unit*。
+ * /play 独立外壳不套工作台;动态段 [x] 变 :x;可选单集段变 :unit?。
  * 静态段与动态段的优先级由 react-router 按特异性自动排序
  * (如 /library/customize 会命中静态路由而不是 /library/:id)。
  */
@@ -84,7 +84,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="tasks" element={<TasksRedirectPage />} />
           </Route>
           <Route element={<PlayLayout />}>
-            <Route path="play/:mediaItemId/:unit*" element={<PlayPage />} />
+            <Route path="play/:mediaItemId/:unit?" element={<PlayPage />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Route>

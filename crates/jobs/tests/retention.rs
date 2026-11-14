@@ -40,13 +40,15 @@ impl Fixture {
 }
 
 fn new_def(queue: &Queue, name: &str) -> JobDefId {
+    let media_id = domain::MediaId::new();
     queue
-        .upsert_def(NewDef {
+        .create_def(NewDef {
             kind: JobKind::CatalogRefresh,
+            scope: jobs::JobScope::Media(media_id),
             name: name.into(),
             enabled: true,
             schedule: None,
-            payload: format!(r#"{{"name":"{name}"}}"#),
+            payload: format!(r#"{{"media_id":"{media_id}","name":"{name}"}}"#),
             timeout_secs: None,
             concurrency_key: None,
         })
@@ -56,7 +58,9 @@ fn new_def(queue: &Queue, name: &str) -> JobDefId {
 
 /// 公开 API 造一条终态独立 job（`def_id = NULL`）。
 fn finished_oneshot(queue: &Queue, payload: &str, finished_at: i64) -> JobId {
-    let job = queue.enqueue(JobKind::Transfer, payload, 0).unwrap();
+    let job = queue
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), payload, 0)
+        .unwrap();
     let claimed = queue.claim(0, 1).unwrap();
     assert_eq!(claimed.len(), 1, "claim 必须拿到刚入队的 job");
     assert_eq!(claimed[0].id, job.id);
@@ -89,9 +93,9 @@ fn insert_raw_job(
     fixture
         .raw()
         .execute(
-            "INSERT INTO jobs (id, def_id, kind, payload, status, attempt, run_after,
+            "INSERT INTO jobs (scope_key, id, def_id, kind, payload, status, attempt, run_after,
                  started_at, finished_at, error, progress, concurrency_key, timeout_secs)
-             VALUES (?1, ?2, 'transfer', 'raw', ?3, 0, 0, NULL, ?4, NULL, NULL, NULL, NULL)",
+             VALUES ('global', ?1, ?2, 'transfer', 'raw', ?3, 0, 0, NULL, ?4, NULL, NULL, NULL, NULL)",
             rusqlite::params![
                 id.to_string(),
                 def_id.map(|def_id| def_id.to_string()),
@@ -122,9 +126,15 @@ fn deletes_expired_terminal_and_keeps_boundary_null_and_live() {
 
     // queued / running 永不删除：queued 用远期 run_after 避免被 claim。
     let queued = queue
-        .enqueue(JobKind::Transfer, "queued", 1_000_000)
+        .enqueue(
+            jobs::JobIdentity::global(JobKind::Transfer),
+            "queued",
+            1_000_000,
+        )
         .unwrap();
-    let running = queue.enqueue(JobKind::Transfer, "running", 0).unwrap();
+    let running = queue
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "running", 0)
+        .unwrap();
     assert_eq!(queue.claim(0, 1).unwrap()[0].id, running.id);
 
     let batch = queue.prune_terminal_jobs(CUTOFF, 500, false).unwrap();
@@ -222,7 +232,9 @@ fn keeps_non_terminal_rows_even_with_stale_finished_at() {
     const CUTOFF: i64 = 10_000;
 
     // 公开 API 的正在重试：queued + finished_at NULL。
-    let retry = queue.enqueue(JobKind::Transfer, "retry", 0).unwrap();
+    let retry = queue
+        .enqueue(jobs::JobIdentity::global(JobKind::Transfer), "retry", 0)
+        .unwrap();
     let claimed = queue.claim(0, 1).unwrap().remove(0);
     let retried = queue.fail_claimed(&claimed, 50, "boom").unwrap().unwrap();
     assert_eq!(retried.status, JobStatus::Queued);
@@ -359,7 +371,13 @@ fn dry_run_reports_candidates_without_writing() {
     let ids: Vec<JobId> = (0..3)
         .map(|index| finished_oneshot(queue, "dry", 100 + index))
         .collect();
-    assert_eq!(queue.jobs_for_payload("dry", 100).len(), 3);
+    assert_eq!(
+        queue
+            .jobs_for_identity(jobs::JobIdentity::global(JobKind::Transfer), 100)
+            .unwrap()
+            .len(),
+        3
+    );
 
     let batch = queue.prune_terminal_jobs(CUTOFF, 500, true).unwrap();
     assert_eq!(batch.scanned, 3);
@@ -368,7 +386,10 @@ fn dry_run_reports_candidates_without_writing() {
     assert_eq!(batch.protected, 0);
     assert!(!batch.has_more);
     assert_eq!(
-        queue.jobs_for_payload("dry", 100).len(),
+        queue
+            .jobs_for_identity(jobs::JobIdentity::global(JobKind::Transfer), 100)
+            .unwrap()
+            .len(),
         3,
         "dry_run 必须零写入"
     );
@@ -378,7 +399,13 @@ fn dry_run_reports_candidates_without_writing() {
 
     let real = queue.prune_terminal_jobs(CUTOFF, 500, false).unwrap();
     assert_eq!(real.deleted, 3);
-    assert_eq!(queue.jobs_for_payload("dry", 100).len(), 0);
+    assert_eq!(
+        queue
+            .jobs_for_identity(jobs::JobIdentity::global(JobKind::Transfer), 100)
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -409,7 +436,12 @@ fn delete_failure_rolls_back_the_whole_batch_and_returns_err() {
     );
 
     assert_eq!(
-        queue.jobs_for_payload("bulk", 500).len(),
+        queue
+            .jobs_for_identity(jobs::JobIdentity::global(JobKind::Transfer), 500)
+            .unwrap()
+            .iter()
+            .filter(|job| job.payload == "bulk")
+            .count(),
         400,
         "失败前已执行的分片也必须随事务回滚"
     );

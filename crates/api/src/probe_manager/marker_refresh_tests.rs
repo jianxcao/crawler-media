@@ -1,10 +1,25 @@
 #[test]
 fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
+    let library = store
+        .as_ref()
+        .create_library(
+            MediaKind::Tv,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .as_ref()
+        .set_library_intro_settings(&library.id, true, true)
+        .unwrap();
     let media_id = MediaId::new();
     store
-        .lock()
+        .as_ref()
         .insert_media(&domain::Media {
             id: media_id,
             kind: MediaKind::Tv,
@@ -19,31 +34,26 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             anilist_id: None,
         })
         .unwrap();
-    let make_row = |episode| LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: tmp
-            .path()
-            .join(format!("Pantheon.S01E{episode:02}.mkv"))
-            .to_string_lossy()
-            .into_owned(),
-        season: Some(1),
-        episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+    let make_row = |episode| {
+        super::super::test_support::coverage(
+            media_id,
+            &tmp.path()
+                .join(format!("Pantheon.S01E{episode:02}.mkv"))
+                .to_string_lossy()
+                .into_owned(),
+            Some(1),
+            Some(episode),
+        )
     };
-    let rows = [make_row(1), make_row(2)];
-    for row in &rows {
-        std::fs::write(&row.path, b"dummy").unwrap();
-        store.lock().insert_ledger(row).unwrap();
+    let mut rows = [make_row(1), make_row(2), make_row(3)];
+    for row in rows.iter_mut() {
+        std::fs::write(&row.file.path, b"dummy").unwrap();
+        super::super::test_support::publish_into(&store.as_ref(), row);
     }
-    let cached = seed_old_refresh_result(&store.lock(), media_id, &rows[0].id.to_string());
+    let cached =
+        seed_old_refresh_result(&store.as_ref(), media_id, &rows[0].file.file_id.to_string());
 
-    let manager = ProbeManager::new(store.clone());
+    let manager = Arc::new(super::super::test_support::confirmed_absence_manager(store.clone(), &rows));
     let units = rows
         .iter()
         .map(|row| ProbeUnit {
@@ -57,44 +67,46 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             job_id: None,
         })
         .collect();
-    assert_eq!(manager.enqueue_forced_item_refresh(units).unwrap(), 2);
+    assert_eq!(manager.enqueue_forced_item_refresh(units).unwrap(), 3);
     let first = manager.take_queued_for_test().unwrap();
     let second = manager.take_queued_for_test().unwrap();
-    manager.finish(&first, true);
+    let third = manager.take_queued_for_test().unwrap();
+    super::super::test_support::handoff_cached(&manager,&first);
 
     let current = store
-        .lock()
-        .get_media_marker(media_id, Some(1), Some(1))
+        .as_ref()
+        .get_fixture_marker(media_id, Some(1), Some(1))
         .unwrap()
         .unwrap();
     assert_eq!(current.source, "old-result");
     assert_eq!(
         store
-            .lock()
-            .get_cached_chapters(&rows[0].id.to_string())
+            .as_ref()
+            .get_cached_chapters(&rows[0].file.file_id.to_string())
             .unwrap()
             .unwrap(),
         cached
     );
 
-    manager.finish(&second, true);
+    super::super::test_support::handoff_cached(&manager,&second);
+    super::super::test_support::handoff_cached(&manager,&third);
+    super::super::test_support::drain_analysis(manager.clone(),first.job_id.as_ref().unwrap());
     assert!(
         store
-            .lock()
-            .get_media_marker(media_id, Some(1), Some(1))
+            .as_ref()
+            .get_fixture_marker(media_id, Some(1), Some(1))
             .unwrap()
             .is_none()
     );
     let chapters = store
-        .lock()
-        .get_cached_chapters(&rows[0].id.to_string())
+        .as_ref()
+        .get_cached_chapters(&rows[0].file.file_id.to_string())
         .unwrap()
         .unwrap();
-    assert_eq!(chapters.len(), 2);
-    assert!(chapters.iter().all(|chapter| chapter.marker_type.is_none()));
+    assert_eq!(chapters, cached);
     assert_eq!(
         store
-            .lock()
+            .as_ref()
             .latest_marker_refresh_for_season(&media_id.to_string(), 1)
             .unwrap()
             .unwrap()
@@ -109,10 +121,7 @@ fn seed_old_refresh_result(
     ledger_id: &str,
 ) -> Vec<marker::ChapterMarker> {
     store
-        .put_media_marker(&crate::store::StoredMediaMarker {
-            media_id,
-            season: 1,
-            episode: 1,
+        .put_fixture_marker(&crate::store::StoredFileMarker {
             intro_start_ms: Some(111_000),
             intro_end_ms: Some(222_000),
             outro_start_ms: Some(1_000_000),
@@ -120,6 +129,11 @@ fn seed_old_refresh_result(
             source: "old-result".into(),
             locked: false,
             updated_at: 0,
+            ..store::test_support::fixture_marker(
+                store,
+                media_id,
+                domain::UnitKey::new(1, 1),
+            )
         })
         .unwrap();
     let cached = vec![
@@ -135,20 +149,6 @@ fn seed_old_refresh_result(
             end_ms: 600_000,
             title: Some("第二章".into()),
             marker_type: None,
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 111_000,
-            end_ms: 222_000,
-            title: Some("片头".into()),
-            marker_type: Some(marker::MarkerType::IntroStart),
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 1_000_000,
-            end_ms: 1_050_000,
-            title: Some("片尾".into()),
-            marker_type: Some(marker::MarkerType::CreditsStart),
             synthetic: false,
         },
     ];

@@ -1,5 +1,6 @@
 use std::fs;
 
+use domain::SubscribeFacts;
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
@@ -7,7 +8,7 @@ use domain::{
 use downloader::MemoryDownloader;
 use hooks::{Bus, Hook, PluginError, Step};
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, run};
 
 #[test]
 fn veto_hook_prevents_add_to_downloader() {
@@ -25,7 +26,7 @@ fn veto_hook_prevents_add_to_downloader() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -72,7 +73,7 @@ fn veto_hook_prevents_add_to_downloader() {
             size_bytes: Some(1),
             seeders: Some(1),
             free: true,
-            hr: false,
+            hr: Some(false),
             imdb_id: None,
             id: None,
             leechers: None,
@@ -86,6 +87,9 @@ fn veto_hook_prevents_add_to_downloader() {
         facts: SubscribeFacts::default(),
         downloader: &downloader,
         library_root: &tmp.path().join("lib"),
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: Some(&bus),

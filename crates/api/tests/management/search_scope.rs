@@ -37,7 +37,6 @@ async fn manual_search_applies_categories_and_private_history_for_json_and_sse()
             ProfileSet::load(None).unwrap(),
             fetcher.clone(),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );
@@ -139,7 +138,6 @@ async fn empty_keyword_browse_works_for_json_and_stream_without_history() {
             ProfileSet::load(None).unwrap(),
             fetcher.clone(),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-            tmp.path().join("library"),
         )
         .unwrap(),
     );

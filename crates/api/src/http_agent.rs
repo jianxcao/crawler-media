@@ -96,7 +96,7 @@ pub fn sync_from_store(store: &Store) {
         .ok()
         .flatten()
         .map(|raw| {
-            raw.split(|c| c == ',' || c == '\n' || c == ';')
+            raw.split([',', '\n', ';'])
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_ascii_lowercase())
@@ -130,8 +130,8 @@ pub fn build_agent(proxy_url: Option<&str>, family: IpFamily) -> ureq::Agent {
         let trimmed = url.trim();
         // 关键优化：对于 socks5://，自动转换为 socks5h://
         // 这样 SOCKS5 代理会在远端解析域名，彻底解决本地 DNS 污染（如 api.bgm.tv 被国内 DNS 投毒到 Facebook IP 导致证书不匹配）
-        let remote_dns_url = if trimmed.starts_with("socks5://") {
-            format!("socks5h://{}", &trimmed["socks5://".len()..])
+        let remote_dns_url = if let Some(stripped) = trimmed.strip_prefix("socks5://") {
+            format!("socks5h://{stripped}")
         } else {
             trimmed.to_string()
         };
@@ -153,6 +153,18 @@ static DIRECT_V6: LazyLock<RwLock<ureq::Agent>> =
 pub fn refresh_direct_agents() {
     *DIRECT_V4.write() = build_agent(None, IpFamily::Ipv4Only);
     *DIRECT_V6.write() = build_agent(None, IpFamily::Ipv6Only);
+}
+
+/// Select one address family without performing a second request on failure.
+pub(crate) fn catalog_agent(proxy: Option<&str>, family: IpFamily) -> ureq::Agent {
+    match proxy.filter(|value| !value.trim().is_empty()) {
+        Some(proxy) => build_agent(Some(proxy), family),
+        None => match family {
+            IpFamily::Ipv4Only => DIRECT_V4.read().clone(),
+            IpFamily::Ipv6Only => DIRECT_V6.read().clone(),
+            _ => build_agent(None, family),
+        },
+    }
 }
 
 /// 允许走全局代理的外部元数据域名白名单。
@@ -290,7 +302,10 @@ mod mask_tests {
             mask_proxy_url("http://bob:pw@host:1"),
             domain::mask_proxy_url("http://bob:pw@host:1")
         );
-        assert_eq!(mask_proxy_url("http://bob:pw@host:1"), "http://bob:***@host:1");
+        assert_eq!(
+            mask_proxy_url("http://bob:pw@host:1"),
+            "http://bob:***@host:1"
+        );
     }
 
     /// 旧 api 实现遇到没有 scheme 的 `user:pass@host` 会原样返回（等于把口令

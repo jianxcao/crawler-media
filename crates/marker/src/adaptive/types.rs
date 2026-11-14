@@ -11,19 +11,16 @@ pub enum SegmentKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SamplingMode {
+    #[default]
     FullWindow,
     Adaptive,
 }
 
-impl Default for SamplingMode {
-    fn default() -> Self {
-        Self::FullWindow
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SamplingPolicy {
+    pub boundary: crate::boundary::BoundaryPolicy,
     pub seed_count: usize,
     pub max_seed_count: usize,
     pub max_templates_per_kind: usize,
@@ -46,6 +43,7 @@ pub struct SamplingPolicy {
 impl Default for SamplingPolicy {
     fn default() -> Self {
         Self {
+            boundary: crate::boundary::BoundaryPolicy::default(),
             seed_count: 3,
             max_seed_count: 5,
             max_templates_per_kind: 3,

@@ -5,9 +5,10 @@ use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
     Subscribe, SubscribeId, Torrent, UserId,
 };
+use domain::{QualityFact, SubscribeFacts};
 use downloader::MemoryDownloader;
 use library::{FileQuality, MediaProbe, TransferMode};
-use subscribe::{QualityFact, RunInput, SubscribeFacts, run, run_with_probe};
+use subscribe::{RunInput, run, run_with_probe};
 
 struct FixedProbe;
 
@@ -43,7 +44,7 @@ fn movie_filter() -> Filter {
             },
         ],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -130,7 +131,7 @@ fn torrent(title: &str, enclosure: &str) -> Torrent {
         size_bytes: Some(1_000),
         seeders: Some(5),
         free: true,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         id: None,
         leechers: None,
@@ -182,6 +183,10 @@ fn run_input<'a>(
         facts,
         downloader,
         library_root,
+        // Files that are published need the Library/root they land in.
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,

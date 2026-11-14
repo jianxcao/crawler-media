@@ -14,8 +14,6 @@ import { Modal } from "@/components/modal";
 import { OverflowText } from "@/components/overflow-text";
 import {
   cancelJob,
-  dismissJob,
-  undismissJob,
   type JobStatus,
   type JobView,
 } from "@/lib/api/jobs";
@@ -53,10 +51,6 @@ export const JOB_TYPE_LABELS: Record<string, string> = {
 export const JOB_STATUS_LABELS: Record<string, string> = {
   queued: "排队中",
   running: "进行中",
-  retry_wait: "等待重试",
-  cancelling: "正在取消",
-  waiting: "等待前置任务",
-  blocked: "需要处理",
   succeeded: "已完成",
   failed: "未完成",
   cancelled: "已取消",
@@ -310,8 +304,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
     setBusyAction("dismiss");
     setActionError(null);
     try {
-      upsert(await dismissJob(job.id));
-      // 新契约 /dismiss 退化为空操作，忽略状态由组件层维护（见 lib/job-attention）
+      // 忽略是本浏览器的静音状态（lib/job-attention），没有服务端端点。
       markJobDismissed(job.id, job.last_finished_at);
       setDismissOpen(false);
     } catch (error) {
@@ -325,8 +318,8 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
     setBusyAction("undismiss");
     setActionError(null);
     try {
-      upsert(await undismissJob(job.id));
       markJobUndismissed(job.id);
+      upsert(job);
     } catch (error) {
       setActionError((error as Error).message || "撤销忽略失败，请稍后重试");
     } finally {

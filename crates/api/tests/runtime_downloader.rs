@@ -24,19 +24,12 @@ fn qb_setting() -> String {
 }
 
 #[test]
-fn settings_qbittorrent_used_when_env_empty() {
+fn old_settings_cannot_select_a_downloader() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store.put_setting("downloader", &qb_setting()).unwrap();
 
-    let ChosenDownloader::Qbittorrent(cfg) = choose_downloader(&store, &empty_env()).unwrap()
-    else {
-        panic!("expected saved qBittorrent Downloader");
-    };
-    assert_eq!(cfg.url, "http://qb.example:8080");
-    assert_eq!(cfg.username, "admin");
-    assert_eq!(cfg.password, "secret");
-    assert_eq!(cfg.category, None);
+    assert!(choose_downloader(&store, &empty_env()).is_err());
 }
 
 #[test]

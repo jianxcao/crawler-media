@@ -54,7 +54,7 @@ fn nexusphp_html_fixture_produces_torrent_fields() {
         None,
     );
 
-    let outcome = indexer.search(&[site.clone()], "matrix");
+    let outcome = indexer.search(std::slice::from_ref(&site), "matrix");
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     assert_eq!(outcome.torrents.len(), 1);
     let torrent = &outcome.torrents[0];
@@ -67,7 +67,7 @@ fn nexusphp_html_fixture_produces_torrent_fields() {
     assert_eq!(torrent.size_bytes, Some(4 * 1024 * 1024 * 1024));
     assert_eq!(torrent.seeders, Some(42));
     assert!(torrent.free);
-    assert!(torrent.hr);
+    assert_eq!(torrent.hr, Some(true));
     // U2 扩展字段。
     assert_eq!(torrent.id.as_deref(), Some("1"), "id 从下载链接提取");
     assert_eq!(torrent.leechers, Some(7));
@@ -133,7 +133,7 @@ fn mteam_json_fixture_uses_api_contract_and_produces_torrent_fields() {
     assert_eq!(torrent.size_bytes, Some(21474836480));
     assert_eq!(torrent.seeders, Some(7));
     assert!(torrent.free);
-    assert!(torrent.hr);
+    assert_eq!(torrent.hr, Some(true));
     assert_eq!(torrent.upload_time.as_deref(), Some("2024-03-01 12:00:00"));
     assert_eq!(
         torrent.poster_url.as_deref(),
@@ -176,7 +176,7 @@ fn rss_xml_fixture_produces_torrent_fields() {
         None,
     );
 
-    let outcome = indexer.rss(&[site.clone()]);
+    let outcome = indexer.rss(std::slice::from_ref(&site));
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     let torrent = &outcome.torrents[0];
     assert_eq!(torrent.title, "Arrival.2016.1080p.BluRay.x264-GROUP");
@@ -184,7 +184,7 @@ fn rss_xml_fixture_produces_torrent_fields() {
     assert_eq!(torrent.size_bytes, Some(8589934592));
     assert_eq!(torrent.seeders, Some(11));
     assert!(torrent.free);
-    assert!(torrent.hr);
+    assert_eq!(torrent.hr, Some(true));
     // U2 扩展字段。
     assert_eq!(torrent.id.as_deref(), Some("8"), "RSS guid 兜底提取 id");
     assert_eq!(torrent.leechers, Some(3));
@@ -289,7 +289,7 @@ fn pterclub_html_fixture_skips_header_and_parses_download_row() {
         None,
     );
 
-    let outcome = indexer.search(&[site.clone()], "friends");
+    let outcome = indexer.search(std::slice::from_ref(&site), "friends");
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     assert_eq!(outcome.torrents.len(), 1);
     let torrent = &outcome.torrents[0];
@@ -301,7 +301,7 @@ fn pterclub_html_fixture_skips_header_and_parses_download_row() {
     assert_eq!(torrent.size_bytes, Some(210 * 1024 * 1024));
     assert_eq!(torrent.seeders, Some(7));
     assert!(torrent.free);
-    assert!(torrent.hr);
+    assert_eq!(torrent.hr, Some(true));
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn pterclub_live_html_nested_torrentname_row_parses() {
         None,
     );
 
-    let outcome = indexer.search(&[site.clone()], "friends");
+    let outcome = indexer.search(std::slice::from_ref(&site), "friends");
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     assert_eq!(outcome.torrents.len(), 1);
     let torrent = &outcome.torrents[0];
@@ -331,7 +331,7 @@ fn pterclub_live_html_nested_torrentname_row_parses() {
     );
     assert_eq!(torrent.seeders, Some(4));
     assert!(torrent.free);
-    assert!(torrent.hr);
+    assert_eq!(torrent.hr, Some(true));
 }
 
 #[test]
@@ -352,7 +352,7 @@ fn expired_cookie_redirecting_to_login_triggers_auth_failure() {
         None,
     );
 
-    let outcome = indexer.search(&[site.clone()], "friends");
+    let outcome = indexer.search(std::slice::from_ref(&site), "friends");
     assert_eq!(outcome.torrents.len(), 0);
     assert_eq!(outcome.failures.len(), 1);
     assert!(

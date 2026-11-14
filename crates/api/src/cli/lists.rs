@@ -197,26 +197,38 @@ pub async fn list_jobs(transport: &impl Transport) -> Result<String, String> {
 }
 
 pub async fn list_directory(transport: &impl Transport) -> Result<String, String> {
-    let (status, body) = transport.send("GET", "/api/v1/directory", None).await?;
-    if status != 200 {
-        return Err(format!("directory failed: {status} {body}"));
-    }
-    let movie = body["movie_root"].as_str().unwrap_or("-");
-    let tv = body["tv_root"].as_str().unwrap_or("-");
-    let mode = body["transfer_mode"].as_str().unwrap_or("-");
-    let movie_naming = body["movie_naming"].as_str().unwrap_or("-");
-    let tv_naming = body["tv_naming"].as_str().unwrap_or("-");
-    let intake = body["watch_intake"].as_str().unwrap_or("-");
-    let inplace = body["watch_inplace"].as_str().unwrap_or("-");
-    let scrape = body["scrape"].as_bool().unwrap_or(false);
-    let mut out = format!(
-        "movie_root={movie}\ntv_root={tv}\ntransfer_mode={mode}\nmovie_naming={movie_naming}\ntv_naming={tv_naming}\nscrape={scrape}\nwatch_intake={intake}\nwatch_inplace={inplace}\n"
-    );
-    if let Some(rows) = body["extra_roots"].as_array() {
-        for row in rows {
-            let kind = row["kind"].as_str().unwrap_or("-");
-            let path = row["path"].as_str().unwrap_or("-");
-            out.push_str(&format!("extra\t{kind}\t{path}\n"));
+    let mut out = String::new();
+    for endpoint in [
+        "/api/v1/libraries",
+        "/api/v1/settings/transfer",
+        "/api/v1/settings/scrape",
+    ] {
+        let (status, body) = transport.send("GET", endpoint, None).await?;
+        if status != 200 {
+            return Err(format!("{endpoint} failed: {status} {body}"));
+        }
+        if let Some(libraries) = body.as_array() {
+            for library in libraries {
+                for root in library["root_paths"].as_array().into_iter().flatten() {
+                    out.push_str(&format!(
+                        "library={} kind={} root={}\n",
+                        library["id"].as_str().unwrap_or_default(),
+                        library["kind"].as_str().unwrap_or_default(),
+                        root.as_str().unwrap_or_default()
+                    ));
+                }
+            }
+        } else {
+            let values = body.get("effective").unwrap_or(&body);
+            for (key, value) in values.as_object().into_iter().flatten() {
+                out.push_str(&format!(
+                    "{key}={}\n",
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string())
+                ));
+            }
         }
     }
     Ok(out)

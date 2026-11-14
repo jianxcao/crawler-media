@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BrandLoader } from "@/components/brand-loader";
@@ -16,7 +17,7 @@ import {
 import { imageUrl } from "@/lib/image-proxy";
 
 /**
- * 「更换图片」弹层（docs/design/metadata.md 6.3）——自动选图挑不中口味时的
+ * 「更换图片」弹层——自动选图挑不中口味时的
  * 人工通道。
  *
  * 两个 tab（海报 / 背景），网格铺候选缩略图，点选即落盘 + 覆盖媒体目录 +
@@ -223,7 +224,7 @@ export function ArtworkPickerDialog({
                     : "ring-white/10 hover:ring-[var(--accent-2)]"
                 }`}
               >
-                <img
+                <ArtworkImage
                   src={imageUrl(c.preview_url)}
                   alt=""
                   loading="lazy"

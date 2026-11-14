@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useState } from "react";
 import { Modal } from "@/components/modal";
 import { publicEnv } from "@/lib/env";
@@ -152,7 +153,7 @@ export function LibraryCoverModal({
 
         {/* 实时预览区 (16:9) */}
         <div className="relative mt-4 aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-[#06080e]">
-          <img
+          <ArtworkImage
             src={previewSrc || currentCoverSrc}
             alt="封面预览"
             className="size-full object-cover"

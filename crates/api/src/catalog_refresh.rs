@@ -6,15 +6,28 @@ use crate::management::ApiState;
 
 pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     let media_id = payload_media_id(payload)?;
-    let stored = state
-        .store
-        .lock()
+    let store = state.store.as_ref();
+    let stored = store
         .get_media(media_id)
         .map_err(|e| e.to_string())?
         .ok_or("Media not found")?;
-    let Some(tmdb_id) = stored.tmdb_id.clone() else {
+    let target = store
+        .media_refresh_alias(media_id, "tmdb")
+        .map_err(|e| e.to_string())?;
+    let Some(refresh_target) = target.or_else(|| {
+        stored.tmdb_id.clone().map(|ext_id| domain::MediaAlias {
+            source: "tmdb".into(),
+            kind: stored.kind,
+            external_id: ext_id,
+        })
+    }) else {
         return Ok(());
     };
+    let tmdb_id = refresh_target.external_id;
+    let rev = store
+        .media_revision(media_id)
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
     tracing::debug!(media = %stored.title, tmdb_id = %tmdb_id, "刷新目录元数据");
     let Some(fresh) = state
         .catalog
@@ -31,9 +44,16 @@ pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     tracing::info!(media = %updated.title, "已从目录更新媒体元数据");
     state
         .store
-        .lock()
-        .update_media(&updated)
+        .as_ref()
+        .update_media_identity(rev, &updated)
         .map_err(|e| e.to_string())?;
+
+    let meta_service =
+        crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
+    if let Err(e) = meta_service.refresh_media_metadata(&updated) {
+        tracing::warn!(media = %updated.title, error = %e, "刷新采纳元数据失败");
+    }
+
     Ok(())
 }
 

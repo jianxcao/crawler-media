@@ -115,6 +115,25 @@ pub trait Catalog: Send + Sync {
         Ok(Vec::new())
     }
     fn details(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<Media>, String>;
+    /// Complete typed Douban subject and credits from the configured source.
+    fn douban_subject_with_credits(
+        &self,
+        _id: &str,
+    ) -> Result<media::DoubanSubject, media::TmdbError> {
+        Err(media::TmdbError::Http(
+            "configured catalog does not support Douban subjects".into(),
+        ))
+    }
+
+    fn normalized_metadata(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        _scope: domain::EntityScope,
+        _preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        Ok(None)
+    }
     fn poster_url(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<String>, String> {
         let _ = (kind, tmdb_id);
         Ok(None)
@@ -146,6 +165,30 @@ pub trait Catalog: Send + Sync {
     ) -> Result<Option<media::ItemMeta>, String> {
         self.metadata(kind, tmdb_id)
     }
+    /// Optional Library enrichment reads existing durable bytes only, never origin.
+    fn cached_metadata_with_preferences(
+        &self,
+        _kind: MediaKind,
+        _tmdb_id: &str,
+        _languages: &[String],
+        _countries: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        Ok(None)
+    }
+    fn cached_poster_url(
+        &self,
+        _kind: MediaKind,
+        _tmdb_id: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn cached_season_episodes(
+        &self,
+        _tmdb_id: &str,
+        _season: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        Ok(None)
+    }
     /// TMDB episode still file paths. Default: none.
     fn episode_stills(
         &self,
@@ -171,6 +214,14 @@ pub trait Catalog: Send + Sync {
     ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
         Ok(None)
     }
+    fn cached_season_details_lang(
+        &self,
+        _id: &str,
+        _season: u32,
+        _language: &str,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        Ok(None)
+    }
     /// Season details with an explicit language (季级语言回落). Default: none.
     fn season_details_lang(
         &self,
@@ -179,6 +230,15 @@ pub trait Catalog: Send + Sync {
         _lang: &str,
     ) -> Result<Vec<media::EpisodeMeta>, String> {
         Ok(Vec::new())
+    }
+    /// Fresh persisted recommendations. None means not fetched/expired, while
+    /// typed source NotFound is a known ready-empty result in this API seam.
+    fn cached_similar(
+        &self,
+        _kind: MediaKind,
+        _tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        Ok(None)
     }
     /// Similar titles. Default: none.
     fn similar(&self, _kind: MediaKind, _tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
@@ -220,6 +280,13 @@ pub trait Catalog: Send + Sync {
 pub struct EmptyCatalog;
 
 impl Catalog for EmptyCatalog {
+    fn cached_similar(
+        &self,
+        _: MediaKind,
+        _: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        Ok(Some(Vec::new()))
+    }
     fn search_movie(&self, _query: &str) -> Result<Vec<CatalogHit>, String> {
         Ok(Vec::new())
     }
@@ -337,6 +404,21 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .map(|path| path.map(|path| format!("{TMDB_POSTER}{path}")))
             .map_err(|err| err.to_string())
     }
+    fn normalized_metadata(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        if scope != domain::EntityScope::Work {
+            return Ok(None);
+        }
+        self.inner
+            .normalized_details(kind, id, scope, preferences)
+            .map(Some)
+            .map_err(|err| err.to_string())
+    }
     fn metadata(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<media::ItemMeta>, String> {
         self.inner
             .details_with_meta(kind, tmdb_id)
@@ -362,6 +444,34 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .details_with_meta_for(kind, tmdb_id, &languages, &countries)
             .map(Some)
             .map_err(|err| err.to_string())
+    }
+    fn cached_metadata_with_preferences(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+        languages: &[String],
+        countries: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        let languages = languages.iter().map(String::as_str).collect::<Vec<_>>();
+        let countries = countries.iter().map(String::as_str).collect::<Vec<_>>();
+        self.inner
+            .cached_details_with_meta_for(kind, tmdb_id, &languages, &countries)
+            .map_err(|error| error.to_string())
+    }
+    fn cached_poster_url(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<String>, String> {
+        self.inner
+            .cached_details_poster(kind, tmdb_id)
+            .map(|path| path.map(|path| format!("{TMDB_POSTER}{path}")))
+            .map_err(|error| error.to_string())
+    }
+    fn cached_season_episodes(
+        &self,
+        tmdb_id: &str,
+        season: u32,
+    ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+        self.inner
+            .cached_season_episodes(tmdb_id, season)
+            .map_err(|error| error.to_string())
     }
     fn episode_stills(
         &self,
@@ -391,6 +501,16 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .cached_season_details(tmdb_id, season)
             .map_err(|err| err.to_string())
     }
+    fn cached_season_details_lang(
+        &self,
+        id: &str,
+        season: u32,
+        language: &str,
+    ) -> Result<Option<Vec<media::EpisodeMeta>>, String> {
+        self.inner
+            .cached_season_details_lang(id, season, Some(language))
+            .map_err(|error| error.to_string())
+    }
     fn season_details_lang(
         &self,
         tmdb_id: &str,
@@ -401,10 +521,23 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .season_details_lang(tmdb_id, season, Some(lang))
             .map_err(|err| err.to_string())
     }
+    fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<media::CatalogHit>>, String> {
+        match self.inner.cached_similar(kind, tmdb_id) {
+            Ok(hits) => Ok(hits),
+            Err(media::TmdbError::NotFound(_)) => Ok(Some(Vec::new())),
+            Err(error) => Err(error.to_string()),
+        }
+    }
     fn similar(&self, kind: MediaKind, tmdb_id: &str) -> Result<Vec<media::CatalogHit>, String> {
-        self.inner
-            .similar(kind, tmdb_id)
-            .map_err(|err| err.to_string())
+        match self.inner.similar(kind, tmdb_id) {
+            Ok(hits) => Ok(hits),
+            Err(media::TmdbError::NotFound(_)) => Ok(Vec::new()),
+            Err(error) => Err(error.to_string()),
+        }
     }
     fn configuration_languages(&self) -> Result<Vec<media::LanguageRow>, String> {
         self.inner

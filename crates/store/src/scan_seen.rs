@@ -7,6 +7,9 @@ use rusqlite::params;
 
 use super::{Store, StoreError};
 
+#[cfg(test)]
+mod tests;
+
 impl Store {
     /// 采集文件版本事实：`(mtime_ms, file_size, content_digest)`。
     ///
@@ -57,33 +60,19 @@ impl Store {
         operation_id: &str,
         stamps: &[(String, i64, i64, Option<String>)],
     ) -> Result<(), StoreError> {
-        if stamps.is_empty() {
-            return Ok(());
-        }
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.library,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        for (path, mtime_ms, file_size, content_digest) in stamps {
-            tx.execute(
-                "INSERT INTO scan_seen (operation_id, path, mtime_ms, file_size, content_digest)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(operation_id, path)
-                 DO UPDATE SET mtime_ms = excluded.mtime_ms, file_size = excluded.file_size,
-                               content_digest = excluded.content_digest",
-                params![operation_id, path, mtime_ms, file_size, content_digest],
-            )?;
-            // 只有已登记的台账行才有 durable 源版本；没有台账行的路径这里是空操作。
-            tx.execute(
-                "UPDATE ledger
-                    SET source_version_ms = ?2, source_version_size = ?3,
-                        source_version_digest = ?4
-                  WHERE path = ?1",
-                params![path, mtime_ms, file_size, content_digest],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.with_library_write(|db| db.record_scan_seen_stamps(operation_id, stamps))
+    }
+
+    /// 清除一条台账行的 durable 源版本，回到「版本未知」（P2-3）。
+    ///
+    /// 路径在扫描窗口内发生变化时，台账上由登记写下的 stat 事实描述的是**观察时**的
+    /// 内容，不能当作「已处理过这份内容」的版本证据。清掉 `mtime_ns`/`size_bytes`/
+    /// `source_digest`（以及 `created_ns`/`stat_known` 这组 stat 事实）后，
+    /// [`Self::ledger_source_versions`] 对该行返回 `0/0/NULL`，下一轮必定重新处理。
+    ///
+    /// 纯 DB 写，不触碰文件系统，调用方持 Store 锁即可。
+    pub fn clear_source_version(&self, ledger_id: &str) -> Result<(), StoreError> {
+        self.with_library_write(|db| db.clear_source_version(ledger_id))
     }
 
     /// 读 durable 每台账源版本：`path -> (mtime_ms, file_size, content_digest)`（P2-3）。
@@ -96,31 +85,7 @@ impl Store {
         &self,
         paths: &[String],
     ) -> Result<HashMap<String, (i64, i64, Option<String>)>, StoreError> {
-        let mut versions = HashMap::new();
-        if paths.is_empty() {
-            return Ok(versions);
-        }
-        // 分块：复用 ledger.path 索引，同时不触碰 SQLite 的变量上限。
-        for chunk in paths.chunks(500) {
-            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
-            let sql = format!(
-                "SELECT path, source_version_ms, source_version_size, source_version_digest
-                 FROM ledger WHERE path IN ({})",
-                placeholders.join(",")
-            );
-            let mut stmt = self.library.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    (row.get(1)?, row.get(2)?, row.get(3)?),
-                ))
-            })?;
-            for row in rows {
-                let (path, version) = row?;
-                versions.insert(path, version);
-            }
-        }
-        Ok(versions)
+        self.with_library_read(|db| db.ledger_source_versions(paths))
     }
 
     /// 批量读断点事实：**纯 DB，不做文件 IO**（P2-NEW-2）。
@@ -132,51 +97,18 @@ impl Store {
         operation_id: &str,
         paths: &[String],
     ) -> Result<HashMap<String, (i64, i64, Option<String>, bool)>, StoreError> {
-        let mut checkpoints = HashMap::new();
-        if paths.is_empty() {
-            return Ok(checkpoints);
-        }
-        let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT s.path, s.mtime_ms, s.file_size, s.content_digest,
-                    EXISTS(SELECT 1 FROM ledger l WHERE l.path = s.path) AS ledger_exists,
-                    (SELECT l.missing_at FROM ledger l WHERE l.path = s.path LIMIT 1) AS missing_at
-             FROM scan_seen s
-             WHERE s.operation_id = ?1 AND s.path IN ({})",
-            placeholders.join(",")
-        );
-        let mut stmt = self.library.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(paths.len() + 1);
-        params.push(&operation_id);
-        for path in paths {
-            params.push(path);
-        }
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            let path: String = row.get(0)?;
-            let ledger_exists: bool = row.get(4)?;
-            let missing_at: Option<i64> = row.get(5)?;
-            Ok((
-                path,
-                (
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    ledger_exists && missing_at.is_none(),
-                ),
-            ))
-        })?;
-        for row in rows {
-            let (path, checkpoint) = row?;
-            checkpoints.insert(path, checkpoint);
-        }
-        Ok(checkpoints)
+        self.with_library_read(|db| db.scan_seen_checkpoints(operation_id, paths))
     }
 
     /// Record paths seen during an operation chunk (convenience: 自行采集版本事实).
     ///
     /// 生产 runner 不走这里：它必须先在 Store 锁外采集版本，再调用
     /// [`Self::record_scan_seen_stamps`]（P2-NEW-2）。
-    pub fn record_scan_seen(&self, operation_id: &str, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
+    pub fn record_scan_seen(
+        &self,
+        operation_id: &str,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), StoreError> {
         let stamps: Vec<(String, i64, i64, Option<String>)> = paths
             .iter()
             .map(|path| {
@@ -189,12 +121,7 @@ impl Store {
 
     /// Check if path has been seen by this operation.
     pub fn is_scan_seen(&self, operation_id: &str, path: &str) -> Result<bool, StoreError> {
-        let found: bool = self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM scan_seen WHERE operation_id = ?1 AND path = ?2)",
-            params![operation_id, path],
-            |r| r.get(0),
-        )?;
-        Ok(found)
+        self.with_library_read(|db| db.is_scan_seen(operation_id, path))
     }
 
     /// 断点命中复核：只有「台账行仍存在、未标记 missing、文件版本仍能证明同一版本」才可跳过。
@@ -204,24 +131,20 @@ impl Store {
     pub fn scan_seen_is_current(&self, operation_id: &str, path: &str) -> Result<bool, StoreError> {
         let current = Self::scan_seen_stamp(Path::new(path));
         let checkpoints = self.scan_seen_checkpoints(operation_id, &[path.to_string()])?;
-        Ok(checkpoints.get(path).is_some_and(
-            |(mtime_ms, file_size, digest, ledger_current)| {
+        Ok(checkpoints
+            .get(path)
+            .is_some_and(|(mtime_ms, file_size, digest, ledger_current)| {
                 *ledger_current
                     && Self::scan_seen_stamp_matches(
                         &(*mtime_ms, *file_size, digest.clone()),
                         &current,
                     )
-            },
-        ))
+            }))
     }
 
     /// Clear seen entries when operation completes or is cancelled.
     pub fn clear_scan_seen(&self, operation_id: &str) -> Result<(), StoreError> {
-        self.library.execute(
-            "DELETE FROM scan_seen WHERE operation_id = ?1",
-            [operation_id],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.clear_scan_seen(operation_id))
     }
 }
 
@@ -265,3 +188,6 @@ fn bounded_content_digest(path: &Path) -> Option<String> {
     }
     Some(format!("{filled:08x}:{hash:016x}"))
 }
+
+#[path = "scan_seen/connection.rs"]
+mod connection;

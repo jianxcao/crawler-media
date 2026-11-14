@@ -25,7 +25,6 @@ fn api_app(root: &Path) -> axum::Router {
             ProfileSet::load(None).unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
-            root.join("library"),
         )
         .unwrap(),
     )
@@ -61,6 +60,7 @@ async fn cors_preflight_allows_dev_origin() {
         response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
         "http://127.0.0.1:3334"
     );
+    assert_eq!(response.headers()[header::ACCESS_CONTROL_MAX_AGE], "86400");
 }
 
 #[tokio::test]

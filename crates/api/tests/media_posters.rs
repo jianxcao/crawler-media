@@ -1,5 +1,11 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod writer_hold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/writer_hold.rs"
+    ));
+}
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, Torrent};
@@ -8,12 +14,15 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use tower::ServiceExt;
 
+use api::Store;
 use api::catalog::Catalog;
 use api::management::ApiState;
+use api::media_posters::PosterError;
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
-use api::media_posters::PosterError;
-use api::Store;
+
+#[path = "media_posters/nonblocking.rs"]
+mod nonblocking;
 
 struct MockCatalog {
     poster_calls: AtomicUsize,
@@ -115,7 +124,6 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
         ProfileSet::load(None).unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
-        tmp.path().join("library"),
     )
     .unwrap();
 

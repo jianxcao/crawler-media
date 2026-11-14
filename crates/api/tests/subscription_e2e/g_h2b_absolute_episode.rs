@@ -34,6 +34,6 @@ async fn absolute_episode_lands_in_later_season() {
         .collect();
     assert_eq!(files.len(), 1, "{files:?}");
     assert!(files[0].contains("S02E01"), "{files:?}");
-    let facts = h.state.store().lock().load_subscribe_facts(id).unwrap();
+    let facts = h.state.store().load_subscribe_facts(id).unwrap();
     assert!(facts.get(Some(2), Some(1)).is_some());
 }

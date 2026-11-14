@@ -25,6 +25,10 @@ impl<H: CatalogGet> Anilist<H> {
         })
     }
 
+    pub fn with_cache(http: H, cache: CatalogCache) -> Self {
+        Self { http, cache }
+    }
+
     pub fn set_now(&self, now: i64) {
         self.cache.set_now(now);
     }

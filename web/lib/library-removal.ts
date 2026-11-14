@@ -45,5 +45,7 @@ export function removalLabel(operation: LibraryRemoval): string {
   if (operation.state === "failed") return `删除失败：${operation.error ?? "请重试"}`;
   if (operation.state === "succeeded") return "已删除媒体库";
   const phase = { frozen: "正在停止相关任务", draining: "正在等待任务结束", cleaning: "正在清除扫描记录与探测缓存" };
-  return `正在删除媒体库 · ${phase[operation.state]}`;
+  // A draining operation carries the backend's wait/auto-retry note in `error`.
+  const note = operation.state === "draining" && operation.error ? `（${operation.error}）` : "";
+  return `正在删除媒体库 · ${phase[operation.state]}${note}`;
 }

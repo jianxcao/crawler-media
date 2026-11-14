@@ -1,12 +1,17 @@
+mod image_delivery;
+mod startup;
+
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use downloader::Downloader;
 use indexer::{Fetcher, Indexer, ProfileSet};
 use parking_lot::Mutex;
 
+use super::query_phase::{QueryPhaseSnapshot, QueryPhaseTotals};
 use crate::Store;
 use crate::catalog::{Catalog, EmptyCatalog};
 use crate::poster_fetch::{HttpPoster, PosterFetch};
@@ -14,60 +19,99 @@ use crate::store::StoreError;
 use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
 use domain::{SubscribeId, UserId};
 
+/// Production Library reader capacity.
+pub(crate) const STORE_READERS: usize = 8;
+
 #[derive(Clone)]
 pub struct ApiState {
-    pub(crate) store: Arc<Mutex<Store>>,
+    pub(crate) store: Arc<Store>,
+    pub(crate) library_reads: Arc<store::ReaderPool>,
+    /// Shared database writers, acquired only at the mutation seam.
+    pub(crate) writers: Arc<store::Writers>,
     /// 两套登录协议共用的 offlock 密码校验与 CAS 签发服务。
     pub(crate) password_login: Arc<crate::password_login::PasswordLogin>,
     /// 有界 blocking 预算：owned 快照上的 stat/catalog 计算准入（生产默认 8）。
     pub http_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Background chapter IO must not consume foreground playback write capacity.
+    pub(crate) chapter_work: Arc<crate::blocking_budget::BlockingBudget>,
+    pub(crate) discover_work: Arc<crate::http::discover::Executor>,
     /// 搜索有界 blocking 预算（默认 4）。
     pub search_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// 后台季详情网络补全独立准入，不占用前台标题搜索容量（默认 2）。
+    pub(crate) season_enrichment_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// 文件目录浏览有界 blocking 预算（默认 2）。
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Cached native artwork reads cannot queue behind maintenance filesystem IO.
+    pub(crate) artwork_reads: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Instance-owned coalesced Browser reconciliation; no global registry.
+    pub(crate) browser_reconcile: Arc<crate::http::browser_settings::ReconcileCoordinator>,
+    /// 后台背景图独立准入，按最终目标路径单飞；不占用交互式请求预算。
+    pub(crate) backdrop_enrichment: Arc<crate::backdrop_enrichment::BackdropEnrichment>,
     /// notify 发送 seam（生产为显式超时的 HTTP 实现；测试可注入阻塞实现）。
     pub(crate) notify_transport: Arc<dyn crate::NotifyTransport>,
     /// 共享 single-flight 字幕交付（生产默认并发 2、受控 ffmpeg runner）。
     pub(crate) subtitle_delivery: Arc<crate::subtitle_delivery::SubtitleDelivery>,
     /// 浏览路径的只读文件访问（NFO / stat）；生产直接读磁盘，测试可注入阻塞实现。
-    pub(crate) browse_files: Arc<dyn crate::browse_file_read::BrowseFileRead>,
+    pub(crate) file_stats: Arc<dyn crate::file_stat_read::FileStatRead>,
     /// 文件系统观察 seam（verify / prune / watcher）；生产默认真实实现，测试可注入。
     pub(crate) library_files: Arc<dyn crate::library_presence::LibraryFileRead>,
+    pub(crate) chapter_probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
     /// 播放时钟 seam（生产为真实系统毫秒时钟；测试可注入假时钟）。
     pub(crate) playback_clock: Arc<dyn crate::playback_events::PlaybackClock>,
     /// 进程内共享的任务计数 watcher（所有 SSE 连接共用一个 poller）。
-    /// 浏览投影服务（单飞构建与失效管理）。
-    pub projection: Arc<crate::browse_projection::ProjectionService>,
     /// 扫描操作协调器（持久单飞与并发控制）。
     pub scan_coordinator: Arc<crate::scan_operations::ScanCoordinator>,
     pub job_updates: Arc<crate::job_updates::JobUpdates>,
     /// Library 封面渲染与版本化发布（生产默认真实渲染器，测试可注入）。
     pub(crate) cover_service: Arc<crate::library_cover_service::LibraryCoverService>,
     pub(crate) library_work: Arc<crate::library_lifecycle::LibraryWorkRegistry>,
-    pub jobs: Arc<Mutex<jobs::Queue>>,
+    pub jobs: Arc<crate::JobsWriter>,
+    pub(crate) jobs_readers: Arc<store::ReaderPool>,
     /// 后台 job_loop 控制（停止意图与正在运行的 blocking worker 跟踪）。
     pub(crate) job_loop_control: Arc<crate::job_loop::JobLoopControl>,
     /// H-1: false while another instance holds the data-directory lease.
     /// Background writers stop and manual write endpoints answer 409.
     pub(crate) instance_writable: Arc<std::sync::atomic::AtomicBool>,
+    /// L5: 维护期写门禁——关闸时前台写入口立刻 503 + `Retry-After`，
+    /// 不在 SQLite busy 上耗 5 秒（与只读的 409 分开）。
+    pub(crate) write_gate: Arc<crate::write_gate::WriteGate>,
     /// 数据库维护执行器（生产为真实 SQLite；测试可注入阻塞/报错的假实现）。
     pub(crate) maintenance_executor: Arc<dyn crate::maintenance::DatabaseExecutor>,
     /// 进程内维护互斥：`concurrency_key` 只防同一 def 重叠，这里覆盖不同维护 def。
     pub(crate) maintenance_lock: Arc<Mutex<()>>,
     /// Job attempts still executing in this process; protects them from timeout recovery.
+    pub(crate) media_refs_retry_at: Arc<Mutex<(u64, Option<std::time::Instant>)>>,
+    pub(crate) subscribe_cleanup_cursor: Arc<Mutex<Option<domain::SubscribeId>>>,
+    pub(crate) subscribe_jobs_cursor: Arc<Mutex<Option<domain::SubscribeId>>>,
     pub(crate) active_job_attempts: Arc<Mutex<HashMap<domain::JobId, jobs::Job>>>,
+    pub(crate) job_attempt_coordinator: Arc<Mutex<()>>,
     /// Serializes a Subscribe pause/update against a worker's final add step.
     subscribe_guards: Arc<Mutex<HashMap<SubscribeId, Weak<Mutex<()>>>>>,
+    pub(crate) active_transfers: Arc<Mutex<std::collections::HashSet<SubscribeId>>>,
+    /// Wake deletion waiters after a round finishes recording its external effects.
+    pub(crate) subscribe_round_finished: Arc<tokio::sync::Notify>,
     /// Deletion reservations prevent workers and manual triggers from starting
     /// new work while asynchronous cleanup runs without holding a sync guard.
     deleting_subscribes: Arc<Mutex<HashSet<SubscribeId>>>,
     pub(crate) jellyfin_server_id: Arc<String>,
     pub(crate) indexer: Arc<Indexer>,
     pub(crate) downloader: Arc<dyn Downloader>,
-    pub(crate) library_root: Arc<PathBuf>,
     pub(crate) catalog: Arc<dyn Catalog>,
+    /// Parsed country and language tables for this process.
+    pub(crate) configuration_memory: Arc<crate::configuration_memory::ConfigurationMemory>,
+    pub(crate) similar_reads: Arc<crate::similar_reads::SimilarReads>,
+    pub(super) scan_catalog: Arc<
+        Mutex<(
+            Arc<dyn Catalog>,
+            Arc<dyn crate::media_posters::MediaPosterSource>,
+        )>,
+    >,
     pub(crate) poster_fetch: Arc<dyn PosterFetch>,
+    /// Fanart cache connection opened once per service lifetime (C03).
+    pub(crate) fanart_cache: Arc<std::sync::OnceLock<Arc<media::cache::CatalogCache>>>,
     pub(crate) media_posters: Arc<dyn crate::media_posters::MediaPosterSource>,
+    /// Remote artwork delivery shares one cache, fill registry and admission gate.
+    pub(crate) image_delivery: Arc<crate::http::image_proxy::ImageProxy>,
     pub log_buffer: LogBuffer,
     pub obscura: Arc<crate::obscura_manager::ObscuraManager>,
     pub browser: Arc<indexer::Browser>,
@@ -75,30 +119,21 @@ pub struct ApiState {
     pub probe: Arc<crate::probe_manager::ProbeManager>,
     /// 持久章节帧义务的有界派发服务（2 进程 / 64 ID 窗口）。
     pub(crate) chapter_frames: Arc<crate::chapter_frame_service::ChapterFrameService>,
-    /// 测试 seam：gallery 实际展开图片 JSON 的组数（生产只读计数，无副作用）。
-    /// 用来证明「先按图片存在性剔除空组、再分页」后只渲染本页图片集合。
-    pub(crate) gallery_expansions: Arc<std::sync::atomic::AtomicUsize>,
-    /// Jellyfin 选择的候选条数（每次选择每行记一次）：证明一次请求只做一遍
-    /// 候选遍历，而不是每个 series 重读整库。
+    /// Protocol references selected for Jellyfin pages.
     pub(crate) jellyfin_candidates: Arc<std::sync::atomic::AtomicUsize>,
     /// Jellyfin 选择里真正构建了重元数据（tracks/chapters/NFO/stat）的条目数：
     /// 证明只有选中的那一页被 enrich。
     pub(crate) jellyfin_heavy_items: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：浏览请求真正解码的投影 file facts 行数（生产只读计数，无副作用）。
-    /// 计数发生在**读取/解析处**，包含随后被丢弃或解析失败的行，以及依赖覆盖的
-    /// 回退重读；热页只应解码选中 Media 的 facts。
-    pub(crate) browse_page_decoded_files: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：浏览请求真正解码的投影 media facts 行数（同上口径）。
-    pub(crate) browse_page_decoded_media: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：选页读过的轻候选 JSON 行数（常用排序的 SQL 分页应为 0）。
-    pub(crate) browse_page_candidate_rows: Arc<std::sync::atomic::AtomicUsize>,
-    /// 测试 seam：投影依赖覆盖读过的轻量行数（列读 + 候选行；重启后的首个小页
-    /// 只应产生这一项成本，不应解码整份 facts）。
-    pub(crate) browse_page_dependency_rows: Arc<std::sync::atomic::AtomicUsize>,
+    /// Files, coverage units, Media and Playback rows captured for selected pages.
+    pub(crate) jellyfin_hydrated_rows: Arc<std::sync::atomic::AtomicUsize>,
+    query_phase_totals: Arc<QueryPhaseTotals>,
+    /// Deterministic seam between protocol selection and selected fact capture.
+    pub(crate) protocol_selection_barrier:
+        Option<Arc<dyn Fn(&domain::ProtocolItemPage) + Send + Sync>>,
+    pub(crate) library_header_barrier: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub(crate) library_read_stage_barrier: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     /// 测试 seam：统计计算在计划收集与 totals 读取之间的屏障（生产为 `None`）。
     pub statistics_phase_barrier: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// 测试 seam：统计路径执行的用户 role 查询次数（生产只读计数）。
-    pub(crate) statistics_role_lookups: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn apply_admin_bootstrap(
@@ -114,13 +149,6 @@ fn apply_admin_bootstrap(
         } => {
             store.seed_admin_with_credentials(user_id, &password, &cli_token)?;
         }
-        crate::bootstrap_credentials::AdminBootstrapAction::Rotate {
-            password,
-            cli_token,
-        } => {
-            tracing::info!("检测到旧实例管理员口令与 CLI token 相同，安全更新为独立密码");
-            store.rotate_admin_password_keeping_cli_token(user_id, &password, &cli_token)?;
-        }
         crate::bootstrap_credentials::AdminBootstrapAction::Keep { cli_token } => {
             let _ = store.force_admin_role(user_id);
             store.register_current_cli_token(user_id, &cli_token)?;
@@ -130,53 +158,70 @@ fn apply_admin_bootstrap(
 }
 
 impl ApiState {
+    pub fn with_chapter_probe(
+        mut self,
+        probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
+    ) -> Self {
+        self.chapter_probe = probe;
+        self
+    }
+
+    /// Source clients share this application's Cache writer and readonly pool.
+    pub fn catalog_cache(
+        &self,
+        source: media::response_cache::CacheSource,
+    ) -> media::cache::CatalogCache {
+        media::cache::CatalogCache::with_backend(
+            Arc::new(crate::catalog_storage::StoreCache(self.store.clone())),
+            source,
+            0,
+        )
+    }
+
+    pub(crate) fn fanart_cache(&self) -> Arc<media::cache::CatalogCache> {
+        self.fanart_cache
+            .get_or_init(|| {
+                Arc::new(self.catalog_cache(media::response_cache::CacheSource::Fanart))
+            })
+            .clone()
+    }
+
     pub fn new<F>(
         store: Store,
         token: String,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        let store = Arc::new(Mutex::new(store));
-        Self::new_arc(store, token, profiles, fetcher, downloader, library_root)
+        let store = Arc::new(store);
+        Self::new_arc(store, token, profiles, fetcher, downloader)
     }
 
-    /// Variant that takes the store already wrapped in Arc<Mutex<>>, so
+    /// Variant that takes the Store already shared through Arc, so
     /// callers can share it with runtime-configurable clients (e.g. TMDB).
     pub fn new_arc<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         token: String,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        Self::new_arc_with_admin_password(
-            store,
-            token,
-            None,
-            profiles,
-            fetcher,
-            downloader,
-            library_root,
-        )
+        Self::new_arc_with_admin_password(store, token, None, profiles, fetcher, downloader)
     }
 
     pub fn new_arc_with_admin_password<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         token: String,
         admin_password: Option<String>,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
@@ -187,59 +232,42 @@ impl ApiState {
             crate::bootstrap_credentials::BootstrapMode::TestFixture
         };
         let action = crate::bootstrap_credentials::prepare_admin_credentials(
-            &store.lock(),
+            &store.as_ref(),
             &token,
             admin_password.as_deref(),
             mode,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        Self::new_arc_with_admin_bootstrap(
-            store,
-            profiles,
-            fetcher,
-            downloader,
-            library_root,
-            action,
-        )
+        Self::new_arc_with_admin_bootstrap(store, profiles, fetcher, downloader, action)
     }
 
     pub fn new_arc_with_admin_bootstrap<F>(
-        store: Arc<Mutex<Store>>,
+        store: Arc<Store>,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
-        library_root: PathBuf,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        std::fs::create_dir_all(&library_root)?;
-        apply_admin_bootstrap(&store.lock(), action)?;
-        let jellyfin_server_id = {
-            let guard = store.lock();
-            match guard.get_setting("jellyfin.server_id")? {
-                Some(id) => id,
-                None => {
-                    let id = uuid::Uuid::new_v4().simple().to_string();
-                    guard.put_setting("jellyfin.server_id", &id)?;
-                    id
-                }
-            }
-        };
-        let jobs = jobs::Queue::open(store.lock().data_dir().join("jobs.db"))
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        crate::jobs_api::seed_instance_defs(&jobs)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
-        crate::maintenance::seed_maintenance_defs(&jobs)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let data_dir = store.lock().data_dir().to_path_buf();
-        // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
-        // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
+        apply_admin_bootstrap(&store.as_ref(), action)?;
+        let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref())?;
+        let jobs_path = store.as_ref().data_dir().join("jobs.db");
+        let jobs = open_jobs(&jobs_path)?;
+        let jobs_readers = crate::jobs_readers::open(&jobs_path)?;
+        store.configure_reader_pool_size(
+            store::Db::Library,
+            NonZeroUsize::new(STORE_READERS)
+                .ok_or_else(|| StoreError::Invalid("Library reader capacity is zero".into()))?,
+        )?;
+        let library_reads = store.reader_pool(store::Db::Library);
+        let data_dir = store.data_dir().to_path_buf();
+        let writers = store.writers();
+        // 有 Tokio runtime 时启动异步探测 worker；测试路径仅创建队列。
         let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-        let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone()));
+        let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone())?);
         probe.set_library_registry(library_work.clone());
         let startup_browser = crate::runtime_browser::startup_browser(store.clone());
         let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
@@ -247,83 +275,84 @@ impl ApiState {
             library_work.clone(),
         ));
         probe.set_chapter_frames(chapter_frames.clone());
+        let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
+        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
+            crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
+        );
         let state = Self {
             store: store.clone(),
+            library_reads,
+            writers,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(
                 Arc::new(crate::password_login::Argon2Engine),
                 2,
             )),
             http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
+            chapter_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
+            discover_work: Arc::new(Default::default()),
             search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
+            season_enrichment_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
+            artwork_reads: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
+            browser_reconcile: Default::default(),
+            backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
             notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),
             subtitle_delivery: Arc::new(crate::subtitle_delivery::SubtitleDelivery::new(
                 Arc::new(library::ControlledSubtitleRunner),
                 2,
             )),
-            browse_files: Arc::new(crate::browse_file_read::LocalBrowseFileRead),
+            file_stats: Arc::new(crate::file_stat_read::LocalFileStatRead),
             library_files: Arc::new(crate::library_presence::SystemLibraryFileRead),
+            chapter_probe: Arc::new(crate::marker_resolver::FfprobeChapters),
             playback_clock: Arc::new(crate::playback_events::SystemPlaybackClock),
             job_updates: Arc::new(crate::job_updates::JobUpdates::new()),
             cover_service: Arc::new(crate::library_cover_service::LibraryCoverService::local()),
-            projection: Arc::new(crate::browse_projection::ProjectionService::new()),
             scan_coordinator: Arc::new(crate::scan_operations::ScanCoordinator::new()),
             library_work,
-            jobs: Arc::new(Mutex::new(jobs)),
+            jobs: Arc::new(crate::JobsWriter::new(jobs)),
+            jobs_readers,
             job_loop_control: Arc::new(crate::job_loop::JobLoopControl::new()),
             instance_writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            write_gate: Arc::new(crate::write_gate::WriteGate::new()),
             maintenance_executor: Arc::new(crate::maintenance::SqliteExecutor),
             maintenance_lock: Arc::new(Mutex::new(())),
+            media_refs_retry_at: Arc::new(Mutex::new((0, None))),
+            subscribe_cleanup_cursor: Arc::new(Mutex::new(None)),
+            subscribe_jobs_cursor: Arc::new(Mutex::new(None)),
             active_job_attempts: Arc::new(Mutex::new(HashMap::new())),
+            job_attempt_coordinator: Arc::new(Mutex::new(())),
             subscribe_guards: Arc::new(Mutex::new(HashMap::new())),
+            active_transfers: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            subscribe_round_finished: Arc::new(tokio::sync::Notify::new()),
             deleting_subscribes: Arc::new(Mutex::new(HashSet::new())),
             jellyfin_server_id: Arc::new(jellyfin_server_id),
             indexer: Arc::new(Indexer::new(profiles, fetcher)),
             downloader,
-            library_root: Arc::new(library_root),
-            catalog: Arc::new(EmptyCatalog),
+            catalog: catalog.clone(),
+            configuration_memory: Arc::new(
+                crate::configuration_memory::ConfigurationMemory::default(),
+            ),
+            similar_reads: Arc::default(),
+            scan_catalog: Arc::new(Mutex::new((catalog, media_posters.clone()))),
             poster_fetch: Arc::new(HttpPoster),
-            media_posters: Arc::new(crate::media_posters::service::MediaPosterService::new(
-                store.clone(),
-                Arc::new(EmptyCatalog),
-            )),
+            fanart_cache: Arc::default(),
+            media_posters,
+            image_delivery: crate::http::image_proxy::new(&data_dir),
             log_buffer: LogBuffer::new(DEFAULT_CAPACITY),
             obscura: Arc::new(crate::obscura_manager::ObscuraManager::new(&data_dir)),
             browser: Arc::new(startup_browser.0),
             probe,
             chapter_frames,
-            gallery_expansions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             jellyfin_candidates: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             jellyfin_heavy_items: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_decoded_files: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_decoded_media: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_candidate_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            browse_page_dependency_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            jellyfin_hydrated_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            query_phase_totals: Arc::new(QueryPhaseTotals::default()),
+            protocol_selection_barrier: None,
+            library_header_barrier: None,
+            library_read_stage_barrier: None,
             statistics_phase_barrier: None,
-            statistics_role_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
-        if let Some(error) = startup_browser.1 {
-            state.obscura.set_last_error(Some(error));
-        }
-        if tokio::runtime::Handle::try_current().is_ok() {
-            crate::http::browser_settings::spawn_reconcile(&state);
-            crate::library_lifecycle::resume_library_removals(&state)
-                .map_err(std::io::Error::other)?;
-            state.probe.try_start_workers();
-            state.chapter_frames.start();
-            crate::scan_probe_dispatch::start_dispatcher(state.clone());
-            // 已访问 Library 的投影周期刷新（外部 NFO/图片修改 ≤60 秒可见）。
-            state.projection.clone().start_periodic_refresh(state.clone());
-            match state.store.lock().recover_orphaned_scans() {
-                Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的扫描操作"),
-                Ok(_) => {}
-                Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
-            }
-            state.scan_coordinator.trigger_next(&state);
-        }
-        // 幂等对账：崩溃可能停在「DB 已提交、封面文件还没删」之间，每次启动重试。
-        crate::library_cover_service::purge_removed_library_covers(&state);
-        Ok(state)
+        state.finish_initialization(startup_browser.1)
     }
 
     pub fn with_log_buffer(mut self, log_buffer: LogBuffer) -> Self {
@@ -342,15 +371,33 @@ impl ApiState {
         mut self,
         runner: Arc<dyn crate::chapter_frame_service::ChapterFrameRunner>,
     ) -> Self {
-        let service = Arc::new(crate::chapter_frame_service::ChapterFrameService::with_runner(
-            self.store.clone(),
-            self.library_work.clone(),
-            runner,
-        ));
+        let service = Arc::new(
+            crate::chapter_frame_service::ChapterFrameService::with_runner(
+                self.store.clone(),
+                self.library_work.clone(),
+                runner,
+            ),
+        );
         self.chapter_frames.abort();
         self.probe.set_chapter_frames(service.clone());
         self.chapter_frames = service;
         self
+    }
+
+    /// Replace media engines while preserving the production Library/frame wiring.
+    pub fn with_probe_engines(
+        mut self,
+        matcher: Arc<dyn marker::FingerprintEngine>,
+        capture: Arc<dyn marker::FingerprintCaptureEngine>,
+        tracks: Arc<dyn crate::probe_manager::TracksProbe>,
+    ) -> Result<Self, ApiStateError> {
+        let probe =
+            crate::probe_manager::ProbeManager::with_engines(self.store.clone(), matcher, capture)?
+                .with_tracks_probe(tracks);
+        probe.set_library_registry(self.library_work.clone());
+        probe.set_chapter_frames(self.chapter_frames.clone());
+        self.probe = Arc::new(probe);
+        Ok(self)
     }
 
     pub fn chapter_frames(&self) -> Arc<crate::chapter_frame_service::ChapterFrameService> {
@@ -379,32 +426,44 @@ impl ApiState {
         self
     }
 
+    /// A one-reader fixture makes pool saturation observable through the Router.
+    pub fn with_library_read_pool_size(self, size: NonZeroUsize) -> Result<Self, StoreError> {
+        self.store
+            .configure_reader_pool_size(store::Db::Library, size)?;
+        Ok(self)
+    }
+
+    #[doc(hidden)]
+    pub fn with_library_read_progress_observer(
+        self,
+        observer: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.library_reads
+            .set_query_progress_observer(Some(observer));
+        self
+    }
+
+    pub fn close_library_reads(&self) {
+        self.library_reads.close();
+    }
+
+    #[doc(hidden)]
+    pub fn library_read_pool_weak(&self) -> Weak<store::ReaderPool> {
+        Arc::downgrade(&self.library_reads)
+    }
+
     pub fn with_browser(mut self, browser: Arc<indexer::Browser>) -> Self {
         self.browser = browser;
         self
     }
 
     /// 替换浏览文件访问 seam（测试注入阻塞实现以证明 NFO/stat 不在 Store 锁内）。
-    pub fn with_browse_file_read(
+    pub fn with_file_stat_read(
         mut self,
-        files: Arc<dyn crate::browse_file_read::BrowseFileRead>,
+        files: Arc<dyn crate::file_stat_read::FileStatRead>,
     ) -> Self {
-        self.browse_files = files;
+        self.file_stats = files;
         self
-    }
-
-    /// 替换 gallery 展开计数 seam（测试注入自有计数器以观察只渲染本页）。
-    pub fn with_gallery_expansions(
-        mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
-        self.gallery_expansions = counter;
-        self
-    }
-
-    /// gallery 展开计数（每次为一组图片构建 JSON 记 1）。
-    pub fn gallery_expansions(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.gallery_expansions.clone()
     }
 
     /// 替换 Jellyfin 选择计数 seam（测试注入自有计数器以观察候选/重元数据条数）。
@@ -418,7 +477,7 @@ impl ApiState {
         self
     }
 
-    /// Jellyfin 选择遍历过的候选条数。
+    /// Jellyfin normal pages' selected references (NextUp keeps its own candidate count).
     pub fn jellyfin_candidates(&self) -> Arc<std::sync::atomic::AtomicUsize> {
         self.jellyfin_candidates.clone()
     }
@@ -428,74 +487,44 @@ impl ApiState {
         self.jellyfin_heavy_items.clone()
     }
 
-    /// 替换浏览页工作量计数 seam（测试注入自有计数器以观察本页解码行数）。
-    pub fn with_browse_page_counters(
+    pub fn jellyfin_hydrated_rows(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.jellyfin_hydrated_rows.clone()
+    }
+
+    pub fn query_phase_snapshot(&self) -> QueryPhaseSnapshot {
+        self.query_phase_totals.snapshot()
+    }
+
+    pub(crate) fn record_query_phase(&self, phase: &'static str, duration: Duration) {
+        self.query_phase_totals.record(phase, duration);
+    }
+
+    pub fn with_protocol_selection_barrier(
         mut self,
-        decoded_files: Arc<std::sync::atomic::AtomicUsize>,
-        decoded_media: Arc<std::sync::atomic::AtomicUsize>,
-        candidate_rows: Arc<std::sync::atomic::AtomicUsize>,
-        dependency_rows: Arc<std::sync::atomic::AtomicUsize>,
+        barrier: Arc<dyn Fn(&domain::ProtocolItemPage) + Send + Sync>,
     ) -> Self {
-        self.browse_page_decoded_files = decoded_files;
-        self.browse_page_decoded_media = decoded_media;
-        self.browse_page_candidate_rows = candidate_rows;
-        self.browse_page_dependency_rows = dependency_rows;
+        self.protocol_selection_barrier = Some(barrier);
         self
     }
 
-    /// 浏览请求真正解码的投影 file facts 行数。
-    pub fn browse_page_decoded_files(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_decoded_files.clone()
+    #[doc(hidden)]
+    pub fn with_library_header_barrier(mut self, barrier: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.library_header_barrier = Some(barrier);
+        self
     }
 
-    /// 浏览请求真正解码的投影 media facts 行数。
-    pub fn browse_page_decoded_media(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_decoded_media.clone()
-    }
-
-    /// 选页读过的轻候选 JSON 行数。
-    pub fn browse_page_candidate_rows(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_candidate_rows.clone()
-    }
-
-    /// 投影依赖覆盖读过的轻量行数。
-    pub fn browse_page_dependency_rows(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.browse_page_dependency_rows.clone()
-    }
-
-    /// 记录本次请求真正解码的投影行数：计数在**读取/解析处**，包含随后被丢弃或
-    /// 解析失败的行（测试 seam；生产只读计数，无副作用）。
-    pub(crate) fn count_decoded(&self, files: usize, media: usize) {
-        self.browse_page_decoded_files
-            .fetch_add(files, std::sync::atomic::Ordering::SeqCst);
-        self.browse_page_decoded_media
-            .fetch_add(media, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// 记录选页读过的轻候选 JSON 行数。
-    pub(crate) fn count_candidate_rows(&self, rows: usize) {
-        self.browse_page_candidate_rows
-            .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// 记录依赖覆盖读过的轻量行数（file 依赖列 + 候选行）。
-    pub(crate) fn count_dependency_rows(&self, rows: usize) {
-        self.browse_page_dependency_rows
-            .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
+    #[doc(hidden)]
+    pub fn with_library_read_stage_barrier(
+        mut self,
+        barrier: Arc<dyn Fn(&'static str) + Send + Sync>,
+    ) -> Self {
+        self.library_read_stage_barrier = Some(barrier);
+        self
     }
 
     /// 替换 notify 发送实现（测试注入阻塞实现以验证预算准入）。
     pub fn with_notify_transport(mut self, transport: Arc<dyn crate::NotifyTransport>) -> Self {
         self.notify_transport = transport;
-        self
-    }
-
-    /// 替换浏览投影服务（测试注入 `ProjectionService::disabled()` 验证回退等价性）。
-    pub fn with_projection_service(
-        mut self,
-        projection: Arc<crate::browse_projection::ProjectionService>,
-    ) -> Self {
-        self.projection = projection;
         self
     }
 
@@ -532,11 +561,15 @@ impl ApiState {
         self.jellyfin_server_id.as_str()
     }
 
-    pub fn store(&self) -> Arc<Mutex<Store>> {
+    pub fn store(&self) -> Arc<Store> {
         self.store.clone()
     }
 
-    pub fn jobs(&self) -> Arc<Mutex<jobs::Queue>> {
+    pub fn jobs_readers(&self) -> Arc<store::ReaderPool> {
+        self.jobs_readers.clone()
+    }
+
+    pub fn jobs(&self) -> Arc<crate::JobsWriter> {
         self.jobs.clone()
     }
 
@@ -544,6 +577,13 @@ impl ApiState {
     pub fn instance_writable(&self) -> bool {
         self.instance_writable
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn with_instance_writable(self, writable: bool) -> Self {
+        self.instance_writable
+            .store(writable, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     /// H-1: 409 for write endpoints while another instance holds the lease.
@@ -556,6 +596,21 @@ impl ApiState {
             "instance.read_only",
             "数据目录由另一个实例占用，本实例为只读模式",
         ))
+    }
+
+    /// L5: 维护期写门禁（维护任务关闸、前台写入口 `admit()`）。
+    pub fn write_gate(&self) -> Arc<crate::write_gate::WriteGate> {
+        self.write_gate.clone()
+    }
+
+    /// L5: 维护关闸期间的写请求 → 503 + `Retry-After`。
+    ///
+    /// 与只读的 409（`require_writable`）是两个原因，状态码不能合并：
+    /// 只读说明「另一个实例在写这个数据目录」，503 说明「本实例正在维护，稍后重试」。
+    pub(crate) fn require_write_admitted(&self) -> Result<(), axum::response::Response> {
+        self.write_gate
+            .admit()
+            .map_err(crate::write_gate::busy_response)
     }
 
     pub fn job_loop_control(&self) -> Arc<crate::job_loop::JobLoopControl> {
@@ -571,10 +626,7 @@ impl ApiState {
         self
     }
 
-    pub fn with_job_loop_control(
-        mut self,
-        control: Arc<crate::job_loop::JobLoopControl>,
-    ) -> Self {
+    pub fn with_job_loop_control(mut self, control: Arc<crate::job_loop::JobLoopControl>) -> Self {
         self.job_loop_control = control;
         self
     }
@@ -606,23 +658,6 @@ impl ApiState {
 
     pub fn clear_subscribe_deleting(&self, id: SubscribeId) {
         self.deleting_subscribes.lock().remove(&id);
-    }
-
-    pub fn with_catalog(mut self, catalog: Arc<dyn Catalog>) -> Self {
-        self.catalog = catalog.clone();
-        self.media_posters = Arc::new(crate::media_posters::service::MediaPosterService::new(
-            self.store.clone(),
-            catalog,
-        ));
-        self
-    }
-
-    pub fn with_media_posters(
-        mut self,
-        media_posters: Arc<dyn crate::media_posters::MediaPosterSource>,
-    ) -> Self {
-        self.media_posters = media_posters;
-        self
     }
 
     pub fn with_poster_fetch(mut self, poster_fetch: Arc<dyn PosterFetch>) -> Self {
@@ -659,4 +694,15 @@ pub enum ApiStateError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+fn open_jobs(jobs_path: &std::path::Path) -> Result<jobs::Queue, ApiStateError> {
+    let jobs =
+        jobs::Queue::open(jobs_path).map_err(|error| std::io::Error::other(error.to_string()))?;
+    crate::jobs_api::seed_instance_defs(&jobs)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
+    crate::maintenance::seed_maintenance_defs(&jobs)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    Ok(jobs)
 }

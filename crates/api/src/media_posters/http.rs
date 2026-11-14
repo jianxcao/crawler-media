@@ -1,6 +1,6 @@
+use super::PosterError;
 use std::io::Read;
 use std::time::Duration;
-use super::PosterError;
 
 pub trait ImageFetcher: Send + Sync {
     fn fetch(&self, url: &str) -> Result<(String, Vec<u8>), PosterError>;
@@ -23,7 +23,10 @@ impl ImageFetcher for RestricedImageFetcher {
             .build()
             .new_agent();
 
-        let response = agent.get(url).call().map_err(|e| PosterError::Upstream(e.to_string()))?;
+        let response = agent
+            .get(url)
+            .call()
+            .map_err(|e| PosterError::Upstream(e.to_string()))?;
         let content_type = response
             .headers()
             .get("content-type")

@@ -1,7 +1,6 @@
 use api::Store;
-use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Site, SiteId,
-};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Site, SiteId};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn movie(title: &str) -> Media {
     Media {
@@ -42,7 +41,7 @@ fn sqlite_defaults_under_the_data_directory() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(store.sqlite_path(), dir.path().join("app.db"));
-    for name in ["app.db", "catalog.db", "library.db", "subscribe.db"] {
+    for name in ["app.db", "cache.db", "library.db", "subscribe.db"] {
         assert!(dir.path().join(name).is_file(), "{name}");
     }
 }
@@ -78,9 +77,13 @@ fn list_media_returns_error_on_corrupt_uuid_instead_of_panic() {
     let store = Store::open(dir.path()).unwrap();
     let media = movie("The Matrix");
     store.insert_media(&media).unwrap();
-    rusqlite::Connection::open(dir.path().join("app.db"))
-        .unwrap()
-        .execute("UPDATE media SET id = 'nope'", [])
+    let conn = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
+    // 刻意制造损坏的 id：关闭外键检查，让 UPDATE 成功，模拟磁盘上的坏行。
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    conn.execute("UPDATE media SET media_id = 'nope'", [])
+        .unwrap();
+    // 别名也必须指向坏 id，查询才会真正返回这一行并触发 id 解析失败。
+    conn.execute("UPDATE media_aliases SET media_id = 'nope'", [])
         .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.get_media_by_tmdb("603")
@@ -183,21 +186,13 @@ fn media_round_trips_year_and_original_title() {
 }
 
 #[test]
-fn naming_templates_and_library_roots_have_defaults() {
+fn current_naming_and_library_roots_have_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert!(
-        store
-            .naming_template(MediaKind::Movie)
-            .unwrap()
-            .contains("{title}")
-    );
-    assert!(
-        store
-            .naming_template(MediaKind::Tv)
-            .unwrap()
-            .contains("Season")
-    );
+    use api::scrape_store::ScrapeStoreExt;
+    let config = store.get_scrape_config().unwrap();
+    assert!(config.effective.compose_movie_pattern().contains("{title}"));
+    assert!(config.effective.compose_tv_pattern().contains("Season"));
     assert!(
         store
             .library_root(MediaKind::Movie)
@@ -208,170 +203,23 @@ fn naming_templates_and_library_roots_have_defaults() {
 }
 
 #[test]
-fn legacy_libraries_table_gains_visibility_columns() {
-    // 模拟 Block 6 之前的旧库：libraries 表没有 access_mode 等列。
-    let tmp = tempfile::tempdir().unwrap();
-    let data = tmp.path().join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let app = rusqlite::Connection::open(data.join("app.db")).unwrap();
-    app.execute_batch(
-        "CREATE TABLE libraries (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            is_default INTEGER NOT NULL DEFAULT 0,
-            sort_order INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO libraries (id, kind, name, is_default) VALUES ('lib-1', 'movie', '旧电影库', 1);",
-    )
-    .unwrap();
-    drop(app);
-
-    let store = crate::Store::open(&data).unwrap();
-    let libraries = store.list_libraries().unwrap();
-    // seed_defaults 会为缺省类型补默认库，旧电影库 + 新剧集库 = 2。
-    assert_eq!(libraries.len(), 2, "旧库行保留且默认库补齐");
-    let legacy = libraries
-        .iter()
-        .find(|l| l.name == "旧电影库")
-        .expect("旧库行");
-    assert_eq!(legacy.access_mode, "everyone", "新列按默认值补齐");
-    assert_eq!(legacy.admin_visible, true);
-    assert!(legacy.member_ids.is_empty());
-}
-
-#[test]
-fn legacy_recycle_bin_is_restored_before_its_table_is_removed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let data = tmp.path().join("data");
-    let original = data.join("library/movies/legacy.mkv");
-    let binned = data.join("recycle_bin/legacy.mkv");
-    std::fs::create_dir_all(binned.parent().unwrap()).unwrap();
-    std::fs::write(&binned, b"legacy file").unwrap();
-    let ledger_id = LedgerId::new();
-    let media_id = MediaId::new();
-    let ledger_json = serde_json::json!({
-        "id": ledger_id.to_string(), "media_id": media_id.to_string(),
-        "path": original.display().to_string(), "season": null, "episode": null,
-        "resolution": "1080p", "codec": null, "hdr": null,
-        "quality_source": QualitySource::Release.as_str(),
-        "confidence": Confidence::High.as_str(), "filter_score": null,
-    })
-    .to_string();
-    let library = rusqlite::Connection::open(data.join("library.db")).unwrap();
-    library
-        .execute_batch(
-            "CREATE TABLE recycle_bin (
-            id TEXT PRIMARY KEY, media_id TEXT NOT NULL, original_path TEXT NOT NULL,
-            binned_path TEXT NOT NULL, ledger_json TEXT NOT NULL, reason TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL, deleted_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
-        );",
-        )
-        .unwrap();
-    library.execute(
-        "INSERT INTO recycle_bin
-         (id, media_id, original_path, binned_path, ledger_json, reason, size_bytes, deleted_at, expires_at)
-         VALUES ('legacy-bin', ?1, ?2, ?3, ?4, 'cleanup', 11, 1, 2)",
-        rusqlite::params![media_id.to_string(), original.display().to_string(), binned.display().to_string(), ledger_json],
-    ).unwrap();
-    drop(library);
-    let store = Store::open(&data).unwrap();
-    assert!(
-        original.is_file(),
-        "legacy bytes are restored to their original path"
-    );
-    assert!(!binned.exists());
-    assert_eq!(
-        store
-            .get_ledger(&ledger_id.to_string().replace('-', ""))
-            .unwrap()
-            .unwrap()
-            .path,
-        original.display().to_string()
-    );
-    drop(store);
-    let library = rusqlite::Connection::open(data.join("library.db")).unwrap();
-    let table_exists: bool = library.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recycle_bin')",
-        [], |row| row.get(0),
-    ).unwrap();
-    assert!(
-        !table_exists,
-        "migration only removes the old table after recovery"
-    );
-}
-
-#[test]
-fn legacy_recycle_restore_never_overwrites_an_existing_recovery_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let data = tmp.path().join("data");
-    let original = data.join("library/movies/legacy.mkv");
-    let binned = data.join("recycle_bin/legacy.mkv");
-    let bin_id = "legacy-bin";
-    let existing_recovery = data.join("library/movies/legacy.recovered-legacy-bin.mkv");
-    std::fs::create_dir_all(binned.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(original.parent().unwrap()).unwrap();
-    std::fs::write(&original, b"existing original").unwrap();
-    std::fs::write(&existing_recovery, b"existing recovery").unwrap();
-    std::fs::write(&binned, b"legacy file").unwrap();
-    let ledger_id = LedgerId::new();
-    let media_id = MediaId::new();
-    let ledger_json = serde_json::json!({
-        "id": ledger_id.to_string(), "media_id": media_id.to_string(),
-        "path": original.display().to_string(), "season": null, "episode": null,
-        "resolution": "1080p", "codec": null, "hdr": null,
-        "quality_source": QualitySource::Release.as_str(),
-        "confidence": Confidence::High.as_str(), "filter_score": null,
-    })
-    .to_string();
-    let library = rusqlite::Connection::open(data.join("library.db")).unwrap();
-    library
-        .execute_batch(
-            "CREATE TABLE recycle_bin (
-            id TEXT PRIMARY KEY, media_id TEXT NOT NULL, original_path TEXT NOT NULL,
-            binned_path TEXT NOT NULL, ledger_json TEXT NOT NULL, reason TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL, deleted_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
-        );",
-        )
-        .unwrap();
-    library.execute(
-        "INSERT INTO recycle_bin
-         (id, media_id, original_path, binned_path, ledger_json, reason, size_bytes, deleted_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'cleanup', 11, 1, 2)",
-        rusqlite::params![bin_id, media_id.to_string(), original.display().to_string(), binned.display().to_string(), ledger_json],
-    ).unwrap();
-    drop(library);
-
-    let store = Store::open(&data).unwrap();
-    let restored = store
-        .get_ledger(&ledger_id.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    assert_eq!(std::fs::read(&original).unwrap(), b"existing original");
-    assert_eq!(
-        std::fs::read(&existing_recovery).unwrap(),
-        b"existing recovery"
-    );
-    assert_ne!(restored.path, existing_recovery.display().to_string());
-    assert_eq!(std::fs::read(&restored.path).unwrap(), b"legacy file");
-}
-
-#[test]
 fn ledger_keeps_its_source_path_for_manual_retransfer() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let media = movie("The Matrix");
     store.insert_media(&media).unwrap();
     let source = dir.path().join("downloads/matrix.mkv");
-    let destination = dir.path().join("library/matrix.mkv");
+    let destination = dir.path().join("library/movies/matrix.mkv");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&source, b"source").unwrap();
     std::fs::write(&destination, b"destination").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let file_id = LedgerId::new();
+    let spec = FixtureFile {
+        file_id: Some(file_id),
         media_id: media.id,
         path: destination.display().to_string(),
+        source_path: source.to_str().map(str::to_owned),
         season: None,
         episode: None,
         resolution: None,
@@ -380,70 +228,16 @@ fn ledger_keeps_its_source_path_for_manual_retransfer() {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
 
-    store.insert_ledger_with_source(&row, &source).unwrap();
+    publish_fixture_file(&store, &spec).unwrap();
 
     let source_path = store
-        .list_ledger_with_mode()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .find(|(saved, _, _)| saved.id == row.id)
-        .and_then(|(_, _, source_path)| source_path);
-    assert_eq!(source_path.as_deref(), source.to_str());
-}
-
-#[test]
-fn stale_stream_cache_is_invalidated_for_detailed_probe_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    let old_video = library::VideoTrack {
-        codec: Some("h264".into()),
-        width: Some(1920),
-        height: Some(1080),
-        ..Default::default()
-    };
-    let legacy_db = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
-    legacy_db
-        .execute_batch(
-            "CREATE TABLE file_meta (
-                ledger_id TEXT PRIMARY KEY,
-                audio_json TEXT NOT NULL,
-                subtitle_json TEXT NOT NULL,
-                video_json TEXT
-            )",
-        )
-        .unwrap();
-    legacy_db
-        .execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, video_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                "legacy-ledger",
-                "[]",
-                "[]",
-                serde_json::to_string(&old_video).unwrap(),
-            ],
-        )
-        .unwrap();
-    drop(legacy_db);
-
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.get_file_meta("legacy-ledger").unwrap(), None);
-
-    let refreshed_tracks = library::Tracks {
-        video: Some(library::VideoTrack {
-            codec: Some("h264".into()),
-            width: Some(1920),
-            height: Some(1080),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    store
-        .put_file_meta("legacy-ledger", &refreshed_tracks)
-        .unwrap();
-    assert_eq!(
-        store.get_file_meta("legacy-ledger").unwrap(),
-        Some(refreshed_tracks)
-    );
+        .find(|cov| cov.file.file_id == file_id)
+        .and_then(|cov| cov.file.source_path);
+    assert_eq!(source_path.as_deref(), Some(source.as_path()));
 }

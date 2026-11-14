@@ -1,40 +1,14 @@
+use indexer::{BrowserConfig, BrowserRoute};
 use std::sync::Arc;
-use indexer::{BrowserConfig, BrowserRoute, FetchMethod, FetchRequest, IndexerError, PageSession};
-
-struct EndpointPage(String);
-impl PageSession for EndpointPage {
-    fn goto(&self, _: &str) -> Result<(), IndexerError> {
-        Ok(())
-    }
-    fn set_cookie_header(&self, _: &str) -> Result<(), IndexerError> {
-        Ok(())
-    }
-    fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
-        Ok(())
-    }
-    fn content(&self) -> Result<String, IndexerError> {
-        Ok(self.0.clone())
-    }
-}
-
-fn request(cdp: Option<&str>) -> FetchRequest {
-    FetchRequest {
-        key: "browser-route".into(),
-        url: "https://fixture.invalid/document".into(),
-        method: FetchMethod::Get,
-        body: None,
-        cookie: None,
-        api_key: None,
-        proxy: None,
-        cdp_url: cdp.map(str::to_owned),
-    }
-}
 
 #[test]
 fn switch_off_resolves_to_none_even_with_a_site_endpoint() {
     let mut config = BrowserConfig::disabled();
     config.enabled = false;
-    assert_eq!(config.resolve(Some("http://site.invalid:9222")).unwrap(), None);
+    assert_eq!(
+        config.resolve(Some("http://site.invalid:9222")).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -44,7 +18,10 @@ fn switch_on_prefers_site_over_instance_over_managed() {
         endpoint: Some("http://instance.invalid:9222".into()),
         managed_endpoint: Some("http://managed.invalid:9223".into()),
     };
-    let (url, route) = config.resolve(Some("http://site.invalid:9222")).unwrap().unwrap();
+    let (url, route) = config
+        .resolve(Some("http://site.invalid:9222"))
+        .unwrap()
+        .unwrap();
     assert_eq!(url, "http://site.invalid:9222");
     assert_eq!(route, BrowserRoute::Site);
 }

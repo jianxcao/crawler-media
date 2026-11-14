@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtworkImage } from "@/components/artwork-image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -48,7 +49,7 @@ import { useSession } from "@/lib/session";
  *   /sessions/[id]       AI 会话
  *   /settings/[section]  设置各分区
  *
- * 外壳按主题分两副骨架（docs/design/web-themes.md）：
+ * 外壳按主题分两副骨架：
  *   - 银玻璃（默认）：左栏玻璃侧栏 + 右区（对齐 Codex / Claude Code 的两栏结构）
  *   - Netflix（结构级主题）：桌面 = 顶栏 + 全宽内容；移动 = 底部标签栏 + 全宽内容
  *
@@ -585,7 +586,7 @@ function MobileTopBar({
             className="flex h-11 shrink-0 items-center transition-opacity active:opacity-60"
           >
             {actions ? (
-              <img
+              <ArtworkImage
                 src="/logo-mark.svg"
                 alt={publicEnv.appName}
                 width={30}
@@ -594,7 +595,7 @@ function MobileTopBar({
               />
             ) : (
               <div className="flex items-center gap-2">
-                <img
+                <ArtworkImage
                   src="/logo-mark.svg"
                   alt=""
                   width={26}

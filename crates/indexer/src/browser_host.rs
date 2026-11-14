@@ -43,7 +43,6 @@ pub fn group_key(host: &str) -> String {
 }
 
 fn group_key_normalized(normalized: String) -> String {
-
     if normalized.parse::<IpAddr>().is_ok() {
         return normalized;
     }

@@ -10,14 +10,9 @@ test("链路体检用接口返回的原始库名并展示库类别", () => {
   );
 });
 
-test("新旧库名字段同时存在时优先使用 library_name", () => {
+test("链路体检使用当前 name 字段及默认库标记", () => {
   assert.deepEqual(
-    libraryPipelineIdentity({
-      library_name: "电影库",
-      name: "旧字段名称",
-      kind: "movie",
-      is_default: true,
-    }),
+    libraryPipelineIdentity({ name: "电影库", kind: "movie", is_default: true }),
     { name: "电影库", kindLabel: "电影", isDefault: true },
   );
 });

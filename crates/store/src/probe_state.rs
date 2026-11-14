@@ -1,7 +1,7 @@
 pub mod retry;
 
-use rusqlite::{params, OptionalExtension, Transaction};
 use super::{Store, StoreError};
+use rusqlite::{OptionalExtension, params};
 
 pub use retry::retry_delay_ms;
 
@@ -21,6 +21,7 @@ impl ProbeStage {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "metadata" => Some(Self::Metadata),
@@ -55,6 +56,7 @@ impl ProbeStageStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
@@ -96,35 +98,11 @@ pub enum ProbeStageCompletion {
 }
 
 impl Store {
-    pub fn get_probe_stage(&self, key: &ProbeStageKey) -> Result<Option<ProbeStageState>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
-             FROM probe_stage_state
-             WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3"
-        )?;
-        let row = stmt.query_row(
-            params![key.ledger_id, key.context_key, key.stage.as_str()],
-            |row| {
-                let status_str: String = row.get(0)?;
-                let status = ProbeStageStatus::from_str(&status_str)
-                    .unwrap_or(ProbeStageStatus::Pending);
-                let failure_count: u32 = row.get(1)?;
-                let next_retry_at_ms: Option<i64> = row.get(2)?;
-                let error_kind: Option<String> = row.get(3)?;
-                let error: Option<String> = row.get(4)?;
-                let active_job_id: Option<String> = row.get(5)?;
-                Ok(ProbeStageState {
-                    key: key.clone(),
-                    status,
-                    failure_count,
-                    next_retry_at_ms,
-                    error_kind,
-                    error,
-                    active_job_id,
-                })
-            }
-        ).optional()?;
-        Ok(row)
+    pub fn get_probe_stage(
+        &self,
+        key: &ProbeStageKey,
+    ) -> Result<Option<ProbeStageState>, StoreError> {
+        self.with_library_read(|db| db.get_probe_stage(key))
     }
 
     pub fn claim_probe_stage(
@@ -133,12 +111,7 @@ impl Store {
         job_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        let claimed = claim_probe_stage_tx(&tx, key, job_id, now_ms)?;
-        if claimed {
-            tx.commit()?;
-        }
-        Ok(claimed)
+        self.with_library_write(|db| db.claim_probe_stage(key, job_id, now_ms))
     }
 
     pub fn finish_probe_stage(
@@ -148,118 +121,37 @@ impl Store {
         completion: &ProbeStageCompletion,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        let (status, err_kind, err_msg, next_retry, inc_fail) = match completion {
-            ProbeStageCompletion::Succeeded => (ProbeStageStatus::Succeeded, None, None, None, false),
-            ProbeStageCompletion::NotApplicable => (ProbeStageStatus::NotApplicable, None, None, None, false),
-            ProbeStageCompletion::Cancelled { reason } => (ProbeStageStatus::Cancelled, Some("cancelled".to_string()), Some(reason.clone()), None, false),
-            ProbeStageCompletion::Failed { error_kind, error } => {
-                let current_fail: u32 = tx.query_row(
-                    "SELECT failure_count FROM probe_stage_state WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3",
-                    params![key.ledger_id, key.context_key, key.stage.as_str()],
-                    |r| r.get(0),
-                ).optional()?.unwrap_or(0);
-                let new_fail = current_fail + 1;
-                let delay = retry_delay_ms(new_fail);
-                let next_retry = delay.map(|d| now_ms + d);
-                (ProbeStageStatus::Failed, Some(error_kind.clone()), Some(error.clone()), next_retry, true)
-            }
-        };
-
-        let updated = if inc_fail {
-            tx.execute(
-                "UPDATE probe_stage_state
-                 SET status = ?4,
-                     failure_count = failure_count + 1,
-                     next_retry_at_ms = ?5,
-                     error_kind = ?6,
-                     error = ?7,
-                     active_job_id = NULL,
-                     updated_at_ms = ?8
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
-                params![
-                    key.ledger_id,
-                    key.context_key,
-                    key.stage.as_str(),
-                    status.as_str(),
-                    next_retry,
-                    err_kind,
-                    err_msg,
-                    now_ms,
-                    job_id,
-                ],
-            )?
-        } else {
-            tx.execute(
-                "UPDATE probe_stage_state
-                 SET status = ?4,
-                     next_retry_at_ms = ?5,
-                     error_kind = ?6,
-                     error = ?7,
-                     active_job_id = NULL,
-                     updated_at_ms = ?8
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
-                params![
-                    key.ledger_id,
-                    key.context_key,
-                    key.stage.as_str(),
-                    status.as_str(),
-                    next_retry,
-                    err_kind,
-                    err_msg,
-                    now_ms,
-                    job_id,
-                ],
-            )?
-        };
-
-        if updated > 0 {
-            tx.commit()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        self.with_library_write(|db| db.finish_probe_stage(key, job_id, completion, now_ms))
     }
 
-    pub fn list_due_probe_stages(
+    /// Claim up to `limit` due failed stages in one transaction, in
+    /// `(deadline, file_id, context, stage)` order, leasing each until
+    /// `now_ms + lease_ms` so the next ticks skip them while the dispatcher
+    /// evaluates and queues them. A finished attempt clears the lease; an
+    /// abandoned one simply becomes due again when it expires (restart-safe).
+    pub fn claim_due_probe_stages(
         &self,
         now_ms: i64,
+        lease_ms: i64,
         limit: usize,
     ) -> Result<Vec<ProbeStageState>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT ledger_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
-             FROM probe_stage_state
-             WHERE status = 'failed' AND next_retry_at_ms IS NOT NULL AND next_retry_at_ms <= ?1 AND active_job_id IS NULL
-             ORDER BY next_retry_at_ms ASC
-             LIMIT ?2"
-        )?;
-        let rows = stmt.query_map(params![now_ms, limit as i64], |row| {
-            let ledger_id: String = row.get(0)?;
-            let context_key: String = row.get(1)?;
-            let stage_str: String = row.get(2)?;
-            let stage = ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata);
-            let status_str: String = row.get(3)?;
-            let status = ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed);
-            let failure_count: u32 = row.get(4)?;
-            let next_retry_at_ms: Option<i64> = row.get(5)?;
-            let error_kind: Option<String> = row.get(6)?;
-            let error: Option<String> = row.get(7)?;
-            let active_job_id: Option<String> = row.get(8)?;
-            Ok(ProbeStageState {
-                key: ProbeStageKey {
-                    ledger_id,
-                    context_key,
-                    stage,
-                },
-                status,
-                failure_count,
-                next_retry_at_ms,
-                error_kind,
-                error,
-                active_job_id,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_library_write(|db| db.claim_due_probe_stages(now_ms, lease_ms, limit))
+    }
+
+    /// Retire one stage row (superseded context, or no longer needed). Deleting
+    /// it makes a late worker's job+context CAS miss, and a restart cannot revive it.
+    pub fn retire_probe_stage(&self, key: &ProbeStageKey) -> Result<bool, StoreError> {
+        self.with_library_write(|db| db.retire_probe_stage(key))
+    }
+
+    /// Adopt `context_key` as the file's current probe context: every other
+    /// context's stage state is retired in the same short transaction.
+    pub fn adopt_probe_context(
+        &self,
+        ledger_id: &str,
+        context_key: &str,
+    ) -> Result<usize, StoreError> {
+        self.with_library_write(|db| db.adopt_probe_context(ledger_id, context_key))
     }
 
     pub fn season_comparison_digest(
@@ -267,15 +159,7 @@ impl Store {
         media_id: &str,
         season: u32,
     ) -> Result<Option<String>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT comparison_digest FROM probe_season_comparison_history
-                 WHERE media_id = ?1 AND season = ?2",
-                params![media_id, season],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        self.with_library_read(|db| db.season_comparison_digest(media_id, season))
     }
 
     pub fn save_season_comparison_digest(
@@ -285,70 +169,59 @@ impl Store {
         digest: &str,
         published_at_ms: i64,
     ) -> Result<(), StoreError> {
-        self.library.execute(
-            "INSERT INTO probe_season_comparison_history (
-                 media_id, season, comparison_digest, published_at_ms
-             ) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(media_id, season) DO UPDATE SET
-               comparison_digest = excluded.comparison_digest,
-               published_at_ms = excluded.published_at_ms",
-            params![media_id, season, digest, published_at_ms],
-        )?;
-        Ok(())
-    }
-
-    pub fn reset_probe_stage_failure(
-        &self,
-        key: &ProbeStageKey,
-        now_ms: i64,
-    ) -> Result<bool, StoreError> {
-        let count = self.library.execute(
-            "UPDATE probe_stage_state
-             SET status = 'pending', failure_count = 0, next_retry_at_ms = NULL, error = NULL, error_kind = NULL, updated_at_ms = ?4
-             WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
-            params![key.ledger_id, key.context_key, key.stage.as_str(), now_ms],
-        )?;
-        Ok(count > 0)
+        self.with_library_write(|db| {
+            db.save_season_comparison_digest(media_id, season, digest, published_at_ms)
+        })
     }
 }
-
 pub(crate) fn claim_probe_stage_tx(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     key: &ProbeStageKey,
     job_id: &str,
     now_ms: i64,
+    admitted_capture: bool,
 ) -> Result<bool, StoreError> {
-    let existing: Option<(String, Option<String>, Option<i64>)> = tx.query_row(
-        "SELECT status, active_job_id, next_retry_at_ms FROM probe_stage_state
-         WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3",
-        params![key.ledger_id, key.context_key, key.stage.as_str()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
-
+    let existing: Option<(String, Option<String>, Option<i64>)> = tx
+        .query_row(
+            "SELECT status, active_job_id, next_retry_at_ms FROM probe_stage_state
+         WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
+            params![key.ledger_id, key.context_key, key.stage.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     match existing {
         Some((status, active_job, next_retry)) => {
+            if admitted_capture && active_job.as_deref() == Some(job_id) && status == "running" {
+                return Ok(true);
+            }
             if active_job.is_some() || status == "running" {
                 return Ok(false);
             }
-            if status == "failed" {
-                if let Some(due) = next_retry {
-                    if due > now_ms {
-                        return Ok(false);
-                    }
-                }
+            if !admitted_capture
+                && status == "failed"
+                && let Some(due) = next_retry
+                && due > now_ms
+            {
+                return Ok(false);
             }
             let updated = tx.execute(
                 "UPDATE probe_stage_state
                  SET status = 'running', active_job_id = ?4, updated_at_ms = ?5
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
-                params![key.ledger_id, key.context_key, key.stage.as_str(), job_id, now_ms],
+                 WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
+                params![
+                    key.ledger_id,
+                    key.context_key,
+                    key.stage.as_str(),
+                    job_id,
+                    now_ms
+                ],
             )?;
             Ok(updated > 0)
         }
         None => {
             let inserted = tx.execute(
                 "INSERT INTO probe_stage_state (
-                     ledger_id, context_key, stage, status, failure_count, active_job_id, updated_at_ms
+                     file_id, context_key, stage, status, failure_count, active_job_id, updated_at_ms
                  ) VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5)",
                 params![key.ledger_id, key.context_key, key.stage.as_str(), job_id, now_ms],
             )?;
@@ -358,12 +231,33 @@ pub(crate) fn claim_probe_stage_tx(
 }
 
 pub(crate) fn delete_probe_stages_for_ledger(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     ledger_id: &str,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "DELETE FROM probe_stage_state WHERE ledger_id = ?1",
+        "DELETE FROM probe_stage_state WHERE file_id = ?1",
         params![ledger_id],
     )?;
     Ok(())
 }
+
+fn stage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeStageState> {
+    let stage_str: String = row.get(2)?;
+    let status_str: String = row.get(3)?;
+    Ok(ProbeStageState {
+        key: ProbeStageKey {
+            ledger_id: row.get(0)?,
+            context_key: row.get(1)?,
+            stage: ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata),
+        },
+        status: ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed),
+        failure_count: row.get(4)?,
+        next_retry_at_ms: row.get(5)?,
+        error_kind: row.get(6)?,
+        error: row.get(7)?,
+        active_job_id: row.get(8)?,
+    })
+}
+
+#[path = "probe_state/connection.rs"]
+mod connection;

@@ -11,8 +11,10 @@ use crate::fingerprint_job::CaptureGate;
 pub struct MetadataPriorityGate {
     metadata_pending: Arc<AtomicUsize>,
     metadata_idle: Arc<Notify>,
-    store: Arc<parking_lot::Mutex<store::Store>>,
+    shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    store: Arc<crate::Store>,
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
+    kind: crate::library_lifecycle::LibraryWorkKind,
     owners: Option<Arc<std::collections::HashMap<String, (String, marker::WorkControl)>>>,
 }
 
@@ -21,8 +23,10 @@ impl MetadataPriorityGate {
         Self {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
+            shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
+            kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
         }
     }
@@ -31,8 +35,10 @@ impl MetadataPriorityGate {
         Self {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
+            shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
+            kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
         }
     }
@@ -42,27 +48,30 @@ impl MetadataPriorityGate {
         manager: &ProbeManager,
         units: &[super::ProbeUnit],
     ) -> Result<(Self, Vec<crate::library_lifecycle::LibraryWorkLease>), String> {
-        let mut gate = Self::from_manager(manager);
+        Self::from_manager(manager).lease_rows(units)
+    }
+
+    pub(super) fn lease_rows(
+        mut self,
+        units: &[super::ProbeUnit],
+    ) -> Result<(Self, Vec<crate::library_lifecycle::LibraryWorkLease>), String> {
+        let gate = &mut self;
+        if let Some(unit) = units.first() {
+            gate.kind = super::tracks::optional_work_kind(unit);
+        }
         let Some(registry) = gate.registry.as_ref() else {
-            return Ok((gate, Vec::new()));
+            return Ok((self, Vec::new()));
         };
         let owners = {
-            let store = manager.store.lock();
+            let store = gate.store.as_ref();
             units
                 .iter()
                 .map(|unit| {
-                    let current = store
-                        .get_ledger(&unit.row.id.to_string())
-                        .map_err(|e| e.to_string())?
-                        .ok_or("file_deleted: probe ledger missing")?;
-                    if current.path != unit.row.path || current.media_id != unit.row.media_id {
-                        return Err("Library probe source identity changed".to_string());
-                    }
-                    let owner = store
-                        .library_for_path_strict(std::path::Path::new(&unit.row.path), unit.kind)
-                        .map_err(|e| e.to_string())?
-                        .ok_or("Library no longer owns probe source")?;
-                    Ok((unit.row.id.to_string(), owner.id))
+                    crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
+                    Ok((
+                        unit.row.file.file_id.to_string(),
+                        unit.row.file.library_id.to_string(),
+                    ))
                 })
                 .collect::<Result<Vec<_>, String>>()?
         };
@@ -70,7 +79,9 @@ impl MetadataPriorityGate {
         let mut controls = std::collections::HashMap::new();
         for (_, owner) in &owners {
             if !controls.contains_key(owner) {
-                let lease = registry.acquire(&manager.store, owner)?;
+                let lease = registry
+                    .acquire_optional(&gate.store, owner, gate.kind)
+                    .map_err(|error| error.to_string())?;
                 controls.insert(owner.clone(), lease.control().signal().clone());
                 leases.push(lease);
             }
@@ -89,7 +100,7 @@ impl MetadataPriorityGate {
                 return Err("Library probe source cancelled or changed".into());
             }
         }
-        Ok((gate, leases))
+        Ok((self, leases))
     }
 }
 
@@ -100,10 +111,8 @@ mod tests {
     #[tokio::test]
     async fn expanded_owners_remain_leased_and_cancel_independently() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(parking_lot::Mutex::new(
-            store::Store::open(temp.path()).unwrap(),
-        ));
-        let manager = ProbeManager::new(store.clone());
+        let store = Arc::new(store::Store::open(temp.path()).unwrap());
+        let manager = ProbeManager::new(store.clone()).unwrap();
         let registry = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
         *manager.library_work.lock() = Some(registry.clone());
         let media = domain::Media {
@@ -119,13 +128,13 @@ mod tests {
             bangumi_id: None,
             anilist_id: None,
         };
-        store.lock().insert_media(&media).unwrap();
+        store.as_ref().insert_media(&media).unwrap();
         let mut units = Vec::new();
         let mut libraries = Vec::new();
         for name in ["a", "b"] {
             let root = temp.path().join(name);
             let owner = store
-                .lock()
+                .as_ref()
                 .create_library(
                     media.kind,
                     name,
@@ -135,20 +144,17 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-            let row = domain::LedgerRow {
-                id: domain::LedgerId::new(),
-                media_id: media.id,
-                path: root.join("episode.mkv").to_string_lossy().into_owned(),
-                season: Some(1),
-                episode: Some(1),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            };
-            store.lock().insert_ledger(&row).unwrap();
+            store
+                .as_ref()
+                .set_library_intro_settings(&owner.id, true, true)
+                .unwrap();
+            let mut row = super::super::test_support::coverage(
+                media.id,
+                &root.join("episode.mkv").to_string_lossy(),
+                Some(1),
+                Some(1),
+            );
+            super::super::test_support::publish_into(&store.as_ref(), &mut row);
             units.push(super::super::ProbeUnit {
                 row,
                 kind: media.kind,
@@ -165,6 +171,10 @@ mod tests {
         assert!(unleased.work_control(&units[0].row).is_cancelled());
         let (gate, leases) = MetadataPriorityGate::for_rows(&manager, &units).unwrap();
         assert_eq!(leases.len(), 2);
+        assert!(
+            unleased.work_control(&units[0].row).is_cancelled(),
+            "an unleased pipeline cannot borrow another pipeline's active control"
+        );
         assert!(!gate.work_control(&units[1].row).is_cancelled());
         registry.cancel(&libraries[1].id);
         assert!(gate.work_control(&units[1].row).is_cancelled());
@@ -183,37 +193,20 @@ mod tests {
 }
 
 impl CaptureGate for MetadataPriorityGate {
-    fn work_control(&self, row: &domain::LedgerRow) -> marker::WorkControl {
-        let owner = {
-            let store = self.store.lock();
-            let current = store.get_ledger(&row.id.to_string()).ok().flatten();
-            current
-                .filter(|current| current.path == row.path && current.media_id == row.media_id)
-                .and_then(|_| store.get_media(row.media_id).ok().flatten())
-                .and_then(|media| {
-                    store
-                        .library_for_path_strict(std::path::Path::new(&row.path), media.kind)
-                        .ok()
-                        .flatten()
-                })
-        };
-        // A registry-backed capture without an active original lease fails closed.
-        // Never switch an old pipeline to a new Library at the same path.
+    fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
         if self.registry.is_none() {
             return marker::WorkControl::default();
         }
-        if let Some(owners) = &self.owners {
-            if let Some((original, control)) = owners.get(&row.id.to_string()) {
-                if owner.as_ref().is_some_and(|owner| &owner.id == original) {
-                    return control.clone();
-                }
-            }
-        } else if let Some(control) = owner.and_then(|owner| {
-            self.registry
-                .as_ref()
-                .and_then(|registry| registry.active_control(&owner.id))
-        }) {
-            return control.signal().clone();
+        let owner = crate::fingerprint_job::source::ensure_source_recorded(&self.store, row)
+            .ok()
+            .map(|()| row.file.library_id.to_string());
+        // A registry-backed capture without an active original lease fails closed.
+        // Never switch an old pipeline to a new Library at the same path.
+        if let Some(owners) = &self.owners
+            && let Some((original, control)) = owners.get(&row.file.file_id.to_string())
+            && owner.as_ref().is_some_and(|owner| owner == original)
+        {
+            return control.clone();
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();
@@ -225,7 +218,9 @@ impl CaptureGate for MetadataPriorityGate {
                 let notified = self.metadata_idle.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if self.metadata_pending.load(Ordering::Acquire) == 0 {
+                if self.metadata_pending.load(Ordering::Acquire) == 0
+                    || self.shutting_down.load(Ordering::Acquire)
+                {
                     return;
                 }
                 notified.await;

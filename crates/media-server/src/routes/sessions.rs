@@ -20,6 +20,8 @@ pub(super) struct ProgressBody {
     play_session_id: Option<String>,
     #[serde(default, rename = "EventSequence")]
     event_sequence: Option<i64>,
+    #[serde(default, rename = "MediaSourceId")]
+    media_source_id: Option<String>,
 }
 
 async fn report_session_event(
@@ -31,25 +33,32 @@ async fn report_session_event(
     paused: bool,
 ) -> StatusCode {
     // Validate session ID length and sequence if provided
-    if let Some(sid) = &body.play_session_id {
-        if sid.len() > 128 {
-            return StatusCode::BAD_REQUEST;
-        }
+    if let Some(sid) = &body.play_session_id
+        && sid.len() > 128
+    {
+        return StatusCode::BAD_REQUEST;
     }
-    if let Some(seq) = body.event_sequence {
-        if seq < 0 {
-            return StatusCode::BAD_REQUEST;
-        }
+    if let Some(seq) = body.event_sequence
+        && seq < 0
+    {
+        return StatusCode::BAD_REQUEST;
     }
+    let media_source_id = match body.media_source_id.as_deref() {
+        None | Some("") => None,
+        Some(value) => match domain::PhysicalSourceId::from_wire_string(value) {
+            Some(source) => Some(source),
+            None => return StatusCode::NO_CONTENT,
+        },
+    };
     let identity = crate::provider::PlaybackEventIdentity {
         play_session_id: body.play_session_id,
         event_sequence: body.event_sequence,
+        media_source_id,
     };
-    let (Some(item_id), Some(position_ticks)) = (body.item_id.as_deref(), body.position_ticks)
-    else {
+    let Some(item_id) = body.item_id.as_deref() else {
         return StatusCode::NO_CONTENT;
     };
-    let position_ms = (position_ticks / 10_000).max(0);
+    let position_ms = body.position_ticks.map(|ticks| (ticks / 10_000).max(0));
     let client = user.playback_client(&headers);
     match state
         .provider
@@ -65,7 +74,15 @@ async fn report_session_event(
     }
     match state
         .provider
-        .report_playback_event(user.id, item_id, position_ms, paused, client, event, identity)
+        .report_playback_event(
+            user.id,
+            item_id,
+            position_ms,
+            paused,
+            client,
+            event,
+            identity,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT,

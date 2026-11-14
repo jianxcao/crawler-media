@@ -1,4 +1,6 @@
-use domain::{AtomRule, Confidence, Filter, Release, Torrent};
+use domain::{AtomRule, Confidence, Filter, Release, Torrent, UnknownHrPolicy};
+
+use crate::platform::platform_matches;
 
 #[derive(Debug, Clone)]
 pub struct ScoredTorrent {
@@ -156,7 +158,12 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
             .as_deref()
             .is_some_and(|got| source_matches(got, want)),
         AtomRule::Free => torrent.free,
-        AtomRule::Hr => torrent.hr,
+        AtomRule::Hr { unknown } => torrent.hr.unwrap_or(*unknown == UnknownHrPolicy::Exclude),
+        AtomRule::Platform(want) => platform_matches(&torrent.title, want),
+        AtomRule::Team(want) => parsed
+            .group
+            .as_deref()
+            .is_some_and(|got| got.eq_ignore_ascii_case(want)),
         AtomRule::Codec(want) => parsed
             .codec
             .as_deref()
@@ -180,9 +187,9 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
                 (Some(a), Some(b)) if a > b => (Some(*b), Some(*a)),
                 (a, b) => (*a, *b),
             };
-            min.map_or(true, |m| per_episode_mb >= m) && max.map_or(true, |m| per_episode_mb <= m)
+            min.is_none_or(|m| per_episode_mb >= m) && max.is_none_or(|m| per_episode_mb <= m)
         }
-        AtomRule::MinSeeders(n) => torrent.seeders.map_or(false, |seeders| seeders >= *n),
+        AtomRule::MinSeeders(n) => torrent.seeders.is_some_and(|seeders| seeders >= *n),
         AtomRule::SubtitleLanguage(want) => parsed
             .subtitle_language
             .as_deref()
@@ -206,8 +213,8 @@ fn lang_matches(got: &str, want: &str) -> bool {
 
 /// 片源匹配：忽略连字符和下划线，支持族匹配（rip 包含 webrip/dvdrip，tv 包含 hdtv）
 fn source_matches(got: &str, want: &str) -> bool {
-    let g = got.to_ascii_lowercase().replace('-', "").replace('_', "");
-    let w = want.to_ascii_lowercase().replace('-', "").replace('_', "");
+    let g = got.to_ascii_lowercase().replace(['-', '_'], "");
+    let w = want.to_ascii_lowercase().replace(['-', '_'], "");
     if g == w {
         return true;
     }

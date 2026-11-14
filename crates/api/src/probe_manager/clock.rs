@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Millisecond clock used by probe eligibility and retry dispatch.
 pub trait ProbeClock: Send + Sync {

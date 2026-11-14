@@ -6,7 +6,7 @@ fn adding_versions_of_one_reference_must_not_change_independent_consensus() {
     let correct = run(&control)
         .markers
         .into_iter()
-        .find(|m| m.episode == 4)
+        .find(|m| m.unit.episode == 4)
         .unwrap();
     assert_eq!(
         (correct.intro_start_ms, correct.intro_end_ms),
@@ -14,7 +14,11 @@ fn adding_versions_of_one_reference_must_not_change_independent_consensus() {
     );
     let f = setup("vote-duplication", &[1, 2, 3, 4, 1, 1]);
     let replacement = run(&f);
-    let target = replacement.markers.iter().find(|m| m.episode == 4).unwrap();
+    let target = replacement
+        .markers
+        .iter()
+        .find(|m| m.unit.episode == 4)
+        .unwrap();
     println!(
         "E4 control={:?}..{:?}; three versions of E1={:?}..{:?}",
         correct.intro_start_ms, correct.intro_end_ms, target.intro_start_ms, target.intro_end_ms
@@ -31,14 +35,17 @@ fn ambiguous_final_verification_does_not_publish_an_earlier_provisional_match() 
     let f = setup("ambiguous-final", &[1, 2, 3, 4, 5]);
     assert!(try_run(&f).is_err());
     let outcome = final_intro_outcome(&f, 4);
-    assert!(matches!(
-        outcome,
-        marker::adaptive::VerificationOutcome::NeedsFullWindow { .. }
-    ));
+    assert!(
+        matches!(
+            outcome,
+            marker::adaptive::VerificationOutcome::NeedsFullWindow { .. }
+        ),
+        "{outcome:?}"
+    );
     let old = f
         .store
-        .lock()
-        .get_media_marker(f.media_id, Some(1), Some(4))
+        .as_ref()
+        .get_fixture_marker(f.media_id, Some(1), Some(4))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -49,46 +56,56 @@ fn ambiguous_final_verification_does_not_publish_an_earlier_provisional_match() 
 }
 
 #[test]
-fn explicit_no_match_in_one_version_conflicts_with_detected_intro_in_another() {
+fn explicit_no_match_in_one_file_does_not_clear_another_cuts_intro() {
     let f = setup("version-missing", &[1, 2, 3, 1]);
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(api::probe_manager::season::run_adaptive_season_pipeline(
-            &f.manager,
-            "review9-job",
-            f.media_id,
-            1,
-            &f.units,
-        ));
-    let conflict = result
-        .as_ref()
-        .err()
-        .map(|e| e.contains("episode_version_conflict"))
-        .unwrap_or(false);
-    if let Ok(replacement) = result {
-        let ledger_b = &f.units[3].row;
-        let has_intro = replacement
-            .chapter_updates
-            .iter()
-            .find(|(id, _)| id == &ledger_b.id.to_string())
+    let replacement = run(&f);
+    let chapter_updates = replacement.chapter_updates.clone();
+    let members = store::observe_sources(
+        &f.store
+            .source_snapshots(
+                &f.units
+                    .iter()
+                    .map(|unit| unit.row.file.file_id)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+    );
+    f.store
+        .complete_marker_refresh_checked("review9-job", &[replacement], &members)
+        .unwrap();
+    for unit in f.units.iter().filter(|unit| unit.row.units[0].episode == 1) {
+        let marker = f
+            .store
+            .get_file_marker(unit.row.file.file_id, unit.row.units[0])
             .unwrap()
-            .1
+            .unwrap();
+        let version_three = unit
+            .row
+            .file
+            .path
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("-3");
+        let expected = if version_three {
+            (None, None)
+        } else {
+            (Some(10_000), Some(70_000))
+        };
+        assert_eq!((marker.intro_start_ms, marker.intro_end_ms), expected);
+        let chapters = &chapter_updates
             .iter()
-            .any(|c| c.marker_type == Some(marker::MarkerType::IntroStart));
-        let canonical = replacement.markers.iter().find(|m| m.episode == 1).unwrap();
-        println!(
-            "E1 version B intro chapter={has_intro}; shared E1 intro={:?}..{:?}; B verdict={:?}",
-            canonical.intro_start_ms,
-            canonical.intro_end_ms,
-            final_intro_outcome(&f, 1)
+            .find(|(id, _)| id == &unit.row.file.file_id.to_string())
+            .unwrap()
+            .1;
+        assert_eq!(
+            chapters
+                .iter()
+                .any(|chapter| chapter.marker_type == Some(marker::MarkerType::IntroStart)),
+            !version_three
         );
     }
-    assert!(
-        conflict,
-        "one version explicitly has no intro while the other has one; a shared episode marker cannot represent both"
-    );
 }
 
 #[test]
@@ -108,19 +125,19 @@ fn unresolved_final_verification_cannot_mark_forced_refresh_successful() {
     let rejected = result.is_err();
     if let Ok(replacement) = result {
         f.store
-            .lock()
+            .as_ref()
             .complete_marker_refresh("review9-job", &[replacement])
             .unwrap();
         let marker = f
             .store
-            .lock()
-            .get_media_marker(f.media_id, Some(1), Some(1))
+            .as_ref()
+            .get_fixture_marker(f.media_id, Some(1), Some(1))
             .unwrap()
             .unwrap();
         println!(
             "unresolved E1 job={} source={} intro={:?}..{:?}",
             f.store
-                .lock()
+                .as_ref()
                 .get_probe_job("review9-job")
                 .unwrap()
                 .unwrap()

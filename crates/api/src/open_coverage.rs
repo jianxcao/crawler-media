@@ -9,7 +9,7 @@ use crate::store::{PendingDownload, WantedHistory};
 pub(crate) fn units(
     subscribe: &Subscribe,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
     pending: &[(i32, PendingDownload)],
     history: &HashMap<(Option<u32>, Option<u32>), WantedHistory>,
     observed: impl IntoIterator<Item = u32>,
@@ -28,7 +28,7 @@ const OBSERVED_SLACK: u32 = 3;
 pub(crate) fn units_bounded(
     subscribe: &Subscribe,
     media: &Media,
-    facts: &subscribe::SubscribeFacts,
+    facts: &domain::SubscribeFacts,
     pending: &[(i32, PendingDownload)],
     history: &HashMap<(Option<u32>, Option<u32>), WantedHistory>,
     observed: impl IntoIterator<Item = u32>,

@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use marker::{
-    CaptureRequest, ChromaprintEngine, FingerprintCaptureEngine, ProbeTarget,
-    SampleWindow,
+    CaptureRequest, ChromaprintEngine, FingerprintCaptureEngine, ProbeTarget, SampleWindow,
 };
 
 #[test]

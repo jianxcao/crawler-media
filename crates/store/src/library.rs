@@ -1,139 +1,45 @@
 use std::path::PathBuf;
 
-use domain::{Confidence, MediaKind};
+use domain::MediaKind;
 use rusqlite::{OptionalExtension, params};
 
 pub mod markers;
-pub use markers::{MarkerResultReplacement, StoredMediaMarker};
+mod missing;
+pub use markers::{
+    MarkerAnalysisScope, MarkerResultReplacement, SourceObservation, SourceSnapshot,
+    StoredFileMarker, observe_sources, observe_sources_with,
+};
+pub use missing::MissingFile;
 
-pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
-const SETTING_TRANSFER_MODE: &str = "transfer_mode";
+pub(super) const CURRENT_TRACKS_VERSION: i64 = 2;
 
 use super::{Store, StoreError};
 
-impl Store {
-    pub fn naming_template(&self, kind: MediaKind) -> Result<String, StoreError> {
-        self.app
-            .query_row(
-                "SELECT pattern FROM naming_templates WHERE kind = ?1",
-                params![kind.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
+/// Owned facts for verification's read/observe/write boundary.
+struct VerificationFile {
+    file_id: String,
+    path: String,
+    library_id: String,
+    root_id: String,
+    media_id: String,
+    revision: i64,
+    source_version: String,
+    missing_at: Option<i64>,
+    publication: String,
+}
 
+impl Store {
     /// Primary root of the kind's default library — where new content lands.
     pub fn library_root(&self, kind: MediaKind) -> Result<PathBuf, StoreError> {
-        let path: String = self.app.query_row(
-            "SELECT r.path FROM library_roots r
-             JOIN libraries l ON l.id = r.library_id
-             WHERE l.kind = ?1 AND l.is_default = 1
-             ORDER BY r.sort_order, r.path LIMIT 1",
-            params![kind.as_str()],
-            |row| row.get(0),
-        )?;
-        Ok(PathBuf::from(path))
+        self.with_library_read(|db| db.library_root(kind))
     }
 
-    /// Replace the primary root of the kind's default library.
-    pub fn set_library_root(&self, kind: MediaKind, path: &str) -> Result<(), StoreError> {
-        if let Some(library) = self.default_library(kind)? {
-            self.ensure_library_mutable(&library.id)?;
-        }
-        self.ensure_removal_roots_available(&[path])?;
-        let root_id: String = self.app.query_row(
-            "SELECT r.id FROM library_roots r
-             JOIN libraries l ON l.id = r.library_id
-             WHERE l.kind = ?1 AND l.is_default = 1
-             ORDER BY r.sort_order, r.path LIMIT 1",
-            params![kind.as_str()],
-            |row| row.get(0),
-        )?;
-        self.app.execute(
-            "UPDATE library_roots SET path = ?2 WHERE id = ?1",
-            params![root_id, path],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_naming_template(&self, kind: MediaKind, pattern: &str) -> Result<(), StoreError> {
-        self.app.execute(
-            "UPDATE naming_templates SET pattern = ?2 WHERE kind = ?1",
-            params![kind.as_str(), pattern],
-        )?;
-        Ok(())
-    }
-
-    pub fn transfer_mode(&self) -> Result<String, StoreError> {
-        Ok(self
-            .get_setting(SETTING_TRANSFER_MODE)?
-            .unwrap_or_else(|| "hardlink".into()))
-    }
-
-    pub fn set_transfer_mode(&self, mode: &str) -> Result<(), StoreError> {
-        self.put_setting(SETTING_TRANSFER_MODE, mode)
-    }
-
-    pub fn scrape_enabled(&self) -> Result<bool, StoreError> {
-        Ok(self
-            .get_setting("scrape")?
-            .map(|value| value == "1" || value == "true")
-            .unwrap_or(false))
-    }
-
-    pub fn set_scrape_enabled(&self, enabled: bool) -> Result<(), StoreError> {
-        self.put_setting("scrape", if enabled { "1" } else { "0" })
-    }
-
-    pub fn watch_intake(&self) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .get_setting("watch_intake")?
-            .filter(|path| !path.is_empty()))
-    }
-
-    pub fn set_watch_intake(&self, path: &str) -> Result<(), StoreError> {
-        self.put_setting("watch_intake", path.trim())
-    }
-
-    pub fn watch_inplace(&self) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .get_setting("watch_inplace")?
-            .filter(|path| !path.is_empty()))
-    }
-
-    pub fn set_watch_inplace(&self, path: &str) -> Result<(), StoreError> {
-        self.put_setting("watch_inplace", path.trim())
-    }
-
+    /// 读取文件的流信息缓存（探测任务写入）。
+    ///
+    /// 缓存按源版本有效：文件内容被重扫替换后，旧流的行内事实不再描述磁盘上的文件，
+    /// 因此这里返回 None 让调用方重新探测，而不是把上一代的流信息当成现状。
     pub fn get_file_meta(&self, ledger_id: &str) -> Result<Option<library::Tracks>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT audio_json, subtitle_json, video_json, tracks_version FROM file_meta WHERE ledger_id = ?1",
-                params![ledger_id],
-                |row| {
-                    let video_raw: Option<String> = row.get(2).ok().flatten();
-                    let tracks_version: i64 = row.get(3)?;
-                    if tracks_version < CURRENT_TRACKS_VERSION {
-                        return Ok(None);
-                    }
-                    // 旧版缓存行没有 video_json（NULL）：视为「未完成探测」，
-                    // 返回 None 让调用方重新探测并补写完整流信息。
-                    if video_raw.is_none() {
-                        return Ok(None);
-                    }
-                    let audio = serde_json::from_str::<Vec<library::AudioTrack>>(&row.get::<_, String>(0)?)
-                        .unwrap_or_default();
-                    let subtitles =
-                        serde_json::from_str::<Vec<library::SubtitleTrack>>(&row.get::<_, String>(1)?)
-                            .unwrap_or_default();
-                    let video = video_raw
-                        .and_then(|s| serde_json::from_str::<library::VideoTrack>(&s).ok());
-                    Ok(Some(library::Tracks { video, audio, subtitles }))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
+        self.with_library_read(|db| db.get_file_meta(ledger_id))
     }
 
     pub fn put_file_meta(
@@ -141,9 +47,13 @@ impl Store {
         ledger_id: &str,
         tracks: &library::Tracks,
     ) -> Result<(), StoreError> {
-        self.put_file_meta_versioned(ledger_id, tracks, None, None)
+        self.with_library_write(|db| db.put_file_meta(ledger_id, tracks))
     }
 
+    /// 写入流信息缓存。
+    ///
+    /// 行携带文件当前的 (source_revision, source_version)：缓存永远标注它描述的是哪一代文件。
+    /// `source_version` 非空时是调用方探测所用的版本，与文件当前版本不符即视为作废结果，忽略写入。
     pub fn put_file_meta_versioned(
         &self,
         ledger_id: &str,
@@ -151,297 +61,143 @@ impl Store {
         source_version: Option<&str>,
         format_duration_ms: Option<i64>,
     ) -> Result<(), StoreError> {
-        self.library.execute(
-            "INSERT INTO file_meta (
-                 ledger_id, audio_json, subtitle_json, video_json, tracks_version,
-                 source_version, format_duration_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(ledger_id) DO UPDATE SET
-               audio_json = excluded.audio_json,
-               subtitle_json = excluded.subtitle_json,
-               video_json = excluded.video_json,
-               tracks_version = excluded.tracks_version,
-               source_version = excluded.source_version,
-               format_duration_ms = excluded.format_duration_ms",
-            params![
-                ledger_id,
-                serde_json::to_string(&tracks.audio)?,
-                serde_json::to_string(&tracks.subtitles)?,
-                tracks
-                    .video
-                    .as_ref()
-                    .map(|v| serde_json::to_string(v).unwrap_or_default()),
-                CURRENT_TRACKS_VERSION,
-                source_version,
-                format_duration_ms,
-            ],
-        )?;
-        Ok(())
+        self.with_library_write(|db| {
+            db.put_file_meta_versioned(ledger_id, tracks, source_version, format_duration_ms)
+        })
     }
 
     pub fn get_cached_chapters(
         &self,
         ledger_id: &str,
     ) -> Result<Option<Vec<library::ChapterMarker>>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT chapters_json FROM file_meta WHERE ledger_id = ?1",
-                params![ledger_id],
-                |row| {
-                    let json_str: Option<String> = row.get(0)?;
-                    Ok(json_str.and_then(|s| serde_json::from_str(&s).ok()))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
+        self.with_library_read(|db| db.get_cached_chapters(ledger_id))
     }
 
+    /// 写入章节缓存（标记检测与探测共用同一写入口）。
     pub fn put_cached_chapters(
         &self,
         ledger_id: &str,
         chapters: &[library::ChapterMarker],
     ) -> Result<(), StoreError> {
-        let json_str = serde_json::to_string(chapters)?;
-        self.library.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
-             VALUES (?1, '[]', '[]', ?2)
-             ON CONFLICT(ledger_id) DO UPDATE SET chapters_json = excluded.chapters_json",
-            params![ledger_id, json_str],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.put_cached_chapters(ledger_id, chapters))
     }
 
     pub fn clear_cached_chapters(&self, ledger_id: &str) -> Result<(), StoreError> {
-        self.library.execute(
-            "UPDATE file_meta SET chapters_json = NULL WHERE ledger_id = ?1",
-            params![ledger_id],
-        )?;
-        Ok(())
-    }
-
-    /// 读取单集声纹指纹缓存（探测任务写入；未探测/失败为 None）。
-    pub fn get_fingerprint(&self, ledger_id: &str) -> Result<Option<Vec<u32>>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT fingerprint_json FROM file_meta WHERE ledger_id = ?1",
-                params![ledger_id],
-                |row| {
-                    let raw: Option<String> = row.get(0).ok().flatten();
-                    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
-    }
-
-    /// 写入单集声纹指纹缓存；None 表示清除（内容变化后失效）。
-    pub fn put_fingerprint(
-        &self,
-        ledger_id: &str,
-        fingerprint: Option<&[u32]>,
-    ) -> Result<(), StoreError> {
-        let json_str =
-            fingerprint.map(|fp| serde_json::to_string(fp).unwrap_or_else(|_| "[]".into()));
-        self.library.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, fingerprint_json)
-             VALUES (?1, '[]', '[]', ?2)
-             ON CONFLICT(ledger_id) DO UPDATE SET fingerprint_json = excluded.fingerprint_json",
-            params![ledger_id, json_str],
-        )?;
-        Ok(())
-    }
-
-    /// 读取单集片尾声纹指纹缓存。
-    pub fn get_outro_fingerprint(&self, ledger_id: &str) -> Result<Option<Vec<u32>>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT outro_fingerprint_json FROM file_meta WHERE ledger_id = ?1",
-                params![ledger_id],
-                |row| {
-                    let raw: Option<String> = row.get(0).ok().flatten();
-                    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
-                },
-            )
-            .optional()
-            .map(|opt| opt.flatten())
-            .map_err(Into::into)
-    }
-
-    /// 写入单集片尾声纹指纹缓存。
-    pub fn put_outro_fingerprint(
-        &self,
-        ledger_id: &str,
-        fingerprint: Option<&[u32]>,
-    ) -> Result<(), StoreError> {
-        let json_str =
-            fingerprint.map(|fp| serde_json::to_string(fp).unwrap_or_else(|_| "[]".into()));
-        self.library.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, outro_fingerprint_json)
-             VALUES (?1, '[]', '[]', ?2)
-             ON CONFLICT(ledger_id) DO UPDATE SET outro_fingerprint_json = excluded.outro_fingerprint_json",
-            params![ledger_id, json_str],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.clear_cached_chapters(ledger_id))
     }
 
     pub fn delete_file_meta_by_ledger_id(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        delete_file_meta_for_ledger(&tx, ledger_id)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn insert_unidentified(
-        &self,
-        path: String,
-        confidence: Confidence,
-    ) -> Result<(), StoreError> {
-        self.library.execute(
-            "INSERT INTO unidentified (path, confidence) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET confidence = excluded.confidence",
-            params![path, confidence.as_str()],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_unidentified(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT path, confidence FROM unidentified ORDER BY path")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn delete_unidentified(&self, path: &str) -> Result<bool, StoreError> {
-        let n = self
-            .library
-            .execute("DELETE FROM unidentified WHERE path = ?1", params![path])?;
-        Ok(n > 0)
+        self.with_library_write(|db| db.delete_file_meta_by_ledger_id(ledger_id))
     }
 }
 
 impl Store {
-    /// 全库文件核验：路径不存在的 ledger 行标 missing_at=now，恢复的文件清掉标记。
+    /// 全库文件核验：路径不存在的文件行标 missing_at=now，恢复的文件清掉标记。
     pub fn verify_library_files(
         &self,
         roots: &[std::path::PathBuf],
         now: i64,
     ) -> Result<(i64, i64), StoreError> {
-        let rows = self.list_ledger()?;
-        let mut missing = 0;
-        let mut restored = 0;
-        for row in rows {
-            let in_root = roots
-                .iter()
-                .any(|root| std::path::Path::new(&row.path).starts_with(root));
-            if !in_root {
-                continue;
-            }
-            if std::path::Path::new(&row.path).exists() {
-                let n = self.library.execute(
-                    "UPDATE ledger SET missing_at = NULL WHERE id = ?1 AND missing_at IS NOT NULL",
-                    params![row.id.to_string()],
-                )?;
-                if n > 0 {
-                    restored += 1;
-                }
-            } else {
-                let n = self.library.execute(
-                    "UPDATE ledger SET missing_at = ?1 WHERE id = ?2 AND missing_at IS NULL",
-                    params![now, row.id.to_string()],
-                )?;
-                if n > 0 {
-                    missing += 1;
-                }
-            }
-        }
-        Ok((missing, restored))
+        self.verify_library_files_with(roots, now, std::path::Path::exists)
     }
 
-    /// path → missing_at 映射（接口打「文件缺失」标用）。
-    pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT path, missing_at FROM ledger WHERE missing_at IS NOT NULL")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// 删除缺失文件对应的 ledger 行（仅限这些根目录内）。
-    pub fn delete_missing_rows(&self, roots: &[std::path::PathBuf]) -> Result<usize, StoreError> {
-        let missing = self.missing_at_by_path()?;
-        let mut deleted = 0;
-        for (path, _) in missing {
-            let in_root = roots
-                .iter()
-                .any(|root| std::path::Path::new(&path).starts_with(root));
-            if in_root {
-                deleted += self
-                    .library
-                    .execute("DELETE FROM ledger WHERE path = ?1", params![path])?;
-            }
-        }
-        Ok(deleted)
-    }
-
-    /// 删除指定媒体的缺失文件对应 ledger 行（仅限这些根目录内）。
-    pub fn delete_missing_rows_for_media(
+    /// Verify recorded paths with an injected filesystem observer.
+    pub fn verify_library_files_with(
         &self,
         roots: &[std::path::PathBuf],
-        media_id: domain::MediaId,
-    ) -> Result<usize, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT path FROM ledger WHERE media_id = ?1 AND missing_at IS NOT NULL")?;
-        let paths = stmt.query_map(params![media_id.to_string()], |row| row.get::<_, String>(0))?;
-        let mut deleted = 0;
-        for path in paths {
-            let path = path?;
-            let in_root = roots
-                .iter()
-                .any(|root| std::path::Path::new(&path).starts_with(root));
-            if in_root {
-                deleted += self
-                    .library
-                    .execute("DELETE FROM ledger WHERE path = ?1", params![path])?;
-            }
-        }
-        Ok(deleted)
+        now: i64,
+        mut exists: impl FnMut(&std::path::Path) -> bool,
+    ) -> Result<(i64, i64), StoreError> {
+        let files = self.with_library_read(|db| db.file_paths())?;
+        let observed = files
+            .into_iter()
+            .filter(|file| {
+                roots
+                    .iter()
+                    .any(|root| std::path::Path::new(&file.path).starts_with(root))
+            })
+            .map(|file| {
+                let present = exists(std::path::Path::new(&file.path));
+                (file, present)
+            })
+            .collect::<Vec<_>>();
+        self.with_library_write(|db| db.apply_file_verification(&observed, now))
     }
 
-    /// 该 Media 是否有「文件缺失」的 ledger 行（transfer 据此决定是否重链）。
-    pub fn media_has_missing(&self, media_id: domain::MediaId) -> Result<bool, StoreError> {
-        Ok(self
-            .library
-            .query_row(
-                "SELECT 1 FROM ledger WHERE media_id = ?1 AND missing_at IS NOT NULL LIMIT 1",
-                params![media_id.to_string()],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+    /// 文件重新入库后清除缺失标记（摘要随事实在同一事务里重算）。
+    pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
+        self.with_library_write(|db| db.clear_ledger_missing(path))
     }
-
 }
 
 /// Remove all caches in the same transaction as ledger deletion when applicable.
 pub(crate) fn delete_file_meta_for_ledger(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     ledger_id: &str,
 ) -> Result<(), StoreError> {
-    tx.execute("DELETE FROM file_meta WHERE ledger_id = ?1", [ledger_id])?;
+    tx.execute("DELETE FROM file_details WHERE file_id = ?1", [ledger_id])?;
+    delete_derived_contexts_for_ledger(tx, ledger_id)
+}
+
+/// Drop context-keyed derived state (fingerprints, attempts, probe stages,
+/// samples) of one file; cold details are left to the caller.
+pub(crate) fn delete_derived_contexts_for_ledger(
+    tx: &rusqlite::Connection,
+    ledger_id: &str,
+) -> Result<(), StoreError> {
     tx.execute(
-        "DELETE FROM fingerprint_cache WHERE ledger_id = ?1",
+        "DELETE FROM fingerprint_cache WHERE file_id = ?1",
         [ledger_id],
     )?;
     tx.execute(
-        "DELETE FROM fingerprint_attempts WHERE ledger_id = ?1",
+        "DELETE FROM fingerprint_attempts WHERE file_id = ?1",
         [ledger_id],
     )?;
     super::probe_state::delete_probe_stages_for_ledger(tx, ledger_id)?;
     super::fingerprint_samples::delete_samples_for_ledger(tx, ledger_id)
 }
+
+/// 章节缓存的唯一写入口。
+///
+/// 行不存在时按文件当前 (revision, source_version) 建行；已存在且版本不同，说明这行（含其
+/// 章节）描述的是旧内容，本次结果不再匹配当前文件，忽略而不覆盖。返回是否写入。
+pub(crate) fn upsert_chapter_cache_tx(
+    tx: &rusqlite::Connection,
+    file_id: &str,
+    chapters_json: &str,
+) -> Result<bool, StoreError> {
+    let changed = tx.execute(
+        "INSERT INTO file_details (
+             file_id, source_revision, source_version, tracks_version,
+             audio_json, subtitle_json, chapters_json
+         )
+         SELECT f.file_id, f.file_revision, f.source_version, 0, '[]', '[]', ?2
+         FROM library_files f
+         WHERE f.file_id = ?1
+         ON CONFLICT(file_id) DO UPDATE SET chapters_json = excluded.chapters_json
+         WHERE file_details.source_version = excluded.source_version",
+        params![file_id, chapters_json],
+    )?;
+    Ok(changed > 0)
+}
+
+fn ensure_file_integrity_writable(tx: &rusqlite::Connection, file: &str) -> Result<(), StoreError> {
+    use rusqlite::OptionalExtension;
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT media_id FROM library_files WHERE file_id=?1",
+            [file],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(owner) = owner {
+        crate::library_operations::integrity_guard::ensure_media_integrity_writable(
+            tx,
+            owner.parse()?,
+        )?;
+    }
+    Ok(())
+}
+
+#[path = "library/connection.rs"]
+mod connection;

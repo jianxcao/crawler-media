@@ -13,7 +13,7 @@ fn make_test_torrent() -> Torrent {
         size_bytes: Some(100),
         seeders: Some(1),
         free: false,
-        hr: false,
+        hr: Some(false),
         imdb_id: None,
         leechers: None,
         snatched: None,
@@ -69,6 +69,49 @@ fn create_sub(store: &Store) -> (SubscribeId, Torrent) {
     };
     store.insert_subscribe(&subscribe).unwrap();
     (subscribe.id, make_test_torrent())
+}
+
+#[test]
+fn deleted_subscribe_cannot_be_recreated_by_late_child_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (id, torrent) = create_sub(&store);
+    let pending = || PendingDownload {
+        torrent: torrent.clone(),
+        release_override: None,
+        downloader_id: None,
+        submitted_at: Some(100),
+    };
+    let mut facts = domain::SubscribeFacts::default();
+    facts.upsert(
+        None,
+        None,
+        domain::QualityFact {
+            score: 10,
+            path: Some("fixture.mkv".into()),
+        },
+    );
+    store.save_subscribe_facts(id, &facts).unwrap();
+    store
+        .touch_wanted_searches(id, &[(None, None)], 100)
+        .unwrap();
+    store.record_pending_submission(id, 10, &pending()).unwrap();
+    assert!(store.delete_subscribe(id).unwrap());
+    assert!(store.load_pending(id).unwrap().is_empty());
+    assert!(store.load_wanted_history(id).unwrap().is_empty());
+    assert!(store.load_subscribe_facts(id).unwrap().movie().is_none());
+
+    assert!(
+        store.record_pending_submission(id, 10, &pending()).is_err(),
+        "a downloader callback must not recreate pending rows after Subscribe deletion"
+    );
+    assert!(store.save_subscribe_facts(id, &facts).is_err());
+    assert!(
+        store
+            .touch_wanted_searches(id, &[(None, None)], 200)
+            .is_err()
+    );
+    assert!(store.list_all_pending_routed().unwrap().is_empty());
 }
 
 fn assert_merge_does_not_bump_timestamp(store: &Store, sub_id: SubscribeId, torrent: &Torrent) {
@@ -145,6 +188,40 @@ fn actual_submission_refreshes_submitted_at_timestamp() {
 }
 
 #[test]
+fn pending_torrents_preserve_unknown_and_known_hr_states() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (sub_id, mut torrent) = create_sub(&store);
+    for (index, hr) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        torrent.hr = hr;
+        torrent.enclosure = format!("https://pt.example/dl/{index}");
+        store
+            .record_pending_submission(
+                sub_id,
+                100,
+                &PendingDownload {
+                    submitted_at: None,
+                    torrent: torrent.clone(),
+                    release_override: None,
+                    downloader_id: None,
+                },
+            )
+            .unwrap();
+    }
+    let loaded = store.load_pending(sub_id).unwrap();
+    assert_eq!(loaded.len(), 3);
+    for (index, expected) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        let pending = loaded
+            .iter()
+            .find(|(_, pending)| {
+                pending.torrent.enclosure == format!("https://pt.example/dl/{index}")
+            })
+            .unwrap();
+        assert_eq!(pending.1.torrent.hr, expected);
+    }
+}
+
+#[test]
 fn batch_pending_submissions_refreshes_all_timestamps() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
@@ -201,57 +278,36 @@ fn rejected_pending_is_only_revived_by_manual_submission() {
         downloader_id: None,
         submitted_at: None,
     };
-    store.record_pending_submissions(id, &[(10, pending())]).unwrap();
-    store.mark_pending_rejected(id, &[torrent.enclosure.clone()]).unwrap();
+    store
+        .record_pending_submissions(id, &[(10, pending())])
+        .unwrap();
+    store
+        .mark_pending_rejected(id, std::slice::from_ref(&torrent.enclosure))
+        .unwrap();
     assert!(store.load_pending(id).unwrap().is_empty());
-    assert!(store.load_rejected_enclosures(id).unwrap().contains(&torrent.enclosure));
-
-    store.record_pending_submissions(id, &[(10, pending())]).unwrap();
-    store.merge_pending(id, &[(10, pending())]).unwrap();
-    assert!(store.load_pending(id).unwrap().is_empty(), "automatic paths keep it rejected");
-
-    store.record_manual_pending_submissions(id, &[(10, pending())]).unwrap();
-    assert_eq!(store.load_pending(id).unwrap().len(), 1, "manual submission revives");
-    assert!(store.load_rejected_enclosures(id).unwrap().is_empty());
-}
-
-/// Review L-3: rows from a database that predates `last_progress_at` start
-/// their stall clock at upgrade time, not at their old `submitted_at`.
-#[test]
-fn upgrade_starts_stall_clock_for_old_pending_rows() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (sub_id, torrent) = {
-        let store = Store::open(tmp.path()).unwrap();
-        let (sub_id, torrent) = create_sub(&store);
-        store
-            .merge_pending(
-                sub_id,
-                &[(
-                    50,
-                    PendingDownload {
-                        submitted_at: Some(1000),
-                        torrent: torrent.clone(),
-                        release_override: None,
-                        downloader_id: None,
-                    },
-                )],
-            )
-            .unwrap();
-        (sub_id, torrent)
-    };
-    // Simulate the pre-H3 schema.
-    let conn = rusqlite::Connection::open(tmp.path().join("subscribe.db")).unwrap();
-    conn.execute_batch("ALTER TABLE pending_downloads DROP COLUMN last_progress_at;")
-        .unwrap();
-    drop(conn);
-
-    let store = Store::open(tmp.path()).unwrap();
-    let since = store
-        .touch_pending_progress(sub_id, &torrent.enclosure, 0.0, 1_000_000)
-        .unwrap()
-        .unwrap();
     assert!(
-        since > 1000,
-        "stall clock restarted at upgrade, got {since}"
+        store
+            .load_rejected_enclosures(id)
+            .unwrap()
+            .contains(&torrent.enclosure)
     );
+
+    store
+        .record_pending_submissions(id, &[(10, pending())])
+        .unwrap();
+    store.merge_pending(id, &[(10, pending())]).unwrap();
+    assert!(
+        store.load_pending(id).unwrap().is_empty(),
+        "automatic paths keep it rejected"
+    );
+
+    store
+        .record_manual_pending_submissions(id, &[(10, pending())])
+        .unwrap();
+    assert_eq!(
+        store.load_pending(id).unwrap().len(),
+        1,
+        "manual submission revives"
+    );
+    assert!(store.load_rejected_enclosures(id).unwrap().is_empty());
 }

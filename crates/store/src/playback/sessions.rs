@@ -4,45 +4,24 @@ use rusqlite::{OptionalExtension, params};
 use super::{PlayLogRow, SessionRow, UnitState, media_id_from, user_id_from};
 use super::{Store, StoreError};
 
+/// The NOT NULL binding columns a live session shares with the play session id
+/// it was issued for. `playback_session_ids` is the API-visible record of the
+/// file, revision, library and generation the client is playing, so a session
+/// row must echo exactly that state instead of inventing defaults.
+struct SessionBinding {
+    play_session_id: String,
+    generation: i64,
+    file_id: String,
+    file_revision: i64,
+    source_version: String,
+    library_id: String,
+    config_revision: i64,
+    timeline_mode: String,
+}
+
 impl Store {
     pub fn upsert_session(&self, session: &SessionRow) -> Result<(), StoreError> {
-        self.subscribe.execute(
-            "INSERT OR REPLACE INTO playback_sessions
-                (device_id, user_id, media_id, season, episode, client, device_name,
-                 client_version, play_method, position_ms, start_position_ms, duration_ms,
-                 paused, watched_ms, rate_bps, bytes_sent, connections, admin_ended,
-                 started_at, last_report_at, ledger_id, play_session_id, last_report_at_ms,
-                 last_event_sequence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
-            params![
-                session.device_id,
-                session.user_id.to_string(),
-                session.media_id.to_string(),
-                session.season,
-                session.episode,
-                session.client,
-                session.device_name,
-                session.client_version,
-                session.play_method,
-                session.position_ms,
-                session.start_position_ms,
-                session.duration_ms,
-                session.paused as i64,
-                session.watched_ms,
-                session.rate_bps,
-                session.bytes_sent,
-                session.connections,
-                session.admin_ended as i64,
-                session.started_at,
-                session.last_report_at,
-                session.ledger_id,
-                session.play_session_id,
-                session.last_report_at_ms,
-                session.last_event_sequence,
-            ],
-        )?;
-        Ok(())
+        self.with_library_write(|db| db.upsert_session(session))
     }
 
     pub fn get_session(
@@ -50,51 +29,18 @@ impl Store {
         user_id: UserId,
         device_id: &str,
     ) -> Result<Option<SessionRow>, StoreError> {
-        self.subscribe
-            .query_row(
-                "SELECT device_id, user_id, media_id, season, episode, client, device_name,
-                        client_version, play_method, position_ms, start_position_ms,
-                        duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                        admin_ended, started_at, last_report_at, ledger_id, play_session_id,
-                        last_report_at_ms, last_event_sequence
-                 FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
-                params![user_id.to_string(), device_id],
-                map_session,
-            )
-            .optional()
-            .map_err(Into::into)
+        self.with_library_read(|db| db.get_session(user_id, device_id))
     }
 
     pub fn sessions_for_device(&self, device_id: &str) -> Result<Vec<SessionRow>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
-            "SELECT device_id, user_id, media_id, season, episode, client, device_name,
-                    client_version, play_method, position_ms, start_position_ms,
-                    duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                    admin_ended, started_at, last_report_at, ledger_id, play_session_id,
-                    last_report_at_ms, last_event_sequence
-             FROM playback_sessions WHERE device_id = ?1
-             ORDER BY last_report_at DESC",
-        )?;
-        let rows = stmt.query_map(params![device_id], map_session)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.with_library_read(|db| db.sessions_for_device(device_id))
     }
     pub fn active_sessions(
         &self,
         now: i64,
         timeout_secs: i64,
     ) -> Result<Vec<SessionRow>, StoreError> {
-        let cutoff = now - timeout_secs;
-        let mut stmt = self.subscribe.prepare(
-            "SELECT device_id, user_id, media_id, season, episode, client, device_name,
-                    client_version, play_method, position_ms, start_position_ms,
-                    duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                    admin_ended, started_at, last_report_at, ledger_id, play_session_id,
-                    last_report_at_ms, last_event_sequence
-             FROM playback_sessions WHERE last_report_at >= ?1
-             ORDER BY last_report_at DESC",
-        )?;
-        let rows = stmt.query_map(params![cutoff], map_session)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.with_library_read(|db| db.active_sessions(now, timeout_secs))
     }
 
     /// Close a session into a play log; returns the log row. Missing session = None.
@@ -104,76 +50,7 @@ impl Store {
         device_id: &str,
         now: i64,
     ) -> Result<Option<PlayLogRow>, StoreError> {
-        self.playback_write(|store| store.close_session_inner(user_id, device_id, now))
-    }
-
-    fn close_session_inner(
-        &self,
-        user_id: UserId,
-        device_id: &str,
-        now: i64,
-    ) -> Result<Option<PlayLogRow>, StoreError> {
-        let Some(session) = self.get_session(user_id, device_id)? else {
-            return Ok(None);
-        };
-        self.subscribe.execute(
-            "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id.to_string(), device_id],
-        )?;
-        let completed = UnitState::playback_completed(session.position_ms, session.duration_ms);
-        let log = PlayLogRow {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: session.user_id,
-            media_id: session.media_id,
-            season: session.season,
-            episode: session.episode,
-            device_id: Some(session.device_id),
-            client: session.client,
-            device_name: session.device_name,
-            play_method: session.play_method,
-            started_at: session.started_at,
-            ended_at: now,
-            watched_ms: session.watched_ms,
-            start_position_ms: session.start_position_ms,
-            end_position_ms: session.position_ms,
-            duration_ms: session.duration_ms,
-            completed,
-        };
-        self.subscribe.execute(
-            "INSERT INTO playback_logs
-                (id, user_id, media_id, season, episode, client, device_name, play_method,
-                 started_at, ended_at, watched_ms, start_position_ms, end_position_ms,
-                 duration_ms, completed, device_id, admin_ended)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                log.id,
-                log.user_id.to_string(),
-                log.media_id.to_string(),
-                log.season,
-                log.episode,
-                log.client,
-                log.device_name,
-                log.play_method,
-                log.started_at,
-                log.ended_at,
-                log.watched_ms,
-                log.start_position_ms,
-                log.end_position_ms,
-                log.duration_ms,
-                log.completed as i64,
-                log.device_id,
-                session.admin_ended as i64,
-            ],
-        )?;
-        Ok(Some(log))
-    }
-
-    pub fn delete_session(&self, user_id: UserId, device_id: &str) -> Result<bool, StoreError> {
-        let n = self.subscribe.execute(
-            "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id.to_string(), device_id],
-        )?;
-        Ok(n > 0)
+        self.with_library_write(|db| db.close_session(user_id, device_id, now))
     }
 
     pub fn end_device_session(
@@ -182,7 +59,7 @@ impl Store {
         device_id: &str,
         now: i64,
     ) -> Result<bool, StoreError> {
-        Ok(self.close_session(user_id, device_id, now)?.is_some())
+        self.with_library_write(|db| db.end_device_session(user_id, device_id, now))
     }
 
     /// Check if a session was explicitly ended by admin on this device within window_secs.
@@ -193,41 +70,16 @@ impl Store {
         now: i64,
         window_secs: i64,
     ) -> Result<bool, StoreError> {
-        let cutoff = now - window_secs;
-        let exists: bool = self.subscribe.query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM playback_logs
-                 WHERE user_id = ?1 AND device_id = ?2 AND ended_at >= ?3 AND admin_ended != 0
-             )",
-            params![user_id.to_string(), device_id, cutoff],
-            |r| r.get(0),
-        )?;
-        Ok(exists)
+        self.with_library_read(|db| db.device_was_admin_ended(user_id, device_id, now, window_secs))
     }
 
     /// Close every session whose heartbeat is older than the timeout.
     pub fn sweep_stale_sessions(&self, now: i64, timeout_secs: i64) -> Result<usize, StoreError> {
-        let cutoff = now - timeout_secs;
-        let session_keys: Vec<(UserId, String)> = {
-            let mut stmt = self.subscribe.prepare(
-                "SELECT user_id, device_id FROM playback_sessions WHERE last_report_at < ?1",
-            )?;
-            let rows = stmt.query_map(params![cutoff], |row| {
-                Ok((user_id_from(row, 0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let mut closed = 0;
-        for (user_id, device_id) in session_keys {
-            if self.close_session(user_id, &device_id, now)?.is_some() {
-                closed += 1;
-            }
-        }
-        Ok(closed)
+        self.with_library_write(|db| db.sweep_stale_sessions(now, timeout_secs))
     }
 }
 
-fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+pub(super) fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         device_id: row.get(0)?,
         user_id: user_id_from(row, 1)?,
@@ -255,3 +107,6 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         last_event_sequence: row.get(23)?,
     })
 }
+
+#[path = "sessions/connection.rs"]
+mod connection;

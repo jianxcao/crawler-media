@@ -1,7 +1,8 @@
-import type { RuleSetSpec } from "@/lib/api/subscriptions";
+import type { RuleSetAtom } from "@/lib/api/subscriptions";
+import { ruleAtomValues, ruleAtomValue } from "./rule-set-edit.ts";
 
 /**
- * 洗版阶梯预览（docs/design/quality-upgrade.md §2.1 / §14.3）：把规则组的洗版
+ * 洗版阶梯预览：把规则组的洗版
  * 配置翻译成一条**从终点往下数**的档位清单。
  *
  * 为什么需要它：开了洗版之后，规则组就不再是一个"筛子"而是一条**有序阶梯**
@@ -96,13 +97,13 @@ export interface UpgradeLadderPreview {
 }
 
 /** 生效维度：偏好列表为空的位自动跳过（后端 effective_ladder 同口径）。 */
-function effectiveDimensions(spec: RuleSetSpec): string[] {
-  const dims = (spec.upgrade_ladder ?? DEFAULT_LADDER).filter(
+function effectiveDimensions(atoms: RuleSetAtom[]): string[] {
+  const dims = (ruleAtomValue(atoms, "upgrade_ladder")?.split(",") ?? DEFAULT_LADDER).filter(
     (dim) =>
       LADDER_OPTIONS.some((option) => option.value === dim) &&
-      !(dim === "hdr" && !spec.hdr_levels?.length) &&
-      !(dim === "video_codec" && !spec.video_codecs?.length) &&
-      !(dim === "platform" && !spec.platforms?.length),
+      !(dim === "hdr" && !ruleAtomValues(atoms, "hdr").length) &&
+      !(dim === "video_codec" && !ruleAtomValues(atoms, "video_codec").length) &&
+      !(dim === "platform" && !ruleAtomValues(atoms, "platform").length),
   );
   return dims.length ? dims : DEFAULT_LADDER;
 }
@@ -123,33 +124,33 @@ function codecAxis(codecs: string[]): string[] {
 /** 某一维的档位偏好序（高 → 低）。 */
 function axisOf(
   dim: string,
-  spec: RuleSetSpec,
+  atoms: RuleSetAtom[],
   platformLabel: (id: string) => string,
 ): string[] {
   if (dim === "resolution") {
-    return spec.resolutions?.length ? spec.resolutions : DEFAULT_RESOLUTION_LADDER;
+    return ruleAtomValues(atoms, "resolution").length ? ruleAtomValues(atoms, "resolution") : DEFAULT_RESOLUTION_LADDER;
   }
   if (dim === "source") {
     // 配了片源白名单就按用户序（后端 media_source_rank 同口径），否则内置档序
-    const chosen = spec.media_sources?.length ? spec.media_sources : null;
+    const chosen = ruleAtomValues(atoms, "source").length ? ruleAtomValues(atoms, "source") : null;
     return (chosen ?? MEDIA_SOURCE_OPTIONS.map((o) => o.value)).map(
       (value) => SOURCE_LABEL[value] ?? value,
     );
   }
-  if (dim === "hdr") return spec.hdr_levels ?? [];
-  if (dim === "video_codec") return codecAxis(spec.video_codecs ?? []);
-  return (spec.platforms ?? []).map(platformLabel);
+  if (dim === "hdr") return ruleAtomValues(atoms, "hdr");
+  if (dim === "video_codec") return codecAxis(ruleAtomValues(atoms, "video_codec"));
+  return (ruleAtomValues(atoms, "platform")).map(platformLabel);
 }
 
 /** 终点在某一维上的取值：分辨率取 cutoff、片源取洗版目标，其余维取偏好首项。 */
-function targetIndexOf(dim: string, axis: string[], spec: RuleSetSpec): number {
+function targetIndexOf(dim: string, axis: string[], atoms: RuleSetAtom[]): number {
   if (dim === "resolution") {
     const resolution =
-      spec.cutoff_resolution || spec.resolutions?.[0] || FALLBACK_CUTOFF_RESOLUTION;
+      ruleAtomValue(atoms, "wash_target")?.split(" ")[0] || ruleAtomValues(atoms, "resolution")[0] || FALLBACK_CUTOFF_RESOLUTION;
     return axis.indexOf(resolution);
   }
   if (dim === "source") {
-    return axis.indexOf(SOURCE_LABEL[spec.upgrade_source ?? ""] ?? "");
+    return axis.indexOf(SOURCE_LABEL[ruleAtomValue(atoms, "wash_target")?.split(" ")[1] ?? ""] ?? "");
   }
   // 只有分辨率与片源会成数量级地改变磁盘占用，才需要"接受但不主动洗"的
   // 区分；其余维度的终点就是偏好首项（后端 target_vector 同口径）
@@ -157,21 +158,21 @@ function targetIndexOf(dim: string, axis: string[], spec: RuleSetSpec): number {
 }
 
 /**
- * spec → 洗版阶梯预览；未开洗版（或配置自相矛盾，如目标分辨率不在偏好序里）
+ * atoms → 洗版阶梯预览；未开洗版（或配置自相矛盾，如目标分辨率不在偏好序里）
  * 返回 null——这两种情况下没有"终点"可言，界面退回纯筛选摘要。
  *
- * `platformLabel` 由调用方注入：本模块要保持零运行时依赖（`node --test`
+ * `platformLabel` 由调用方注入：本模块只依赖原子读取函数（`node --test`
  * 直接跑 .ts，路径别名在那里解析不了）。
  */
 export function upgradeLadderPreview(
-  spec: RuleSetSpec,
+  atoms: RuleSetAtom[],
   platformLabel: (id: string) => string = (id) => id,
 ): UpgradeLadderPreview | null {
-  if (!spec.upgrade_source) return null;
+  if (!ruleAtomValue(atoms, "wash_target")?.split(" ")[1]) return null;
 
-  const dimensions = effectiveDimensions(spec);
-  const axes = dimensions.map((dim) => axisOf(dim, spec, platformLabel));
-  const digits = dimensions.map((dim, i) => targetIndexOf(dim, axes[i], spec));
+  const dimensions = effectiveDimensions(atoms);
+  const axes = dimensions.map((dim) => axisOf(dim, atoms, platformLabel));
+  const digits = dimensions.map((dim, i) => targetIndexOf(dim, axes[i], atoms));
   // 任一维取不到终点值 = 配置矛盾（校验层已拦，这里只做防御性静默）
   if (digits.some((index) => index < 0) || axes.some((axis) => !axis.length)) return null;
 

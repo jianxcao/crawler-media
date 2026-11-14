@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use domain::MediaId;
 use super::PosterError;
+use domain::MediaId;
 
 pub trait PosterClock: Send + Sync {
     fn now(&self) -> Duration;
@@ -80,7 +80,7 @@ impl NegativePosterCache {
         self.sweep_expired(now);
 
         let pos = self.entries.iter().position(|e| e.media_id == id)?;
-        let mut entry = self.entries.remove(pos)?;
+        let entry = self.entries.remove(pos)?;
         let error = entry.error.clone();
         // Move to most recently used (back)
         self.entries.push_back(entry);

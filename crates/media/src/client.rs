@@ -17,19 +17,45 @@ struct Genre {
     name: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum TmdbError {
+    #[error("catalog origin deadline elapsed")]
+    OriginTimeout,
+    #[error("catalog request deadline elapsed")]
+    Deadline,
+    #[error("catalog request cancelled")]
+    Cancelled,
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("http: {0}")]
     Http(String),
     #[error("parse: {0}")]
     Parse(String),
+    #[error("cache backend: {0}")]
+    CacheBackend(String),
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::sync::Arc<std::io::Error>),
     #[error(transparent)]
-    Json(#[from] serde_json::Error),
+    Json(std::sync::Arc<serde_json::Error>),
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(std::sync::Arc<rusqlite::Error>),
+    #[error(transparent)]
+    CacheDb(std::sync::Arc<crate::response_cache::CacheDbError>),
 }
+
+macro_rules! shared_error_from {
+    ($error:ty, $variant:ident) => {
+        impl From<$error> for TmdbError {
+            fn from(error: $error) -> Self {
+                Self::$variant(std::sync::Arc::new(error))
+            }
+        }
+    };
+}
+shared_error_from!(std::io::Error, Io);
+shared_error_from!(serde_json::Error, Json);
+shared_error_from!(rusqlite::Error, Sqlite);
+shared_error_from!(crate::response_cache::CacheDbError, CacheDb);
 
 pub trait CatalogGet {
     fn get(&self, path: &str) -> Result<String, TmdbError>;
@@ -47,6 +73,14 @@ impl<H: CatalogGet> Tmdb<H> {
     pub fn new(http: H, catalog_db: &Path) -> Result<Self, TmdbError> {
         // now = 0 → CatalogCache 走实时时钟（生产路径缓存正常过期）。
         Self::new_at(http, catalog_db, 0)
+    }
+
+    pub fn with_cache(http: H, cache: CatalogCache) -> Self {
+        Self {
+            http,
+            cache,
+            language: "zh-CN".to_string(),
+        }
     }
 
     pub fn with_language(mut self, language: &str) -> Self {
@@ -187,12 +221,29 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Option<String>, TmdbError> {
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
-            MediaKind::Tv => format!("/tv/{tmdb_id}"),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
         };
         self.fetch(&path, |body| {
             crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
             parse::details_poster_path(body)
         })
+    }
+
+    /// Read previously fetched artwork without initiating a catalog request.
+    pub fn cached_details_poster(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<String>, TmdbError> {
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+        };
+        self.cached_fetch(&path, &self.language, |body| {
+            crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
+            parse::details_poster_path(body)
+        })
+        .map(Option::flatten)
     }
 
     pub fn movie_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
@@ -204,25 +255,31 @@ impl<H: CatalogGet> Tmdb<H> {
     }
 
     pub fn tv_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
-        let path = format!("/tv/{tmdb_id}?append_to_response=translations,alternative_titles");
+        let path = crate::tmdb_keys::tv_details_paths(tmdb_id)[0].clone();
         match self.cached_details(MediaKind::Tv, &path) {
             Ok(media) => Ok(media),
-            Err(_) => self.cached_details(MediaKind::Tv, &format!("/tv/{tmdb_id}")),
+            Err(_) => self.cached_details(
+                MediaKind::Tv,
+                &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+            ),
         }
     }
 
     /// Season overviews from the `/tv/{id}` details body (shares its cache key).
     pub fn tv_seasons(&self, tmdb_id: &str) -> Result<Vec<parse::TvSeason>, TmdbError> {
-        let path1 = format!("/tv/{tmdb_id}?append_to_response=translations,alternative_titles");
+        let path1 = crate::tmdb_keys::tv_details_paths(tmdb_id)[0].clone();
         let decode = |body: &str| {
             crate::contracts::object(body, &["seasons", "id", "name"])?;
             parse::tv_seasons(body)
         };
         match self.fetch(&path1, decode) {
-            Ok(seasons) if !seasons.is_empty() => Ok(seasons),
+            Ok(seasons) if !seasons.is_empty() => Ok(seasons as Vec<parse::TvSeason>),
             result => {
                 tracing::warn!(tmdb_id, error = ?result.err(), "TMDB seasons unavailable; trying basic details");
-                self.fetch(&format!("/tv/{tmdb_id}"), decode)
+                self.fetch(
+                    &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+                    decode,
+                )
             }
         }
     }
@@ -235,6 +292,19 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Vec<parse::SeasonEpisode>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
         self.fetch(&path, |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_episodes(body)
+        })
+    }
+
+    /// Read adopted-display episode facts from any retained valid cache entry.
+    pub fn cached_season_episodes(
+        &self,
+        tmdb_id: &str,
+        season: u32,
+    ) -> Result<Option<Vec<parse::SeasonEpisode>>, TmdbError> {
+        let path = format!("/tv/{tmdb_id}/season/{season}");
+        self.cached_fetch(&path, &self.language, |body| {
             crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
             parse::season_episodes(body)
         })
@@ -298,13 +368,74 @@ impl<H: CatalogGet> Tmdb<H> {
             // `credits` on TV details only returns the principal cast. The
             // aggregate endpoint includes cast credited across the series. Ratings and
             // translations are subresources, so they must be appended explicitly.
-            MediaKind::Tv => format!(
-                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
-            ),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };
         self.fetch_with_language(&path, request_language, |body| {
             crate::contracts::metadata(body)?;
             parse::details_meta_for(body, languages, countries)
+        })
+    }
+
+    /// Optional enrichment consumes retained metadata and never waits for origin.
+    pub fn cached_details_with_meta_for(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+        metadata_languages: &[&str],
+        rating_countries: &[&str],
+    ) -> Result<Option<parse::ItemMeta>, TmdbError> {
+        let default_languages = [self.language.as_str(), "en-US"];
+        let languages = if metadata_languages.is_empty() {
+            &default_languages[..]
+        } else {
+            metadata_languages
+        };
+        let countries = if rating_countries.is_empty() {
+            &["CN", "US"][..]
+        } else {
+            rating_countries
+        };
+        let language = languages
+            .iter()
+            .copied()
+            .find(|language| !language.trim().is_empty())
+            .unwrap_or(&self.language);
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => {
+                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+            }
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
+        };
+        self.cached_fetch(&path, language, |body| {
+            crate::contracts::metadata(body)?;
+            parse::details_meta_for(body, languages, countries)
+        })
+    }
+
+    /// The validated full details response (same request and cache entry as
+    /// [`Self::details_with_meta_for`]) normalized into a source snapshot.
+    pub fn normalized_details(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<domain::NormalizedMetadata, TmdbError> {
+        let request_language = preferences
+            .language_priority
+            .iter()
+            .map(String::as_str)
+            .find(|language| !language.trim().is_empty())
+            .unwrap_or(self.language.as_str());
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => {
+                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+            }
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
+        };
+        self.fetch_with_language(&path, request_language, |body| {
+            crate::contracts::metadata(body)?;
+            crate::normalized::normalize_metadata("tmdb", scope, body, preferences)
         })
     }
 
@@ -329,6 +460,35 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Tv => format!("/tv/{tmdb_id}/similar"),
         };
         self.fetch(&path, |body| parse::search_results(kind, body))
+    }
+
+    /// Return only a fresh persisted similar response, including typed NotFound.
+    /// An unfetched or expired key is None; no catalog origin is contacted.
+    pub fn cached_similar(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+    ) -> Result<Option<Vec<parse::CatalogHit>>, TmdbError> {
+        let segment = match kind {
+            MediaKind::Movie | MediaKind::Video => "movie",
+            MediaKind::Tv => "tv",
+        };
+        let key = format!("/{segment}/{tmdb_id}/similar?language={}", self.language);
+        let Some(body) = self.cache.get_fresh(&key)? else {
+            return Ok(None);
+        };
+        let decoded =
+            crate::contracts::json(&body).and_then(|_| parse::search_results(kind, &body));
+        match decoded {
+            Ok(hits) => Ok(Some(hits)),
+            Err(error @ TmdbError::NotFound(_)) => Err(error),
+            Err(error) => {
+                // Match get_or_fetch: invalid durable bytes need a refresh;
+                // storage failures above and real origin failures stay errors.
+                tracing::warn!(path = %key, %error, "Malformed cached recommendations; refresh required");
+                Ok(None)
+            }
+        }
     }
 
     /// Whole-season episode details (names/overviews/stills) — one request
@@ -362,18 +522,20 @@ impl<H: CatalogGet> Tmdb<H> {
         tmdb_id: &str,
         season: u32,
     ) -> Result<Option<Vec<parse::EpisodeMeta>>, TmdbError> {
+        self.cached_season_details_lang(tmdb_id, season, None)
+    }
+
+    pub fn cached_season_details_lang(
+        &self,
+        tmdb_id: &str,
+        season: u32,
+        lang: Option<&str>,
+    ) -> Result<Option<Vec<parse::EpisodeMeta>>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
-        let join = if path.contains('?') { '&' } else { '?' };
-        let key = format!("{path}{join}language={}", self.language);
-        let body = match self.cache.get_fresh(&key)? {
-            Some(body) => body,
-            None => match self.cache.get_stale(&key)? {
-                Some(body) => body,
-                None => return Ok(None),
-            },
-        };
-        crate::contracts::object(&body, &["episodes", "id", "name", "season_number"])?;
-        parse::season_details(&body).map(Some)
+        self.cached_fetch(&path, lang.unwrap_or(&self.language), |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_details(body)
+        })
     }
 
     /// TMDB episode still file paths (`/tv/{id}/season/{s}/episode/{e}/images`).
@@ -417,6 +579,22 @@ impl<H: CatalogGet> Tmdb<H> {
         self.fetch(path, |body| parse::search_results(kind, body))
     }
 
+    fn cached_fetch<T>(
+        &self,
+        path: &str,
+        language: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<Option<T>, TmdbError> {
+        let key = crate::tmdb_keys::request_key(path, language);
+        self.cache
+            .get_stale(&key)?
+            .map(|body| {
+                crate::contracts::json(&body)?;
+                decode(&body)
+            })
+            .transpose()
+    }
+
     fn paged_search(
         &self,
         kind: MediaKind,
@@ -447,12 +625,7 @@ impl<H: CatalogGet> Tmdb<H> {
         language: &str,
         decode: impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<T, TmdbError> {
-        let join = if path.contains('?') { '&' } else { '?' };
-        let full = if language.is_empty() {
-            path.to_string()
-        } else {
-            format!("{path}{join}language={language}")
-        };
+        let full = crate::tmdb_keys::request_key(path, language);
         self.cache.get_or_fetch(&self.http, &full, |body| {
             crate::contracts::json(body)?;
             decode(body)

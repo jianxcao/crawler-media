@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{make_target_evidence, MockVerificationEngine};
+use common::{MockVerificationEngine, make_target_evidence};
 use marker::{
     CommonSegment, SamplingPolicy, SegmentKind, TemplateContext, TemplateModel, TemplateReference,
     VerificationOutcome, verify_template_window,
@@ -60,7 +60,9 @@ fn center_only_match_requires_full_window() {
         duration_sec: 20.0,
         score: 1.0,
     };
-    engine.returns.insert((3000, 1000), vec![center_seg.clone()]);
+    engine
+        .returns
+        .insert((3000, 1000), vec![center_seg.clone()]);
     engine.returns.insert((3000, 2000), vec![center_seg]);
 
     let outcome = verify_template_window(&engine, &target, &templates, &policy);
@@ -189,7 +191,9 @@ fn window_edge_match_is_not_a_complete_template() {
         duration_sec: 85.0,
         score: 1.0,
     };
-    engine.returns.insert((3000, 1000), vec![clipped_seg.clone()]);
+    engine
+        .returns
+        .insert((3000, 1000), vec![clipped_seg.clone()]);
     engine.returns.insert((3000, 2000), vec![clipped_seg]);
 
     let outcome = verify_template_window(&engine, &target, &templates, &policy);
@@ -457,7 +461,13 @@ fn review_known_complete_full_window_zero_candidates_reports_no_match() {
         make_target_evidence("ref-2", 2, SegmentKind::Intro, 2000, 0, 180_000),
     );
 
-    let target = make_target_evidence("target", 9, SegmentKind::Intro, 9000, 0, 180_000);
+    let mut target = make_target_evidence("target", 9, SegmentKind::Intro, 9000, 0, 180_000);
     let outcome = verify_template_window(&engine, &target, &templates, &policy);
     assert!(matches!(outcome, VerificationOutcome::NoMatch { .. }));
+    target.capture.pcm_duration_ms = Some(179_500);
+    let outcome = verify_template_window(&engine, &target, &templates, &policy);
+    assert!(
+        matches!(outcome, VerificationOutcome::NeedsFullWindow { .. }),
+        "incomplete PCM cannot establish absence: {outcome:?}"
+    );
 }

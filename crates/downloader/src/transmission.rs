@@ -304,10 +304,10 @@ impl Downloader for TransmissionDownloader {
         })?;
         // D-H2: a duplicate (e.g. added by hand) keeps its old labels; add ours
         // so ownership survives restarts. Existing labels are preserved.
-        if self.labels_supported {
-            if let Some(hash) = added["torrent-duplicate"]["hashString"].as_str() {
-                self.claim_duplicate(hash, torrent)?;
-            }
+        if self.labels_supported
+            && let Some(hash) = added["torrent-duplicate"]["hashString"].as_str()
+        {
+            self.claim_duplicate(hash, torrent)?;
         }
         for field in ["torrent-added", "torrent-duplicate"] {
             if let Some(hash) = added[field]["hashString"]
@@ -549,7 +549,7 @@ impl Downloader for TransmissionDownloader {
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .find(|label| *label == crate::TASK_TAG || label.starts_with("crawler-media-"))
+                .find(|label| *label == crate::TASK_TAG)
                 .unwrap_or("")
                 .to_string();
             let owned_tags = crate::owned_tags_from(

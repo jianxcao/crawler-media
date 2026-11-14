@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, QualitySource, SubscribeId};
+use domain::QualityFact;
+use domain::{Confidence, LedgerId, QualitySource, SubscribeId};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn wash_cut_deletes_previous_library_file_and_ledger_row() {
@@ -52,9 +53,10 @@ async fn wash_cut_deletes_previous_library_file_and_ledger_row() {
     std::fs::write(&old, b"old-1080p").unwrap();
     {
         let store = Store::open(tmp.path().join("data")).unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(LedgerId::new()),
                 media_id: media_id.parse().unwrap(),
                 path: old.display().to_string(),
                 season: None,
@@ -65,9 +67,11 @@ async fn wash_cut_deletes_previous_library_file_and_ledger_row() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: Some(50),
-            })
-            .unwrap();
-        let mut facts = subscribe::SubscribeFacts::default();
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut facts = domain::SubscribeFacts::default();
         facts.upsert(
             None,
             None,
@@ -145,9 +149,10 @@ async fn wash_cut_drops_ledger_when_previous_file_is_already_gone() {
     let gone = tmp.path().join("data/library/movies/missing.mkv");
     {
         let store = Store::open(tmp.path().join("data")).unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(LedgerId::new()),
                 media_id: media_id.parse().unwrap(),
                 path: gone.display().to_string(),
                 season: None,
@@ -158,9 +163,11 @@ async fn wash_cut_drops_ledger_when_previous_file_is_already_gone() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: Some(50),
-            })
-            .unwrap();
-        let mut facts = subscribe::SubscribeFacts::default();
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut facts = domain::SubscribeFacts::default();
         facts.upsert(
             None,
             None,

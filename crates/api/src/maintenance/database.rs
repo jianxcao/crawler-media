@@ -4,7 +4,7 @@
 //!
 //! - 路径只由内部事实产生：Store 真实 `app_path` + `data_dir` 下的固定文件名，
 //!   外加**已存在**的可选 fanart 库。不接受任意用户路径，也不会创建空数据库。
-//! - 独立连接 `READ_WRITE`（不带 CREATE），短 `busy_timeout=250ms`，不为维护重复
+//! - 借用该库唯一 writer 连接，短 `busy_timeout=250ms`，退出时恢复原策略；不为维护重复
 //!   迁移/seed，不执行 `wal_checkpoint(TRUNCATE)`，不删除/搬移 DB/WAL/SHM 文件。
 //! - 轻量路径只有 `PRAGMA optimize`；VACUUM 需要显式开启 + 冷却 + 空闲页阈值 +
 //!   磁盘准入，全部通过才执行。
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, ffi};
+use rusqlite::{Connection, ffi};
 
 use super::policy::{
     VACUUM_MIN_FREE_BYTES, VACUUM_MIN_FREE_RATIO_PERCENT, VACUUM_MIN_INTERVAL_SECS,
@@ -29,7 +29,7 @@ pub const PER_DATABASE_LIMIT: Duration = Duration::from_secs(30);
 pub const VACUUM_DISK_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 维护连接的 `busy_timeout`：不沿用前台 5s，避免维护积压。
-const MAINTENANCE_BUSY_TIMEOUT_MS: &str = "250";
+const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// 超时后重试中断的节奏。
 ///
@@ -48,22 +48,20 @@ const INTERRUPT_RETRY: Duration = Duration::from_millis(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseName {
     App,
-    Catalog,
+    Cache,
     Library,
     Subscribe,
     Jobs,
-    Fanart,
 }
 
 impl DatabaseName {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::App => "app",
-            Self::Catalog => "catalog",
+            Self::Cache => "cache",
             Self::Library => "library",
             Self::Subscribe => "subscribe",
             Self::Jobs => "jobs",
-            Self::Fanart => "fanart",
         }
     }
 }
@@ -72,10 +70,28 @@ impl DatabaseName {
 pub struct DatabaseTarget {
     pub name: DatabaseName,
     pub path: PathBuf,
+    /// Filesystem observations captured before acquiring any database writer.
+    pub size_before: u64,
+    pub available_disk_bytes: Option<u64>,
+}
+
+impl DatabaseTarget {
+    fn observe(name: DatabaseName, path: PathBuf) -> Self {
+        Self {
+            name,
+            size_before: file_len(&path),
+            available_disk_bytes: available_disk_bytes(&path),
+            path,
+        }
+    }
+
+    pub(crate) fn finish_report(&self, report: &mut DatabaseReport) {
+        report.size_after = file_len(&self.path);
+    }
 }
 
 /// 可选库：文件不存在时记 Skipped，**不**创建。
-const OPTIONAL: [DatabaseName; 1] = [DatabaseName::Fanart];
+const OPTIONAL: [DatabaseName; 0] = [];
 
 fn data_dir_path(name: DatabaseName, data_dir: &Path) -> PathBuf {
     data_dir.join(format!("{}.db", name.as_str()))
@@ -85,31 +101,28 @@ fn data_dir_path(name: DatabaseName, data_dir: &Path) -> PathBuf {
 /// 文件名；可选 fanart 仅当文件已存在才进入列表。
 pub fn database_targets(data_dir: &Path, app_path: &Path) -> Vec<DatabaseTarget> {
     let mut targets = vec![
-        DatabaseTarget {
-            name: DatabaseName::App,
-            path: app_path.to_path_buf(),
-        },
-        DatabaseTarget {
-            name: DatabaseName::Catalog,
-            path: data_dir_path(DatabaseName::Catalog, data_dir),
-        },
-        DatabaseTarget {
-            name: DatabaseName::Library,
-            path: data_dir_path(DatabaseName::Library, data_dir),
-        },
-        DatabaseTarget {
-            name: DatabaseName::Subscribe,
-            path: data_dir_path(DatabaseName::Subscribe, data_dir),
-        },
-        DatabaseTarget {
-            name: DatabaseName::Jobs,
-            path: data_dir_path(DatabaseName::Jobs, data_dir),
-        },
+        DatabaseTarget::observe(DatabaseName::App, app_path.to_path_buf()),
+        DatabaseTarget::observe(
+            DatabaseName::Cache,
+            data_dir_path(DatabaseName::Cache, data_dir),
+        ),
+        DatabaseTarget::observe(
+            DatabaseName::Library,
+            data_dir_path(DatabaseName::Library, data_dir),
+        ),
+        DatabaseTarget::observe(
+            DatabaseName::Subscribe,
+            data_dir_path(DatabaseName::Subscribe, data_dir),
+        ),
+        DatabaseTarget::observe(
+            DatabaseName::Jobs,
+            data_dir_path(DatabaseName::Jobs, data_dir),
+        ),
     ];
     for name in OPTIONAL {
         let path = data_dir_path(name, data_dir);
         if path.is_file() {
-            targets.push(DatabaseTarget { name, path });
+            targets.push(DatabaseTarget::observe(name, path));
         }
     }
     targets
@@ -119,10 +132,7 @@ pub fn database_targets(data_dir: &Path, app_path: &Path) -> Vec<DatabaseTarget>
 pub(crate) fn missing_optional_targets(data_dir: &Path) -> Vec<DatabaseTarget> {
     OPTIONAL
         .iter()
-        .map(|name| DatabaseTarget {
-            name: *name,
-            path: data_dir_path(*name, data_dir),
-        })
+        .map(|name| DatabaseTarget::observe(*name, data_dir_path(*name, data_dir)))
         .filter(|target| !target.path.is_file())
         .collect()
 }
@@ -139,6 +149,7 @@ pub struct MaintenanceContext<'a> {
 pub trait DatabaseExecutor: Send + Sync {
     fn execute(
         &self,
+        conn: &Connection,
         target: &DatabaseTarget,
         vacuum_enabled: bool,
         context: &MaintenanceContext<'_>,
@@ -189,48 +200,45 @@ impl ConfiguredSqliteExecutor {
 impl DatabaseExecutor for SqliteExecutor {
     fn execute(
         &self,
+        conn: &Connection,
         target: &DatabaseTarget,
         vacuum_enabled: bool,
         context: &MaintenanceContext<'_>,
     ) -> Result<DatabaseReport, String> {
-        run_sqlite(target, vacuum_enabled, context, SqliteLimits::production())
+        run_sqlite(
+            conn,
+            target,
+            vacuum_enabled,
+            context,
+            SqliteLimits::production(),
+        )
     }
 }
 
 impl DatabaseExecutor for ConfiguredSqliteExecutor {
     fn execute(
         &self,
+        conn: &Connection,
         target: &DatabaseTarget,
         vacuum_enabled: bool,
         context: &MaintenanceContext<'_>,
     ) -> Result<DatabaseReport, String> {
-        run_sqlite(target, vacuum_enabled, context, self.limits)
+        run_sqlite(conn, target, vacuum_enabled, context, self.limits)
     }
 }
 
-/// 打开一个真实的库（**不带 CREATE**），在有界看门狗下执行维护并记录报告。
-///
-/// 打不开真实库是 `Err`，不静默忽略；缺失的可选库已由 [`database_targets`] 提前排除。
+/// Maintain the already acquired unique writer. All filesystem observations belong
+/// to the caller, before admission and after this borrowed connection is released.
 fn run_sqlite(
+    conn: &Connection,
     target: &DatabaseTarget,
     vacuum_enabled: bool,
     context: &MaintenanceContext<'_>,
     limits: SqliteLimits,
 ) -> Result<DatabaseReport, String> {
     let started = Instant::now();
-    let size_before = file_len(&target.path);
-    let conn = Connection::open_with_flags(&target.path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|error| format!("打开数据库 {} 失败: {error}", target.path.display()))?;
-    // journal_mode=WAL 是持久属性，已由 Store/Queue 写进文件头；维护连接不重复设置，
-    // 避免为维护引入额外写锁。外键策略与前台保持一致。
-    conn.pragma_update(None, "busy_timeout", MAINTENANCE_BUSY_TIMEOUT_MS)
-        .map_err(|error| {
-            format!(
-                "设置 {} 的 busy_timeout 失败: {error}",
-                target.path.display()
-            )
-        })?;
-    let _ = conn.pragma_update(None, "foreign_keys", "ON");
+    let size_before = target.size_before;
+    let _policy = BusyPolicy::install(conn)?;
 
     let interrupt = conn.get_interrupt_handle();
     let (done_tx, done_rx) = channel::<()>();
@@ -248,7 +256,7 @@ fn run_sqlite(
         }
     });
 
-    let work = execute_work(&conn, target, vacuum_enabled, context, limits, size_before);
+    let work = execute_work(conn, target, vacuum_enabled, context, limits, size_before);
     // 正常完成（或被中断返回）后通知看门狗提前退出并 join，避免残留线程在连接释放后
     // 仍持有 InterruptHandle。
     let _ = done_tx.send(());
@@ -260,10 +268,40 @@ fn run_sqlite(
         free_pages: work.free_pages,
         page_size: work.page_size,
         size_before,
-        size_after: file_len(&target.path),
+        size_after: size_before,
         skip_reason: work.skip_reason,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+/// A maintenance attempt must never leave the shared foreground connection with
+/// its shortened SQLite busy policy. Progress handlers are left untouched.
+struct BusyPolicy<'a> {
+    conn: &'a Connection,
+    previous: Duration,
+}
+
+impl<'a> BusyPolicy<'a> {
+    fn install(conn: &'a Connection) -> Result<Self, String> {
+        let millis: u64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .map_err(|error| format!("读取数据库 busy_timeout 失败: {error}"))?;
+        let policy = Self {
+            conn,
+            previous: Duration::from_millis(millis),
+        };
+        conn.busy_timeout(MAINTENANCE_BUSY_TIMEOUT)
+            .map_err(|error| format!("设置数据库维护 busy_timeout 失败: {error}"))?;
+        Ok(policy)
+    }
+}
+
+impl Drop for BusyPolicy<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.conn.busy_timeout(self.previous) {
+            tracing::error!(%error, "恢复数据库维护前的 busy_timeout 失败");
+        }
+    }
 }
 
 struct WorkOutcome {
@@ -294,6 +332,8 @@ fn execute_work(
         page_size,
     };
     if !vacuum_enabled {
+        // 轻量路径不重建文件，但仍然回收空闲页尾部（`incremental_vacuum` 不拿独占锁）。
+        log_incremental_reclaim(conn, target, free_pages);
         return light;
     }
     if (context.cancelled)() {
@@ -312,11 +352,14 @@ fn execute_work(
         vacuum_history_unreadable: context.vacuum_history_unreadable,
         limits,
     };
+    // 完整 VACUUM 的准入窗口：冷却、空闲页字节/比例、磁盘余量全部满足才重建文件。
+    // 没进窗口时改跑 `PRAGMA incremental_vacuum(N)`，并在报告里写明为什么没升级到
+    // 完整 VACUUM、增量回收了多少页（或该库为何不支持增量回收）。
     if let Some(reason) = vacuum_skip_reason(&facts) {
-        return skip(reason, free_pages, page_size);
+        return skip_after_incremental(conn, reason, free_pages, page_size);
     }
     if let Some(reason) = disk_skip_reason(target, size_before, limits) {
-        return skip(reason, free_pages, page_size);
+        return skip_after_incremental(conn, reason, free_pages, page_size);
     }
     match conn.execute_batch("VACUUM;") {
         Ok(()) => WorkOutcome {
@@ -360,11 +403,11 @@ fn vacuum_skip_reason(facts: &VacuumFacts) -> Option<String> {
             facts.limits.min_free_bytes
         ));
     }
-    let ratio = if facts.page_count == 0 {
-        0
-    } else {
-        facts.free_pages.saturating_mul(100) / facts.page_count
-    };
+    let ratio = facts
+        .free_pages
+        .saturating_mul(100)
+        .checked_div(facts.page_count)
+        .unwrap_or(0);
     if ratio < u64::from(facts.limits.min_free_ratio_percent) {
         return Some(format!(
             "空闲页比例 {ratio}% < 阈值 {}%",
@@ -383,7 +426,7 @@ fn disk_skip_reason(
     let required = size_before
         .saturating_mul(2)
         .saturating_add(limits.vacuum_headroom_bytes);
-    match available_disk_bytes(&target.path) {
+    match target.available_disk_bytes {
         Some(available) if available >= required => None,
         Some(available) => Some(format!(
             "已执行 PRAGMA optimize；VACUUM 跳过：磁盘可用空间 {available} 字节 < 需要 {required} 字节（2 × 主体 + 预留）"
@@ -399,6 +442,59 @@ fn skip(reason: impl Into<String>, free_pages: i64, page_size: i64) -> WorkOutco
         free_pages,
         page_size,
     }
+}
+
+/// `PRAGMA auto_vacuum` 的取值：0 = 关闭，1 = 全量，2 = incremental。
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// 回收空闲页但不重建文件：`PRAGMA incremental_vacuum(N)`。
+///
+/// 只有以 `auto_vacuum=INCREMENTAL` 建过的库才有意义（建库时的 pragma 由
+/// `open.rs` 的 create 路径负责；`jobs.db` 由 `jobs::Queue` 打开，没有走那条路径，
+/// 因此这里必须**先读** `PRAGMA auto_vacuum`，不支持就如实返回原因，不假装回收过。
+fn reclaim_incremental(conn: &Connection, free_pages: i64) -> Result<i64, String> {
+    if free_pages <= 0 {
+        return Ok(0);
+    }
+    let mode = pragma_i64(conn, "auto_vacuum");
+    if mode != AUTO_VACUUM_INCREMENTAL {
+        return Err(format!(
+            "该库 auto_vacuum={mode}（非 incremental），增量回收不适用"
+        ));
+    }
+    conn.execute_batch(&format!("PRAGMA incremental_vacuum({free_pages});"))
+        .map_err(|error| format!("PRAGMA incremental_vacuum({free_pages}) 失败: {error}"))?;
+    Ok(free_pages)
+}
+
+/// 轻量路径的增量回收只进日志：`skip_reason` 保持为空表示"没有跳过任何东西"。
+fn log_incremental_reclaim(conn: &Connection, target: &DatabaseTarget, free_pages: i64) {
+    match reclaim_incremental(conn, free_pages) {
+        Ok(0) => {}
+        Ok(reclaimed) => tracing::debug!(
+            database = target.name.as_str(),
+            reclaimed,
+            "已增量回收空闲页"
+        ),
+        Err(reason) => tracing::debug!(database = target.name.as_str(), %reason),
+    }
+}
+
+/// 完整 VACUUM 未准入时：先尽力增量回收，再把两条事实一起写进 `skip_reason`。
+fn skip_after_incremental(
+    conn: &Connection,
+    reason: String,
+    free_pages: i64,
+    page_size: i64,
+) -> WorkOutcome {
+    let note = match reclaim_incremental(conn, free_pages) {
+        Ok(0) => format!("{reason}；没有空闲页需要回收"),
+        Ok(reclaimed) => {
+            format!("{reason}；已执行 PRAGMA incremental_vacuum 回收 {reclaimed} 页")
+        }
+        Err(why) => format!("{reason}；增量回收未执行：{why}"),
+    };
+    skip(note, free_pages, page_size)
 }
 
 /// busy/locked → 跳过（下轮再试）；其余（IO/corrupt/full/中断）→ 失败并保留上下文。
@@ -467,7 +563,7 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
     } else {
         stats.f_bsize
     };
-    Some((stats.f_bavail as u64).saturating_mul(block as u64))
+    Some((stats.f_bavail as u64).saturating_mul(block))
 }
 
 #[cfg(not(unix))]

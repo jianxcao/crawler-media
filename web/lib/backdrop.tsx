@@ -1,5 +1,6 @@
 "use client";
 
+import { createArtworkImage } from "@/lib/artwork-loading";
 import {
   createContext,
   useCallback,
@@ -138,7 +139,8 @@ export function BackdropProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (overrideUrl === null) return; // 清除时不重置 ready——覆盖层带着旧图淡出
     let cancelled = false;
-    const img = new Image();
+    const preload = new AbortController();
+    const { image: img, load: loadImage } = createArtworkImage(preload.signal);
     const settle = () => {
       if (cancelled) return;
       // decode 失败（极端情况下图已坏）不阻塞：照常上屏走 onerror 兜底
@@ -150,9 +152,10 @@ export function BackdropProvider({ children }: { children: React.ReactNode }) {
         });
     };
     img.onload = settle;
-    img.src = overrideUrl;
+    loadImage(overrideUrl);
     return () => {
       cancelled = true;
+      preload.abort();
     };
   }, [overrideUrl]);
 

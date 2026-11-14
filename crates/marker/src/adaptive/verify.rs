@@ -1,6 +1,6 @@
 use super::types::{
-    EpisodeEvidence, SamplingPolicy, SegmentKind, TemplateContext, TemplateModel,
-    VerificationOutcome, VerifiedInterval,
+    EpisodeEvidence, SamplingPolicy, TemplateContext, TemplateModel, VerificationOutcome,
+    VerifiedInterval,
 };
 use crate::fingerprint::FingerprintEngine;
 use crate::types::CommonSegment;
@@ -20,6 +20,16 @@ pub fn verify_template_window(
     target: &EpisodeEvidence,
     templates: &TemplateContext,
     policy: &SamplingPolicy,
+) -> VerificationOutcome {
+    verify_template_window_with_chapters(engine, target, templates, policy, &[])
+}
+
+pub fn verify_template_window_with_chapters(
+    engine: &dyn FingerprintEngine,
+    target: &EpisodeEvidence,
+    templates: &TemplateContext,
+    policy: &SamplingPolicy,
+    chapters: &[crate::boundary::Interval],
 ) -> VerificationOutcome {
     // Check if target words are empty or silent/constant
     if target.capture.words.is_empty() {
@@ -54,7 +64,34 @@ pub fn verify_template_window(
 
     for model in matching_models {
         match verify_against_model(engine, target, model, templates, policy) {
-            Ok(verified) => verified_models.push(verified),
+            Ok(mut verified) => {
+                let references: Vec<_> = model
+                    .references
+                    .iter()
+                    .filter_map(|r| templates.references.get(&r.sample_id))
+                    .collect();
+                match crate::boundary::evidence::review_candidate(
+                    engine,
+                    target,
+                    &references,
+                    crate::boundary::Interval {
+                        start_ms: verified.start_ms,
+                        end_ms: verified.end_ms,
+                    },
+                    chapters,
+                    policy,
+                ) {
+                    crate::boundary::BoundaryDecision::Verified(interval) => {
+                        verified.start_ms = interval.start_ms;
+                        verified.end_ms = interval.end_ms;
+                        verified_models.push(verified);
+                    }
+                    crate::boundary::BoundaryDecision::Uncertain(reason) => {
+                        all_templates_confirm_no_match = false;
+                        failure_reasons.push(reason.to_string());
+                    }
+                }
+            }
             Err(reason) => {
                 if !template_confirms_no_match(&reason) {
                     all_templates_confirm_no_match = false;
@@ -76,16 +113,18 @@ pub fn verify_template_window(
             .map(|dur| dur > 0 && target.capture.window.duration_ms() >= dur)
             .unwrap_or(false);
 
-    let is_complete_pcm = match target.capture.pcm_duration_ms {
-        Some(pcm_ms) => pcm_ms + 1000 >= target.capture.window.duration_ms(),
-        None => false,
-    };
+    let is_complete_pcm = crate::boundary::evidence::complete_pcm(&target.capture);
 
     // "Successfully no match" may only be concluded when every applicable template completed
     // its comparison without candidates on a complete PCM full window.
     if all_templates_confirm_no_match && is_full_window && is_complete_pcm {
         VerificationOutcome::NoMatch { reason }
     } else {
+        let reason = if is_complete_pcm {
+            reason
+        } else {
+            format!("incomplete_pcm: {reason}")
+        };
         VerificationOutcome::NeedsFullWindow { reason }
     }
 }
@@ -100,14 +139,18 @@ fn resolve_verified_models(
             interval.start_ms.abs_diff(other.start_ms) > tolerance
                 || interval.end_ms.abs_diff(other.end_ms) > tolerance
         }) {
-            tracing::warn!(models = outcomes.len(), "有效片头片尾模型区间冲突，保持未决");
+            tracing::warn!(
+                models = outcomes.len(),
+                "有效片头片尾模型区间冲突，保持未决"
+            );
             return VerificationOutcome::NeedsFullWindow {
                 reason: "conflicting_verified_templates".into(),
             };
         }
     }
     outcomes.sort_by(|a, b| {
-        b.supporting_episodes.cmp(&a.supporting_episodes)
+        b.supporting_episodes
+            .cmp(&a.supporting_episodes)
             .then(a.score.total_cmp(&b.score))
             .then(b.coverage.total_cmp(&a.coverage))
             .then(a.start_ms.cmp(&b.start_ms))
@@ -116,7 +159,9 @@ fn resolve_verified_models(
     // Called only for a nonempty list; avoid an unchecked unwrap nevertheless.
     match outcomes.into_iter().next() {
         Some(interval) => VerificationOutcome::Verified(interval),
-        None => VerificationOutcome::NeedsFullWindow { reason: "no_verified_templates".into() },
+        None => VerificationOutcome::NeedsFullWindow {
+            reason: "no_verified_templates".into(),
+        },
     }
 }
 
@@ -148,14 +193,19 @@ fn verify_against_model(
     policy: &SamplingPolicy,
 ) -> Result<VerifiedInterval, String> {
     // We need matches against at least two independent reference episodes
-    let (raw_segments_found, ref_matches) =
+    let (raw_segments_found, unusable_reference, ref_matches) =
         collect_reference_matches(engine, target, model, templates, policy);
 
     if raw_segments_found == 0 {
-        return Err("zero_engine_segments".to_string());
+        return Err(if unusable_reference {
+            "unusable_reference_fingerprint"
+        } else {
+            "zero_engine_segments"
+        }
+        .to_string());
     }
 
-    let min_required_matches = min_required_matches(model, target);
+    let min_required_matches = 2;
 
     let independent_matched_episodes = count_unique_episodes(&ref_matches);
     if independent_matched_episodes < min_required_matches {
@@ -226,63 +276,104 @@ fn collect_reference_matches(
     model: &TemplateModel,
     templates: &TemplateContext,
     policy: &SamplingPolicy,
-) -> (usize, Vec<(String, u32, CommonSegment)>) {
+) -> (usize, bool, Vec<(String, u32, CommonSegment)>) {
     let mut ref_matches: Vec<(String, u32, CommonSegment)> = Vec::new();
     let mut raw_segments_found = 0;
+    let mut unusable_reference = false;
+    let mut completed_episodes = std::collections::HashSet::new();
 
     for r in &model.references {
         if r.episode == target.episode {
             continue; // Skip comparing against same episode
         }
         let Some(ref_ev) = templates.references.get(&r.sample_id) else {
+            unusable_reference = true;
             continue;
         };
+        if ref_ev.kind != target.kind
+            || ref_ev.episode == target.episode
+            || crate::boundary::evidence::candidate_pcm_coverage(&ref_ev.capture).is_none()
+            || super::model::is_constant_or_silent(&ref_ev.capture.words)
+        {
+            unusable_reference = true;
+            tracing::debug!(sample_id = r.sample_id, "拒绝静音或常量参考指纹");
+            continue;
+        }
 
-        let segs = engine.find_common_segments(
-            &target.capture.words,
-            &ref_ev.capture.words,
+        let comparison = engine.compare_evidence(
+            target,
+            ref_ev,
             (policy.min_match_duration_ms as f32) / 1000.0,
             (policy.max_match_duration_ms as f32) / 1000.0,
         );
 
+        let segs = match comparison {
+            crate::PairFingerprintDecision::Candidates(segments) if !segments.is_empty() => {
+                segments
+            }
+            crate::PairFingerprintDecision::NoMatch => Vec::new(),
+            _ => {
+                unusable_reference = true;
+                continue;
+            }
+        };
+        // Bounded reference context may support a candidate, but cannot establish
+        // definitive absence in a whole window with missing PCM.
+        if segs.is_empty() && !crate::boundary::evidence::complete_pcm(&ref_ev.capture) {
+            unusable_reference = true;
+            continue;
+        }
         raw_segments_found += segs.len();
+        completed_episodes.insert(ref_ev.episode);
 
         let (tpl_start, tpl_end) = r.match_interval_ms;
         for s in segs {
-            if (s.score as f64) > policy.max_score {
+            if !crate::candidate_quality::acceptable_segment(
+                &s,
+                policy.min_match_duration_ms as f32 / 1000.0,
+                policy.max_match_duration_ms as f32 / 1000.0,
+                policy.max_score,
+            ) {
+                tracing::debug!(
+                    sample_id = r.sample_id,
+                    score = s.score,
+                    "验证拒绝低质量或无效区间候选"
+                );
                 continue;
             }
 
             // Verify coordinates in the reference episode match the template interval
-            let ref_start = ref_ev.capture.window.start_ms + (s.start2_sec * 1000.0).round() as i64;
-            let ref_end = ref_ev.capture.window.start_ms + (s.end2_sec * 1000.0).round() as i64;
+            let Ok(reference_interval) = crate::boundary::normalize_capture_interval(
+                &ref_ev.capture,
+                crate::boundary::Interval {
+                    start_ms: (s.start2_sec * 1000.0).round() as i64,
+                    end_ms: (s.end2_sec * 1000.0).round() as i64,
+                },
+            ) else {
+                continue;
+            };
 
-            let start_delta = (ref_start - tpl_start).abs();
-            let end_delta = (ref_end - tpl_end).abs();
+            let start_delta = reference_interval.start_ms.abs_diff(tpl_start);
+            let end_delta = reference_interval.end_ms.abs_diff(tpl_end);
 
             // Match must align with the template's reference interval within boundary tolerance
             // and cover both start and end edge anchors
-            if start_delta > policy.max_reference_boundary_delta_ms
-                || end_delta > policy.max_reference_boundary_delta_ms
-            {
+            let Ok(tolerance) = u64::try_from(policy.max_reference_boundary_delta_ms) else {
+                continue;
+            };
+            if start_delta > tolerance || end_delta > tolerance {
                 continue;
             }
 
             ref_matches.push((r.sample_id.clone(), r.episode, s));
-            break;
         }
     }
 
-    (raw_segments_found, ref_matches)
-}
-
-fn min_required_matches(model: &TemplateModel, target: &EpisodeEvidence) -> usize {
-    let is_target_model_ref = model.references.iter().any(|r| {
-        r.ledger_id == target.ledger_id
-            && r.sample_id == target.sample_id
-            && r.source_version == target.source_version
-    });
-    if is_target_model_ref { 1 } else { 2 }
+    (
+        raw_segments_found,
+        unusable_reference || completed_episodes.len() < 2,
+        ref_matches,
+    )
 }
 
 struct MatchedCandidate {
@@ -302,8 +393,15 @@ fn build_candidates(
     ref_matches
         .into_iter()
         .filter_map(|(sid, ep, s)| {
-            let s_start = target.capture.window.start_ms + (s.start1_sec * 1000.0).round() as i64;
-            let s_end = target.capture.window.start_ms + (s.end1_sec * 1000.0).round() as i64;
+            let interval = crate::boundary::normalize_capture_interval(
+                &target.capture,
+                crate::boundary::Interval {
+                    start_ms: (s.start1_sec * 1000.0).round() as i64,
+                    end_ms: (s.end1_sec * 1000.0).round() as i64,
+                },
+            )
+            .ok()?;
+            let (s_start, s_end) = (interval.start_ms, interval.end_ms);
             seen.insert((ep, s_start, s_end, s.score.to_bits()))
                 .then_some(MatchedCandidate {
                     sample_id: sid,
@@ -344,18 +442,18 @@ fn build_clusters<'a>(
     } else {
         for i in 0..candidates.len() {
             let mut cluster = vec![&candidates[i]];
-            for j in 0..candidates.len() {
+            for (j, candidate) in candidates.iter().enumerate() {
                 if i == j {
                     continue;
                 }
                 let matches_all = cluster.iter().all(|c| {
-                    (c.target_start - candidates[j].target_start).abs()
+                    (c.target_start - candidate.target_start).abs()
                         <= policy.max_reference_boundary_delta_ms
-                        && (c.target_end - candidates[j].target_end).abs()
+                        && (c.target_end - candidate.target_end).abs()
                             <= policy.max_reference_boundary_delta_ms
                 });
                 if matches_all {
-                    cluster.push(&candidates[j]);
+                    cluster.push(candidate);
                 }
             }
             cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
@@ -451,26 +549,17 @@ fn validate_interval_evidence(
         return Err("matched_duration_shorter_than_edge_anchors".to_string());
     }
 
-    let actual_decoded_end_ms = match target.capture.pcm_duration_ms {
-        Some(pcm_ms) => target.capture.window.start_ms + pcm_ms,
-        None => return Err("pcm_coverage_unknown".to_string()),
-    };
-    let left_guard = target_start - target.capture.window.start_ms;
-    let right_guard = actual_decoded_end_ms - target_end;
-
-    let is_intro_media_start = target.kind == SegmentKind::Intro && target_start == 0;
-    if !is_intro_media_start && left_guard < policy.min_guard_evidence_ms {
-        return Err("window_edge_left_boundary_clipped".to_string());
-    }
-
-    let is_outro_media_end = target.kind == SegmentKind::Outro
-        && target
-            .duration_ms
-            .map(|dur| (dur - target_end).abs() <= policy.max_reference_boundary_delta_ms)
-            .unwrap_or(false);
-
-    if !is_outro_media_end && right_guard < policy.min_guard_evidence_ms {
-        return Err("window_edge_right_boundary_clipped".to_string());
+    if !crate::boundary::evidence::complete_guards(
+        &target.capture,
+        crate::boundary::Interval {
+            start_ms: target_start,
+            end_ms: target_end,
+        },
+        target.kind,
+        target.duration_ms,
+        &policy.boundary,
+    ) {
+        return Err("window_edge_boundary_context_incomplete".to_string());
     }
 
     Ok(())

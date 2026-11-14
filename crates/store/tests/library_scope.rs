@@ -5,7 +5,7 @@ use store::{Library, Store};
 
 fn create(store: &Store, kind: MediaKind, roots: &[&Path]) -> Library {
     let roots: Vec<&str> = roots.iter().map(|root| root.to_str().unwrap()).collect();
-    let name = format!("lib-{}", roots.first().map(|s| *s).unwrap_or("empty"));
+    let name = format!("lib-{}", roots.first().copied().unwrap_or("empty"));
     store
         .create_library(kind, &name, &roots, "everyone", true, &[])
         .unwrap()
@@ -21,8 +21,9 @@ fn strict_scope_does_not_fall_back_to_default() {
 
     let outside = tmp.path().join("outside/one.mkv");
     let snapshot = store.library_ownership().unwrap();
-    assert!(snapshot.owner(&outside, MediaKind::Movie).is_some());
-
+    // The strict scope is the only surviving path rule: it never falls back to
+    // the kind's default Library (ownership of a recorded file is its
+    // `library_files.library_id`, not a path).
     let scope = store::LibraryPathScope::resolve(snapshot).unwrap();
     let resolved = store::LibraryPathScope::resolve_path(&outside).unwrap();
     assert!(matches!(
@@ -63,25 +64,6 @@ fn nested_root_wins_and_sibling_prefix_does_not_match() {
     assert!(matches!(
         scope.owner(&resolved_sibling, MediaKind::Movie),
         store::StrictOwner::Unmatched
-    ));
-}
-
-#[test]
-fn equal_depth_is_ambiguous() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared_root = tmp.path().join("shared");
-    std::fs::create_dir_all(&shared_root).unwrap();
-
-    let _lib1 = create(&store, MediaKind::Movie, &[&shared_root]);
-    let _lib2 = create(&store, MediaKind::Movie, &[&shared_root]);
-
-    let scope = store::LibraryPathScope::resolve(store.library_ownership().unwrap()).unwrap();
-    let file = shared_root.join("one.mkv");
-    let resolved = store::LibraryPathScope::resolve_path(&file).unwrap();
-    assert!(matches!(
-        scope.owner(&resolved, MediaKind::Movie),
-        store::StrictOwner::Ambiguous
     ));
 }
 
@@ -130,25 +112,19 @@ fn scope_is_stale_after_root_kind_or_freeze_change() {
 }
 
 #[test]
-fn different_kind_overlap_keeps_existing_kind_contract() {
+fn watch_owner_compares_only_roots_covering_the_observed_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared_root = tmp.path().join("mixed");
-    std::fs::create_dir_all(&shared_root).unwrap();
-
-    let movie_lib = create(&store, MediaKind::Movie, &[&shared_root]);
-    let tv_lib = create(&store, MediaKind::Tv, &[&shared_root]);
-
+    let parent = tmp.path().join("parent");
+    let nested = parent.join("nested");
+    let unrelated = tmp.path().join("far/deep/unrelated/path");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+    create(&store, MediaKind::Movie, &[&parent, &unrelated]);
+    let target = create(&store, MediaKind::Tv, &[&nested]);
     let scope = store::LibraryPathScope::resolve(store.library_ownership().unwrap()).unwrap();
-    let file = shared_root.join("item.mkv");
-    let resolved = store::LibraryPathScope::resolve_path(&file).unwrap();
-
-    match scope.owner(&resolved, MediaKind::Movie) {
-        store::StrictOwner::Owned(lib) => assert_eq!(lib.id, movie_lib.id),
-        _ => panic!("expected movie lib for movie kind"),
-    }
-    match scope.owner(&resolved, MediaKind::Tv) {
-        store::StrictOwner::Owned(lib) => assert_eq!(lib.id, tv_lib.id),
-        _ => panic!("expected tv lib for tv kind"),
-    }
+    let path = store::LibraryPathScope::resolve_path(&nested.join("episode.mkv")).unwrap();
+    assert!(
+        matches!(scope.owner_any(&path),store::StrictOwner::Owned(owner) if owner.id==target.id)
+    );
 }

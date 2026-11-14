@@ -25,14 +25,26 @@ pub fn match_episodes_outros_with(
     max_duration_secs: f32,
 ) -> Vec<DetectedOutro> {
     let started = Instant::now();
-    let consensus = find_season_consensus(episodes.len(), |first, second| {
-        engine.find_common_segments(
-            &episodes[first].1,
-            &episodes[second].1,
-            min_duration_secs,
-            max_duration_secs,
-        )
-    });
+    let episode_numbers = episodes.iter().map(|e| e.0).collect::<Vec<_>>();
+    let consensus = find_season_consensus(
+        &episode_numbers,
+        min_duration_secs,
+        max_duration_secs,
+        |first, second| {
+            if crate::adaptive::model::is_constant_or_silent(&episodes[first].1)
+                || crate::adaptive::model::is_constant_or_silent(&episodes[second].1)
+            {
+                tracing::debug!(first, second, "拒绝静音或常量片尾指纹");
+                return crate::PairFingerprintDecision::Uncertain("unusable_fingerprint".into());
+            }
+            crate::PairFingerprintDecision::Candidates(engine.find_common_segments(
+                &episodes[first].1,
+                &episodes[second].1,
+                min_duration_secs,
+                max_duration_secs,
+            ))
+        },
+    );
     if consensus.ranges.is_empty() {
         tracing::warn!(
             episodes = episodes.len(),

@@ -1,12 +1,10 @@
-use marker::adaptive::{
-    verify_template_window, EpisodeEvidence, VerificationOutcome,
-};
-use marker::FingerprintEngine;
+use marker::adaptive::{EpisodeEvidence, VerificationOutcome, verify_template_window};
+use marker::matcher::session::SeasonMatchSession;
 
 use super::types::EpisodeCaptureRequest;
 
 pub fn analyze_and_verify_segment(
-    matcher: &dyn FingerprintEngine,
+    matcher: &std::sync::Arc<SeasonMatchSession>,
     request: &EpisodeCaptureRequest,
     evidence: &EpisodeEvidence,
     timings: Option<&crate::probe_manager::timings::ProbeTimingLedger>,
@@ -18,8 +16,15 @@ pub fn analyze_and_verify_segment(
     }
 
     let start = std::time::Instant::now();
-    let outcome = verify_template_window(matcher, evidence, &request.templates, &request.policy);
+    let (outcome, observation) = crate::fingerprint_job::measurement::EvidenceMeasurement::new(
+        matcher.clone(),
+        &request.policy,
+    )
+    .measure(|engine| {
+        verify_template_window(engine, evidence, &request.templates, &request.policy)
+    });
     if let Some(timings) = timings {
+        timings.record_analysis(Some(&request.job_id), &observation);
         timings.record_comparison(Some(&request.job_id), start.elapsed().as_millis() as u64);
     }
     outcome

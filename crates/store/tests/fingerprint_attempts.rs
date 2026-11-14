@@ -20,7 +20,7 @@ fn attempt(attempt_id: &str, status: &str) -> StoredFingerprintAttempt {
 #[test]
 fn attempt_and_sample_commit_together() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
     let att = attempt("att-1", "running");
     store.begin_fingerprint_attempt(&att).unwrap();
@@ -62,7 +62,7 @@ fn attempt_and_sample_commit_together() {
 #[test]
 fn interrupted_attempt_preserves_unknown_byte_measurement() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
     let att = StoredFingerprintAttempt {
         attempt_id: "att-interrupted".into(),
@@ -81,40 +81,103 @@ fn interrupted_attempt_preserves_unknown_byte_measurement() {
     store.begin_fingerprint_attempt(&att).unwrap();
 
     // Recover jobs / recover interrupted attempts
-    store.recover_interrupted_fingerprint_attempts("job-crash").unwrap();
+    store
+        .recover_interrupted_fingerprint_attempts("job-crash")
+        .unwrap();
 
-    let recovered = store.get_fingerprint_attempt("att-interrupted").unwrap().unwrap();
+    let recovered = store
+        .get_fingerprint_attempt("att-interrupted")
+        .unwrap()
+        .unwrap();
     assert_eq!(recovered.status, "interrupted");
     assert!(recovered.metrics_json.contains("\"input_bytes\":null"));
-    assert!(recovered.metrics_json.contains("\"measurement_complete\":false"));
+    assert!(
+        recovered
+            .metrics_json
+            .contains("\"measurement_complete\":false")
+    );
 }
 
 #[test]
 fn put_and_read_probe_sampling_plan_and_outcome() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
+    let media_id = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Tv,
+            title: "Sampling plan".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let root = temp.path().join("tv");
+    store
+        .create_library(
+            domain::MediaKind::Tv,
+            "Sampling plan",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let file = store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id,
+            path: root.join("S01E01.mkv").display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ledger_id = file.file_id.to_string();
     let unit = store::ProbeJobUnitSpec {
-        ledger_id: "ledger-plan",
+        ledger_id: &ledger_id,
         kind: "tv",
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: true,
         reuse_media_info_cache: true,
     };
-    store
-        .create_probe_job("job-plan", "marker_refresh", "media-1", Some(1), "scope-1", &[unit])
-        .unwrap();
+    assert!(
+        store
+            .create_probe_job(
+                "job-plan",
+                "marker_refresh",
+                &media_id.to_string(),
+                Some(1),
+                "scope-1",
+                &[unit],
+            )
+            .unwrap()
+    );
 
     store
-        .put_probe_sampling_plan("job-plan", "ledger-plan", "{\"mode\":\"adaptive\"}")
+        .put_probe_sampling_plan("job-plan", &ledger_id, "{\"mode\":\"adaptive\"}")
         .unwrap();
     store
-        .put_probe_detection_outcome("job-plan", "ledger-plan", "{\"result\":\"detected\"}")
+        .put_probe_detection_outcome("job-plan", &ledger_id, "{\"result\":\"detected\"}")
         .unwrap();
 
     let units = store.probe_job_units("job-plan").unwrap();
     assert_eq!(units.len(), 1);
-    assert_eq!(units[0].sampling_plan_json.as_deref(), Some("{\"mode\":\"adaptive\"}"));
-    assert_eq!(units[0].detection_outcome_json.as_deref(), Some("{\"result\":\"detected\"}"));
+    assert_eq!(
+        units[0].sampling_plan_json.as_deref(),
+        Some("{\"mode\":\"adaptive\"}")
+    );
+    assert_eq!(
+        units[0].detection_outcome_json.as_deref(),
+        Some("{\"result\":\"detected\"}")
+    );
 }

@@ -192,15 +192,36 @@ mod tests {
     #[test]
     fn observe_marks_requests_at_or_over_the_threshold_as_slow() {
         let threshold = Duration::from_millis(1_000);
-        let slow = observe("GET", "/x", "id", 200, Duration::from_millis(1_500), threshold);
+        let slow = observe(
+            "GET",
+            "/x",
+            "id",
+            200,
+            Duration::from_millis(1_500),
+            threshold,
+        );
         assert!(slow.slow);
         assert_eq!(slow.headers_latency_ms, 1_500);
         assert_eq!(slow.status, 200);
 
-        let edge = observe("GET", "/x", "id", 200, Duration::from_millis(1_000), threshold);
+        let edge = observe(
+            "GET",
+            "/x",
+            "id",
+            200,
+            Duration::from_millis(1_000),
+            threshold,
+        );
         assert!(edge.slow, "恰好等于阈值也算慢");
 
-        let fast = observe("GET", "/x", "id", 200, Duration::from_millis(900), threshold);
+        let fast = observe(
+            "GET",
+            "/x",
+            "id",
+            200,
+            Duration::from_millis(900),
+            threshold,
+        );
         assert!(!fast.slow);
     }
 
