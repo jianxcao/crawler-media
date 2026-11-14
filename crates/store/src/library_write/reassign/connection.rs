@@ -19,6 +19,9 @@ impl crate::LibraryConnection<'_> {
             let library = ensure_file_movable(&tx, file_id, version, request.from, &target_kind)?;
             libraries.insert(library);
         }
+        for library in &libraries {
+            ensure_library_writable(&tx, library)?;
+        }
         let ended = terminate_bound_playback(&tx, &request.files)?;
         for (file_id, _) in &request.files {
             move_file_ownership(&tx, *file_id, request.to)?;

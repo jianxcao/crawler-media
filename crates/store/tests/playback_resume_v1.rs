@@ -183,6 +183,7 @@ fn commit_progress(
                 audio_track: audio.map(Into::into),
                 subtitle_track: subtitle.map(Into::into),
                 paused: false,
+                playback_rate: 1.0,
                 rate_bps: 0,
                 client: Some("Web".into()),
                 device_name: None,

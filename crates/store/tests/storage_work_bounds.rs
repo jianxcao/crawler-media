@@ -249,6 +249,7 @@ fn commit_progress_event(
         audio_track: None,
         subtitle_track: None,
         paused: false,
+        playback_rate: 1.0,
         rate_bps: 0,
         client: Some("AppleTV".into()),
         device_name: None,

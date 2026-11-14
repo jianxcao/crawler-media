@@ -1564,19 +1564,13 @@ export async function generateLibraryCover(
   options: GenerateLibraryCoverOptions,
 ): Promise<{ success?: boolean; cover_url?: string; data_url: string; preview?: boolean }> {
   // 生成 1080p 超清图片和编码耗时较多，设置充足的客户端超时时间 (180s)
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 180_000);
-
-  try {
-    return await unwrap(
-      request<ApiEnvelope<{ success?: boolean; cover_url?: string; data_url: string; preview?: boolean }>>(
-        `/libraries/${libraryId}/cover/generate`,
-        { method: "POST", body: JSON.stringify(options), signal: controller.signal },
-      ),
-    );
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return unwrap(
+    request<ApiEnvelope<{ success?: boolean; cover_url?: string; data_url: string; preview?: boolean }>>(
+      `/libraries/${libraryId}/cover/generate`,
+      { method: "POST", body: JSON.stringify(options) },
+      { timeoutMs: 180_000 },
+    ),
+  );
 }
 
 /** 删除/清空媒体库的封面。 */

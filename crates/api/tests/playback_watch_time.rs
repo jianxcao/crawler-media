@@ -168,6 +168,54 @@ async fn watched_time_accumulates_correctly_and_ignores_seeks() {
 }
 
 #[tokio::test]
+async fn playback_rates_count_elapsed_watch_time_including_fractional_rates() {
+    let (fix, clock) = clocked_fixture(1_000_000);
+    let (_, row) = fix.insert_media_and_ledger("clock_rates.mkv");
+    let user_id = admin_user(&fix);
+    for (device, rate, advance) in [
+        ("half_speed", 0.5, 5_000),
+        ("fractional_speed", 1.5, 15_000),
+        ("double_speed", 2.0, 20_000),
+    ] {
+        let session_id = support::session::issue_session(
+            fix.state.store().as_ref(),
+            user_id,
+            device,
+            row.file_id,
+            clock.0.load(Ordering::SeqCst) / 1000,
+        );
+        for (event, position) in [("start", 0), ("progress", advance)] {
+            if event == "progress" {
+                clock.0.fetch_add(10_000, Ordering::SeqCst);
+            }
+            let (status, _) = fix
+                .request_with_body(
+                    "POST",
+                    "/api/v1/playback/progress",
+                    Some(&fix.admin_token),
+                    json!({
+                        "event_sequence": support::session::next_sequence(),
+                        "device_id": device,
+                        "play_session_id": session_id,
+                        "media_item_id": row.media_id.to_string(),
+                        "file_id": row.file_id.to_string(),
+                        "event": event,
+                        "position_ms": position,
+                        "rate": rate,
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "rate {rate}, event {event}");
+        }
+        assert_eq!(
+            session_state(&fix, user_id, device),
+            (10_000, advance),
+            "{rate}x playback records ten seconds of elapsed watch time"
+        );
+    }
+}
+
+#[tokio::test]
 async fn missing_session_events_do_not_create_watch_time_or_resume_facts() {
     let (fix, clock) = clocked_fixture(1_000_000);
     let (_, row) = fix.insert_media_and_ledger("unbound_seek.mkv");

@@ -234,6 +234,7 @@ fn report(fx: &Fx, session_id: String, position_ms: i64) -> store::playback::Eve
         audio_track: Some("eng".into()),
         subtitle_track: None,
         paused: false,
+        playback_rate: 1.0,
         rate_bps: 0,
         client: Some("Web".into()),
         device_name: None,

@@ -529,6 +529,7 @@ impl ProgressSession {
             audio_track: None,
             subtitle_track: None,
             paused: false,
+            playback_rate: 1.0,
             rate_bps: 0,
             client: Some("perf".into()),
             device_name: None,

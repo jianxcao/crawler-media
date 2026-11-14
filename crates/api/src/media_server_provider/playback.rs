@@ -286,6 +286,7 @@ impl ProtocolEvent<'_> {
             audio_track: None,
             subtitle_track: None,
             paused,
+            playback_rate: 1.0,
             rate_bps: 0,
             client: self.client.client.clone(),
             device_name: self.client.device_name.clone(),

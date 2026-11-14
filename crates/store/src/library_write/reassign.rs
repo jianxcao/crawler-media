@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use domain::{FileVersion, LedgerId, MediaId};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::publish::ensure_file_version;
+use super::publish::{ensure_file_version, ensure_library_writable};
 use super::reduce::reduce_library_media;
 use crate::{Store, StoreError};
 

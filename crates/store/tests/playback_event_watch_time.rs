@@ -259,6 +259,38 @@ fn paused_stop_still_records_its_final_position_and_watch_time() {
 }
 
 #[test]
+fn network_throughput_does_not_change_watch_time() {
+    let (_tmp, f) = seed();
+    let item = episode(&f, 1);
+    for rate_bps in [0, 1, 2, 4, 8_000_000] {
+        let device = format!("throughput_{rate_bps}");
+        let session = issue_on(&f, &device, &item, &f.file);
+        for (position, now) in [(0, 2_000), (10_000, 12_000)] {
+            let mut bound = event_on(
+                &f,
+                &device,
+                item.clone(),
+                (&session.0, session.1),
+                &f.file,
+                position,
+                PlaybackEventType::Progress,
+            );
+            bound.rate_bps = rate_bps;
+            assert_eq!(
+                f.store.commit_playback_event(&bound, now).unwrap(),
+                EventOutcome::Applied
+            );
+        }
+        let row = live_row(&f, &device);
+        assert_eq!(
+            (row.watched_ms, row.rate_bps),
+            (10_000, rate_bps),
+            "throughput is retained without changing playback speed"
+        );
+    }
+}
+
+#[test]
 fn new_session_on_same_device_starts_fresh_and_logs_the_old_once() {
     let (_tmp, f) = seed();
     let user: UserId = USER.parse().unwrap();

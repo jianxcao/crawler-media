@@ -96,13 +96,17 @@ function classifyRequestAbort(lease: { isLocalTimeout: () => boolean }, error: u
   throw error;
 }
 
-export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  options: { timeoutMs?: number } = {},
+): Promise<T> {
   // 兜底超时：后端异常/负载过高时不让页面无限「正在连接服务…」。
   // 调用方的取消信号与超时同时生效，避免带 signal 的请求无限占用连接。
   // The lease deliberately covers response-body consumption so external cancellation
   // works while the body streams. This also means fallback timeout covers the body read,
   // unlike the previous headers-only boundary.
-  const lease = linkRequestSignal(init.signal, 15_000);
+  const lease = linkRequestSignal(init.signal, options.timeoutMs ?? 15_000);
 
   try {
     let response: Response;

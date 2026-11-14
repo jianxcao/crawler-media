@@ -670,8 +670,8 @@ fn watch_increment(
         return 0;
     }
     let advance = (position_ms - previous.position_ms).max(0);
-    let rate = if (0.25..=4.0).contains(&(event.rate_bps as f64)) {
-        event.rate_bps as f64
+    let rate = if (0.25..=4.0).contains(&event.playback_rate) {
+        event.playback_rate
     } else {
         1.0
     };

@@ -137,7 +137,8 @@ fn delete_duplicate_blocking(
     ok(json!({ "deleted": true, "path": path })).into_response()
 }
 
-/// Target first, then every other file of the same Media in the Library.
+/// Target first, then the same Media's files without accepted deletion intents.
+/// Rechecking this set under the writer also detects a newly queued sibling.
 struct DeletePlan {
     files: Vec<domain::FileCoverage>,
 }
@@ -238,6 +239,15 @@ fn capture_plan_on(
     }
     let mut files = vec![target];
     let id = files[0].file.library_id;
+    let pending = store
+        .file_ids_pending_deletion_in_library(id, media.id)
+        .map_err(|error| {
+            Box::new(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ))
+        })?;
     files.extend(
         store
             .file_coverage_in_library(id, Some(media.id), store::FileReadScope::AllRecorded)
@@ -249,7 +259,9 @@ fn capture_plan_on(
                 ))
             })?
             .into_iter()
-            .filter(|other| other.file.file_id != file_id),
+            .filter(|other| {
+                other.file.file_id != file_id && !pending.contains(&other.file.file_id)
+            }),
     );
     Ok(DeletePlan { files })
 }

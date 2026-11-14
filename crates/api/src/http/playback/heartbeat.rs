@@ -272,6 +272,7 @@ fn bound_event(
             .as_str()
             .map(str::to_string),
         paused: heartbeat.body["paused"].as_bool().unwrap_or(false),
+        playback_rate: heartbeat.body["rate"].as_f64().unwrap_or(1.0),
         rate_bps: 0,
         client: heartbeat.body["client"].as_str().map(str::to_string),
         device_name: heartbeat.body["device_name"].as_str().map(str::to_string),

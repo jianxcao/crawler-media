@@ -14,6 +14,9 @@ use store::playback::{BoundPlaybackEvent, EventOutcome, MediaMergeRequest, Playb
 use store::test_support::FixtureFile;
 use store::{PlaySessionIdState, SessionRow, Store, StoreError};
 
+#[path = "media_reassign/lifecycle.rs"]
+mod lifecycle;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     store: Store,
@@ -435,6 +438,7 @@ fn assert_reassigned_session_event_is_stale(
                 audio_track: None,
                 subtitle_track: None,
                 paused: false,
+                playback_rate: 1.0,
                 rate_bps: 0,
                 client: Some("fixture".into()),
                 device_name: None,

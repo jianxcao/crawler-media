@@ -31,6 +31,23 @@ impl crate::LibraryConnection<'_> {
         )?)
     }
 
+    /// Accepted deletion intents cannot serve as retained copies in a cleanup plan.
+    pub fn file_ids_pending_deletion_in_library(
+        &self,
+        library: domain::LibraryId,
+        media: domain::MediaId,
+    ) -> Result<std::collections::HashSet<domain::LedgerId>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT f.file_id FROM library_files f
+             JOIN pending_file_deletions d ON d.path_key = f.path_key
+             WHERE f.library_id = ?1 AND f.media_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![library.to_string(), media.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|id| Ok(id?.parse()?)).collect()
+    }
+
     pub fn enqueue_file_deletion_observed(
         &self,
         path: &str,

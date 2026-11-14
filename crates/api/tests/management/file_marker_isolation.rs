@@ -232,6 +232,8 @@ async fn theintrodb_candidate_without_file_validation_is_not_published_or_overla
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // macOS inherits the listener's nonblocking mode on accept.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                         .unwrap();

@@ -90,6 +90,9 @@ pub struct BoundPlaybackEvent {
     pub audio_track: Option<String>,
     pub subtitle_track: Option<String>,
     pub paused: bool,
+    /// Media position advanced per unit of elapsed wall time.
+    pub playback_rate: f64,
+    /// Network throughput in bytes per second.
     pub rate_bps: i64,
     pub client: Option<String>,
     /// Device identity as reported by the client for this event; `None` keeps the
