@@ -60,6 +60,23 @@ test("empty and disabled states stay neutral while run states use signal tokens"
   assert.match(mockData, /failed: \{ label: "失败", color: "var\(--danger\)" \}/);
 });
 
+test("disabled buttons neutralize bright fills and avoid double-fading text-faint across themes", () => {
+  assert.match(
+    css,
+    /\.btn-accent:disabled[\s\S]*?\{[^}]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.0[6-9]\)[^}]*color:\s*var\(--text-faint\)[^}]*opacity:\s*1/
+  );
+  assert.match(
+    css,
+    /html\[data-theme="paper"\]\s+\.btn-accent:disabled[\s\S]*?\{[^}]*background:\s*rgba\(32,\s*42,\s*58,\s*0\.0[5-8]\)[^}]*color:\s*var\(--text-faint\)[^}]*opacity:\s*1/
+  );
+  assert.match(
+    css,
+    /html\[data-theme="netflix"\]\s+\.btn-accent:disabled[\s\S]*?\{[^}]*background:\s*#404040[^}]*color:\s*var\(--text-faint\)[^}]*opacity:\s*1/
+  );
+  assert.doesNotMatch(css, /\.btn-glass:disabled\s*\{[^}]*opacity:\s*0\./);
+});
+
+
 test("settings keeps a saved theme selector for every registered theme", () => {
   assert.match(mockData, /id: "appearance", label: "外观"/);
   assert.match(settingsView, /THEMES\.map\(\(theme\) =>/);
