@@ -28,7 +28,7 @@ import { LibraryCoverModal } from "@/components/library-cover-modal";
 import { LIBRARY_KIND_META } from "@/components/library-kind-meta";
 import { usePhotoWallDensity, type PhotoWallDensity } from "@/components/wall";
 import { WallLoadMore, WallRecallPill } from "@/components/wall-chrome";
-import { InventoryCell, PosterWall, WALL_GRID_WIDE } from "@/components/poster-wall";
+import { PosterWall } from "@/components/poster-wall";
 import {
   GALLERY_LOAD_MARGIN,
   GALLERY_PAGE_SIZE,
@@ -109,9 +109,8 @@ import { useScrollRestoration } from "@/lib/use-scroll-restoration";
 /**
  * 单库页（/library/[id]）：库头部 + **真实库存**海报墙（Emby 进库后的浏览视图）。
  *
- * 两个分区：
- * 1. 库存（library_file 台账聚合）：已在磁盘上的作品，格下标注集数/规格/大小；
- * 2. 待识别：扫描认不出身份的文件，按条目目录成组，点候选或填 TMDB ID 整组认领。
+ * 海报墙展示全部已发布作品，包含没有外部别名、使用本地 NFO 的 Media。
+ * 待识别文件以待处理清单为准，按条目目录成组，点候选或填 TMDB ID 整组认领。
  *
  * 不再有「追踪中」分区（订阅了、文件还没落地的片）：它不受筛选与搜索约束，永远
  * 钉在墙顶，搜什么都先看到一排无关的片。订阅进度去订阅页看；系列合集里缺的那几部
@@ -119,8 +118,6 @@ import { useScrollRestoration } from "@/lib/use-scroll-restoration";
  */
 
 /** 海报墙每次向服务端要的格数（首屏一批，滚到底再追加一批）。 */
-/** 未识别分区一次拉取的上限：它不分页，超出的去待处理清单看 */
-const PROVISIONAL_LIMIT = 200;
 const WALL_PAGE_SIZE = 60;
 /** 后端单次分页的硬上限；轮询已加载窗口时按此上限分块请求。 */
 const WALL_API_PAGE_SIZE = 200;
@@ -307,8 +304,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const [items, setItems] = useState<LibraryItem[]>(snapshot?.items ?? []);
   // 文件核验：磁盘上已不存在的文件数（清理入口用）
   const missingFileCount = items.filter((item) => item.missing).length;
-  // 影视库里认不出、按文件名临时挂着的条目：不进主墙，单独一段展示（其他库恒空）
-  const [provisional, setProvisional] = useState<LibraryItem[]>([]);
   // 服务端还有没有下一页；滚动加载的哨兵据此决定是否继续观察
   const [wallHasMore, setWallHasMore] = useState(snapshot?.wallHasMore ?? false);
   // A-Z 索引条的分档（按标题排序时才有意义）
@@ -507,14 +502,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         return libs;
       }),
       fetchWall(),
-      // 临时条目通常是几个到几十个，一次拉全、按入账时间倒序；不参与主墙分页与索引
-      listLibraryItems(libraryId, {
-        identity: "provisional",
-        sort: "added_at",
-        limit: PROVISIONAL_LIMIT,
-      })
-        .then((page) => page.items)
-        .catch(() => [] as LibraryItem[]),
       canManageLibraries
         ? keepOnError(listUnidentifiedLibraryFiles(libraryId))
         : Promise.resolve([]),
@@ -522,7 +509,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         ? keepOnError(listMissingLibraryFiles(libraryId))
         : Promise.resolve([]),
     ])
-      .then(([libs, [libraryItems, index], provisionalItems, unknown, missingItems]) => {
+      .then(([libs, [libraryItems, index], unknown, missingItems]) => {
         // 更晚的整轮 reload 把两把序号一起推过去，这一轮整个作废；只推 reloadSeq 的
         // 换排序 / 翻页 / 跳转只作废墙的部分，清单与库列表仍照常落地——它们与
         // 窗口、排序无关（见 listsSeq）
@@ -538,7 +525,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         // 的 memo，只有真正变化的格子重渲染），其余列表整体复用。否则扫描期间
         // 每 3 秒就把几百个格子全部重画一遍，表现为周期性卡顿
         setLibraries((prev) => (prev ? keepIfEqual(prev, libs) : libs));
-        setProvisional((prev) => reconcileList(prev, provisionalItems, (i) => i.media_item_id));
         if (unknown !== null) setUnidentified((prev) => keepIfEqual(prev, unknown));
         if (missingItems !== null) setMissing((prev) => keepIfEqual(prev, missingItems));
         if (seq !== reloadSeq.current) return;
@@ -558,8 +544,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   /**
    * 只重拉墙（本窗口条目 + 索引），换排序 / 方向时走这条。
    *
-   * 此前换排序走的是整轮 reload：8 趟请求一起飞（库列表、临时条目、四份待办清单
-   * 都跟着重拉），而墙要等 Promise.all 里**最慢的那趟**回来才换内容。这几趟与
+   * 此前换排序走的是整轮 reload：库列表、待办清单都跟着重拉，
+   * 而墙要等 Promise.all 里**最慢的那趟**回来才换内容。这几趟与
    * 排序毫无关系，却在服务端争同一份 CPU，把「点一下排序」拖成了几百毫秒
    * （9500 部的电影库实测选档→墙换内容 ≈ 420 ms，只拉墙 ≈ 120 ms）。
    * 清单与库列表本来就由轮询按节奏刷新，不必为一次换排序提前一轮。
@@ -1090,8 +1076,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       gallery ? "data-gallery-item-id" : "data-library-item-id",
       scrollElement.getBoundingClientRect().top,
     );
-    // 反查不到就不记：未识别分区的格子也挂着条目 id，但它不在主排序里，
-    // 拿它的位置去跳会跳到一部毫不相干的作品上
+    // 只记录当前窗口中能反查到位置的条目。
     return id === null ? null : ((gallery ? galleryOffsetById : offsetById).get(id) ?? null);
   }, [gallery, galleryOffsetById, offsetById, scrollElement]);
   // 久别回归时把这一屏复位：页面没重新加载，人还停在离开时的位置上，不回到
@@ -1528,7 +1513,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
 
       <>
       {/* —— 库存海报墙 —— */}
-      {items.length === 0 && provisional.length === 0 && filtering ? (
+      {items.length === 0 && filtering ? (
         failed ? null : (
           <FilterEmptyState
             libraryId={libraryId}
@@ -1536,7 +1521,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
             onFilterChange={applyFilter}
           />
         )
-      ) : items.length === 0 && provisional.length === 0 ? (
+      ) : items.length === 0 ? (
         failed ? null : (
           <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">
             这个库还没有内容。
@@ -1581,9 +1566,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
             />
           </div>
           <div ref={wallTop} className="mt-6 max-md:mt-4">
-            {/* 索引条与内容列并排：条固定在视口右侧（sticky），列照常滚。索引条
-                有固定高度，加载哨兵与未识别分区必须放进同一列里——否则卡片少时
-                这一行被索引条撑高，分区会被推到一大段空白之下 */}
+            {/* 索引条与内容列并排：条固定在视口右侧（sticky），列照常滚。
+                加载哨兵放在内容列内，紧跟最后一张卡片。 */}
             <div className="flex items-start gap-2 px-6 max-md:gap-1 max-md:px-4">
               {/* overflow-anchor:none：向上补页后墙会长高，浏览器自带的滚动锚定
                   会跟着自己补一次 scrollTop，与我们按长高量做的补偿叠加就是跳两下
@@ -1617,50 +1601,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
                   onReach={gallery ? loadMoreGallery : loadMore}
                   rootMargin={gallery ? GALLERY_LOAD_MARGIN : undefined}
                 />
-
-                {/* —— 未识别分区（只有影视库会有）：认不出的文件按文件名/目录名
-                    临时挂着，可直接播放、记进度；和正式条目分开摆——2:3 海报与
-                    16:9 抓帧混排、又混进拼音序里，正片的墙会被打散。认领后并入主墙 —— */}
-                {!gallery && provisional.length > 0 && (
-                  <section
-                    data-wall="provisional"
-                    aria-labelledby="provisional-title"
-                    className="mt-6 max-md:mt-4"
-                  >
-                    <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
-                      <div>
-                        <h3
-                          id="provisional-title"
-                          className="text-on-image text-body-lg font-semibold text-white/85"
-                        >
-                          未识别 {provisional.length}
-                        </h3>
-                        <p className="text-on-image mt-1 text-caption text-[var(--text-muted)]">
-                          按文件名展示，可以直接播放；认领身份后会并入上方的正式条目。
-                        </p>
-                      </div>
-                      {canManageLibraries && (
-                        <button
-                          type="button"
-                          onClick={() => setIssueTab("unidentified")}
-                          className="btn-glass h-7 shrink-0 px-2.5 text-caption font-medium"
-                        >
-                          去待处理认领
-                        </button>
-                      )}
-                    </div>
-                    <div className={`mt-4 ${WALL_GRID_WIDE}`}>
-                      {provisional.map((item) => (
-                        <InventoryCell
-                          key={item.media_item_id}
-                          item={item}
-                          libraryId={libraryId}
-                          workingLabel={undefined}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                )}
               </div>
               {/* 补探阶段排序不是拼音序，字母跳转会跳错位置——那几分钟里收起来；
                   其他库按内容时间排，同理没有字母档；「最近添加」序两种档都没有 */}
