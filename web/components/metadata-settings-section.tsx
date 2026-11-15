@@ -73,13 +73,12 @@ export function MetadataSettingsSection() {
   }, [reload]);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && window.location.hash === "#proxy") {
-      const timer = setTimeout(() => {
-        document.getElementById("proxy")?.scrollIntoView({ behavior: "smooth" });
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, []);
+    if (!settings || typeof window === "undefined" || window.location.hash !== "#proxy") return;
+    const timer = setTimeout(() => {
+      document.getElementById("proxy")?.scrollIntoView({ behavior: "smooth" });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [settings]);
 
   const save = async () => {
     if (!key.trim()) {

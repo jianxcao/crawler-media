@@ -115,11 +115,7 @@ export function NetworkProxyHealthPanel() {
                 </p>
               </div>
               <Link
-                to="/settings/overview"
-                onClick={() => {
-                  // 点击后切到同一设置界面的元数据源卡片
-                  window.location.hash = "#proxy";
-                }}
+                to="/settings/metadata#proxy"
                 className="btn-accent flex items-center gap-1 px-3 py-1.5 text-sub font-semibold"
               >
                 前往配置代理

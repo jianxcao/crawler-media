@@ -152,10 +152,27 @@ test("metadata proxy configuration connects API and settings UI", async () => {
 });
 
 test("settings overview includes metadata network and proxy health panel", async () => {
-  const overview = await readWeb("components/settings-overview-section.tsx");
+  const [overview, metadataSection] = await Promise.all([
+    readWeb("components/settings-overview-section.tsx"),
+    readWeb("components/metadata-settings-section.tsx"),
+  ]);
   assert.match(overview, /NetworkProxyHealthPanel/);
   assert.match(overview, /diagnoseProxySettings/);
   assert.match(overview, /元数据网络与代理体检/);
+  assert.match(
+    overview,
+    /to="\/settings\/metadata#proxy"[\s\S]{0,200}前往配置代理/,
+    "前往配置代理按钮必须跳转到 /settings/metadata#proxy",
+  );
+  assert.doesNotMatch(
+    overview,
+    /to="\/settings\/overview"[\s\S]{0,200}前往配置代理/,
+  );
+  assert.match(
+    metadataSection,
+    /if \(!settings \|\| typeof window === "undefined" \|\| window\.location\.hash !== "#proxy"\) return;/,
+    "元数据源设置加载完成后再滚动到 #proxy 锚点",
+  );
 });
 
 test("speed limit reads and writes preserve exactly the supported server shape", async () => {

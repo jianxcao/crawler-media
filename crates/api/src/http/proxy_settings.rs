@@ -203,59 +203,34 @@ pub(crate) async fn test_proxy(
 
     let probe_res = tokio::task::spawn_blocking(move || {
         crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
-            agent
-                .get(&target_for_block)
-                .header("User-Agent", "crawler-media-probe/1.0")
-                .call()
+            extract_http_status(
+                agent
+                    .get(&target_for_block)
+                    .header("User-Agent", "crawler-media-probe/1.0")
+                    .call(),
+            )
         })
     })
     .await;
 
     let elapsed_ms = started.elapsed().as_millis() as i64;
+    let (probe_ok, error) =
+        evaluate_probe_result(probe_res.map_err(|join_err| format!("探测异常: {join_err}")));
 
-    match probe_res {
-        Ok(Ok(_)) => ok(json!({
-            "ok": true,
-            "latency_ms": elapsed_ms,
-            "error": Value::Null,
-        }))
-        .into_response(),
-        Ok(Err(err)) => ok(json!({
-            "ok": false,
-            "latency_ms": elapsed_ms,
-            "error": err.to_string(),
-        }))
-        .into_response(),
-        Err(join_err) => ok(json!({
-            "ok": false,
-            "latency_ms": elapsed_ms,
-            "error": format!("探测异常: {join_err}"),
-        }))
-        .into_response(),
-    }
+    ok(json!({
+        "ok": probe_ok,
+        "latency_ms": elapsed_ms,
+        "error": error,
+    }))
+    .into_response()
 }
 
 /// POST /settings/proxy/diagnose — Check routing and connectivity for all major metadata domains.
 pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
-    let (active_proxy, douban_bypass, tmdb_key) =
-        match super::store_wait::store_read(&state, &[store::Db::App], |store| {
-            let key = store
-                .get_setting(settings_keys::TMDB_API_KEY)
-                .ok()
-                .flatten();
-            (
-                crate::http_agent::current_proxy(),
-                crate::http_agent::douban_bypass(),
-                key,
-            )
-        })
-        .await
-        {
-            Ok(config) => config,
-            Err(error) => return error.response(),
-        };
+    let active_proxy = crate::http_agent::current_proxy();
+    let douban_bypass = crate::http_agent::douban_bypass();
 
-    let targets = build_diagnose_targets(tmdb_key.as_deref());
+    let targets = build_diagnose_targets();
     let mut set = tokio::task::JoinSet::new();
 
     for target in targets {
@@ -315,17 +290,12 @@ struct TargetProbe {
     bypassable_for_douban: bool,
 }
 
-fn build_diagnose_targets(tmdb_key: Option<&str>) -> Vec<TargetProbe> {
-    let tmdb_probe_url = match tmdb_key.filter(|k| !k.is_empty()) {
-        Some(k) => format!("https://api.themoviedb.org/3/configuration?api_key={k}"),
-        None => "https://api.themoviedb.org/3/configuration".to_string(),
-    };
-
+fn build_diagnose_targets() -> Vec<TargetProbe> {
     vec![
         TargetProbe {
             name: "TMDB (条目数据)",
             display_url: "https://api.themoviedb.org",
-            probe_url: tmdb_probe_url,
+            probe_url: "https://api.themoviedb.org/3/configuration".to_string(),
             method: ProbeMethod::Get {
                 ua: "crawler-media/0.1",
                 referer: None,
@@ -389,7 +359,7 @@ async fn run_single_probe(
     let probe_res = budget
         .run(super::library::BROWSE_DEADLINE, move || {
             crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
-                match target.method {
+                let response = match target.method {
                     ProbeMethod::Get { ua, referer } => {
                         let mut req = agent.get(&probe_url).header("User-Agent", ua);
                         if let Some(ref_val) = referer {
@@ -403,26 +373,14 @@ async fn run_single_probe(
                         .header("Content-Type", "application/json")
                         .header("Accept", "application/json")
                         .send(body),
-                }
+                };
+                extract_http_status(response)
             })
         })
         .await;
 
     let latency_ms = started.elapsed().as_millis() as i64;
-    let (ok, error) = match probe_res {
-        Ok(Ok(response)) => {
-            let code = response.status().as_u16();
-            if code < 400 {
-                (true, None)
-            } else if code == 401 {
-                (true, Some("服务可达 (401 未配置Key)".to_string()))
-            } else {
-                (false, Some(format!("HTTP 状态码: {code}")))
-            }
-        }
-        Ok(Err(err)) => (false, Some(err.to_string())),
-        Err(join_err) => (false, Some(format!("调度异常: {join_err}"))),
-    };
+    let (ok, error) = evaluate_probe_result(probe_res.map_err(|e| format!("调度异常: {e}")));
 
     json!({
         "name": target.name,
@@ -433,4 +391,64 @@ async fn run_single_probe(
         "latency_ms": latency_ms,
         "error": error,
     })
+}
+
+fn extract_http_status(
+    result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<u16, ureq::Error> {
+    match result {
+        Ok(response) => Ok(response.status().as_u16()),
+        Err(ureq::Error::StatusCode(code)) => Ok(code),
+        Err(err) => Err(err),
+    }
+}
+
+fn evaluate_probe_result(
+    probe_res: Result<Result<u16, ureq::Error>, String>,
+) -> (bool, Option<String>) {
+    match probe_res {
+        Ok(Ok(code)) | Ok(Err(ureq::Error::StatusCode(code))) => {
+            if code < 500 {
+                (true, None)
+            } else {
+                (false, Some(format!("HTTP 状态码: {code}")))
+            }
+        }
+        Ok(Err(err)) => (false, Some(err.to_string())),
+        Err(join_err) => (false, Some(join_err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_treats_ureq_status_401_and_404_as_network_reachable_without_error() {
+        let extracted = extract_http_status(Err(ureq::Error::StatusCode(401)));
+        assert_eq!(extracted.as_ref().ok().copied(), Some(401));
+        let (ok, error) = evaluate_probe_result(Ok(extracted));
+        assert!(ok, "401 from ureq should be treated as network reachable");
+        assert_eq!(error, None);
+
+        let (ok, error) =
+            evaluate_probe_result(Ok(extract_http_status(Err(ureq::Error::StatusCode(404)))));
+        assert!(ok, "404 from ureq should be treated as network reachable");
+        assert_eq!(error, None);
+
+        let (ok, error) =
+            evaluate_probe_result(Ok(extract_http_status(Err(ureq::Error::StatusCode(502)))));
+        assert!(!ok, "502 from ureq should be treated as failure");
+        assert_eq!(error.as_deref(), Some("HTTP 状态码: 502"));
+    }
+
+    #[test]
+    fn diagnose_targets_probe_tmdb_network_only_without_api_key() {
+        let targets = build_diagnose_targets();
+        let tmdb = targets
+            .iter()
+            .find(|t| t.display_url == "https://api.themoviedb.org")
+            .expect("tmdb target exists");
+        assert_eq!(tmdb.probe_url, "https://api.themoviedb.org/3/configuration");
+    }
 }
