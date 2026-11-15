@@ -2,9 +2,12 @@
 //!
 //! A Media row exists to describe Library content. Once its last
 //! `library_files` row is gone and nothing user-curated still points at it
-//! (a collection entry or a subscription), the Media and every row it owns —
+//! (a collection entry or a subscription), every row it owns —
 //! aliases, metadata, episodes, markers, probe jobs, fingerprint models and
 //! per-user playback state — are removed in the caller's transaction.
+//! The Media identity is removed too, except for a retired redirect or its target:
+//! those identity rows preserve the FK graph and let Jobs recover old Media refs.
+//! A historical redirect does not retain any of the Media's business facts.
 //! Historic logs (`playback_logs`, `playback_metrics`, removal receipts) are
 //! history, not ownership, and stay.
 
@@ -14,6 +17,17 @@ use domain::MediaId;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
+
+/// A merge target kept only for redirect recovery, evaluated against `media m`.
+/// Ordinary Media can receive metadata before files exist; a historical merge
+/// target needs either a business reference or an alias to accept new facts.
+pub(crate) const IDENTITY_ONLY_PREDICATE: &str =
+    "CASE WHEN EXISTS(SELECT 1 FROM media r WHERE r.survivor_id=m.media_id)
+     THEN NOT EXISTS(SELECT 1 FROM library_files WHERE media_id=m.media_id)
+      AND NOT EXISTS(SELECT 1 FROM collection_items WHERE media_id=m.media_id)
+      AND NOT EXISTS(SELECT 1 FROM subscribe_retention WHERE media_id=m.media_id)
+      AND NOT EXISTS(SELECT 1 FROM media_aliases WHERE media_id=m.media_id)
+     ELSE 0 END";
 
 /// Child tables keyed by `media_id`, deleted before `media` (FK order).
 const OWNED: &[&str] = &[
@@ -32,10 +46,9 @@ const OWNED: &[&str] = &[
     "media_aliases",
 ];
 
-impl crate::Store {}
-
 /// Purge every candidate Media that has no file, no collection entry, no
-/// subscription (`subscribed`) and is not a merge survivor. Returns the purged ids.
+/// subscription (`subscribed`). Merge identity rows survive without owned facts.
+/// Returns only ids whose Media identity rows were actually deleted.
 pub(crate) fn purge_orphan_media_in_tx(
     tx: &Connection,
     candidates: &HashSet<MediaId>,
@@ -60,8 +73,6 @@ pub(crate) fn purge_orphan_media_in_tx(
                 "SELECT 1 WHERE EXISTS(SELECT 1 FROM library_files WHERE media_id=?1)
                     OR EXISTS(SELECT 1 FROM collection_items WHERE media_id=?1)
                     OR EXISTS(SELECT 1 FROM subscribe_retention WHERE media_id=?1)
-                    OR EXISTS(SELECT 1 FROM media WHERE survivor_id=?1)
-                    OR EXISTS(SELECT 1 FROM media WHERE media_id=?1 AND identity_state='retired')
                     OR NOT EXISTS(SELECT 1 FROM media WHERE media_id=?1)",
                 [&id],
                 |row| row.get(0),
@@ -81,6 +92,22 @@ pub(crate) fn purge_orphan_media_in_tx(
                 &format!("DELETE FROM {table} WHERE media_id=?1"),
                 params![id],
             )?;
+        }
+        let merge_identity: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media WHERE survivor_id=?1)
+                 OR EXISTS(SELECT 1 FROM media WHERE media_id=?1 AND identity_state='retired')",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if merge_identity {
+            // The identity still exists, so invalidate Catalog responses captured
+            // before cleanup; they must not recreate the facts just removed.
+            tx.execute(
+                "UPDATE media SET metadata_revision=metadata_revision+1 WHERE media_id=?1",
+                [&id],
+            )?;
+            tracing::info!(media_id = %id, "Purged orphan Media facts; retained merge identity for Jobs recovery");
+            continue;
         }
         tx.execute("DELETE FROM media WHERE media_id=?1", [&id])?;
         tracing::info!(media_id = %id, "Purged Media without Library files");

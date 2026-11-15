@@ -11,7 +11,7 @@ test-support = []
 
 [dependencies]
 parking_lot.workspace = true
-tokio = { workspace = true, features = ["time", "sync"] }
+tokio = { workspace = true, features = ["time", "sync", "rt"] }
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true

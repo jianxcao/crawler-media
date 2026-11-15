@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{LibraryReadError, ReaderLease, pool::Inner};
+use super::{LibraryReadError, ReaderLease, admission::Admission, pool::Inner};
 
 /// Waiters allowed per connection in the single shared admission queue.
 const WAITERS_PER_READER: usize = 4;
@@ -35,6 +35,10 @@ impl Ticket {
     }
 
     pub(super) fn try_acquire(&self) -> Result<Option<ReaderLease>, LibraryReadError> {
+        self.reserve()?.map(Admission::open).transpose()
+    }
+
+    fn reserve(&self) -> Result<Option<Admission>, LibraryReadError> {
         self.pool.check_identity()?;
         let mut state = self.pool.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.closed {
@@ -51,8 +55,11 @@ impl Ticket {
             state.waiters.pop_front();
             drop(state);
             self.pool.wake();
-            crate::stats::record_reader_checkout(self.pool.database);
-            return Ok(Some(ReaderLease::new(conn, Arc::clone(&self.pool), epoch)));
+            return Ok(Some(Admission::new(
+                Arc::clone(&self.pool),
+                epoch,
+                Some(conn),
+            )));
         }
         if state.total >= self.pool.capacity() {
             return Ok(None);
@@ -61,19 +68,7 @@ impl Ticket {
         state.waiters.pop_front();
         drop(state);
         self.pool.wake();
-        let opened = self.pool.open_connection();
-        let valid = self.pool.check_identity();
-        match (opened, valid) {
-            (Ok(conn), Ok(())) => {
-                crate::stats::record_reader_checkout(self.pool.database);
-                Ok(Some(ReaderLease::new(conn, Arc::clone(&self.pool), epoch)))
-            }
-            (opened, valid) => {
-                self.pool.retired();
-                valid?;
-                Err(opened.err().ok_or(LibraryReadError::Closed)?.into())
-            }
-        }
+        Ok(Some(Admission::new(Arc::clone(&self.pool), epoch, None)))
     }
 
     pub(super) fn blocking(&self, wait: Duration) -> Result<ReaderLease, LibraryReadError> {
@@ -107,7 +102,7 @@ impl Ticket {
         }
     }
 
-    pub(super) fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<ReaderLease, LibraryReadError>> {
+    pub(super) fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<Admission, LibraryReadError>> {
         // Register first: a return while acquisition checks readiness will wake us.
         {
             let mut state = self.pool.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -115,8 +110,8 @@ impl Ticket {
                 *waker = Some(cx.waker().clone());
             }
         }
-        match self.try_acquire() {
-            Ok(Some(lease)) => Poll::Ready(Ok(lease)),
+        match self.reserve() {
+            Ok(Some(admission)) => Poll::Ready(Ok(admission)),
             Ok(None) => Poll::Pending,
             Err(error) => Poll::Ready(Err(error)),
         }

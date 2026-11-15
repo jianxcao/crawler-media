@@ -165,7 +165,7 @@ pub(crate) fn ensure_config_revision(
     Ok(())
 }
 
-/// Reject new facts for a Media whose identity is frozen or retired.
+/// Reject new facts for a frozen, retired or identity-only merge Media.
 pub(crate) fn ensure_media_writable(tx: &Connection, media_id: MediaId) -> Result<(), StoreError> {
     crate::library_operations::integrity_guard::ensure_media_integrity_writable(tx, media_id)?;
     ensure_media_identity_writable(tx, media_id)
@@ -175,14 +175,18 @@ pub(crate) fn ensure_media_identity_writable(
     tx: &Connection,
     media_id: MediaId,
 ) -> Result<(), StoreError> {
-    let identity: Option<(String, Option<String>)> = tx
+    let identity: Option<(String, Option<String>, bool)> = tx
         .query_row(
-            "SELECT identity_state, survivor_id FROM media WHERE media_id = ?1",
+            &format!(
+                "SELECT identity_state, survivor_id, ({})
+                 FROM media m WHERE media_id = ?1",
+                super::orphan_media::IDENTITY_ONLY_PREDICATE
+            ),
             params![media_id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((state, survivor)) = identity else {
+    let Some((state, survivor, identity_only)) = identity else {
         return Err(StoreError::Missing(format!("media {media_id}")));
     };
     match state.as_str() {
@@ -193,6 +197,15 @@ pub(crate) fn ensure_media_identity_writable(
                 .unwrap_or_default();
             Err(StoreError::Protected(format!(
                 "media {media_id} identity is {state}{survivor}"
+            )))
+        }
+        _ if identity_only => {
+            // Orphan cleanup retains this row only for Jobs redirect recovery.
+            // A fresh metadata revision or stale Media object cannot reopen it;
+            // ordinary Media without files and retained merge targets still pass.
+            tracing::warn!(%media_id, "Media write rejected for orphan merge identity");
+            Err(StoreError::Protected(format!(
+                "media {media_id} retains only a merge redirect identity"
             )))
         }
         _ => Ok(()),

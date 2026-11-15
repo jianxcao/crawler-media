@@ -271,7 +271,10 @@ impl crate::LibraryConnection<'_> {
             }
             Some(existing)
         } else if !has_incoming_alias {
-            let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2");
+            let sql = format!(
+                "{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND NOT ({})",
+                crate::library_write::orphan_media::IDENTITY_ONLY_PREDICATE
+            );
             let mut stmt = self.library.prepare(&sql)?;
             let candidates: Vec<Media> = stmt
                 .query_map(params![incoming.title, incoming.kind.as_str()], map_media)?

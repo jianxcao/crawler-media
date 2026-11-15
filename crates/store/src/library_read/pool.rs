@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -52,6 +53,7 @@ pub(super) struct Inner {
     pub(super) returned: std::sync::Condvar,
     pub(super) state: Mutex<State>,
     pub(super) stopped: AtomicBool,
+    closed: tokio::sync::Notify,
     pub(super) snapshot_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub(super) query_progress_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test seam: when set, retiring a connection pauses until the test releases
@@ -105,6 +107,7 @@ impl ReaderPool {
                     waiters: Default::default(),
                 }),
                 stopped: AtomicBool::new(false),
+                closed: tokio::sync::Notify::new(),
                 query_progress_observer: Mutex::new(None),
                 snapshot_observer: Mutex::new(None),
                 #[cfg(test)]
@@ -133,7 +136,20 @@ impl ReaderPool {
         wait: std::time::Duration,
     ) -> Result<ReaderLease, LibraryReadError> {
         let ticket = super::wait::Ticket::new(Arc::clone(&self.inner))?;
-        tokio::time::timeout(wait, std::future::poll_fn(|cx| ticket.poll(cx)))
+        let mut closed = std::pin::pin!(self.inner.closed.notified());
+        let mut acquire = std::pin::pin!(async {
+            std::future::poll_fn(|cx| ticket.poll(cx))
+                .await?
+                .open_async()
+                .await
+        });
+        let admission = std::future::poll_fn(|cx| {
+            if self.inner.stopped.load(Ordering::Acquire) || closed.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(Err(LibraryReadError::Closed));
+            }
+            acquire.as_mut().poll(cx)
+        });
+        tokio::time::timeout(wait, admission)
             .await
             .map_err(|_| LibraryReadError::Busy)?
     }
@@ -281,6 +297,7 @@ impl Inner {
 
     pub(super) fn close(&self) {
         self.stopped.store(true, Ordering::Release);
+        self.closed.notify_waiters();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if !state.closed {
             state.closed = true;

@@ -54,23 +54,18 @@ fn ensure_adoption_current(
     input: &MetadataAdoption,
     expected: i64,
 ) -> Result<(), StoreError> {
+    crate::library_write::publish::ensure_media_identity_writable(tx, input.media_id)?;
     let media = input.media_id.to_string();
-    let row: Option<(String, String, i64)> = tx
+    let row: Option<(String, i64)> = tx
         .query_row(
-            "SELECT identity_state, kind, metadata_revision FROM media WHERE media_id = ?1",
+            "SELECT kind, metadata_revision FROM media WHERE media_id = ?1",
             params![media],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((state, kind, revision)) = row else {
+    let Some((kind, revision)) = row else {
         return Err(StoreError::Missing(format!("media {}", input.media_id)));
     };
-    if state == "merging" || state == "retired" {
-        return Err(StoreError::Protected(format!(
-            "media {} identity is frozen ({state})",
-            input.media_id
-        )));
-    }
     if revision != expected {
         return Err(StoreError::Conflict(format!(
             "media {} metadata revision moved: captured {expected}, current {revision}",

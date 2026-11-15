@@ -618,3 +618,6 @@ async fn movie_zero_coordinates_are_rejected_without_writes() {
 
 #[path = "playback_event_identity/source_generation.rs"]
 mod source_generation;
+
+#[path = "playback_event_identity/selected_source.rs"]
+mod selected_source;

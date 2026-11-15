@@ -199,6 +199,8 @@ fn last_file_merge_and_cross_library_moves_conserve_counts() {
         "succeeded"
     );
     assert_eq!(browse_total(&db, lib), 1);
+    let mut incoming = store.get_media(request.survivor).unwrap().unwrap();
+    incoming.id = domain::MediaId::new();
     let files = store.file_coverage_for_media(request.survivor).unwrap();
     store
         .delete_files(
@@ -207,8 +209,13 @@ fn last_file_merge_and_cross_library_moves_conserve_counts() {
         )
         .unwrap();
     assert_eq!(browse_total(&db, lib), 0);
+    // Last-file removal purges business facts; the merge redirect cannot be
+    // reused as a publication target. A reimport first resolves a fresh Media.
+    let reimported = store.resolve_scanned_media(incoming).unwrap();
+    assert_ne!(reimported.id, request.survivor);
     let mut file = files[0].file.clone();
     file.file_id = domain::LedgerId::new();
+    file.media_id = reimported.id;
     file.path = "/movies/nested/move.mkv".into();
     store
         .publish_files(

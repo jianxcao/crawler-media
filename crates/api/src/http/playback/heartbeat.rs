@@ -446,8 +446,8 @@ fn read_heartbeat_target(
         Err(error) => return Err(persistence_error(&error, user_id, device_id)),
     }
     let session_id = body["play_session_id"].as_str().unwrap_or_default();
-    match store.play_session_binding(user_id, device_id, session_id) {
-        Ok(Some(_)) => {}
+    let binding = match store.play_session_binding(user_id, device_id, session_id) {
+        Ok(Some(binding)) => binding,
         Ok(None) => {
             tracing::warn!(%user_id, device_id, "Playback heartbeat rejected: unissued session identity");
             return Err(err(
@@ -457,8 +457,15 @@ fn read_heartbeat_target(
             ));
         }
         Err(error) => return Err(persistence_error(&error, user_id, device_id)),
+    };
+    // Session issuance may select a non-default resume source. An omitted file
+    // keeps that binding; explicit sources and target coordinates still pass
+    // through the normal visibility/coverage checks and event classification.
+    let mut selection = body.clone();
+    if selection.get("file_id").is_none_or(Value::is_null) {
+        selection["file_id"] = Value::String(binding.ledger_id.to_string());
     }
-    let (file, media, season, episode) = match row_for(store, body, Some(user_id)) {
+    let (file, media, season, episode) = match row_for(store, &selection, Some(user_id)) {
         Ok(row) => row,
         Err(error) => return Err(error.response()),
     };
