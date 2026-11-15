@@ -27,6 +27,10 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
             get(subtitle_stream),
         )
+        .route(
+            "/Videos/{id}/{media_source_id}/Subtitles/{index}/Stream.{codec}",
+            get(subtitle_stream),
+        )
         .route("/playback/files/{id}/fonts", get(file_fonts))
         .route("/playback/files/{id}/trickplay", get(file_trickplay))
         .route_layer(axum::middleware::from_fn(move |req, next| {
@@ -224,16 +228,31 @@ async fn check_device_revocation(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct SubtitlePath {
+    id: String,
+    media_source_id: Option<String>,
+    index: u32,
+    codec: String,
+}
+
 async fn subtitle_stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
-    Path((id, index, codec)): Path<(String, u32, String)>,
+    Path(path): Path<SubtitlePath>,
     axum::extract::Query(query): axum::extract::Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 字幕").await?;
 
-    let wants_vtt = codec.eq_ignore_ascii_case("vtt");
+    let media_source_id = match (
+        path.media_source_id.as_deref(),
+        query.media_source_id.as_deref(),
+    ) {
+        (Some(path), Some(query)) if path != query => return Err(StatusCode::BAD_REQUEST),
+        (path, query) => path.or(query),
+    };
+    let wants_vtt = path.codec.eq_ignore_ascii_case("vtt");
     let client = user.playback_client(&headers);
     let device_id = query.device_id.as_deref().unwrap_or(&client.device_id);
     // 协议层只调用 provider seam；同步提取与 single-flight 都在 provider 内部。
@@ -242,11 +261,11 @@ async fn subtitle_stream(
         .deliver_subtitle(
             user.id,
             crate::provider::SubtitleRequest {
-                item_id: &id,
-                media_source_id: query.media_source_id.as_deref(),
+                item_id: &path.id,
+                media_source_id,
                 play_session_id: query.play_session_id.as_deref(),
                 device_id,
-                index,
+                index: path.index,
                 wants_vtt,
             },
         )
@@ -262,11 +281,11 @@ async fn subtitle_stream(
         Err(SubtitleDeliveryError::Timeout) => Err(StatusCode::GATEWAY_TIMEOUT),
         Err(SubtitleDeliveryError::Cancelled) => Err(StatusCode::CONFLICT),
         Err(SubtitleDeliveryError::Failed(message)) => {
-            tracing::error!(item_id = %id, index, error = %message, "Jellyfin 交付字幕失败");
+            tracing::error!(item_id = %path.id, index = path.index, error = %message, "Jellyfin 交付字幕失败");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
         Err(SubtitleDeliveryError::Unsupported) => {
-            tracing::error!(item_id = %id, index, "Jellyfin provider 未实现字幕交付");
+            tracing::error!(item_id = %path.id, index = path.index, "Jellyfin provider 未实现字幕交付");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

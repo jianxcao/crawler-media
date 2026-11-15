@@ -2140,7 +2140,7 @@ function IssueDrawer({
                 if (
                   !(await confirm({
                     title: `清理全部 ${missingFileTotal} 条缺失记录？`,
-                    description: "只删台账，不动磁盘。",
+                    description: "复查视频仍缺失后，删除记录及残留的字幕、NFO 和图片；已恢复的文件会保留。",
                     confirmLabel: "全部清理",
                     tone: "danger",
                   }))
@@ -2162,7 +2162,7 @@ function IssueDrawer({
         {/* 说明行 */}
         <p className="px-5 pt-3 text-caption leading-5 text-[var(--text-muted)]">
           {open === "missing"
-            ? "文件已不在磁盘；「清理记录」只删台账（不动磁盘）；文件回归会自动恢复。经常自己删片子的话，可在库设置里打开「扫描后自动清理丢失记录」，以后扫完即对齐。"
+            ? "缺失文件恢复后会自动解除标记。「清理记录」会复查视频是否仍缺失，并删除缺失记录和残留附件。可在库设置里开启「扫描后自动清理丢失记录」。"
             : "同一目录的文件聚成一组，认领一次整组生效；点候选可先核对海报简介再确认。状态标签悬停看完整原因。"}
         </p>
 
@@ -2267,8 +2267,8 @@ function MissingRow({
                 const ok = await confirm({
                   title: `清理「${item.title}」的 ${item.files.length} 条缺失记录？`,
                   description: item.subscription_id
-                    ? "该条目有正在追踪的订阅，只清记录的话订阅可能把它重新下回来。（只删台账，不动磁盘）"
-                    : "只删台账，不动磁盘。",
+                    ? "复查视频仍缺失后，删除记录及残留的字幕、NFO 和图片。该条目有正在追踪的订阅，清理后可能重新下载；已恢复的文件会保留。"
+                    : "复查视频仍缺失后，删除记录及残留的字幕、NFO 和图片；已恢复的文件会保留。",
                   confirmLabel: "清理记录",
                   tone: "danger",
                 });

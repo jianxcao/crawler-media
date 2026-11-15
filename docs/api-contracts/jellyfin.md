@@ -50,7 +50,7 @@ PlaybackInfo 的来源与签发 SID 必须对应同一逻辑单元和版本。�
 
 签发、事件和取流采用相同的设备身份解析，包括缺省 DeviceId。测试同时覆盖 unknown/closed SID、错误设备/用户、跨 Media、同物理文件跨 Episode、隐藏来源，以及配置 revision 或生命周期改变。恢复 Library ready 后，失效 SID 仍不能复活；按当前授权使用严格来源 URL 或重新签发 SID 是不同正控。
 
-字幕地址携带版本化 MediaSourceId，防止首选变化后读到另一文件的字幕。有 SID 时额外检查用户、设备、单元、来源、会话状态和 Library 配置；无 SID 时仍检查可见性、覆盖和来源版本。回归必须消费详情顶层与 MediaSources 内的实际 DeliveryUrl，并让 A/B 字幕字节不同。
+字幕地址携带版本化 MediaSourceId，防止首选变化后读到另一文件的字幕。详情与 PlaybackInfo 的 DeliveryUrl 使用查询参数；VidHub 会按 `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.{codec}` 构造请求，两个入口共用来源解析和权限校验。路径与查询同时指定不同来源时返回 400。有 SID 时额外检查用户、设备、单元、来源、会话状态和 Library 配置；无 SID 时仍检查可见性、覆盖和来源版本。回归必须消费详情顶层与 MediaSources 内的实际 DeliveryUrl，覆盖 VidHub 的路径形式，并让 A/B 字幕字节不同。
 
 Playing / Progress / Stopped 中缺失或 null PositionTicks 不代表零。活动/停止语义仍处理，已有位置保留；停止后会话关闭。毫秒与 ticks 的换算、时长、resume 和日志分别核对，不能把 204 的空操作当作成功持久化。
 

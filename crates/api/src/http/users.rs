@@ -116,51 +116,48 @@ pub(crate) async fn update_user(
         None => None,
     };
     store_write(&state, move |store| {
-        let Some(mut user) = (match store.get_user(id) {
-            Ok(user) => user,
+        // Read, validate and patch while owning the same App writer. An earlier
+        // reader snapshot must not overwrite a concurrent disable or role change.
+        let updated = store.writers().with_app(|app| {
+            let Some(mut user) = app.get_user(id)? else {
+                return Ok(None);
+            };
+            if body.enabled == Some(false) && user.role == UserRole::Admin {
+                return Err(store::StoreError::Protected("不能停用管理员".into()));
+            }
+            if let Some(login) = body.login.filter(|l| !l.trim().is_empty()) {
+                user.login = login;
+            }
+            if let Some(enabled) = body.enabled {
+                user.enabled = enabled;
+            }
+            if let Some(prepared) = prepared {
+                app.update_user_with_prepared_password(&user, &prepared)?;
+            } else {
+                app.save_user(&user)?;
+            }
+            Ok(Some(user))
+        });
+        match updated {
+            Ok(Some(user)) => ok(user_json(&user)).into_response(),
+            Ok(None) => err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
+            Err(store::StoreError::Protected(message)) => {
+                err(StatusCode::BAD_REQUEST, "user.protected", &message)
+            }
+            Err(store::StoreError::CredentialConflict(message)) => err(
+                StatusCode::BAD_REQUEST,
+                "user.credential_conflict",
+                &message,
+            ),
             Err(error) => {
-                return err(
+                tracing::error!(%error, user_id = %id, "更新用户信息或凭据失败");
+                err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
-                );
+                )
             }
-        }) else {
-            return err(StatusCode::NOT_FOUND, "user.missing", "用户不存在");
-        };
-        if body.enabled == Some(false) && user.role == UserRole::Admin {
-            return err(StatusCode::BAD_REQUEST, "user.protected", "不能停用管理员");
         }
-        if let Some(login) = body.login.filter(|l| !l.trim().is_empty()) {
-            user.login = login;
-        }
-        if let Some(enabled) = body.enabled {
-            user.enabled = enabled;
-        }
-        if let Some(prepared) = prepared {
-            // 原子更新用户状态、密码并撤销全部会话 token
-            if let Err(error) = store.update_user_with_prepared_password(&user, &prepared) {
-                tracing::error!(%error, user_id = %user.id, "更新用户凭据失败");
-                return match error {
-                    store::StoreError::CredentialConflict(msg) => {
-                        err(StatusCode::BAD_REQUEST, "user.credential_conflict", &msg)
-                    }
-                    other => err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &other.to_string(),
-                    ),
-                };
-            }
-        } else if let Err(error) = store.save_user(&user) {
-            tracing::error!(%error, user_id = %user.id, "保存用户信息失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-        ok(user_json(&user)).into_response()
     })
     .await
     .unwrap_or_else(|response| response)

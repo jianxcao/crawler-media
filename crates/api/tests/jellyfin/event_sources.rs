@@ -8,6 +8,8 @@ mod playback_info_race;
 mod shared_episode_binding;
 #[path = "event_sources/subtitle_source.rs"]
 mod subtitle_source;
+#[path = "event_sources/vidhub_subtitles.rs"]
+mod vidhub_subtitles;
 
 const DEVICE: &str = "source-contract-device";
 
