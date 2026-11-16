@@ -32,6 +32,14 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     tokio::task::spawn_blocking(move || work.cancel(&library_for_cancel))
         .await
         .map_err(|e| e.to_string())?;
+    let store = state.store.clone();
+    let operation_for_cancel = id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::http::file_delete::close_library_deletions(&store, &operation_for_cancel)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     loop {
         let owned = id.to_owned();
         if window(state, move |store| {

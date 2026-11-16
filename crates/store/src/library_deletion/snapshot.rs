@@ -51,6 +51,7 @@ pub(super) fn capture_batch(tx: &Connection, id: &str) -> Result<bool, StoreErro
         .collect::<Result<Vec<_>, _>>()?;
     for row in &mut rows {
         row.coverage = units(tx, &row.ledger_id)?;
+        cancel_file_deletion(tx, &row.path_key)?;
         tx.execute(
             "INSERT INTO library_removal_files(operation_id,file_id,root_id,path_key,display_path,
              media_id,file_revision,source_version,units_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -156,5 +157,14 @@ pub(super) fn validate(
             return Err(StoreError::Protected("删除快照台账身份或归属已改变".into()));
         }
     }
+    Ok(())
+}
+
+/// The removal owns this path now; physical deletion must not survive its facts.
+pub(super) fn cancel_file_deletion(tx: &Connection, path_key: &str) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM pending_file_deletions WHERE path_key=?1",
+        [path_key],
+    )?;
     Ok(())
 }

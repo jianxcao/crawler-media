@@ -206,3 +206,143 @@ fn heartbeat_without_file_cannot_change_the_issued_media() {
         assert!(store.get_session(sources.user, "resume").unwrap().is_none());
     });
 }
+
+#[test]
+fn omitted_duration_never_carries_another_sources_completion_threshold() {
+    for duration in [Some(1_200_000), None] {
+        let sources = Sources::new();
+        let store = sources.fix.state.store();
+        if let Some(duration) = duration {
+            let file = store
+                .file_coverage_by_id(sources.default)
+                .unwrap()
+                .unwrap()
+                .file;
+            store
+                .publish_probe_result(
+                    file.file_id,
+                    &store::library_write::probe::ProbePublication {
+                        expected: &file.version,
+                        tracks_version: file.tracks_version + 1,
+                        resolution: None,
+                        codec: None,
+                        hdr: store::library_write::probe::Observed::NotObserved,
+                        duration_ms: Some(duration),
+                        details: None,
+                    },
+                    1_000,
+                )
+                .unwrap();
+        }
+        run(async {
+            sources.seed_resume().await;
+            let session = sources.issue(Some(sources.default), "changed-source").await;
+            for event in ["start", "progress", "stop"] {
+                let (status, body) = sources
+                    .event(
+                        &session,
+                        "changed-source",
+                        json!({
+                            "event": event, "position_ms": 570_000, "duration_ms": null,
+                        }),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                let unit = store
+                    .unit_state(sources.user, sources.media, -1, -1)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    unit.duration_ms, duration,
+                    "{event} must use the selected physical source's duration"
+                );
+                assert!(
+                    !unit.played,
+                    "another source's shorter duration must not mark this one played"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn archived_session_accepts_new_http_progress_without_replaying_old_sequences() {
+    let sources = Sources::new();
+    run(async {
+        let session = sources.issue(Some(sources.selected), "sleep").await;
+        let (status, body) = sources
+            .event(
+                &session,
+                "sleep",
+                json!({
+                    "event": "start", "position_ms": 10_000, "event_sequence": 3,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let store = sources.fix.state.store();
+        assert_eq!(
+            store
+                .sweep_stale_sessions(store::unix_now() + 600, 300)
+                .unwrap(),
+            1
+        );
+        let (status, body) = sources
+            .event(
+                &session,
+                "sleep",
+                json!({
+                    "event": "progress", "position_ms": 20_000, "event_sequence": 4,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            store
+                .unit_state(sources.user, sources.media, -1, -1)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            20_000
+        );
+        for event in ["progress", "stop"] {
+            let (status, body) = sources
+                .event(
+                    &session,
+                    "sleep",
+                    json!({
+                        "event": event, "position_ms": 1_000, "event_sequence": 3,
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        assert_eq!(
+            store
+                .unit_state(sources.user, sources.media, -1, -1)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            20_000
+        );
+        let (status, body) = sources
+            .event(
+                &session,
+                "sleep",
+                json!({
+                    "event": "stop", "position_ms": 30_000, "event_sequence": 5,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            store
+                .unit_state(sources.user, sources.media, -1, -1)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            30_000
+        );
+        assert!(store.get_session(sources.user, "sleep").unwrap().is_none());
+    });
+}

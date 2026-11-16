@@ -6,6 +6,7 @@
 //! * the `playback_session_ids` row exists for `(user, device, session)` and still carries
 //!   the generation, target unit, source version and file revision the caller claims;
 //! * the session is not already closed (a repeated `Stop` changes nothing);
+//! * a supplied event sequence is newer than this session's last committed sequence;
 //! * the file is still the published, present generation we issued, and it still covers the
 //!   event's unit (two episodes can share one physical file);
 //! * the Library is still `ready` at the config revision recorded at issuance, and the user
@@ -33,6 +34,7 @@ struct IssuedBinding {
     media_id: String,
     season: i32,
     episode: i32,
+    last_event_sequence: Option<i64>,
 }
 
 /// How long after an admin ends a device's playback a later heartbeat still counts as
@@ -144,7 +146,7 @@ fn read_binding(
     let row = tx
         .query_row(
             "SELECT generation, state, file_id, file_revision, source_version, library_id,
-                    config_revision, media_id, season, episode
+                    config_revision, media_id, season, episode, last_event_sequence
              FROM playback_session_ids
              WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
             params![event.user_id.to_string(), event.device_id, event.session_id],
@@ -160,6 +162,7 @@ fn read_binding(
                     media_id: r.get(7)?,
                     season: r.get(8)?,
                     episode: r.get(9)?,
+                    last_event_sequence: r.get(10)?,
                 })
             },
         )
@@ -304,8 +307,24 @@ fn write_unit_facts(
              timeline_mode = 'full_file',
              watch_activity_at = ?15,
              tracks_version = ?12,
-             audio_track = CASE WHEN ?12 IS NULL THEN playback_units.audio_track WHEN ?13 IS NOT NULL THEN ?13 ELSE playback_units.audio_track END,
-             subtitle_track = CASE WHEN ?12 IS NULL THEN playback_units.subtitle_track WHEN ?14 IS NOT NULL THEN ?14 ELSE playback_units.subtitle_track END",
+             audio_track = CASE
+                 WHEN ?12 IS NULL THEN NULL
+                 WHEN ?13 IS NOT NULL THEN ?13
+                 WHEN playback_units.resume_file_id = ?9
+                      AND playback_units.resume_file_revision = ?10
+                      AND playback_units.resume_source_version = ?11
+                      AND playback_units.timeline_mode = 'full_file'
+                      AND playback_units.tracks_version = ?12
+                 THEN playback_units.audio_track ELSE NULL END,
+             subtitle_track = CASE
+                 WHEN ?12 IS NULL THEN NULL
+                 WHEN ?14 IS NOT NULL THEN ?14
+                 WHEN playback_units.resume_file_id = ?9
+                      AND playback_units.resume_file_revision = ?10
+                      AND playback_units.resume_source_version = ?11
+                      AND playback_units.timeline_mode = 'full_file'
+                      AND playback_units.tracks_version = ?12
+                 THEN playback_units.subtitle_track ELSE NULL END",
         params![
             event.user_id.to_string(),
             media_id.to_string(),
@@ -393,7 +412,13 @@ fn archive_superseded_session(
                 started_at, ?4, watched_ms, start_position_ms, position_ms, duration_ms, ?5,
                 device_id, admin_ended, play_session_id, generation, file_id, file_revision,
                 source_version, COALESCE(timeline_mode, 'full_file')
-         FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
+         FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2
+         ON CONFLICT(user_id, device_id, play_session_id, generation) DO UPDATE SET
+            ended_at = excluded.ended_at,
+            watched_ms = playback_logs.watched_ms + excluded.watched_ms,
+            end_position_ms = excluded.end_position_ms,
+            duration_ms = excluded.duration_ms, completed = excluded.completed,
+            admin_ended = MAX(playback_logs.admin_ended, excluded.admin_ended)",
         params![
             user,
             device,
@@ -434,7 +459,7 @@ fn close_live_session(
         .optional()?;
 
     let Some(session) = session else {
-        return Ok(());
+        return finish_archived_session(tx, event, binding, now_ms);
     };
 
     tx.execute(
@@ -470,7 +495,13 @@ fn close_live_session(
              duration_ms, completed, device_id, admin_ended, play_session_id, generation,
              file_id, file_revision, source_version, timeline_mode)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+         ON CONFLICT(user_id, device_id, play_session_id, generation) DO UPDATE SET
+            ended_at = excluded.ended_at,
+            watched_ms = playback_logs.watched_ms + excluded.watched_ms,
+            end_position_ms = excluded.end_position_ms,
+            duration_ms = excluded.duration_ms, completed = excluded.completed,
+            admin_ended = MAX(playback_logs.admin_ended, excluded.admin_ended)",
         params![
             log.id,
             log.user_id.to_string(),
@@ -495,6 +526,53 @@ fn close_live_session(
             binding.file_revision,
             binding.source_version,
             "full_file",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A Stop after timeout still supplies the final position for the archived session.
+/// No live interval exists to contribute watch time.
+fn finish_archived_session(
+    tx: &rusqlite::Connection,
+    event: &BoundPlaybackEvent,
+    binding: &IssuedBinding,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let previous: Option<(i64, Option<i64>)> = tx
+        .query_row(
+            "SELECT end_position_ms, duration_ms FROM playback_logs
+         WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3 AND generation = ?4",
+            params![
+                event.user_id.to_string(),
+                event.device_id,
+                event.session_id,
+                binding.generation
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((position, duration)) = previous else {
+        return Ok(());
+    };
+    let position = event.position_ms.unwrap_or(position);
+    let duration = event
+        .duration_ms
+        .filter(|duration| *duration > 0)
+        .or(duration);
+    tx.execute(
+        "UPDATE playback_logs SET ended_at = ?5, end_position_ms = ?6,
+             duration_ms = ?7, completed = ?8
+         WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3 AND generation = ?4",
+        params![
+            event.user_id.to_string(),
+            event.device_id,
+            event.session_id,
+            binding.generation,
+            now_ms / 1000,
+            position,
+            duration,
+            UnitState::playback_completed(position, duration)
         ],
     )?;
     Ok(())

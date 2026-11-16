@@ -58,6 +58,10 @@ fn clean_window(
     let rows = snapshot::next_batch(&tx, id)?;
     snapshot::validate(&tx, &operation.library_id, &rows)?;
     if !rows.is_empty() {
+        // Revoke any remaining intent before its file facts disappear on retry.
+        for row in &rows {
+            snapshot::cancel_file_deletion(&tx, &row.path_key)?;
+        }
         let files = rows
             .iter()
             .map(|r| r.ledger_id.parse())
@@ -85,6 +89,10 @@ fn clean_window(
         );
         #[cfg(test)]
         super::removal_batch_failpoint()?;
+        return Ok(false);
+    }
+    if crate::pending_file_deletions::scope::cancel_removal_batch(&tx, &operation.library_id)? > 0 {
+        tx.commit()?;
         return Ok(false);
     }
     let unidentified = tx.execute(

@@ -207,14 +207,23 @@ impl crate::LibraryConnection<'_> {
             duration_ms: session.duration_ms,
             completed,
         };
-        self.library.execute(
+        let persisted = self.library.query_row(
             "INSERT INTO playback_logs
                 (id, user_id, media_id, season, episode, client, device_name, play_method,
                  started_at, ended_at, watched_ms, start_position_ms, end_position_ms,
                  duration_ms, completed, device_id, admin_ended, play_session_id, generation,
                  file_id, file_revision, source_version, timeline_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+             ON CONFLICT(user_id, device_id, play_session_id, generation) DO UPDATE SET
+                ended_at = excluded.ended_at,
+                watched_ms = playback_logs.watched_ms + excluded.watched_ms,
+                end_position_ms = excluded.end_position_ms,
+                duration_ms = excluded.duration_ms, completed = excluded.completed,
+                admin_ended = MAX(playback_logs.admin_ended, excluded.admin_ended)
+             RETURNING id, user_id, media_id, season, episode, client, device_name,
+                       play_method, started_at, ended_at, watched_ms, start_position_ms,
+                       end_position_ms, duration_ms, completed, device_id",
             params![
                 log.id,
                 log.user_id.to_string(),
@@ -240,8 +249,9 @@ impl crate::LibraryConnection<'_> {
                 binding.source_version,
                 binding.timeline_mode,
             ],
+            super::super::logs::map_log,
         )?;
-        Ok(Some(log))
+        Ok(Some(persisted))
     }
 
     pub fn end_device_session(

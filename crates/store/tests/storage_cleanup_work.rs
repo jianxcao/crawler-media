@@ -105,8 +105,9 @@ fn reassigning_one_file_does_not_scan_unrelated_session_ids() {
     for history in [100, 1000, 10_000] {
         let f = Fixture::new();
         f.db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?1)
-            INSERT INTO playback_session_ids SELECT 'user','device','session-'||i,'item','media',-1,-1,'other',1,'v1','library',0,'full_file',0,i,'active' FROM n", [history]).unwrap();
-        f.db.execute("INSERT INTO playback_session_ids VALUES ('user','device','target','item',?1,-1,-1,?2,1,'v1',?3,0,'full_file',0,0,'active')",
+            INSERT INTO playback_session_ids(user_id,device_id,play_session_id,item_id,media_id,season,episode,file_id,file_revision,source_version,library_id,config_revision,timeline_mode,issued_at,generation,state)
+            SELECT 'user','device','session-'||i,'item','media',-1,-1,'other',1,'v1','library',0,'full_file',0,i,'active' FROM n", [history]).unwrap();
+        f.db.execute("INSERT INTO playback_session_ids(user_id,device_id,play_session_id,item_id,media_id,season,episode,file_id,file_revision,source_version,library_id,config_revision,timeline_mode,issued_at,generation,state) VALUES ('user','device','target','item',?1,-1,-1,?2,1,'v1',?3,0,'full_file',0,0,'active')",
             params![f.file.media_id.to_string(), f.file.file_id.to_string(), f.file.library_id.to_string()]).unwrap();
         let request = ReassignFiles {
             files: vec![(f.file.file_id, f.file.version.clone())],

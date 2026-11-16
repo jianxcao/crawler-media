@@ -17,6 +17,17 @@ impl crate::LibraryConnection<'_> {
         if stale_bound_event(self, &tx, event, &binding, media_id, unit)? {
             return Ok(EventOutcome::IgnoredStale);
         }
+        // The caller may have classified this event before a newer event acquired the
+        // writer. Recheck inside our IMMEDIATE transaction before any session/unit write.
+        if let Some(sequence) = event.event_sequence
+            && binding
+                .last_event_sequence
+                .is_some_and(|last| sequence <= last)
+        {
+            tracing::debug!(session_id = %event.session_id, sequence,
+                "out-of-order playback event ignored");
+            return Ok(EventOutcome::IgnoredStale);
+        }
         match crate::library_write::publish::ensure_media_identity_writable(&tx, media_id) {
             Ok(()) => {}
             Err(StoreError::Protected(_) | StoreError::Missing(_)) => {
@@ -34,6 +45,7 @@ impl crate::LibraryConnection<'_> {
             && event.event_type != PlaybackEventType::Stopped
         {
             archive_admin_ended_session(&tx, event, &binding, now_ms)?;
+            advance_binding_sequence(&tx, event)?;
             tx.commit()?;
             tracing::debug!(
                 session_id = %event.session_id,
@@ -80,6 +92,7 @@ impl crate::LibraryConnection<'_> {
         if event.position_ms.is_some() {
             self.refresh_user_library_summary(event.user_id, media_id)?;
         }
+        advance_binding_sequence(&tx, event)?;
         tx.commit()?;
         tracing::debug!(
             session_id = %event.session_id,
@@ -98,4 +111,24 @@ impl crate::LibraryConnection<'_> {
         }
         Ok(())
     }
+}
+
+fn advance_binding_sequence(
+    tx: &rusqlite::Connection,
+    event: &BoundPlaybackEvent,
+) -> Result<(), StoreError> {
+    let Some(sequence) = event.event_sequence else {
+        return Ok(());
+    };
+    tx.execute(
+        "UPDATE playback_session_ids SET last_event_sequence = ?4
+         WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
+        rusqlite::params![
+            event.user_id.to_string(),
+            event.device_id,
+            event.session_id,
+            sequence
+        ],
+    )?;
+    Ok(())
 }

@@ -135,7 +135,7 @@ fn queued_deletion_keeps_the_identity_observed_before_publication() {
 
 #[cfg(unix)]
 #[test]
-fn durable_deletion_completion_survives_library_alias_retirement() {
+fn library_removal_cancels_deletion_before_retiring_root_alias() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let real = tmp.path().join("real");
@@ -174,26 +174,179 @@ fn durable_deletion_completion_survives_library_alias_retirement() {
     store
         .clean_library_removal(&operation.operation_id)
         .unwrap();
-    assert_eq!(
-        store.list_due_file_deletions(0).unwrap(),
-        vec![entry.clone()]
-    );
-    for _ in 0..store::MAX_FILE_DELETION_ATTEMPTS {
+    assert!(store.list_due_file_deletions(0).unwrap().is_empty());
+    assert!(!store.file_deletion_intent_pending(&entry).unwrap());
+    assert_eq!(std::fs::read(&entry.path).unwrap(), b"bytes");
+}
+
+#[test]
+fn freeze_suppresses_deletions_beyond_the_first_snapshot_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("removed");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = create_library(&store, &root);
+    let media = create_media(&store, "Frozen");
+    let mut entries = Vec::new();
+    for n in 0..101 {
+        let path = root.join(format!("{n}.mkv")).display().to_string();
+        store::test_support::publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id: media.id,
+                path: path.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store
-            .record_file_deletion_failure(&entry, 0, "offline")
+            .enqueue_file_deletion_observed(&path, "test", None)
+            .unwrap();
+        entries.push(store.due_file_deletion(&path, 0).unwrap().unwrap());
+    }
+    store
+        .enqueue_file_deletion_observed("/unrelated/keep.mkv", "other", None)
+        .unwrap();
+    let operation = store.begin_library_removal(&library.id).unwrap();
+    let due = store.list_due_file_deletions(0).unwrap();
+    assert_eq!(
+        due.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        ["/unrelated/keep.mkv"]
+    );
+    for entry in &entries {
+        assert!(store.due_file_deletion(&entry.path, 0).unwrap().is_none());
+        assert!(store.due_file_deletion_intent(entry, 0).unwrap().is_none());
+    }
+    store
+        .set_removal_state(&operation.operation_id, "cleaning", None)
+        .unwrap();
+    store
+        .clean_library_removal(&operation.operation_id)
+        .unwrap();
+    assert_eq!(
+        store.list_pending_file_deletions().unwrap(),
+        ["/unrelated/keep.mkv"]
+    );
+}
+
+#[test]
+fn frozen_libraries_reject_late_deletion_intents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("removed");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = create_library(&store, &root);
+    let media = create_media(&store, "Frozen");
+    let path = root.join("movie.mkv").display().to_string();
+    std::fs::write(&path, b"preserve").unwrap();
+    store::test_support::publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media.id,
+            path: path.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let operation = store.begin_library_removal(&library.id).unwrap();
+    let enqueue =
+        || store.enqueue_file_deletion_observed(&path, "late", store::file_identity(&path));
+    assert!(matches!(enqueue(), Err(store::StoreError::Protected(_))));
+    store
+        .set_removal_state(&operation.operation_id, "cleaning", None)
+        .unwrap();
+    store
+        .clean_library_removal(&operation.operation_id)
+        .unwrap();
+    assert!(store.list_pending_file_deletions().unwrap().is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), b"preserve");
+}
+
+#[test]
+fn removal_cancels_untracked_sidecars_but_keeps_nested_library_intents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("removed");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let library = create_library(&store, &root);
+    create_library(&store, &nested);
+    let keep = nested.join("keep.nfo").display().to_string();
+    let sibling = tmp
+        .path()
+        .join("removed-other/keep.nfo")
+        .display()
+        .to_string();
+    for path in [&keep, &sibling] {
+        store
+            .enqueue_file_deletion_observed(path, "rename-left-behind-sidecar", None)
             .unwrap();
     }
-    assert_eq!(store.list_stuck_file_deletions().unwrap().len(), 1);
-    assert!(store.file_deletion_pending(&entry.path).unwrap());
-    store.reset_file_deletion_backoff(&entry.path).unwrap();
+    for n in 0..101 {
+        let path = root.join(format!("{n}.nfo"));
+        store
+            .enqueue_file_deletion_observed(
+                path.to_str().unwrap(),
+                "rename-left-behind-sidecar",
+                None,
+            )
+            .unwrap();
+    }
+    let operation = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&operation.operation_id, "cleaning", None)
+        .unwrap();
+    store
+        .clean_library_removal(&operation.operation_id)
+        .unwrap();
     assert_eq!(
-        store.due_file_deletion(&entry.path, 0).unwrap(),
-        Some(entry.clone())
+        store.list_pending_file_deletions().unwrap(),
+        [keep, sibling]
     );
-    std::fs::remove_file(&entry.path).unwrap();
-    store.complete_file_deletion(&entry).unwrap();
-    assert!(
-        store.list_pending_file_deletions().unwrap().is_empty(),
-        "alias retirement hid the intent from completion"
-    );
+}
+
+#[test]
+fn removal_cancels_owned_intents_after_file_rows_disappear_under_another_kind_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("movies");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let library = create_library(&store, &root);
+    store
+        .create_library(
+            MediaKind::Tv,
+            "TV",
+            &[nested.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = create_media(&store, "Movie under TV root");
+    let path = nested.join("movie.mkv").display().to_string();
+    let file = store::test_support::publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media.id,
+            path: path.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(file.library_id.to_string(), library.id);
+    store
+        .enqueue_file_deletion_observed(&path, "test", None)
+        .unwrap();
+    store
+        .delete_files(file.library_id, &[file.file_id])
+        .unwrap();
+    let operation = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&operation.operation_id, "cleaning", None)
+        .unwrap();
+    store
+        .clean_library_removal(&operation.operation_id)
+        .unwrap();
+    assert!(store.list_pending_file_deletions().unwrap().is_empty());
 }

@@ -119,7 +119,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<Option<PlaySessionBinding>, StoreError> {
         self.library
             .query_row(
-                "SELECT item_id, issued_at, generation, state, file_id, file_revision, source_version, library_id, config_revision, media_id, season, episode
+                "SELECT item_id, issued_at, generation, state, file_id, file_revision, source_version, library_id, config_revision, media_id, season, episode, last_event_sequence
                  FROM playback_session_ids
                  WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
                 params![user_id.to_string(), device_id, play_session_id],
@@ -136,6 +136,7 @@ impl crate::LibraryConnection<'_> {
                     let media_id: String = row.get(9)?;
                     let season: i32 = row.get(10)?;
                     let episode: i32 = row.get(11)?;
+                    let last_event_sequence: Option<i64> = row.get(12)?;
                     let ledger_id = LedgerId::from_str(&item_str)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
                     let state = PlaySessionIdState::from_str(&state_str)
@@ -152,6 +153,7 @@ impl crate::LibraryConnection<'_> {
                         config_revision,
                         media_id: media_id.parse().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(9, 0))?,
                         unit: domain::UnitKey::new(season, episode),
+                        last_event_sequence,
                     })
                 },
             )

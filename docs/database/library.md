@@ -72,10 +72,10 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
 - [media_metadata_sources](#media_metadata_sources) — 13 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
 - [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
-- [pending_file_deletions](#pending_file_deletions) — 10 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
+- [pending_file_deletions](#pending_file_deletions) — 11 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
 - [playback_logs](#playback_logs) — 23 字段；终态会话历史；按稳定会话/generation 去重，不依赖文件仍存在。
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
-- [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
+- [playback_session_ids](#playback_session_ids) — 17 字段；签发会话的逻辑目标、物理源、生命周期、generation 与已提交事件序号。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配或序号不递增一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
 - [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成 Progress 保留既有 played 断言；达到已知源时长90%阈值写 true 及毫秒断言时钟，人工 mark/unmark 写显式 true/false。目标按最新时钟、同时间 episode>season>whole 决议；effective assertion 与协议 SQL 使用同一规则。分集按请求单元/必要祖先分窗读取，在同一快照内归约。清历史清完整 resume 与断言，favorite 保留。
 - [probe_job_units](#probe_job_units) — 15 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
@@ -1358,19 +1358,21 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 | `next_retry_at` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `last_error` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
 | `file_id` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
+| `library_id` | `TEXT` | — | 否 | 无 | 入队时的 Library 归属；无外键，文件记录删除后仍用于取消与重试隔离。 |
 | `file_size` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
 | `file_inode` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
 
 **生产表定义**
 
 ```sql
-CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,library_id TEXT,file_size INTEGER,file_inode INTEGER);
 ```
 
 **显式命名索引**
 
 ```sql
 CREATE INDEX pending_deletions_due ON pending_file_deletions(next_retry_at);
+CREATE INDEX pending_deletions_library ON pending_file_deletions(library_id,path_key);
 CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_key);
 ```
 
@@ -1468,6 +1470,10 @@ CREATE INDEX metrics_recorded ON playback_metrics(recorded_at,id);
 
 签发会话的逻辑目标、物理源、生命周期与 generation。self Playback 必须提交签发 session/sequence，缺失或伪造请求拒绝，过期绑定不发布；Jellyfin 由协议适配层建立绑定。
 
+`last_event_sequence` 在提交事件的 IMMEDIATE 事务内复查并推进，拒绝小于或等于已提交序号的事件；无序号事件不清空水位。live 会话因超时或 `close_session` 归档后，签发绑定及序号水位保留，允许同一有效会话以更新序号或无序号事件恢复；显式 Stop 与代际替换仍将绑定关闭。
+
+同一签发会话恢复后的再次归档合并原 play log，保留最初开始时间和位置，只累加各 live 区间的观看时长，结束时间、位置和时长采用最新归档值；休眠时间不计入观看。
+
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
 |---|---|---:|---|---|---|
@@ -1487,6 +1493,7 @@ CREATE INDEX metrics_recorded ON playback_metrics(recorded_at,id);
 | `issued_at` | `INTEGER` | — | 是 | 无 | 见本表生产定义。 |
 | `generation` | `INTEGER` | — | 是 | 无 | 本次生命周期的 generation。 |
 | `state` | `TEXT` | — | 是 | 无 | 持久操作或 fence 状态。 |
+| `last_event_sequence` | `INTEGER` | — | 否 | 无 | 本绑定已提交的最新事件序号，独立于 live 会话行保留。 |
 
 **生产表定义**
 
@@ -1496,6 +1503,7 @@ CREATE TABLE playback_session_ids (
  media_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, file_id TEXT NOT NULL, file_revision INTEGER NOT NULL CHECK(file_revision>0),
  source_version TEXT NOT NULL, library_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision>=0), timeline_mode TEXT NOT NULL CHECK(timeline_mode='full_file'),
  issued_at INTEGER NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0), state TEXT NOT NULL CHECK(state IN ('pending','active','closed')),
+ last_event_sequence INTEGER,
  PRIMARY KEY(user_id,device_id,play_session_id)
 );
 ```

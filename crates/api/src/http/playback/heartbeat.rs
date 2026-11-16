@@ -7,7 +7,7 @@ use axum::{
 use serde_json::Value;
 
 use super::heartbeat_input::HeartbeatInput;
-use super::{effective_watch_state, row_for, watch_state_json};
+use super::{row_for, watch_state_json};
 use crate::http::store_wait::{store_read, store_write};
 use crate::http::strict_json::StrictJson;
 use crate::store::{StoreError, UNIT_WHOLE, UnitState};
@@ -115,16 +115,11 @@ fn persistence_error(error: &StoreError, user_id: domain::UserId, device_id: &st
     )
 }
 
-fn unit_duration(
+fn source_duration(
     store: &crate::Store,
-    user: domain::UserId,
     file: &domain::LibraryFile,
-    season: i32,
-    episode: i32,
 ) -> Result<Option<i64>, StoreError> {
-    if let Some(duration) = effective_watch_state(store, user, file.media_id, season, episode)?
-        .and_then(|unit| unit.duration_ms)
-    {
+    if let Some(duration) = file.duration_ms.filter(|duration| *duration > 0) {
         return Ok(Some(duration));
     }
     Ok(store
@@ -476,7 +471,7 @@ fn read_heartbeat_target(
             "条目不存在",
         ));
     };
-    let duration = match unit_duration(store, user_id, &file, season, episode) {
+    let duration = match source_duration(store, &file) {
         Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
         Err(error) => return Err(persistence_error(&error, user_id, device_id)),
     };

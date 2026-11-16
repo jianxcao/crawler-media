@@ -417,6 +417,49 @@ fn identical_destination_clears_sole_owned_source_and_keeps_references_consisten
 }
 
 #[test]
+fn renamed_sidecar_keeps_original_library_owner_beneath_a_different_kind_root() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    fx.store
+        .create_library(
+            MediaKind::Movie,
+            "Nested movie",
+            &[src.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    for dir in [&src, &dest] {
+        std::fs::write(dir.join("fanart.jpg"), b"same").unwrap();
+    }
+    let request = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    let receipt = execute(&fx, &request.rename_id);
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+    fx.store
+        .complete_file_rename(&request.rename_id, 3)
+        .unwrap();
+    let queued = fx.store.list_due_file_deletions(0).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].library_id, Some(file.library_id.to_string()));
+    let operation = fx
+        .store
+        .begin_library_removal(&file.library_id.to_string())
+        .unwrap();
+    fx.store
+        .set_removal_state(&operation.operation_id, "cleaning", None)
+        .unwrap();
+    fx.store
+        .clean_library_removal(&operation.operation_id)
+        .unwrap();
+    assert!(fx.store.list_pending_file_deletions().unwrap().is_empty());
+    assert_eq!(std::fs::read(src.join("fanart.jpg")).unwrap(), b"same");
+}
+
+#[test]
 fn failed_rename_waits_for_its_retry_time_in_seconds() {
     let fx = fixture();
     let src = fx.a.join("Show");

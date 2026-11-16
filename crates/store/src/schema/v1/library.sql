@@ -329,6 +329,7 @@ CREATE TABLE playback_session_ids (
  media_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, file_id TEXT NOT NULL, file_revision INTEGER NOT NULL CHECK(file_revision>0),
  source_version TEXT NOT NULL, library_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision>=0), timeline_mode TEXT NOT NULL CHECK(timeline_mode='full_file'),
  issued_at INTEGER NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0), state TEXT NOT NULL CHECK(state IN ('pending','active','closed')),
+ last_event_sequence INTEGER,
  PRIMARY KEY(user_id,device_id,play_session_id)
 );
 CREATE INDEX playback_session_ids_media ON playback_session_ids(media_id);
@@ -423,8 +424,9 @@ CREATE TABLE library_removal_files (
  PRIMARY KEY(operation_id,file_id)
 );
 CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
-CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,library_id TEXT,file_size INTEGER,file_inode INTEGER);
 CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_key);
+CREATE INDEX pending_deletions_library ON pending_file_deletions(library_id,path_key);
 -- Store::list_due_file_deletions reads the retry window; the caller orders by
 -- next_retry_at so the index supplies both the window and the order.
 CREATE INDEX pending_deletions_due ON pending_file_deletions(next_retry_at);

@@ -191,7 +191,8 @@ pub fn event_on(
         device_id: device.to_string(),
         session_id: session.0.to_string(),
         generation: session.1,
-        event_sequence: Some(1),
+        // Most shared fixtures model unsequenced clients; sequence tests opt in explicitly.
+        event_sequence: None,
         item,
         source_id: PhysicalSourceId {
             file_id: file.file_id,

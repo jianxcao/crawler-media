@@ -28,6 +28,19 @@ fn queued_path_was_reused(
     store: &Store,
     entry: &store::QueuedFileDeletion,
 ) -> Result<bool, store::StoreError> {
+    if let Some(library) = &entry.library_id {
+        if !store.library_accepts_work(library)? {
+            return Ok(true);
+        }
+    } else if store.file_deletion_blocked(&entry.path_key)? {
+        return Ok(true);
+    }
+    // Retired root aliases no longer participate in SQL key normalization.
+    // Resolve caller spelling here, outside database writers, before any unlink.
+    let resolved = store::LibraryPathScope::resolve_path(std::path::Path::new(&entry.path))?;
+    if entry.library_id.is_none() && store.file_deletion_blocked(&resolved.to_string_lossy())? {
+        return Ok(true);
+    }
     let current = {
         store
             .file_id_at_deletion_path(entry)?
@@ -35,15 +48,21 @@ fn queued_path_was_reused(
             .transpose()?
             .flatten()
     };
+    if let Some(row) = &current
+        && !store.library_accepts_work(&row.file.library_id.to_string())?
+    {
+        return Ok(true);
+    }
     let file_now = current.as_ref().map(|row| row.file.file_id.to_string());
     let file_changed = match (entry.file_id.as_deref(), file_now.as_deref()) {
         // A different file owns the path now: the queued file was replaced.
         (Some(queued), Some(now)) => queued != now,
         // A file appeared where the queue recorded none: a new import claimed it.
         (None, Some(_)) => true,
-        // No file row: either the path never was a Library file, or the accepted
-        // deletion intent already removed the row. The bytes are still ours.
-        (_, None) => false,
+        // Losing a previously owned row (for example during Library removal)
+        // revokes this intent's permission to delete the remaining bytes.
+        (Some(_), None) => true,
+        (None, None) => false,
     };
     let source_changed = if let Some(row) = &current {
         match library::observe_source(&row.file.path) {
@@ -78,8 +97,26 @@ fn abandon_queued_deletion(
     entry: &store::QueuedFileDeletion,
 ) -> Result<(), store::StoreError> {
     let path = entry.path.as_str();
-    tracing::warn!(path = %path, "待删除路径已被新文件复用，放弃删除");
+    tracing::warn!(path = %path, "待删除路径身份或 Library 状态已改变，放弃删除");
     store.abandon_file_deletion(entry)
+}
+
+/// Freeze rejects new deletion admissions. Close the operations already holding
+/// claims, including those that removed their live rows before freeze began.
+pub(crate) fn close_library_deletions(
+    store: &Store,
+    operation: &str,
+) -> Result<(), store::StoreError> {
+    let roots = store.removal_roots(operation)?;
+    for (key, claim) in claims::active_path_claims() {
+        if roots
+            .iter()
+            .any(|root| std::path::Path::new(&key).starts_with(root))
+        {
+            drop(claim.lock());
+        }
+    }
+    Ok(())
 }
 
 /// M6: retry every queued Library file deletion. Filesystem work happens

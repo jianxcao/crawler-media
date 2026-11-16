@@ -17,6 +17,10 @@ impl Fixture {
     }
 
     fn with_alias(alias: bool) -> Self {
+        Self::at_path(alias, "file.mkv")
+    }
+
+    fn at_path(alias: bool, relative: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
         let root = dir.path().join("owned");
@@ -57,7 +61,8 @@ impl Fixture {
                 anilist_id: None,
             })
             .unwrap();
-        let path = root.join("file.mkv");
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"original").unwrap();
         let file = store::test_support::publish_fixture_file(
             &store,
@@ -216,7 +221,7 @@ fn stale_worker_cannot_drain_a_recreated_intent_with_the_same_file_identity() {
 
 #[cfg(unix)]
 #[test]
-fn durable_deletion_survives_retirement_of_its_library_root_alias() {
+fn library_removal_preserves_bytes_after_root_alias_retirement() {
     let f = Fixture::with_alias(true);
     let entry = f.queue();
     {
@@ -234,15 +239,118 @@ fn durable_deletion_survives_retirement_of_its_library_root_alias() {
         store
             .clean_library_removal(&operation.operation_id)
             .unwrap();
-        assert_eq!(
-            store.list_due_file_deletions(0).unwrap(),
-            vec![entry.clone()]
-        );
+        assert!(store.list_due_file_deletions(0).unwrap().is_empty());
     }
+    process_queued_deletion(&f.store, &entry, crate::job_loop::unix_now()).unwrap();
     retry_queued_deletions(&f.store).unwrap();
-    assert!(
-        !f.file.path.exists(),
-        "retired root alias hid the durable deletion"
-    );
+    assert_eq!(std::fs::read(&f.file.path).unwrap(), b"original");
     assert!(f.store.list_pending_file_deletions().unwrap().is_empty());
+}
+
+#[test]
+fn file_fact_removal_does_not_authorize_a_queued_unlink() {
+    let f = Fixture::new();
+    f.queue();
+    f.store
+        .delete_files(f.file.library_id, &[f.file.file_id])
+        .unwrap();
+    retry_queued_deletions(&f.store).unwrap();
+    assert_eq!(std::fs::read(&f.file.path).unwrap(), b"original");
+    assert!(f.store.list_pending_file_deletions().unwrap().is_empty());
+}
+
+#[test]
+fn removal_waits_for_an_admitted_file_deletion_before_finishing() {
+    struct NoFetch;
+    impl indexer::Fetcher for NoFetch {
+        fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+            Err(indexer::IndexerError::Fetch("network forbidden".into()))
+        }
+    }
+    let f = Fixture::at_path(false, "nested/file.mkv");
+    f.store
+        .create_library(
+            MediaKind::Tv,
+            "Nested TV",
+            &[f.file.path.parent().unwrap().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let entry = f.queue();
+    let state = crate::ApiState::new_arc(
+        f.store.clone(),
+        "secret".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(downloader::MemoryDownloader::new(
+            f._dir.path().join("stage"),
+        )),
+    )
+    .unwrap();
+    // Model an already admitted filesystem operation. Removal must close this
+    // existing path boundary before it reports completion; it must not hold a DB writer.
+    let claim = claims::path_claim(&entry.path_key);
+    let held = claim.lock();
+    // An admitted delete can finish its SQL before freeze, then continue sidecar
+    // cleanup. Its claim must be closed even though no file enters the snapshot.
+    f.store
+        .delete_files(f.file.library_id, &[f.file.file_id])
+        .unwrap();
+    f.store.abandon_file_deletion(&entry).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let operation =
+            crate::library_lifecycle::start_library_removal(&state, &f.file.library_id.to_string())
+                .unwrap();
+        let complete = || async {
+            loop {
+                let operation = f
+                    .store
+                    .library_removal(&operation.operation_id)
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(operation.state, "failed", "{:?}", operation.error);
+                if operation.state == "succeeded" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let premature = tokio::time::timeout(Duration::from_millis(100), complete()).await;
+        // Reads and unrelated writes remain available while the file boundary is busy.
+        f.store.put_setting("removal-test", "available").unwrap();
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(3), complete())
+            .await
+            .unwrap();
+        assert!(
+            premature.is_err(),
+            "removal completed before its admitted file operation"
+        );
+    });
+    process_queued_deletion(&f.store, &entry, crate::job_loop::unix_now()).unwrap();
+    assert_eq!(std::fs::read(&f.file.path).unwrap(), b"original");
+    assert!(f.store.list_pending_file_deletions().unwrap().is_empty());
+}
+
+#[test]
+fn frozen_library_preserves_queued_sidecars_without_file_rows() {
+    let f = Fixture::with_alias(cfg!(unix));
+    let path = f.file.path.with_extension("nfo");
+    std::fs::write(&path, b"metadata").unwrap();
+    let path = path.to_str().unwrap();
+    f.store
+        .enqueue_file_deletion_observed(
+            path,
+            "rename-left-behind-sidecar",
+            store::file_identity(path),
+        )
+        .unwrap();
+    f.store
+        .begin_library_removal(&f.file.library_id.to_string())
+        .unwrap();
+    retry_queued_deletions(&f.store).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"metadata");
 }

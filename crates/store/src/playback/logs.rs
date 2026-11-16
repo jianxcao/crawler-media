@@ -70,7 +70,7 @@ impl Store {
     }
 }
 
-fn map_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlayLogRow> {
+pub(super) fn map_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlayLogRow> {
     Ok(PlayLogRow {
         id: row.get(0)?,
         user_id: user_id_from(row, 1)?,

@@ -303,8 +303,10 @@ async fn chapter_batch_keeps_process_and_queue_limits() {
     assert_eq!(counts.failed, 0);
     assert_eq!(fixture.durable_total(), FILES);
     assert!(fixture.runner.max_active() <= 2);
-    assert!(fixture.service.published_images() >= FILES * TARGETS.len());
+    // Terminal DB rows precede the dispatcher's in-memory metrics. Join it before
+    // inspecting those metrics so the assertion cannot race a completed publish.
     let _ = fixture.service.shutdown().await;
+    assert!(fixture.service.published_images() >= FILES * TARGETS.len());
 }
 
 #[tokio::test]

@@ -171,11 +171,14 @@ impl Store {
         // destination). Shared and retained sources are never queued.
         for leftover in leftovers {
             let path = &leftover.path;
-            if let Err(error) = self.enqueue_file_deletion_observed(
-                &path.to_string_lossy(),
-                "rename-left-behind-sidecar",
-                leftover.identity,
-            ) {
+            if let Err(error) = self.with_library_write(|db| {
+                db.enqueue_file_deletion_owned(
+                    &path.to_string_lossy(),
+                    "rename-left-behind-sidecar",
+                    leftover.identity,
+                    Some(request.from_library_id),
+                )
+            }) {
                 tracing::error!(rename_id, path = %path.display(), %error,
                     "left-behind sidecar enqueue failed; rename intent kept for retry");
                 self.record_file_rename_failure(rename_id, now, &error.to_string())?;

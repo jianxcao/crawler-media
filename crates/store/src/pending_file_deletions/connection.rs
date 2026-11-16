@@ -2,22 +2,41 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    pub fn file_deletion_blocked(&self, path_key: &str) -> Result<bool, StoreError> {
+        let key = crate::path_key::canonical_recorded_key(self.library, path_key);
+        if let Some(library) = super::scope::owner(self.library, &key)? {
+            return match crate::library_write::publish::ensure_library_writable(
+                self.library,
+                &library,
+            ) {
+                Ok(()) => Ok(false),
+                Err(StoreError::Protected(_) | StoreError::Missing(_)) => Ok(true),
+                Err(error) => Err(error),
+            };
+        }
+        self.path_key_in_removal_scope(std::path::Path::new(&key))
+    }
+
     pub fn due_file_deletion(
         &self,
         path: &str,
         now: i64,
     ) -> Result<Option<QueuedFileDeletion>, StoreError> {
         Ok(self.library.query_row(
-            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
+            "SELECT path,file_id,library_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
              WHERE path_key=COALESCE((SELECT path_key FROM pending_file_deletions WHERE path=?1),norm_path_key(?1))
-               AND next_retry_at<=?2 AND attempts<?3",
+               AND next_retry_at<=?2 AND attempts<?3
+               AND NOT EXISTS (
+                   SELECT 1 FROM library_removals r
+                   WHERE r.library_id=pending_file_deletions.library_id)",
             params![path,now,MAX_FILE_DELETION_ATTEMPTS],
             |row| Ok(QueuedFileDeletion {
                 path:row.get(0)?, file_id:row.get(1)?,
-                file_size:row.get::<_,Option<i64>>(2)?.map(|v| v as u64),
-                file_inode:row.get::<_,Option<i64>>(3)?.map(|v| v as u64),
-                path_key:row.get(4)?,
-                deletion_id:row.get(5)?,
+                library_id:row.get(2)?,
+                file_size:row.get::<_,Option<i64>>(3)?.map(|v| v as u64),
+                file_inode:row.get::<_,Option<i64>>(4)?.map(|v| v as u64),
+                path_key:row.get(5)?,
+                deletion_id:row.get(6)?,
             }),
         ).optional()?)
     }
@@ -54,25 +73,42 @@ impl crate::LibraryConnection<'_> {
         reason: &str,
         identity: Option<(u64, Option<u64>)>,
     ) -> Result<(), StoreError> {
+        self.enqueue_file_deletion_owned(path, reason, identity, None)
+    }
+
+    pub(crate) fn enqueue_file_deletion_owned(
+        &self,
+        path: &str,
+        reason: &str,
+        identity: Option<(u64, Option<u64>)>,
+        owner: Option<domain::LibraryId>,
+    ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
-        let file_id: Option<String> = tx
+        let key = crate::path_key::canonical_recorded_key(&tx, path);
+        let file_info: Option<(String, String)> = tx
             .query_row(
-                "SELECT file_id FROM library_files
+                "SELECT file_id,library_id FROM library_files
                  WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
                 [path],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some(file_id) = &file_id {
+        let (file_id, library_id) = if let Some((file_id, library_id)) = file_info {
+            if owner.is_some_and(|owner| owner.to_string() != library_id) {
+                return Err(StoreError::Protected(
+                    "physical deletion owner changed".into(),
+                ));
+            }
+            crate::library_write::publish::ensure_library_writable(&tx, &library_id)?;
             let placing: bool = tx.query_row(
                 "SELECT publication_state='pending' FROM library_files WHERE file_id=?1",
-                [file_id],
+                [&file_id],
                 |row| row.get(0),
             )?;
             let renaming: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pending_file_renames WHERE file_id=?1)",
-                [file_id],
+                [&file_id],
                 |row| row.get(0),
             )?;
             if renaming || placing {
@@ -86,15 +122,29 @@ impl crate::LibraryConnection<'_> {
                     "file {file_id} has a rename or placement owner"
                 )));
             }
-        }
+            (Some(file_id), Some(library_id))
+        } else {
+            let library = owner
+                .map(|id| id.to_string())
+                .or(super::scope::owner(&tx, &key)?);
+            if let Some(library) = &library {
+                crate::library_write::publish::ensure_library_writable(&tx, library)?;
+            } else if self.file_deletion_blocked(&key)? {
+                return Err(StoreError::Protected(format!(
+                    "Library refuses physical deletion of {path}"
+                )));
+            }
+            (None, library)
+        };
         tx.execute(
-            "INSERT INTO pending_file_deletions (path, path_key, reason, file_id, file_size, file_inode, deletion_id)
-             VALUES (?1, norm_path_key(?1), ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO pending_file_deletions (path, path_key, reason, file_id, library_id, file_size, file_inode, deletion_id)
+             VALUES (?1, norm_path_key(?1), ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT DO NOTHING",
             params![
                 path,
                 reason,
                 file_id,
+                library_id,
                 identity.map(|(size, _)| size as i64),
                 identity.and_then(|(_, ino)| ino).map(|ino| ino as i64),
                 uuid::Uuid::new_v4().to_string(),
@@ -106,17 +156,21 @@ impl crate::LibraryConnection<'_> {
 
     pub fn list_due_file_deletions(&self, now: i64) -> Result<Vec<QueuedFileDeletion>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT path, file_id, file_size, file_inode, path_key, deletion_id FROM pending_file_deletions
-             WHERE next_retry_at <= ?1 AND attempts < ?2 ORDER BY next_retry_at",
+            "SELECT path, file_id, library_id, file_size, file_inode, path_key, deletion_id FROM pending_file_deletions
+             WHERE next_retry_at <= ?1 AND attempts < ?2
+             AND NOT EXISTS (
+                   SELECT 1 FROM library_removals r
+                   WHERE r.library_id=pending_file_deletions.library_id) ORDER BY next_retry_at",
         )?;
         let rows = stmt.query_map(params![now, MAX_FILE_DELETION_ATTEMPTS], |row| {
             Ok(QueuedFileDeletion {
                 path: row.get(0)?,
-                path_key: row.get(4)?,
-                deletion_id: row.get(5)?,
+                path_key: row.get(5)?,
+                deletion_id: row.get(6)?,
                 file_id: row.get(1)?,
-                file_size: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-                file_inode: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                library_id: row.get(2)?,
+                file_size: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                file_inode: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -128,14 +182,17 @@ impl crate::LibraryConnection<'_> {
         now: i64,
     ) -> Result<Option<QueuedFileDeletion>, StoreError> {
         Ok(self.library.query_row(
-            "SELECT path,file_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
-             WHERE path_key=?1 AND deletion_id=?2 AND next_retry_at<=?3 AND attempts<?4",
+            "SELECT path,file_id,library_id,file_size,file_inode,path_key,deletion_id FROM pending_file_deletions
+             WHERE path_key=?1 AND deletion_id=?2 AND next_retry_at<=?3 AND attempts<?4
+             AND NOT EXISTS (
+                   SELECT 1 FROM library_removals r
+                   WHERE r.library_id=pending_file_deletions.library_id)",
             params![entry.path_key,entry.deletion_id,now,MAX_FILE_DELETION_ATTEMPTS],
             |row| Ok(QueuedFileDeletion {
-                path:row.get(0)?, file_id:row.get(1)?,
-                file_size:row.get::<_,Option<i64>>(2)?.map(|v|v as u64),
-                file_inode:row.get::<_,Option<i64>>(3)?.map(|v|v as u64),
-                path_key:row.get(4)?, deletion_id:row.get(5)?,
+                path:row.get(0)?, file_id:row.get(1)?, library_id:row.get(2)?,
+                file_size:row.get::<_,Option<i64>>(3)?.map(|v|v as u64),
+                file_inode:row.get::<_,Option<i64>>(4)?.map(|v|v as u64),
+                path_key:row.get(5)?, deletion_id:row.get(6)?,
             }),
         ).optional()?)
     }

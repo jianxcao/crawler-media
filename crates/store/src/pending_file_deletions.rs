@@ -5,6 +5,8 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
+pub(crate) mod scope;
+
 /// The durable deletion owns this path until it is completed or explicitly
 /// abandoned. Source writers check this in their own write transaction.
 pub(crate) fn ensure_path_not_pending_deletion(
@@ -38,6 +40,7 @@ pub struct QueuedFileDeletion {
     pub path_key: String,
     pub deletion_id: String,
     pub file_id: Option<String>,
+    pub library_id: Option<String>,
     pub file_size: Option<u64>,
     pub file_inode: Option<u64>,
 }
@@ -60,6 +63,10 @@ pub fn file_identity(path: &str) -> Option<(u64, Option<u64>)> {
 }
 
 impl Store {
+    /// SQL-only deletion admission for an already resolved or recorded path key.
+    pub fn file_deletion_blocked(&self, path_key: &str) -> Result<bool, StoreError> {
+        self.with_library_read(|db| db.file_deletion_blocked(path_key))
+    }
     /// Read exactly one due intent; draining one path must not scan the queue.
     pub fn due_file_deletion(
         &self,

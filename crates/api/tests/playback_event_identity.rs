@@ -448,6 +448,7 @@ fn binding_unit_mismatch_is_ignored_at_decision_seam() {
         ledger_id: ledger,
         issued_at: 1_000,
         generation: 1,
+        last_event_sequence: None,
         state: store::PlaySessionIdState::Pending,
         media_id: domain::MediaId::new(),
         unit: domain::UnitKey::new(1, 2),

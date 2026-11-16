@@ -45,6 +45,7 @@ pub struct PlaySessionBinding {
     pub source_version: Option<String>,
     pub library_id: Option<String>,
     pub config_revision: i64,
+    pub last_event_sequence: Option<i64>,
 }
 
 impl Store {

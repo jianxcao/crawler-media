@@ -106,10 +106,14 @@ fn classify_with_session_id(
             // instead of dropping the first real position the user watched.
             PlaySessionIdState::Pending => EventDecision::Start,
             PlaySessionIdState::Active if same_session => EventDecision::Update,
+            // Sweeping an idle live row archives its interval, not the issued
+            // session. The Store's durable sequence watermark guards resumption.
+            PlaySessionIdState::Active if previous.is_none() => EventDecision::Start,
             _ => EventDecision::Ignore,
         },
         PlaybackEventKind::Stop => match b.state {
             PlaySessionIdState::Active if same_session => EventDecision::Stop,
+            PlaySessionIdState::Active if previous.is_none() => EventDecision::Stop,
             _ => EventDecision::Ignore,
         },
     }
