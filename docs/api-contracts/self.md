@@ -87,6 +87,8 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 每种 `kind` 可以有多个库（多根、可见性、刮削开关等）。完整字段见 [Store Library](<../../crates/store/src/libraries.rs>) 与 `GET /libraries`。
 
+管理员 `POST /libraries/{id}/media-info/refresh` 接受唯一 JSON 形状 `{mode:"missing"|"force",request_id:UUID,after?:file_id|null}`，缺失、未知模式或额外字段返回 422。`missing` 仅为媒体信息缺少或失效的在位文件入队，显式提交可重试之前失败的抓取；`force` 为本库全部已发布且在位文件重新读取媒体信息。两者跳过已有活动任务，不跨库扩展同一 Media 的文件；每请求最多检查 50 个文件并持久化入队，返回 `{mode,total,queued,skipped,next_cursor}`；客户端以同一 `request_id` 顺序请求到 `next_cursor=null`，重试同一操作不会重复抓取已经完成的文件（`total` 为本次遍历到的已发布文件数，包含跳过的失联文件；`queued` 为已持久化文件数，非完成数；各数字为本批计数，客户端累计）。未扫描的磁盘源变化返回 409 `library.probe_source_changed`，提示先扫描；不能以旧文件版本创建注定失效的任务。旧媒体信息保持可见直到成功替换；片头片尾和声纹仍服从库开关，不转换成显式标记刷新。此操作独立于 `/metadata/refresh` 的 TMDB 简介、海报、背景与 NFO 元数据刷新。
+
 ### Library 配置变更操作
 
 `GET /settings/metadata-language` 返回 `{language, revision, operations:[{library_id, operation_id, state, error}]}`；`PATCH /settings/metadata-language` 只接受 `{expected_revision, language}`，拒绝未知字段或缺失字段（400 `settings.invalid`）。revision 过期、已有互斥 Library 操作或非 ready 库返回 409 `settings.conflict`。语言实际改变时，在一个 `library.db` 事务内更新默认语言及 revision，并为每个 Library 登记可恢复的 `default_locale` 操作；有操作时返回 202，无变化或无库时返回 200。`PUT /settings/metadata` 不接受 `language`，返回 400 `settings.language_moved`。单库 `display_locale` 优先于实例默认语言；二者切换都重建唯一的查询投影。

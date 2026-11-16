@@ -30,6 +30,8 @@ pub mod clock;
 mod dispatch;
 mod lifecycle;
 mod markers;
+mod media_info;
+pub(crate) use media_info::MediaInfoRefreshError;
 pub mod policy;
 mod presence;
 mod probe;

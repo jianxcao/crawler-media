@@ -12,6 +12,7 @@ import { ChevronDownIcon, PlusIcon, SearchIcon, XIcon } from "@/components/icons
 import { LibraryFormDialog } from "@/components/library-form-dialog";
 import { LibraryCoverModal } from "@/components/library-cover-modal";
 import { LibraryOrganizeDialog } from "@/components/library-organize-dialog";
+import { LibraryMediaInfoDialog } from "@/components/library-media-info-dialog";
 import type { OrganizeRenameRequest } from "@/lib/library-organize";
 import {
   type LibraryRowActions,
@@ -94,6 +95,7 @@ export function LibraryManageView() {
   // 弹窗态：新增（"new"）/ 编辑（库对象）/ 关闭(null)
   const [editing, setEditing] = useState<MediaLibrary | "new" | null>(null);
   const [coverModalLibrary, setCoverModalLibrary] = useState<MediaLibrary | null>(null);
+  const [mediaInfoLibrary, setMediaInfoLibrary] = useState<MediaLibrary | null>(null);
   const [reorderOpen, setReorderOpen] = useState(false);
   const [organizing, setOrganizing] = useState<{
     library: MediaLibrary;
@@ -225,6 +227,7 @@ export function LibraryManageView() {
           if (ok) run(startLibraryMetadataRefresh(library.id));
         });
       },
+      onMediaInfo: setMediaInfoLibrary,
       onEdit: (library) => setEditing(library),
       onSetDefault: (library) => {
         void confirm({
@@ -341,6 +344,13 @@ export function LibraryManageView() {
   return (
     <div className="scroll-thin scroll-safe flex-1 overflow-y-auto pb-10">
       <PageNav title="媒体库管理" fallback={{ label: "媒体库", href: "/library" }} />
+
+      {mediaInfoLibrary && <LibraryMediaInfoDialog library={mediaInfoLibrary}
+        onClose={() => setMediaInfoLibrary(null)}
+        onSubmitted={(receipt) => {
+          toast.success(`已提交 ${receipt.queued} 个文件的媒体信息抓取，跳过 ${receipt.skipped} 个`);
+          reload();
+        }} />}
 
       {/* 页头：标题 + 说明，右侧是页面级动作「创建媒体库」（与首页「管理媒体库」
           同一位置约定：页面动作放标题行右端，顶栏只留返回与吸顶标题） */}

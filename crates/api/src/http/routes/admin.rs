@@ -176,6 +176,10 @@ pub(super) fn admin_library_routes() -> Router<ApiState> {
 pub(super) fn admin_metadata_routes() -> Router<ApiState> {
     Router::new()
         .route(
+            "/libraries/{id}/media-info/refresh",
+            post(library::refresh_library_media_info),
+        )
+        .route(
             "/libraries/{id}/metadata/refresh",
             post(library_scan::refresh_metadata),
         )

@@ -697,6 +697,15 @@ export interface MetadataRefreshReceipt {
   refreshed: number;
 }
 
+export type MediaInfoRefreshMode = "missing" | "force";
+
+export interface MediaInfoRefreshReceipt {
+  mode: MediaInfoRefreshMode;
+  total: number;
+  queued: number;
+  skipped: number;
+}
+
 // 筛选的纯逻辑放独立模块（lib/library-filter.ts）；这里原样再导出，
 // 调用方仍然只认 "@/lib/api/libraries" 一个入口。
 import {
@@ -1262,6 +1271,44 @@ export async function startLibraryMetadataRefresh(id: string): Promise<MetadataR
     }),
   );
   return refreshReceiptOf(data ?? {});
+}
+
+/** 用普通 HTTP 页面也可用的随机源生成一次媒体信息抓取的 UUID。 */
+export function createMediaInfoRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** 分批为本库文件抓取媒体流信息；同一 requestId 可重试已提交的批次。 */
+export async function refreshLibraryMediaInfo(
+  id: string,
+  mode: MediaInfoRefreshMode,
+  requestId: string = createMediaInfoRequestId(),
+): Promise<MediaInfoRefreshReceipt> {
+  const receipt: MediaInfoRefreshReceipt = { mode, total: 0, queued: 0, skipped: 0 };
+  let after: string | null = null;
+  const cursors = new Set<string>();
+  do {
+    const data: MediaInfoRefreshReceipt & { next_cursor: string | null } = await unwrap(request<ApiEnvelope<MediaInfoRefreshReceipt & { next_cursor: string | null }>>(
+      `/libraries/${id}/media-info/refresh`,
+      { method: "POST", body: JSON.stringify({ mode, request_id: requestId, after }) },
+    ));
+    if (!data || data.mode !== mode ||
+      ![data.total, data.queued, data.skipped].every(value => Number.isSafeInteger(value) && value >= 0) ||
+      data.total !== data.queued + data.skipped ||
+      (data.next_cursor !== null && (typeof data.next_cursor !== "string" || !data.next_cursor || cursors.has(data.next_cursor)))) {
+      throw new Error("媒体信息抓取响应格式错误");
+    }
+    receipt.total += data.total;
+    receipt.queued += data.queued;
+    receipt.skipped += data.skipped;
+    after = data.next_cursor;
+    if (after) cursors.add(after);
+  } while (after !== null);
+  return receipt;
 }
 
 /** 刷新单个条目的元数据（海报/背景/NFO；POST .../metadata/refresh）。 */

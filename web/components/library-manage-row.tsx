@@ -33,6 +33,7 @@ export interface LibraryRowActions {
   onToggleScan: (library: MediaLibrary) => void;
   onOpenPending: (library: MediaLibrary) => void;
   onToggleRefresh: (library: MediaLibrary) => void;
+  onMediaInfo: (library: MediaLibrary) => void;
   onOrganize: (library: MediaLibrary) => void;
   onReconcile: (library: MediaLibrary) => void;
   onConsolidate: (library: MediaLibrary) => void;
@@ -248,13 +249,7 @@ function StatusCell({ status }: { status: LibraryStatus }) {
   );
 }
 
-/**
- * 行尾 ··· 菜单：只保留新契约仍有后端支撑的条目——
- * 待处理（/unidentified 清单入口）/ 扫描库（POST /libraries/{id}/scan）/
- * 刷新元数据（POST /libraries/{id}/metadata/refresh）/ 编辑库 / 调整顺序。
- * 已删除端点的入口（整理文件名 / 生成章节 / 设默认 / 首页展示开关 / 删除库）
- * 按组件适配规则一并移除。
- */
+/** 行尾菜单分别提供文件扫描、媒体流信息抓取及作品元数据刷新。 */
 function RowMenu({
   library,
   actions,
@@ -300,6 +295,9 @@ function RowMenu({
             className={itemClass}
           >
             刷新元数据
+          </DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={() => actions.onMediaInfo(library)} className={itemClass}>
+            媒体信息抓取
           </DropdownMenu.Item>
           <DropdownMenu.Item onSelect={() => actions.onOrganize(library)} className={itemClass}>
             整理文件名

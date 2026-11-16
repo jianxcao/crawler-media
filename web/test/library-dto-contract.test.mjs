@@ -3,17 +3,17 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-async function loadLibraries(request) {
+async function loadLibraries(request, cryptoApi = globalThis.crypto) {
   const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
   const js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const module = { exports: {} };
-  new Function("require", "module", "exports", js)((dependency) => {
+  new Function("require", "module", "exports", "crypto", js)((dependency) => {
     if (dependency === "@/lib/http") return { request, resolveRequestUrl: (p) => p };
     if (dependency.endsWith("library-filter")) return { filterQuery: () => undefined };
     return {};
-  }, module, module.exports);
+  }, module, module.exports, cryptoApi);
   return module.exports;
 }
 
@@ -102,6 +102,50 @@ test("metadata refresh returns the synchronous refreshed count, not a fake job",
   assert.deepEqual(library, { refreshed: 3 });
   const item = await api.refreshItemMetadata("lib", "m");
   assert.deepEqual(item, { refreshed: 3 });
+});
+
+test("library media information refresh carries the chosen mode and reports durable queue counts", async () => {
+  const calls = [];
+  const receipt = { mode: "missing", total: 6, queued: 2, skipped: 4 };
+  const api = await loadLibraries(async (path, init) => {
+    calls.push({ path, init });
+    return envelope({ ...receipt, mode: JSON.parse(init.body).mode, next_cursor: null });
+  });
+  assert.deepEqual(await api.refreshLibraryMediaInfo("lib", "missing", "request-1"), receipt);
+  await api.refreshLibraryMediaInfo("lib", "force", "request-2");
+  assert.deepEqual(calls.map(call => [call.path, call.init.method, JSON.parse(call.init.body)]), [
+    ["/libraries/lib/media-info/refresh", "POST", { mode: "missing", request_id: "request-1", after: null }],
+    ["/libraries/lib/media-info/refresh", "POST", { mode: "force", request_id: "request-2", after: null }],
+  ]);
+  const broken = await loadLibraries(async () => envelope({ queued: true }));
+  await assert.rejects(broken.refreshLibraryMediaInfo("lib", "missing"), /响应格式错误/);
+});
+
+test("media information admission follows bounded pages and reuses the submission identity", async () => {
+  const calls = [];
+  const api = await loadLibraries(async (_path, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    return envelope({ mode: "force", total: 2, queued: body.after ? 1 : 2, skipped: body.after ? 1 : 0,
+      next_cursor: body.after ? null : "file-cursor" });
+  });
+  assert.deepEqual(await api.refreshLibraryMediaInfo("lib", "force", "batch"), { mode: "force", total: 4, queued: 3, skipped: 1 });
+  assert.deepEqual(calls, [
+    { mode: "force", request_id: "batch", after: null },
+    { mode: "force", request_id: "batch", after: "file-cursor" },
+  ]);
+});
+
+test("media information submission generates UUIDs on ordinary HTTP origins", async () => {
+  const ids = [];
+  const api = await loadLibraries(async (_path, init) => {
+    ids.push(JSON.parse(init.body).request_id);
+    return envelope({ mode: "force", total: 0, queued: 0, skipped: 0, next_cursor: null });
+  }, { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+  await api.refreshLibraryMediaInfo("lib", "force");
+  await api.refreshLibraryMediaInfo("lib", "force");
+  for (const id of ids) assert.match(id, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.notEqual(ids[0], ids[1]);
 });
 
 test("list endpoints reject a non-array payload instead of rendering empty", async () => {

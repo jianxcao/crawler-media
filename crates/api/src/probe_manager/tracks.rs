@@ -31,7 +31,7 @@ impl TracksProbe for FfprobeTracks {
     }
 }
 
-fn reusable_media_duration(
+pub(super) fn reusable_media_duration(
     store: &crate::Store,
     ledger_id: &str,
     source_version: &str,

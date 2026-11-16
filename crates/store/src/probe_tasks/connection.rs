@@ -2,6 +2,26 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    /// A skipped explicit request has no dispatch units. Its terminal receipt
+    /// preserves the admission decision without replacing a file's latest work.
+    pub fn record_media_info_refresh_skip(
+        &self,
+        id: &str,
+        media_id: &str,
+        scope_key: &str,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "INSERT INTO probe_jobs (
+                 id, kind, media_id, scope_key, status, total, error,
+                 created_at_ms, finished_at_ms
+             ) VALUES (?1, 'media_probe', ?2, ?3, 'cancelled', 0,
+                 'media_info_already_running', ?4, ?4)
+             ON CONFLICT(id) DO NOTHING",
+            params![id, media_id, scope_key, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn create_probe_job(
         &self,
         id: &str,

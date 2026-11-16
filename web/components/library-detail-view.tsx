@@ -10,6 +10,7 @@ import { useNavigate } from "react-router-dom";
 import { BrandLoader } from "@/components/brand-loader";
 import { useConfirm, useToast } from "@/components/feedback";
 import { refreshLibraryConfirm, scanLibraryConfirm } from "@/lib/library-confirm";
+import { LibraryMediaInfoDialog } from "@/components/library-media-info-dialog";
 import {
   MoreIcon,
   XIcon,
@@ -290,6 +291,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   );
   const navigate = useNavigate();
   const confirm = useConfirm();
+  const [mediaInfoOpen, setMediaInfoOpen] = useState(false);
   const toast = useToast();
   // 筛选态：首帧就从 URL 读，这样分享出去的链接一进来就是筛好的
   const [filter, setFilter] = useState<LibraryFilter>(() => readFilterFromUrl());
@@ -1373,6 +1375,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
             .catch((e) => setNotice((e as Error).message));
         });
       }}
+      onMediaInfo={() => setMediaInfoOpen(true)}
       pendingCount={pendingCount}
       onOpenPending={() => setIssueTab(pendingTab)}
       onEdit={() => setEditing(library)}
@@ -1701,6 +1704,12 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
           }}
         />
       )}
+      {canManageLibraries && mediaInfoOpen && <LibraryMediaInfoDialog library={library}
+        onClose={() => setMediaInfoOpen(false)}
+        onSubmitted={(receipt) => {
+          toast.success(`已提交 ${receipt.queued} 个文件的媒体信息抓取，跳过 ${receipt.skipped} 个`);
+          reload();
+        }} />}
     </div>
   );
 }
@@ -1720,6 +1729,7 @@ interface LibraryActionsMenuProps {
   pendingCount: number;
   onOpenPending: () => void;
   onToggleMetaRefresh: () => void;
+  onMediaInfo: () => void;
   onEdit: () => void;
   /**
    * 调用方仍传着「设为默认库」的完整实现（含二次确认），但菜单里目前没有这一项。
@@ -1748,6 +1758,7 @@ function LibraryActionsMenu({
   pendingCount,
   onOpenPending,
   onToggleMetaRefresh,
+  onMediaInfo,
   onEdit,
   onDelete,
   onCoverModal,
@@ -1800,6 +1811,9 @@ function LibraryActionsMenu({
           </DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onToggleMetaRefresh} className={itemClass}>
             刷新元数据
+          </DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={onMediaInfo} className={itemClass}>
+            媒体信息抓取
           </DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onEdit} className={itemClass}>
             编辑库

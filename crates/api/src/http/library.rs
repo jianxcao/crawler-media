@@ -2,7 +2,9 @@
 //! summaries. Entity CRUD lives in `library_config`, scans/refresh in `library_scan`,
 //! artwork in `library_artwork`, admin views in `library_admin`.
 
+mod media_info;
 mod probe;
+pub(crate) use media_info::refresh_library_media_info;
 pub(crate) use probe::{
     enqueue_probes_for_files, enqueue_probes_for_paths, ensure_probe_enqueued,
     ensure_probe_enqueued_blocking, probe_item,
