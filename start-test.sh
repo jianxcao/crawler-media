@@ -9,12 +9,14 @@
 #   ./start-test.sh stop           停止全部服务
 #   ./start-test.sh status         查看各服务状态
 #   ./start-test.sh logs           跟随查看后端日志（终端实时输出）
-#   ./start-test.sh clean-logs     清空全部测试日志（.test-logs/*.log）
+#   ./start-test.sh clean-logs     清空服务输出日志（~/Downloads/crawler-media/log/*.log）
 #
 # 选项:
 #   --clean / --clean-logs         显式指定清除日志（start/restart 已默认自动清理）
 #   --no-clean                     启动/重启时不清除旧日志
 #
+# 测试文件默认位于 ~/Downloads/crawler-media：data/ 数据，log/ 日志，run/ PID，qb/ 下载
+# 可用 TEST_ROOT 覆盖根目录；DATA_DIR、LOG_DIR、QB_HOST_DOWNLOADS 可分别覆盖。
 # 启动后访问:  http://127.0.0.1:3334   账号 admin / 密码 test-admin-secret-password
 # =============================================================================
 set -euo pipefail
@@ -24,27 +26,36 @@ BACKEND_PORT="${BACKEND_PORT:-18765}"
 FRONTEND_PORT="${FRONTEND_PORT:-3334}"
 QB_PORT="${QB_PORT:-8080}"
 MOCK_PORT="${MOCK_PORT:-18090}"
-DATA_DIR="${DATA_DIR:-data/live}"
 TOKEN="${TOKEN:-changeme}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}"
 QB_USER="${QB_USER:-admin}"
 QB_PASS="${QB_PASS:-adminadmin}"
 QB_DOCKER="${QB_DOCKER:-crawler-media-qb}"
-QB_HOST_DOWNLOADS="${QB_HOST_DOWNLOADS:-$HOME/Downloads/crawler-media-test/qb}"
-MOCK_SITE_PY="${MOCK_SITE_PY:-/tmp/mock-site/server.py}"
 
 # 仓库根目录（脚本所在位置）
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_BIN="$ROOT_DIR/target/debug/crawler-media"
 FRONTEND_DIR="$ROOT_DIR/web"
 
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+  esac
+}
+
+TEST_ROOT="$(absolute_path "${TEST_ROOT:-$HOME/Downloads/crawler-media}")"
+DATA_DIR="$(absolute_path "${DATA_DIR:-$TEST_ROOT/data}")"
+LOG_DIR="$(absolute_path "${LOG_DIR:-$TEST_ROOT/log}")"
+RUN_DIR="$TEST_ROOT/run"
+QB_HOST_DOWNLOADS="$(absolute_path "${QB_HOST_DOWNLOADS:-$TEST_ROOT/qb}")"
+MOCK_SITE_PY="$(absolute_path "${MOCK_SITE_PY:-$TEST_ROOT/mock-site/server.py}")"
+
 # 非交互 shell 常缺的 PATH：rustup cargo + homebrew node + docker
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 command -v cargo >/dev/null 2>&1 || { echo "[!!] 找不到 cargo，请先安装 Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"; exit 1; }
 
 # 日志文件
-LOG_DIR="$ROOT_DIR/.test-logs"
-mkdir -p "$LOG_DIR"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 MOCK_LOG="$LOG_DIR/mock.log"
@@ -74,7 +85,7 @@ clean_logs() {
       for f in "$BACKEND_LOG" "$FRONTEND_LOG" "$MOCK_LOG"; do
         [[ -f "$f" ]] && : > "$f"
       done
-      log "已清空所有测试日志 (.test-logs/*.log)"
+      log "已清空所有服务输出日志 ($LOG_DIR/*.log)"
       ;;
   esac
 }
@@ -89,7 +100,21 @@ local_curl() {
   command curl -q --noproxy "*" --connect-timeout 1 --max-time 2 "$@"
 }
 
-pid_file() { echo "$LOG_DIR/$1.pid"; }
+pid_file() { echo "$RUN_DIR/$1.pid"; }
+
+prepare_runtime_dirs() {
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$QB_HOST_DOWNLOADS"
+  # 后端日志写入与日志导出都使用 data/logs，将它接到同一个日志目录。
+  local app_logs="$DATA_DIR/logs"
+  if [[ -e "$app_logs" || -L "$app_logs" ]]; then
+    if [[ ! "$app_logs" -ef "$LOG_DIR" ]]; then
+      fail "$app_logs 已存在且未指向 ${LOG_DIR}；请停服整理该目录后再启动"
+      return 1
+    fi
+  else
+    ln -s "$LOG_DIR" "$app_logs"
+  fi
+}
 
 read_pid() {
   local file="$1"
@@ -145,7 +170,8 @@ launch() {
 # -------------------------------- 各服务 ------------------------------------
 start_backend() {
   local force="${1:-false}"
-  if [[ "$force" != "true" ]] && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
+  prepare_runtime_dirs
+  if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
     log "后端已在运行且健康 (端口 $BACKEND_PORT)，跳过重复启动"
     return 0
   fi
@@ -157,7 +183,7 @@ start_backend() {
   free_port "$BACKEND_PORT"
 
   log "构建后端..."
-  (cd "$ROOT_DIR" && cargo build -p api 2>>"$BACKEND_LOG") || { fail "构建失败，见 $BACKEND_LOG"; return 1; }
+  (cd "$ROOT_DIR" && python3 scripts/with-build-lock.py cargo build -j4 -p api >>"$BACKEND_LOG" 2>&1) || { fail "构建失败，见 $BACKEND_LOG"; return 1; }
   
   # 确保端口彻底释放，无任何 TIME_WAIT 或残留监听
   free_port "$BACKEND_PORT"
@@ -167,7 +193,7 @@ start_backend() {
   launch backend env \
     RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
     CRAWLER_MEDIA_FFMPEG_LOG_LEVEL="${CRAWLER_MEDIA_FFMPEG_LOG_LEVEL:-verbose}" \
-    CRAWLER_MEDIA_DATA="$ROOT_DIR/$DATA_DIR" \
+    CRAWLER_MEDIA_DATA="$DATA_DIR" \
     CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE="1" \
     CRAWLER_MEDIA_TOKEN="$TOKEN" \
     CRAWLER_MEDIA_ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}" \
@@ -330,6 +356,7 @@ status_all() {
     mock="· 进程在、端口未响应 (http://127.0.0.1:$MOCK_PORT)"
   fi
   printf '  后端: %s\n  前端: %s\n  qB:   %s\n  mock: %s\n' "$backend" "$frontend" "$qb" "$mock"
+  printf '\n  数据目录: %s\n  日志目录: %s\n  下载目录: %s\n' "$DATA_DIR" "$LOG_DIR" "$QB_HOST_DOWNLOADS"
   printf '\n  登录页面: http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
   printf '  API 接口: http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
 }
@@ -401,7 +428,7 @@ case "$ACTION" in
     tail -f "$BACKEND_LOG"
     ;;
   *)
-    sed -n '2,19p' "$0"
+    sed -n '2,21p' "$0"
     exit 1
     ;;
 esac

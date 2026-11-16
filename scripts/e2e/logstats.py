@@ -1,5 +1,16 @@
-import re,statistics
-L=open('/Users/jianxcao/work/fun/crawler-media/.test-logs/backend.log',errors='ignore').read().splitlines()
+import os,re,statistics,sys
+from pathlib import Path
+
+repo = Path(__file__).resolve().parents[2]
+test_root = Path(os.environ.get("TEST_ROOT", Path.home() / "Downloads/crawler-media"))
+if not test_root.is_absolute():
+    test_root = repo / test_root
+log_dir = Path(os.environ.get("LOG_DIR", test_root / "log"))
+if not log_dir.is_absolute():
+    log_dir = repo / log_dir
+log_file = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else log_dir / "backend.log"
+# backend.log 收集终端输出，tracing 的颜色码会夹在字段名和等号之间。
+L=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', log_file.read_text(errors='ignore')).splitlines()
 def st(name,vals):
     v=sorted(vals)
     if not v: print(name,'n=0');return

@@ -101,7 +101,7 @@ python3 scripts/with-build-lock.py pnpm --dir web build
 ## 调试提示
 
 - **卡住/超时先找根因**，不要加大超时或重试掩盖：查锁等待（writer 锁是否跨 await/IO 持有、`store_write` 1s writer 准入超时）、读池耗尽（目标库 reader 是否被长查询占满，library 容量为 8）、远程读闸门排队、任务未被取消。
-- 日志：`.test-logs/backend.log`；`python3 scripts/e2e/logstats.py` 统计慢请求/5xx/探测阶段耗时。
+- 本地测试数据：`~/Downloads/crawler-media/data/`；日志：`~/Downloads/crawler-media/log/backend.log`（可用 `TEST_ROOT` / `LOG_DIR` 覆盖）；`python3 scripts/e2e/logstats.py [日志路径]` 统计慢请求/5xx/探测阶段耗时。
 - E2E 前 `touch crates/api/build.rs` 刷新版本戳（`GIT_HASH`），再确认 `/api/v1/health` 的 commit 等于 `git rev-parse --short HEAD`。
 
 ## 工作流程

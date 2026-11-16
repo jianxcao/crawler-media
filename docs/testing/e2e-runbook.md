@@ -32,7 +32,23 @@ python3 scripts/with-build-lock.py --exclusive pnpm --dir web build
 
 ## 启动与真实媒体链
 
-`start-test.sh start|restart|restart-all|stop|status|logs` 管理本地开发实例，默认后端 `:18765`、前端 `:3334`。使用前检查脚本配置、现有进程与 `DATA_DIR`：脚本实际拼接 `$ROOT_DIR/$DATA_DIR`，因此必须提供从仓库根到隔离目录的相对路径，不能直接填绝对路径。它还会自行构建并释放指定端口；严格资源受限的验收应先按上文受锁构建，再用已构建二进制 `serve` 和绝对 `CRAWLER_MEDIA_DATA` 启动独立实例。不要重启另一轮正在使用的实例。
+`start-test.sh start|restart|restart-all|stop|status|logs` 管理本地开发实例，默认后端 `:18765`、前端 `:3334`。测试文件统一位于 `~/Downloads/crawler-media/`：
+
+```text
+crawler-media/
+├── data/       数据库、缓存、图片等应用数据
+│   └── logs    指向 log/ 的符号链接
+├── log/        backend.log、frontend.log、mock.log 及应用的滚动日志
+├── run/        服务 PID 文件
+├── qb/         qBittorrent 下载文件（容器中的 /downloads）
+└── mock-site/  可选的 mock 站点 server.py
+```
+
+`TEST_ROOT` 可指定另一套测试根目录，`DATA_DIR`、`LOG_DIR`、`QB_HOST_DOWNLOADS`、`MOCK_SITE_PY` 可单独覆盖；绝对路径直接使用，相对路径从仓库根目录解析，与调用时的工作目录无关。例如 `TEST_ROOT=/tmp/crawler-e2e-XXXXXX ./start-test.sh restart` 使用独立实例目录。`status` 显示实际数据、日志和下载路径；`python3 scripts/e2e/logstats.py [日志路径]` 默认读取相同 `TEST_ROOT` / `LOG_DIR` 下的 `backend.log`。
+
+脚本在启动时将 `data/logs` 链接到 `log/`，应用日志导出也读取该目录。若已有不同的 `data/logs` 文件或目录，脚本会报错并保留内容；停服整理后再启动。`clean-logs` 清空三个服务输出日志，应用滚动日志保留。脚本不搬移旧数据库或日志；已有 qB 容器的 `/downloads` 挂载需与 `QB_HOST_DOWNLOADS` 一致。
+
+使用前检查脚本配置、现有进程与目录。后端构建通过 `scripts/with-build-lock.py` 使用普通构建槽与 `-j4`；脚本还会释放指定端口。严格性能测量按上文独占构建，再用已构建二进制 `serve` 和绝对 `CRAWLER_MEDIA_DATA` 启动独立实例。不要重启另一轮正在使用的实例。
 
 验收前记录实际代码与构建身份，刷新 `crates/api/build.rs` 的构建戳后按锁规则构建，核对 `/api/v1/health` 与实际被测二进制一致。运行报告需要可追溯身份，但本手册不固定某个提交为永久验收依据。
 
