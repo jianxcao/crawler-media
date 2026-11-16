@@ -38,7 +38,7 @@ impl CatalogGet for Source {
 #[test]
 fn shared_failures_retain_not_found_or_transport_category_and_allow_recovery() {
     for missing in [false, true] {
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let source = Arc::new(FiniteFailure {
             state: AtomicUsize::new(0),
             missing,

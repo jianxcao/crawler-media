@@ -15,7 +15,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
         Self {
             dir,

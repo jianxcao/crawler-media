@@ -9,9 +9,7 @@ use store::{Db, Store, StoreError};
 
 #[test]
 fn opposite_read_orders_complete_without_reader_pool_deadlock() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     for db in [Db::Library, Db::App] {
         store
@@ -68,9 +66,7 @@ fn opposite_read_orders_complete_without_reader_pool_deadlock() {
 
 #[test]
 fn undeclared_database_is_rejected_even_when_the_callback_ignores_the_error() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let result = store.with_read_snapshot(&[Db::Library], Duration::from_secs(1), || {
         store.list_libraries().unwrap();
@@ -86,9 +82,7 @@ fn undeclared_database_is_rejected_even_when_the_callback_ignores_the_error() {
 
 #[test]
 fn nested_declarations_may_narrow_but_cannot_expand_the_outer_stage() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let user = domain::UserId::new();
     store
@@ -114,9 +108,7 @@ fn nested_declarations_may_narrow_but_cannot_expand_the_outer_stage() {
 
 #[test]
 fn externally_bound_readers_enforce_the_same_database_order() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let lease = store.reader_pool(Db::App).try_checkout().unwrap();
     let reversed = store
@@ -135,9 +127,7 @@ fn externally_bound_readers_enforce_the_same_database_order() {
 
 #[test]
 fn library_only_stages_keep_all_eight_readers_without_borrowing_other_databases() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     let mut other_leases = Vec::new();
     for db in [Db::App, Db::Subscribe, Db::Cache] {

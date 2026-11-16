@@ -3,9 +3,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use store::{Db, Store};
 
 fn fixture() -> tempfile::TempDir {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    tempfile::tempdir_in(root).unwrap()
+    tempfile::tempdir().unwrap()
 }
 
 fn one_reader(store: &Store, db: Db) {

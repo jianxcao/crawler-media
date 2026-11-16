@@ -34,8 +34,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
         let state = ApiState::new(
             store,

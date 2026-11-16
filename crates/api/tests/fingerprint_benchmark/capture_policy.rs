@@ -36,9 +36,7 @@ fn with_one_window(mut evaluation: BenchmarkSession, head: bool) -> BenchmarkSes
 fn natural_retry_reuses_valid_heads_and_rejects_claimed_recapture() {
     let root = tempfile::tempdir().unwrap();
     let mut opts = options(root.path(), &[1, 2, 3]);
-    let failed = with_one_window(session(opts.clone(), false), true)
-        .run()
-        .unwrap();
+    let failed = run(with_one_window(session(opts.clone(), false), true));
     assert!(!failed.wallclock_complete);
     opts.run_id = "retry".into();
     opts.scenario = "retry".into();
@@ -71,7 +69,7 @@ fn natural_retry_reuses_valid_heads_and_rejects_claimed_recapture() {
     }
     let evaluation = with_one_window(session(opts, false), false);
     let store = evaluation.state.store().clone();
-    let run = evaluation.run().unwrap();
+    let run = run(evaluation);
     assert!(
         run.wallclock_complete,
         "{:?} {:?}",

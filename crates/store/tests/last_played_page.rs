@@ -68,7 +68,7 @@ fn favorite(store: &Store, user: UserId, media: MediaId, s: i32, e: i32, at: i64
 #[test]
 fn last_played_pages_cross_from_played_to_unplayed() {
     use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     let store = Store::open(&data).unwrap();
     let root = tmp.path().join("a");
@@ -123,7 +123,7 @@ fn last_played_pages_cross_from_played_to_unplayed() {
 #[test]
 fn last_played_sort_has_no_temp_btree() {
     use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     let store = Store::open(&data).unwrap();
     let root = tmp.path().join("a");
@@ -187,7 +187,7 @@ fn mark_show(store: &Store, user: UserId, media: MediaId, at: i64) {
 #[test]
 fn last_played_tiers_keep_segment_tie_directions_and_watch_filters() {
     use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");
@@ -312,7 +312,7 @@ fn tier_fixtures(store: &Store, user: UserId, root: &std::path::Path) -> Vec<(i3
 #[test]
 fn last_played_titles_and_bucket_cursors_match_pages_with_and_without_user() {
     use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");

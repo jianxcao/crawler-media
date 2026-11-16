@@ -20,7 +20,7 @@ impl CatalogGet for FiniteOrigin {
 }
 #[test]
 fn simultaneous_cold_reads_share_a_complete_catalog_result() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let tmdb = Arc::new(
         Tmdb::new_at(
             FiniteOrigin(AtomicBool::new(true)),
@@ -71,7 +71,7 @@ impl CatalogGet for SharedBoundedOrigin {
 fn unrelated_cold_keys_keep_complete_results_under_a_fixed_upstream_bound() {
     // Candidate fixed source budget=8, with enough bounded pending capacity for16.
     // Parent may choose a smaller fixed bound; raising this assertion is not a fix.
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let origin = Arc::new(BoundedOrigin {
         active: std::sync::atomic::AtomicUsize::new(0),
         peak: std::sync::atomic::AtomicUsize::new(0),

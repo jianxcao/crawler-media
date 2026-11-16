@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[path = "themes_samples.rs"]
+mod samples;
 
 struct Themes {
     forbid_seed_reads: AtomicBool,
@@ -126,6 +128,9 @@ async fn competing_theme_rebuild_revisits_verified_files_with_their_own_jobs() {
         } {
             for episode in first..=last {
                 let row = row(&store, media, &root, 1, episode);
+                if incremental && episode > 3 {
+                    samples::seed_narrow_intro(&store, &row, episode);
+                }
                 manager
                     .enqueue_direct_fingerprint(
                         unit(row.clone()),
@@ -166,7 +171,7 @@ async fn competing_theme_rebuild_revisits_verified_files_with_their_own_jobs() {
         let final_result = outcome(&store, &rows[0]);
         assert_eq!(
             final_result.1["status"], "partial",
-            "old Intro must be reviewed while independent Outro stays verified"
+            "old Intro must be reviewed while independent Outro stays verified; incremental={incremental}",
         );
         assert_eq!(final_result.1["kinds"]["intro"]["status"], "uncertain");
         assert_eq!(final_result.1["kinds"]["outro"]["status"], "verified");

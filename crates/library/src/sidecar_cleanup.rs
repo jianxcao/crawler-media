@@ -6,7 +6,12 @@
 //! Only known sidecar extensions are ever deleted; a directory containing any
 //! other file or any subdirectory is left untouched.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
+
+use crate::is_video_file;
 
 const SIDECAR_EXT: &[&str] = &[
     "nfo", "jpg", "jpeg", "png", "webp", "gif", "tbn", "bif", "srt", "ass", "ssa", "sub", "idx",
@@ -35,39 +40,62 @@ fn remove(path: &Path, removed: &mut Vec<PathBuf>) {
     }
 }
 
+fn read_entries(dir: &Path) -> Option<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect()
+    });
+    match entries {
+        Ok(entries) => Some(entries),
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), %error, "读取附属文件目录失败，停止清理");
+            None
+        }
+    }
+}
+
+fn matches_stem(name: &OsStr, stem: &OsStr) -> bool {
+    name.as_encoded_bytes()
+        .strip_prefix(stem.as_encoded_bytes())
+        .is_some_and(|suffix| matches!(suffix.first(), Some(b'.' | b'-')))
+}
+
 /// Clean up after `deleted` (already removed) inside Library `root`.
 /// Returns every path removed (files and directories).
 pub fn prune_after_delete(deleted: &Path, root: &Path) -> Vec<PathBuf> {
     let mut removed = Vec::new();
-    let (Some(dir), Some(stem)) = (
-        deleted.parent(),
-        deleted.file_stem().and_then(|s| s.to_str()),
-    ) else {
+    let (Some(dir), Some(stem)) = (deleted.parent(), deleted.file_stem()) else {
         return removed;
     };
     if !dir.starts_with(root) {
         return removed;
     }
-    let own_prefixes = [format!("{stem}."), format!("{stem}-")];
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if path.is_file()
-                && is_sidecar(&path)
-                && own_prefixes.iter().any(|p| name.starts_with(p.as_str()))
-            {
-                remove(&path, &mut removed);
-            }
+    let Some(entries) = read_entries(dir) else {
+        return removed;
+    };
+    let remaining_stems: Vec<&OsStr> = entries
+        .iter()
+        .filter(|path| is_video_file(path))
+        .filter_map(|path| path.file_stem())
+        .collect();
+    for path in &entries {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        // The longest matching video stem owns a sidecar. Equal stems share it.
+        let shared = remaining_stems
+            .iter()
+            .any(|other| other.len() >= stem.len() && matches_stem(name, other));
+        if path.is_file() && is_sidecar(path) && matches_stem(name, stem) && !shared {
+            remove(path, &mut removed);
         }
     }
     let mut current = dir.to_path_buf();
     while current != root && current.starts_with(root) {
-        let Ok(entries) = std::fs::read_dir(&current) else {
+        let Some(entries) = read_entries(&current) else {
             break;
         };
-        let entries: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         if entries.iter().any(|p| !p.is_file() || !is_sidecar(p)) {
             break;
         }

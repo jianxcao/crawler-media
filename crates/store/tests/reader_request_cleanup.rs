@@ -11,9 +11,7 @@ use std::{
 use store::{Db, LibraryReadError, QueryBudget, Store, StoreError};
 
 fn fixture() -> (tempfile::TempDir, Store) {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store
         .configure_reader_pool_size(Db::Library, NonZeroUsize::new(1).unwrap())

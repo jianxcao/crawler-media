@@ -125,7 +125,7 @@ const WALL_API_PAGE_SIZE = 200;
 /**
  * 游标链尾还有没有下一页。
  *
- * 约定：`cursors[i]` 是第 i 页的起始游标（0 号恒为 null，即第一页不需要游标），
+ * 约定：`cursors[i]` 是第 i 页的起始游标（跳档后 0 号是该档的游标），
  * 每取完一页就把它的 `next_cursor` 写进 `cursors[i + 1]`。因此最后一个元素就是
  * 「下一页的游标」，null = 已经到底（或还没开始取，此时也当作没有更多）。
  */
@@ -348,7 +348,10 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const [galleryHasMore, setGalleryHasMore] = useState(snapshot?.galleryHasMore ?? false);
   // 当前图廊窗口在整份排序里的起点（0 = 墙首；「回到上次位置」跳过来后不为 0）。
   // 图廊也走**游标链**：galleryCursors[i] 是第 i 页的起始 cursor（第 0 项 = 窗口起点）
-  const galleryCursors = useRef<(string | null)[]>([null]);
+  const galleryCursors = useRef<(string | null)[]>(
+    snapshot ? [...snapshot.galleryCursors] : [null],
+  );
+  const galleryWindowSort = useRef<string | null>(snapshot?.gallerySortKey ?? null);
   // 图廊窗口第一组在整份排序里的绝对位置（前缀模型下 0，跳档后是该档起点）
   const [galleryOrigin, setGalleryOrigin] = useState(snapshot?.galleryStart ?? 0);
   // 已请求到第几个条目（绝对位置，按页长推进，不按拿到的组数——没图的条目也占一组）
@@ -372,19 +375,22 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const wallOrder = useRef<LibraryItemOrder | undefined>(snapshot?.wallOrder);
   /**
    * 光标链：`wallCursors[i]` 是第 i 页（每页 `WALL_API_PAGE_SIZE` 条）的起始游标，
-   * 0 号恒为 `null`（第一页没有游标）。
+   * 0 号是窗口起点：库首页为 `null`，跳档后是该档游标。
    *
    * 服务端只签发 forward-only 的键集游标（`after`），所以这条链只能从 0 往后走。
    * 走过的页把游标记下来：轮询用同一批游标并行重拉同一个前缀，追加页直接取
    * 链尾。排序 / 方向 / 筛选一变，链就作废（游标绑定的是那一份有序名单）。
    */
-  const wallCursors = useRef<(string | null)[]>([null]);
+  const wallCursors = useRef<(string | null)[]>(
+    snapshot ? [...snapshot.wallCursors] : [null],
+  );
   const snapshotRef = useRef<LibraryDetailSnapshot | null>(null);
   snapshotRef.current = libraries
     ? {
         libraries,
         items,
         wallHasMore,
+        wallCursors: [...wallCursors.current],
         wallIndex,
         // 窗口起点：前缀模型下是 0，跳档后是该档在整份排序里的位置
         wallStart: wallOrigin,
@@ -396,6 +402,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         wallOffset: 0,
         galleryGroups,
         galleryHasMore,
+        galleryCursors: [...galleryCursors.current],
+        gallerySortKey: galleryWindowSort.current,
         galleryStart: galleryOrigin,
         galleryLoaded: galleryLoaded.current,
         stale: snapshotStale,
@@ -429,32 +437,42 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    * `next_cursor`。返回整个前缀的条目。
    */
   const loadWallPages = useCallback(
-    async (pages: number): Promise<LibraryItem[]> => {
+    async (pages: number, seq: number): Promise<LibraryItem[]> => {
+      // 每轮只使用自己的查询和游标链，旧响应不能污染新排序/筛选的窗口。
+      const cursors = [...wallCursors.current];
+      const query = {
+        sort: wallSort.current,
+        order: wallOrder.current,
+        filter: wallFilter.current,
+        limit: WALL_API_PAGE_SIZE,
+      };
       const fetchAt = (page: number, cursor: string | null) =>
         listLibraryItems(libraryId, {
-          sort: wallSort.current,
-          order: wallOrder.current,
-          filter: wallFilter.current,
-          limit: WALL_API_PAGE_SIZE,
+          ...query,
           cursor,
         }).then((result) => {
-          wallCursors.current[page] = cursor;
-          wallCursors.current[page + 1] = result.next_cursor;
+          cursors[page] = cursor;
+          cursors[page + 1] = result.next_cursor;
           return result.items;
         });
-      const known = Math.min(pages, wallCursors.current.length - 1);
+      const known = Math.min(pages, cursors.length - 1);
       const prefix: LibraryItem[] = [];
       const head = await Promise.all(
         Array.from({ length: known }, (_, page) =>
-          fetchAt(page, wallCursors.current[page] ?? null),
+          fetchAt(page, cursors[page] ?? null),
         ),
       );
       for (const items of head) prefix.push(...items);
       for (let page = known; page < pages; page += 1) {
+        if (seq !== reloadSeq.current) return [];
         // 上一页已经到底（next_cursor 为 null）：没有更后面的页了
-        if (page > 0 && wallCursors.current[page] === null) break;
-        prefix.push(...(await fetchAt(page, wallCursors.current[page] ?? null)));
+        if (page > 0 && cursors[page] === null) break;
+        prefix.push(...(await fetchAt(page, cursors[page] ?? null)));
       }
+      if (seq !== reloadSeq.current) return [];
+      const end = cursors.indexOf(null, 1);
+      cursors.length = end < 0 ? Math.min(cursors.length, pages + 1) : end + 1;
+      wallCursors.current = cursors;
       return prefix;
     },
     [libraryId],
@@ -465,17 +483,19 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    * 只有这两趟，整轮 reload 与「只换排序」（reloadWall）共用。
    * 返回 [前缀条目, 索引档]。
    */
-  const fetchWall = useCallback(() => {
+  const fetchWall = useCallback((seq: number) => {
     // 已加载到第几条 → 要走几页；前缀模型下这就是「这次要重拉的前缀有多长」
     const pages = Math.max(1, Math.ceil(wallLoaded.current / WALL_API_PAGE_SIZE));
     // 跳转索引与当前排序、当前筛选同口径——三者读的是同一份有序名单。
     // 只有三种排序分得出有意义的档：首字母 / 月份 / 评分档。其余（最近添加、
     // 片长、体积、最近观看）轨道本来就不显示，索引这一趟请求也省了
     const indexKind = INDEXED_SORTS[wallSort.current];
+    const filter = wallFilter.current;
+    const order = wallOrder.current;
     const fetchIndex = (): Promise<LibraryIndexEntry[]> =>
       indexKind === undefined
         ? Promise.resolve([])
-        : listLibraryItemIndex(libraryId, indexKind, wallFilter.current, wallOrder.current).catch(
+        : listLibraryItemIndex(libraryId, indexKind, filter, order).catch(
             () => [],
           );
     // 超管不在这个库的浏览范围内时海报墙接口按 404 拒绝（管理视图不渲染墙），
@@ -483,12 +503,15 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     // 索引**排在条目页之后**发、不并发：两趟都要在服务端把整库标题（或上映日）
     // 过一遍，同时飞出去会在后端互相拖慢——SQLite 逐行取数与事件循环争 GIL，
     // 9500 部的库实测两趟并发各要 250 ms 以上，串着走一共不到 100 ms
-    return loadWallPages(pages)
+    return loadWallPages(pages, seq)
       .catch((e) => {
         if (e instanceof HttpError && e.status === 404) return [] as LibraryItem[];
         throw e;
       })
-      .then((libraryItems) => fetchIndex().then((index) => [libraryItems, index] as const));
+      .then((libraryItems) =>
+        (seq === reloadSeq.current ? fetchIndex() : Promise.resolve([]))
+          .then((index) => [libraryItems, index] as const),
+      );
   }, [libraryId, loadWallPages]);
 
   const reload = useCallback(() => {
@@ -501,7 +524,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         if (lseq === listsSeq.current) setLibraries((prev) => prev ? keepIfEqual(prev, libs) : libs);
         return libs;
       }),
-      fetchWall(),
+      fetchWall(seq),
       canManageLibraries
         ? keepOnError(listUnidentifiedLibraryFiles(libraryId))
         : Promise.resolve([]),
@@ -552,7 +575,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    */
   const reloadWall = useCallback(() => {
     const seq = ++reloadSeq.current;
-    fetchWall()
+    fetchWall(seq)
       .then(([libraryItems, index]) => {
         if (seq !== reloadSeq.current) return;
         setItems((prev) => reconcileList(prev, libraryItems, (i) => i.media_item_id));
@@ -695,13 +718,16 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       const cursor = bucket < 0 ? null : wallIndex[bucket].cursor;
       loadingMore.current = true;
       // 作废在途的轮询：它拿的是旧窗口，晚一步回来会把刚跳到的位置又拽回去
-      reloadSeq.current += 1;
+      const seq = ++reloadSeq.current;
+      const query = {
+        sort: wallSort.current,
+        order: wallOrder.current,
+        filter: wallFilter.current,
+        limit: WALL_API_PAGE_SIZE,
+      };
       const fetchAt = (from: string | null) =>
         listLibraryItems(libraryId, {
-          sort: wallSort.current,
-          order: wallOrder.current,
-          filter: wallFilter.current,
-          limit: WALL_API_PAGE_SIZE,
+          ...query,
           cursor: from,
         });
       void (async () => {
@@ -712,12 +738,14 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         const chain: (string | null)[] = [cursor];
         // 目标可能比这一页更深（一个档里超过一页作品）：顺着链补到够为止
         while (next !== null && target - bucketStart >= itemsInWindow.length) {
+          if (seq !== reloadSeq.current) return;
           chain.push(next);
           const page = await fetchAt(next);
           itemsInWindow = [...itemsInWindow, ...page.items];
           next = page.next_cursor;
         }
         chain.push(next);
+        if (seq !== reloadSeq.current) return;
         wallCursors.current = chain;
         setWallOrigin(bucketStart);
         wallLoaded.current = Math.max(WALL_PAGE_SIZE, itemsInWindow.length);
@@ -751,7 +779,11 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   usePageTitle(library?.name);
 
   // 新契约无扫描/整理/入库中状态（字段已删），空闲低频轮询兜底即可
-  useVisiblePolling(reload, 30_000);
+  const poll = useCallback(() => {
+    // 用户正在翻页或跳档时保留其请求，后台刷新在下一轮对账。
+    if (!loadingMore.current) reload();
+  }, [reload]);
+  useVisiblePolling(poll, 30_000);
 
   // 待识别的文件总数（清单按条目目录分组，一组可能是一部剧的几十集）
   const unidentifiedFiles = unidentified.reduce((n, g) => n + g.file_count, 0);
@@ -876,31 +908,39 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     const wanted = galleryLoaded.current;
     if (wanted <= 0 || galleryLoading.current) return;
     galleryLoading.current = true; // 对账期间别让滚动哨兵同时追加下一页
+    const gen = galleryGeneration.current;
+    const cursors = [...galleryCursors.current];
+    const filter = wallFilter.current;
     const fetchAt = (page: number, cursor: string | null) =>
       listLibraryGallery(libraryId, {
-        filter: wallFilter.current,
+        filter,
         limit: GALLERY_PAGE_SIZE,
         cursor,
         sort: effectiveSort,
         order: wallOrderParam,
       }).then((result) => {
-        galleryCursors.current[page] = cursor;
-        galleryCursors.current[page + 1] = result.next_cursor;
+        cursors[page] = cursor;
+        cursors[page + 1] = result.next_cursor;
         return result;
       });
     const pages = Math.max(1, Math.ceil(wanted / GALLERY_PAGE_SIZE));
-    const known = Math.min(pages, galleryCursors.current.length - 1);
+    const known = Math.min(pages, cursors.length - 1);
     void (async () => {
       const head = await Promise.all(
         Array.from({ length: known }, (_, page) =>
-          fetchAt(page, galleryCursors.current[page] ?? null),
+          fetchAt(page, cursors[page] ?? null),
         ),
       );
       const tail: { groups: LibraryGalleryGroup[]; next_cursor: string | null }[] = [];
       for (let page = known; page < pages; page += 1) {
-        if (page > 0 && galleryCursors.current[page] === null) break;
-        tail.push(await fetchAt(page, galleryCursors.current[page] ?? null));
+        if (gen !== galleryGeneration.current) return;
+        if (page > 0 && cursors[page] === null) break;
+        tail.push(await fetchAt(page, cursors[page] ?? null));
       }
+      if (gen !== galleryGeneration.current) return;
+      const end = cursors.indexOf(null, 1);
+      cursors.length = end < 0 ? Math.min(cursors.length, pages + 1) : end + 1;
+      galleryCursors.current = cursors;
       const all = [...head, ...tail];
       galleryLoaded.current = all.reduce((sum, page) => sum + page.groups.length, 0);
       setGalleryGroups(dedupeGalleryGroups(all.flatMap((page) => page.groups)));
@@ -908,7 +948,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     })()
       .catch(() => undefined)
       .finally(() => {
-        galleryLoading.current = false;
+        if (gen === galleryGeneration.current) galleryLoading.current = false;
       });
   }, [libraryId, effectiveSort, wallOrderParam]);
 
@@ -1004,9 +1044,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const galleryWindowLibrary = useRef<string | null>(
     snapshot?.galleryGroups.length ? libraryId : null,
   );
-  // 当前这份窗口是按哪个排序取的。null = 快照带回来的窗口（与偏好同一份
-  // localStorage，排序不会中途变），按现在的排序对账即可，不必重拉
-  const galleryWindowSort = useRef<string | null>(null);
   /**
    * 切进图廊：第一次（或换库、换排序）从第一页拉起；从条目详情页返回时窗口已经
    * 由快照恢复，**不能**清空重拉——只补第一页的话容器矮到装不下离开时的滚动

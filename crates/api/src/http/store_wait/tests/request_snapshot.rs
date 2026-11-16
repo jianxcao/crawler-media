@@ -4,9 +4,7 @@ use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use super::store_read_handle;
 
 fn fixture() -> (tempfile::TempDir, Arc<crate::Store>) {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(crate::Store::open(dir.path()).unwrap());
     store
         .configure_reader_pool_size(store::Db::Library, NonZeroUsize::new(1).unwrap())

@@ -87,7 +87,7 @@ fn fixture() -> (tempfile::TempDir, axum::Router) {
     fixture_with_source(Arc::new(Source))
 }
 fn fixture_with_source(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Router) {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         TOKEN.into(),
@@ -173,7 +173,7 @@ fn douban_missing_and_transient_errors_never_become_successful_empty_movies() {
 
 #[test]
 fn douban_local_alias_keeps_tmdb_detail_fastpath() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     store
         .insert_media(&Media {

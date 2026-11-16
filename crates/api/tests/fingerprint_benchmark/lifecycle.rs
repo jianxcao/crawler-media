@@ -5,6 +5,10 @@ use api::chapter_frame_service::{
 };
 use std::{sync::Arc, time::Duration};
 
+#[path = "clock.rs"]
+mod clock;
+use clock::run;
+
 #[path = "capture_policy.rs"]
 mod capture_policy;
 #[path = "completion.rs"]
@@ -152,7 +156,7 @@ fn current_runner_waits_for_real_frame_terminal_and_retains_failed_elapsed() {
             let root = tempfile::tempdir().unwrap();
             let mut opts = options(root.path(), &[1, 2, 3, 4]);
             opts.mode = mode.into();
-            let run = session(opts, fail).run().unwrap();
+            let run = run(session(opts, fail));
             assert_eq!(run.media.len(), 1, "{mode}: {run:?}");
             let media = &run.media[0];
             assert_eq!(media.independent_episode_count, 4);
@@ -194,7 +198,8 @@ fn incremental_arrival_keeps_existing_ids_and_same_episode_files_separate() {
     let opts = options(root.path(), &[1, 2, 3]);
     let first = session(opts, false);
     let before = first.registered_files();
-    assert!(first.run().unwrap().wallclock_complete);
+    let initial = run(first);
+    assert!(initial.wallclock_complete, "{initial:#?}");
     let mut opts = options(root.path(), &[1, 2, 3, 4]);
     opts.scenario = "incremental".into();
     opts.run_id = "arrival".into();
@@ -207,7 +212,7 @@ fn incremental_arrival_keeps_existing_ids_and_same_episode_files_separate() {
                 .any(|new| new.file.file_id == old.file.file_id && new.units == old.units)
         );
     }
-    let run = next.run().unwrap();
+    let run = run(next);
     assert!(run.wallclock_complete, "{run:?}");
     assert_eq!(run.media[0].independent_episode_count, 4);
     assert_eq!(
@@ -247,7 +252,7 @@ fn incremental_arrival_keeps_existing_ids_and_same_episode_files_separate() {
         .collect::<Vec<_>>();
     assert_eq!(cuts.len(), 2);
     assert_ne!(cuts[0].file.file_id, cuts[1].file.file_id);
-    let run = separate.run().unwrap();
+    let run = clock::run(separate);
     assert_eq!(run.media[0].independent_episode_count, 3);
     assert_eq!(run.media[0].file_count, 4);
 }
@@ -281,12 +286,7 @@ impl api::probe_manager::TracksProbe for RefuseMedia {
 fn warm_refresh_finishes_without_media_reads_and_reports_measured_zero_capture() {
     let root = tempfile::tempdir().unwrap();
     let mut opts = options(root.path(), &[1, 2, 3]);
-    assert!(
-        session(opts.clone(), false)
-            .run()
-            .unwrap()
-            .wallclock_complete
-    );
+    assert!(run(session(opts.clone(), false)).wallclock_complete);
     opts.scenario = "warm".into();
     opts.run_id = "warm".into();
     let mut warm = session(opts, false);
@@ -298,7 +298,7 @@ fn warm_refresh_finishes_without_media_reads_and_reports_measured_zero_capture()
             Arc::new(RefuseMedia),
         )
         .unwrap();
-    let run = warm.run().unwrap();
+    let run = run(warm);
     assert!(run.wallclock_complete, "{run:?}");
     assert_eq!(run.stage_totals.capture, Some(0));
     assert_eq!(run.stage_totals.remote_gate_wait, Some(0));

@@ -24,7 +24,7 @@ pub(super) async fn execute(session: BenchmarkSession) -> Result<BenchmarkRun, S
             .probe
             .select_capture_audio(source.row.file.path.clone(), source.audio_stream_index);
     }
-    let started = Instant::now();
+    let started = session.clock.now();
     session.state.probe.try_start_workers();
     session.state.chapter_frames().start();
     let session = std::sync::Arc::new(session);
@@ -58,10 +58,18 @@ pub(super) async fn execute(session: BenchmarkSession) -> Result<BenchmarkRun, S
             let (jobs, observation) = observation?;
             media.jobs = jobs;
             if let Some((status, targets, ready)) = observation {
-                media.terminal = Some(measurement(media, status, targets, ready));
+                media.terminal = Some(measurement(
+                    media,
+                    status,
+                    targets,
+                    ready,
+                    session.clock.now(),
+                ));
             }
         }
-        if started.elapsed() >= Duration::from_millis(session.options.deadline_ms) {
+        if session.clock.now().saturating_duration_since(started)
+            >= Duration::from_millis(session.options.deadline_ms)
+        {
             expired = true;
             break;
         }
@@ -69,8 +77,12 @@ pub(super) async fn execute(session: BenchmarkSession) -> Result<BenchmarkRun, S
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    record_incomplete(session.state.clone(), &mut work).await?;
-    let elapsed = started.elapsed().as_millis() as u64;
+    record_incomplete(session.state.clone(), &mut work, session.clock.as_ref()).await?;
+    let elapsed = session
+        .clock
+        .now()
+        .saturating_duration_since(started)
+        .as_millis() as u64;
     let output_state = session.state.clone();
     let session =
         std::sync::Arc::try_unwrap(session).map_err(|_| "evaluation session still shared")?;
@@ -125,7 +137,11 @@ fn associated_jobs(
     Ok(jobs.into_iter().map(|job| job.id).collect())
 }
 
-async fn record_incomplete(state: crate::ApiState, work: &mut [MediaWork]) -> Result<(), String> {
+async fn record_incomplete(
+    state: crate::ApiState,
+    work: &mut [MediaWork],
+    clock: &dyn BenchmarkClock,
+) -> Result<(), String> {
     let sources = work
         .iter()
         .filter(|media| media.terminal.is_none())
@@ -153,6 +169,7 @@ async fn record_incomplete(state: crate::ApiState, work: &mut [MediaWork]) -> Re
             TerminalStatus::Incomplete,
             frames.targets,
             frames.ready,
+            clock.now(),
         ));
     }
     Ok(())
@@ -163,6 +180,7 @@ fn measurement(
     status: TerminalStatus,
     targets: usize,
     ready: usize,
+    now: Instant,
 ) -> MediaMeasurement {
     MediaMeasurement {
         media_group: media.group.clone(),
@@ -174,7 +192,7 @@ fn measurement(
             .flat_map(|s| s.row.units.iter().map(|u| (u.season, u.episode)))
             .collect::<BTreeSet<_>>()
             .len(),
-        elapsed_ms: media.started.elapsed().as_millis() as u64,
+        elapsed_ms: now.saturating_duration_since(media.started).as_millis() as u64,
         wallclock_complete: status == TerminalStatus::Completed,
         terminal_status: status,
         job_ids: media.jobs.clone(),
@@ -197,7 +215,7 @@ fn enqueue(session: &BenchmarkSession) -> Result<Vec<MediaWork>, String> {
             group,
             sources,
             jobs: Vec::new(),
-            started: Instant::now(),
+            started: session.clock.now(),
             terminal: None,
             error: None,
         };

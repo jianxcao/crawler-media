@@ -23,7 +23,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let state = make_state(dir.path());
         let root = seed_library(&state.store(), dir.path(), "cursor");
         let (user, token) = seed_member(&state.store(), "cursor-member");

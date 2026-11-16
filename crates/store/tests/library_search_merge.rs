@@ -6,7 +6,7 @@ use store::{Store, playback::MediaMergeRequest};
 
 #[test]
 fn search_merge_keeps_survivor_and_removes_retired_card_postings() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     let root = dir.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();

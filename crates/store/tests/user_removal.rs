@@ -2,9 +2,7 @@ use domain::{MediaKind, User, UserId, UserRole};
 use store::{Db, Store};
 
 fn fixture() -> (tempfile::TempDir, Store, UserId, UserId) {
-    let base = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(base).unwrap();
-    let tmp = tempfile::tempdir_in(base).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let member = UserId::new();
     let other = UserId::new();

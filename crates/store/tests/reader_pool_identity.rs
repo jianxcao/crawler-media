@@ -5,8 +5,7 @@ use rusqlite::Connection;
 use store::{Db, LibraryReadError, ReaderPool, Store, StoreError};
 
 fn temp_dir() -> tempfile::TempDir {
-    std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
-    tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap()
+    tempfile::tempdir().unwrap()
 }
 
 #[test]

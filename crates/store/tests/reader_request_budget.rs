@@ -11,9 +11,7 @@ use rusqlite::functions::FunctionFlags;
 use store::{Db, LibraryReadError, QueryBudget, Store, StoreError};
 
 fn fixture() -> (tempfile::TempDir, Store) {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     (dir, store)
 }

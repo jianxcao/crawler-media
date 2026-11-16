@@ -138,7 +138,7 @@ fn hit(title: &str) -> CatalogHit {
     }
 }
 fn fixture(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Router) {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         TOKEN.into(),

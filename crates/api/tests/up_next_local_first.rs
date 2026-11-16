@@ -328,8 +328,7 @@ async fn blocked_metadata_does_not_delay_local_up_next() {
 /// Background season IO must leave foreground title-search capacity available.
 #[tokio::test]
 async fn blocked_season_enrichment_does_not_starve_title_search() {
-    std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("app");
     std::fs::create_dir_all(&root).unwrap();
     let gate = Arc::new(Gate::default());

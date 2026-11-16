@@ -10,6 +10,20 @@ mod registration;
 use super::CapturePolicy;
 use crate::ScrapeStoreExt;
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Monotonic time source for lifecycle deadlines and elapsed measurements.
+pub trait BenchmarkClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemBenchmarkClock;
+
+impl BenchmarkClock for SystemBenchmarkClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 pub struct BenchmarkSession {
     pub state: crate::ApiState,
@@ -18,6 +32,7 @@ pub struct BenchmarkSession {
     inputs: Vec<input::VerifiedInput>,
     registered: Vec<registration::RegisteredSource>,
     build: BuildProvenance,
+    clock: Arc<dyn BenchmarkClock>,
 }
 
 struct NoNetwork;
@@ -90,7 +105,14 @@ impl BenchmarkSession {
             inputs,
             registered,
             build: provenance::build(),
+            clock: Arc::new(SystemBenchmarkClock),
         })
+    }
+
+    /// Use the same monotonic time source for deadlines and all lifecycle spans.
+    pub fn with_clock(mut self, clock: Arc<dyn BenchmarkClock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn registered_files(&self) -> Vec<domain::FileCoverage> {

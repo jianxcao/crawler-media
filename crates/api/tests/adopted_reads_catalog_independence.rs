@@ -120,8 +120,7 @@ fn fixture_with_file(owned: bool) -> Fixture {
     fixture_with_metadata(owned, true)
 }
 fn fixture_with_metadata(owned: bool, work_metadata: bool) -> Fixture {
-    std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     let root = dir.path().join("tv/Adopted");
     std::fs::create_dir_all(&root).unwrap();

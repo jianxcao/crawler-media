@@ -99,7 +99,13 @@ fn discovery_view(
         if episodes.contains(&candidate.episode) {
             continue;
         }
-        if matches!(engine.compare_evidence(anchor,candidate,policy.min_match_duration_ms as f32/1000.,policy.max_match_duration_ms as f32/1000.),marker::PairFingerprintDecision::Candidates(candidates) if !candidates.is_empty())
+        // A raw candidate can fall outside this capture's usable PCM or guards.
+        // Only consume the episode after the same checks used by model building;
+        // a later independent capture of this episode may contain valid evidence.
+        let pair = [anchor.clone(), candidate.clone()];
+        if marker::adaptive::build_season_models(engine, &pair, policy)
+            .iter()
+            .any(|model| guarded(model, &pair, policy))
         {
             episodes.insert(candidate.episode);
             view.push(candidate.clone());

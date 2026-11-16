@@ -45,7 +45,7 @@ impl CatalogGet for Source {
 }
 #[test]
 fn douban_subject_and_cast_use_persistent_cache() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("cache.db");
     let source = Source(Arc::new(Mutex::new(Reply::Present)));
     let douban = Douban::new_at(source.clone(), &db, NOW).unwrap();
@@ -66,7 +66,7 @@ fn douban_subject_and_cast_use_persistent_cache() {
 }
 #[test]
 fn catalog_not_found_and_transport_failure_remain_distinct() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let source = Source(Arc::new(Mutex::new(Reply::Missing)));
     let douban = Douban::new_at(source.clone(), &dir.path().join("cache.db"), NOW).unwrap();
     assert!(matches!(
@@ -100,7 +100,7 @@ fn catalog_not_found_and_transport_failure_remain_distinct() {
 #[test]
 fn malformed_douban_components_cannot_replace_valid_durable_pairs() {
     for broken in [Reply::MalformedSubject, Reply::MalformedCredits] {
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("cache.db");
         let source = Source(Arc::new(Mutex::new(Reply::Present)));
         let douban = Douban::new_at(source.clone(), &db, NOW).unwrap();
@@ -145,7 +145,7 @@ impl CatalogGet for PairedOrigin {
 }
 #[test]
 fn independent_douban_components_are_requested_together_and_remain_complete() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let douban = Douban::new_at(
         PairedOrigin {
             entered: Mutex::new(0),
@@ -166,7 +166,7 @@ fn independent_douban_components_are_requested_together_and_remain_complete() {
 #[test]
 fn cold_malformed_douban_components_are_errors_and_do_not_poison_recovery() {
     for broken in [Reply::MalformedSubject, Reply::MalformedCredits] {
-        let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let source = Source(Arc::new(Mutex::new(broken)));
         let db = dir.path().join("cache.db");
         let douban = Douban::new_at(source.clone(), &db, NOW).unwrap();

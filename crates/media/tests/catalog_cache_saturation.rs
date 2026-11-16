@@ -35,7 +35,7 @@ impl CatalogGet for Source {
 
 #[test]
 fn expired_complete_catalog_result_survives_saturated_refresh_admission() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let origin = Arc::new(Origin::default());
     let tmdb = Arc::new(
         Tmdb::new_at(

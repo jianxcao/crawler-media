@@ -67,7 +67,7 @@ fn partial_run(locked: bool) -> api::fingerprint_job::benchmark::BenchmarkRun {
             })
             .unwrap();
     }
-    let run = session.run().unwrap();
+    let run = run(session);
     assert!(run.wallclock_complete, "{run:?}");
     run
 }

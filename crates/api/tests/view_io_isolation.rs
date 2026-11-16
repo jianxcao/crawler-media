@@ -338,7 +338,7 @@ async fn playback_item_observes_poster_without_holding_store() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn favorite_views_do_not_publish_files_deleted_during_artwork_observation() {
     for endpoint in ["favorites", "favorites/gallery"] {
-        let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let gate = Arc::new(Gate::new());
         let state = make_state(tmp.path(), Arc::new(GatedFileRead { gate: gate.clone() }));
         let (_, library, media) = seed_movie(&state, tmp.path());

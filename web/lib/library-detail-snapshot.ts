@@ -20,6 +20,8 @@ export interface LibraryDetailSnapshot {
   libraries: MediaLibrary[];
   items: LibraryItem[];
   wallHasMore: boolean;
+  /** 每页起始游标及链尾 next_cursor；跳档后的第一个游标可以非空。 */
+  wallCursors: (string | null)[];
   wallIndex: LibraryIndexEntry[];
   wallStart: number;
   unidentified: UnidentifiedGroup[];
@@ -36,6 +38,9 @@ export interface LibraryDetailSnapshot {
    */
   galleryGroups: LibraryGalleryGroup[];
   galleryHasMore: boolean;
+  galleryCursors: (string | null)[];
+  /** 图廊可在海报墙换排序后保留旧窗口，游标必须与其实际排序一起恢复。 */
+  gallerySortKey: string | null;
   /** 这份窗口在整份排序里的起点（「回到上次位置」跳过来后不为 0） */
   galleryStart: number;
   /** 已向服务端请求到第几个条目（绝对位置，图廊按条目分页），返回后按同样的页数对账 */

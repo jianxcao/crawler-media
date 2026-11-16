@@ -39,9 +39,7 @@ fn scoped_reader_reuses_one_lease_and_allows_another_database_inside_sql() {
 
 #[test]
 fn a_bound_reader_keeps_one_snapshot_across_store_methods() {
-    let root = std::path::Path::new("/tmp/crawler-storage-fixes");
-    std::fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let writer = Store::open(dir.path()).unwrap();
     one_reader(&store);

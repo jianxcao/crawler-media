@@ -84,7 +84,7 @@ fn query(
 
 #[test]
 fn favorites_keep_global_unit_semantics_when_only_other_episode_is_visible() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let ra = tmp.path().join("a");
     let rb = tmp.path().join("b");
@@ -120,7 +120,7 @@ fn favorites_keep_global_unit_semantics_when_only_other_episode_is_visible() {
 
 #[test]
 fn favorites_keyset_pages_are_disjoint_and_complete() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("a");
     let a = library(&store, &root, "A");
@@ -153,7 +153,7 @@ fn favorites_keyset_pages_are_disjoint_and_complete() {
 
 #[test]
 fn favorites_page_plan_has_no_scan() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("a");
     let a = library(&store, &root, "A");
@@ -200,7 +200,7 @@ fn set_favorite(store: &Store, user: UserId, media: MediaId, s: i32, e: i32, on:
 
 #[test]
 fn favorite_global_unit_winner_lifecycle_and_unknown_timestamp() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("visible");
     let a = library(&store, &root, "Visible");
@@ -269,7 +269,7 @@ fn favorite_global_unit_winner_lifecycle_and_unknown_timestamp() {
 
 #[test]
 fn favorite_unwatched_tiers_aggregate_visible_libraries_before_paging() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root_a = tmp.path().join("a");
     let root_b = tmp.path().join("b");
@@ -342,7 +342,7 @@ fn favorite_unwatched_tiers_aggregate_visible_libraries_before_paging() {
 
 #[test]
 fn favorite_position_seek_and_cursor_scope_preserve_real_window_navigation() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("visible");
     let a = library(&store, &root, "Visible");
@@ -402,7 +402,7 @@ fn favorite_position_seek_and_cursor_scope_preserve_real_window_navigation() {
 
 #[test]
 fn favorite_cursor_orders_preserve_ascending_ties_and_null_years() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("visible");
     let library = library(&store, &root, "Visible");
@@ -474,7 +474,7 @@ fn favorite_cursor_orders_preserve_ascending_ties_and_null_years() {
 
 #[test]
 fn favorite_continuation_skips_the_exact_total_statement() {
-    let tmp = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = tmp.path().join("visible");
     let library = library(&store, &root, "Visible");

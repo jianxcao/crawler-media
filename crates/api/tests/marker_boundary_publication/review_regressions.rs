@@ -174,7 +174,22 @@ async fn refresh(s: &ProbeScenario) -> store::ProbeJob {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        let state = s
+            .store
+            .latest_marker_refresh_for_season(&s.media_id.to_string(), 1)
+            .and_then(|job| {
+                job.map(|job| s.store.probe_job_units(&job.id).map(|units| (job, units)))
+                    .transpose()
+            });
+        panic!(
+            "refresh deadline: {error}; clock={}; queued={}; workers={}; job_and_units={state:#?}; pending_analysis={:?}",
+            s.clock.now_ms(),
+            s.manager.queued_ledger_count(),
+            s.manager.worker_count(),
+            s.store.pending_probe_analysis_keys(None, 16),
+        )
+    });
     s.manager.shutdown_workers().await.unwrap();
     job
 }

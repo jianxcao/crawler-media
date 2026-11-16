@@ -100,7 +100,7 @@ async fn ledger(state: ApiState) -> Vec<Value> {
 
 #[tokio::test]
 async fn ledger_rows_preserve_owner_media_transfer_and_size() {
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     let root = dir.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();
@@ -185,8 +185,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn ledger_work(files: usize) -> QueryMetricsSnapshot {
-    std::fs::create_dir_all("/tmp/crawler-storage-fixes").unwrap();
-    let dir = tempfile::tempdir_in("/tmp/crawler-storage-fixes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     let root = dir.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();
