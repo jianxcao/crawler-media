@@ -168,6 +168,52 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
         .expect("seeded admin")
 }
 
+#[test]
+fn single_item_metadata_io_keeps_the_async_executor_responsive() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let gate = Arc::new(Gate::new());
+    let state = make_state(tmp.path(), gate.clone());
+    let user_id = seed(&state, tmp.path());
+    let media_id = state.store().list_media().unwrap()[0].id;
+    let item_id = domain::TypedItemId::Work(media_id).to_wire_string();
+    let provider = api::media_server_provider::ApiServerProvider::new(state);
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let observer_gate = gate.clone();
+    let observer = std::thread::spawn(move || {
+        let entered = *observer_gate
+            .entered_cv
+            .wait_timeout_while(
+                observer_gate.entered.lock().unwrap(),
+                Duration::from_secs(5),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        let _ = entered_tx.send(entered);
+        // Release even on the broken path so the runtime cannot hang the test.
+        let responsive = entered && progress_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        observer_gate.release();
+        responsive
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (result, ()) = runtime.block_on(async {
+        tokio::join!(provider.resolve_single_item(user_id, &item_id), async {
+            if entered_rx.await.unwrap() {
+                let _ = progress_tx.send(());
+            }
+        })
+    });
+    assert!(
+        observer.join().unwrap(),
+        "single-item metadata IO blocked the async executor"
+    );
+    assert_eq!(result.unwrap().unwrap().media.title, "Off Lock");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_visible_items_reads_metadata_io_outside_the_store_lock() {
     let tmp = tempfile::tempdir_in("/tmp").unwrap();

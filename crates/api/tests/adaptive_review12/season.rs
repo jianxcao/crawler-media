@@ -28,6 +28,7 @@ impl FingerprintCaptureEngine for RestoreCancelledCapture {
             ] {
                 let file = store.file_coverage_by_id(self.anchor).unwrap().unwrap();
                 let observation = store::LedgerPresenceObservation {
+                    observed_source: None,
                     path_key: file.path_key.clone(),
                     file,
                     missing_at,

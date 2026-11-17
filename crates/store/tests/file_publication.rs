@@ -412,6 +412,7 @@ fn presence_verify_marks_missing_and_restores() {
 
     // Observe Missing
     let obs_missing = LedgerPresenceObservation {
+        observed_source: None,
         file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
         path_key: store
             .file_coverage_by_id(file.file_id)
@@ -436,6 +437,7 @@ fn presence_verify_marks_missing_and_restores() {
 
     // Observe Present (restored)
     let obs_present = LedgerPresenceObservation {
+        observed_source: None,
         file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
         path_key: store
             .file_coverage_by_id(file.file_id)
@@ -569,6 +571,7 @@ fn deleting_all_files_cleans_item_and_orphan_media() {
 
     // Prune the file
     let obs = LedgerPresenceObservation {
+        observed_source: None,
         file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
         path_key: store
             .file_coverage_by_id(file.file_id)

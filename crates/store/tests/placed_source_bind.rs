@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use domain::{FileVersion, LibraryFile, Media, MediaId, MediaKind};
 use store::Store;
+use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
+use store::library_write::probe::{Observed, ProbePublication};
 use store::library_write::{FilePublication, WriteScope};
 use store::test_support::{FixtureFile, publish_fixture_file};
 
@@ -142,6 +144,95 @@ fn obligated(fx: &Fx, file: &LibraryFile) -> bool {
         .any(|o| o.ledger_id == file.file_id)
 }
 
+fn publish_resolution(fx: &Fx, file: &LibraryFile, version: &FileVersion, value: Option<&str>) {
+    assert!(
+        fx.store
+            .publish_probe_result(
+                file.file_id,
+                &ProbePublication {
+                    expected: version,
+                    tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+                    resolution: value,
+                    codec: Some("h264"),
+                    hdr: Observed::NotObserved,
+                    duration_ms: None,
+                    details: None,
+                },
+                3,
+            )
+            .unwrap()
+    );
+}
+
+fn resolution_page(fx: &Fx, file: &LibraryFile) -> store::library_query::ItemPage {
+    fx.store
+        .library_item_page(&LibraryQuery {
+            library_id: file.library_id,
+            user_id: None,
+            filter: BrowseFilter {
+                resolutions: vec!["2160p".into()],
+                ..Default::default()
+            },
+            order: BrowseOrder::Title,
+            descending: false,
+            page: BrowsePage::Offset {
+                start: 0,
+                limit: 10,
+            },
+            include_total: true,
+        })
+        .unwrap()
+}
+
+#[test]
+fn changed_bytes_clear_old_probe_resolution_from_file_and_browse() {
+    for replace in [true, false] {
+        let fx = fixture();
+        let (file, initial) = placed(&fx, "Changed.mkv");
+        let expected = bind(&fx, &file, &initial);
+        publish_resolution(&fx, &file, &expected, Some("2160p"));
+        assert_eq!(resolution_page(&fx, &file).total, Some(1));
+
+        std::fs::write(&file.path, b"new, differently sized video content").unwrap();
+        let observed = library::observe_source(&file.path).unwrap();
+        let version = if replace {
+            fx.store
+                .replace_file_source(&scope(&fx, &file), file.file_id, &expected, &observed, 4)
+        } else {
+            fx.store.bind_placed_file_source(
+                &scope(&fx, &file),
+                file.file_id,
+                &expected,
+                &observed,
+                4,
+            )
+        }
+        .unwrap();
+        let current = fx.store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        assert_eq!(current.file.version, version);
+        assert_eq!(
+            current.file.resolution, None,
+            "new bytes have no probe dimensions"
+        );
+        let page = resolution_page(&fx, &file);
+        assert_eq!(page.total, Some(0));
+        assert!(page.items.is_empty());
+        assert!(obligated(&fx, &file));
+
+        publish_resolution(&fx, &file, &version, None);
+        assert_eq!(
+            fx.store
+                .file_coverage_by_id(file.file_id)
+                .unwrap()
+                .unwrap()
+                .file
+                .resolution,
+            None,
+            "a probe without dimensions cannot revive old source facts"
+        );
+    }
+}
+
 #[test]
 fn same_bytes_cold_row_is_rebound_and_stays_readable() {
     let fx = fixture();
@@ -149,6 +240,7 @@ fn same_bytes_cold_row_is_rebound_and_stays_readable() {
     let id = file.file_id.to_string();
     fx.store.put_file_meta(&id, &tracks()).unwrap();
     fx.store.put_cached_chapters(&id, &[]).unwrap();
+    publish_resolution(&fx, &file, &file.version, Some("2160p"));
     assert!(fx.store.get_file_meta(&id).unwrap().is_some());
 
     let version = bind(&fx, &file, &observation);
@@ -167,6 +259,17 @@ fn same_bytes_cold_row_is_rebound_and_stays_readable() {
         "chapters stay readable"
     );
     assert!(obligated(&fx, &file));
+    assert_eq!(
+        fx.store
+            .file_coverage_by_id(file.file_id)
+            .unwrap()
+            .unwrap()
+            .file
+            .resolution
+            .as_deref(),
+        Some("2160p"),
+        "binding the same placed bytes keeps their proven resolution"
+    );
 }
 
 #[test]

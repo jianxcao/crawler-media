@@ -258,7 +258,11 @@ fn observation(
     } else {
         row.path_key.clone()
     };
+    let observed_source = (row.file.publication == FilePublication::Pending
+        && presence == FilePresence::Present)
+        .then(|| library::observe_source(&row.file.path).unwrap());
     LedgerPresenceObservation {
+        observed_source,
         file: row,
         path_key,
         missing_at,
@@ -268,67 +272,93 @@ fn observation(
 
 #[test]
 fn unpublished_transfer_survives_presence_and_present_publication_publishes_it() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let media_id = MediaId::new();
-    store.insert_media(&sample_media(media_id)).unwrap();
-    let (library, root_id) = create_library(&store, tmp.path());
-    let path = tmp.path().join("pending.mkv").display().to_string();
-    let file = publish_file(
-        &store,
-        &library,
-        &root_id,
-        media_id,
-        &path,
-        FilePublication::Pending,
-        LedgerId::new(),
-    );
-    let row = store
-        .file_coverage_by_path(&path)
-        .unwrap()
-        .expect("pending file row");
-    assert!(store.transfer_pending(&path).unwrap());
-
-    for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
-        let result = store
-            .apply_ledger_presence(
-                &[observation(
-                    &store,
-                    row.clone(),
-                    None,
-                    ObservedPresence::Missing,
-                )],
-                mode,
-                100,
-            )
-            .unwrap();
-        assert_eq!(result.skipped, 1);
-        assert!(store.file_coverage_by_path(&path).unwrap().is_some());
-        assert!(store.missing_at_by_path().unwrap().is_empty());
-    }
-
-    let result = store
-        .apply_ledger_presence(
-            &[observation(
-                &store,
-                row.clone(),
-                None,
-                ObservedPresence::Present,
-            )],
-            LedgerPresenceMode::Verify,
-            200,
-        )
-        .unwrap();
-    assert_eq!(result.restored, 0);
-    assert!(!store.transfer_pending(&path).unwrap());
-    assert_eq!(file.file_id, row.file.file_id);
-    assert!(
-        store
-            .get_library_item(library.id.parse().unwrap(), media_id)
+    for mode in [
+        LedgerPresenceMode::Verify,
+        LedgerPresenceMode::Prune,
+        LedgerPresenceMode::Purge,
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let media_id = MediaId::new();
+        store.insert_media(&sample_media(media_id)).unwrap();
+        let (library, root_id) = create_library(&store, tmp.path());
+        let path = tmp.path().join("pending.mkv").display().to_string();
+        let file = publish_file(
+            &store,
+            &library,
+            &root_id,
+            media_id,
+            &path,
+            FilePublication::Pending,
+            LedgerId::new(),
+        );
+        let row = store
+            .file_coverage_by_path(&path)
             .unwrap()
-            .is_some(),
-        "a recovered publication becomes library content"
-    );
+            .expect("pending file row");
+        assert!(store.transfer_pending(&path).unwrap());
+
+        for missing_mode in [
+            LedgerPresenceMode::Verify,
+            LedgerPresenceMode::Prune,
+            LedgerPresenceMode::Purge,
+        ] {
+            let result = store
+                .apply_ledger_presence(
+                    &[observation(
+                        &store,
+                        row.clone(),
+                        None,
+                        ObservedPresence::Missing,
+                    )],
+                    missing_mode,
+                    100,
+                )
+                .unwrap();
+            assert_eq!(result.skipped, 1);
+            assert!(store.file_coverage_by_path(&path).unwrap().is_some());
+            assert!(store.missing_at_by_path().unwrap().is_empty());
+        }
+
+        std::fs::write(&path, b"completed pending Transfer").unwrap();
+        let present = observation(&store, row.clone(), None, ObservedPresence::Present);
+        let mut unobserved = present.clone();
+        unobserved.observed_source = None;
+        let skipped = store
+            .apply_ledger_presence(&[unobserved], LedgerPresenceMode::Verify, 150)
+            .unwrap();
+        assert_eq!(skipped.skipped, 1);
+        assert!(store.transfer_pending(&path).unwrap());
+        let result = store
+            .apply_ledger_presence(std::slice::from_ref(&present), mode, 200)
+            .unwrap();
+        assert_eq!(result.restored, 0);
+        assert!(!store.transfer_pending(&path).unwrap());
+        assert_eq!(file.file_id, row.file.file_id);
+        let recovered = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        assert_eq!(
+            recovered.file.version.source_version,
+            library::observe_source(Path::new(&path))
+                .unwrap()
+                .source_version
+        );
+        assert_eq!(result.applied[0].version, recovered.file.version);
+        assert_eq!(
+            store.scan_probe_obligations(10).unwrap()[0].ledger_id,
+            file.file_id
+        );
+        store.ack_scan_probe_obligation(file.file_id).unwrap();
+        let stale = store.apply_ledger_presence(&[present], mode, 250).unwrap();
+        assert_eq!(stale.skipped, 1);
+        assert!(store.scan_probe_obligations(10).unwrap().is_empty());
+        assert!(
+            store
+                .get_library_item(library.id.parse().unwrap(), media_id)
+                .unwrap()
+                .is_some(),
+            "a recovered publication becomes library content"
+        );
+    }
 }
 
 #[test]

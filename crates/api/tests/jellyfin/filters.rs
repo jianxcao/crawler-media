@@ -211,6 +211,53 @@ async fn genre_and_studio_filters_read_adopted_metadata_instead_of_nfo() {
     assert_query_count(&app, "StudioIds=Nfo%20Studio", 0).await;
 }
 
+#[tokio::test]
+async fn studio_ids_from_catalog_filter_movies_in_both_protocol_mounts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media_id, item_id) = app(tmp.path());
+    Store::open(tmp.path().join("data"))
+        .unwrap()
+        .set_metadata_overrides(
+            media_id,
+            domain::EntityScope::Work,
+            "zh-CN",
+            &domain::MetadataFields {
+                studios: domain::FieldValue::Value(vec!["Codex Test Studio".into()]),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+    for prefix in ["", "/emby"] {
+        let views = get_json(&app, &format!("{prefix}/Users/admin/Views")).await;
+        let library_id = views["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["CollectionType"] == "movies")
+            .unwrap()["Id"]
+            .as_str()
+            .unwrap();
+        let studios = get_json(&app, &format!("{prefix}/Studios?ParentId={library_id}")).await;
+        let studio = studios["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|studio| studio["Name"] == "Codex Test Studio")
+            .unwrap_or_else(|| panic!("studio missing from {studios}"));
+        assert_eq!(studio["ChildCount"], 1);
+        let studio_id = uuid::Uuid::parse_str(studio["Id"].as_str().unwrap()).unwrap();
+        for requested_id in [studio_id.to_string(), studio_id.simple().to_string()] {
+            let uri = format!(
+                "{prefix}/Users/admin/Items?ParentId={library_id}&IncludeItemTypes=Movie&StudioIds={requested_id}"
+            );
+            let items = get_json(&app, &uri).await;
+            assert_eq!(items["TotalRecordCount"], 1, "{uri}");
+            assert_eq!(items["Items"][0]["Id"], item_id, "{uri}");
+        }
+    }
+}
+
 /// 搜索词与 person 过滤同样读取采纳行：NFO 冲突值不得命中，采纳的简介/演员必须命中。
 #[tokio::test]
 async fn search_and_people_filters_read_adopted_metadata_instead_of_nfo() {

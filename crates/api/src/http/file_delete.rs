@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use crate::Store;
 
 mod claims;
-pub(crate) use claims::path_claim;
+pub(crate) use claims::{PathClaimGuard, path_claim, transfer_claim};
 #[cfg(test)]
 mod tests;
 

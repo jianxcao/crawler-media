@@ -558,6 +558,7 @@ fn restore_first_presence(store: &crate::Store, harness: &RefreshHarness) {
         .unwrap()
         .unwrap();
     let observation = store::LedgerPresenceObservation {
+        observed_source: None,
         path_key: current.path_key.clone(),
         file: current,
         missing_at: None,
@@ -575,6 +576,7 @@ fn restore_first_presence(store: &crate::Store, harness: &RefreshHarness) {
         .unwrap()
         .unwrap();
     let observation = store::LedgerPresenceObservation {
+        observed_source: None,
         path_key: current.path_key.clone(),
         file: current,
         missing_at: Some(1000),

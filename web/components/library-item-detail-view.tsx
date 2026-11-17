@@ -209,6 +209,9 @@ export function LibraryItemDetailView({
     : (selectedSeriesEpisode?.files ?? []);
   // 缺失/未知的文件仍可查看（保留在列表里说明「文件不在位」），但不作为可播版本。
   const availableTrackFiles = trackFiles.filter(isPlayableFile);
+  const explicitTrackFileId = availableTrackFiles.some((file) => file.file_id === selectedTrackFileId)
+    ? selectedTrackFileId ?? undefined
+    : undefined;
   const selectedTrackFile =
     availableTrackFiles.find((file) => file.file_id === selectedTrackFileId) ??
     availableTrackFiles[0] ??
@@ -217,6 +220,12 @@ export function LibraryItemDetailView({
   const chapterIsTv = detail?.kind === "tv";
   const chapterSeason = selectedSeriesEpisode?.seasonNumber;
   const chapterEpisode = selectedSeriesEpisode?.episode.episode_number;
+  const handleEpisodeChange = useCallback((selection: SelectedEpisodeContext | null) => {
+    if (selection?.seasonNumber !== chapterSeason || selection?.episode.episode_number !== chapterEpisode) {
+      setSelectedTrackFileId(null);
+    }
+    setSelectedSeriesEpisode(selection);
+  }, [chapterSeason, chapterEpisode]);
   const chapterTarget = useMemo<ChapterTarget | null>(() => {
     if (!chapterFileId || (chapterIsTv && (chapterSeason == null || chapterEpisode == null))) return null;
     return { file_id: chapterFileId, ...(chapterIsTv ? { season: chapterSeason, episode: chapterEpisode } : {}) };
@@ -237,7 +246,7 @@ export function LibraryItemDetailView({
     if (detail.kind !== "tv") {
       return {
         media_item_id: detail.media_item_id,
-        file_id: selectedTrackFileId ?? undefined,
+        file_id: explicitTrackFileId,
       };
     }
     if (!selectedSeriesEpisode) return null;
@@ -245,14 +254,14 @@ export function LibraryItemDetailView({
       media_item_id: detail.media_item_id,
       season_number: selectedSeriesEpisode.seasonNumber,
       episode_number: selectedSeriesEpisode.episode.episode_number,
-      file_id: selectedTrackFileId ?? undefined,
+      file_id: explicitTrackFileId,
     };
-  }, [detail, selectedSeriesEpisode, selectedTrackFileId]);
+  }, [detail, selectedSeriesEpisode, explicitTrackFileId]);
 
-  // 单元三元组的字符串形式：detail 每次轮询都是新对象，直接依赖 playUnit
+  // 播放单元与显式版本的字符串形式：detail 每次轮询都是新对象，直接依赖 playUnit
   // 会让刮削期间每两秒重查一次续播点。
   const playUnitKey = playUnit
-    ? `${playUnit.media_item_id}/${playUnit.season_number}/${playUnit.episode_number}`
+    ? `${playUnit.media_item_id}/${playUnit.season_number}/${playUnit.episode_number}/${playUnit.file_id ?? ""}`
     : null;
   useEffect(() => {
     if (!playUnit) {
@@ -270,9 +279,9 @@ export function LibraryItemDetailView({
     return () => {
       cancelled = true;
     };
-    // playUnit 是对象字面量，按内容（三元组）比较
+    // playUnit 是对象字面量，按内容（播放单元与显式版本）比较
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playUnitKey]);
+  }, [playUnitKey, episodesVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -319,7 +328,7 @@ export function LibraryItemDetailView({
     setMarking(true);
     try {
       await setPlaybackMarks(playUnit, { played: next });
-      setWatched(await fetchResumeState(playUnit));
+      // 当前选择的 effect 负责重查，避免标记期间换集/换版本后发布旧目标的续播点。
       setEpisodesVersion((v) => v + 1);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "标记失败，请稍后重试");
@@ -905,11 +914,7 @@ export function LibraryItemDetailView({
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
                     // 只有用户真的选过版本才带 file_id；默认展示的文件不是显式选择 (R10)
-                    fileId: playLinkFileId(
-                      availableTrackFiles.some((file) => file.file_id === selectedTrackFileId)
-                        ? selectedTrackFileId
-                        : null,
-                    ),
+                    fileId: playLinkFileId(explicitTrackFileId),
                   }),);
               }}
             />
@@ -940,7 +945,7 @@ export function LibraryItemDetailView({
             detail={detail}
             initialSeason={initialSeason}
             initialEpisode={initialEpisode}
-            onEpisodeChange={setSelectedSeriesEpisode}
+            onEpisodeChange={handleEpisodeChange}
             refreshKey={episodesVersion}
           />
         </div>
@@ -1199,7 +1204,7 @@ export function PlayAction({
   /** 额外动作（如「加入合集」），排在收藏/已看之后。 */
   extraAction?: React.ReactNode | null;
 }) {
-  const positionMs = watched?.position_ms ?? 0;
+  const positionMs = watched?.start_ms ?? watched?.position_ms ?? 0;
   const durationMs = watched?.duration_ms ?? null;
   const finished = watched?.played ?? false;
   // 「能续播」以服务端结论为准：已看完的重播从头开始（播放器同一套判定），

@@ -133,6 +133,7 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
         guard
             .apply_ledger_presence(
                 &[store::LedgerPresenceObservation {
+                    observed_source: None,
                     path_key: path_key.clone(),
                     file: coverage,
                     missing_at: None,

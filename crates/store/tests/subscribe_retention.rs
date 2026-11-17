@@ -317,6 +317,7 @@ fn all_file_cleanup_seams_preserve_retained_media_then_final_release_purges() {
                 store
                     .apply_ledger_presence(
                         &[store::LedgerPresenceObservation {
+                            observed_source: None,
                             path_key: row.path_key.clone(),
                             file: row,
                             missing_at: None,

@@ -380,8 +380,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    * 0 号是窗口起点：库首页为 `null`，跳档后是该档游标。
    *
    * 服务端只签发 forward-only 的键集游标（`after`），所以这条链只能从 0 往后走。
-   * 走过的页把游标记下来：轮询用同一批游标并行重拉同一个前缀，追加页直接取
-   * 链尾。排序 / 方向 / 筛选一变，链就作废（游标绑定的是那一份有序名单）。
+   * 追加页直接取链尾；轮询从窗口起点重建游标链，避免增删条目后旧页边界造成
+   * 重复或漏项。排序 / 方向 / 筛选一变，链就作废。
    */
   const wallCursors = useRef<(string | null)[]>(
     snapshot ? [...snapshot.wallCursors] : [null],
@@ -435,13 +435,12 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    * 把墙的前缀走到能覆盖 `pages` 页（每页 `WALL_API_PAGE_SIZE` 条）。
    *
    * 游标是 forward-only 的（`BrowsePage::Cursor { after }`），链只能从 0 往后
-   * 走：已经走过的页按记住的游标并行重拉，没走过的页只能等上一页的
-   * `next_cursor`。返回整个前缀的条目。
+   * 走：每页都使用本轮上一页返回的 `next_cursor`。返回整个前缀的条目。
    */
   const loadWallPages = useCallback(
     async (pages: number, seq: number): Promise<LibraryItem[]> => {
       // 每轮只使用自己的查询和游标链，旧响应不能污染新排序/筛选的窗口。
-      const cursors = [...wallCursors.current];
+      const cursors: (string | null)[] = [wallCursors.current[0] ?? null];
       const query = {
         sort: wallSort.current,
         order: wallOrder.current,
@@ -457,15 +456,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
           cursors[page + 1] = result.next_cursor;
           return result.items;
         });
-      const known = Math.min(pages, cursors.length - 1);
       const prefix: LibraryItem[] = [];
-      const head = await Promise.all(
-        Array.from({ length: known }, (_, page) =>
-          fetchAt(page, cursors[page] ?? null),
-        ),
-      );
-      for (const items of head) prefix.push(...items);
-      for (let page = known; page < pages; page += 1) {
+      for (let page = 0; page < pages; page += 1) {
         if (seq !== reloadSeq.current) return [];
         // 上一页已经到底（next_cursor 为 null）：没有更后面的页了
         if (page > 0 && cursors[page] === null) break;
@@ -772,7 +764,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     if (!library || removal.states[libraryId]?.pending) return;
     const ok = await confirm({
       title: `删除媒体库「${library.name}」？`,
-      description: "将停止该库相关任务，清除扫描记录与探测缓存。磁盘文件、NFO 和图片不会删除，观看进度、已看和收藏会保留。重新添加目录后将重新扫描。",
+      description: "将停止该库相关任务，清除扫描记录与探测缓存。磁盘文件、NFO 和图片不会删除。若作品在其他媒体库中没有文件，也未被合集或订阅保留，其观看进度、已看状态和收藏将一并清除，重新扫描不会恢复这些记录。",
       confirmLabel: "删除媒体库",
       tone: "danger",
     });
@@ -911,7 +903,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     if (wanted <= 0 || galleryLoading.current) return;
     galleryLoading.current = true; // 对账期间别让滚动哨兵同时追加下一页
     const gen = galleryGeneration.current;
-    const cursors = [...galleryCursors.current];
+    const cursors: (string | null)[] = [galleryCursors.current[0] ?? null];
     const filter = wallFilter.current;
     const fetchAt = (page: number, cursor: string | null) =>
       listLibraryGallery(libraryId, {
@@ -926,24 +918,17 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         return result;
       });
     const pages = Math.max(1, Math.ceil(wanted / GALLERY_PAGE_SIZE));
-    const known = Math.min(pages, cursors.length - 1);
     void (async () => {
-      const head = await Promise.all(
-        Array.from({ length: known }, (_, page) =>
-          fetchAt(page, cursors[page] ?? null),
-        ),
-      );
-      const tail: { groups: LibraryGalleryGroup[]; next_cursor: string | null }[] = [];
-      for (let page = known; page < pages; page += 1) {
+      const all: { groups: LibraryGalleryGroup[]; next_cursor: string | null }[] = [];
+      for (let page = 0; page < pages; page += 1) {
         if (gen !== galleryGeneration.current) return;
         if (page > 0 && cursors[page] === null) break;
-        tail.push(await fetchAt(page, cursors[page] ?? null));
+        all.push(await fetchAt(page, cursors[page] ?? null));
       }
       if (gen !== galleryGeneration.current) return;
       const end = cursors.indexOf(null, 1);
       cursors.length = end < 0 ? Math.min(cursors.length, pages + 1) : end + 1;
       galleryCursors.current = cursors;
-      const all = [...head, ...tail];
       galleryLoaded.current = all.reduce((sum, page) => sum + page.groups.length, 0);
       setGalleryGroups(dedupeGalleryGroups(all.flatMap((page) => page.groups)));
       setGalleryHasMore((all.at(-1)?.next_cursor ?? null) !== null);
@@ -1103,9 +1088,9 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const galleryOffsetById = useMemo(
     () =>
       new Map(
-        galleryGroups.map((group, index) => [String(group.media_item_id), index]),
+        galleryGroups.map((group, index) => [String(group.media_item_id), galleryOrigin + index]),
       ),
-    [galleryGroups],
+    [galleryGroups, galleryOrigin],
   );
   const wallOffsetAt = useCallback(() => {
     const wall = wallTop.current;

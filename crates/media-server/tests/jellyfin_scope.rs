@@ -523,6 +523,19 @@ async fn studio_parent_filters_by_studio() {
 }
 
 #[tokio::test]
+async fn studio_ids_filter_by_catalog_identity() {
+    let app = app(false);
+    let studio_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"Netflix");
+    for requested_id in [studio_id.to_string(), studio_id.simple().to_string()] {
+        let uri = format!("/Items?ParentId=lib-movies&StudioIds={requested_id}");
+        let (status, body) = get(&app, &uri, "token-a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["TotalRecordCount"], 1, "{uri}: {body}");
+        assert_eq!(body["Items"][0]["Name"], "Alpha");
+    }
+}
+
+#[tokio::test]
 async fn user_profile_accepts_self_and_rejects_other_users() {
     let app = app(false);
     let compact = USER_A.replace('-', "");

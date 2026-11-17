@@ -2,6 +2,32 @@
 use crate::StoreError;
 use rusqlite::{Connection, params};
 
+pub(super) fn publish_pending(
+    tx: &Connection,
+    file: &domain::LibraryFile,
+    source: &library::SourceObservation,
+    now_ms: i64,
+) -> Result<domain::FileVersion, StoreError> {
+    let revision = file.version.revision + 1;
+    crate::library_write::source::advance_to_new_content(
+        tx,
+        file.file_id,
+        revision,
+        source,
+        now_ms,
+    )?;
+    tx.execute(
+        "UPDATE library_files SET publication_state='published', presence_state='present',
+                missing_at=NULL WHERE file_id=?1",
+        [file.file_id.to_string()],
+    )?;
+    tracing::info!(file_id = %file.file_id, "Recovered completed Transfer publication");
+    Ok(domain::FileVersion {
+        revision,
+        source_version: source.source_version.clone(),
+    })
+}
+
 pub(super) fn source_missing(
     tx: &Connection,
     file_id: &str,

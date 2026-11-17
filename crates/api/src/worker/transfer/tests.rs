@@ -7,6 +7,7 @@ use crate::management::ApiState;
 use super::*;
 
 mod deletion_pins;
+mod presence;
 mod snapshot;
 use deletion_pins::publication_observation;
 

@@ -467,6 +467,7 @@ fn pending_and_missing_files_are_never_playable() {
     f.store
         .apply_ledger_presence(
             &[LedgerPresenceObservation {
+                observed_source: None,
                 file: f
                     .store
                     .file_coverage_by_id(missing.file_id)

@@ -456,7 +456,11 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
-        match items::entry_snapshot(&self.state, user_id, id)? {
+        let id = id.to_owned();
+        let snapshot = self
+            .run_sync(move |provider| items::entry_snapshot(&provider.state, user_id, &id))
+            .await??;
+        match snapshot {
             Some(snapshot) => Ok(Some(self.enrich_single_item(snapshot).await)),
             None => Ok(None),
         }

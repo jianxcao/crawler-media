@@ -60,6 +60,7 @@ impl crate::LibraryConnection<'_> {
         let observations = group_file_coverage(facts)
             .into_iter()
             .map(|file| LedgerPresenceObservation {
+                observed_source: None,
                 path_key: file.path_key.clone(),
                 missing_at: missing.remove(&file.file.file_id).flatten(),
                 presence: file.file.presence,

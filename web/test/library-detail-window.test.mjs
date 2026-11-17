@@ -1,9 +1,66 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deferred, libraryDetailHarness, page } from "./support/library-detail-renderer.mjs";
+import { deferred, item, libraryDetailHarness, page } from "./support/library-detail-renderer.mjs";
+
+test("gallery records an absolute recall position after jumping into a later window", async () => {
+  const view = libraryDetailHarness({
+    gallery: true,
+    realRecall: true,
+    load: async (_mode, { cursor }) => {
+      if (cursor === "title-M") return page("M movie", "title-M-next");
+      if (cursor === "title-M-next") return page("N movie");
+      return page("A movie", "title-A-next");
+    },
+  });
+  await view.mount();
+  try {
+    await view.click("recall");
+    await view.click("more");
+    assert.equal(view.rows(), "M movie,N movie");
+    // The recall hook ignores navigation's scroll events for the first 500 ms.
+    await new Promise((resolve) => setTimeout(resolve, 510));
+    await view.scrollToItem("N movie");
+    assert.equal(view.savedRecall().offset, 501);
+  } finally {
+    await view.unmount();
+  }
+});
 
 for (const gallery of [false, true]) {
   const mode = gallery ? "gallery" : "poster wall";
+  for (const change of ["insert", "remove"]) {
+    test(`${mode} refreshes contiguous pages after an early ${change}`, async () => {
+      let ids = Array.from({ length: 450 }, (_, index) => String(index + 1).padStart(3, "0"));
+      const view = libraryDetailHarness({
+        gallery,
+        load: async (_mode, { cursor, limit }) => {
+          const start = cursor ? ids.findIndex((id) => id > cursor) : 0;
+          const rows = start < 0 ? [] : ids.slice(start, start + limit);
+          return {
+            items: rows.map(item),
+            groups: rows.map((id) => ({ ...item(id), images: [] })),
+            next_cursor: start >= 0 && start + limit < ids.length ? rows.at(-1) : null,
+            total: ids.length,
+          };
+        },
+      });
+      await view.mount();
+      await view.click("more");
+      const windowSize = gallery ? 120 : 400;
+      assert.deepEqual(view.rows().split(","), ids.slice(0, windowSize));
+      await view.unmount();
+      ids = change === "insert" ? ["000", ...ids] : ids.slice(1);
+      await view.mount();
+      try {
+        assert.deepEqual(view.rows().split(","), ids.slice(0, windowSize));
+        await view.click("more");
+        assert.deepEqual(view.rows().split(","), ids.slice(0, gallery ? 180 : 600));
+      } finally {
+        await view.unmount();
+      }
+    });
+  }
+
   test(`${mode} returns from details to the same letter window and can append`, async () => {
     const view = libraryDetailHarness({
       gallery,

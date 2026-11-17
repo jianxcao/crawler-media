@@ -95,6 +95,7 @@ fn rejects_shared_write(action: &str) {
         "verify" | "prune" => store
             .apply_ledger_presence(
                 &[LedgerPresenceObservation {
+                    observed_source: None,
                     file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
                     path_key: store
                         .file_coverage_by_id(file.file_id)

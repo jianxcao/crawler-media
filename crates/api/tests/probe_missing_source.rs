@@ -79,6 +79,7 @@ fn fixture() -> Fixture {
     store
         .apply_ledger_presence(
             &[LedgerPresenceObservation {
+                observed_source: None,
                 file: row.clone(),
                 path_key: row.path_key.clone(),
                 missing_at: None,

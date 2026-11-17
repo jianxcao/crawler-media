@@ -29,13 +29,33 @@ export const page = (id, next_cursor = null) => ({
 // Real React effects/state, the real component, sorting and session snapshots.
 // API calls and browser preferences are the external seams; visual children
 // expose the component's selected rows and pagination controls without a DOM.
-export function libraryDetailHarness({ gallery = false, load, recallOffset = 500 } = {}) {
+export function libraryDetailHarness({ gallery = false, load, recallOffset = 500, realRecall = false } = {}) {
   const storage = new Map([["cm:wall-sort", "title"]]);
+  if (realRecall) storage.set("crawler-media.wall-recall", JSON.stringify({
+    "library:library": { offset: recallOffset, view: "wall:title:title", updatedAt: Date.now() },
+  }));
   globalThis.window = {
     location: { search: "", pathname: "/library/library" },
     history: { replaceState: noop },
     localStorage: { getItem: (key) => storage.get(key) ?? "title", setItem: (key, value) => storage.set(key, value) },
   };
+  let visibleItem;
+  const scroller = new globalThis.EventTarget();
+  Object.assign(scroller, {
+    scrollTop: 0, clientHeight: 800,
+    getBoundingClientRect: () => ({ top: 0 }), scrollTo: noop,
+  });
+  const wall = {
+    getBoundingClientRect: () => ({ top: 0 }), scrollIntoView: noop,
+    querySelectorAll: () => visibleItem ? [{
+      getBoundingClientRect: () => ({ bottom: 100 }), getAttribute: () => visibleItem,
+    }] : [],
+  };
+  if (realRecall) {
+    globalThis.document = { addEventListener: noop, removeEventListener: noop };
+    globalThis.requestAnimationFrame = () => 0;
+    globalThis.cancelAnimationFrame = noop;
+  }
   const library = {
     id: "library", name: "Movies", kind: "movie", root_paths: ["/movies"], is_default: true,
     stats: { item_count: 1000, file_count: 1000, total_size_bytes: 0, strm_file_count: 1000 },
@@ -95,6 +115,12 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
     "@/lib/poll-reconcile", "@/lib/library-wall-index", "@/lib/wall-sort",
     "@/lib/library-detail-snapshot", "@/lib/session-snapshot",
   ]);
+  if (realRecall) {
+    delete mocks["@/lib/use-wall-recall"];
+    delete mocks["@/lib/library-wall-recall"];
+    real.add("@/lib/use-wall-recall");
+    real.add("@/lib/library-wall-recall");
+  }
   function loadModule(name) {
     if (mocks[name]) return mocks[name];
     if (modules.has(name)) return modules.get(name).exports;
@@ -113,7 +139,9 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
   let renderer;
   return {
     async mount() {
-      await act(async () => { renderer = create(React.createElement(LibraryDetailView, { libraryId: "library" })); });
+      await act(async () => { renderer = create(React.createElement(LibraryDetailView, { libraryId: "library" }), {
+        createNodeMock: (element) => realRecall ? (element.props.className?.includes("scroll-safe") ? scroller : wall) : null,
+      }); });
     },
     async unmount() { await act(async () => { renderer.unmount(); }); },
     async click(id) { await act(async () => { renderer.root.findByProps({ id }).props.onClick(); }); },
@@ -121,6 +149,11 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
     async gallery(value) { await act(async () => { setGalleryPreference(value); }); },
     async poll() { await act(async () => { poll(); }); },
     async resolve(pending, value) { await act(async () => { pending.resolve(value); }); },
+    async scrollToItem(id) {
+      visibleItem = id;
+      await act(async () => { scroller.scrollTop += 100; scroller.dispatchEvent(new globalThis.Event("scroll")); });
+    },
+    savedRecall: () => JSON.parse(storage.get("crawler-media.wall-recall"))["library:library"],
     rows: () => renderer.root.findByProps({ id: "rows" }).children.join(""),
     start: () => renderer.root.findByProps({ id: "more" }).props["data-start"],
     hasMore: () => !renderer.root.findByProps({ id: "more" }).props.disabled,

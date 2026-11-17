@@ -221,6 +221,7 @@ async fn stale_presence_generation_request(prune: bool) {
         store
             .apply_ledger_presence(
                 &[store::LedgerPresenceObservation {
+                    observed_source: None,
                     path_key: row.path_key.clone(),
                     file: row,
                     missing_at: None,

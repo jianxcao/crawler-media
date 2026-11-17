@@ -124,7 +124,48 @@ async fn hidden_entity_parent_does_not_expand_to_global_scope() {
             assert_eq!(body["TotalRecordCount"], 0);
             assert!(body["Items"].as_array().unwrap().is_empty());
         }
+        assert_item_filters_preserve_parent_scope(&app, prefix, &fx.movies_library).await;
     }
+}
+
+async fn assert_item_filters_preserve_parent_scope(
+    app: &axum::Router,
+    prefix: &str,
+    hidden_library: &str,
+) {
+    let studios = member_json(app, &format!("{prefix}/Studios")).await;
+    let genres = member_json(app, &format!("{prefix}/Genres")).await;
+    let studio_id = studios["Items"][0]["Id"].as_str().unwrap();
+    let genre_id = genres["Items"][0]["Id"].as_str().unwrap();
+    for filter in [
+        format!("StudioIds={studio_id}"),
+        "Genres=Drama".to_string(),
+        format!("GenreIds={genre_id}"),
+    ] {
+        let global = member_json(app, &format!("{prefix}/Items?{filter}")).await;
+        assert!(global["TotalRecordCount"].as_u64().unwrap() > 0);
+        for parent in [hidden_library, "unknown-parent"] {
+            let uri = format!("{prefix}/Items?ParentId={parent}&{filter}");
+            let page = member_json(app, &uri).await;
+            assert_eq!(page["TotalRecordCount"], 0, "{uri}");
+            assert!(page["Items"].as_array().unwrap().is_empty(), "{uri}");
+        }
+    }
+}
+
+async fn member_json(app: &axum::Router, uri: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(uri)
+                .header("authorization", "Bearer entity-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
 struct NoFetch;

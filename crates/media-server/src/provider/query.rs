@@ -436,7 +436,7 @@ fn matches_studios(item: &MediaItemSnapshot, studio_ids: Option<&str>) -> bool {
         item.metadata
             .studios
             .iter()
-            .any(|s| s.eq_ignore_ascii_case(ts))
+            .any(|s| matches_genre_or_studio(ts, s))
     })
 }
 

@@ -15,7 +15,7 @@ export function LibraryRemovalNotice({ library, state, onRetry }: {
   return (
     <div role={failed ? "alert" : "status"} aria-live="polite" className={`my-2 rounded-xl border px-3 py-2 text-sub ${failed ? "border-red-400/30 bg-red-500/10 text-red-200" : "border-sky-400/25 bg-sky-500/10 text-sky-200"}`}>
       <p className="font-medium">「{library.name}」{state?.error ? `删除未完成：${state.error}` : operation ? removalLabel(operation) : "正在提交删除请求…"}</p>
-      <p className="mt-1 text-caption">磁盘文件、NFO 和图片不会删除；观看进度、已看和收藏会保留。</p>
+      <p className="mt-1 text-caption">磁盘文件、NFO 和图片不会删除。若作品在其他媒体库中没有文件，也未被合集或订阅保留，其观看进度、已看状态和收藏将一并清除，重新扫描不会恢复这些记录。</p>
       {!pending && failed && (
         <button type="button" onClick={() => onRetry(operation && operation.state !== "failed" ? operation : undefined)} className="btn-glass mt-2 px-3 py-1 text-caption">
           {operation && operation.state !== "failed" ? "重新读取删除状态" : "重试删除"}

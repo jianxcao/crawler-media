@@ -793,7 +793,12 @@ export async function setPlaybackMarks(
 ): Promise<PlaybackMarks> {
   const response = await request<ApiEnvelope<PlaybackMarks>>("/playback/marks", {
     method: "POST",
-    body: JSON.stringify({ ...target, ...change }),
+    body: JSON.stringify({
+      media_item_id: target.media_item_id,
+      season_number: target.season_number,
+      episode_number: target.episode_number,
+      ...change,
+    }),
   });
   return response.data;
 }

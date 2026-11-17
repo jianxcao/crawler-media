@@ -166,33 +166,15 @@ impl PublicationRecorder<'_> {
     }
 }
 
-impl subscribe::TransferRecorder for PublicationRecorder<'_> {
-    fn prepare(
-        &self,
-        candidate: &domain::FileCoverage,
-        source: &std::path::Path,
-        mode: library::TransferMode,
-    ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
-        self.prepare_with_plan(
-            candidate,
-            source,
-            mode,
-            None,
-            &std::collections::HashSet::new(),
-        )
-    }
-
-    fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
-        self.published_with_plan(candidate, None)
-    }
-}
-
 pub(crate) struct PlannedPublicationRecorder<'a> {
     pub(crate) recorder: PublicationRecorder<'a>,
     pub(crate) plan: &'a TransferPlan,
     /// File rows this round has already reserved/published. Their appearance in
     /// the scoped fingerprint is this round's own effect, not an external change.
     reserved: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// One sequential placement attempt owns one path. A failed attempt is
+    /// released before choosing another destination; completion/drop releases it.
+    active_path: std::sync::Mutex<Option<crate::http::file_delete::PathClaimGuard>>,
 }
 
 impl<'a> PlannedPublicationRecorder<'a> {
@@ -204,6 +186,7 @@ impl<'a> PlannedPublicationRecorder<'a> {
             recorder,
             plan,
             reserved: std::sync::Mutex::new(std::collections::HashSet::new()),
+            active_path: std::sync::Mutex::new(None),
         }
     }
 }
@@ -215,6 +198,20 @@ impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
         source: &std::path::Path,
         mode: library::TransferMode,
     ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
+        // Retire a failed placement before an alternate-name attempt. No mutex
+        // guard is retained while waiting, observing bytes or writing to Store.
+        drop(
+            self.active_path
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take(),
+        );
+        let key = self
+            .recorder
+            .state
+            .store
+            .recorded_path_key(&candidate.file.path.to_string_lossy());
+        let claim = crate::http::file_delete::transfer_claim(&key).lock();
         let mut reserved = self.reserved.lock().map_err(|_| {
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(
                 "Transfer publication recorder poisoned".into(),
@@ -228,11 +225,17 @@ impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
         // not the fresh candidate UUID, so that is the id this round wrote.
         if let Ok(reservation) = &result {
             reserved.insert(reservation.file.file_id.to_string());
+            *self.active_path.lock().unwrap_or_else(|p| p.into_inner()) = Some(claim);
         }
         result
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
+        let _claim = self
+            .active_path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.recorder
             .published_with_plan(candidate, Some(self.plan))
     }

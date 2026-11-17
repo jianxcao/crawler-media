@@ -249,7 +249,7 @@ export function LibraryManageView() {
       onDelete: (library) => {
         void confirm({
           title: `删除媒体库「${library.name}」？`,
-          description: "将停止该库相关任务，清除扫描记录与探测缓存。磁盘文件、NFO 和图片不会删除，观看进度、已看和收藏会保留。重新添加目录后将重新扫描。",
+          description: "将停止该库相关任务，清除扫描记录与探测缓存。磁盘文件、NFO 和图片不会删除。若作品在其他媒体库中没有文件，也未被合集或订阅保留，其观看进度、已看状态和收藏将一并清除，重新扫描不会恢复这些记录。",
           confirmLabel: "删除媒体库",
           tone: "danger",
         }).then((ok) => {

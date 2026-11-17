@@ -133,6 +133,7 @@ fn observe(
     store
         .apply_ledger_presence(
             &[LedgerPresenceObservation {
+                observed_source: None,
                 file,
                 path_key,
                 missing_at,
@@ -413,6 +414,7 @@ fn failed_presence_settlement_rolls_back_probe_lifecycle_too() {
     let file = store.file_coverage_by_id(fixture.file_id).unwrap().unwrap();
     let result = store.apply_ledger_presence(
         &[LedgerPresenceObservation {
+            observed_source: None,
             path_key: file.path_key.clone(),
             file,
             missing_at: None,

@@ -26,6 +26,8 @@ pub struct LedgerPresenceObservation {
     pub path_key: String,
     pub missing_at: Option<i64>,
     pub presence: FilePresence,
+    /// Source facts read outside Store before recovering a pending Transfer.
+    pub observed_source: Option<library::SourceObservation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,18 +162,23 @@ fn apply_observation(
         result.skipped += 1;
         return Ok(());
     };
+    if outcome == LedgerPresenceOutcome::Published && obs.observed_source.is_none() {
+        result.skipped += 1;
+        return Ok(());
+    }
     let now_ms = now.checked_mul(1_000).ok_or_else(|| {
         StoreError::Invalid("presence timestamp exceeds milliseconds range".into())
     })?;
     batch.capture(tx, file.library_id, file.media_id, &file_id)?;
-    if outcome == LedgerPresenceOutcome::Published {
-        tx.execute(
-            "UPDATE library_files SET publication_state='published', presence_state='present',
-                    missing_at=NULL WHERE file_id=?1",
-            [&file_id],
-        )?;
-        tracing::info!(file_id, "Recovered completed Transfer publication");
-    }
+    let version = if let Some(source) = obs
+        .observed_source
+        .as_ref()
+        .filter(|_| outcome == LedgerPresenceOutcome::Published)
+    {
+        lifecycle::publish_pending(tx, file, source, now_ms)?
+    } else {
+        file.version.clone()
+    };
 
     match outcome {
         LedgerPresenceOutcome::Missing => {
@@ -195,7 +202,7 @@ fn apply_observation(
     }
     result.applied.push(AppliedLedgerPresence {
         file_id: obs.file.file.file_id,
-        version: obs.file.file.version.clone(),
+        version,
         outcome,
     });
     tracing::info!(file_id, ?outcome, "Applied Library file presence");

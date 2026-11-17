@@ -26,12 +26,37 @@ pub(super) fn exact_predicates(
     bindings: &mut Bindings,
 ) -> Result<Membership, StoreError> {
     let mut clauses = Vec::new();
-    for (kind, keys) in [("genre", &request.genres), ("studio", &request.studios)] {
+    // ParentId always narrows the explicit filters. Values within one filter
+    // are alternatives, while the parent and each filter are intersections.
+    for (kind, keys, wire_ids) in [
+        ("genre", request.genres.as_slice(), [].as_slice()),
+        ("genre", request.parent_genres.as_slice(), [].as_slice()),
+        (
+            "studio",
+            request.studios.as_slice(),
+            request.studio_wire_ids.as_slice(),
+        ),
+        (
+            "studio",
+            request.parent_studios.as_slice(),
+            request.parent_studio_wire_ids.as_slice(),
+        ),
+    ] {
         if keys.is_empty() {
             continue;
         }
-        let list = list(bindings, keys);
-        clauses.push(format!("EXISTS (SELECT 1 FROM library_protocol_terms t WHERE t.library_id=s.library_id AND t.media_id=s.media_id AND t.term_kind='{kind}' AND t.term_value IN ({list}))"));
+        let names = list(bindings, keys);
+        let by_name = format!(
+            "EXISTS (SELECT 1 FROM library_protocol_terms t WHERE t.library_id=s.library_id AND t.media_id=s.media_id AND t.term_kind='{kind}' AND t.term_value IN ({names}))"
+        );
+        if !wire_ids.is_empty() {
+            let ids = list(bindings, wire_ids);
+            // The catalog hashes the display name, so IDs retain its exact identity;
+            // resolving through lowercase names would merge different catalog entries.
+            clauses.push(format!("({by_name} OR EXISTS (SELECT 1 FROM library_protocol_entities e WHERE e.library_id=s.library_id AND e.media_id=s.media_id AND e.entity_kind='studio' AND e.wire_id IN ({ids})))"));
+        } else {
+            clauses.push(by_name);
+        }
     }
     let ctes = if request.people.is_empty() {
         None

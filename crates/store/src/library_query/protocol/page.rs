@@ -23,71 +23,7 @@ pub(crate) struct ProtocolReadPlan {
 
 pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> ProtocolReadPlan {
     let q = &request.original;
-    let residual = scope.pinned
-        || !q.filters.is_empty()
-        || q.is_favorite.is_some()
-        || q.is_played.is_some()
-        || q.name_starts_with
-            .as_deref()
-            .is_some_and(|v| !v.trim().is_empty())
-        || q.search_term
-            .as_deref()
-            .is_some_and(|v| !v.trim().is_empty());
-    let kind = if q.include_types.len() == 1 {
-        match q.include_types[0] {
-            domain::ProtocolItemType::Movie => Some("movie"),
-            domain::ProtocolItemType::Series => Some("tv"),
-            domain::ProtocolItemType::Video => Some("video"),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let genre_name = if request.studios.is_empty() && request.genres.len() == 2 {
-        request
-            .genres
-            .iter()
-            .find(|v| v.starts_with("name:"))
-            .map(String::as_str)
-    } else {
-        None
-    };
-    let raw_genre = q.genres.first().map(String::as_str).or(match &q.parent {
-        domain::ProtocolParent::Genre(value) => Some(value.as_str()),
-        _ => None,
-    });
-    let plain_genre = raw_genre.is_some_and(|v| {
-        !v.to_ascii_lowercase().starts_with("genre_")
-            && uuid::Uuid::parse_str(v).is_err()
-            && q.genre_ids.is_empty()
-    });
-    let classification = match (
-        genre_name,
-        request.studios.as_slice(),
-        request.genres.is_empty(),
-    ) {
-        (Some(genre), [], _) if plain_genre && !genre[5..].is_empty() => Some(("genre", genre)),
-        (None, [studio], true) => Some(("studio", studio.as_str())),
-        (None, [], true) => kind.map(|kind| ("kind", kind)).or(Some(("all", "*"))),
-        _ => None,
-    };
-    let count_strategy = if scope.library_ids.len() == 1
-        && scope.granularity == Granularity::Work
-        && !residual
-        && request.people.is_empty()
-        && q.is_folder.is_none()
-        && !matches!(q.parent, domain::ProtocolParent::Folder { .. })
-    {
-        match classification {
-            Some((dimension, value)) => CountStrategy::Marginal {
-                dimension: dimension.into(),
-                value: value.into(),
-            },
-            _ => CountStrategy::ExactMembers,
-        }
-    } else {
-        CountStrategy::ExactMembers
-    };
+    let count_strategy = count_strategy(request, scope);
     let effective = effective_sorts(q, scope.granularity);
     let indexed = scope.library_ids.len() == 1
         && request.people.is_empty()
@@ -130,6 +66,84 @@ pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> Pr
         } else {
             PageStrategy::GeneralExact
         },
+    }
+}
+
+fn count_strategy(request: &NormalizedProtocolRequest, scope: &Scope) -> CountStrategy {
+    let q = &request.original;
+    let genres = if request.genres.is_empty() {
+        &request.parent_genres
+    } else {
+        &request.genres
+    };
+    let studios = if request.studios.is_empty() {
+        &request.parent_studios
+    } else {
+        &request.studios
+    };
+    let residual = scope.pinned
+        || (!request.genres.is_empty() && !request.parent_genres.is_empty())
+        || (!request.studios.is_empty() && !request.parent_studios.is_empty())
+        || !q.filters.is_empty()
+        || q.is_favorite.is_some()
+        || q.is_played.is_some()
+        || q.name_starts_with
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        || q.search_term
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty());
+    let kind = if q.include_types.len() == 1 {
+        match q.include_types[0] {
+            domain::ProtocolItemType::Movie => Some("movie"),
+            domain::ProtocolItemType::Series => Some("tv"),
+            domain::ProtocolItemType::Video => Some("video"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let genre_name = if studios.is_empty() && genres.len() == 2 {
+        genres
+            .iter()
+            .find(|v| v.starts_with("name:"))
+            .map(String::as_str)
+    } else {
+        None
+    };
+    let raw_genre = q.genres.first().map(String::as_str).or(match &q.parent {
+        domain::ProtocolParent::Genre(value) => Some(value.as_str()),
+        _ => None,
+    });
+    let plain_genre = raw_genre.is_some_and(|v| {
+        !v.to_ascii_lowercase().starts_with("genre_")
+            && uuid::Uuid::parse_str(v).is_err()
+            && q.genre_ids.is_empty()
+    });
+    let classification = match (genre_name, studios.as_slice(), genres.is_empty()) {
+        (Some(genre), [], _) if plain_genre && !genre[5..].is_empty() => Some(("genre", genre)),
+        (None, [studio], true) => Some(("studio", studio.as_str())),
+        (None, [], true) => kind.map(|kind| ("kind", kind)).or(Some(("all", "*"))),
+        _ => None,
+    };
+    if scope.library_ids.len() == 1
+        && scope.granularity == Granularity::Work
+        && !residual
+        && request.people.is_empty()
+        && request.studio_wire_ids.is_empty()
+        && request.parent_studio_wire_ids.is_empty()
+        && q.is_folder.is_none()
+        && !matches!(q.parent, domain::ProtocolParent::Folder { .. })
+    {
+        match classification {
+            Some((dimension, value)) => CountStrategy::Marginal {
+                dimension: dimension.into(),
+                value: value.into(),
+            },
+            _ => CountStrategy::ExactMembers,
+        }
+    } else {
+        CountStrategy::ExactMembers
     }
 }
 

@@ -55,6 +55,130 @@ fn effective_locale_genre_does_not_read_each_candidate_metadata() {
 }
 
 #[test]
+fn classification_parents_intersect_explicit_filters() {
+    let (_tmp, store, library, ids) = setup_count(3);
+    for (index, studio) in ["Parent Studio", "Filter Studio", "Parent Studio"]
+        .iter()
+        .enumerate()
+    {
+        store
+            .set_metadata_overrides(
+                ids[index].parse().unwrap(),
+                domain::EntityScope::Work,
+                "en-US",
+                &domain::MetadataFields {
+                    genres: domain::FieldValue::Value(vec![domain::MetadataGenre {
+                        source: "nfo".into(),
+                        source_id: None,
+                        name: if index < 2 { "Drama" } else { "Comedy" }.into(),
+                        filter_key: if index < 2 { "drama" } else { "comedy" }.into(),
+                    }]),
+                    studios: domain::FieldValue::Value(vec![studio.to_string()]),
+                    ..Default::default()
+                },
+                i64::from(index < 2),
+            )
+            .unwrap();
+    }
+    let mut request = query(library);
+    request.parent = ProtocolParent::Genre("unknown-parent".into());
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+    request.parent = ProtocolParent::Genre("Drama".into());
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 2);
+    request.genres = vec!["Comedy".into()];
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+    request.genres.clear();
+    request.studio_ids = vec!["Parent Studio".into()];
+    request.parent = ProtocolParent::Studio("unknown-parent".into());
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+    request.parent = ProtocolParent::Studio("Filter Studio".into());
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+    request.parent = ProtocolParent::Studio("Parent Studio".into());
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 2);
+    request.studio_ids = vec!["Filter Studio".into()];
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+}
+
+#[test]
+fn studio_catalog_ids_preserve_identity_and_union_with_names_before_paging() {
+    let (_tmp, store, library, ids) = setup_count(3);
+    for (index, name) in ["Mixed Studio", "mixed studio", "Other"].iter().enumerate() {
+        let fields = domain::MetadataFields {
+            studios: domain::FieldValue::Value(vec![name.to_string()]),
+            ..Default::default()
+        };
+        store
+            .set_metadata_overrides(
+                ids[index].parse().unwrap(),
+                domain::EntityScope::Work,
+                "en-US",
+                &fields,
+                i64::from(index < 2),
+            )
+            .unwrap();
+    }
+    let mut request = query(library);
+    request.genres.clear();
+    let studios = store
+        .protocol_entities(&store::ProtocolEntityQuery {
+            user_id: request.user_id,
+            library_id: Some(library),
+            kind: store::ProtocolEntityKind::Studio,
+            search: None,
+            offset: 0,
+            limit: 50,
+        })
+        .unwrap();
+    let studio = studios
+        .items
+        .iter()
+        .find(|e| e.name == "Mixed Studio")
+        .unwrap();
+    assert_eq!(studio.child_count, 1);
+    let studio_id = uuid::Uuid::parse_str(&studio.wire_id).unwrap();
+    for id in [
+        studio_id.to_string(),
+        studio_id.simple().to_string().to_uppercase(),
+    ] {
+        request.studio_ids = vec![id];
+        let page = store.protocol_item_page(&request).unwrap();
+        assert_eq!(
+            page.total, 1,
+            "ID must preserve the catalog's case-sensitive identity"
+        );
+        assert_eq!(
+            page.items[0].item,
+            domain::TypedItemId::Work(ids[0].parse().unwrap())
+        );
+    }
+    request.studio_ids = vec![uuid::Uuid::nil().to_string()];
+    assert_eq!(store.protocol_item_page(&request).unwrap().total, 0);
+    request.studio_ids = vec![studio_id.to_string(), "Other".into()];
+    let page = store.protocol_item_page(&request).unwrap();
+    assert_eq!(page.total, 2);
+    assert!(
+        page.items
+            .iter()
+            .all(|item| item.item != domain::TypedItemId::Work(ids[1].parse().unwrap()))
+    );
+    request.offset = 1;
+    request.limit = 1;
+    let paged = store.protocol_item_page(&request).unwrap();
+    assert_eq!(paged.total, 2);
+    assert_eq!(paged.items, page.items[1..]);
+    request.offset = 0;
+    request.limit = 10;
+    request.studio_ids = vec![studio_id.to_string(), "MIXED STUDIO".into()];
+    let page = store.protocol_item_page(&request).unwrap();
+    assert_eq!(
+        page.total, 2,
+        "name matching remains case-insensitive and deduplicated"
+    );
+    request.parent = ProtocolParent::Root;
+    assert_eq!(store.protocol_item_page(&request).unwrap(), page);
+}
+
+#[test]
 fn scoped_person_aliases_preserve_name_or_tmdb_matching() {
     let (tmp, store, library, ids) = setup_count(5);
     publish_hidden_person(&tmp, &store);

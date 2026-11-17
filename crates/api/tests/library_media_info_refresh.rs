@@ -242,6 +242,7 @@ fn library_refresh_visits_all_pages_and_keeps_other_libraries_and_missing_files_
     store
         .apply_ledger_presence(
             &[store::LedgerPresenceObservation {
+                observed_source: None,
                 path_key: missing.path_key.clone(),
                 file: missing,
                 missing_at: None,

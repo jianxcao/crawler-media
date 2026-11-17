@@ -1,6 +1,7 @@
 use super::*;
 use std::io::Write;
 use std::sync::Mutex;
+use tracing_subscriber::prelude::*;
 
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -51,16 +52,23 @@ impl futures_core::Stream for ArrivalCheckedBody {
     }
 }
 
-async fn protocol_arrival_is_logged_before_body_is_read() {
+async fn protocol_arrival_is_logged_before_body_is_read(buffer: &Buffer) {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, _) = app(tmp.path());
-    let buffer = Buffer::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(buffer.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
+    // A parallel request can register the middleware's tracing callsite on a
+    // thread with no thread-local subscriber before this request reaches it.
+    let parallel_app = app.clone();
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let request = Request::builder()
+                .uri("/System/Info/Public")
+                .body(Body::empty())
+                .unwrap();
+            parallel_app.oneshot(request).await.unwrap();
+        });
+    })
+    .join()
+    .unwrap();
     let request = Request::builder()
         .method("POST")
         .uri("/Sessions/Playing")
@@ -68,12 +76,11 @@ async fn protocol_arrival_is_logged_before_body_is_read() {
         .header("content-type", "application/json")
         .header("x-request-id", "body-read-1")
         .body(Body::from_stream(ArrivalCheckedBody {
-            buffer,
+            buffer: buffer.clone(),
             sent: false,
         }))
         .unwrap();
     let _response = app.oneshot(request).await.unwrap();
-    drop(guard);
 }
 
 async fn send(
@@ -119,17 +126,10 @@ fn assert_observed(logs: &str, id: &str, method: &str, route: &str, status: u16)
     );
 }
 
-async fn protocol_requests_are_observed_without_sensitive_data() {
+async fn protocol_requests_are_observed_without_sensitive_data(buffer: &Buffer) {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, item_id) = app(tmp.path());
     let session = play_session_for(&app, &item_id, None).await;
-    let buffer = Buffer::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(buffer.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
 
     assert_eq!(
         send(
@@ -228,16 +228,29 @@ async fn protocol_requests_are_observed_without_sensitive_data() {
         .await,
         StatusCode::OK
     );
-    drop(guard);
-
     let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert_safe_logs(&logs, &item_id, &session);
 }
 
 #[tokio::test]
 async fn protocol_request_observation_contract() {
-    protocol_arrival_is_logged_before_body_is_read().await;
-    protocol_requests_are_observed_without_sensitive_data().await;
+    let buffer = Buffer::default();
+    // Callsite interest is process-wide. A thread-local subscriber can miss a
+    // callsite first registered by another test without a default subscriber.
+    // Capture request logs globally, as production does; request IDs isolate
+    // these assertions from other tests running in this executable.
+    let logs = tracing_subscriber::fmt::layer()
+        .with_writer(buffer.clone())
+        .with_ansi(false)
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            matches!(
+                metadata.target(),
+                "api::management::protocol_observation" | "api::http::request_observation"
+            )
+        }));
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(logs)).unwrap();
+    protocol_arrival_is_logged_before_body_is_read(&buffer).await;
+    protocol_requests_are_observed_without_sensitive_data(&buffer).await;
 }
 
 fn assert_safe_logs(logs: &str, item_id: &str, session: &str) {
