@@ -118,13 +118,44 @@ async fn capture_sample(
             attempt_count
         ));
     }
-    *attempt_count += 1;
-    let mut attempt = begin_attempt(ctx, request, kind, window, &options.phase).await?;
+    let mut attempt = new_attempt(request, kind, window, options.phase);
     ctx.gate.wait_before_capture().await;
     let availability = ctx.store.source_available_async(&request.row).await;
     if let Err(error) = availability {
         return finish_error(ctx, request, &mut attempt, error).await;
     }
+    let result = run_capture_attempt(ctx, request, window, &mut attempt).await?;
+    if matches!(&result, Err(error) if error.message == marker::media_read::READ_WAIT_STOPPED) {
+        return Err(marker::media_read::READ_WAIT_STOPPED.into());
+    }
+    *attempt_count += 1;
+    // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
+    let availability = ctx.store.source_available_async(&request.row).await;
+    if let Err(error) = availability {
+        return finish_error(ctx, request, &mut attempt, error).await;
+    }
+    match result {
+        Ok(captured) => finish_capture(ctx, request, kind, attempt, captured).await,
+        Err(error) => {
+            attempt.error_kind = Some(capture_error_kind(&error.kind).into());
+            attempt.metrics_json = serde_json::to_string(&error.metrics).unwrap_or_default();
+            finish_error(
+                ctx,
+                request,
+                &mut attempt,
+                format!("Capture failed: {error}"),
+            )
+            .await
+        }
+    }
+}
+
+async fn run_capture_attempt(
+    ctx: &AdaptiveCaptureContext,
+    request: &EpisodeCaptureRequest,
+    window: &SampleWindow,
+    attempt: &mut StoredFingerprintAttempt,
+) -> Result<Result<CapturedFingerprint, marker::CaptureFailure>, String> {
     let capture_req = CaptureRequest {
         path: request.row.file.path.clone(),
         window: window.clone(),
@@ -143,71 +174,69 @@ async fn capture_sample(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let result = tokio::task::spawn_blocking(move || {
+    let access = ctx.store.clone();
+    let mut running = attempt.clone();
+    let (result, started_at_ms, store_failure) = match tokio::task::spawn_blocking(move || {
         let control = gate.work_control(&row);
-        capture.capture_window_after_metadata_controlled(&capture_req, source.as_ref(), &control)
+        let mut store_failure = None;
+        let result = capture.capture_window_after_metadata_controlled(
+            &capture_req,
+            source.as_ref(),
+            &control,
+            &mut || {
+                running.started_at_ms = now_ms();
+                access.store.begin_fingerprint_attempt(&running).map_err(|error| {
+                    tracing::error!(%error, job_id = %running.job_id, "声纹采集开始状态写入失败");
+                    let message = format!("Store error beginning attempt: {error}");
+                    store_failure = Some(message.clone());
+                    marker::CaptureFailure {
+                        kind: CaptureFailureKind::Io,
+                        message,
+                        metrics: Default::default(),
+                    }
+                })
+            },
+        );
+        (result, running.started_at_ms, store_failure)
     })
-    .await;
-    // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
-    let availability = ctx.store.source_available_async(&request.row).await;
-    if let Err(error) = availability {
-        return finish_error(ctx, request, &mut attempt, error).await;
-    }
-    match result {
-        Ok(Ok(captured)) => finish_capture(ctx, request, kind, attempt, captured).await,
-        Ok(Err(error)) => {
-            attempt.error_kind = Some(capture_error_kind(&error.kind).into());
-            attempt.metrics_json = serde_json::to_string(&error.metrics).unwrap_or_default();
-            finish_error(
-                ctx,
-                request,
-                &mut attempt,
-                format!("Capture failed: {error}"),
-            )
-            .await
-        }
+    .await
+    {
+        Ok(result) => result,
         Err(error) => {
-            finish_error(
-                ctx,
-                request,
-                &mut attempt,
-                format!("Capture task failed: {error}"),
-            )
-            .await
+            return Ok(Err(marker::CaptureFailure {
+                kind: CaptureFailureKind::Io,
+                message: format!("Capture task failed: {error}"),
+                metrics: Default::default(),
+            }));
         }
+    };
+    if let Some(error) = store_failure {
+        return Err(error);
     }
+    attempt.started_at_ms = started_at_ms;
+    Ok(result)
 }
 
-async fn begin_attempt(
-    ctx: &AdaptiveCaptureContext,
+fn new_attempt(
     request: &EpisodeCaptureRequest,
     kind: SegmentKind,
     window: &SampleWindow,
-    phase: &str,
-) -> Result<StoredFingerprintAttempt, String> {
-    let attempt = StoredFingerprintAttempt {
+    phase: String,
+) -> StoredFingerprintAttempt {
+    StoredFingerprintAttempt {
         attempt_id: format!("att-{}", Uuid::new_v4()),
         job_id: request.job_id.clone(),
         ledger_id: request.row.file.file_id.to_string(),
         kind: kind_name(kind).into(),
         window_start_ms: window.start_ms,
         window_end_ms: window.end_ms,
-        phase: phase.into(),
+        phase,
         started_at_ms: now_ms(),
         finished_at_ms: None,
         status: "running".into(),
         error_kind: None,
         metrics_json: "{}".into(),
-    };
-    let stored_attempt = attempt.clone();
-    ctx.store
-        .write_async(move |store| store.begin_fingerprint_attempt(&stored_attempt))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, job_id = %request.job_id, "声纹采集开始状态写入失败");
-            format!("Store error beginning attempt: {error}")
-        })?;
-    Ok(attempt)
+    }
 }
 
 async fn finish_error(

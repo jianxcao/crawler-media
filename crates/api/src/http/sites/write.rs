@@ -128,29 +128,20 @@ async fn put_site_inner(
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "下载器 id 无效"),
     };
     crate::http::store_wait::store_write(&state, move |store| {
-        let current = match store.get_site(site_id) {
+        let expected = match store.get_site(site_id) {
             Ok(Some(site)) => site,
             Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
             Err(error) => return site_store_error(&error),
         };
-        let site = match replacement_site(current, body, downloader_id) {
+        let site = match replacement_site(expected.clone(), body, downloader_id) {
             Ok(site) => site,
             Err((status, code, msg)) => return err(status, code, msg),
         };
-        let updated = match store.save_site(&site) {
-            Ok(updated) => updated,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        };
-        if !updated {
-            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
+        match store.save_site_if_current(&site, &expected) {
+            Ok(true) => ok(site_json(&site)).into_response(),
+            Ok(false) => site_changed(),
+            Err(error) => site_store_error(&error),
         }
-        ok(site_json(&site)).into_response()
     })
     .await
     .unwrap_or_else(|response| response)
@@ -228,6 +219,14 @@ fn site_store_error(error: &impl std::fmt::Display) -> Response {
     )
 }
 
+fn site_changed() -> Response {
+    err(
+        StatusCode::CONFLICT,
+        "site.changed",
+        "站点已更改，请刷新后重试",
+    )
+}
+
 async fn patch_site_inner(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -238,9 +237,12 @@ async fn patch_site_inner(
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
     crate::http::store_wait::store_write(&state, move |store| {
-        let Some(mut site) = store.get_site(id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
+        let expected = match store.get_site(id) {
+            Ok(Some(site)) => site,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
+            Err(error) => return site_store_error(&error),
         };
+        let mut site = expected.clone();
         if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
             site.name = name;
         }
@@ -304,14 +306,11 @@ async fn patch_site_inner(
                 "浏览器维护方式不支持配置代理",
             );
         }
-        if let Err(error) = store.save_site(&site) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+        match store.save_site_if_current(&site, &expected) {
+            Ok(true) => ok(site_public(&site, auth_type(&site), true)).into_response(),
+            Ok(false) => site_changed(),
+            Err(error) => site_store_error(&error),
         }
-        ok(site_public(&site, auth_type(&site), true)).into_response()
     })
     .await
     .unwrap_or_else(|response| response)

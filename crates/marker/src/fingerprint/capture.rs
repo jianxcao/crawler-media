@@ -56,6 +56,16 @@ pub fn capture_from_source(
     control: &crate::WorkControl,
     program: &std::ffi::OsStr,
 ) -> Result<CapturedFingerprint, CaptureFailure> {
+    capture_from_source_with(request, source, control, program, &mut || Ok(()))
+}
+
+pub(super) fn capture_from_source_with(
+    request: &CaptureRequest,
+    source: &super::CaptureSourceFacts,
+    control: &crate::WorkControl,
+    program: &std::ffi::OsStr,
+    begin: &mut dyn FnMut() -> Result<(), CaptureFailure>,
+) -> Result<CapturedFingerprint, CaptureFailure> {
     let started = Instant::now();
     if control.is_cancelled() {
         return Err(CaptureFailure {
@@ -83,6 +93,7 @@ pub fn capture_from_source(
                 metrics: CaptureMetrics::default(),
             }
         })?;
+    begin()?;
 
     if crate::capture_profile::quantized_aac(source) {
         return super::quantized::capture(request, source, control, started);

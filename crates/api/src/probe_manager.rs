@@ -118,6 +118,7 @@ pub struct ProbeManager {
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
+    remote_reads_paused: Mutex<bool>,
     metadata_admission: Mutex<worker::MetadataAdmission>,
     metadata_capacity: Notify,
     shutting_down: Arc<AtomicBool>,
@@ -162,6 +163,7 @@ impl ProbeManager {
     ) -> Result<Self, store::StoreError> {
         let channels = dispatch::channels();
         let settings = crate::probe_settings::ProbeSettings::load(&store)?;
+        let remote_reads = crate::probe_settings::RemoteReadsSettings::load(&store)?;
         let (shutdown_signal, _) = tokio::sync::watch::channel(false);
         let data_dir = store.data_dir().to_path_buf();
         let store_key = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
@@ -197,6 +199,7 @@ impl ProbeManager {
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
             probe_settings: Mutex::new(settings),
+            remote_reads_paused: Mutex::new(remote_reads.paused),
             metadata_admission: Mutex::new(worker::MetadataAdmission::new(
                 settings.metadata_workers,
             )),
@@ -280,6 +283,12 @@ impl ProbeManager {
         let mut current = self.probe_settings.lock();
         *current = settings;
         self.configure_probe_admission(settings);
+    }
+
+    pub(crate) fn apply_remote_reads_pause(&self, paused: bool) {
+        let mut current = self.remote_reads_paused.lock();
+        *current = paused;
+        marker::media_read::set_remote_reads_paused(paused);
     }
 
     fn configure_probe_admission(&self, settings: crate::probe_settings::ProbeSettings) {

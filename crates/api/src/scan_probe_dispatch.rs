@@ -32,46 +32,31 @@ fn dispatch_obligations(
 
     let mut acked = 0;
     for ob in obligations {
-        let row_opt = {
-            let store = shared;
-            store
-                .file_coverage_by_id(ob.ledger_id)
-                .map_err(|e| e.to_string())?
-        };
-
-        let Some(row) = row_opt else {
-            // Ledger row no longer exists (pruned/deleted), ack obligation immediately
-            let store = shared;
-            match store.ack_scan_probe_obligation(ob.ledger_id) {
-                Ok(()) => acked += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        ledger_id = %ob.ledger_id,
-                        "台账行已不存在，确认探测义务失败（该义务将被反复重派）"
-                    );
-                }
-            }
-            continue;
-        };
-
         // An obligation means "this file still needs a probe". Once presence has recorded the
         // source missing the work cannot succeed, and keeping the row would fill the head of
-        // the 100-row dispatch window with files that will never run. Restoring the source
-        // re-arms the obligation (`crates/api/src/library_presence.rs`).
+        // the 100-row dispatch window with files that will never run. Preserve an obligation
+        // re-armed by presence after this read.
+        let row = match shared
+            .file_coverage_by_id(ob.ledger_id)
+            .map_err(|error| error.to_string())?
         {
-            let store = shared;
-            if store
-                .ledger_is_missing(&row.file.file_id.to_string())
-                .map_err(|error| error.to_string())?
+            Some(row)
+                if !shared
+                    .ledger_is_missing(&ob.ledger_id.to_string())
+                    .map_err(|error| error.to_string())? =>
             {
-                store
-                    .ack_scan_probe_obligation(ob.ledger_id)
-                    .map_err(|error| error.to_string())?;
-                acked += 1;
+                row
+            }
+            _ => {
+                match shared.discard_scan_probe_obligation_if_source_unavailable(&ob) {
+                    Ok(discarded) => acked += usize::from(discarded),
+                    Err(error) => {
+                        tracing::warn!(%error, ledger_id = %ob.ledger_id, "清理不可用源文件的探测义务失败");
+                    }
+                }
                 continue;
             }
-        }
+        };
 
         let result = probe.request_probe(
             &row,

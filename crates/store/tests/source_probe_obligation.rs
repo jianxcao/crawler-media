@@ -1,9 +1,9 @@
-use domain::{Media, MediaId, MediaKind};
+use domain::{LibraryFile, Media, MediaId, MediaKind};
 use store::library_write::WriteScope;
 use store::test_support::{FixtureFile, publish_fixture_file};
+use store::{FilePresence, LedgerPresenceMode, LedgerPresenceObservation, Store};
 
-#[test]
-fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
+fn fixture() -> (tempfile::TempDir, Store, LibraryFile) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("movies");
     std::fs::create_dir(&root).unwrap();
@@ -44,6 +44,14 @@ fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
         },
     )
     .unwrap();
+    (tmp, store, file)
+}
+
+#[test]
+fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
+    let (tmp, store, file) = fixture();
+    let data = tmp.path().join("data");
+    let path = &file.path;
     let scope = WriteScope {
         library_id: file.library_id,
         config_revision: store
@@ -65,7 +73,7 @@ fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
                 .create_probe_job(
                     &job_id,
                     "media_probe",
-                    &media.id.to_string(),
+                    &file.media_id.to_string(),
                     None,
                     "ledger",
                     &[store::ProbeJobUnitSpec {
@@ -79,13 +87,13 @@ fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
                 )
                 .unwrap()
         );
-        std::fs::write(&path, url).unwrap();
+        std::fs::write(path, url).unwrap();
         expected = store
             .replace_file_source(
                 &scope,
                 file.file_id,
                 &expected,
-                &library::observe_source(&path).unwrap(),
+                &library::observe_source(path).unwrap(),
                 100,
             )
             .unwrap();
@@ -118,4 +126,47 @@ fn replacing_source_keeps_a_durable_obligation_safe_from_previous_source_ack() {
         store.get_file_version(file.file_id).unwrap(),
         Some(expected)
     );
+}
+
+#[test]
+fn delayed_missing_source_ack_preserves_the_restored_obligation() {
+    let (_tmp, store, file) = fixture();
+    let file_id = file.file_id.to_string();
+    let apply_presence = |presence, missing_at, now_ms| {
+        let row = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        store
+            .apply_ledger_presence(
+                &[LedgerPresenceObservation {
+                    path_key: row.path_key.clone(),
+                    file: row,
+                    presence,
+                    missing_at,
+                    observed_source: None,
+                }],
+                LedgerPresenceMode::Verify,
+                now_ms,
+            )
+            .unwrap()
+    };
+    store
+        .arm_scan_probe_obligation(&file_id, 100, "publish")
+        .unwrap();
+    let old = store.scan_probe_obligations(10).unwrap().remove(0);
+    assert_eq!(apply_presence(FilePresence::Missing, None, 200).missing, 1);
+    assert!(store.ledger_is_missing(&file_id).unwrap());
+    assert_eq!(
+        apply_presence(FilePresence::Present, Some(200), 300).restored,
+        1
+    );
+
+    assert!(
+        !store
+            .discard_scan_probe_obligation_if_source_unavailable(&old)
+            .unwrap()
+    );
+
+    let remaining = store.scan_probe_obligations(10).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].ledger_id, file.file_id);
+    assert_eq!(remaining[0].reason, "source_restored");
 }

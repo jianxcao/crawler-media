@@ -199,7 +199,7 @@ pub async fn list_jobs(transport: &impl Transport) -> Result<String, String> {
 pub async fn list_directory(transport: &impl Transport) -> Result<String, String> {
     let mut out = String::new();
     for endpoint in [
-        "/api/v1/libraries",
+        "/api/v1/libraries?scope=admin",
         "/api/v1/settings/transfer",
         "/api/v1/settings/scrape",
     ] {

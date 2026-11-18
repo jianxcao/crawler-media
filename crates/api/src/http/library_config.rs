@@ -465,6 +465,7 @@ pub(crate) async fn delete_library(
             Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "library.removal", &error),
         },
         Err(StoreError::Missing(_)) => missing_library(),
+        Err(StoreError::WriteBusy) => super::store_wait::busy_response(),
         Err(StoreError::Protected(message)) => {
             err(StatusCode::CONFLICT, "library.protected", &message)
         }

@@ -143,64 +143,23 @@ fn apply_entry(
         Ok(request) => request,
         Err(error) => return OrganizeOutcome::Failed(format!("{from}: 媒体库工作已取消: {error}")),
     };
-    let observed = match apply_disk_and_observe(state, &request, now) {
-        Ok(observed) => observed,
+    let store = state.store.as_ref();
+    let _publication = match store.apply_file_rename(&request, now) {
+        Ok(publication) => publication,
         Err(error) => {
             tracing::error!(from, to, %error, rename_id = %request.rename_id, "整理文件重命名失败");
             return OrganizeOutcome::Failed(format!("{from} -> {to}: {error}"));
         }
     };
-    let completed = source_lease.publish(|| {
-        if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
-            return Err("目标媒体库正在删除".into());
-        }
-        let store = state.store.as_ref();
-        store
-            .complete_observed_file_rename(observed, now)
-            .map_err(|e| e.to_string())?;
-        Ok(store
-            .file_coverage_by_path(&to)
-            .ok()
-            .flatten()
-            .and_then(|c| store.get_media(c.file.media_id).ok().flatten()))
-    });
-    match completed {
-        Ok(media) => {
-            if let Some(media) = media {
-                write_missing_nfo(&entry.to, &media);
-            }
-            OrganizeOutcome::Applied
-        }
-        Err(error) => {
-            // The durable intent remains resumable after cancellation or failure.
-            tracing::error!(from, to, %error, rename_id = %request.rename_id, "整理文件更新台账失败");
-            OrganizeOutcome::Failed(format!("{from} -> {to}: 台账记录更新失败: {error}"))
-        }
+    if let Some(media) = store
+        .file_coverage_by_path(&to)
+        .ok()
+        .flatten()
+        .and_then(|c| store.get_media(c.file.media_id).ok().flatten())
+    {
+        write_missing_nfo(&entry.to, &media);
     }
-}
-
-fn apply_disk_and_observe(
-    state: &ApiState,
-    request: &store::library_write::FileRenameRequest,
-    now: i64,
-) -> Result<store::library_write::ObservedRenameCompletion, store::StoreError> {
-    // The intent is committed; every disk phase runs outside Store and publication.
-    let receipt = store::library_write::execute_rename_disk(request).inspect_err(|error| {
-        if let Err(record) =
-            state
-                .store
-                .as_ref()
-                .record_rename_refusal(&request.rename_id, now, error)
-        {
-            tracing::error!(%record, rename_id = %request.rename_id, "记录重命名拒绝失败");
-        }
-    })?;
-    crate::rename_work::record_disk(&state.store, &receipt, now)?;
-    let plan = state
-        .store
-        .as_ref()
-        .plan_file_rename_completion(&request.rename_id)?;
-    plan.observe()
+    OrganizeOutcome::Applied
 }
 
 fn write_missing_nfo(to: &FsPath, media: &domain::Media) {

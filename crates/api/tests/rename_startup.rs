@@ -192,3 +192,106 @@ async fn startup_recovery_does_not_take_over_a_live_rename_intent() {
     );
     assert!(!live_to.exists());
 }
+
+#[tokio::test]
+async fn startup_recovery_preserves_source_when_destination_library_is_removing() {
+    assert_source_survives_destination_removal(false).await;
+}
+
+#[tokio::test]
+async fn startup_recovery_does_not_unlink_source_after_interrupted_destination_link() {
+    assert_source_survives_destination_removal(true).await;
+}
+
+async fn assert_source_survives_destination_removal(destination_linked: bool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    let target = tmp.path().join("target");
+    for root in [&source, &target] {
+        std::fs::create_dir_all(root).unwrap();
+    }
+    let from = source.join("Original.mkv");
+    let to = target.join("Moved.mkv");
+    std::fs::write(&from, b"video").unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    for root in [&source, &target] {
+        store
+            .create_library(
+                MediaKind::Movie,
+                root.file_name().unwrap().to_str().unwrap(),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let media_id = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: media_id,
+            kind: MediaKind::Movie,
+            title: "Movie".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let file = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id,
+            path: from.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let request = store
+        .begin_file_rename(file.file_id, &file.version, &from, &to, 1)
+        .unwrap();
+    if destination_linked {
+        std::fs::hard_link(&from, &to).unwrap();
+    }
+    let removal = store
+        .begin_library_removal(&request.to_library_id.to_string())
+        .unwrap();
+    let state = ApiState::new(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .unwrap();
+    let shared = state.store();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if shared.list_due_file_rename_ids(2).unwrap().is_empty()
+                && shared
+                    .library_removal(&removal.operation_id)
+                    .unwrap()
+                    .unwrap()
+                    .state
+                    == "succeeded"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("startup must settle the removal and interrupted rename");
+    assert_eq!(std::fs::read(&from).unwrap(), b"video");
+    assert_eq!(to.exists(), destination_linked);
+    assert!(
+        shared
+            .list_due_file_rename_ids(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}

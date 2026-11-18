@@ -44,11 +44,8 @@ impl Store {
         self.rename_within_root(file_id, expected, from, to)?;
         let now = crate::unix_now();
         let request = self.begin_file_rename(file_id, expected, from, to, now)?;
-        let receipt = super::execute_rename_disk(&request).inspect_err(|error| {
-            let _ = self.record_rename_refusal(&request.rename_id, now, error);
-        })?;
-        self.record_rename_disk(&receipt, now)?;
-        self.complete_file_rename(&request.rename_id, now)
+        let _publication = self.apply_file_rename(&request, now)?;
+        Ok(())
     }
 
     fn rename_within_root(

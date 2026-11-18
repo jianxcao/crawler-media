@@ -32,7 +32,7 @@ pub struct RenameDiskReceipt {
 
 /// Run the disk phase for a planned rename. Holds no Store lock; idempotent.
 pub fn execute_rename_disk(request: &FileRenameRequest) -> Result<RenameDiskReceipt, StoreError> {
-    execute(request, false)
+    execute(request, false, || Ok(())).map(|(receipt, ())| receipt)
 }
 
 /// Test seam: take the cross-filesystem (staged copy) path on one filesystem.
@@ -40,15 +40,19 @@ pub fn execute_rename_disk(request: &FileRenameRequest) -> Result<RenameDiskRece
 pub fn execute_rename_disk_copying(
     request: &FileRenameRequest,
 ) -> Result<RenameDiskReceipt, StoreError> {
-    execute(request, true)
+    execute(request, true, || Ok(())).map(|(receipt, ())| receipt)
 }
 
-fn execute(request: &FileRenameRequest, force_copy: bool) -> Result<RenameDiskReceipt, StoreError> {
+pub(super) fn execute<G>(
+    request: &FileRenameRequest,
+    force_copy: bool,
+    admit: impl Fn() -> Result<G, StoreError>,
+) -> Result<(RenameDiskReceipt, G), StoreError> {
     let evidence = &request.source_evidence;
     let (from, to) = (&request.from_path, &request.to_path);
     let staging = staging_path(to, &request.rename_id);
-    match (stat_source(from)?, stat(to)?) {
-        (None, Some(_)) if owns_destination(request, &staging)? => receipt(request),
+    let publication = match (stat_source(from)?, stat(to)?) {
+        (None, Some(_)) if owns_destination(request, &staging)? => Ok(admit()?),
         (None, Some(_)) => Err(refused(request, "destination is not this intent's file")),
         (None, None) => Err(StoreError::Missing(format!(
             "rename {}: neither {} nor {} exists on disk",
@@ -62,16 +66,15 @@ fn execute(request: &FileRenameRequest, force_copy: bool) -> Result<RenameDiskRe
         )),
         // Crash after link/copy, before the source was removed.
         (Some(_), Some(_)) if owns_destination(request, &staging)? => {
+            let publication = admit()?;
             std::fs::remove_file(from)?;
             sync_parent(from)?;
-            receipt(request)
+            Ok(publication)
         }
         (Some(_), Some(_)) => Err(refused(request, "destination is occupied")),
-        (Some(_), None) => {
-            move_bytes(request, &staging, force_copy)?;
-            receipt(request)
-        }
-    }
+        (Some(_), None) => move_bytes(request, &staging, force_copy, &admit),
+    }?;
+    Ok((receipt(request)?, publication))
 }
 
 /// `to` carries the source inode, the kept staging inode, or the recorded receipt.
@@ -105,21 +108,24 @@ fn receipt(request: &FileRenameRequest) -> Result<RenameDiskReceipt, StoreError>
     })
 }
 
-fn move_bytes(
+fn move_bytes<G>(
     request: &FileRenameRequest,
     staging: &Path,
     force_copy: bool,
-) -> Result<(), StoreError> {
+    admit: &impl Fn() -> Result<G, StoreError>,
+) -> Result<G, StoreError> {
     let (from, to) = (&request.from_path, &request.to_path);
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if !force_copy {
+        let publication = admit()?;
         match std::fs::hard_link(from, to) {
             Ok(()) => {
                 sync_parent(to)?;
                 std::fs::remove_file(from)?;
-                return sync_parent(from);
+                sync_parent(from)?;
+                return Ok(publication);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(refused(request, "destination appeared during the move"));
@@ -128,10 +134,14 @@ fn move_bytes(
             Err(error) => return Err(error.into()),
         }
     }
-    copy_through_staging(request, staging)
+    copy_through_staging(request, staging, admit)
 }
 
-fn copy_through_staging(request: &FileRenameRequest, staging: &Path) -> Result<(), StoreError> {
+fn copy_through_staging<G>(
+    request: &FileRenameRequest,
+    staging: &Path,
+    admit: &impl Fn() -> Result<G, StoreError>,
+) -> Result<G, StoreError> {
     let (from, to) = (&request.from_path, &request.to_path);
     // `to` is absent here, so a leftover staging file proves nothing: start over.
     remove_if_present(staging)?;
@@ -144,6 +154,13 @@ fn copy_through_staging(request: &FileRenameRequest, staging: &Path) -> Result<(
             return Err(refused(request, "source changed during copy"));
         }
     }
+    let publication = match admit() {
+        Ok(publication) => publication,
+        Err(error) => {
+            remove_if_present(staging)?;
+            return Err(error);
+        }
+    };
     match std::fs::hard_link(staging, to) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -155,7 +172,8 @@ fn copy_through_staging(request: &FileRenameRequest, staging: &Path) -> Result<(
     sync_parent(to)?;
     // The staging link stays: it is the recovery proof until the receipt is recorded.
     std::fs::remove_file(from)?;
-    sync_parent(from)
+    sync_parent(from)?;
+    Ok(publication)
 }
 
 /// Drop the staging link once the receipt is durable. Missing is fine (replay).

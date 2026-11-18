@@ -195,7 +195,7 @@ mod tests {
 impl CaptureGate for MetadataPriorityGate {
     fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
         if self.registry.is_none() {
-            return marker::WorkControl::default();
+            return marker::WorkControl::default().with_read_stop(self.shutting_down.clone());
         }
         let owner = crate::fingerprint_job::source::ensure_source_recorded(&self.store, row)
             .ok()
@@ -206,7 +206,7 @@ impl CaptureGate for MetadataPriorityGate {
             && let Some((original, control)) = owners.get(&row.file.file_id.to_string())
             && owner.as_ref().is_some_and(|owner| owner == original)
         {
-            return control.clone();
+            return control.clone().with_read_stop(self.shutting_down.clone());
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();

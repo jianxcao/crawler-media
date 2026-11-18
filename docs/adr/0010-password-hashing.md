@@ -15,5 +15,5 @@ ADR-0003 记录了 PT 站点凭证（Cookie/API key/Passkey）以明文存储在
 4. **种子管理员密码与 CLI Bearer Token 分离**：
    - 初始管理员密码（`CRAWLER_MEDIA_ADMIN_PASSWORD`）仅用于密码哈希计算并存入 `users.password`，绝对不作为明文会话写入 `user_tokens` 表；
    - 独立配置 `CRAWLER_MEDIA_TOKEN` 用于 CLI 或受信服务调用；首次管理员初始化需要独立密码，不得与当前或已知 CLI Bearer 凭据相同。
-   - 已有管理员保留其持久凭据，重启不使用环境变量覆盖密码。`admin_password_is_set` 对非空无效哈希报错，启动不自动修复凭据。实现见 `crates/store/src/users.rs` 和 `crates/api/src/bootstrap_credentials.rs`。
+   - 已有管理员保留其持久凭据，重启不使用环境变量覆盖密码。生产启动时，如果待登记的 `CRAWLER_MEDIA_TOKEN` 与现有管理员密码相同，服务拒绝启动。`admin_password_is_set` 对非空无效哈希报错，启动不自动修复凭据。实现见 `crates/store/src/users.rs` 和 `crates/api/src/bootstrap_credentials.rs`。
    - 数据库及备份仍包含可用的 Site 凭证与会话 token，须按部署方的秘密数据策略保护。

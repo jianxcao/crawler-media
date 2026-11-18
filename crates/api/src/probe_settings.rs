@@ -46,3 +46,18 @@ impl ProbeSettings {
         Ok(settings)
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteReadsSettings {
+    pub paused: bool,
+}
+
+impl RemoteReadsSettings {
+    pub fn load(store: &Store) -> Result<Self, store::StoreError> {
+        match store.get_setting(settings_keys::PROBE_REMOTE_READS)? {
+            Some(raw) => Ok(serde_json::from_str(&raw)?),
+            None => Ok(Self::default()),
+        }
+    }
+}

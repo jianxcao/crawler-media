@@ -236,8 +236,19 @@ async fn extract(
             process_deadline_ms: 120_000,
         };
         engine
-            .capture_window_after_metadata_controlled(&request, source.as_ref(), &control)
-            .map_err(|error| error.to_string())
+            .capture_window_after_metadata_controlled(
+                &request,
+                source.as_ref(),
+                &control,
+                &mut || Ok(()),
+            )
+            .map_err(|error| {
+                if error.message == marker::media_read::READ_WAIT_STOPPED {
+                    error.message
+                } else {
+                    error.to_string()
+                }
+            })
     })
     .await
     .map_err(|error| format!("fingerprint worker failed: {error}"))?

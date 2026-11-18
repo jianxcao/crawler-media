@@ -387,7 +387,6 @@ fn delete_coverages_blocking(
     let mut report = FileDeletionReport::default();
     for row in observed {
         let path = row.coverage.file.path.to_string_lossy().into_owned();
-        report.paths.push(path.clone());
         if let Err(error) = retry_queued_deletions_for(&state.store, &path) {
             tracing::error!(%error, %path, "删除未完成，持久意图保留供重试");
             report.errors.push(error);
@@ -395,6 +394,7 @@ fn delete_coverages_blocking(
         }
         match state.store.file_coverage_by_id(row.coverage.file.file_id) {
             Ok(None) => {
+                report.paths.push(path);
                 report.removed += 1;
                 report.freed_bytes += row.size;
             }

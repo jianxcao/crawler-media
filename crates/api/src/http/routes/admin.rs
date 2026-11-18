@@ -279,6 +279,10 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
             "/settings/probe",
             get(probe_settings::get).put(probe_settings::put),
         )
+        .route(
+            "/settings/probe/remote-reads",
+            get(probe_settings::get_remote_reads).put(probe_settings::put_remote_reads),
+        )
         .route("/notify/config", put(notify::put_config))
         .route("/notify/test", post(notify::test))
         .route(

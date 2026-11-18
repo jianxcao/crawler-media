@@ -1,27 +1,6 @@
-//! Drive durable rename IO with owned plans, taking the Store only for DB steps.
+//! Replay durable rename intents captured at startup.
 use store::Store;
 use store::StoreError;
-use store::library_write::RenameDiskReceipt;
-
-pub(crate) fn record_disk(
-    store: &Store,
-    receipt: &RenameDiskReceipt,
-    now: i64,
-) -> Result<(), StoreError> {
-    let Some(plan) = store.begin_rename_disk_record(receipt)? else {
-        return Ok(());
-    };
-    let observed = plan.observe();
-    let decided = store.decide_rename_disk(observed)?;
-    let applied = decided.apply()?;
-    store.finish_rename_disk(applied, now)
-}
-
-pub(crate) fn complete(store: &Store, rename_id: &str, now: i64) -> Result<(), StoreError> {
-    let plan = store.plan_file_rename_completion(rename_id)?;
-    let observed = plan.observe()?;
-    store.complete_observed_file_rename(observed, now)
-}
 
 const RECOVERY_WINDOW: usize = 100;
 
@@ -72,7 +51,7 @@ pub(crate) fn resume_startup(state: crate::management::ApiState) {
 fn resume_batch(store: &Store, ids: &[String], now: i64) -> Result<usize, StoreError> {
     let mut completed = 0;
     for id in ids {
-        let result = resume_one(store, id, now);
+        let result = store.resume_one_file_rename(id, now);
         match result {
             Ok(()) => completed += 1,
             Err(error) => {
@@ -85,15 +64,4 @@ fn resume_batch(store: &Store, ids: &[String], now: i64) -> Result<usize, StoreE
         }
     }
     Ok(completed)
-}
-
-fn resume_one(store: &Store, rename_id: &str, now: i64) -> Result<(), StoreError> {
-    let request = store.load_file_rename(rename_id)?;
-    if request.phase == "planned" {
-        let receipt = store::library_write::execute_rename_disk(&request).inspect_err(|error| {
-            let _ = store.record_rename_refusal(rename_id, now, error);
-        })?;
-        record_disk(store, &receipt, now)?;
-    }
-    complete(store, rename_id, now)
 }

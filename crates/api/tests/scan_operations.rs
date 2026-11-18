@@ -278,8 +278,14 @@ fn seed_probe_baseline(
     store: &store::Store,
     rows: &[domain::FileCoverage],
 ) -> (domain::LedgerId, domain::LedgerId) {
+    for obligation in store.scan_probe_obligations(100).unwrap() {
+        assert!(
+            store
+                .ack_scan_probe_obligation_if_current(&obligation)
+                .unwrap()
+        );
+    }
     for row in rows {
-        store.ack_scan_probe_obligation(row.file.file_id).unwrap();
         let tracks = library::Tracks {
             video: Some(library::VideoTrack {
                 codec: Some("h264".to_string()),

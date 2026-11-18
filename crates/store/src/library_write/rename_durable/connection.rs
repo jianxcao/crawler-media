@@ -143,11 +143,9 @@ impl crate::LibraryConnection<'_> {
             .optional()?
             .ok_or_else(|| StoreError::Missing(format!("rename {rename_id}")))?;
         if raw.file_vanished() {
-            // The file row is gone: the intent can never complete. Keep it as a
-            // terminal audit record instead of retrying forever.
-            let error = format!("rename {rename_id}: file record vanished");
-            self.mark_file_rename_failed(rename_id, crate::unix_now(), &error)?;
-            return Err(StoreError::Missing(error));
+            return Err(StoreError::Missing(format!(
+                "rename {rename_id}: file record vanished"
+            )));
         }
         raw.into_request(rename_id)
     }
@@ -202,7 +200,7 @@ impl crate::LibraryConnection<'_> {
                  next_retry_at = ?2 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
                  last_error = ?3,
                  updated_at_ms = ?2 * 1000
-             WHERE rename_id = ?1",
+             WHERE rename_id = ?1 AND phase <> 'failed'",
             params![rename_id, now, error],
         )?;
         Ok(())

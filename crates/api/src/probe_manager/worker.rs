@@ -5,6 +5,8 @@ use fingerprint::run_fingerprint_worker;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::library_lifecycle::BoundedLeaseError;
+
 use super::{ProbeManager, ProbeUnit, probe};
 
 pub(super) struct MetadataAdmission {
@@ -104,6 +106,10 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     {
         let settings = manager.probe_settings.lock();
         manager.configure_probe_admission(*settings);
+    }
+    {
+        let paused = manager.remote_reads_paused.lock();
+        marker::media_read::set_remote_reads_paused(*paused);
     }
     let bootstrap = manager.clone();
     let handle = tokio::spawn(async move {
@@ -234,8 +240,7 @@ async fn process_metadata(
             if !is_temporary_busy(&reason) {
                 let _ = step(&manager, {
                     let unit = unit.clone();
-                    let reason = reason.clone();
-                    move |manager| manager.cancel_unit(&unit, &reason)
+                    move |manager| manager.cancel_unit(&unit, &reason.to_string())
                 })
                 .await;
             }
@@ -266,7 +271,7 @@ async fn process_metadata(
                 if !is_temporary_busy(&reason) {
                     let _ = step(&manager, {
                         let unit = unit.clone();
-                        move |manager| manager.cancel_unit(&unit, &reason)
+                        move |manager| manager.cancel_unit(&unit, &reason.to_string())
                     })
                     .await;
                 }
@@ -283,7 +288,8 @@ async fn process_metadata(
     let control = lease
         .as_ref()
         .map(|lease| lease.control().clone())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .with_read_stop(manager.shutting_down.clone());
     let outcome = probe::probe_metadata(&manager, &unit, &control).await;
     let still_ready = step(&manager, {
         let unit = unit.clone();
@@ -303,6 +309,11 @@ async fn process_metadata(
             .await;
         }
         probe::MetadataOutcome::Failed => {
+            if manager.shutting_down.load(Ordering::Acquire)
+                || marker::media_read::remote_reads_stopping()
+            {
+                return (false, true);
+            }
             let _ = step(&manager, {
                 let unit = unit.clone();
                 move |manager| manager.finish(&unit, false)
@@ -322,8 +333,11 @@ async fn process_metadata(
     (false, true)
 }
 
-fn is_temporary_busy(reason: &str) -> bool {
-    super::store_access::is_busy_message(reason)
+fn is_temporary_busy(error: &BoundedLeaseError) -> bool {
+    matches!(
+        error,
+        BoundedLeaseError::StoreBusy | BoundedLeaseError::RegistryBusy
+    )
 }
 
 async fn retry_dispatch(
@@ -456,7 +470,7 @@ async fn run_window_dispatcher(manager: Arc<ProbeManager>) {
 fn refresh_leases(
     manager: &ProbeManager,
     unit: &ProbeUnit,
-) -> Result<Vec<crate::library_lifecycle::LibraryWorkLease>, String> {
+) -> Result<Vec<crate::library_lifecycle::LibraryWorkLease>, BoundedLeaseError> {
     work_lease(manager, unit, true).map(|lease| lease.into_iter().collect())
 }
 
@@ -464,16 +478,25 @@ pub(super) fn work_lease(
     manager: &ProbeManager,
     unit: &ProbeUnit,
     optional: bool,
-) -> Result<Option<crate::library_lifecycle::LibraryWorkLease>, String> {
+) -> Result<Option<crate::library_lifecycle::LibraryWorkLease>, BoundedLeaseError> {
     let registry = manager.library_work.lock().clone();
     let Some(registry) = registry else {
         return Ok(None);
     };
-    let library_id = {
-        let store = manager.store.as_ref();
-        crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
-        unit.row.file.library_id.to_string()
-    };
+    manager
+        .store
+        .library_read_snapshot(|store| {
+            crate::fingerprint_job::source::ensure_source_recorded_on(store, &unit.row)
+        })
+        .map_err(|error| {
+            if super::store_access::is_busy(&error) {
+                BoundedLeaseError::StoreBusy
+            } else {
+                BoundedLeaseError::Store(error.to_string())
+            }
+        })?
+        .map_err(BoundedLeaseError::Store)?;
+    let library_id = unit.row.file.library_id.to_string();
     let acquired = if optional {
         registry.acquire_optional(
             &manager.store,
@@ -483,7 +506,7 @@ pub(super) fn work_lease(
     } else {
         registry.acquire_bounded(&manager.store, &library_id)
     };
-    acquired.map(Some).map_err(|error| error.to_string())
+    acquired.map(Some)
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
@@ -502,6 +525,10 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
                 .seen
                 .lock()
                 .remove(&unit.row.file.file_id.to_string());
+            return false;
+        }
+        Err(error) if super::store_access::is_busy(&error) => {
+            tracing::warn!(%error, ledger_id = %unit.row.file.file_id, "检查探测源文件时读池繁忙，保留单元等待重试");
             return false;
         }
         Err(error) => Err(error.to_string()),

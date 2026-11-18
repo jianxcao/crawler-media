@@ -104,3 +104,94 @@ fn probe_admission_returns_busy_before_the_writer_is_released_without_a_late_job
         "a timed-out admission must not enqueue after its caller returns"
     );
 }
+
+struct MovieTracks {
+    first_probe: std::sync::Mutex<Option<FirstProbe>>,
+}
+
+struct FirstProbe {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+impl api::probe_manager::TracksProbe for MovieTracks {
+    fn probe(
+        &self,
+        _path: &std::path::Path,
+        _control: &library::WorkControl,
+    ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
+        let first_probe = self.first_probe.lock().unwrap().take();
+        if let Some(gate) = first_probe {
+            gate.entered.send(()).unwrap();
+            gate.release.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        Ok((library::Tracks::default(), Some(120_000)))
+    }
+}
+
+#[test]
+fn metadata_probe_resumes_after_library_reader_admission_expires() {
+    use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
+    use std::{num::NonZeroUsize, sync::Arc};
+
+    let fixture = support::Fixture::new();
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let state = fixture
+        .state
+        .clone()
+        .with_probe_engines(
+            Arc::new(marker::ChromaprintEngine),
+            Arc::new(marker::ChromaprintEngine),
+            Arc::new(MovieTracks {
+                first_probe: std::sync::Mutex::new(Some(FirstProbe {
+                    entered,
+                    release: release_rx,
+                })),
+            }),
+        )
+        .unwrap();
+    let store = state.store();
+    let row = store.list_file_coverage().unwrap().remove(0);
+    let ProbeRequestResult::Queued { job_id } = state
+        .probe
+        .request_probe(&row, ProbeRequestOrigin::Detail)
+        .unwrap()
+    else {
+        panic!("fixture must enqueue a metadata probe");
+    };
+
+    let library_pool = store.reader_pool(store::Db::Library);
+    library_pool.set_capacity(NonZeroUsize::MIN).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let status = runtime.block_on(async {
+        assert!(state.probe.try_start_workers());
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)))
+            .await
+            .unwrap()
+            .expect("worker did not reach the tracks probe");
+        let library_reader = library_pool.checkout(Duration::from_secs(1)).unwrap();
+        release.send(()).unwrap();
+        // The tracks publication uses the writer. The source check after publication
+        // must wait for a reader and exceed the synchronous Store read budget.
+        tokio::time::sleep(Duration::from_millis(5_250)).await;
+        drop(library_reader);
+
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let job = store.get_probe_job(&job_id).unwrap().unwrap();
+                if !matches!(job.status.as_str(), "queued" | "running") {
+                    return job.status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        state.probe.shutdown_workers().await.unwrap();
+        status.expect("metadata probe did not resume")
+    });
+    assert_eq!(status, "succeeded");
+}

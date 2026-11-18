@@ -1,11 +1,65 @@
 import { useEffect, useState } from "react";
-import { getProbeSettings, saveProbeSettings, type ProbeSettings } from "@/lib/api/probe-settings";
+import {
+  getProbeSettings, getRemoteReadsSettings, saveProbeSettings, saveRemoteReadsSettings,
+  type ProbeSettings,
+} from "@/lib/api/probe-settings";
 
 const FIELDS: { key: keyof ProbeSettings; label: string; min: number; max: number; hint: string }[] = [
   { key: "metadata_workers", label: "媒体信息并发", min: 1, max: 8, hint: "同时抓取媒体流信息的文件数，默认 1。" },
   { key: "remote_concurrency", label: "远程读取并发", min: 1, max: 8, hint: "同时读取 STRM 等远程媒体的数量，默认 1。" },
   { key: "remote_cooldown_ms", label: "远程读取间隔（毫秒）", min: 0, max: 60000, hint: "远程读取完成后到下一次读取的间隔，默认 500；0 表示不等待。" },
 ];
+
+function RemoteReadsControl() {
+  const [paused, setPaused] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void getRemoteReadsSettings().then(settings => {
+      if (active) setPaused(settings.paused);
+    }).catch((cause: unknown) => {
+      if (active) setError(`读取 STRM 暂停状态失败：${(cause as Error).message}`);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const toggle = async () => {
+    if (paused === null || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const settings = await saveRemoteReadsSettings(!paused);
+      setPaused(settings.paused);
+    } catch (cause) {
+      setError(`保存 STRM 暂停状态失败：${(cause as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-white/[0.08] pt-4">
+      <p className="text-caption leading-5 text-white/55">
+        暂停后，新的 STRM 媒体信息、声纹、图片和章节后台读取会等待恢复。
+        已开始的读取可完成，暂停状态会在重启后保留。
+      </p>
+      {paused !== null && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button type="button" onClick={toggle} disabled={busy}
+            className="rounded-xl bg-white/15 px-4 py-2 text-ui font-medium text-white transition hover:bg-white/25 disabled:opacity-40">
+            {busy ? "保存中…" : paused ? "恢复 STRM 后台读取" : "暂停 STRM 后台读取"}
+          </button>
+          <p role="status" className="text-caption text-white/60">
+            {paused ? "已暂停" : "已启用"}
+          </p>
+        </div>
+      )}
+      {error && <p role="alert" className="mt-2 text-caption text-[var(--danger)]">{error}</p>}
+    </div>
+  );
+}
 
 export function ProbeSettingsCard() {
   const [saved, setSaved] = useState<ProbeSettings | null>(null);
@@ -47,6 +101,7 @@ export function ProbeSettingsCard() {
       <p className="mt-2 text-caption leading-5 text-white/45">
         根据设备性能和远程媒体服务的限制调整抓取速度。保存后立即生效。
       </p>
+      <RemoteReadsControl />
       {draft ? (
         <div className="mt-4 grid gap-4 lg:grid-cols-3">
           {FIELDS.map(field => (

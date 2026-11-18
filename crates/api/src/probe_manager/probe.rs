@@ -262,6 +262,9 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     .await
     {
         Ok(outcome) => outcome,
+        Err(error) if error == marker::media_read::READ_WAIT_STOPPED => {
+            return super::stages::FingerprintRunOutcome::Retry;
+        }
         Err(error) => {
             tracing::error!(
                 %error,
@@ -289,6 +292,9 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     }
     if let Err(outcome) = publish_captured_fingerprints(mgr, unit, &ledger_id, &outcome.cache) {
         return outcome;
+    }
+    if outcome.outro_error.as_deref() == Some(marker::media_read::READ_WAIT_STOPPED) {
+        return super::stages::FingerprintRunOutcome::Retry;
     }
     super::stages::log_fingerprint_publication(
         unit,

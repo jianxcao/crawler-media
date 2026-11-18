@@ -89,6 +89,55 @@ fn recorded(store: &Store, file_id: domain::LedgerId) -> domain::LibraryFile {
 }
 
 #[test]
+fn recovery_retires_a_rename_whose_file_record_disappeared() {
+    let fx = fixture();
+    let to = fx.b.join("Moved.mkv");
+    let request = begin(&fx, &to);
+    assert_eq!(
+        fx.store
+            .delete_files(request.from_library_id, &[request.file_id])
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 0);
+    assert!(
+        fx.store
+            .list_due_file_rename_ids(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fx.file.path.is_file());
+    assert!(!to.exists());
+}
+
+#[test]
+fn removal_can_freeze_either_library_after_rename_publication_finishes() {
+    let fx = fixture();
+    let to = fx.tmp.join("other").join("Moved.mkv");
+    let request = begin(&fx, &to);
+    let from_id = request.from_library_id.to_string();
+    let to_id = request.to_library_id.to_string();
+    assert_ne!(from_id, to_id);
+
+    let publication = fx.store.apply_file_rename(&request, 2).unwrap();
+    for library in [&from_id, &to_id] {
+        assert!(matches!(
+            fx.store.begin_library_removal(library),
+            Err(store::StoreError::WriteBusy)
+        ));
+        assert!(fx.store.library_accepts_work(library).unwrap());
+    }
+    assert_eq!(recorded(&fx.store, fx.file.file_id).path, to);
+    drop(publication);
+
+    fx.store.begin_library_removal(&to_id).unwrap();
+    assert!(!fx.store.library_accepts_work(&to_id).unwrap());
+    assert!(fx.store.library_accepts_work(&from_id).unwrap());
+    assert_eq!(std::fs::read(to).unwrap(), b"m");
+}
+
+#[test]
 fn durable_same_root_rename_moves_sidecar_and_survives_crash_after_disk() {
     let fx = fixture();
     let to = fx.a.join("Renamed.2000.mkv");

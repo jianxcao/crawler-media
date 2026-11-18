@@ -52,7 +52,97 @@ pub struct FileRenameRequest {
     pub to_config_revision: i64,
 }
 
+/// Keeps Library removal from freezing either Library during rename publication.
+/// The reservation holds no mutex or database connection while the caller does IO.
+#[must_use]
+pub struct RenamePublication<'a> {
+    store: &'a Store,
+    libraries: Vec<String>,
+}
+
+impl Drop for RenamePublication<'_> {
+    fn drop(&mut self) {
+        let mut publications = self.store.writers.rename_publications.lock();
+        for library in &self.libraries {
+            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                publications.entry(library.clone())
+            {
+                *entry.get_mut() -= 1;
+                if *entry.get() == 0 {
+                    entry.remove();
+                }
+            }
+        }
+    }
+}
+
 impl Store {
+    /// Move bytes and finish their ledger publication. A caller can keep the
+    /// returned reservation while writing metadata associated with the new path.
+    pub fn apply_file_rename(
+        &self,
+        request: &FileRenameRequest,
+        now: i64,
+    ) -> Result<RenamePublication<'_>, StoreError> {
+        let publication = self.apply_file_rename_disk(request, now)?;
+        self.complete_file_rename(&request.rename_id, now)?;
+        Ok(publication)
+    }
+
+    fn apply_file_rename_disk(
+        &self,
+        request: &FileRenameRequest,
+        now: i64,
+    ) -> Result<RenamePublication<'_>, StoreError> {
+        let (receipt, publication) = super::rename_receipt::execute(request, false, || {
+            self.admit_rename_publication(request)
+        })
+        .inspect_err(|error| self.log_rename_refusal(&request.rename_id, now, error))?;
+        self.record_rename_disk(&receipt, now)?;
+        Ok(publication)
+    }
+
+    fn admit_rename_publication(
+        &self,
+        request: &FileRenameRequest,
+    ) -> Result<RenamePublication<'_>, StoreError> {
+        let mut publications = self.writers.rename_publications.lock();
+        let from = request.from_library_id.to_string();
+        let to = request.to_library_id.to_string();
+        self.with_library_read(|db| {
+            for (library, revision) in [
+                (&from, request.from_config_revision),
+                (&to, request.to_config_revision),
+            ] {
+                ensure_library_writable(db.library, library)?;
+                if config_revision(db.library, library)? != revision {
+                    return Err(StoreError::Protected(format!(
+                        "rename {}: Library configuration changed since planning",
+                        request.rename_id
+                    )));
+                }
+            }
+            Ok(())
+        })?;
+        let mut libraries = vec![from];
+        if to != libraries[0] {
+            libraries.push(to);
+        }
+        for library in &libraries {
+            *publications.entry(library.clone()).or_default() += 1;
+        }
+        Ok(RenamePublication {
+            store: self,
+            libraries,
+        })
+    }
+
+    fn log_rename_refusal(&self, rename_id: &str, now: i64, error: &StoreError) {
+        if let Err(record) = self.record_rename_refusal(rename_id, now, error) {
+            tracing::error!(rename_id, %record, "recording rename refusal failed");
+        }
+    }
+
     /// Record a disk receipt from [`super::execute_rename_disk`] (run without the
     /// Store): persist the destination identity and the re-checked sidecar
     /// decisions in one short transaction, then mark `disk_applied` and drop the
@@ -215,15 +305,18 @@ impl Store {
         Ok(done)
     }
 
-    fn resume_one_file_rename(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
-        let request = self.load_file_rename(rename_id)?;
-        if request.phase == "planned" {
-            // Startup recovery: the disk phase is idempotent and bounded to one file.
-            let receipt = super::execute_rename_disk(&request).inspect_err(|error| {
-                let _ = self.record_rename_refusal(rename_id, now, error);
-            })?;
-            self.record_rename_disk(&receipt, now)?;
-        }
+    pub fn resume_one_file_rename(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
+        let request = self
+            .load_file_rename(rename_id)
+            .inspect_err(|error| self.log_rename_refusal(rename_id, now, error))?;
+        let _publication = match request.phase.as_str() {
+            "planned" => Some(self.apply_file_rename_disk(&request, now)?),
+            "disk_applied" => Some(
+                self.admit_rename_publication(&request)
+                    .inspect_err(|error| self.log_rename_refusal(rename_id, now, error))?,
+            ),
+            _ => None,
+        };
         self.complete_file_rename(rename_id, now)
     }
 

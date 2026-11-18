@@ -74,7 +74,8 @@ impl ChapterFrameService {
                 }
             }
         };
-        if self.shutting_down.load(Ordering::SeqCst) {
+        if self.shutting_down.load(Ordering::SeqCst) || marker::media_read::remote_reads_stopping()
+        {
             // Leave the row `running`; shutdown() requeues it after the join.
         } else {
             let (results, frame_ms, file_publish_ms) = match outcome {

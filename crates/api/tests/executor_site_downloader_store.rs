@@ -11,9 +11,14 @@ mod fixture;
 mod verification;
 use api::router;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use fixture::{Fixture, route};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
@@ -111,4 +116,84 @@ fn site_downloader_mutations_recheck_admission_after_lock_wait() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn site_patch_rejects_snapshot_superseded_by_concurrent_disable() {
+    let site = update_site_after_conflict("PATCH", json!({"name":"Renamed Site"}));
+    assert!(!site.enabled);
+}
+
+#[test]
+fn site_put_rejects_snapshot_superseded_by_concurrent_cookie_refresh() {
+    let site = update_site_after_conflict(
+        "PUT",
+        json!({"name":"Renamed Site","url":"https://fixture.invalid/","profile_id":"mteam"}),
+    );
+    assert_eq!(site.cookie.as_deref(), Some("refreshed-cookie"));
+}
+
+fn update_site_after_conflict(method: &str, body: Value) -> domain::Site {
+    let fixture = Fixture::new();
+    let store = fixture.state.store();
+    let site_id = fixture.site;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (update_tx, update_rx) = mpsc::channel();
+    let writer = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            store
+                .writers()
+                .with_app(|app| {
+                    ready_tx.send(()).unwrap();
+                    update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    let mut site = app.get_site(site_id)?.unwrap();
+                    site.enabled = false;
+                    site.cookie = Some("refreshed-cookie".into());
+                    assert!(app.save_site(&site)?);
+                    Ok(())
+                })
+                .unwrap();
+        })
+    };
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let pool = store.reader_pool(store::Db::App);
+    let initially_idle = pool.available();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&reads);
+    pool.set_query_progress_observer(Some(Arc::new(move || {
+        observed.fetch_add(1, Ordering::SeqCst);
+    })));
+
+    let app = router(fixture.state.clone());
+    let uri = fixture.site_uri("");
+    let update = || request(method, &uri, body.clone());
+    runtime().block_on(async {
+        let release_writer = async {
+            // Wait for auth, role, and the update's own read to finish.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while reads.load(Ordering::SeqCst) < 3 || pool.available() < initially_idle {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            pool.set_query_progress_observer(None);
+            update_tx.send(()).unwrap();
+            writer.join().unwrap();
+        };
+        let (response, ()) = tokio::join!(app.clone().oneshot(update()), release_writer);
+        assert_eq!(response.unwrap().status(), StatusCode::CONFLICT);
+        let site = store.get_site(site_id).unwrap().unwrap();
+        assert_eq!(site.name, "Original Site");
+        assert!(!site.enabled);
+        assert_eq!(site.cookie.as_deref(), Some("refreshed-cookie"));
+
+        let response = app.oneshot(update()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let site = store.get_site(site_id).unwrap().unwrap();
+        assert_eq!(site.name, "Renamed Site");
+        site
+    })
 }

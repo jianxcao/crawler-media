@@ -2,8 +2,8 @@
 //!
 //! Each case pins a removed legacy path at a public seam: a retired query key is
 //! rejected by the same generic rule as any unknown key, a qBittorrent client
-//! tag from an older build is not our marker, and the admin bootstrap never
-//! treats the CLI bearer as an administrator password.
+//! tag from an older build is not our marker, and admin bootstrap never
+//! silently replaces a stored password.
 
 #[path = "management/common.rs"]
 mod common;
@@ -16,7 +16,9 @@ use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use api::bootstrap_credentials::{AdminBootstrapAction, BootstrapMode, prepare_admin_credentials};
+use api::bootstrap_credentials::{
+    BootstrapCredentialsError, BootstrapMode, prepare_admin_credentials,
+};
 use axum::http::StatusCode;
 use domain::{User, UserId, UserRole};
 use lifecycle::FakeServer;
@@ -156,11 +158,8 @@ fn qbit_ignores_legacy_per_torrent_tag() {
     );
 }
 
-/// An administrator whose stored password still equals the CLI bearer is a
-/// legacy state. Bootstrap must not read the bearer as a password and must not
-/// demand a re-hash/rotate path: it keeps the row and reports `Keep`.
 #[test]
-fn bootstrap_never_reads_cli_token_password() {
+fn bootstrap_rejects_shared_credentials_without_replacing_the_password() {
     let tmp = tempfile::tempdir().unwrap();
     let store = api::Store::open(tmp.path()).unwrap();
     let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -174,11 +173,21 @@ fn bootstrap_never_reads_cli_token_password() {
         .unwrap();
     store.set_password(admin_id, "cli-bearer-token").unwrap();
 
-    let action =
-        prepare_admin_credentials(&store, "cli-bearer-token", None, BootstrapMode::Production)
-            .expect("a stored password is not re-interpreted as a CLI credential");
+    let error = prepare_admin_credentials(
+        &store,
+        "cli-bearer-token",
+        Some("replacement-password"),
+        BootstrapMode::Production,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        BootstrapCredentialsError::PasswordEqualsToken
+    ));
     assert!(
-        matches!(action, AdminBootstrapAction::Keep { .. }),
-        "no legacy detection path may remain: {action:?}"
+        store
+            .admin_password_matches(admin_id, "cli-bearer-token")
+            .unwrap()
     );
+    assert!(store.user_by_token("cli-bearer-token").unwrap().is_none());
 }

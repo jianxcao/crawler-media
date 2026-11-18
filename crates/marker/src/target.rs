@@ -36,10 +36,7 @@ pub enum ProbeTarget {
 
 impl ProbeTarget {
     pub fn from_path(path: &Path) -> Self {
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+        if is_strm_path(path)
             && let Some(url) = read_strm_url(path)
         {
             return Self::Remote(url);
@@ -140,6 +137,12 @@ impl ProbeTarget {
     pub fn apply_ffmpeg_input(&self, cmd: &mut Command) {
         self.apply_ffmpeg_input_with_seek(cmd, 0);
     }
+}
+
+pub(crate) fn is_strm_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
 }
 
 fn disable_proxy_environment(command: &mut Command) {

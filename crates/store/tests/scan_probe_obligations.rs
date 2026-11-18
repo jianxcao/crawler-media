@@ -120,7 +120,13 @@ fn ack_removes_obligation() {
         .insert_scanned_files(std::slice::from_ref(&row), 1000)
         .unwrap();
 
-    assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 1);
-    store.ack_scan_probe_obligation(row.file_id).unwrap();
+    let obligations = store.scan_probe_obligations(10).unwrap();
+    assert_eq!(obligations.len(), 1);
+    assert_eq!(obligations[0].ledger_id, row.file_id);
+    assert!(
+        store
+            .ack_scan_probe_obligation_if_current(&obligations[0])
+            .unwrap()
+    );
     assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 0);
 }

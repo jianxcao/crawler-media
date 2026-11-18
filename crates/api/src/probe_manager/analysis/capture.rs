@@ -55,6 +55,9 @@ pub(in crate::probe_manager) async fn capture_target(
 ) -> FingerprintRunOutcome {
     match capture(manager, unit, plan).await {
         Ok(()) => FingerprintRunOutcome::Complete,
+        Err(error) if error == marker::media_read::READ_WAIT_STOPPED => {
+            FingerprintRunOutcome::Retry
+        }
         Err(error) if error.contains("file_deleted") => {
             FingerprintRunOutcome::Cancelled { reason: error }
         }
@@ -331,6 +334,9 @@ async fn capture_kind(
         &mut attempts,
     )
     .await;
+    if matches!(&result, Err(error) if error == marker::media_read::READ_WAIT_STOPPED) {
+        return result;
+    }
     let completion = match &result {
         Ok(_) => store::ProbeStageCompletion::Succeeded,
         Err(error) if error.contains("budget exhausted") => {

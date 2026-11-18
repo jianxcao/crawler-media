@@ -1,5 +1,6 @@
 /* global EventTarget, Event */
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 import { createArtworkImage, manageArtworkImage } from "../lib/artwork-loading.ts";
 import * as freezeFrame from "../lib/player/freeze-frame.ts";
@@ -124,6 +125,21 @@ test("completed artwork stays usable for canvas caches when its owner is dispose
   abort.abort();
   assert.equal(request.image.src, "https://app.invalid/posters/cached");
   assert.equal(request.image.naturalWidth, 100);
+});
+
+test("settled preloads release their cancellation listeners on a shared signal", (t) => {
+  const { load, abort } = setup(t);
+  const loaded = load("ready");
+  const failed = load("failed");
+  loaded.image.finish();
+  failed.load("https://cdn.invalid/failure.jpg");
+  failed.image.finish("error");
+
+  assert.equal(getEventListeners(abort.signal, "abort").length, 0);
+  loaded.load("https://app.invalid/posters/replacement");
+  assert.equal(getEventListeners(abort.signal, "abort").length, 1);
+  abort.abort();
+  assert.equal(loaded.image.src, "");
 });
 
 

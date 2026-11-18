@@ -8,7 +8,11 @@ export interface ArtworkSource {
 }
 
 /** All source assignments, including retries, share the same admission queue. */
-export function manageArtworkImage(image: HTMLImageElement, initialPriority = 1) {
+export function manageArtworkImage(
+  image: HTMLImageElement,
+  initialPriority = 1,
+  onSettled?: () => void,
+) {
   let source: ArtworkSource = {};
   let visible = true;
   let disposed = false;
@@ -41,11 +45,12 @@ export function manageArtworkImage(image: HTMLImageElement, initialPriority = 1)
     loaded = true;
     retry.onLoad();
     release();
+    onSettled?.();
   };
   const onError = (event: Event) => {
     if (!lease || disposed || !visible) { event.stopImmediatePropagation(); return; }
     release();
-    retry.onError(event);
+    if (!retry.onError(event)) onSettled?.();
   };
   image.addEventListener("load", onLoad, true);
   image.addEventListener("error", onError, true);
@@ -89,15 +94,22 @@ export function manageArtworkImage(image: HTMLImageElement, initialPriority = 1)
 /** Explicit loading keeps handler setup before admission and supports navigation abort. */
 export function createArtworkImage(signal: AbortSignal, priority = 1) {
   const image = new Image();
-  const managed = manageArtworkImage(image, priority);
+  const stopListening = () => signal.removeEventListener("abort", cancel);
+  const managed = manageArtworkImage(image, priority, stopListening);
   const cancel = () => {
     managed.dispose();
     image.onload = null;
     image.onerror = null;
   };
-  signal.addEventListener("abort", cancel, { once: true });
-  if (signal.aborted) cancel();
-  return { image, load: (src: string) => managed.load({ src }) };
+  return {
+    image,
+    load(src: string) {
+      if (signal.aborted) return;
+      if (src) signal.addEventListener("abort", cancel, { once: true });
+      else stopListening();
+      managed.load({ src });
+    },
+  };
 }
 
 export { observeArtworkImage } from "./artwork-viewport.ts";

@@ -65,6 +65,10 @@ impl ChapterFrameRunner for FfmpegChapterFrameRunner {
                     );
                     extract_frame(&self.ffmpeg, &request.video, midpoint, &target, control)
                 });
+            if matches!(&staged, Err(error) if error == marker::media_read::READ_WAIT_STOPPED) {
+                cleanup_staged(&results);
+                return Err(marker::media_read::READ_WAIT_STOPPED.into());
+            }
             results.push(ChapterFrameRenderResult { index, staged });
         }
         Ok(results)

@@ -343,11 +343,13 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
                 .source_version
         );
         assert_eq!(result.applied[0].version, recovered.file.version);
-        assert_eq!(
-            store.scan_probe_obligations(10).unwrap()[0].ledger_id,
-            file.file_id
+        let obligations = store.scan_probe_obligations(10).unwrap();
+        assert_eq!(obligations[0].ledger_id, file.file_id);
+        assert!(
+            store
+                .ack_scan_probe_obligation_if_current(&obligations[0])
+                .unwrap()
         );
-        store.ack_scan_probe_obligation(file.file_id).unwrap();
         let stale = store.apply_ledger_presence(&[present], mode, 250).unwrap();
         assert_eq!(stale.skipped, 1);
         assert!(store.scan_probe_obligations(10).unwrap().is_empty());

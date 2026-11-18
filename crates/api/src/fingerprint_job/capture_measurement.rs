@@ -15,11 +15,15 @@ impl FingerprintCaptureEngine for CaptureMeasurement {
         request: &CaptureRequest,
         source: Option<&CaptureSourceFacts>,
         control: &WorkControl,
+        begin: &mut dyn FnMut() -> Result<(), CaptureFailure>,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let result = self
             .engine
-            .capture_window_after_metadata_controlled(request, source, control);
-        self.timings.record_capture(self.job_id.as_deref(), &result);
+            .capture_window_after_metadata_controlled(request, source, control, begin);
+        if !matches!(&result, Err(error) if error.message == marker::media_read::READ_WAIT_STOPPED)
+        {
+            self.timings.record_capture(self.job_id.as_deref(), &result);
+        }
         result
     }
     fn capture_window(

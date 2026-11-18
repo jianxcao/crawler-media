@@ -78,7 +78,7 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
             if !is_temporary_busy(&reason) {
                 let _ = step(manager, {
                     let unit = unit.clone();
-                    move |manager| manager.cancel_unit(&unit, &reason)
+                    move |manager| manager.cancel_unit(&unit, &reason.to_string())
                 })
                 .await;
             }
@@ -97,7 +97,8 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
                 control.cancel();
             }
             control
-        });
+        })
+        .with_read_stop(manager.shutting_down.clone());
     // The full-window and adaptive pipelines include synchronous source reads
     // and SQL between awaits. Drive the whole future on one bounded worker;
     // the permit stays with it until its final publication has really finished.
@@ -114,6 +115,13 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         }
     };
     let _ = step(&manager, move |manager| {
+        if manager
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            || marker::media_read::remote_reads_stopping()
+        {
+            return;
+        }
         if !source_ready(manager, &unit) {
             return;
         }

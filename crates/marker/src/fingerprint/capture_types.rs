@@ -191,7 +191,9 @@ pub trait FingerprintCaptureEngine: Send + Sync {
         request: &CaptureRequest,
         source: Option<&CaptureSourceFacts>,
         control: &crate::WorkControl,
+        begin: &mut dyn FnMut() -> Result<(), CaptureFailure>,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
+        begin()?;
         match source {
             Some(source) => self.capture_window_from_source_controlled(request, source, control),
             None => self.capture_window_controlled(request, control),

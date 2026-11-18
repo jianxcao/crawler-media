@@ -280,7 +280,6 @@ fn restored_file_rearms_one_obligation_and_retains_prior_probe_history() {
         LedgerPresenceMode::Verify,
         100,
     );
-    store.ack_scan_probe_obligation(fixture.file_id).unwrap();
     assert!(store.scan_probe_obligations(100).unwrap().is_empty());
 
     let restored = observe(
@@ -319,7 +318,11 @@ fn restored_file_rearms_one_obligation_and_retains_prior_probe_history() {
         store.probe_job_units("probe").unwrap()[0].status,
         "cancelled"
     );
-    store.ack_scan_probe_obligation(fixture.file_id).unwrap();
+    assert!(
+        store
+            .ack_scan_probe_obligation_if_current(&obligations[0])
+            .unwrap()
+    );
     let coverage = store.file_coverage_by_id(fixture.file_id).unwrap().unwrap();
     assert_eq!(coverage.file.media_id, fixture.media_id);
     assert!(store.get_file_meta(&ledger_id).unwrap().is_some());
@@ -338,7 +341,7 @@ fn watcher_reappearance_clears_missing_once() {
         LedgerPresenceMode::Verify,
         100,
     );
-    store.ack_scan_probe_obligation(fixture.file_id).unwrap();
+    assert!(store.scan_probe_obligations(100).unwrap().is_empty());
 
     // A reappeared file clears the flag once; the second call has nothing left to do.
     assert!(store.clear_ledger_missing(&fixture.path).unwrap());

@@ -71,6 +71,10 @@ impl Store {
     /// Freeze before observing any file. The first indexed snapshot window shares
     /// this transaction; later windows cannot race a writer past the persisted barrier.
     pub fn begin_library_removal(&self, id: &str) -> Result<LibraryRemoval, StoreError> {
+        let publications = self.writers.rename_publications.lock();
+        if publications.contains_key(id) {
+            return Err(StoreError::WriteBusy);
+        }
         self.with_library_write(|db| db.begin_library_removal(id))
     }
 

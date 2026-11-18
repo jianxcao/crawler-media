@@ -12,6 +12,11 @@ pub struct WorkControl {
 }
 
 impl WorkControl {
+    pub fn with_read_stop(mut self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.signal = self.signal.with_read_stop(stop);
+        self
+    }
+
     pub fn signal(&self) -> &marker::WorkControl {
         &self.signal
     }

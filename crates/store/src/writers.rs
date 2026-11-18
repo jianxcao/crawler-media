@@ -41,6 +41,7 @@ pub struct Writers {
     subscribe: Mutex<Connection>,
     library: Mutex<Connection>,
     cache: Mutex<Connection>,
+    pub(crate) rename_publications: Mutex<std::collections::HashMap<String, usize>>,
 }
 
 struct Admission {
@@ -70,6 +71,7 @@ impl Writers {
             subscribe: Mutex::new(subscribe),
             library: Mutex::new(library),
             cache: Mutex::new(cache),
+            rename_publications: Mutex::default(),
         }
     }
 

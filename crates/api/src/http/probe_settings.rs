@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{
     http::{err, ok},
     management::ApiState,
-    probe_settings::ProbeSettings,
+    probe_settings::{ProbeSettings, RemoteReadsSettings},
 };
 
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
@@ -56,6 +56,51 @@ pub(crate) async fn put(State(state): State<ApiState>, Json(body): Json<Value>) 
             Ok(()) => {
                 tracing::info!(?settings, "媒体探测设置已保存并生效");
                 ok(serde_json::json!(settings)).into_response()
+            }
+            Err(error) => store_error(error),
+        }
+    })
+    .await
+    .unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn get_remote_reads(State(state): State<ApiState>) -> Response {
+    super::store_wait::store_read(
+        &state,
+        &[store::Db::App],
+        |store| match RemoteReadsSettings::load(store) {
+            Ok(settings) => ok(serde_json::json!(settings)).into_response(),
+            Err(error) => store_error(error),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| error.response())
+}
+
+pub(crate) async fn put_remote_reads(
+    State(state): State<ApiState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Ok(settings) = serde_json::from_value::<RemoteReadsSettings>(body) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "probe.invalid",
+            "暂停状态需要布尔值",
+        );
+    };
+    let probe = state.probe.clone();
+    let data = serde_json::json!(settings);
+    let raw = data.to_string();
+    super::store_wait::store_write(&state, move |store| {
+        let saved = store.writers().with_app(|app| {
+            app.put_setting(crate::settings_keys::PROBE_REMOTE_READS, &raw)?;
+            probe.apply_remote_reads_pause(settings.paused);
+            Ok(())
+        });
+        match saved {
+            Ok(()) => {
+                tracing::info!(paused = settings.paused, "STRM 后台读取设置已保存并生效");
+                ok(data).into_response()
             }
             Err(error) => store_error(error),
         }

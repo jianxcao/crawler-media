@@ -17,3 +17,15 @@ export async function saveProbeSettings(settings: ProbeSettings): Promise<ProbeS
     method: "PUT", body: JSON.stringify(settings),
   })).data;
 }
+
+interface RemoteReadsSettings { paused: boolean }
+
+export async function getRemoteReadsSettings(): Promise<RemoteReadsSettings> {
+  return (await request<{ data: RemoteReadsSettings }>("/settings/probe/remote-reads")).data;
+}
+
+export async function saveRemoteReadsSettings(paused: boolean): Promise<RemoteReadsSettings> {
+  return (await request<{ data: RemoteReadsSettings }>("/settings/probe/remote-reads", {
+    method: "PUT", body: JSON.stringify({ paused }),
+  })).data;
+}

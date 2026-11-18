@@ -285,26 +285,54 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // Graceful shutdown waits for open connections (SSE streams can stay
     // open); give them 10 s after the signal, then stop anyway.
     let (signalled_tx, signalled_rx) = tokio::sync::watch::channel(false);
+    let http_signal = signalled_tx.clone();
     let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_signal().await;
-        let _ = signalled_tx.send(true);
+        marker::media_read::stop_remote_reads();
+        http_signal.send_replace(true);
     });
+    let mut grace_signal = signalled_rx.clone();
     let grace = async move {
-        let mut rx = signalled_rx;
-        let _ = rx.wait_for(|signalled| *signalled).await;
+        let _ = grace_signal.wait_for(|signalled| *signalled).await;
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     };
-    tokio::select! {
-        result = serve => result?,
-        _ = grace => tracing::warn!("连接未在 10 秒内关闭，强制退出"),
-    }
-    state.close_library_reads();
+    let http = async {
+        let served = tokio::select! {
+            result = serve => result,
+            _ = grace => {
+                tracing::warn!("连接未在 10 秒内关闭，强制退出");
+                Ok(())
+            }
+        };
+        // Also stop workers if the HTTP server exits on its own.
+        marker::media_read::stop_remote_reads();
+        signalled_tx.send_replace(true);
+        served
+    };
     // Review N-2: stopping the job loop drops its instance lease, which
     // deletes the lock row, so an immediate restart is writable.
-    if let Err(error) =
-        tokio::time::timeout(std::time::Duration::from_secs(10), jobs.shutdown()).await
-    {
-        tracing::warn!(%error, "停止后台任务超时");
-    }
+    let chapter_frames = state.chapter_frames();
+    let shutdown = async {
+        let mut signalled_rx = signalled_rx;
+        let _ = signalled_rx.wait_for(|signalled| *signalled).await;
+        let stop_workers = async {
+            let (jobs, probe, frames) = tokio::join!(
+                jobs.shutdown(),
+                state.probe.shutdown_workers(),
+                chapter_frames.shutdown(),
+            );
+            for error in [jobs, probe, frames].into_iter().filter_map(Result::err) {
+                tracing::warn!(%error, "停止后台任务失败");
+            }
+        };
+        if let Err(error) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), stop_workers).await
+        {
+            tracing::warn!(%error, "停止后台任务超时");
+        }
+    };
+    let (served, ()) = tokio::join!(http, shutdown);
+    state.close_library_reads();
+    served?;
     Ok(())
 }

@@ -44,6 +44,26 @@ fn production_fresh_install_rejects_equal_secrets() {
 }
 
 #[test]
+fn production_restart_rejects_cli_token_equal_to_existing_admin_password() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    store
+        .seed_admin_with_credentials(admin_id, "admin-password", "original-cli-token")
+        .unwrap();
+
+    let error =
+        prepare_admin_credentials(&store, "admin-password", None, BootstrapMode::Production)
+            .unwrap_err();
+    assert!(matches!(
+        error,
+        BootstrapCredentialsError::PasswordEqualsToken
+    ));
+    assert!(store.user_by_token("original-cli-token").unwrap().is_some());
+    assert!(store.user_by_token("admin-password").unwrap().is_none());
+}
+
+#[test]
 fn test_fixture_mode_may_reuse_token_as_password() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

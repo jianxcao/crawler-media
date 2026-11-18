@@ -102,7 +102,7 @@ impl crate::writers::App<'_> {
         Ok(n > 0)
     }
 
-    /// Publish a maintenance result only against the exact Site it observed.
+    /// Save a Site only if the stored row still matches the observed snapshot.
     /// The IMMEDIATE transaction also excludes writers using another connection.
     pub fn save_site_if_current(&self, site: &Site, expected: &Site) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.app)?;

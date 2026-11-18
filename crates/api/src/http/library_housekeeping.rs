@@ -372,29 +372,8 @@ fn apply_reconciliation(
                     .map_err(|e| e.to_string())
             })
             .map_err(store::StoreError::Conflict)?;
-        // The destination already owns the bytes. Receipt and completion observations
-        // still run outside the Store and publication gate, as for a physical move.
-        let receipt = store::library_write::execute_rename_disk(&request)
-            .inspect_err(|error| {
-                if let Err(record) = state.store.as_ref().record_rename_refusal(&request.rename_id, now, error) {
-                    tracing::error!(%record, rename_id = %request.rename_id, "Recording reconciliation refusal failed");
-                }
-            })?;
-        crate::rename_work::record_disk(&state.store, &receipt, now)?;
-        let completion = state
-            .store
-            .as_ref()
-            .plan_file_rename_completion(&request.rename_id)?;
-        let observed = completion.observe()?;
-        lease
-            .publish(|| {
-                state
-                    .store
-                    .as_ref()
-                    .complete_observed_file_rename(observed, now)
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(store::StoreError::Conflict)
+        let _publication = state.store.apply_file_rename(&request, now)?;
+        Ok(())
     })();
     result.map_err(|error: store::StoreError| {
         tracing::warn!(library_id = %library.id, from = %row.from, to = %row.to, %error, "Reconciliation durable rename failed");

@@ -59,17 +59,12 @@ impl ProbeStoreAccess {
 }
 
 pub(super) fn is_busy(error: &StoreError) -> bool {
-    matches!(error, StoreError::WriteBusy)
-        || matches!(error, StoreError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    matches!(
+        error,
+        StoreError::WriteBusy | StoreError::ReadBusy | StoreError::ReadDeadline
+    ) || matches!(error, StoreError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         || matches!(error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
             if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
-}
-
-pub(crate) fn is_busy_message(message: &str) -> bool {
-    message.contains("probe Store busy")
-        || message.contains("Library Store busy")
-        || message.contains("Library Registry busy")
-        || message.contains("database writer is temporarily busy")
 }
 
 impl super::ProbeManager {

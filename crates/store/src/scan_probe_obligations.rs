@@ -100,8 +100,14 @@ impl Store {
         self.with_library_read(|db| db.scan_probe_obligations_with_vm_steps(limit))
     }
 
-    pub fn ack_scan_probe_obligation(&self, ledger_id: LedgerId) -> Result<(), StoreError> {
-        self.with_library_write(|db| db.ack_scan_probe_obligation(ledger_id))
+    /// Discard the assessed obligation only while its source is still missing or deleted.
+    pub fn discard_scan_probe_obligation_if_source_unavailable(
+        &self,
+        obligation: &ScanProbeObligation,
+    ) -> Result<bool, StoreError> {
+        self.with_library_write(|db| {
+            db.discard_scan_probe_obligation_if_source_unavailable(obligation)
+        })
     }
 
     /// Acknowledge the exact obligation the caller assessed, and only while its source is

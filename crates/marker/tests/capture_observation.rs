@@ -1,5 +1,63 @@
-use marker::{CaptureRequest, CaptureSourceFacts, PcmTimeline, SampleWindow};
+use marker::{
+    CaptureRequest, CaptureSourceFacts, FingerprintCaptureEngine, PcmTimeline, SampleWindow,
+};
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+#[test]
+fn paused_capture_does_not_begin_an_attempt_before_admission() {
+    let request = CaptureRequest {
+        path: "unopened.STRM".into(),
+        window: SampleWindow::new(0, 10_000),
+        audio_stream_index: Some(0),
+        process_deadline_ms: 30_000,
+    };
+    let facts = CaptureSourceFacts {
+        audio_stream_index: 0,
+        format_start_time_us: None,
+        stream_start_pts: None,
+        stream_time_base: None,
+        codec_name: None,
+        native_sample_rate: None,
+        audio_channels: None,
+        provenance: "fixture".into(),
+    };
+    marker::media_read::set_remote_reads_paused(true);
+    let stop = Arc::new(AtomicBool::new(false));
+    let control = marker::WorkControl::default().with_read_stop(stop.clone());
+    let (entered, entry) = std::sync::mpsc::channel();
+    let (attempt, began) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        entered.send(()).unwrap();
+        marker::ChromaprintEngine.capture_window_after_metadata_controlled(
+            &request,
+            Some(&facts),
+            &control,
+            &mut || {
+                attempt.send(()).unwrap();
+                Err(marker::CaptureFailure {
+                    kind: marker::CaptureFailureKind::Io,
+                    message: "unexpected capture admission".into(),
+                    metrics: Default::default(),
+                })
+            },
+        )
+    });
+    entry.recv_timeout(Duration::from_secs(1)).unwrap();
+    let early_attempt = began.recv_timeout(Duration::from_millis(100));
+    stop.store(true, Ordering::Release);
+    let error = worker.join().unwrap().unwrap_err();
+    marker::media_read::set_remote_reads_paused(false);
+    assert!(matches!(
+        early_attempt,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(error.message, marker::media_read::READ_WAIT_STOPPED);
+}
 
 fn observed(lines: &str) -> marker::CapturedFingerprint {
     let root = tempfile::tempdir().unwrap();

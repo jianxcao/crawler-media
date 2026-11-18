@@ -323,6 +323,10 @@ impl crate::writers::App<'_> {
 
     /// 检查管理员是否已经设置过非空密码。用于启动自检防止空口令被误判为安全管理员。
     pub fn admin_password_is_set(&self, admin_id: UserId) -> Result<bool, StoreError> {
+        Ok(self.admin_password_hash(admin_id)?.is_some())
+    }
+
+    fn admin_password_hash(&self, admin_id: UserId) -> Result<Option<String>, StoreError> {
         let stored_pw: Option<Option<String>> = self
             .app
             .query_row(
@@ -332,9 +336,9 @@ impl crate::writers::App<'_> {
             )
             .optional()?;
         match stored_pw.flatten() {
-            None => Ok(false),
-            Some(password) if password.trim().is_empty() => Ok(false),
-            Some(password) if crate::password::is_verifiable_hash(&password) => Ok(true),
+            None => Ok(None),
+            Some(password) if password.trim().is_empty() => Ok(None),
+            Some(password) if crate::password::is_verifiable_hash(&password) => Ok(Some(password)),
             Some(_) => Err(StoreError::Invalid(
                 "administrator credential is not a supported password hash; rebuild the pre-cutover database using the documented storage clean-cutover procedure, or repair the credential explicitly while offline".into(),
             )),

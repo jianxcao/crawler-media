@@ -4,7 +4,7 @@
 //! validates the current layout and never re-derives probe work. Work lost to a
 //! full dispatch window is therefore handled at the two durable seams instead —
 //! the scan-armed obligation (`arm_scan_probe_obligation`, one row per file)
-//! and the acknowledged obligation (`ack_scan_probe_obligation`) — and both must
+//! and acknowledgment of the current obligation — and both must
 //! keep their verdict across an ordinary restart.
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey};
@@ -139,8 +139,14 @@ fn capacity_cancelled_work_stays_armed_and_acked_work_stays_acked() {
         store.get_probe_job("lost").unwrap().unwrap().status,
         "cancelled"
     );
-    assert_eq!(store.scan_probe_obligations(100).unwrap().len(), 1);
-    store.ack_scan_probe_obligation(setup.file_id).unwrap();
+    let obligations = store.scan_probe_obligations(100).unwrap();
+    assert_eq!(obligations.len(), 1);
+    job(&store, "accepted", &ledger_id, setup.media_id);
+    assert!(
+        store
+            .ack_scan_probe_obligation_for_work(&obligations[0], Some("accepted"))
+            .unwrap()
+    );
     drop(store);
 
     assert!(
@@ -154,7 +160,13 @@ fn armed_work_is_one_durable_obligation_per_file() {
     let setup = Setup::new();
     let ledger_id = setup.ledger_id();
     let store = setup.open();
-    store.ack_scan_probe_obligation(setup.file_id).unwrap();
+    let initial = store.scan_probe_obligations(100).unwrap();
+    assert_eq!(initial.len(), 1);
+    assert!(
+        store
+            .ack_scan_probe_obligation_if_current(&initial[0])
+            .unwrap()
+    );
     assert!(store.scan_probe_obligations(100).unwrap().is_empty());
 
     // Re-arming is idempotent: repeated observations of the same changed/restored
@@ -174,7 +186,11 @@ fn armed_work_is_one_durable_obligation_per_file() {
     assert_eq!(obligations[0].created_at_ms, 3_000);
     assert_eq!(obligations[0].reason, "scan_changed");
 
-    store.ack_scan_probe_obligation(setup.file_id).unwrap();
+    assert!(
+        store
+            .ack_scan_probe_obligation_if_current(&obligations[0])
+            .unwrap()
+    );
     assert!(store.scan_probe_obligations(100).unwrap().is_empty());
     assert!(
         store.file_coverage_by_id(setup.file_id).unwrap().is_some(),

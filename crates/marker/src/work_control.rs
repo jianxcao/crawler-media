@@ -8,9 +8,22 @@ use std::sync::{
 pub struct WorkControl {
     cancelled: Arc<AtomicBool>,
     publication: Arc<std::sync::Mutex<()>>,
+    read_stop: Option<Arc<AtomicBool>>,
 }
 
 impl WorkControl {
+    /// Stop waiting for admission without interrupting an admitted read.
+    pub fn with_read_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.read_stop = Some(stop);
+        self
+    }
+
+    pub(crate) fn read_wait_stopped(&self) -> bool {
+        self.read_stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+    }
+
     pub fn cancel(&self) {
         let _guard = self
             .publication

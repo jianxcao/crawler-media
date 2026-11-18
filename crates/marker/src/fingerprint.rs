@@ -112,13 +112,20 @@ impl FingerprintCaptureEngine for ChromaprintEngine {
         request: &CaptureRequest,
         source: Option<&CaptureSourceFacts>,
         control: &crate::WorkControl,
+        begin: &mut dyn FnMut() -> Result<(), CaptureFailure>,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let source = source.ok_or_else(|| CaptureFailure {
             kind: CaptureFailureKind::Decode,
             message: "audio_source_facts_unavailable".into(),
             metrics: CaptureMetrics::default(),
         })?;
-        self.capture_window_from_source_controlled(request, source, control)
+        capture::capture_from_source_with(
+            request,
+            source,
+            control,
+            std::ffi::OsStr::new("ffmpeg"),
+            begin,
+        )
     }
     fn capture_window_from_source_controlled(
         &self,

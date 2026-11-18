@@ -22,9 +22,7 @@ pub enum BootstrapCredentialsError {
         "首次启动缺少必要的环境变量 CRAWLER_MEDIA_ADMIN_PASSWORD。安全要求：管理员密码必须独立配置且不可与 CLI Token 相同"
     )]
     MissingAdminPassword,
-    #[error(
-        "CRAWLER_MEDIA_ADMIN_PASSWORD 不得与 CRAWLER_MEDIA_TOKEN 相同。安全要求：初始口令必须与 CLI 凭据分离"
-    )]
+    #[error("管理员登录密码不得与 CRAWLER_MEDIA_TOKEN 相同")]
     PasswordEqualsToken,
     #[error(
         "管理员密码不得与任何已知系统 CLI Bearer 凭据相同。安全要求：登录密码必须与自动化密钥严格分离"
@@ -76,14 +74,13 @@ pub fn prepare_admin_credentials(
     mode: BootstrapMode,
 ) -> Result<AdminBootstrapAction, BootstrapCredentialsError> {
     let admin_id = UserId::from_str(STATIC_ADMIN_UUID_STR).map_err(StoreError::from)?;
-    if store.get_user(admin_id)?.is_none() || !store.admin_password_is_set(admin_id)? {
-        prepare_fresh_admin(store, admin_id, token, admin_password, mode)
-    } else {
-        // A stored password is the administrator's own credential. It is never
-        // re-read against a CLI bearer, so a shared bearer from an older install
-        // is simply a password the operator already owns.
-        Ok(AdminBootstrapAction::Keep {
-            cli_token: token.to_string(),
-        })
+    if !store.admin_password_is_set(admin_id)? {
+        return prepare_fresh_admin(store, admin_id, token, admin_password, mode);
     }
+    if mode == BootstrapMode::Production && store.admin_password_matches(admin_id, token)? {
+        return Err(BootstrapCredentialsError::PasswordEqualsToken);
+    }
+    Ok(AdminBootstrapAction::Keep {
+        cli_token: token.to_string(),
+    })
 }

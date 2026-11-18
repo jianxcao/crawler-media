@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 use super::common::*;
@@ -120,6 +121,73 @@ async fn delete_library_item_removes_file_and_ledger() {
     )
     .await;
     assert!(ledger_after.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_library_item_reports_only_successfully_removed_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    );
+    let store = state.store();
+    let movie = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "The Matrix".into(),
+        year: Some(1999),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&movie).unwrap();
+    let root = tmp.path().join("data/library/movies");
+    let deleted = root.join("matrix.mkv");
+    let blocked = root.join("blocked.mkv");
+    // A directory with this name can be observed but the file unlink must fail,
+    // including when the tests run with elevated filesystem privileges.
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(&deleted, b"movie").unwrap();
+    for path in [&deleted, &blocked] {
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id: movie.id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let library = store.default_library(movie.kind).unwrap().unwrap();
+    let response = router(state)
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/libraries/{}/items/{}", library.id, movie.id),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+
+    let data = json_data(response).await;
+    assert!(!deleted.exists());
+    assert!(blocked.is_dir());
+    assert_eq!(data["rows_deleted"], 1);
+    assert_eq!(data["freed_bytes"], 5);
+    assert_eq!(data["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        data["removed_paths"],
+        serde_json::json!([deleted.display().to_string()])
+    );
 }
 
 #[tokio::test]

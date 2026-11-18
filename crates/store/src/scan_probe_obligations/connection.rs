@@ -136,12 +136,22 @@ impl crate::LibraryConnection<'_> {
         Ok((obligations, vm_steps))
     }
 
-    pub fn ack_scan_probe_obligation(&self, ledger_id: LedgerId) -> Result<(), StoreError> {
-        self.library.execute(
-            "DELETE FROM file_probe_obligations WHERE file_id = ?1",
-            params![ledger_id.to_string()],
+    pub fn discard_scan_probe_obligation_if_source_unavailable(
+        &self,
+        obligation: &ScanProbeObligation,
+    ) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "DELETE FROM file_probe_obligations
+             WHERE file_id = ?1 AND created_at_ms = ?2 AND reason = ?3
+               AND NOT EXISTS (SELECT 1 FROM library_files f
+                               WHERE f.file_id = ?1 AND f.missing_at IS NULL)",
+            params![
+                obligation.ledger_id.to_string(),
+                obligation.created_at_ms,
+                obligation.reason
+            ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn ack_scan_probe_obligation_if_current(

@@ -34,6 +34,7 @@ pub const CDP_URL: &str = "cdp.url";
 pub const OBSCURA_INSTALL: &str = "obscura.install";
 /// 媒体信息并发、远程读取并发与间隔的完整 JSON 设置。
 pub const PROBE_SETTINGS: &str = "probe.settings";
+pub const PROBE_REMOTE_READS: &str = "probe.remote_reads";
 /// 系统全局统一 User-Agent（默认 crawler-media/0.1.0）。
 pub const GLOBAL_USER_AGENT: &str = "network.user_agent";
 /// G-H1 air-date gate for scheduled TV searches ("0"/"false" disables; default on).

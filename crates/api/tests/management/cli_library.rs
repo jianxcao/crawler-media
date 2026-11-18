@@ -1,9 +1,40 @@
 use api::Store;
-use api::cli::{Command, run};
+use api::cli::{Command, Transport, run};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 
 use super::cli::transport;
 use store::test_support::{FixtureFile, publish_fixture_file};
+
+#[tokio::test]
+async fn cli_directory_lists_roots_of_libraries_hidden_from_admin_browse() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = transport(&tmp);
+    let root = tmp.path().join("hidden-library");
+    std::fs::create_dir(&root).unwrap();
+    let (status, library) = t
+        .send(
+            "POST",
+            "/api/v1/libraries",
+            Some(serde_json::json!({
+                "name": "Hidden",
+                "kind": "movie",
+                "root_paths": [root],
+                "admin_visible": false,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "{library}");
+    let library_id = library["id"].as_str().unwrap();
+    let path = library["root_paths"][0].as_str().unwrap();
+
+    let out = run(Command::Directory, &t).await.unwrap();
+    assert!(
+        out.lines()
+            .any(|line| line == format!("library={library_id} kind=movie root={path}")),
+        "{out}"
+    );
+}
 
 #[tokio::test]
 async fn cli_library_prints_no_media_when_empty() {

@@ -62,6 +62,16 @@ impl Store {
         self.with_app_read(|app| app.admin_password_is_set(admin_id))
     }
 
+    /// 验证启动时待登记的 CLI Token 是否与现有口令重合。哈希校验在读连接归还后执行。
+    pub fn admin_password_matches(
+        &self,
+        admin_id: UserId,
+        candidate: &str,
+    ) -> Result<bool, StoreError> {
+        let password_hash = self.with_app_read(|app| app.admin_password_hash(admin_id))?;
+        Ok(password_hash.is_some_and(|hash| crate::password::verify_password(candidate, &hash)))
+    }
+
     /// 检查拟设置的管理员密码是否与任何已知作为系统 CLI Bearer 的密钥重合。
     /// 防止运维在初始化或迁移时将历史 CLI secret 重新用作管理员登录口令。
     pub fn admin_password_matches_known_bearer(

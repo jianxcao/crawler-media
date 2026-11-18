@@ -4,13 +4,14 @@ use std::path::Path;
 use std::sync::{Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{ProbeTarget, WorkControl};
+use crate::{WorkControl, target::is_strm_path};
 
 const CANCELLATION_POLL: Duration = Duration::from_millis(25);
 /// Default remote reads in flight; instance probe settings may change this.
 pub const DEFAULT_REMOTE_READ_LIMIT: usize = 1;
 /// STRM sources: pause between remote reads.
 pub const DEFAULT_REMOTE_READ_COOLDOWN: Duration = Duration::from_millis(500);
+pub const READ_WAIT_STOPPED: &str = "Remote media read stopped during shutdown";
 static REMOTE_READS: LazyLock<MediaReadGate> =
     LazyLock::new(|| MediaReadGate::new(DEFAULT_REMOTE_READ_LIMIT, DEFAULT_REMOTE_READ_COOLDOWN));
 
@@ -24,6 +25,8 @@ pub struct MediaReadGate {
 
 struct State {
     active: usize,
+    paused: bool,
+    shutting_down: bool,
     limit: usize,
     cooldown: Duration,
     available_at: Instant,
@@ -41,6 +44,8 @@ impl MediaReadGate {
         Self {
             state: Mutex::new(State {
                 active: 0,
+                paused: false,
+                shutting_down: false,
                 limit: limit.max(1),
                 cooldown,
                 available_at: Instant::now(),
@@ -63,6 +68,11 @@ impl MediaReadGate {
         self.changed.notify_all();
     }
 
+    fn set_paused(&self, paused: bool) {
+        self.lock().paused = paused;
+        self.changed.notify_all();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
@@ -77,7 +87,8 @@ impl MediaReadGate {
         if control.is_cancelled() {
             return Err("Library work cancelled".into());
         }
-        if matches!(ProbeTarget::from_path(path), ProbeTarget::Local(_)) {
+        // The STRM sidecar can change between admission and opening its target.
+        if !is_strm_path(path) {
             return Ok(MediaReadPermit { gate: None });
         }
         let started = Instant::now();
@@ -92,8 +103,14 @@ impl MediaReadGate {
                 tracing::debug!(path = %path.display(), "Remote media read cancelled while waiting");
                 return Err("Library work cancelled".into());
             }
+            if state.shutting_down || control.read_wait_stopped() {
+                state.waiting.retain(|waiting| *waiting != ticket);
+                self.changed.notify_all();
+                return Err(READ_WAIT_STOPPED.into());
+            }
             let now = Instant::now();
-            if state.active < state.limit
+            if !state.paused
+                && state.active < state.limit
                 && now >= state.available_at
                 && state.waiting.front() == Some(&ticket)
             {
@@ -140,6 +157,21 @@ impl Drop for MediaReadPermit<'_> {
 /// Configure admission for subsequent reads without interrupting active reads.
 pub fn configure_remote_reads(limit: usize, cooldown: Duration) {
     REMOTE_READS.configure(limit, cooldown);
+}
+
+/// Pause or resume admission while letting active reads complete.
+pub fn set_remote_reads_paused(paused: bool) {
+    REMOTE_READS.set_paused(paused);
+}
+
+/// Release background reads waiting at the gate as the process exits.
+pub fn stop_remote_reads() {
+    REMOTE_READS.lock().shutting_down = true;
+    REMOTE_READS.changed.notify_all();
+}
+
+pub fn remote_reads_stopping() -> bool {
+    REMOTE_READS.lock().shutting_down
 }
 
 /// All production background media reads use this process-wide gate.
