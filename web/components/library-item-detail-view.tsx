@@ -66,6 +66,7 @@ import {
   listLibraries,
   refreshItemMetadata,
 } from "@/lib/api/libraries";
+import { deleteLedgerRow } from "@/lib/api/transfers";
 import {
   type PlaybackUnit,
   type PlaybackWatchState,
@@ -300,6 +301,7 @@ export function LibraryItemDetailView({
   /** 收藏 / 取消收藏整个条目：先翻按钮再请求，失败翻回来并提示。 */
   const toggleFavorite = useCallback(async () => {
     if (marking) return;
+    const key = pageKey;
     const next = !(favorite ?? false);
     setMarking(true);
     setFavorite(next);
@@ -308,14 +310,16 @@ export function LibraryItemDetailView({
         { media_item_id: mediaItemId },
         { favorite: next },
       );
+      if (currentPageKey.current !== key) return;
       setFavorite(marks.is_favorite);
     } catch (e) {
+      if (currentPageKey.current !== key) return;
       setFavorite(!next);
       toast.error(e instanceof Error ? e.message : "收藏失败，请稍后重试");
     } finally {
-      setMarking(false);
+      if (currentPageKey.current === key) setMarking(false);
     }
-  }, [favorite, marking, mediaItemId, toast]);
+  }, [favorite, marking, mediaItemId, pageKey, toast]);
 
   /**
    * 标记当前播放单元已看 / 未看（电影，或剧集当前选中的那一集）。写完重查一次
@@ -324,18 +328,21 @@ export function LibraryItemDetailView({
    */
   const togglePlayed = useCallback(async () => {
     if (marking || !playUnit) return;
+    const key = pageKey;
     const next = !(watched?.played ?? false);
     setMarking(true);
     try {
       await setPlaybackMarks(playUnit, { played: next });
+      if (currentPageKey.current !== key) return;
       // 当前选择的 effect 负责重查，避免标记期间换集/换版本后发布旧目标的续播点。
       setEpisodesVersion((v) => v + 1);
     } catch (e) {
+      if (currentPageKey.current !== key) return;
       toast.error(e instanceof Error ? e.message : "标记失败，请稍后重试");
     } finally {
-      setMarking(false);
+      if (currentPageKey.current === key) setMarking(false);
     }
-  }, [marking, playUnit, toast, watched]);
+  }, [marking, pageKey, playUnit, toast, watched]);
 
   // Only the latest reload may publish; an older one that settles late is ignored.
   const reloadSeq = useRef(0);
@@ -368,6 +375,8 @@ export function LibraryItemDetailView({
     setRefreshError(null);
     setSelectedSeriesEpisode(null);
     setSelectedTrackFileId(null);
+    setMarking(false);
+    setDeleteFileTarget(null);
     const controller = new AbortController();
     fetchDetail(controller.signal).catch(() => undefined);
     return () => controller.abort();
@@ -423,7 +432,7 @@ export function LibraryItemDetailView({
   const probeSeasonsKey = detail?.kind === "tv" ? [...new Set(detail.seasons)].sort((a, b) => a - b).join(",") : "";
   useEffect(() => {
     const session = chapterSession.current;
-    if (!session || !chapterTarget || !probeSeasonsKey) return;
+    if (!canManageLibraries || !session || !chapterTarget || !probeSeasonsKey) return;
     const controller = new AbortController();
     const observedActive = new Set<number>();
     const read = async () => {
@@ -445,7 +454,7 @@ export function LibraryItemDetailView({
     let stop: (() => void) | undefined;
     void read().then((active) => { if (!controller.signal.aborted && active) stop = startSingleFlightPoll(read, 5000); });
     return () => { controller.abort(); stop?.(); };
-  }, [libraryId, mediaItemId, probeSeasonsKey, chapterTarget, chapterDiscovery]);
+  }, [canManageLibraries, libraryId, mediaItemId, probeSeasonsKey, chapterTarget, chapterDiscovery]);
 
   const wasProbeQueued = useRef(false);
   useEffect(() => {
@@ -958,34 +967,36 @@ export function LibraryItemDetailView({
         <div className="mt-6 px-12 max-md:px-4">
           <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sub font-semibold text-white/70">章节与片头片尾</h3>
-            <div className="flex flex-wrap items-center gap-1.5 text-micro">
-              <button
-                type="button"
-                disabled={chaptersBusy || !chapterTarget}
-                onClick={() => void forceRefreshChaptersAndMarkers("reuse_valid")}
-                title="复用有效音频并重新识别片头片尾和章节"
-                className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
-              >
-                {chaptersBusy ? "识别中…" : "重新获取片头/章节"}
-              </button>
-              <button
-                type="button"
-                disabled={chaptersBusy || !chapterTarget}
-                onClick={() => void regenerateChapters()}
-                className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
-              >
-                {chaptersBusy ? "提交中…" : frameTask?.state === "partial" || frameTask?.state === "failed" ? "重试失败场景图" : "生成场景图"}
-              </button>
-              <button
-                type="button"
-                disabled={probing}
-                onClick={() => void handleProbeMedia()}
-                title="清空该条目全部文件的流信息/章节/片头片尾缓存并重新后台探测（视频流、音轨、字幕、声纹）"
-                className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
-              >
-                {probing ? "探测中…" : "重新探测媒体信息"}
-              </button>
-            </div>
+            {canManageLibraries && (
+              <div className="flex flex-wrap items-center gap-1.5 text-micro">
+                <button
+                  type="button"
+                  disabled={chaptersBusy || !chapterTarget}
+                  onClick={() => void forceRefreshChaptersAndMarkers("reuse_valid")}
+                  title="复用有效音频并重新识别片头片尾和章节"
+                  className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
+                >
+                  {chaptersBusy ? "识别中…" : "重新获取片头/章节"}
+                </button>
+                <button
+                  type="button"
+                  disabled={chaptersBusy || !chapterTarget}
+                  onClick={() => void regenerateChapters()}
+                  className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
+                >
+                  {chaptersBusy ? "提交中…" : frameTask?.state === "partial" || frameTask?.state === "failed" ? "重试失败场景图" : "生成场景图"}
+                </button>
+                <button
+                  type="button"
+                  disabled={probing}
+                  onClick={() => void handleProbeMedia()}
+                  title="清空该条目全部文件的流信息/章节/片头片尾缓存并重新后台探测（视频流、音轨、字幕、声纹）"
+                  className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-white/60 transition hover:bg-white/[0.08] hover:text-white/90 disabled:opacity-40"
+                >
+                  {probing ? "探测中…" : "重新探测媒体信息"}
+                </button>
+              </div>
+            )}
           </div>
           {frameTask && <p role="status" className="mb-2 text-caption text-white/60">
             {frameTask.state === "queued" ? `场景图已排队 ${frameTask.ready}/${frameTask.total}` : frameTask.state === "running" ? `正在生成场景图 ${frameTask.ready}/${frameTask.total}` : frameTask.state === "cancelled" ? "场景图任务已取消" : frameTask.state === "superseded" ? "场景图任务已更新" : `已完成 ${frameTask.ready}/${frameTask.total}${frameTask.failed ? `，${frameTask.failed} 张失败` : ""}`}
@@ -1053,7 +1064,14 @@ export function LibraryItemDetailView({
             <FileSection
               files={files}
               title="文件"
-              onDeleteFile={canManageLibraries ? setDeleteFileTarget : undefined}
+              onDeleteFile={
+                canManageLibraries
+                  ? (file) => {
+                      if (detail.files.length <= 1) setDeleteOpen(true);
+                      else setDeleteFileTarget(file);
+                    }
+                  : undefined
+              }
             />
           </div>
         );
@@ -1106,6 +1124,19 @@ export function LibraryItemDetailView({
         }}
         libraryId={libraryId}
       />}
+
+      {canManageLibraries && deleteFileTarget && (
+        <DeleteFileDialog
+          file={deleteFileTarget}
+          onClose={() => setDeleteFileTarget(null)}
+          onDeleted={() => {
+            toast.success(`已删除文件「${fileNameOf(deleteFileTarget.path)}」`);
+            invalidateLibraryDetailSnapshot(libraryId);
+            setDeleteFileTarget(null);
+            reload();
+          }}
+        />
+      )}
 
 
 
@@ -2177,6 +2208,89 @@ function DeleteDialog({
             </div>
           </>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+function DeleteFileDialog({
+  file,
+  onClose,
+  onDeleted,
+}: {
+  file: LibraryItemFile;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setConfirmed(false);
+    setError(null);
+  }, [file.file_id]);
+
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteLedgerRow(file.file_id, true);
+      onDeleted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除失败，请稍后重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={busy ? () => {} : onClose} label="删除单个文件" width="lg">
+      <div className="p-6">
+        <h3 className="flex items-center gap-2 text-title-sm font-semibold text-[var(--text)]">
+          <TrashIcon className="size-4.5 text-[#ff9f9f]" />
+          删除文件「{fileNameOf(file.path)}」
+        </h3>
+        <p className="mt-3 text-ui leading-6 text-white/80">
+          将从磁盘和媒体库台账中<span className="font-semibold text-[#ff9f9f]">永久删除</span>
+          下列单个文件，其他版本文件会保留。此操作不可恢复。
+        </p>
+        <div className="mt-4 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3.5">
+          <p className="tnum break-all font-mono text-caption leading-5 text-white/70">
+            {file.path}
+          </p>
+        </div>
+        <label className="mt-4 flex cursor-pointer items-start gap-2.5 text-sub leading-6 text-white/80">
+          <input
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => setConfirmed(e.target.checked)}
+            className="mt-1 size-4 accent-[#ff6b6b]"
+          />
+          我已明白：该文件将被永久删除，无法恢复。
+        </label>
+        {error && <p className="mt-3 text-sub text-[#ff9f9f]">{error}</p>}
+        <div className="mt-5 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="btn-glass px-4 py-2 text-ui font-medium text-[var(--text)]"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void run()}
+            disabled={!confirmed || busy}
+            className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-white transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy && (
+              <span className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            )}
+            {busy ? "正在删除…" : "删除此文件"}
+          </button>
+        </div>
       </div>
     </Modal>
   );

@@ -524,3 +524,36 @@ fn source_matching_handles_ui_hyphen_and_family_variants() {
     }]);
     assert_eq!(filter::admit(vec![t_hdtv.clone()], &f_tv).admitted.len(), 1);
 }
+
+#[test]
+fn hdr_atom_matches_aliases_and_case_variants() {
+    let dv_rel = torrent("Movie.2024.2160p.WEB-DL.DV", None, None);
+    let dovi_rel = torrent("Movie.2024.2160p.WEB-DL.DoVi", None, None);
+    let hdr10p_rel = torrent("Movie.2024.2160p.WEB-DL.HDR10+", None, None);
+
+    for want in ["Dolby Vision", "dolbyvision", "dovi", "DV"] {
+        let f = filter_with(vec![FilterAtom {
+            priority: 100,
+            rule: AtomRule::Hdr(want.into()),
+            exclude: false,
+        }]);
+        assert_eq!(
+            filter::admit(vec![dv_rel.clone(), dovi_rel.clone()], &f)
+                .admitted
+                .len(),
+            2,
+            "Hdr({want}) should match DV and DoVi releases"
+        );
+    }
+
+    let f_hdr10 = filter_with(vec![FilterAtom {
+        priority: 100,
+        rule: AtomRule::Hdr("HDR10".into()),
+        exclude: false,
+    }]);
+    assert_eq!(
+        filter::admit(vec![hdr10p_rel], &f_hdr10).admitted.len(),
+        0,
+        "exact HDR10 should not match HDR10+ unintentionally unless aliases match"
+    );
+}

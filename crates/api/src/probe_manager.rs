@@ -98,6 +98,8 @@ pub struct ProbeManager {
     tracks_probe: Arc<dyn TracksProbe>,
     metadata_tx: mpsc::Sender<store::ProbeDispatchId>,
     fingerprint_tx: mpsc::Sender<(store::ProbeDispatchId, probe::FingerprintWork)>,
+    metadata_overflowed: AtomicBool,
+    fingerprint_overflowed: AtomicBool,
     /// 幂等去重：窗口内或执行中的 ledger_id，不是全量积压。
     seen: Mutex<HashSet<String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
@@ -138,6 +140,19 @@ impl ProbeManager {
         )
     }
 
+    pub(crate) fn new_deferred(store: Arc<Store>) -> Result<Self, store::StoreError> {
+        Self::with_comparison_session_inner(
+            store,
+            Arc::new(marker::matcher::session::SeasonMatchSession::new(
+                Arc::new(ChromaprintEngine),
+                marker::matcher::session::DEFAULT_MAX_PAIRS,
+                marker::matcher::session::DEFAULT_MAX_BYTES,
+            )),
+            Arc::new(ChromaprintEngine),
+            false,
+        )
+    }
+
     pub fn with_engines(
         store: Arc<Store>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
@@ -161,6 +176,15 @@ impl ProbeManager {
         fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Result<Self, store::StoreError> {
+        Self::with_comparison_session_inner(store, fingerprint_engine, capture_engine, true)
+    }
+
+    fn with_comparison_session_inner(
+        store: Arc<Store>,
+        fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
+        capture_engine: Arc<dyn FingerprintCaptureEngine>,
+        recover_now: bool,
+    ) -> Result<Self, store::StoreError> {
         let channels = dispatch::channels();
         let settings = crate::probe_settings::ProbeSettings::load(&store)?;
         let remote_reads = crate::probe_settings::RemoteReadsSettings::load(&store)?;
@@ -172,7 +196,7 @@ impl ProbeManager {
             store,
             store_key,
             store_lease: Mutex::new(None),
-            recovery_deferred: AtomicBool::new(false),
+            recovery_deferred: AtomicBool::new(!recover_now),
             library_work: Mutex::new(None),
             chapter_frames: Mutex::new(None),
             fingerprint_engine,
@@ -180,6 +204,8 @@ impl ProbeManager {
             tracks_probe: Arc::new(tracks::FfprobeTracks),
             metadata_tx: channels.metadata_tx,
             fingerprint_tx: channels.fingerprint_tx,
+            metadata_overflowed: AtomicBool::new(false),
+            fingerprint_overflowed: AtomicBool::new(false),
             seen: Mutex::new(HashSet::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
@@ -211,10 +237,16 @@ impl ProbeManager {
             workers: Mutex::new(Vec::new()),
             wake: Notify::new(),
         };
-        if !store_lease::recover_if_idle(&manager) {
+        if recover_now && !store_lease::recover_if_idle(&manager) {
             manager.recovery_deferred.store(true, Ordering::SeqCst);
         }
         Ok(manager)
+    }
+
+    pub(crate) fn recover_deferred(&self) {
+        if self.recovery_deferred.load(Ordering::SeqCst) && store_lease::recover_if_idle(self) {
+            self.recovery_deferred.store(false, Ordering::SeqCst);
+        }
     }
 
     /// Replace stream IO while retaining the same queue and publication pipeline.

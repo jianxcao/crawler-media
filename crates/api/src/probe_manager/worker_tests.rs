@@ -122,3 +122,143 @@ async fn old_cleanup_does_not_release_new_job_dispatch() {
         "running"
     );
 }
+
+struct BlockedFirstTracks {
+    entered_tx: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release_rx: parking_lot::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl super::super::TracksProbe for BlockedFirstTracks {
+    fn probe(
+        &self,
+        path: &std::path::Path,
+        _control: &library::WorkControl,
+    ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "movie-000.mkv" {
+            if let Some(tx) = self.entered_tx.lock().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release_rx.lock().take() {
+                let _ = rx.recv();
+            }
+        } else if name == "movie-065.mkv" {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+        Ok((library::Tracks::default(), Some(60_000)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_idle_waits_for_overflow_window_refill_before_notifying() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(store::Store::open(tmp.path().join("data")).unwrap());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let manager = Arc::new(
+        ProbeManager::new(store.clone())
+            .unwrap()
+            .with_tracks_probe(Arc::new(BlockedFirstTracks {
+                entered_tx: parking_lot::Mutex::new(Some(entered_tx)),
+                release_rx: parking_lot::Mutex::new(Some(release_rx)),
+            })),
+    );
+    // Start workers first on empty DB, mirroring production startup.
+    assert!(manager.try_start_workers());
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Overflow Movie".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.as_ref().insert_media(&media).unwrap();
+    let _lib = store
+        .as_ref()
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let total = super::super::dispatch::METADATA_WINDOW + 2;
+    let mut ledger_ids = Vec::with_capacity(total);
+    for idx in 0..total {
+        let path = root.join(format!("movie-{idx:03}.mkv"));
+        std::fs::write(&path, b"video").unwrap();
+        let cov =
+            super::super::test_support::coverage(media.id, &path.to_string_lossy(), None, None);
+        let published = super::super::test_support::publish(store.as_ref(), &cov);
+        ledger_ids.push(published.file.file_id.to_string());
+    }
+    let specs: Vec<_> = ledger_ids
+        .iter()
+        .map(|id| store::ProbeJobUnitSpec {
+            ledger_id: id,
+            kind: "movie",
+            force_fingerprint: false,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: false,
+            reuse_media_info_cache: false,
+        })
+        .collect();
+    assert!(
+        store
+            .as_ref()
+            .create_probe_job(
+                "overflow-job",
+                "media_probe",
+                &media.id.to_string(),
+                None,
+                "overflow-scope",
+                &specs,
+            )
+            .unwrap()
+    );
+
+    // Fill 64 into channel; worker pops movie-000 and blocks. Then fill once more so
+    // movie-064 takes slot 64 while movie-065 stays queued in SQLite backlog.
+    manager.fill_dispatch_windows();
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("worker must pop movie-000");
+    manager.fill_dispatch_windows();
+
+    let gate = manager.priority_gate();
+    let waiter = tokio::spawn(async move {
+        gate.wait_before_capture().await;
+    });
+    tokio::task::yield_now().await;
+
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), waiter)
+        .await
+        .expect("metadata queue must become idle after draining overflow")
+        .unwrap();
+
+    let units = store.as_ref().probe_job_units("overflow-job").unwrap();
+    let pending: Vec<_> = units
+        .iter()
+        .filter(|u| matches!(u.status.as_str(), "queued" | "running"))
+        .map(|u| (&u.ledger_id, &u.status))
+        .collect();
+    assert!(
+        pending.is_empty(),
+        "metadata_idle fired before refilling and completing overflowed units: remaining={pending:?}"
+    );
+    let _ = manager.shutdown_workers().await;
+}

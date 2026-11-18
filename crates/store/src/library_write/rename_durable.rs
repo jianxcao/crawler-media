@@ -12,11 +12,11 @@ use domain::{FileVersion, LedgerId, LibraryId, MediaId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::publish::{ensure_library_writable, ensure_media_writable};
+use super::publish::ensure_media_writable;
 use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
 pub use super::rename_disk::RenameSourceEvidence;
-use super::rename_record::{RawRename, config_revision, set_phase};
+use super::rename_record::{RawRename, set_phase};
 pub use super::rename_sidecars::SidecarAction;
 use crate::{Store, StoreError};
 
@@ -106,31 +106,22 @@ impl Store {
         &self,
         request: &FileRenameRequest,
     ) -> Result<RenamePublication<'_>, StoreError> {
-        let mut publications = self.writers.rename_publications.lock();
+        let already_moved = request.phase == "disk_applied"
+            || (!request.from_path.exists() && request.to_path.exists());
         let from = request.from_library_id.to_string();
         let to = request.to_library_id.to_string();
-        self.with_library_read(|db| {
-            for (library, revision) in [
-                (&from, request.from_config_revision),
-                (&to, request.to_config_revision),
-            ] {
-                ensure_library_writable(db.library, library)?;
-                if config_revision(db.library, library)? != revision {
-                    return Err(StoreError::Protected(format!(
-                        "rename {}: Library configuration changed since planning",
-                        request.rename_id
-                    )));
-                }
-            }
-            Ok(())
-        })?;
         let mut libraries = vec![from];
         if to != libraries[0] {
             libraries.push(to);
         }
-        for library in &libraries {
-            *publications.entry(library.clone()).or_default() += 1;
-        }
+        self.with_library_write(|db| {
+            ensure_rename_libraries_admitted(db.library, request, already_moved)?;
+            let mut publications = self.writers.rename_publications.lock();
+            for library in &libraries {
+                *publications.entry(library.clone()).or_default() += 1;
+            }
+            Ok(())
+        })?;
         Ok(RenamePublication {
             store: self,
             libraries,
@@ -401,51 +392,216 @@ pub(super) fn sidecars_json(sidecars: &[RenameSidecar]) -> Result<String, StoreE
     serde_json::to_string(sidecars).map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))
 }
 
+pub(super) fn ensure_rename_libraries_admitted(
+    tx: &Connection,
+    request: &FileRenameRequest,
+    already_moved: bool,
+) -> Result<(), StoreError> {
+    let from = request.from_library_id.to_string();
+    let to = request.to_library_id.to_string();
+    let mut revision_mismatch = false;
+    for (library, expected_revision) in [
+        (&from, request.from_config_revision),
+        (&to, request.to_config_revision),
+    ] {
+        let removing: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_removals
+                           WHERE library_id = ?1 AND state <> 'succeeded')",
+            params![library],
+            |r| r.get(0),
+        )?;
+        if removing {
+            return Err(StoreError::Protected(format!(
+                "library {library} is being removed"
+            )));
+        }
+        let row: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT lifecycle_state, config_revision FROM libraries WHERE library_id = ?1",
+                params![library],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((lifecycle, current_revision)) = row else {
+            return Err(StoreError::Missing(format!("library {library}")));
+        };
+        if lifecycle != "ready" {
+            return Err(StoreError::Conflict(format!(
+                "library {library} lifecycle is {lifecycle}"
+            )));
+        }
+        if current_revision != expected_revision {
+            revision_mismatch = true;
+        }
+    }
+    if revision_mismatch {
+        if !already_moved {
+            return Err(StoreError::Protected(format!(
+                "rename {}: Library configuration changed since planning",
+                request.rename_id
+            )));
+        }
+        let to_str = request.to_path.to_string_lossy();
+        let root_valid: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM library_roots
+                 WHERE library_id = ?1 AND root_id = ?2 AND enabled = 1
+                   AND (path_key = '/'
+                        OR norm_path_key(?3) = path_key
+                        OR substr(norm_path_key(?3), 1, length(path_key) + 1) = path_key || '/')
+             )",
+            params![to, request.to_root_id, to_str.as_ref()],
+            |r| r.get(0),
+        )?;
+        if !root_valid {
+            return Err(StoreError::Protected(format!(
+                "rename {}: destination root {} no longer owns {}",
+                request.rename_id,
+                request.to_root_id,
+                request.to_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn migrate_metadata_inputs(
+    tx: &Connection,
+    from_library: &str,
+    to_library: &str,
+    to_root: &str,
+    media_id: MediaId,
+    from_video: &str,
+    to_video: &str,
+    sidecars: &[RenameSidecar],
+) -> Result<(), StoreError> {
+    for side in sidecars {
+        let is_nfo = side.kind == "nfo"
+            || side
+                .from
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("nfo"));
+        if !is_nfo {
+            continue;
+        }
+        migrate_nfo_sidecar_input(
+            tx,
+            from_library,
+            to_library,
+            to_root,
+            from_video,
+            to_video,
+            side,
+        )?;
+    }
+    migrate_remaining_video_inputs(
+        tx,
+        from_library,
+        to_library,
+        to_root,
+        media_id,
+        from_video,
+        to_video,
+    )
+}
+
+fn migrate_nfo_sidecar_input(
     tx: &Connection,
     from_library: &str,
     to_library: &str,
     to_root: &str,
     from_video: &str,
     to_video: &str,
-    sidecars: &[RenameSidecar],
+    side: &RenameSidecar,
 ) -> Result<(), StoreError> {
-    let mut pairs: Vec<(String, String)> = vec![(from_video.to_string(), to_video.to_string())];
-    for side in sidecars {
-        pairs.push((
-            side.from.to_string_lossy().into_owned(),
-            side.to.to_string_lossy().into_owned(),
-        ));
+    let from_nfo = side.from.to_string_lossy().into_owned();
+    let to_nfo = side.to.to_string_lossy().into_owned();
+    tx.execute(
+        "INSERT INTO library_metadata_inputs
+            (library_id,media_id,entity_scope,season,episode,locale,input_key,root_id,path_key,
+             parse_state,source_version,fields_json,present_fields_json,provenance_json,
+             export_id,export_digest,export_fields_json,revision)
+         SELECT ?2,media_id,entity_scope,season,episode,locale,norm_path_key(?3),?4,
+                CASE WHEN path_key = norm_path_key(?5) THEN norm_path_key(?6) ELSE path_key END,
+                parse_state,source_version,fields_json,present_fields_json,provenance_json,
+                export_id,export_digest,export_fields_json,revision+1
+         FROM library_metadata_inputs
+         WHERE library_id = ?1 AND input_key = norm_path_key(?7)
+         ON CONFLICT DO UPDATE SET
+            root_id=excluded.root_id,
+            path_key=excluded.path_key,
+            parse_state=excluded.parse_state,
+            source_version=excluded.source_version,
+            fields_json=excluded.fields_json,
+            present_fields_json=excluded.present_fields_json,
+            provenance_json=excluded.provenance_json,
+            export_id=excluded.export_id,
+            export_digest=excluded.export_digest,
+            export_fields_json=excluded.export_fields_json,
+            revision=library_metadata_inputs.revision+1",
+        params![
+            from_library,
+            to_library,
+            to_nfo,
+            to_root,
+            from_video,
+            to_video,
+            from_nfo,
+        ],
+    )?;
+    if side.action.deletes_source() {
+        tx.execute(
+            "DELETE FROM library_metadata_inputs
+             WHERE library_id = ?1 AND input_key = norm_path_key(?2)
+               AND NOT (?1 = ?3 AND input_key = norm_path_key(?4))",
+            params![from_library, from_nfo, to_library, to_nfo],
+        )?;
     }
-    for (from, to) in pairs {
-        if from_library == to_library {
+    Ok(())
+}
+
+fn migrate_remaining_video_inputs(
+    tx: &Connection,
+    from_library: &str,
+    to_library: &str,
+    to_root: &str,
+    media_id: MediaId,
+    from_video: &str,
+    to_video: &str,
+) -> Result<(), StoreError> {
+    if from_library == to_library {
+        tx.execute(
+            "UPDATE library_metadata_inputs
+             SET path_key = norm_path_key(?2), root_id = ?3, revision = revision + 1
+             WHERE library_id = ?1 AND path_key = norm_path_key(?4)",
+            params![from_library, to_video, to_root, from_video],
+        )?;
+        return Ok(());
+    }
+    let surviving: Option<(String, String)> = tx
+        .query_row(
+            "SELECT path_key, root_id FROM library_files
+             WHERE library_id = ?1 AND media_id = ?2
+             ORDER BY file_id LIMIT 1",
+            params![from_library, media_id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match surviving {
+        Some((surviving_path, surviving_root)) => {
             tx.execute(
                 "UPDATE library_metadata_inputs
-                 SET path_key = norm_path_key(?2), root_id = ?3, revision = revision + 1
-                 WHERE library_id = ?4 AND path_key = norm_path_key(?1)",
-                params![from, to, to_root, from_library],
+                 SET path_key = ?2, root_id = ?3, revision = revision + 1
+                 WHERE library_id = ?1 AND path_key = norm_path_key(?4)",
+                params![from_library, surviving_path, surviving_root, from_video],
             )?;
-        } else {
-            // PK includes library_id: copy then delete so cross-Library re-parent
-            // keeps the input under the destination Library.
+        }
+        None => {
             tx.execute(
-                "INSERT INTO library_metadata_inputs
-                    (library_id,media_id,entity_scope,season,episode,locale,input_key,root_id,path_key,
-                     parse_state,source_version,fields_json,present_fields_json,provenance_json,
-                     export_id,export_digest,export_fields_json,revision)
-                 SELECT ?2,media_id,entity_scope,season,episode,locale,input_key,?3,norm_path_key(?4),
-                        parse_state,source_version,fields_json,present_fields_json,provenance_json,
-                        export_id,export_digest,export_fields_json,revision+1
-                 FROM library_metadata_inputs
-                 WHERE library_id = ?1 AND path_key = norm_path_key(?5)
-                 ON CONFLICT DO UPDATE SET
-                    root_id=excluded.root_id, path_key=excluded.path_key,
-                    revision=library_metadata_inputs.revision+1",
-                params![from_library, to_library, to_root, to, from],
-            )?;
-            tx.execute(
-                "DELETE FROM library_metadata_inputs WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
-                params![from_library, from],
+                "DELETE FROM library_metadata_inputs
+                 WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
+                params![from_library, from_video],
             )?;
         }
     }

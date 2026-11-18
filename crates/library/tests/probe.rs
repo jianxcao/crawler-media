@@ -30,6 +30,35 @@ JSON
     assert_eq!(quality.hdr.as_deref(), Some("HDR10"));
 }
 
+#[cfg(unix)]
+#[test]
+fn ffprobe_prefers_dolby_vision_over_hdr10_for_profile_8_1() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use library::{Ffprobe, MediaProbe};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let program = tmp.path().join("ffprobe");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+cat <<'JSON'
+{"streams":[{"codec_name":"hevc","width":3840,"height":2160,"color_transfer":"smpte2084","side_data_list":[{"side_data_type":"DOVI configuration record"}]}]}
+JSON
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+    seal_executable(&program);
+    let media = tmp.path().join("dv.mkv");
+    std::fs::write(&media, b"fixture").unwrap();
+
+    let quality = Ffprobe::with_program(program).probe(&media).unwrap();
+    assert_eq!(quality.hdr.as_deref(), Some("Dolby Vision"));
+}
+
 /// Re-create a freshly written test script from a child process before it is
 /// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
 /// write fd for the script inode until that child execs, making our exec fail

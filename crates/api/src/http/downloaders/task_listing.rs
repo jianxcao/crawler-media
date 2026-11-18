@@ -14,32 +14,18 @@ use crate::pending_reconcile::{absence_is_provable, snapshot_matches_pending};
 
 fn prune_orphan_pending(
     store: &crate::Store,
-    state: &ApiState,
 ) -> (
     Vec<(domain::SubscribeId, i32, store::PendingDownload)>,
     HashSet<Option<DownloaderId>>,
+    Vec<(domain::SubscribeId, String, String)>,
 ) {
     let rows = store.list_all_pending_routed().unwrap_or_default();
     let mut kept = Vec::with_capacity(rows.len());
+    let mut orphans = Vec::new();
     for (subscribe_id, score, item) in rows {
         match store.get_subscribe(subscribe_id) {
             Ok(Some(_)) => kept.push((subscribe_id, score, item)),
-            Ok(None) => {
-                if state.require_writable().is_err() || state.require_write_admitted().is_err() {
-                    tracing::debug!(%subscribe_id, "Protected task read skips orphan cleanup");
-                    continue;
-                }
-                if let Err(error) = with_foreground_store(state, |store| {
-                    store.delete_pending(subscribe_id, &item.torrent.enclosure)
-                })
-                .map_err(|response| format!("pending cleanup rejected ({})", response.status()))
-                .and_then(|result| result.map_err(|error| error.to_string()))
-                {
-                    tracing::error!(%subscribe_id, %error, "清理孤儿 pending 失败");
-                } else {
-                    tracing::info!(%subscribe_id, torrent = %item.torrent.title, "清理孤儿 pending：订阅已删除");
-                }
-            }
+            Ok(None) => orphans.push((subscribe_id, item.torrent.enclosure, item.torrent.title)),
             Err(error) => {
                 tracing::error!(%subscribe_id, %error, "读取订阅失败，保留 pending 行");
                 kept.push((subscribe_id, score, item));
@@ -48,7 +34,28 @@ fn prune_orphan_pending(
     }
     let targets: HashSet<Option<DownloaderId>> =
         kept.iter().map(|(_, _, item)| item.downloader_id).collect();
-    (kept, targets)
+    (kept, targets, orphans)
+}
+
+fn cleanup_orphan_pending(state: &ApiState, orphans: Vec<(domain::SubscribeId, String, String)>) {
+    if orphans.is_empty()
+        || state.require_writable().is_err()
+        || state.require_write_admitted().is_err()
+    {
+        return;
+    }
+    for (subscribe_id, enclosure, torrent) in orphans {
+        if let Err(error) = with_foreground_store(state, |store| {
+            store.delete_pending(subscribe_id, &enclosure)
+        })
+        .map_err(|response| format!("pending cleanup rejected ({})", response.status()))
+        .and_then(|result| result.map_err(|error| error.to_string()))
+        {
+            tracing::warn!(%subscribe_id, %error, "清理孤儿 pending 跳过或失败");
+        } else {
+            tracing::info!(%subscribe_id, %torrent, "清理孤儿 pending：订阅已删除");
+        }
+    }
 }
 
 async fn load_task_snapshots(
@@ -124,7 +131,7 @@ fn prune_absent_pending(
             reachable_list,
             now,
         );
-        if absent && delete_absent_pending(state, subscribe_id, &item)? {
+        if absent && delete_absent_pending(state, subscribe_id, &item) {
             continue;
         }
         kept.push((subscribe_id, score, item));
@@ -139,11 +146,15 @@ fn delete_absent_pending(
     state: &ApiState,
     subscribe_id: domain::SubscribeId,
     item: &store::PendingDownload,
-) -> Result<bool, Response> {
+) -> bool {
+    if state.require_writable().is_err() || state.require_write_admitted().is_err() {
+        tracing::debug!(%subscribe_id, "Protected task read skips absent pending cleanup");
+        return false;
+    }
     let guard = state.subscribe_guard(subscribe_id);
     let Some(_held) = guard.try_lock() else {
         tracing::debug!(%subscribe_id, "订阅正在搜索/转存，本轮跳过缺失任务清理");
-        return Ok(false);
+        return false;
     };
     with_foreground_store(state, |store| {
         if state.require_writable().is_err() || state.require_write_admitted().is_err() {
@@ -171,6 +182,10 @@ fn delete_absent_pending(
                 false
             }
         }
+    })
+    .unwrap_or_else(|response| {
+        tracing::debug!(%subscribe_id, status = %response.status(), "Protected task read skips absent pending cleanup");
+        false
     })
 }
 
@@ -274,13 +289,11 @@ fn map_task_rows(
 
 pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
     let initial_state = state.clone();
-    // This GET may reconcile orphan rows. Keep that whole conditional mutation
-    // owned to completion rather than hiding a late write behind a read timeout.
-    let (pending, targets) = match state
+    let (pending, targets, orphans) = match state
         .http_work
         .run_to_completion(move || {
             with_store_read(&initial_state, &[store::Db::Subscribe], |store| {
-                prune_orphan_pending(store, &initial_state)
+                prune_orphan_pending(store)
             })
         })
         .await
@@ -297,6 +310,13 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
             );
         }
     };
+    if !orphans.is_empty() {
+        let cleanup_state = state.clone();
+        let _ = state
+            .http_work
+            .run_to_completion(move || cleanup_orphan_pending(&cleanup_state, orphans))
+            .await;
+    }
     let (snapshots, reachable) = load_task_snapshots(&state, targets).await;
     let snapshots = Arc::new(snapshots);
     let reachable = Arc::new(reachable);

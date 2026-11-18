@@ -353,6 +353,23 @@ fn move_nfo_inputs(tx: &Connection, survivor: MediaId, loser: MediaId) -> Result
     Ok(())
 }
 
+fn move_playback_sessions(
+    tx: &Connection,
+    survivor: MediaId,
+    loser: MediaId,
+) -> Result<(), StoreError> {
+    let (survivor, loser) = (survivor.to_string(), loser.to_string());
+    tx.execute(
+        "UPDATE playback_sessions SET media_id = ?1 WHERE media_id = ?2",
+        params![survivor, loser],
+    )?;
+    tx.execute(
+        "UPDATE playback_session_ids SET media_id = ?1 WHERE media_id = ?2",
+        params![survivor, loser],
+    )?;
+    Ok(())
+}
+
 /// Move the loser's files and coverage, dropping its derived summaries first so
 /// no `preferred_file_id` points at a row whose owner just changed.
 fn move_files(tx: &Connection, survivor: MediaId, loser: MediaId) -> Result<(), StoreError> {
@@ -468,6 +485,8 @@ fn ensure_loser_has_no_references(tx: &Connection, loser: MediaId) -> Result<(),
         "media_metadata_overrides",
         "media_episodes",
         "playback_units",
+        "playback_sessions",
+        "playback_session_ids",
         "collection_items",
         "fingerprint_season_models",
         "probe_season_comparison_history",

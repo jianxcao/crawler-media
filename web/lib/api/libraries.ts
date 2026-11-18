@@ -1121,10 +1121,12 @@ export function listLibraryItemIndex(
   sort: "title" | "release_date" | "rating" = "title",
   filter?: LibraryFilter,
   order?: LibraryItemOrder,
+  options?: { gallery?: boolean },
 ): Promise<LibraryIndexEntry[]> {
   const query = new URLSearchParams();
   if (sort !== "title") query.set("sort", sort);
   if (order) query.set("order", order);
+  if (options?.gallery) query.set("gallery", "true");
   filterQuery(filter, query);
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/item-index${suffix}`)).then(

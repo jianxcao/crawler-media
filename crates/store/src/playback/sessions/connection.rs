@@ -295,8 +295,13 @@ impl crate::LibraryConnection<'_> {
         };
         let mut closed = 0;
         for (user_id, device_id) in session_keys {
-            if self.close_session(user_id, &device_id, now)?.is_some() {
-                closed += 1;
+            match self.close_session(user_id, &device_id, now) {
+                Ok(Some(_)) => closed += 1,
+                Ok(None) => {}
+                Err(StoreError::Protected(reason)) => {
+                    tracing::warn!(%user_id, %device_id, %reason, "跳过受保护媒体的过期播放会话清理");
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(closed)

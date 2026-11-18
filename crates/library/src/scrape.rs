@@ -50,7 +50,9 @@ fn nfo_xml(media: &Media) -> String {
         ("anilistid", media.anilist_id.as_deref()),
     ]
     .into_iter()
-    .filter_map(|(tag, id)| id.map(|id| format!("  <{tag}>{id}</{tag}>\n")))
+    .filter_map(|(tag, id)| {
+        id.map(|id| format!("  <{tag}>{}</{tag}>\n", crate::nfo::xml_escape(id)))
+    })
     .collect::<String>();
     let tag = match media.kind {
         MediaKind::Movie => "movie",
@@ -60,6 +62,6 @@ fn nfo_xml(media: &Media) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
          <{tag}>\n  <title>{}</title>\n{year}{aliases}</{tag}>\n",
-        media.title
+        crate::nfo::xml_escape(&media.title)
     )
 }

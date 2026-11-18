@@ -64,6 +64,8 @@ mod media_probe;
 mod transfer_mode;
 
 pub use error::LibraryError;
-pub use frame::{extract_frame, extract_frame_with_ffmpeg, probe_duration};
+pub use frame::{
+    extract_frame, extract_frame_with_ffmpeg, probe_duration, probe_duration_with_ffprobe,
+};
 pub use media_probe::{Ffprobe, FileQuality, MediaProbe};
 pub use transfer_mode::{TransferMode, resolve_mode};

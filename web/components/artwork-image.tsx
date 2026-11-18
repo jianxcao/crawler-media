@@ -6,12 +6,17 @@ import { manageArtworkImage, observeArtworkImage } from "@/lib/artwork-loading";
 /** Static artwork shares four network slots with preloads and retries. */
 export function ArtworkImage({ ref, src, srcSet, sizes, loading = "lazy", ...props }: ComponentPropsWithRef<"img">) {
   const current = useRef<ReturnType<typeof manageArtworkImage> | null>(null);
+  const eager = loading === "eager";
+  const eagerRef = useRef(eager);
+  eagerRef.current = eager;
   const attach = useCallback((image: HTMLImageElement | null) => {
     if (!image) return;
     const managed = manageArtworkImage(image);
-    managed.setVisible(false);
+    managed.setVisible(eagerRef.current, eagerRef.current ? 0 : undefined);
     current.current = managed;
-    const stop = observeArtworkImage(image, (near, priority) => managed.setVisible(near, priority));
+    const stop = eagerRef.current
+      ? () => undefined
+      : observeArtworkImage(image, (near, priority) => managed.setVisible(near, priority));
     const detachRef = typeof ref === "function" ? ref(image) : undefined;
     if (ref && typeof ref !== "function") ref.current = image;
     return () => {

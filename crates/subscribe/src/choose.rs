@@ -476,9 +476,9 @@ fn codec_level(value: &str) -> i32 {
 
 fn hdr_level(value: &str) -> i32 {
     match value.to_ascii_lowercase().as_str() {
-        "dv" | "dovi" | "dolbyvision" => 3,
+        "dv" | "dovi" | "dolbyvision" | "dolby vision" => 3,
         "hdr10+" => 2,
-        "hdr10" | "hdr" => 1,
+        "hdr10" | "hlg" | "hdr" => 1,
         _ => 0,
     }
 }

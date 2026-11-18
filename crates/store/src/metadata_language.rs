@@ -67,6 +67,9 @@ impl Store {
         now_ms: i64,
     ) -> Result<MetadataLanguageState, StoreError> {
         self.with_library_write(|db| {
+            if self.writers.has_any_rename_publication() {
+                return Err(StoreError::WriteBusy);
+            }
             db.change_metadata_language(expected_revision, language, operation_id, now_ms)
         })
     }

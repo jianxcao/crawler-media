@@ -99,13 +99,32 @@ impl crate::LibraryConnection<'_> {
     }
 }
 
+/// Parse a non-null TEXT column or report `FromSqlConversionFailure`.
+fn parse_text_column<T: std::str::FromStr>(
+    r: &rusqlite::Row<'_>,
+    col: usize,
+    label: &str,
+) -> rusqlite::Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let raw: String = r.get(col)?;
+    raw.parse().map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            col,
+            rusqlite::types::Type::Text,
+            format!("invalid {label} '{raw}': {err}").into(),
+        )
+    })
+}
+
 /// Decode the file-fact projection independently of page cursor selection.
 fn map_file_page_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryFile> {
-    let file_id: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
-    let lib_id: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
+    let file_id: LedgerId = parse_text_column(r, 0, "file_id")?;
+    let lib_id: LibraryId = parse_text_column(r, 1, "library_id")?;
     let root_id: String = r.get(2)?;
-    let media_id: MediaId = r.get::<_, String>(3)?.parse().unwrap();
-    let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
+    let media_id: MediaId = parse_text_column(r, 3, "media_id")?;
+    let kind: MediaKind = parse_text_column(r, 4, "kind")?;
     let display_path: String = r.get(6)?;
     let presence_str: String = r.get(7)?;
     let pub_str: String = r.get(8)?;

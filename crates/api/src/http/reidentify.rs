@@ -211,6 +211,12 @@ fn acquire_file_leases(
 }
 
 fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
     let request: ReidentifyRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
         Err(error) => {
@@ -290,18 +296,18 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         }
     }
 
-    let to_media = {
-        let store = state.store.as_ref();
-        match store.ensure_media(target_media.clone()) {
-            Ok(m) => m,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &e.to_string(),
-                );
-            }
+    let to_media = match crate::http::store_wait::with_foreground_store(state, |store| {
+        store.ensure_media(target_media.clone())
+    }) {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &e.to_string(),
+            );
         }
+        Err(response) => return response,
     };
 
     reassign_parsed_files(state, parsed, &target_media, &to_media)
@@ -326,29 +332,35 @@ fn reassign_parsed_files(
     };
 
     let now_ms = crate::job_loop::unix_now() * 1000;
-    let claimed = match state.store.as_ref().reassign_files(&reassign_req, now_ms) {
-        Ok(c) => c,
-        Err(store::StoreError::Protected(msg)) => {
-            return err(StatusCode::CONFLICT, "library.protected", &msg);
-        }
-        Err(e) => return err(StatusCode::CONFLICT, "library.frozen", &e.to_string()),
-    };
-
-    if let Some(ext_id) = target.tmdb_id.as_deref() {
-        let alias = MediaAlias {
-            source: "tmdb".into(),
-            kind: target.kind,
-            external_id: ext_id.to_string(),
+    let write_outcome = crate::http::store_wait::with_foreground_store(state, |store| {
+        let claimed = match store.reassign_files(&reassign_req, now_ms) {
+            Ok(c) => c,
+            Err(store::StoreError::Protected(msg)) => {
+                return Err(err(StatusCode::CONFLICT, "library.protected", &msg));
+            }
+            Err(e) => return Err(err(StatusCode::CONFLICT, "library.frozen", &e.to_string())),
         };
-        if let Err(e) = state.store.as_ref().add_media_alias(to_media.id, &alias) {
-            match e {
-                store::StoreError::Protected(msg) => {
-                    return err(StatusCode::CONFLICT, "reidentify.alias_conflict", &msg);
+        if let Some(ext_id) = target.tmdb_id.as_deref() {
+            let alias = MediaAlias {
+                source: "tmdb".into(),
+                kind: target.kind,
+                external_id: ext_id.to_string(),
+            };
+            if let Err(e) = store.add_media_alias(to_media.id, &alias) {
+                match e {
+                    store::StoreError::Protected(msg) => {
+                        return Err(err(StatusCode::CONFLICT, "reidentify.alias_conflict", &msg));
+                    }
+                    _ => tracing::warn!(%e, "无法为目标媒体添加别名"),
                 }
-                _ => tracing::warn!(%e, "无法为目标媒体添加别名"),
             }
         }
-    }
+        Ok(claimed)
+    });
+    let claimed = match write_outcome {
+        Ok(Ok(claimed)) => claimed,
+        Ok(Err(response)) | Err(response) => return response,
+    };
 
     // 针对已迁移的文件执行元数据刷新（失败不破坏已完成的迁移）
     refresh_sidecars_for_reassigned(state, to_media, &parsed.rows_to_refresh);

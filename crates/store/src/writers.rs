@@ -227,6 +227,22 @@ impl Writers {
         }
     }
 
+    pub(crate) fn has_rename_publication(&self, library_id: &str) -> bool {
+        self.rename_publications
+            .lock()
+            .get(library_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
+    }
+
+    pub(crate) fn has_any_rename_publication(&self) -> bool {
+        self.rename_publications
+            .lock()
+            .values()
+            .any(|count| *count > 0)
+    }
+
     pub fn with_app<T>(
         &self,
         work: impl FnOnce(&App<'_>) -> Result<T, StoreError>,

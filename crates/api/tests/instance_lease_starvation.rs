@@ -102,3 +102,77 @@ async fn heartbeat_survives_long_library_write() {
     second.shutdown().await.unwrap();
     first.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standby_instance_defers_startup_writes_until_lease_acquired() {
+    fast_lease();
+    let tmp = tempfile::tempdir().unwrap();
+    let first_state = open(tmp.path());
+    let first_store = first_state.store();
+    let first = job_loop::spawn_job_loop(first_state);
+    assert!(!first.is_read_only(), "first instance must own the lease");
+
+    // Hold Library writer AND own the lease in instance 1 so a standby instance
+    // booting read-only must neither block on Library writes nor mutate startup state.
+    let hold = crate::writer_hold::WriterHold::acquire(first_store.clone(), store::Db::Library);
+    let data_dir = tmp.path().join("data");
+    let stage_dir = tmp.path().join("stage");
+    let second_state = tokio::time::timeout(
+        Duration::from_millis(400),
+        tokio::task::spawn_blocking(move || {
+            let store = Arc::new(Store::open(&data_dir).unwrap());
+            let initial_lease = api::instance_lease::acquire(&store);
+            assert!(initial_lease.is_err(), "standby must see lease conflict");
+            let action = api::bootstrap_credentials::prepare_admin_credentials(
+                store.as_ref(),
+                "lease-secret",
+                None,
+                api::bootstrap_credentials::BootstrapMode::TestFixture,
+            )
+            .unwrap();
+            let state = ApiState::new_arc_with_admin_bootstrap_writable(
+                store,
+                ProfileSet::load(None).unwrap(),
+                Arc::new(NoFetch),
+                Arc::new(MemoryDownloader::new(stage_dir)),
+                action,
+                false,
+            )
+            .unwrap();
+            (state, initial_lease)
+        }),
+    )
+    .await
+    .expect("standby ApiState startup must not block on Library writer")
+    .unwrap();
+    let (second_state, initial_lease) = second_state;
+    assert!(
+        !second_state.instance_writable(),
+        "standby ApiState must start non-writable"
+    );
+
+    drop(hold);
+    first.shutdown().await.unwrap();
+
+    let second = job_loop::spawn_job_loop_with_lease(second_state.clone(), initial_lease);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if !second.is_read_only() && second_state.instance_writable() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        !second.is_read_only() && second_state.instance_writable(),
+        "standby instance must transition to writable after acquiring lease"
+    );
+    assert!(
+        second_state
+            .store()
+            .get_setting("jellyfin.server_id")
+            .unwrap()
+            .is_some(),
+        "jellyfin.server_id must be persisted once writable"
+    );
+    second.shutdown().await.unwrap();
+}

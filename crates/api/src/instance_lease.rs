@@ -104,7 +104,7 @@ fn multi_instance_allowed(store: &Store) -> bool {
 }
 
 /// Acquire the data-directory lease; `Err` when another live instance holds it.
-pub(crate) fn acquire(store: &Arc<Store>) -> std::io::Result<Option<Arc<InstanceLease>>> {
+pub fn acquire(store: &Arc<Store>) -> std::io::Result<Option<Arc<InstanceLease>>> {
     let owner = format!(
         "pid{}-{}",
         std::process::id(),

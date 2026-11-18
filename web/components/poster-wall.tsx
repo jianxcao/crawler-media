@@ -340,7 +340,7 @@ export function PosterWall<T extends LibraryItem>({
 
   const reportRef = useRef(onGeometry);
   reportRef.current = onGeometry;
-  useEffect(() => {
+  useLayoutEffect(() => {
     reportRef.current?.(layout ? { rowTops: layout.rowTops, columns: layout.columns } : null);
   }, [layout]);
 

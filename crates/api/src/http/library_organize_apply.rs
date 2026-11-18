@@ -34,6 +34,12 @@ enum Prepared {
 }
 
 pub(crate) fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
     let source_lease = match state.acquire_library_work(id) {
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
@@ -134,11 +140,12 @@ fn apply_entry(
         if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
             return Err("目标媒体库正在删除".into());
         }
-        state
-            .store
-            .as_ref()
-            .begin_observed_file_rename(observed, now)
-            .map_err(|e| e.to_string())
+        crate::http::store_wait::with_foreground_store(state, |store| {
+            store
+                .begin_observed_file_rename(observed, now)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|response| format!("写入被拒绝 ({})", response.status()))?
     }) {
         Ok(request) => request,
         Err(error) => return OrganizeOutcome::Failed(format!("{from}: 媒体库工作已取消: {error}")),

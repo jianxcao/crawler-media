@@ -149,7 +149,13 @@ impl Store {
         prepared: &PreparedLibraryReconfiguration,
         now_ms: i64,
     ) -> Result<OperationStatus, StoreError> {
-        self.with_library_write(|db| db.begin_library_reconfiguration_prepared(prepared, now_ms))
+        let library_id = prepared.request.library_id.to_string();
+        self.with_library_write(|db| {
+            if self.writers.has_rename_publication(&library_id) {
+                return Err(StoreError::WriteBusy);
+            }
+            db.begin_library_reconfiguration_prepared(prepared, now_ms)
+        })
     }
 
     /// Advance one reconfiguration operation by at most `max_media` Media.

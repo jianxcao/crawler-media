@@ -9,7 +9,7 @@ import ts from "typescript";
 const require = createRequire(import.meta.url);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-async function mount(save, remoteReads = { paused: false }) {
+async function mount(save, remoteReads = { paused: false }, getProbe = async () => ({ metadata_workers: 3, remote_concurrency: 2, remote_cooldown_ms: 750 })) {
   const source = readFileSync(new URL("../components/probe-settings-card.tsx", import.meta.url), "utf8");
   const js = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022,
@@ -17,7 +17,7 @@ async function mount(save, remoteReads = { paused: false }) {
   const module = { exports: {} };
   new Function("require", "module", "exports", js)(name => {
     if (name === "@/lib/api/probe-settings") return {
-      getProbeSettings: async () => ({ metadata_workers: 3, remote_concurrency: 2, remote_cooldown_ms: 750 }),
+      getProbeSettings: getProbe,
       saveProbeSettings: save,
       getRemoteReadsSettings: async () => remoteReads,
       saveRemoteReadsSettings: async paused => ({ paused }),
@@ -82,4 +82,35 @@ test("STRM reads can be paused and resumed while speed settings have invalid edi
   assert.match(ui.status(), /已暂停/);
   assert.equal(ui.field("远程读取并发").props.value, 0);
   await ui.unmount();
+});
+
+test("probe settings disables inputs while saving and offers retry on initial load failure", async () => {
+  let resolveSave;
+  const savePromise = new Promise(resolve => { resolveSave = resolve; });
+  const savingUi = await mount(async () => savePromise);
+  await savingUi.change("媒体信息并发", "4");
+  let pendingSubmit;
+  await act(async () => { pendingSubmit = savingUi.button().props.onClick(); });
+  assert.equal(savingUi.field("媒体信息并发").props.disabled, true);
+  assert.equal(savingUi.field("远程读取并发").props.disabled, true);
+  assert.equal(savingUi.field("远程读取间隔（毫秒）").props.disabled, true);
+  resolveSave({ metadata_workers: 4, remote_concurrency: 2, remote_cooldown_ms: 750 });
+  await act(async () => { await pendingSubmit; });
+  assert.equal(savingUi.field("媒体信息并发").props.disabled, false);
+  await savingUi.unmount();
+
+  let attempts = 0;
+  const retryUi = await mount(
+    async x => x,
+    { paused: false },
+    async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("网络异常");
+      return { metadata_workers: 2, remote_concurrency: 1, remote_cooldown_ms: 500 };
+    },
+  );
+  assert.match(retryUi.status(), /网络异常/);
+  await retryUi.press("重试");
+  assert.equal(retryUi.field("媒体信息并发").props.value, 2);
+  await retryUi.unmount();
 });

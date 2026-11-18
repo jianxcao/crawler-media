@@ -263,3 +263,43 @@ async fn non_revoked_device_still_checks_the_session_token() {
         vec!["phone-1".to_string(), TOKEN.to_string()]
     );
 }
+
+#[tokio::test]
+async fn playback_info_checks_device_and_token_revocation() {
+    let provider = Arc::new(RecordingProvider::new(vec!["banned-device"]));
+    let req = Request::post("/Items/movie/PlaybackInfo")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("X-Emby-Device-Id", "banned-device")
+        .body(Body::empty())
+        .unwrap();
+    let resp = media_server::routes(provider.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let provider_tok = Arc::new(RecordingProvider::new(vec![TOKEN]));
+    let req_tok = Request::post("/Items/movie/PlaybackInfo")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("X-Emby-Device-Id", "fresh-phone")
+        .body(Body::empty())
+        .unwrap();
+    let resp_tok = media_server::routes(provider_tok)
+        .oneshot(req_tok)
+        .await
+        .unwrap();
+    assert_eq!(resp_tok.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn session_playing_checks_token_revocation_even_with_fresh_device() {
+    let provider = Arc::new(RecordingProvider::new(vec![TOKEN]));
+    let req = Request::post("/Sessions/Playing")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("X-Emby-Device-Id", "fresh-phone")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"ItemId":"movie","PositionTicks":10000}"#))
+        .unwrap();
+    let resp = media_server::routes(provider).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

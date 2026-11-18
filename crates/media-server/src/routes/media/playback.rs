@@ -436,6 +436,7 @@ pub async fn playback_info(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
+    check_device_revocation(state.provider.as_ref(), &user, &headers, "PlaybackInfo").await?;
     let snapshot = state
         .provider
         .resolve_single_item(user.id, &id)

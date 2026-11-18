@@ -37,6 +37,71 @@ impl InFlight {
     fn remove(&self, target: &FlightTarget) {
         self.0.lock().remove(target);
     }
+
+    pub(crate) fn is_active(
+        &self,
+        file_id: LedgerId,
+        version: &FileVersion,
+        unit: UnitKey,
+        media_id: domain::MediaId,
+        tmdb_id: &str,
+    ) -> bool {
+        self.0.lock().contains(&FlightTarget {
+            file_id,
+            version: version.clone(),
+            unit,
+            media_id,
+            tmdb_id: tmdb_id.to_string(),
+        })
+    }
+}
+
+pub(crate) fn session_needs_cloud_lookup(
+    store: &Store,
+    factory: &dyn ClientFactory,
+    negative: &NegativeCache,
+    now_ms: i64,
+    coverage: &domain::FileCoverage,
+    unit: UnitKey,
+    media: &domain::Media,
+    has_marker: bool,
+) -> bool {
+    if has_marker
+        || media.kind != domain::MediaKind::Tv
+        || coverage.units.len() != 1
+        || unit.episode_coordinates().is_none()
+    {
+        return false;
+    }
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        return false;
+    };
+    let library_id = coverage.file.library_id.to_string();
+    let detect_intros = store
+        .get_library(&library_id)
+        .ok()
+        .flatten()
+        .is_some_and(|library| library.detect_intros);
+    if !detect_intros {
+        return false;
+    }
+    let Some(client) = configured_client(store, factory) else {
+        return false;
+    };
+    if let Some(duration_ms) = coverage.file.duration_ms.filter(|d| *d > 0) {
+        let key = LookupKey {
+            file_id: coverage.file.file_id,
+            version: coverage.file.version.clone(),
+            unit,
+            duration_ms,
+            tmdb_id: tmdb_id.to_string(),
+            configuration: client.cache_scope(),
+        };
+        if negative.contains(&key, now_ms) {
+            return false;
+        }
+    }
+    true
 }
 
 struct FlightGuard {

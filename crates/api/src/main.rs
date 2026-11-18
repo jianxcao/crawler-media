@@ -11,7 +11,7 @@ use api::{
     catalog::{
         AnilistCatalog, BangumiCatalog, DoubanCatalog, FanoutCatalog, TmdbCatalog, TvdbCatalog,
     },
-    cli, router, spawn_job_loop,
+    cli, router,
 };
 use downloader::Downloader;
 use indexer::ProfileSet;
@@ -63,16 +63,19 @@ fn init_logging(
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
+    let mut env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new(
                 "info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,\
-                 downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,\
-                 hooks=debug,jobs=debug,playback=debug",
+             downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,\
+             hooks=debug,jobs=debug,playback=debug",
             )
-        })
-        .add_directive("html5ever=off".parse().unwrap())
-        .add_directive("selectors=warn".parse().unwrap());
+        });
+    for spec in ["html5ever=off", "selectors=warn"] {
+        if let Ok(directive) = spec.parse() {
+            env_filter = env_filter.add_directive(directive);
+        }
+    }
 
     let timer = api::compact_time::CompactTime;
     tracing_subscriber::registry()
@@ -164,12 +167,13 @@ fn load_catalog_sources(
 fn spawn_background_services(
     state: &ApiState,
     address: SocketAddr,
+    initial_lease: std::io::Result<Option<Arc<api::instance_lease::InstanceLease>>>,
 ) -> api::job_loop::JobLoopHandle {
     tokio::spawn(api::ssdp::run(
         address.port(),
         state.jellyfin_server_id().to_string(),
     ));
-    let jobs = spawn_job_loop(state.clone());
+    let jobs = api::spawn_job_loop_with_lease(state.clone(), initial_lease);
     api::spawn_fs_watcher(state.clone());
     jobs
 }
@@ -204,6 +208,7 @@ fn create_api_state(
     store: std::sync::Arc<Store>,
     action: api::bootstrap_credentials::AdminBootstrapAction,
     log_buffer: api::system_logs::LogBuffer,
+    initial_writable: bool,
 ) -> Result<ApiState, Box<dyn std::error::Error>> {
     let downloader: Arc<dyn Downloader> = Arc::new(DynamicDownloader::new(
         store.clone(),
@@ -211,12 +216,13 @@ fn create_api_state(
         data_dir,
     ));
     let browser = api::runtime_browser::production_browser(store.clone())?;
-    let mut state = ApiState::new_arc_with_admin_bootstrap(
+    let mut state = ApiState::new_arc_with_admin_bootstrap_writable(
         store.clone(),
         ProfileSet::load(Some(overlay_dir))?,
         Arc::new(HttpFetcher),
         downloader,
         action,
+        initial_writable,
     )?
     .with_log_buffer(log_buffer)
     .with_browser(Arc::new(browser));
@@ -250,7 +256,14 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let store = std::sync::Arc::new(Store::open(&data_dir)?);
-    seed_store_settings(&store, &config);
+    let initial_lease = api::instance_lease::acquire(&store);
+    let initial_writable = initial_lease.is_ok();
+    if initial_writable {
+        seed_store_settings(&store, &config);
+    } else {
+        api::http_agent::sync_from_store(&store);
+        api::user_agent::sync_user_agent(&store);
+    }
 
     let action = api::bootstrap_credentials::prepare_admin_credentials(
         store.as_ref(),
@@ -273,13 +286,14 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         store.clone(),
         action,
         log_buffer,
+        initial_writable,
     )?;
 
     let address: SocketAddr = config.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("crawler-media 已监听 http://{address}");
 
-    let jobs = spawn_background_services(&state, address);
+    let jobs = spawn_background_services(&state, address, initial_lease);
 
     let app = api::ui::attach_ui(router(state.clone()), config.ui_dir.clone());
     // Graceful shutdown waits for open connections (SSE streams can stay

@@ -687,3 +687,57 @@ async fn task_snapshot_exposes_only_supported_fields() {
         vec!["id", "media_item_id", "media_kind", "media_title"]
     );
 }
+
+#[tokio::test]
+async fn list_tasks_succeeds_without_writing_when_read_only_even_with_stale_absent_pending() {
+    let tmp = tempfile::tempdir().unwrap();
+    let enclosure = "https://pt.example/download.php?id=readonly-stale";
+    let task_id = seed_pending_at(tmp.path(), enclosure, now_secs() - 30 * 60);
+    // Use a reachable downloader whose snapshot proves the torrent is absent so delete_absent_pending triggers.
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    downloader.push_snapshot(downloader::TaskSnapshot {
+        tag: downloader::TASK_TAG.into(),
+        name: "Other.2026".into(),
+        progress: 0.5,
+        state: "downloading".into(),
+        size_bytes: 100,
+        downloaded_bytes: 50,
+        uploaded_bytes: 0,
+        download_speed: 1,
+        upload_speed: 0,
+        info_hash: "cccc".into(),
+        owned_tags: vec![downloader::ownership_tag("https://pt.example/other")],
+    });
+    let base_state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        downloader,
+    );
+    let ro_state = base_state.clone().with_instance_writable(false);
+    let app = router(ro_state);
+    let resp = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/downloaders/tasks",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "read-only GET tasks must return 200 OK"
+    );
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let subscribe_id: SubscribeId = task_id.split(':').next().unwrap().parse().unwrap();
+    assert_eq!(
+        store.load_pending(subscribe_id).unwrap().len(),
+        1,
+        "read-only GET tasks must not delete stale absent pending row"
+    );
+}

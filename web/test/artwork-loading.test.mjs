@@ -1,9 +1,18 @@
 /* global EventTarget, Event */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { getEventListeners } from "node:events";
+import { createRequire } from "node:module";
 import test from "node:test";
+import React, { act } from "react";
+import { create } from "react-test-renderer";
+import ts from "typescript";
+import * as artworkLoading from "../lib/artwork-loading.ts";
 import { createArtworkImage, manageArtworkImage } from "../lib/artwork-loading.ts";
 import * as freezeFrame from "../lib/player/freeze-frame.ts";
+
+const require = createRequire(import.meta.url);
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 class ImageFixture extends EventTarget {
   source = "";
@@ -178,3 +187,43 @@ for (const [name, source] of [
     assert.equal(image.getAttribute("srcset"), null);
   });
 }
+
+test("ArtworkImage with loading='eager' starts immediately and skips IntersectionObserver", async () => {
+  let observeCalls = 0;
+  const source = readFileSync(new URL("../components/artwork-image.tsx", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const module = { exports: {} };
+  new Function("require", "module", "exports", js)(
+    (name) => {
+      if (name === "@/lib/artwork-loading") {
+        return {
+          manageArtworkImage: artworkLoading.manageArtworkImage,
+          observeArtworkImage: (...args) => {
+            observeCalls += 1;
+            return artworkLoading.observeArtworkImage(...args);
+          },
+        };
+      }
+      return require(name);
+    },
+    module,
+    module.exports,
+  );
+  const { ArtworkImage } = module.exports;
+  const img = new ImageFixture();
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(ArtworkImage, { src: "https://app.invalid/posters/hero.jpg", loading: "eager" }),
+      { createNodeMock: () => img },
+    );
+  });
+  try {
+    assert.equal(img.src, "https://app.invalid/posters/hero.jpg");
+    assert.equal(observeCalls, 0, "eager ArtworkImage must not attach offscreen IntersectionObserver");
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});

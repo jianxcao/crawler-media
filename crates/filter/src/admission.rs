@@ -175,7 +175,7 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
         AtomRule::Hdr(want) => parsed
             .hdr
             .as_deref()
-            .is_some_and(|got| got.eq_ignore_ascii_case(want)),
+            .is_some_and(|got| hdr_matches(got, want)),
         AtomRule::Size { min_mb, max_mb } => {
             let Some(size_bytes) = torrent.size_bytes else {
                 return false;
@@ -202,6 +202,19 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
         AtomRule::WashTarget(_) => false,    // 洗版目标不参与 admit
         AtomRule::UpgradeLadder(_) => false, // 洗版比较维度不参与 admit
     }
+}
+
+/// HDR 匹配：忽略大小写、空格和连字符，统一识别 Dolby Vision 别名。
+fn hdr_matches(got: &str, want: &str) -> bool {
+    let normalize = |value: &str| match value
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "dv" | "dovi" | "dolbyvision" => "dv".to_string(),
+        other => other.to_string(),
+    };
+    normalize(got) == normalize(want)
 }
 
 /// 语言匹配：完全一致，或 `zh` 命中任意中文字幕/音轨（简/繁）。

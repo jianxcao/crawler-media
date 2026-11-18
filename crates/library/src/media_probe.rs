@@ -116,6 +116,14 @@ fn resolution(width: Option<u32>, height: Option<u32>) -> Option<String> {
 }
 
 fn hdr(stream: &ProbeStream) -> Option<String> {
+    if let Some(dovi) = stream.side_data_list.iter().find_map(|side| {
+        side.kind
+            .as_deref()
+            .is_some_and(|kind| kind.contains("DOVI") || kind.contains("Dolby Vision"))
+            .then(|| "Dolby Vision".to_string())
+    }) {
+        return Some(dovi);
+    }
     let transfer = stream.color_transfer.as_deref().unwrap_or_default();
     if transfer.eq_ignore_ascii_case("smpte2084") {
         return Some("HDR10".into());
@@ -123,10 +131,5 @@ fn hdr(stream: &ProbeStream) -> Option<String> {
     if transfer.eq_ignore_ascii_case("arib-std-b67") {
         return Some("HLG".into());
     }
-    stream.side_data_list.iter().find_map(|side| {
-        side.kind
-            .as_deref()
-            .is_some_and(|kind| kind.contains("DOVI") || kind.contains("Dolby Vision"))
-            .then(|| "Dolby Vision".into())
-    })
+    None
 }

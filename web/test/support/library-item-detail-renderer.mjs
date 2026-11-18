@@ -41,8 +41,16 @@ const file = (id, episodes) => ({
 // Real detail/episode/PlayAction components and playback API serialization.
 // HTTP and browser providers are external seams; the track selector replaces
 // only its visual presentation, preserving the component's controlled contract.
-export function itemDetailHarness({ tv = false, sharedFile = false, resume = () => watchState(), mark } = {}) {
+export function itemDetailHarness({
+  tv = false,
+  sharedFile = false,
+  canManageLibraries = false,
+  resume = () => watchState(),
+  mark,
+} = {}) {
   const requests = [];
+  const probeStatusCalls = [];
+  const deletedLedgerRows = [];
   const navigation = [];
   const errors = [];
   const files = [file("file-a", tv ? [1] : []), file("file-b", tv ? (sharedFile ? [1, 2] : [1]) : [])];
@@ -59,6 +67,7 @@ export function itemDetailHarness({ tv = false, sharedFile = false, resume = () 
     position_ms: 0, played: false, progress_percent: null,
   }));
   const feedback = { info: noop, success: noop, error: (message) => errors.push(message) };
+  const favorites = new Map();
   let played = false;
   const request = async (path, options = {}) => {
     const url = new URL(path, "http://localhost");
@@ -67,14 +76,16 @@ export function itemDetailHarness({ tv = false, sharedFile = false, resume = () 
     requests.push({ path: url.pathname, query, body });
     if (url.pathname === "/playback/resume") return { data: await resume(query, played) };
     if (url.pathname === "/playback/marks") {
-      if (body) {
+      if (options.method && options.method !== "GET" && body) {
         if (Object.keys(body).some((key) => !["media_item_id", "season_number", "episode_number", "played", "favorite"].includes(key))) {
           throw new Error("playback.invalid: unknown mark field");
         }
         if (mark) await mark(body);
         if (body.played != null) played = body.played;
+        if (body.favorite != null) favorites.set(body.media_item_id, body.favorite);
       }
-      return { data: { played, is_favorite: false, unplayed_count: null } };
+      const targetId = query.media_item_id ?? body?.media_item_id ?? "media";
+      return { data: { played, is_favorite: favorites.get(targetId) ?? false, unplayed_count: null } };
     }
     throw new Error(`Unexpected request ${path}`);
   };
@@ -93,16 +104,29 @@ export function itemDetailHarness({ tv = false, sharedFile = false, resume = () 
     "@/lib/player/active-target": activeTarget,
     "@/lib/format": format, "@/lib/player/timeline": timeline,
     "@/lib/api/libraries": {
-      getLibraryItemDetail: async () => detail,
+      getLibraryItemDetail: async (_lib, id) => ({ ...detail, media_item_id: id ?? detail.media_item_id }),
       getLibrary: async () => ({ id: "library", name: "Library", kind: detail.kind }),
       getItemEpisodes: async () => ({ season_number: 1, episodes }),
       fetchItemChapters: async () => [],
       fetchChapterFrameStatus: async () => ({ task: null, empty: true }),
-      fetchItemProbeStatus: async () => ({ active: false, job: null }),
+      fetchItemProbeStatus: async (libraryId, mediaItemId, season) => {
+        probeStatusCalls.push({ libraryId, mediaItemId, season });
+        return { active: false, job: null };
+      },
     },
-    "@/lib/permissions": { usePermissions: () => ({ canManageLibraries: false, isAdmin: false }) },
-    "@/components/subscribe-entry": { useSubscribeEntry: () => ({ canSubscribe: false }) },
+    "@/lib/api/transfers": {
+      deleteLedgerRow: async (id, deleteFile = false) => {
+        deletedLedgerRows.push({ id, deleteFile });
+        return { deleted: true, path: `/media/${id}.mkv`, file_deleted: deleteFile };
+      },
+    },
+    "@/components/modal": {
+      Modal: ({ open, children: content }) =>
+        open ? React.createElement("div", { "data-modal": "true" }, content) : null,
+    },
     "@/components/feedback": { useConfirm: () => noop, useToast: () => feedback },
+    "@/components/subscribe-entry": { useSubscribeEntry: () => ({ canSubscribe: false }) },
+    "@/lib/permissions": { usePermissions: () => ({ canManageLibraries, isAdmin: canManageLibraries }) },
     "@/lib/backdrop": { useBackdrop: () => ({ setOverrideBackdrop: noop }) },
     "@/lib/ui-prefs": { useTheme: () => ({ id: "default" }) },
     "@/lib/use-media-query": { useIsMobile: () => false },
@@ -129,11 +153,33 @@ export function itemDetailHarness({ tv = false, sharedFile = false, resume = () 
   let renderer;
   const playButton = () => renderer.root.findAllByType("button").find((button) => /^(播放|继续观看|重新播放)/.test(button.props["aria-label"] ?? ""));
   return {
-    requests, navigation, errors,
-    async mount() { await act(async () => { renderer = create(React.createElement(LibraryItemDetailView, { libraryId: "library", mediaItemId: "media" })); }); },
+    requests, probeStatusCalls, deletedLedgerRows, navigation, errors,
+    root: () => renderer.root,
+    async mount(mediaItemId = "media") {
+      await act(async () => {
+        renderer = create(React.createElement(LibraryItemDetailView, { libraryId: "library", mediaItemId }));
+      });
+    },
+    async remount(mediaItemId) {
+      await act(async () => {
+        renderer.update(React.createElement(LibraryItemDetailView, { libraryId: "library", mediaItemId }));
+      });
+    },
     async unmount() { await act(async () => { renderer.unmount(); }); },
     async source(id) { await act(async () => { renderer.root.findByProps({ "aria-label": "播放版本" }).props.onChange({ target: { value: id } }); }); },
     async episode(number) { await act(async () => { renderer.root.findByProps({ "data-episode-number": number }).props.onClick(); }); },
+    async markFavorite() {
+      const btn = renderer.root.findAllByType("button").find((b) => /^(收藏|取消收藏)$/.test(b.props["aria-label"] ?? ""));
+      await act(async () => { btn.props.onClick(); });
+    },
+    favoritePressed: () => {
+      const btn = renderer.root.findAllByType("button").find((b) => /^(收藏|取消收藏)$/.test(b.props["aria-label"] ?? ""));
+      return Boolean(btn?.props["aria-pressed"]);
+    },
+    favoriteDisabled: () => {
+      const btn = renderer.root.findAllByType("button").find((b) => /^(收藏|取消收藏)$/.test(b.props["aria-label"] ?? ""));
+      return Boolean(btn?.props.disabled);
+    },
     async markPlayed() { await act(async () => { renderer.root.findByProps({ "aria-label": "标记为已看" }).props.onClick(); }); },
     async play() { await act(async () => { playButton().props.onClick(); }); },
     async resolve(pending, value) { await act(async () => { pending.resolve(value); }); },

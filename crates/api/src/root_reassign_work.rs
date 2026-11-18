@@ -15,31 +15,37 @@ pub(crate) fn start(state: &ApiState) {
     }
     let store = std::sync::Arc::downgrade(&state.store);
     let budget = std::sync::Arc::downgrade(&state.fs_work);
+    let writable = std::sync::Arc::downgrade(&state.instance_writable);
     let changed = state.library_work.root_changed.clone();
     tokio::spawn(async move {
         loop {
-            let (Some(shared), Some(budget)) = (store.upgrade(), budget.upgrade()) else {
+            let (Some(shared), Some(budget), Some(writable)) =
+                (store.upgrade(), budget.upgrade(), writable.upgrade())
+            else {
                 break;
             };
-            let result = budget
-                .run_to_completion(move || (&shared).drain_one_root_batch())
-                .await;
-            match result {
-                Ok(Ok(Some(true))) => {
-                    tokio::task::yield_now().await;
-                    continue;
+            if writable.load(Ordering::SeqCst) {
+                let result = budget
+                    .run_to_completion(move || (&shared).drain_one_root_batch())
+                    .await;
+                match result {
+                    Ok(Ok(Some(true))) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!(%error,"Root reassignment window failed; durable work retained")
+                    }
+                    Err(crate::blocking_budget::BlockingError::Busy) => {}
+                    Err(error) => tracing::error!(%error,"Root reassignment worker failed"),
+                    _ => {}
                 }
-                Ok(Err(error)) => {
-                    tracing::error!(%error,"Root reassignment window failed; durable work retained")
-                }
-                Err(crate::blocking_budget::BlockingError::Busy) => {}
-                Err(error) => tracing::error!(%error,"Root reassignment worker failed"),
-                _ => {}
             }
             drop(budget);
+            drop(writable);
             tokio::select! {
-                _=changed.notified()=>{},
-                _=tokio::time::sleep(Duration::from_millis(250))=>{},
+                _ = changed.notified() => {},
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
             }
         }
     });

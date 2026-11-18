@@ -83,3 +83,18 @@ fn manual_directory_scrape_does_not_move_video() {
     assert!(dir.join("show.nfo").is_file());
     assert!(!dir.join("poster.jpg").exists());
 }
+
+#[test]
+fn scrape_escapes_xml_special_characters_in_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let video = tmp.path().join("Tom & Jerry.mkv");
+    fs::write(&video, b"video").unwrap();
+    let mut m = movie();
+    m.title = "Tom & Jerry <Special>".into();
+    scrape_beside(&video, &m, true, None).unwrap();
+    let body = fs::read_to_string(tmp.path().join("Tom & Jerry.nfo")).unwrap();
+    assert!(
+        body.contains("<title>Tom &amp; Jerry &lt;Special&gt;</title>"),
+        "expected XML-escaped title, got: {body}"
+    );
+}

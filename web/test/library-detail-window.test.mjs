@@ -196,3 +196,78 @@ test("background polling preserves a pending user letter jump", async () => {
     await view.unmount();
   }
 });
+
+test("cold default sort uses title for movies and release_date for videos without added_at", async () => {
+  const movieSorts = [];
+  const movieView = libraryDetailHarness({
+    initialSortPref: null,
+    libraryKind: "movie",
+    load: async (mode, { sort }) => {
+      if (mode === "wall") movieSorts.push(sort);
+      return page("Alpha");
+    },
+  });
+  await movieView.mount();
+  try {
+    assert.ok(movieSorts.length > 0);
+    assert.ok(
+      movieSorts.every((s) => s === "title"),
+      `movie default sort must be title, saw ${JSON.stringify(movieSorts)}`,
+    );
+  } finally {
+    await movieView.unmount();
+  }
+
+  const videoSorts = [];
+  const videoView = libraryDetailHarness({
+    initialSortPref: null,
+    libraryKind: "video",
+    load: async (mode, { sort }) => {
+      if (mode === "wall") videoSorts.push(sort);
+      return page("Clip");
+    },
+  });
+  await videoView.mount();
+  try {
+    assert.equal(
+      videoSorts.at(-1),
+      "release_date",
+      `video default sort must be release_date, saw ${JSON.stringify(videoSorts)}`,
+    );
+  } finally {
+    await videoView.unmount();
+  }
+});
+
+test("gallery passes gallery=true to item-index and aborts multi-page jump on sort change", async () => {
+  const secondPage = deferred();
+  let pageCount = 0;
+  const view = libraryDetailHarness({
+    gallery: true,
+    load: async (mode, { sort, cursor }) => {
+      if (mode === "gallery" && sort === "title" && cursor === "title-M") {
+        pageCount += 1;
+        if (pageCount === 1) return { groups: [item("M-1")], next_cursor: "title-M-2", total: 1000 };
+        return secondPage.promise;
+      }
+      if (sort === "added_at") {
+        return page("Added first", "added-next");
+      }
+      return page("A movie", "title-A-next");
+    },
+  });
+  await view.mount();
+  try {
+    assert.ok(
+      view.indexCalls().some((c) => c.options?.gallery === true),
+      "gallery mode must request item-index with { gallery: true }",
+    );
+    await view.click("recall");
+    await view.sort("added_at");
+    assert.equal(view.rows(), "Added first");
+    await view.resolve(secondPage, { groups: [item("M-2")], next_cursor: null, total: 1000 });
+    assert.equal(view.rows(), "Added first");
+  } finally {
+    await view.unmount();
+  }
+});

@@ -122,6 +122,7 @@ impl crate::LibraryConnection<'_> {
         let libraries = affected_libraries(&tx, survivor, loser)?;
         move_files(&tx, survivor, loser)?;
         move_nfo_inputs(&tx, survivor, loser)?;
+        move_playback_sessions(&tx, survivor, loser)?;
         merge_metadata(&tx, survivor, loser)?;
         merge_playback_units(&tx, survivor, loser)?;
         merge_collection_items(&tx, survivor, loser)?;

@@ -241,3 +241,176 @@ fn failed_event_transaction_does_not_advance_binding_sequence() {
     );
     assert_eq!(unit_position(&f, 1), Some(7_000));
 }
+
+fn seed_loser_show(
+    store: &store::Store,
+    library_id: &str,
+    root_id: &str,
+    loser_id: MediaId,
+) -> LibraryFile {
+    store
+        .insert_media(&Media {
+            id: loser_id,
+            kind: MediaKind::Tv,
+            title: "Loser Show".into(),
+            year: Some(2024),
+            original_title: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+            aliases: vec![],
+        })
+        .unwrap();
+    let loser_file = LibraryFile {
+        file_id: domain::LedgerId::new(),
+        library_id: library_id.parse().unwrap(),
+        root_id: root_id.to_string(),
+        media_id: loser_id,
+        kind: MediaKind::Tv,
+        path: "Loser Show/S01E01.mkv".into(),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash2".into()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".into()),
+        codec: Some("hevc".into()),
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: Some(1_800_000),
+        tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let scope = WriteScope {
+        library_id: library_id.parse().unwrap(),
+        config_revision: 0,
+    };
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &loser_file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1_000,
+        )
+        .unwrap();
+    loser_file
+}
+
+#[test]
+fn library_removal_and_session_sweep_succeed_after_media_merge() {
+    let (_tmp, f) = seed();
+    let user = USER.parse().unwrap();
+    let loser_id = MediaId::new();
+    let loser_file = seed_loser_show(&f.store, &f.library_id, &f.root_id, loser_id);
+
+    // Start two active playback sessions on the loser Media before merging:
+    // one stale (for sweep) and one fresh (for Library removal).
+    let loser_item = TypedItemId::Unit {
+        media: loser_id,
+        key: UnitKey::new(1, 1),
+    };
+    for (device, report_at_ms) in [("dev_stale", 1_000_i64), ("dev_active", 99_995_000_i64)] {
+        let sid = f
+            .store
+            .issue_play_session(
+                user,
+                device,
+                loser_file.file_id,
+                loser_id,
+                UnitKey::new(1, 1),
+                &loser_file.version,
+                1_000,
+            )
+            .unwrap();
+        let generation = f
+            .store
+            .play_session_binding(user, device, &sid)
+            .unwrap()
+            .unwrap()
+            .generation;
+        let mut bound = event_on(
+            &f,
+            device,
+            loser_item.clone(),
+            (&sid, generation),
+            &loser_file,
+            5_000,
+            PlaybackEventType::Playing,
+        );
+        bound.event_sequence = Some(1);
+        assert_eq!(
+            f.store.commit_playback_event(&bound, report_at_ms).unwrap(),
+            EventOutcome::Applied
+        );
+    }
+
+    // Merge loser into survivor (f.media_id) while both sessions exist.
+    let op_id = f
+        .store
+        .begin_media_merge(
+            &store::playback::MediaMergeRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                survivor: f.media_id,
+                loser: loser_id,
+                survivor_revision: 0,
+                loser_revision: 0,
+                refresh_targets: std::collections::BTreeMap::new(),
+            },
+            1_000,
+        )
+        .unwrap();
+    while f.store.advance_media_merge(&op_id, 1_000).unwrap().state != "succeeded" {}
+
+    // Sweep stale sessions (closes dev_stale) and Library removal (closes dev_active) must both succeed cleanly!
+    assert_eq!(f.store.sweep_stale_sessions(100_000, 30).unwrap(), 1);
+    assert!(f.store.get_session(user, "dev_stale").unwrap().is_none());
+    assert!(f.store.get_session(user, "dev_active").unwrap().is_some());
+
+    let extra_lib = f
+        .store
+        .create_library(
+            MediaKind::Tv,
+            "Other TV",
+            &["/other-tv"],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    assert!(!extra_lib.id.is_empty());
+    let removal = f.store.begin_library_removal(&f.library_id).unwrap();
+    assert_eq!(
+        f.store
+            .close_playback_sessions_for_removal(&removal.operation_id)
+            .unwrap(),
+        1
+    );
+    f.store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    let final_op = f
+        .store
+        .clean_library_removal(&removal.operation_id)
+        .unwrap();
+    assert_eq!(final_op.state, "succeeded");
+}

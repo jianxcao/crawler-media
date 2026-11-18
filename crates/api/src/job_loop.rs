@@ -90,6 +90,14 @@ pub fn spawn_job_loop(state: ApiState) -> JobLoopHandle {
     spawn_job_loop_with_control(state, Duration::from_secs(1), unix_now, control)
 }
 
+pub fn spawn_job_loop_with_lease(
+    state: ApiState,
+    first: std::io::Result<Option<Arc<crate::instance_lease::InstanceLease>>>,
+) -> JobLoopHandle {
+    let control = state.job_loop_control();
+    spawn_job_loop_with_control_and_lease(state, Duration::from_secs(1), unix_now, control, first)
+}
+
 pub fn spawn_job_loop_with(
     state: ApiState,
     interval: Duration,
@@ -105,13 +113,22 @@ pub fn spawn_job_loop_with_control(
     clock: impl Fn() -> i64 + Send + 'static,
     control: Arc<JobLoopControl>,
 ) -> JobLoopHandle {
+    let first = crate::instance_lease::acquire(&state.store);
+    spawn_job_loop_with_control_and_lease(state, interval, clock, control, first)
+}
+
+pub fn spawn_job_loop_with_control_and_lease(
+    state: ApiState,
+    interval: Duration,
+    clock: impl Fn() -> i64 + Send + 'static,
+    control: Arc<JobLoopControl>,
+    first: std::io::Result<Option<Arc<crate::instance_lease::InstanceLease>>>,
+) -> JobLoopHandle {
     // G-M5 / H-1: only the instance holding the data-directory lease runs
     // background jobs. A read-only instance retries the lease every TTL/2
     // (a crashed holder's lease expires), and an instance whose lease was
     // taken over stops its jobs and goes back to retrying.
     let writable = state.instance_writable.clone();
-    // 启动路径：一次性拿租约（含开 app.db 心跳连接），此刻还没有请求在跑。
-    let first = crate::instance_lease::acquire(&state.store);
     writable.store(first.is_ok(), std::sync::atomic::Ordering::SeqCst);
     if let Err(error) = &first {
         tracing::error!(%error, "实例锁冲突：本实例暂不运行后台任务（只读模式），将定期重试");
@@ -184,6 +201,15 @@ async fn lease_loop(
         if !loop_writable.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::info!("已获取实例锁，恢复后台任务");
         }
+        let startup_state = state.clone();
+        if let Some(Err(error)) = off_executor("ensure_writable_runtime_started", move || {
+            startup_state.ensure_writable_runtime_started()
+        })
+        .await
+        {
+            tracing::error!(%error, "获取实例锁后启动可写运行时失败");
+        }
+        crate::root_reassign_work::notify(&state);
         recover_startup_work(&state).await;
         match owner_round(&state, &loop_control, &mut lease, &clock, interval).await {
             RoundEnd::Stop => return,

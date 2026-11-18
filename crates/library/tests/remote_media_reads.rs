@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
-use library::{Ffprobe, MediaProbe, extract_frame_with_ffmpeg};
+use library::{Ffprobe, MediaProbe, extract_frame_with_ffmpeg, probe_duration_with_ffprobe};
 
 fn program(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
@@ -77,5 +77,71 @@ fn metadata_and_artwork_processes_share_remote_admission() {
                     "metadata-finish"
                 ],
         "remote media processes overlapped: {events:?}"
+    );
+}
+
+#[test]
+fn duration_probe_shares_remote_admission_with_artwork() {
+    marker::media_read::configure_remote_reads(1, std::time::Duration::ZERO);
+    let dir = tempfile::tempdir().unwrap();
+    let events = dir.path().join("events");
+    let ffprobe_dur = program(
+        dir.path(),
+        "ffprobe-dur",
+        &format!(
+            "echo duration-start >> '{}'\nsleep 0.15\necho duration-finish >> '{}'\nprintf '%s' '{{\"format\":{{\"duration\":\"120.5\"}}}}'",
+            events.display(),
+            events.display()
+        ),
+    );
+    let frame = program(
+        dir.path(),
+        "frame",
+        &format!(
+            "echo artwork-start >> '{}'\nsleep 0.15\nfor out do :; done\nprintf jpeg > \"$out\"\necho artwork-finish >> '{}'",
+            events.display(),
+            events.display()
+        ),
+    );
+    let media = dir.path().join("episode.strm");
+    std::fs::write(&media, "https://fixture.invalid/video\n").unwrap();
+    let ready = Arc::new(Barrier::new(3));
+    let duration = {
+        let (ready, media, ffprobe_dur) = (ready.clone(), media.clone(), ffprobe_dur.clone());
+        std::thread::spawn(move || {
+            ready.wait();
+            probe_duration_with_ffprobe(&media, ffprobe_dur.to_str().unwrap())
+        })
+    };
+    let artwork = {
+        let ready = ready.clone();
+        let out = dir.path().join("episode-thumb.jpg");
+        std::thread::spawn(move || {
+            ready.wait();
+            extract_frame_with_ffmpeg(&media, 60_000, &out, frame.to_str().unwrap()).unwrap();
+            std::fs::read(out).unwrap()
+        })
+    };
+    ready.wait();
+    assert_eq!(duration.join().unwrap(), Some(120_500));
+    assert_eq!(artwork.join().unwrap(), b"jpeg");
+    let events = std::fs::read_to_string(events).unwrap();
+    let events = events.lines().collect::<Vec<_>>();
+    assert!(
+        events
+            == [
+                "duration-start",
+                "duration-finish",
+                "artwork-start",
+                "artwork-finish"
+            ]
+            || events
+                == [
+                    "artwork-start",
+                    "artwork-finish",
+                    "duration-start",
+                    "duration-finish"
+                ],
+        "duration probe overlapped remote artwork extraction: {events:?}"
     );
 }

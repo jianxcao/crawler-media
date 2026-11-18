@@ -281,3 +281,65 @@ fn high_confidence_episode_keeps_filename_title_and_inherits_ancestor_year() {
     assert_eq!(parsed.season, Some(1));
     assert_eq!(parsed.episode, Some(1));
 }
+
+#[test]
+fn intake_identifies_tvshow_nfo_when_triggered_with_movie_media() {
+    let tmp = tempfile::tempdir().unwrap();
+    let intake = tmp.path().join("intake");
+    let show_dir = intake.join("My Show");
+    let movies_lib = tmp.path().join("movies");
+    let tv_lib = tmp.path().join("tv");
+    fs::create_dir_all(&show_dir).unwrap();
+    fs::create_dir_all(&movies_lib).unwrap();
+    fs::create_dir_all(&tv_lib).unwrap();
+
+    fs::write(
+        show_dir.join("tvshow.nfo"),
+        "<tvshow><title>Anchor Show</title><year>2021</year><tmdbid>999</tmdbid></tvshow>",
+    )
+    .unwrap();
+    let ep = show_dir.join("01.mkv");
+    fs::write(&ep, b"ep-data").unwrap();
+
+    let job = WatchJob {
+        kind: WatchKind::Intake,
+        scrape: false,
+        path: intake,
+        library_root: movies_lib.clone(),
+        tv_library_root: Some(tv_lib.clone()),
+    };
+    let outcome = scan_watch(&job, &movie()).unwrap();
+    assert_eq!(outcome.transferred.len(), 1);
+    let nfo_id = outcome.transferred[0]
+        .nfo_identity
+        .as_ref()
+        .expect("should read tvshow.nfo even if WatchJob media param is Movie");
+    assert_eq!(nfo_id.tmdb_id.as_deref(), Some("999"));
+    assert!(tv_lib.join("My Show/01.mkv").is_file());
+}
+
+#[test]
+fn intake_skips_nfo_write_when_media_has_no_tmdb_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let intake = tmp.path().join("intake");
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&intake).unwrap();
+    fs::create_dir_all(&library).unwrap();
+    let src = intake.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src, b"video").unwrap();
+    let mut local_media = movie();
+    local_media.tmdb_id = None;
+    let job = WatchJob {
+        kind: WatchKind::Intake,
+        scrape: true,
+        path: intake,
+        library_root: library.clone(),
+        tv_library_root: None,
+    };
+    let outcome = scan_watch(&job, &local_media).unwrap();
+    assert_eq!(outcome.transferred.len(), 1);
+    assert!(
+        !library.join("The.Matrix.1999.2160p.BluRay.nfo").exists(),
+        "scrape without tmdb_id must not fabricate an NFO beside transferred file"
+    );
+}

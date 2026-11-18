@@ -710,3 +710,91 @@ async fn concurrent_playback_requests_share_one_inflight_cloud_lookup() {
         "one file/version must have at most one cloud lookup in flight"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn episode_with_embedded_chapters_keeps_cached_chapters_unready_while_cloud_lookup_inflight()
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tower::ServiceExt;
+
+    let mut f = fixture(Some(2_700_000));
+    let release = Arc::new(AtomicBool::new(false));
+    let released = release.clone();
+    let server = Server::with_action(200, RESPONSE, false, move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !released.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    enable_cloud(&mut f, &server);
+    f.store
+        .put_cached_chapters(
+            &f.row.file.file_id.to_string(),
+            &[library::ChapterMarker {
+                start_ms: 0,
+                end_ms: 600_000,
+                title: Some("Part 1".into()),
+                marker_type: None,
+                synthetic: false,
+            }],
+        )
+        .unwrap();
+
+    let app = api::router(f.state.clone());
+    let req = common::request(
+        "POST",
+        "/api/v1/playback/sessions",
+        Some("management-secret"),
+        serde_json::json!({ "media_item_id": f.media.id, "file_id": f.row.file.file_id, "season_number": 1, "episode_number": 2 }),
+    );
+    let session_resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(session_resp.status(), axum::http::StatusCode::OK);
+    let session_json = common::json_data(session_resp).await;
+    assert_eq!(session_json["chapters_pending"], true);
+    let play_session_id = session_json["play_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cache_url =
+        format!("/api/v1/playback/chapters?play_session_id={play_session_id}&device_id=web-player");
+    let poll_resp = app
+        .clone()
+        .oneshot(common::request(
+            "GET",
+            &cache_url,
+            Some("management-secret"),
+            serde_json::Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(poll_resp.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        common::json_data(poll_resp).await["ready"],
+        false,
+        "cached-chapters must stay unready while TheIntroDB lookup is in flight"
+    );
+
+    release.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while f
+        .store
+        .get_file_marker(f.row.file.file_id, UnitKey::new(1, 2))
+        .unwrap()
+        .is_none()
+    {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let settled_resp = app
+        .oneshot(common::request(
+            "GET",
+            &cache_url,
+            Some("management-secret"),
+            serde_json::Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(common::json_data(settled_resp).await["ready"], true);
+}

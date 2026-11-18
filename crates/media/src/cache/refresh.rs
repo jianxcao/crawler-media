@@ -74,7 +74,7 @@ impl OriginPermit {
 impl Drop for OriginPermit {
     fn drop(&mut self) {
         budget().counts.lock().active -= 1;
-        budget().ready.notify_one();
+        budget().ready.notify_all();
     }
 }
 struct Leader<'a> {

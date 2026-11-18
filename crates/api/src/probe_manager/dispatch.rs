@@ -83,7 +83,9 @@ impl ProbeManager {
                 let _ = drained.send(());
             });
         }
-        let mut receiver = self.shutdown_drain.lock().as_ref().unwrap().clone();
+        let Some(mut receiver) = self.shutdown_drain.lock().clone() else {
+            return Err("探测关闭状态缺失".into());
+        };
         let finished = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while !*receiver.borrow_and_update() {
                 if receiver.changed().await.is_err() {
@@ -187,9 +189,19 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: ProbeDispatchStage::Fingerprint,
         };
+        if self.fingerprint_overflowed.load(Ordering::Acquire) {
+            tracing::info!(
+                ledger_id,
+                "声纹队列存在积压，已完成的媒体信息按顺序留在数据库排队"
+            );
+            self.seen.lock().remove(&ledger_id);
+            self.wake.notify_waiters();
+            return false;
+        }
         match self.fingerprint_tx.try_send((id, work)) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.fingerprint_overflowed.store(true, Ordering::Release);
                 tracing::info!(
                     ledger_id,
                     "声纹窗口已满，已完成的媒体信息保持排队等待下一次派发"
@@ -240,9 +252,17 @@ impl ProbeManager {
         id: ProbeDispatchId,
         unit: ProbeUnit,
     ) -> Result<(), ProbeUnit> {
+        if self.metadata_overflowed.load(Ordering::Acquire) {
+            tracing::info!(
+                ledger_id = %unit.row.file.file_id,
+                "探测队列存在积压，新任务按顺序留在数据库排队"
+            );
+            return Err(unit);
+        }
         match self.publish_metadata_observed(&tx, id, || {}) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metadata_overflowed.store(true, Ordering::Release);
                 tracing::info!(
                     ledger_id = %unit.row.file.file_id,
                     "探测窗口已满，任务保持数据库排队"
@@ -262,32 +282,37 @@ impl ProbeManager {
         self.fill_fingerprint();
     }
 
-    /// Top up a window only once it is fully drained.
-    ///
-    /// Every refill runs one `pending_probe_dispatch_ids` query over the queued set, so
-    /// refilling after *each* completed unit turns a drain of N units into N queries. The
-    /// natural batching point is an empty window: that is exactly when the worker would
-    /// otherwise block, and a full `WINDOW` batch of ids is offered in a single query.
+    /// Top up a window once emptied or at half-drain when durable backlog overflowed.
     pub(super) fn refill_drained_windows(&self) {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        if self.metadata_tx.capacity() == METADATA_WINDOW {
+        let metadata_free = self.metadata_tx.capacity();
+        if metadata_free == METADATA_WINDOW
+            || (self.metadata_overflowed.load(Ordering::Acquire)
+                && metadata_free >= METADATA_WINDOW / 2)
+        {
             self.fill_metadata();
         }
-        if self.fingerprint_tx.capacity() == FINGERPRINT_WINDOW {
+        let fingerprint_free = self.fingerprint_tx.capacity();
+        if fingerprint_free == FINGERPRINT_WINDOW
+            || (self.fingerprint_overflowed.load(Ordering::Acquire)
+                && fingerprint_free >= FINGERPRINT_WINDOW / 2)
+        {
             self.fill_fingerprint();
         }
     }
 
     fn fill_metadata(&self) {
         let tx = &self.metadata_tx;
-        let free = tx.capacity();
+        let mut free = tx.capacity();
         if free == 0 {
             return;
         }
         let store = self.store.as_ref();
-        let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, free) {
+        let ids = match store
+            .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, METADATA_WINDOW + 1)
+        {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取媒体信息派发窗口失败");
@@ -295,8 +320,16 @@ impl ProbeManager {
             }
         };
 
+        let mut remaining_unseen = false;
         let mut seen = self.seen.lock();
         for id in ids {
+            if seen.contains(&id.ledger_id) {
+                continue;
+            }
+            if free == 0 {
+                remaining_unseen = true;
+                break;
+            }
             if !seen.insert(id.ledger_id.clone()) {
                 continue;
             }
@@ -305,9 +338,13 @@ impl ProbeManager {
                 .is_err()
             {
                 seen.remove(&id.ledger_id);
+                remaining_unseen = true;
                 break;
             }
+            free -= 1;
         }
+        self.metadata_overflowed
+            .store(remaining_unseen, Ordering::Release);
     }
 
     fn fill_fingerprint(&self) {
@@ -317,7 +354,9 @@ impl ProbeManager {
             return;
         }
         let store = self.store.as_ref();
-        let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, free) {
+        let ids = match store
+            .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, FINGERPRINT_WINDOW + 1)
+        {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取声纹派发窗口失败");
@@ -326,9 +365,14 @@ impl ProbeManager {
         };
 
         let mut ready = Vec::new();
+        let mut remaining_unseen = false;
         for id in ids {
             if self.seen.lock().contains(&id.ledger_id) {
                 continue;
+            }
+            if ready.len() >= free {
+                remaining_unseen = true;
+                break;
             }
             if let Some((_, work)) = self.load_dispatch_unit(&id) {
                 ready.push((id, work));
@@ -341,9 +385,12 @@ impl ProbeManager {
             }
             if tx.try_send((id.clone(), work)).is_err() {
                 seen.remove(&id.ledger_id);
+                remaining_unseen = true;
                 break;
             }
         }
+        self.fingerprint_overflowed
+            .store(remaining_unseen, Ordering::Release);
     }
 
     pub(super) fn load_dispatch_unit(

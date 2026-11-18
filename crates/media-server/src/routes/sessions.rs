@@ -72,6 +72,16 @@ async fn report_session_event(
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     }
+    if client.device_id != user.token {
+        match state.provider.is_device_revoked(user.id, &user.token).await {
+            Ok(true) => return StatusCode::FORBIDDEN,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(%error, user_id = %user.id, "Jellyfin token revocation lookup failed");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
     match state
         .provider
         .report_playback_event(

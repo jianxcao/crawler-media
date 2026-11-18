@@ -172,7 +172,7 @@ fn evaluate(snapshot: &Snapshot) -> Evaluation {
         let fact = facts.get(season, episode);
         let in_flight = pending_index.get((season, episode), &pending).is_some();
         let state = unit_wash_state(subscribe, fact, in_flight, *target_score);
-        *counts.get_mut(state).unwrap() += 1;
+        *counts.entry(state).or_insert(0) += 1;
         units.push(json!({
             "season_number": season.unwrap_or(0) as i64,
             "episode_number": episode.unwrap_or(0) as i64,

@@ -155,6 +155,12 @@ pub(crate) async fn path_reconciliations(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
     let capture_id = id.clone();
     let captured = super::store_wait::store_read(&state, &[store::Db::Library], move |store| {
         let library = store
@@ -365,11 +371,12 @@ fn apply_reconciliation(
         let now = crate::job_loop::unix_now();
         let request = lease
             .publish(|| {
-                state
-                    .store
-                    .as_ref()
-                    .begin_observed_file_rename(observed, now)
-                    .map_err(|e| e.to_string())
+                crate::http::store_wait::with_foreground_store(state, |store| {
+                    store
+                        .begin_observed_file_rename(observed, now)
+                        .map_err(|e| e.to_string())
+                })
+                .map_err(|response| format!("写入被拒绝 ({})", response.status()))?
             })
             .map_err(store::StoreError::Conflict)?;
         let _publication = state.store.apply_file_rename(&request, now)?;

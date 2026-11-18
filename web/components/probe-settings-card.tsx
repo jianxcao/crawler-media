@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getProbeSettings, getRemoteReadsSettings, saveProbeSettings, saveRemoteReadsSettings,
   type ProbeSettings,
@@ -14,16 +14,22 @@ function RemoteReadsControl() {
   const [paused, setPaused] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const activeRef = useRef(true);
+
+  const loadRemoteReads = useCallback(() => {
+    setError("");
+    void getRemoteReadsSettings().then(settings => {
+      if (activeRef.current) setPaused(settings.paused);
+    }).catch((cause: unknown) => {
+      if (activeRef.current) setError(`读取 STRM 暂停状态失败：${(cause as Error).message}`);
+    });
+  }, []);
 
   useEffect(() => {
-    let active = true;
-    void getRemoteReadsSettings().then(settings => {
-      if (active) setPaused(settings.paused);
-    }).catch((cause: unknown) => {
-      if (active) setError(`读取 STRM 暂停状态失败：${(cause as Error).message}`);
-    });
-    return () => { active = false; };
-  }, []);
+    activeRef.current = true;
+    loadRemoteReads();
+    return () => { activeRef.current = false; };
+  }, [loadRemoteReads]);
 
   const toggle = async () => {
     if (paused === null || busy) return;
@@ -56,7 +62,17 @@ function RemoteReadsControl() {
           </p>
         </div>
       )}
-      {error && <p role="alert" className="mt-2 text-caption text-[var(--danger)]">{error}</p>}
+      {error && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-caption text-[var(--danger)]">{error}</p>
+          {paused === null && (
+            <button type="button" onClick={loadRemoteReads}
+              className="rounded-lg border border-white/15 px-2.5 py-1 text-caption text-white/80 hover:bg-white/10">
+              重试
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -67,16 +83,22 @@ export function ProbeSettingsCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const activeRef = useRef(true);
+
+  const loadSettings = useCallback(() => {
+    setError("");
+    void getProbeSettings().then(settings => {
+      if (activeRef.current) { setSaved(settings); setDraft(settings); }
+    }).catch((cause: unknown) => {
+      if (activeRef.current) setError(`读取探测设置失败：${(cause as Error).message}`);
+    });
+  }, []);
 
   useEffect(() => {
-    let active = true;
-    void getProbeSettings().then(settings => {
-      if (active) { setSaved(settings); setDraft(settings); }
-    }).catch((cause: unknown) => {
-      if (active) setError(`读取探测设置失败：${(cause as Error).message}`);
-    });
-    return () => { active = false; };
-  }, []);
+    activeRef.current = true;
+    loadSettings();
+    return () => { activeRef.current = false; };
+  }, [loadSettings]);
 
   const invalid = !draft || FIELDS.some(field => {
     const value = draft[field.key];
@@ -109,6 +131,7 @@ export function ProbeSettingsCard() {
               {field.label}
               <input
                 type="number" aria-label={field.label} min={field.min} max={field.max} step={1}
+                disabled={busy}
                 value={Number.isNaN(draft[field.key]) ? "" : draft[field.key]}
                 onChange={event => {
                   const value = event.target.value === "" ? Number.NaN : Number(event.target.value);
@@ -130,7 +153,17 @@ export function ProbeSettingsCard() {
           {busy ? "保存中…" : "保存探测设置"}
         </button>
         {message && <p role="status" className="text-caption text-white/60">{message}</p>}
-        {error && <p role="alert" className="text-caption text-[var(--danger)]">{error}</p>}
+        {error && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="alert" className="text-caption text-[var(--danger)]">{error}</p>
+            {!draft && (
+              <button type="button" onClick={loadSettings}
+                className="rounded-lg border border-white/15 px-2.5 py-1 text-caption text-white/80 hover:bg-white/10">
+                重试
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );

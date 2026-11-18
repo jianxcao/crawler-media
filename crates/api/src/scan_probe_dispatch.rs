@@ -96,19 +96,21 @@ pub fn start_dispatcher(state: ApiState) {
     let probe = std::sync::Arc::downgrade(&state.probe);
     let instance = std::sync::Arc::downgrade(&state.instance_writable);
     tokio::spawn(async move {
-        loop {
-            if instance.upgrade().is_none() {
-                break;
-            }
+        while let Some(writable) = instance.upgrade() {
             let (Some(shared), Some(probe)) = (shared.upgrade(), probe.upgrade()) else {
                 break;
             };
-            let result =
-                tokio::task::spawn_blocking(move || dispatch_obligations(&shared, &probe)).await;
-            match result {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => tracing::error!(%error,"Probe obligation dispatcher failed"),
-                Err(error) => tracing::error!(%error,"Probe obligation dispatcher worker failed"),
+            if writable.load(std::sync::atomic::Ordering::SeqCst) {
+                let result =
+                    tokio::task::spawn_blocking(move || dispatch_obligations(&shared, &probe))
+                        .await;
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::error!(%error,"Probe obligation dispatcher failed"),
+                    Err(error) => {
+                        tracing::error!(%error,"Probe obligation dispatcher worker failed")
+                    }
+                }
             }
             // The sleep retains Weak handles only; dropping an ApiState can stop
             // its drivers and release its per-instance blocking budgets.

@@ -250,6 +250,9 @@ impl<H: CatalogGet> Tmdb<H> {
         let path = format!("/movie/{tmdb_id}?append_to_response=translations,alternative_titles");
         match self.cached_details(MediaKind::Movie, &path) {
             Ok(media) => Ok(media),
+            Err(err @ (TmdbError::OriginTimeout | TmdbError::Deadline | TmdbError::Cancelled)) => {
+                Err(err)
+            }
             Err(_) => self.cached_details(MediaKind::Movie, &format!("/movie/{tmdb_id}")),
         }
     }
@@ -258,6 +261,9 @@ impl<H: CatalogGet> Tmdb<H> {
         let path = crate::tmdb_keys::tv_details_paths(tmdb_id)[0].clone();
         match self.cached_details(MediaKind::Tv, &path) {
             Ok(media) => Ok(media),
+            Err(err @ (TmdbError::OriginTimeout | TmdbError::Deadline | TmdbError::Cancelled)) => {
+                Err(err)
+            }
             Err(_) => self.cached_details(
                 MediaKind::Tv,
                 &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
@@ -273,9 +279,12 @@ impl<H: CatalogGet> Tmdb<H> {
             parse::tv_seasons(body)
         };
         match self.fetch(&path1, decode) {
-            Ok(seasons) if !seasons.is_empty() => Ok(seasons as Vec<parse::TvSeason>),
-            result => {
-                tracing::warn!(tmdb_id, error = ?result.err(), "TMDB seasons unavailable; trying basic details");
+            Ok(seasons) => Ok(seasons),
+            Err(err @ (TmdbError::OriginTimeout | TmdbError::Deadline | TmdbError::Cancelled)) => {
+                Err(err)
+            }
+            Err(err) => {
+                tracing::warn!(tmdb_id, error = ?err, "TMDB seasons unavailable; trying basic details");
                 self.fetch(
                     &crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
                     decode,

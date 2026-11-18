@@ -241,6 +241,20 @@ fn walk_in_place_reported(
 
 /// 文件名已经能确定剧名时，仍从上层目录补年份和别名。
 /// 文件名本身是 Low 时，才用父目录标题替换；NFO 在单独的有界步骤处理。
+fn has_ancestor_tvshow_nfo(start: &std::path::Path, root: &std::path::Path) -> bool {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join("tvshow.nfo").is_file() {
+            return true;
+        }
+        if dir == root {
+            break;
+        }
+        current = dir.parent();
+    }
+    false
+}
+
 pub(crate) fn enrich_from_ancestors(
     parsed: &mut Release,
     start: &std::path::Path,
@@ -364,91 +378,110 @@ fn walk_intake(
         if !meta.is_file() || !is_video_file(&path) {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let mut parsed = release::parse(name);
-        if let Some(parent) = path.parent() {
-            enrich_from_ancestors(&mut parsed, parent, &job.path);
-        }
-        let nfo_identity = identify_local(&mut parsed, &path, &job.path, media.kind);
-        if parsed.confidence == Confidence::Low {
-            outcome.unidentified.push(Unidentified {
-                path,
-                confidence: Confidence::Low,
-            });
-            continue;
-        }
-        let is_tv = parsed.season.is_some() || parsed.episode.is_some();
-        let control = match controls {
-            Some((_, None)) if is_tv => {
-                return Err(LibraryError::Naming("TV Library is not configured".into()));
-            }
-            Some((_, Some(tv))) if is_tv => tv.clone(),
-            Some((movie, _)) => movie.clone(),
-            None => crate::WorkControl::default(),
-        };
-        control.check()?;
-        let target_root = if is_tv {
-            job.tv_library_root.as_ref().unwrap_or(&job.library_root)
-        } else {
-            &job.library_root
-        };
-
-        // 如果文件位于子目录中（例如 watch/Show Title/S01E01.mp4 或 watch/Show Title/Season 1/S01E01.mp4），
-        // 在目标库中保持相同的相对层级结构，避免把各集直接平铺到电视剧库根目录下
-        let rel_path = path.strip_prefix(&job.path).unwrap_or(&path);
-        let dest = target_root.join(rel_path);
-
-        if dest.exists() {
-            if same_entity(&path, &dest) {
-                outcome.transferred.push(TransferredFile {
-                    path: dest,
-                    identified_release: Some(parsed),
-                    nfo_identity,
-                });
-            } else {
-                tracing::error!(src=%path.display(), dest=%dest.display(), "Watch intake 目标冲突，拒绝覆盖");
-                outcome.errors.push(FileError {
-                    path: path.clone(),
-                    error: format!(
-                        "watch intake destination already exists: {}",
-                        dest.display()
-                    ),
-                });
-            }
-            continue;
-        }
-        let mode = resolve_mode(&path, target_root, Some(TransferMode::Hardlink));
-        if let Err(err) = crate::transfer_file_controlled(&path, &dest, mode, &control) {
-            tracing::error!(
-                src = %path.display(),
-                dest = %dest.display(),
-                error = %err,
-                "Watch intake transfer file failed"
-            );
-            outcome.errors.push(FileError {
-                path: path.clone(),
-                error: err.to_string(),
-            });
-            continue;
-        }
-        if job.scrape
-            && let Err(err) = control
-                .publish(|| scrape_beside(&dest, media, true, None).map_err(|e| e.to_string()))
-        {
-            tracing::warn!(
-                dest = %dest.display(),
-                error = %err,
-                "Watch intake scrape beside failed"
-            );
-        }
-        outcome.transferred.push(TransferredFile {
-            path: dest,
-            identified_release: Some(parsed),
-            nfo_identity,
-        });
+        intake_video_file(path, job, media, outcome, controls)?;
     }
+    Ok(())
+}
+
+fn intake_video_file(
+    path: std::path::PathBuf,
+    job: &WatchJob,
+    media: &Media,
+    outcome: &mut WatchOutcome,
+    controls: Option<(&crate::WorkControl, Option<&crate::WorkControl>)>,
+) -> Result<(), LibraryError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let mut parsed = release::parse(name);
+    if let Some(parent) = path.parent() {
+        enrich_from_ancestors(&mut parsed, parent, &job.path);
+    }
+    let local_kind = if parsed.season.is_some()
+        || parsed.episode.is_some()
+        || media.kind == MediaKind::Tv
+        || path
+            .parent()
+            .is_some_and(|dir| has_ancestor_tvshow_nfo(dir, &job.path))
+    {
+        MediaKind::Tv
+    } else {
+        media.kind
+    };
+    let nfo_identity = identify_local(&mut parsed, &path, &job.path, local_kind);
+    if parsed.confidence == Confidence::Low {
+        outcome.unidentified.push(Unidentified {
+            path,
+            confidence: Confidence::Low,
+        });
+        return Ok(());
+    }
+    let is_tv = local_kind == MediaKind::Tv || parsed.season.is_some() || parsed.episode.is_some();
+    let control = match controls {
+        Some((_, None)) if is_tv => {
+            return Err(LibraryError::Naming("TV Library is not configured".into()));
+        }
+        Some((_, Some(tv))) if is_tv => tv.clone(),
+        Some((movie, _)) => movie.clone(),
+        None => crate::WorkControl::default(),
+    };
+    control.check()?;
+    let target_root = if is_tv {
+        job.tv_library_root.as_ref().unwrap_or(&job.library_root)
+    } else {
+        &job.library_root
+    };
+    let rel_path = path.strip_prefix(&job.path).unwrap_or(&path);
+    let dest = target_root.join(rel_path);
+    if dest.exists() {
+        if same_entity(&path, &dest) {
+            outcome.transferred.push(TransferredFile {
+                path: dest,
+                identified_release: Some(parsed),
+                nfo_identity,
+            });
+        } else {
+            tracing::error!(src=%path.display(), dest=%dest.display(), "Watch intake 目标冲突，拒绝覆盖");
+            outcome.errors.push(FileError {
+                path,
+                error: format!(
+                    "watch intake destination already exists: {}",
+                    dest.display()
+                ),
+            });
+        }
+        return Ok(());
+    }
+    let mode = resolve_mode(&path, target_root, Some(TransferMode::Hardlink));
+    if let Err(err) = crate::transfer_file_controlled(&path, &dest, mode, &control) {
+        tracing::error!(
+            src = %path.display(),
+            dest = %dest.display(),
+            error = %err,
+            "Watch intake transfer file failed"
+        );
+        outcome.errors.push(FileError {
+            path,
+            error: err.to_string(),
+        });
+        return Ok(());
+    }
+    if job.scrape
+        && media.tmdb_id.is_some()
+        && let Err(err) =
+            control.publish(|| scrape_beside(&dest, media, true, None).map_err(|e| e.to_string()))
+    {
+        tracing::warn!(
+            dest = %dest.display(),
+            error = %err,
+            "Watch intake scrape beside failed"
+        );
+    }
+    outcome.transferred.push(TransferredFile {
+        path: dest,
+        identified_release: Some(parsed),
+        nfo_identity,
+    });
     Ok(())
 }

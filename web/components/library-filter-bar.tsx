@@ -18,6 +18,7 @@ import {
   filterCount,
   isFilterEmpty,
 } from "@/lib/api/libraries";
+import { usePermissions } from "@/lib/permissions";
 import { useIsMobile } from "@/lib/use-media-query";
 
 /**
@@ -541,9 +542,13 @@ export function FilterEmptyState({
   filter: LibraryFilter;
   onFilterChange: (next: LibraryFilter) => void;
 }) {
+  const { canManageLibraries } = usePermissions();
   const [relax, setRelax] = useState<LibraryRelax | null>(null);
 
   useEffect(() => {
+    if (!canManageLibraries) {
+      return;
+    }
     let alive = true;
     getLibraryRelax(libraryId, filter)
       .then((data) => alive && setRelax(data))
@@ -551,7 +556,7 @@ export function FilterEmptyState({
     return () => {
       alive = false;
     };
-  }, [libraryId, filter]);
+  }, [canManageLibraries, libraryId, filter]);
 
   // 数的是**全部**条件，不只是一级四维：只数一级的话，用「4K + 评分≥9」筛空
   // 时标题会写「没有同时满足这 0 个条件的作品」

@@ -76,15 +76,9 @@ pub(crate) async fn start_session(
         let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage).await;
     }
     tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
-    let is_strm = file
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    let stream_url = session_stream_url(&file, &play_session_id, device_id, &token, is_strm);
+    let (stream_url, source) = load_session_io(&file, &play_session_id, device_id, &token).await;
     let (chapters, chapters_pending) =
         session_chapters(&state, &file, resolved.target.unit, &media).await;
-    let source = session_source(&file, is_strm);
     let subtitle_urls: Vec<String> = decision
         .get("subtitles")
         .and_then(|s| s.as_array())
@@ -126,10 +120,44 @@ pub(crate) async fn start_session(
     .into_response()
 }
 
+async fn load_session_io(
+    file: &domain::LibraryFile,
+    play_session_id: &str,
+    device_id: &str,
+    token: &str,
+) -> (String, Value) {
+    let is_strm = file
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
+    let io_file = file.clone();
+    let io_session_id = play_session_id.to_string();
+    let io_device = device_id.to_string();
+    let io_token = token.to_string();
+    tokio::task::spawn_blocking(move || {
+        let stream_url =
+            session_stream_url(&io_file, &io_session_id, &io_device, &io_token, is_strm);
+        let source = session_source(&io_file, is_strm);
+        (stream_url, source)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let fallback_url = format!(
+            "/api/v1/playback/sessions/{play_session_id}/stream?device_id={device_id}&api_key={token}"
+        );
+        (fallback_url, session_source_json(file, None))
+    })
+}
+
 fn session_source(file: &domain::LibraryFile, is_strm: bool) -> Value {
     let size_bytes = (!is_strm)
         .then(|| std::fs::metadata(&file.path).ok().map(|m| m.len() as i64))
         .flatten();
+    session_source_json(file, size_bytes)
+}
+
+fn session_source_json(file: &domain::LibraryFile, size_bytes: Option<i64>) -> Value {
     json!({
         "container": file.path.extension().and_then(|e| e.to_str()),
         "resolution": file.resolution,
@@ -203,7 +231,10 @@ async fn session_chapters(
     let file_id = file.file_id;
     let expected = file.version.clone();
     let factory = state.theintrodb_factory.clone();
-    let (cached_chapters, configured, has_marker) =
+    let negative = state.theintrodb_negative.clone();
+    let now_ms = state.playback_clock.now_ms();
+    let media_for_read = media.clone();
+    let (cached_chapters, cloud_lookup_needed) =
         match store_read(state, &[store::Db::Library, store::Db::App], move |store| {
             let coverage = store.file_coverage_by_id(file_id).ok().flatten()?;
             if coverage.file.version != expected || !coverage.units.contains(&unit) {
@@ -213,34 +244,39 @@ async fn session_chapters(
                 .get_cached_chapters(&file_id.to_string())
                 .ok()
                 .flatten();
+            let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
             if let Some(ref mut chapters) = cached {
-                let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
                 crate::marker_resolver::append_marker_chapters(
                     chapters,
                     marker.as_ref(),
                     coverage.file.duration_ms,
                 );
             }
-            let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
-            Some((
-                cached,
-                crate::theintrodb_lookup::configured_client(store, factory.as_ref()),
+            let cloud_needed = crate::theintrodb_lookup::session_needs_cloud_lookup(
+                store,
+                factory.as_ref(),
+                &negative,
+                now_ms,
+                &coverage,
+                unit,
+                &media_for_read,
                 marker.is_some(),
-            ))
+            );
+            Some((cached, cloud_needed))
         })
         .await
         {
             Ok(Some(captured)) => captured,
-            Ok(None) => (None, None, false),
+            Ok(None) => (None, false),
             Err(error) => {
                 tracing::warn!(
                     ?error,
                     "读取章节缓存失败，本次按待生成返回；章节仍在后台生成"
                 );
-                (None, None, false)
+                (None, false)
             }
         };
-    let pending = cached_chapters.is_none() || (configured.is_some() && !has_marker);
+    let pending = cached_chapters.is_none() || cloud_lookup_needed;
     if pending {
         crate::theintrodb_lookup::schedule_file_lookup(
             state.clone(),

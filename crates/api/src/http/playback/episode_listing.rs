@@ -242,9 +242,9 @@ fn render_rows(
 
     let episode_rows: Vec<episodes::EpisodeRow> = keys
         .into_iter()
-        .map(|(season, episode)| {
+        .filter_map(|(season, episode)| {
             let (file_ids, file_name, local_still, backdrop) =
-                grouped.remove(&(season, episode)).unwrap();
+                grouped.remove(&(season, episode))?;
 
             let (position_ms, played, progress_percent) = match unit_states
                 .get(&(season, episode))
@@ -267,7 +267,7 @@ fn render_rows(
                 None => (0, false, None),
             };
 
-            episodes::EpisodeRow {
+            Some(episodes::EpisodeRow {
                 season,
                 episode,
                 file_ids,
@@ -280,7 +280,7 @@ fn render_rows(
                 position_ms,
                 played,
                 progress_percent,
-            }
+            })
         })
         .collect();
     episodes::format_episodes_json(&episode_rows, id)

@@ -202,12 +202,51 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
             continue;
         }
         let (handed_off, owns_running) = process_metadata(&manager, &id).await;
-        drop(pending);
         drop(permit);
         if !handed_off {
             retry_dispatch(&manager, &id, owns_running).await;
         }
         let _ = step(&manager, |manager| manager.refill_drained_windows()).await;
+        drop(pending);
+    }
+}
+
+async fn finish_metadata_outcome(
+    manager: &Arc<ProbeManager>,
+    unit: &ProbeUnit,
+    outcome: probe::MetadataOutcome,
+) -> (bool, bool) {
+    match outcome {
+        probe::MetadataOutcome::Complete => {
+            let _ = step(manager, {
+                let unit = unit.clone();
+                move |manager| manager.finish(&unit, true)
+            })
+            .await;
+            (false, true)
+        }
+        probe::MetadataOutcome::Failed => {
+            if manager.shutting_down.load(Ordering::Acquire)
+                || marker::media_read::remote_reads_stopping()
+            {
+                return (false, true);
+            }
+            let _ = step(manager, {
+                let unit = unit.clone();
+                move |manager| manager.finish(&unit, false)
+            })
+            .await;
+            (false, true)
+        }
+        probe::MetadataOutcome::Retry => (false, true),
+        probe::MetadataOutcome::Fingerprint(work) => {
+            let handed_off = step(manager, move |manager| {
+                manager.enqueue_fingerprint_after_metadata(work)
+            })
+            .await
+            .unwrap_or(false);
+            (handed_off, true)
+        }
     }
 }
 
@@ -300,37 +339,7 @@ async fn process_metadata(
     if !still_ready {
         return (false, true);
     }
-    match outcome {
-        probe::MetadataOutcome::Complete => {
-            let _ = step(&manager, {
-                let unit = unit.clone();
-                move |manager| manager.finish(&unit, true)
-            })
-            .await;
-        }
-        probe::MetadataOutcome::Failed => {
-            if manager.shutting_down.load(Ordering::Acquire)
-                || marker::media_read::remote_reads_stopping()
-            {
-                return (false, true);
-            }
-            let _ = step(&manager, {
-                let unit = unit.clone();
-                move |manager| manager.finish(&unit, false)
-            })
-            .await;
-        }
-        probe::MetadataOutcome::Retry => return (false, true),
-        probe::MetadataOutcome::Fingerprint(work) => {
-            let handed_off = step(&manager, move |manager| {
-                manager.enqueue_fingerprint_after_metadata(work)
-            })
-            .await
-            .unwrap_or(false);
-            return (handed_off, true);
-        }
-    }
-    (false, true)
+    finish_metadata_outcome(manager, &unit, outcome).await
 }
 
 fn is_temporary_busy(error: &BoundedLeaseError) -> bool {

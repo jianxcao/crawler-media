@@ -241,3 +241,86 @@ fn test_upgrade_ladder_preserves_worse_or_equal_candidate_rejection() {
         "低质量和同质量候选不能因为未达 cutoff 就被替换"
     );
 }
+
+#[test]
+fn hdr_ladder_orders_dolby_vision_above_hdr10_and_hlg() {
+    let subscribe = tv_subscribe();
+    let wash_filter = Filter::new(
+        domain::FilterId::new(),
+        "hdr-ladder",
+        vec![FilterAtom {
+            priority: 1,
+            rule: AtomRule::UpgradeLadder("hdr".into()),
+            exclude: false,
+        }],
+    );
+
+    // Owned HDR10 -> candidate Dolby Vision ("dolbyvision") upgrades cleanly.
+    let mut facts_hdr10 = SubscribeFacts::default();
+    let p1 = "/path/S01E01.hdr10.mkv";
+    facts_hdr10.replace(
+        Some(1),
+        Some(1),
+        QualityFact {
+            score: 50,
+            path: Some(p1.into()),
+        },
+    );
+    let mut owned_hlg = release_with(Some("2160p"), Some("WEB-DL"));
+    owned_hlg.hdr = Some("HLG".into());
+    facts_hdr10.set_quality(p1.into(), owned_hlg);
+
+    let mut cand_hdr10 = scored_candidate(
+        "Show.S01E01.2160p.WEB-DL.HDR10",
+        Some("2160p"),
+        Some("WEB-DL"),
+        60,
+    );
+    cand_hdr10.release.hdr = Some("HDR10".into());
+    assert_eq!(
+        choose(&subscribe, Some(&wash_filter), &[cand_hdr10], &facts_hdr10).len(),
+        0,
+        "HDR10 equals HLG rank at tier 1 and must not churn without gain"
+    );
+
+    let mut cand_dv = scored_candidate(
+        "Show.S01E01.2160p.WEB-DL.DV",
+        Some("2160p"),
+        Some("WEB-DL"),
+        60,
+    );
+    cand_dv.release.hdr = Some("Dolby Vision".into());
+    assert_eq!(
+        choose(&subscribe, Some(&wash_filter), &[cand_dv], &facts_hdr10).len(),
+        1,
+        "Dolby Vision outranks HLG/HDR10"
+    );
+
+    // Owned Dolby Vision ("Dolby Vision" from ffprobe) -> HDR10+ candidate must NOT downgrade!
+    let mut facts_dv = SubscribeFacts::default();
+    let p2 = "/path/S01E01.dv.mkv";
+    facts_dv.replace(
+        Some(1),
+        Some(1),
+        QualityFact {
+            score: 50,
+            path: Some(p2.into()),
+        },
+    );
+    let mut owned_dv = release_with(Some("2160p"), Some("WEB-DL"));
+    owned_dv.hdr = Some("Dolby Vision".into());
+    facts_dv.set_quality(p2.into(), owned_dv);
+
+    let mut cand_hdr10p = scored_candidate(
+        "Show.S01E01.2160p.WEB-DL.HDR10+",
+        Some("2160p"),
+        Some("WEB-DL"),
+        80,
+    );
+    cand_hdr10p.release.hdr = Some("HDR10+".into());
+    assert_eq!(
+        choose(&subscribe, Some(&wash_filter), &[cand_hdr10p], &facts_dv).len(),
+        0,
+        "Owned Dolby Vision must never downgrade to HDR10+"
+    );
+}

@@ -186,6 +186,61 @@ async fn item_index_returns_opaque_cursors_and_no_absolute_index() {
 }
 
 #[tokio::test]
+async fn item_index_gallery_true_excludes_items_without_artwork() {
+    let tmp = tempfile::tempdir().unwrap();
+    let api_state = base_state(&tmp);
+    let (library_id, root) = movie_library(&api_state);
+    seed_movie(&api_state, "Alpha With Poster", &root);
+    let poster_path = root.join("Alpha With Poster/poster.jpg");
+    std::fs::write(&poster_path, b"jpg").unwrap();
+    let alpha_path = root.join("Alpha With Poster/Alpha With Poster.mkv");
+    let cov = api_state
+        .store()
+        .file_coverage_by_path(&alpha_path.to_string_lossy())
+        .unwrap()
+        .unwrap();
+    assert!(
+        api_state
+            .store()
+            .record_file_artwork(
+                cov.file.file_id,
+                &cov.file.version,
+                &store::library_write::FileArtwork {
+                    poster: Some(&poster_path),
+                    backdrop: None,
+                    still: None,
+                },
+            )
+            .unwrap()
+    );
+
+    seed_movie(&api_state, "Bravo No Poster", &root);
+    let app = router(api_state);
+
+    let (status_all, body_all) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/item-index?sort=title&order=asc"),
+    )
+    .await;
+    assert_eq!(status_all, StatusCode::OK, "{body_all}");
+    assert_eq!(body_all["data"].as_array().unwrap().len(), 2);
+
+    let (status_gal, body_gal) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/item-index?sort=title&order=asc&gallery=true"),
+    )
+    .await;
+    assert_eq!(status_gal, StatusCode::OK, "{body_gal}");
+    let buckets = body_gal["data"].as_array().unwrap();
+    assert_eq!(
+        buckets.len(),
+        1,
+        "gallery=true item-index must exclude posterless items: {body_gal}"
+    );
+    assert_eq!(buckets[0]["initial"], "A");
+}
+
+#[tokio::test]
 async fn letter_jump_is_one_request_and_lands_on_that_letters_first_item() {
     let (_tmp, app, library_id) = fixture();
     let ordered = ordered_titles(&app, &library_id).await;

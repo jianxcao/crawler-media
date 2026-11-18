@@ -287,3 +287,84 @@ fn tv_external_ids_return_the_tvdb_id() {
     let tvdb_id = tmdb.tvdb_id("119847").unwrap();
     assert_eq!(tvdb_id.as_deref(), Some("425039"));
 }
+
+#[test]
+fn timeout_deadline_and_cancelled_do_not_trigger_fallback_requests() {
+    struct ErrTmdb {
+        err: TmdbError,
+        hits: Arc<Mutex<Vec<String>>>,
+    }
+    impl CatalogGet for ErrTmdb {
+        fn get(&self, path: &str) -> Result<String, TmdbError> {
+            self.hits.lock().unwrap().push(path.to_string());
+            Err(self.err.clone())
+        }
+    }
+    for err in [
+        TmdbError::OriginTimeout,
+        TmdbError::Deadline,
+        TmdbError::Cancelled,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let tmdb = Tmdb::new(
+            ErrTmdb {
+                err: err.clone(),
+                hits: hits.clone(),
+            },
+            &dir.path().join("catalog.db"),
+        )
+        .unwrap();
+        let res = tmdb.movie_details("603");
+        assert!(res.is_err());
+        assert_eq!(
+            hits.lock().unwrap().len(),
+            1,
+            "movie_details must not retry fallback path on {err:?}"
+        );
+        hits.lock().unwrap().clear();
+
+        let tv_res = tmdb.tv_details("1396");
+        assert!(tv_res.is_err());
+        assert_eq!(
+            hits.lock().unwrap().len(),
+            1,
+            "tv_details must not retry fallback path on {err:?}"
+        );
+        hits.lock().unwrap().clear();
+
+        let seasons_res = tmdb.tv_seasons("1396");
+        assert!(seasons_res.is_err());
+        assert_eq!(
+            hits.lock().unwrap().len(),
+            1,
+            "tv_seasons must not retry fallback path on {err:?}"
+        );
+    }
+}
+
+#[test]
+fn tv_seasons_accepts_empty_seasons_without_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let rich_path = media_rich_tv_path("1396");
+    let bodies = HashMap::from([(
+        rich_path,
+        r#"{"id":1396,"name":"NoSeasons","seasons":[]}"#.to_string(),
+    )]);
+    let tmdb = Tmdb::new(
+        FakeTmdb {
+            bodies,
+            hits: hits.clone(),
+        },
+        &dir.path().join("catalog.db"),
+    )
+    .unwrap();
+    let seasons = tmdb.tv_seasons("1396").unwrap();
+    assert!(seasons.is_empty());
+    assert_eq!(hits.lock().unwrap().len(), 1);
+}
+
+fn media_rich_tv_path(id: &str) -> String {
+    format!("/tv/{id}?append_to_response=translations,alternative_titles")
+}

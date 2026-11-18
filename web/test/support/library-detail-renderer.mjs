@@ -29,15 +29,28 @@ export const page = (id, next_cursor = null) => ({
 // Real React effects/state, the real component, sorting and session snapshots.
 // API calls and browser preferences are the external seams; visual children
 // expose the component's selected rows and pagination controls without a DOM.
-export function libraryDetailHarness({ gallery = false, load, recallOffset = 500, realRecall = false } = {}) {
-  const storage = new Map([["cm:wall-sort", "title"]]);
+export function libraryDetailHarness({
+  gallery = false,
+  load,
+  recallOffset = 500,
+  realRecall = false,
+  initialSortPref = "title",
+  libraryKind = "movie",
+} = {}) {
+  const storage = new Map();
+  if (initialSortPref !== null) {
+    storage.set("crawler-media.library.wall-sort", initialSortPref);
+  }
   if (realRecall) storage.set("crawler-media.wall-recall", JSON.stringify({
     "library:library": { offset: recallOffset, view: "wall:title:title", updatedAt: Date.now() },
   }));
   globalThis.window = {
     location: { search: "", pathname: "/library/library" },
     history: { replaceState: noop },
-    localStorage: { getItem: (key) => storage.get(key) ?? "title", setItem: (key, value) => storage.set(key, value) },
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, value),
+    },
   };
   let visibleItem;
   const scroller = new globalThis.EventTarget();
@@ -57,12 +70,13 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
     globalThis.cancelAnimationFrame = noop;
   }
   const library = {
-    id: "library", name: "Movies", kind: "movie", root_paths: ["/movies"], is_default: true,
+    id: "library", name: "Movies", kind: libraryKind, root_paths: ["/movies"], is_default: true,
     stats: { item_count: 1000, file_count: 1000, total_size_bytes: 0, strm_file_count: 1000 },
   };
   let poll;
   let galleryPreference = gallery;
   let setGalleryPreference;
+  const indexCalls = [];
   const modules = new Map();
   const mocks = {
     react: React,
@@ -72,10 +86,13 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
       listLibraries: async () => [library],
       listLibraryItems: (_, query) => load("wall", query),
       listLibraryGallery: (_, query) => load("gallery", query),
-      listLibraryItemIndex: async () => [
-        { initial: "A", count: 500, cursor: null },
-        { initial: "M", count: 500, cursor: "title-M" },
-      ],
+      listLibraryItemIndex: async (id, sort, filter, order, options) => {
+        indexCalls.push({ id, sort, filter, order, options });
+        return [
+          { initial: "A", count: 500, cursor: null },
+          { initial: "M", count: 500, cursor: "title-M" },
+        ];
+      },
       filterKey: () => "", isFilterEmpty: () => true,
       listMissingLibraryFiles: async () => [], listUnidentifiedLibraryFiles: async () => [],
     },
@@ -86,7 +103,7 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
     "@/lib/use-visible-polling": { useVisiblePolling: (callback) => { poll = callback; } },
     "@/lib/use-wall-recall": { useWallRecall: () => ({ recallOffset, dismissRecall: noop }) },
     "@/lib/library-wall-recall": { wallRecallScope: () => "library", isReentryAfterAbsence: () => false },
-    "@/components/library-kind-meta": { LIBRARY_KIND_META: { movie: { label: "电影" } } },
+    "@/components/library-kind-meta": { LIBRARY_KIND_META: { movie: { label: "电影" }, tv: { label: "剧集" }, video: { label: "视频" } } },
     "@/components/wall": { usePhotoWallDensity: () => ["normal", noop] },
     "@/components/poster-wall": {
       PosterWall: ({ items }) => React.createElement("output", { id: "rows" }, items.map((row) => row.title).join(",")),
@@ -154,6 +171,7 @@ export function libraryDetailHarness({ gallery = false, load, recallOffset = 500
       await act(async () => { scroller.scrollTop += 100; scroller.dispatchEvent(new globalThis.Event("scroll")); });
     },
     savedRecall: () => JSON.parse(storage.get("crawler-media.wall-recall"))["library:library"],
+    indexCalls: () => indexCalls,
     rows: () => renderer.root.findByProps({ id: "rows" }).children.join(""),
     start: () => renderer.root.findByProps({ id: "more" }).props["data-start"],
     hasMore: () => !renderer.root.findByProps({ id: "more" }).props.disabled,

@@ -75,6 +75,10 @@ pub struct ApiState {
     /// H-1: false while another instance holds the data-directory lease.
     /// Background writers stop and manual write endpoints answer 409.
     pub(crate) instance_writable: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) writable_startup_done: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) runtime_workers_started: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) deferred_bootstrap:
+        Arc<Mutex<Option<crate::bootstrap_credentials::AdminBootstrapAction>>>,
     /// L5: 维护期写门禁——关闸时前台写入口立刻 503 + `Retry-After`，
     /// 不在 SQLite busy 上耗 5 秒（与只读的 409 分开）。
     pub(crate) write_gate: Arc<crate::write_gate::WriteGate>,
@@ -253,20 +257,26 @@ impl ApiState {
         Self::new_arc_with_admin_bootstrap(store, profiles, fetcher, downloader, action)
     }
 
-    pub fn new_arc_with_admin_bootstrap<F>(
+    pub fn new_arc_with_admin_bootstrap_writable<F>(
         store: Arc<Store>,
         profiles: ProfileSet,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
+        initial_writable: bool,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        apply_admin_bootstrap(&store.as_ref(), action)?;
-        let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref())?;
+        let deferred_action = if initial_writable {
+            apply_admin_bootstrap(&store.as_ref(), action)?;
+            None
+        } else {
+            Some(action)
+        };
+        let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref(), initial_writable)?;
         let jobs_path = store.as_ref().data_dir().join("jobs.db");
-        let jobs = open_jobs(&jobs_path)?;
+        let jobs = open_jobs(&jobs_path, initial_writable)?;
         let jobs_readers = crate::jobs_readers::open(&jobs_path)?;
         store.configure_reader_pool_size(
             store::Db::Library,
@@ -276,20 +286,10 @@ impl ApiState {
         let library_reads = store.reader_pool(store::Db::Library);
         let data_dir = store.data_dir().to_path_buf();
         let writers = store.writers();
-        // 有 Tokio runtime 时启动异步探测 worker；测试路径仅创建队列。
-        let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-        let probe = Arc::new(crate::probe_manager::ProbeManager::new(store.clone())?);
-        probe.set_library_registry(library_work.clone());
+        // 有 Tokio runtime 时启动异步探测 worker；只读从属实例延迟恢复与后台启动。
+        let (library_work, probe, chapter_frames, catalog, media_posters) =
+            init_probe_and_catalog(&store, initial_writable)?;
         let startup_browser = crate::runtime_browser::startup_browser(store.clone());
-        let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
-            store.clone(),
-            library_work.clone(),
-        ));
-        probe.set_chapter_frames(chapter_frames.clone());
-        let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
-        let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
-            crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
-        );
         let state = Self {
             store: store.clone(),
             library_reads,
@@ -326,7 +326,10 @@ impl ApiState {
             jobs: Arc::new(crate::JobsWriter::new(jobs)),
             jobs_readers,
             job_loop_control: Arc::new(crate::job_loop::JobLoopControl::new()),
-            instance_writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            instance_writable: Arc::new(std::sync::atomic::AtomicBool::new(initial_writable)),
+            writable_startup_done: Arc::new(std::sync::atomic::AtomicBool::new(initial_writable)),
+            runtime_workers_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deferred_bootstrap: Arc::new(Mutex::new(deferred_action)),
             write_gate: Arc::new(crate::write_gate::WriteGate::new()),
             maintenance_executor: Arc::new(crate::maintenance::SqliteExecutor),
             maintenance_lock: Arc::new(Mutex::new(())),
@@ -367,6 +370,21 @@ impl ApiState {
             statistics_phase_barrier: None,
         };
         state.finish_initialization(startup_browser.1)
+    }
+
+    pub fn new_arc_with_admin_bootstrap<F>(
+        store: Arc<Store>,
+        profiles: ProfileSet,
+        fetcher: Arc<F>,
+        downloader: Arc<dyn Downloader>,
+        action: crate::bootstrap_credentials::AdminBootstrapAction,
+    ) -> Result<Self, ApiStateError>
+    where
+        F: Fetcher + 'static,
+    {
+        Self::new_arc_with_admin_bootstrap_writable(
+            store, profiles, fetcher, downloader, action, true,
+        )
     }
 
     pub fn with_log_buffer(mut self, log_buffer: LogBuffer) -> Self {
@@ -710,13 +728,51 @@ pub enum ApiStateError {
     Store(#[from] StoreError),
 }
 
-fn open_jobs(jobs_path: &std::path::Path) -> Result<jobs::Queue, ApiStateError> {
+fn open_jobs(jobs_path: &std::path::Path, seed_defs: bool) -> Result<jobs::Queue, ApiStateError> {
     let jobs =
         jobs::Queue::open(jobs_path).map_err(|error| std::io::Error::other(error.to_string()))?;
-    crate::jobs_api::seed_instance_defs(&jobs)
+    if seed_defs {
+        seed_jobs(&jobs)?;
+    }
+    Ok(jobs)
+}
+
+pub(super) fn seed_jobs(jobs: &jobs::Queue) -> Result<(), ApiStateError> {
+    crate::jobs_api::seed_instance_defs(jobs)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
-    crate::maintenance::seed_maintenance_defs(&jobs)
+    crate::maintenance::seed_maintenance_defs(jobs)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
-    Ok(jobs)
+    Ok(())
+}
+
+type ProbeCatalogInit = (
+    Arc<crate::library_lifecycle::LibraryWorkRegistry>,
+    Arc<crate::probe_manager::ProbeManager>,
+    Arc<crate::chapter_frame_service::ChapterFrameService>,
+    Arc<dyn Catalog>,
+    Arc<dyn crate::media_posters::MediaPosterSource>,
+);
+
+fn init_probe_and_catalog(
+    store: &Arc<Store>,
+    initial_writable: bool,
+) -> Result<ProbeCatalogInit, ApiStateError> {
+    let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
+    let probe = Arc::new(if initial_writable {
+        crate::probe_manager::ProbeManager::new(store.clone())?
+    } else {
+        crate::probe_manager::ProbeManager::new_deferred(store.clone())?
+    });
+    probe.set_library_registry(library_work.clone());
+    let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
+        store.clone(),
+        library_work.clone(),
+    ));
+    probe.set_chapter_frames(chapter_frames.clone());
+    let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
+    let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
+        crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
+    );
+    Ok((library_work, probe, chapter_frames, catalog, media_posters))
 }

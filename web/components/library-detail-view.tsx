@@ -273,6 +273,9 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   // 海报 / 剧照 / 章节图瀑布流，点开灯箱能直接播放或进详情。偏好记在浏览器里；
   // 图片库本身就是相册墙，这个开关对它没有意义
   const [galleryPreferred, setGalleryMode] = useVideoGalleryMode();
+  const galleryRef = useRef(galleryPreferred);
+  galleryRef.current = galleryPreferred;
+  const lastIndexGalleryRef = useRef(galleryPreferred);
   // 两种墙的锚点属性不同：海报墙一格一个条目（data-library-item-id），图廊一部
   // 作品十几张图，得按瓦片认（data-gallery-tile-id）。两者不会同时在 DOM 里
   const restoreScrollRef = useScrollRestoration(`library:${libraryId}`, {
@@ -486,12 +489,14 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     const indexKind = INDEXED_SORTS[wallSort.current];
     const filter = wallFilter.current;
     const order = wallOrder.current;
+    const galleryMode = galleryRef.current;
+    lastIndexGalleryRef.current = galleryMode;
     const fetchIndex = (): Promise<LibraryIndexEntry[]> =>
       indexKind === undefined
         ? Promise.resolve([])
-        : listLibraryItemIndex(libraryId, indexKind, filter, order).catch(
-            () => [],
-          );
+        : listLibraryItemIndex(libraryId, indexKind, filter, order, {
+            gallery: galleryMode,
+          }).catch(() => []);
     // 超管不在这个库的浏览范围内时海报墙接口按 404 拒绝（管理视图不渲染墙），
     // 不是拉取失败，别点亮顶部的重试提示条。
     // 索引**排在条目页之后**发、不并发：两趟都要在服务端把整库标题（或上映日）
@@ -823,16 +828,14 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     toggleWallSortReversed,
     wallSortReady,
   ] = useWallSortPref();
-  const recentFirst =
-    (wallSortPref === "default" || wallSortPref === "added_at") && !probing;
-  // 当前真正生效的服务端排序键：补探阶段临时接管；其次是用户选的档；默认档按入库时间。
-  // 图片库只认「最近添加」：偏好是全站共用的一个键，别的库里选的「按评分」
-  // 不该把相册的按月瀑布流排乱（图片库也不摆排序控件）
+  const recentFirst = wallSortPref === "added_at" && !probing;
   const effectiveSort: LibraryItemSort = probing
     ? "probing"
     : wallSortPref !== "default"
       ? PREF_TO_SORT[wallSortPref]
-      : "added_at";
+      : timeline
+        ? "release_date"
+        : "title";
   // 这一次是不是升序：该档自然方向，用户反转过就倒过来（补探序与相册墙不理会方向）
   const sortAscending =
     SORT_DIRECTIONS[effectiveSort].naturalAsc !==
@@ -975,6 +978,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         let next = first.next_cursor;
         const chain: (string | null)[] = [cursor];
         while (next !== null && target - bucketStart >= groups.length) {
+          if (gen !== galleryGeneration.current) return;
           chain.push(next);
           const page = await fetchAt(next);
           groups = [...groups, ...page.groups];
@@ -1073,7 +1077,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   // 海报墙与图廊**共用一条记录**（与收藏页同一处理）：两面墙现在是同一份名单、同一个
   // 排序、同一种按作品分页，「第 300 个」在两种形态里是同一部作品——在图廊里看到哪，
   // 切回海报墙照样跳得回去。此前图廊另记一条（"gallery" 前缀）是因为它只有标题序
-  const defaultSort = effectiveSort === "probing";
+  const defaultSort = wallSortPref === "default" || effectiveSort === "probing";
   const wallView =
     (timeline ? "wall:time" : "wall:title") +
     (recentFirst ? ":added" : defaultSort ? "" : `:${effectiveSort}`) +
@@ -1190,7 +1194,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       scrollElement.scrollTop;
     // 瞬时而不是平滑：墙内容整段换了，平滑滚过去的是一堆不存在的旧内容
     scrollElement.scrollTo({ top: Math.max(0, offset + rowTop), behavior: "instant" });
-  }, [items.length, scrollElement]);
+  }, [items, scrollElement]);
 
   useEffect(() => {
     const fallback = wallInitialAtOffset(wallIndex, wallOrigin);
@@ -1243,6 +1247,21 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     setWallOrigin(0);
     reloadWall();
   }, [effectiveSort, wallOrderParam, wallSortReady, reloadWall]);
+
+  useEffect(() => {
+    if (lastIndexGalleryRef.current === galleryPreferred) return;
+    lastIndexGalleryRef.current = galleryPreferred;
+    const indexKind = INDEXED_SORTS[wallSort.current];
+    if (indexKind === undefined) return;
+    const seq = reloadSeq.current;
+    void listLibraryItemIndex(libraryId, indexKind, wallFilter.current, wallOrder.current, {
+      gallery: galleryPreferred,
+    })
+      .then((index) => {
+        if (seq === reloadSeq.current) setWallIndex((prev) => keepIfEqual(prev, index));
+      })
+      .catch(() => {});
+  }, [galleryPreferred, libraryId]);
 
   // 只有一次都没加载成功过才整页报错；已有数据在手时，瞬时失败只在页内
   // 挂提示条（stale-while-error）——为一次网络抖动把整面海报墙换成错误屏，
@@ -1483,7 +1502,10 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
                     if (!ok) return;
                     void verifyLibraryFiles(library.id)
                       .then(() => deleteMissingRows(library.id))
-                      .then(() => reload());
+                      .then(() => reload())
+                      .catch((e) =>
+                        toast.error(e instanceof Error ? e.message : "清理缺失记录失败"),
+                      );
                   });
                 }}
                 className="flex items-center gap-1.5 rounded-full border border-red-400/40 bg-red-500/10 px-3 py-1 text-sub font-semibold text-red-200 transition hover:bg-red-500/20"
@@ -2010,6 +2032,7 @@ function IssueDrawer({
   onChanged: () => void;
 }) {
   const confirm = useConfirm();
+  const toast = useToast();
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -2125,7 +2148,9 @@ function IssueDrawer({
                 setBusy(true);
                 void clearMissingLibraryRecords(libraryId)
                   .then(onChanged)
-                  .catch(() => {})
+                  .catch((e) =>
+                    toast.error(e instanceof Error ? e.message : "清理缺失记录失败"),
+                  )
                   .finally(() => setBusy(false));
               }}
               className="btn-glass shrink-0 px-3 py-1.5 text-sub font-medium disabled:opacity-50"
@@ -2138,7 +2163,7 @@ function IssueDrawer({
         {/* 说明行 */}
         <p className="px-5 pt-3 text-caption leading-5 text-[var(--text-muted)]">
           {open === "missing"
-            ? "缺失文件恢复后会自动解除标记。「清理记录」会复查视频是否仍缺失，并删除缺失记录和残留附件。可在库设置里开启「扫描后自动清理丢失记录」。"
+            ? "缺失文件恢复后会自动解除标记。「清理记录」会复查视频是否仍缺失，并删除缺失记录和残留附件；扫描媒体库时也会自动清理仍缺失的记录。"
             : "同一目录的文件聚成一组，认领一次整组生效；点候选可先核对海报简介再确认。状态标签悬停看完整原因。"}
         </p>
 

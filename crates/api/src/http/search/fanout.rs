@@ -51,16 +51,24 @@ impl UnreportedSites {
     fn mark_spawned(&self, site_id: &str, site_name: &str) {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push((site_id.to_string(), site_name.to_string()));
     }
 
     fn mark_reported(&self, site_id: &str) {
-        self.0.lock().unwrap().retain(|(id, _)| id != site_id);
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(id, _)| id != site_id);
     }
 
     fn drain(&self) -> Vec<(String, String)> {
-        std::mem::take(&mut *self.0.lock().unwrap())
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 }
 

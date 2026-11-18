@@ -206,8 +206,64 @@ fn shared_origin_timeout_does_not_trigger_re_election() {
     assert!(matches!(cached, Ok(None)));
 }
 
+fn releasing_permit_wakes_all_waiters() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let (origin, entries) = gate(false);
+    let tmdb = Arc::new(
+        Tmdb::new_at(
+            Source(origin.clone()),
+            &dir.path().join("cache.db"),
+            1_000_000,
+        )
+        .unwrap(),
+    );
+    let holders: Vec<_> = (0..8)
+        .map(|id| {
+            let tmdb = tmdb.clone();
+            std::thread::spawn(move || tmdb.details_poster(MediaKind::Movie, &format!("wake-{id}")))
+        })
+        .collect();
+    for _ in 0..8 {
+        entries.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+    let (done_tx, done_rx) = mpsc::channel();
+    let deadline_waiters: Vec<_> = (0..4)
+        .map(|id| {
+            let tmdb = tmdb.clone();
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let res = CatalogRequest::new(Instant::now() + Duration::from_millis(60))
+                    .scope(|| tmdb.details_poster(MediaKind::Movie, &format!("exp-{id}")));
+                let _ = done_tx.send(res);
+            })
+        })
+        .collect();
+    let (unscoped_tx, unscoped_rx) = mpsc::channel();
+    let unscoped = {
+        let tmdb = tmdb.clone();
+        std::thread::spawn(move || {
+            let res = tmdb.details_poster(MediaKind::Movie, "unscoped-survives");
+            let _ = unscoped_tx.send(res);
+        })
+    };
+    std::thread::sleep(Duration::from_millis(120));
+    release(&origin);
+    assert!(unscoped_rx.recv_timeout(Duration::from_secs(3)).is_ok());
+    for _ in 0..4 {
+        let _ = done_rx.recv_timeout(Duration::from_secs(2));
+    }
+    let _ = unscoped.join();
+    for h in holders {
+        let _ = h.join();
+    }
+    for w in deadline_waiters {
+        let _ = w.join();
+    }
+}
+
 #[test]
 fn origin_budget_covers_admission_and_shared_timeout_is_not_retried() {
     admission_is_inside_origin_budget();
     shared_origin_timeout_does_not_trigger_re_election();
+    releasing_permit_wakes_all_waiters();
 }

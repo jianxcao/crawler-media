@@ -108,7 +108,11 @@ impl Store {
         operation_id: &str,
         now_ms: i64,
     ) -> Result<OperationStatus, StoreError> {
+        let library_key = library.to_string();
         self.with_library_write(|db| {
+            if self.writers.has_rename_publication(&library_key) {
+                return Err(StoreError::WriteBusy);
+            }
             db.begin_library_integrity(library, repair, operation_id, now_ms)
         })
     }

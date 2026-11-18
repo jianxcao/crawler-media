@@ -8,7 +8,12 @@ impl crate::LibraryConnection<'_> {
         now: i64,
         error: &StoreError,
     ) -> Result<(), StoreError> {
-        if matches!(error, StoreError::Protected(_) | StoreError::Missing(_)) {
+        let terminal = match error {
+            StoreError::Protected(msg) => msg != "write admission refused",
+            StoreError::Missing(_) => true,
+            _ => false,
+        };
+        if terminal {
             self.mark_file_rename_failed(rename_id, now, &error.to_string())?;
         }
         Ok(())
@@ -35,15 +40,7 @@ impl crate::LibraryConnection<'_> {
         }
         let from_library = request.from_library_id.to_string();
         let to_library = request.to_library_id.to_string();
-        if config_revision(&tx, &from_library)? != request.from_config_revision
-            || config_revision(&tx, &to_library)? != request.to_config_revision
-        {
-            return Err(StoreError::Protected(format!(
-                "rename {rename_id}: Library configuration changed since planning"
-            )));
-        }
-        ensure_library_writable(&tx, &from_library)?;
-        ensure_library_writable(&tx, &to_library)?;
+        ensure_rename_libraries_admitted(&tx, request, true)?;
         ensure_media_writable(&tx, request.media_id)?;
         refuse_occupied(&tx, &to_str, &id)?;
         let changed = tx.execute(
@@ -70,7 +67,7 @@ impl crate::LibraryConnection<'_> {
                 request.file_id,
                 owned.revision + 1,
                 observed,
-                now,
+                now.saturating_mul(1000),
             )?;
         }
         // Coverage rows carry composite FK (file_id, library_id, media_id).
@@ -90,6 +87,7 @@ impl crate::LibraryConnection<'_> {
             &from_library,
             &to_library,
             &request.to_root_id,
+            request.media_id,
             &from_str,
             &to_str,
             &placed,

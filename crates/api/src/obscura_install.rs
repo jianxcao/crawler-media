@@ -384,11 +384,14 @@ fn terminate_group(child: &mut Child, pid: u32) {
         while std::time::Instant::now() < deadline {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 // Leader gone; make sure no worker in the group survives.
+                // SAFETY: `pgid` is `-pid` where `pid` came from spawning our child with `process_group(0)`,
+                // so `kill(pgid, SIGKILL)` targets only that child's process group.
                 unsafe { libc::kill(pgid, libc::SIGKILL) };
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        // SAFETY: same own child process group `pgid = -pid` after grace timeout.
         unsafe { libc::kill(pgid, libc::SIGKILL) };
     }
     #[cfg(not(unix))]

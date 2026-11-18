@@ -75,11 +75,11 @@ pub(crate) fn adopt_catalog_metadata(
         expected_revision: Some(expected_revision),
         preferences,
     };
-    state
-        .store
-        .as_ref()
-        .adopt_metadata(&adoption, fetched_at)
-        .map_err(|e| e.to_string())?;
+    crate::http::store_wait::with_foreground_store(state, |store| {
+        store.adopt_metadata(&adoption, fetched_at)
+    })
+    .map_err(|response| format!("metadata write admission rejected ({})", response.status()))?
+    .map_err(|e| e.to_string())?;
     Ok(true)
 }
 

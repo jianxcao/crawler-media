@@ -162,6 +162,8 @@ impl Fixture {
             ("DELETE", format!("/ledger/{file}?delete_file=true")),
             ("POST", format!("/libraries/{lib}/metadata/refresh")),
             ("POST", format!("/libraries/{lib}/media-info/refresh")),
+            ("POST", format!("/libraries/{lib}/organize")),
+            ("POST", format!("/libraries/{lib}/path-reconciliations")),
             (
                 "POST",
                 format!("/libraries/{lib}/items/{item}/metadata/refresh"),

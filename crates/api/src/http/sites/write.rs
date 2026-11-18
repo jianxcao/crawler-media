@@ -326,10 +326,11 @@ async fn delete_site_inner(State(state): State<ApiState>, Path(id): Path<String>
             tracing::info!(site_id = %id, "已删除索引站点");
             ok(json!({ "deleted": true })).into_response()
         }
-        _ => {
+        Ok(false) => {
             tracing::warn!(site_id = %id, "待删除的站点不存在");
             err(StatusCode::NOT_FOUND, "site.missing", "站点不存在")
         }
+        Err(error) => site_store_error(&error),
     })
     .await
     .unwrap_or_else(|response| response)

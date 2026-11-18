@@ -7,9 +7,9 @@ pub fn subtitle_index(tracks: &Tracks, ordinal: usize) -> u32 {
     let sub = tracks.subtitles.get(ordinal);
     if let Some(sub) = sub
         && !sub.is_external
-        && sub.stream_index.is_some()
+        && let Some(idx) = sub.stream_index
     {
-        return sub.stream_index.unwrap();
+        return idx;
     }
     let max_stream_idx = tracks
         .video

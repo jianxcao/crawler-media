@@ -22,6 +22,7 @@ pub(crate) async fn cached_chapters(
     axum::extract::Query(query): axum::extract::Query<ChapterCacheQuery>,
 ) -> Response {
     // Review L2: a cache read on the player's hot path; off the executor.
+    let inflight_registry = state.theintrodb_inflight.clone();
     let result = store_read(
         &state,
         &[store::Db::Library, store::Db::App],
@@ -82,13 +83,23 @@ pub(crate) async fn cached_chapters(
             match store.get_cached_chapters(&cov.file.file_id.to_string()) {
                 Ok(Some(mut chapters)) => {
                     let marker = crate::marker_resolver::unit_marker(store, &cov, binding.unit);
+                    let inflight = marker.is_none()
+                        && media.tmdb_id.as_deref().is_some_and(|tmdb_id| {
+                            inflight_registry.is_active(
+                                cov.file.file_id,
+                                &cov.file.version,
+                                binding.unit,
+                                media.id,
+                                tmdb_id,
+                            )
+                        });
                     crate::marker_resolver::append_marker_chapters(
                         &mut chapters,
                         marker.as_ref(),
                         cov.file.duration_ms,
                     );
                     ok(json!({
-                        "ready": true,
+                        "ready": !inflight,
                         "chapters": chapters.iter().map(|chapter| json!({
                             "start_ms": chapter.start_ms,
                             "title": chapter.title,

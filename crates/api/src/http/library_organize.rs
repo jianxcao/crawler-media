@@ -171,6 +171,12 @@ pub(crate) async fn refresh_item_metadata(
 /// 整个同步刷新用例（lease → TMDB 抓取 → 海报/NFO 落盘）在 blocking 闭包内，
 /// LibraryLease 持有到真实工作结束。
 fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+    {
+        return response;
+    }
     let lease = match state.acquire_library_work(id) {
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),

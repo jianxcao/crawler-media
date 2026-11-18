@@ -234,8 +234,16 @@ fn verify_against_model(
 
     ensure_cluster_consensus_is_unambiguous(&clusters, best_cluster, policy)?;
 
-    let target_start = best_cluster.iter().map(|c| c.target_start).min().unwrap();
-    let target_end = best_cluster.iter().map(|c| c.target_end).max().unwrap();
+    let target_start = best_cluster
+        .iter()
+        .map(|c| c.target_start)
+        .min()
+        .ok_or_else(|| "empty_consensus_cluster".to_string())?;
+    let target_end = best_cluster
+        .iter()
+        .map(|c| c.target_end)
+        .max()
+        .ok_or_else(|| "empty_consensus_cluster".to_string())?;
     let matched_duration = target_end - target_start;
 
     // Check coverage against model expected duration

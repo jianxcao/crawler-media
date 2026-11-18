@@ -481,3 +481,186 @@ fn cross_filesystem_move_copies_and_recovers_by_evidence() {
         "copy is new content"
     );
 }
+
+#[test]
+fn recovery_keeps_intent_retryable_while_library_is_reindexing() {
+    let fx = fixture();
+    let to = fx.a.join("Renamed.2000.mkv");
+    let req = begin(&fx, &to);
+    store::library_write::execute_rename_disk(&req).unwrap();
+    assert!(to.is_file());
+    assert!(!fx.file.path.exists());
+
+    let lib_id: domain::LibraryId = req.from_library_id;
+    let op = fx
+        .store
+        .begin_library_reconfiguration(
+            &store::LibraryReconfiguration {
+                operation_id: "reconfig-lock-rename".into(),
+                library_id: lib_id,
+                expected_revision: req.from_config_revision,
+                root_paths: None,
+                display_locale: Some("en-US".into()),
+            },
+            1_000,
+        )
+        .unwrap();
+    // Transient `reindexing` must NOT mark a moved rename as permanently `failed`.
+    assert!(fx.store.resume_pending_file_renames(2).unwrap() == 0);
+    assert_ne!(intent_phase(&fx, &req.rename_id).as_deref(), Some("failed"));
+    assert_eq!(
+        fx.store.list_due_file_rename_ids(i64::MAX).unwrap(),
+        vec![req.rename_id.clone()]
+    );
+
+    // Finish reconfiguration (`ready` + bumped `config_revision`), then resume succeeds!
+    while fx
+        .store
+        .advance_library_operation(&op.operation_id, 2_000, 50)
+        .unwrap()
+        .state
+        != "succeeded"
+    {}
+    assert_eq!(fx.store.resume_pending_file_renames(70).unwrap(), 1);
+    assert_eq!(recorded(&fx.store, fx.file.file_id).path, to);
+    assert!(
+        fx.store
+            .list_due_file_rename_ids(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn reconfiguration_and_integrity_wait_on_active_rename_publication_and_no_reader_deadlock() {
+    let fx = fixture();
+    fx.store
+        .configure_reader_pool_size(store::Db::Library, std::num::NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let to = fx.tmp.join("other").join("Moved.2000.mkv");
+    let req = begin(&fx, &to);
+    let from_id = req.from_library_id.to_string();
+    let publication = fx.store.apply_file_rename(&req, 2).unwrap();
+
+    // Library operations must see active rename_publications and return WriteBusy cleanly.
+    assert!(matches!(
+        fx.store
+            .begin_library_integrity(req.from_library_id, false, "op-busy-1", 1_000),
+        Err(store::StoreError::WriteBusy)
+    ));
+    let new_root = fx.tmp.join("other-new-root");
+    std::fs::create_dir_all(&new_root).unwrap();
+    assert!(matches!(
+        fx.store.begin_library_reconfiguration(
+            &store::LibraryReconfiguration {
+                operation_id: "op-busy-2".into(),
+                library_id: req.to_library_id,
+                expected_revision: req.to_config_revision,
+                root_paths: Some(vec![new_root]),
+                display_locale: None,
+            },
+            1_000,
+        ),
+        Err(store::StoreError::WriteBusy)
+    ));
+    assert!(fx.store.library_accepts_work(&from_id).unwrap());
+
+    // Dropping `RenamePublication` inside a saturated Library reader pool (size 1)
+    // must never deadlock against a concurrent `admit_rename_publication`.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store_ref = &fx.store;
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(move || {
+            store_ref
+                .library_read_snapshot(|_db| {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+                    drop(publication);
+                })
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+        let file2_path = fx.b.join("Second.2000.mkv");
+        std::fs::write(&file2_path, b"s").unwrap();
+        let file2 = publish_fixture_file(
+            &fx.store,
+            &FixtureFile {
+                media_id: fx._media,
+                path: file2_path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let to2 = fx.b.join("Second-Renamed.2000.mkv");
+        let req2 = fx
+            .store
+            .begin_file_rename(file2.file_id, &file2.version, &file2_path, &to2, 3)
+            .unwrap();
+        let releaser = scope.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = release_tx.send(());
+        });
+        let pub2 = fx.store.apply_file_rename(&req2, 4).unwrap();
+        drop(pub2);
+        holder.join().unwrap();
+        releaser.join().unwrap();
+    });
+}
+
+#[test]
+fn rename_with_changed_destination_bytes_records_obligation_in_milliseconds() {
+    let fx = fixture();
+    let to = fx.a.join("Replaced.2000.mkv");
+    let req = begin(&fx, &to);
+    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+    // Simulate destination bytes changing (cross-device copy / new content) before completion.
+    std::fs::write(&to, b"new-video-content").unwrap();
+    let now_secs = 1_760_000_000_i64;
+    fx.store
+        .complete_file_rename(&req.rename_id, now_secs)
+        .unwrap();
+
+    let obligations = fx.store.scan_probe_obligations(10).unwrap();
+    let ob = obligations
+        .into_iter()
+        .find(|ob| ob.ledger_id == fx.file.file_id)
+        .expect("changed source must emit a probe obligation");
+    assert_eq!(ob.created_at_ms, now_secs * 1000);
+}
+
+#[test]
+fn rename_migrates_nfo_input_key_so_removing_renamed_nfo_clears_ghost_metadata() {
+    let fx = fixture();
+    let old_nfo = fx.a.join("M.2000.nfo");
+    std::fs::write(&old_nfo, "<movie><title>Old NFO Title</title></movie>").unwrap();
+    assert!(fx.store.reconcile_nfo_inputs(&fx.file.path).unwrap());
+    let detail_before = fx
+        .store
+        .library_item_detail(fx.file.library_id, fx._media, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail_before.item.title, "Old NFO Title");
+
+    let to = fx.a.join("Renamed.2000.mkv");
+    let new_nfo = fx.a.join("Renamed.2000.nfo");
+    let req = begin(&fx, &to);
+    let pub_guard = fx.store.apply_file_rename(&req, 2).unwrap();
+    drop(pub_guard);
+    assert!(new_nfo.is_file());
+    assert!(!old_nfo.exists());
+
+    // Delete the moved NFO and reconcile: no ghost row at old `input_key` may linger.
+    std::fs::remove_file(&new_nfo).unwrap();
+    assert!(fx.store.reconcile_nfo_inputs(&to).unwrap());
+    let detail_after = fx
+        .store
+        .library_item_detail(fx.file.library_id, fx._media, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail_after.item.title, "M",
+        "deleting the renamed NFO must clear the migrated metadata input without leaving a ghost old-key row"
+    );
+}

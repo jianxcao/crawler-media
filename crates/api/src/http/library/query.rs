@@ -36,7 +36,7 @@ pub(crate) fn browse_work_error(error: crate::blocking_budget::BlockingError) ->
 /// facet tier). A key outside this set means the caller expects a filter this
 /// API cannot express, so it is rejected instead of silently returning a list
 /// filtered by less than the caller asked for.
-const BROWSE_QUERY_KEYS: [&str; 17] = [
+const BROWSE_QUERY_KEYS: [&str; 18] = [
     "g",
     "c",
     "d",
@@ -54,6 +54,7 @@ const BROWSE_QUERY_KEYS: [&str; 17] = [
     "cursor",
     "limit",
     "tier",
+    "gallery",
 ];
 
 pub(crate) fn browse_filter_from_query(
@@ -137,7 +138,7 @@ pub(crate) fn browse_filter_from_query(
                 return Err(format!("unwatched_first must be true or false, got {raw}"));
             }
         },
-        require_image: false,
+        require_image: flag("gallery")?.unwrap_or(false),
     })
 }
 

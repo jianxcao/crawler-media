@@ -58,8 +58,15 @@ pub fn extract_frame_with_ffmpeg(
 
 /// Best-effort media duration in ms via ffprobe (format=duration).
 pub fn probe_duration(path: &std::path::Path) -> Option<i64> {
+    probe_duration_with_ffprobe(path, "ffprobe")
+}
+
+/// 同 `probe_duration`，但 ffprobe 程序路径可替换。测试传入假程序，避免依赖 PATH。
+pub fn probe_duration_with_ffprobe(path: &std::path::Path, ffprobe: &str) -> Option<i64> {
+    let control = WorkControl::default();
+    let _permit = marker::media_read::acquire_media_read(path, control.signal()).ok()?;
     let target = ProbeTarget::from_path(path);
-    let mut cmd = Command::new("ffprobe");
+    let mut cmd = Command::new(ffprobe);
     cmd.args([
         "-v",
         "error",

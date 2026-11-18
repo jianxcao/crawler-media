@@ -91,25 +91,45 @@ pub(crate) async fn refresh_item_chapters(
         Ok(items) => items,
         Err(response) => return response,
     };
+    finalize_chapter_refresh(
+        &state,
+        &media,
+        &fingerprint_rows,
+        season,
+        body.capture_policy,
+        items,
+    )
+    .await
+}
+
+async fn finalize_chapter_refresh(
+    state: &ApiState,
+    media: &domain::Media,
+    fingerprint_rows: &[domain::FileCoverage],
+    season: u32,
+    capture_policy: crate::fingerprint_job::CapturePolicy,
+    items: Vec<Value>,
+) -> Response {
     let worker = state.clone();
+    let media_id = media.id;
+    let media = media.clone();
+    let rows = fingerprint_rows.to_vec();
     let after = state
         .http_work
         .run_to_completion(move || {
-            worker.require_writable()?;
-            worker.require_write_admitted()?;
-            let (probe_queued, season_probe_was_active) = enqueue_season_refresh(
-                &worker,
-                &media,
-                &fingerprint_rows,
-                season,
-                body.capture_policy,
-            );
-            let marker_job = worker
-                .probe
-                .marker_refresh_job(media_id, season)
-                .map_err(chapter_store_error)?;
+            let outcome = crate::http::store_wait::with_foreground_store(&worker, |store| {
+                let _ = store;
+                let (probe_queued, season_probe_was_active) =
+                    enqueue_season_refresh(&worker, &media, &rows, season, capture_policy);
+                let marker_job = worker
+                    .probe
+                    .marker_refresh_job(media_id, season)
+                    .map_err(chapter_store_error)?;
+                Ok::<_, Response>((probe_queued, season_probe_was_active, marker_job))
+            })??;
+            let (probe_queued, season_probe_was_active, marker_job) = outcome;
             let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
-            let active_after_enqueue = fingerprint_rows
+            let active_after_enqueue = rows
                 .iter()
                 .any(|candidate| worker.probe.is_queued(&candidate.file.file_id.to_string()));
             let already_running = probe_queued == 0

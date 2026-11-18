@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import React from 'react';
 import ts from 'typescript';
 import { createLibraryItemProbe } from '../lib/library-item-probe.ts';
 import { createChapterFrameSession, shouldPollFrameTask } from '../lib/chapter-frame-task.ts';
 import { isPlayableFile } from '../lib/library-file-pages.ts';
+import { deferred, itemDetailHarness } from './support/library-item-detail-renderer.mjs';
 
 const noop = () => undefined;
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -57,4 +59,62 @@ test('item probe button submits without an episode selection after effect setup-
   probe.props.onClick(); await tick();
   assert.deepEqual(submitted, [{ libraryId: 'library', mediaId: 'whole-item', aborted: false }]);
   assert.equal(reads, initialReads + 1, 'probe completion refreshes item facts without a chapter session');
+});
+
+test('non-admin hides probe/chapter action buttons and does not poll probe-status', async () => {
+  const view = itemDetailHarness({ tv: true, canManageLibraries: false });
+  await view.mount();
+  try {
+    const labels = view.root().findAllByType('button').map((b) => String(b.props.children ?? ''));
+    for (const adminLabel of ['重新获取片头/章节', '生成场景图', '重新探测媒体信息']) {
+      assert.ok(!labels.includes(adminLabel), `non-admin must not see button: ${adminLabel}`);
+    }
+    assert.equal(view.probeStatusCalls.length, 0, 'non-admin must not request admin probe-status');
+  } finally {
+    await view.unmount();
+  }
+});
+
+test('admin single-file delete opens confirmation modal and deletes ledger row with deleteFile=true', async () => {
+  const view = itemDetailHarness({ tv: false, canManageLibraries: true });
+  await view.mount();
+  try {
+    const deleteBtns = view.root().findAllByType('button').filter((b) => b.props['aria-label'] === '删除此文件');
+    assert.ok(deleteBtns.length > 0, 'admin should see per-file delete button');
+    await React.act(async () => {
+      deleteBtns[0].props.onClick();
+    });
+    const checkbox = view.root().findAllByType('input').find((i) => i.props.type === 'checkbox');
+    assert.ok(checkbox, 'DeleteFileDialog must render a confirmation checkbox');
+    await React.act(async () => {
+      checkbox.props.onChange({ target: { checked: true } });
+    });
+    const confirmBtn = view.root().findAllByType('button').find((b) => String(b.children?.join?.('') ?? b.props.children ?? '').includes('删除此文件') && b.props.type === 'button' && !b.props['aria-label']);
+    assert.ok(confirmBtn, 'DeleteFileDialog must render confirm delete button');
+    await React.act(async () => {
+      await confirmBtn.props.onClick();
+    });
+    assert.deepEqual(view.deletedLedgerRows, [{ id: 'file-a', deleteFile: true }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test('stale toggleFavorite completion after changing mediaItemId does not overwrite new item state', async () => {
+  const slowMark = deferred();
+  const view = itemDetailHarness({
+    tv: false,
+    mark: (body) => (body.media_item_id === 'media-1' ? slowMark.promise : Promise.resolve()),
+  });
+  await view.mount('media-1');
+  try {
+    const pendingClick = view.markFavorite();
+    await view.remount('media-2');
+    assert.equal(view.favoriteDisabled(), false, 'navigating to new item must reset marking lock');
+    await view.resolve(slowMark);
+    await pendingClick;
+    assert.equal(view.favoritePressed(), false, 'stale rejection/completion on old item must not flip new item favorite');
+  } finally {
+    await view.unmount();
+  }
 });
