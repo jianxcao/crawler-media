@@ -7,23 +7,65 @@ use std::sync::atomic::Ordering;
 
 use super::{ProbeManager, ProbeUnit, probe};
 
-async fn recv_id(manager: &ProbeManager) -> Option<store::ProbeDispatchId> {
-    // Only the current receive owns the channel. Other workers await ownership
-    // instead of interpreting an temporarily empty receiver slot as shutdown.
+pub(super) struct MetadataAdmission {
+    active: usize,
+    pub(super) limit: usize,
+}
+
+impl MetadataAdmission {
+    pub(super) fn new(limit: usize) -> Self {
+        Self { active: 0, limit }
+    }
+}
+
+async fn next_metadata_work(
+    manager: &Arc<ProbeManager>,
+) -> Option<(store::ProbeDispatchId, MetadataPermit, MetadataStageGuard)> {
+    // Keep exclusive reception until the queue head has admission. Otherwise
+    // idle workers hide older ids while a completing worker takes a newer id
+    // and races those waiters for the newly available slot.
     let _receiver = tokio::select! {
         _ = wait_for_shutdown(manager) => return None,
         guard = manager.metadata_receiver.lock() => guard,
     };
-    let slot = &manager.metadata_rx;
-    let mut rx = slot.lock().take()?;
+    let mut rx = manager.metadata_rx.lock().take()?;
     let id = tokio::select! {
-        _ = wait_for_shutdown(manager) => None,
+        _ = wait_for_shutdown(manager) => return None,
         id = rx.recv() => id,
     };
-    if id.is_some() {
-        *slot.lock() = Some(rx);
+    let id = id?;
+    *manager.metadata_rx.lock() = Some(rx);
+    let pending = MetadataStageGuard(manager.clone());
+    let permit = metadata_permit(manager).await?;
+    Some((id, permit, pending))
+}
+
+async fn metadata_permit(manager: &Arc<ProbeManager>) -> Option<MetadataPermit> {
+    loop {
+        let available = manager.metadata_capacity.notified();
+        tokio::pin!(available);
+        available.as_mut().enable();
+        {
+            let mut admission = manager.metadata_admission.lock();
+            if admission.active < admission.limit {
+                admission.active += 1;
+                return Some(MetadataPermit(manager.clone()));
+            }
+        }
+        tokio::select! {
+            _ = wait_for_shutdown(manager) => return None,
+            _ = available => {}
+        }
     }
-    id
+}
+
+struct MetadataPermit(Arc<ProbeManager>);
+
+impl Drop for MetadataPermit {
+    fn drop(&mut self) {
+        self.0.metadata_admission.lock().active -= 1;
+        self.0.metadata_capacity.notify_waiters();
+    }
 }
 
 pub(super) async fn wait_for_shutdown(manager: &ProbeManager) {
@@ -59,6 +101,10 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     let recovery_deferred = manager.recovery_deferred.swap(false, Ordering::SeqCst);
     manager.workers_started.store(true, Ordering::SeqCst);
     manager.shutdown_signal.send_replace(false);
+    {
+        let settings = manager.probe_settings.lock();
+        manager.configure_probe_admission(*settings);
+    }
     let bootstrap = manager.clone();
     let handle = tokio::spawn(async move {
         if recovery_deferred {
@@ -82,24 +128,10 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-        let configured = step(&bootstrap, |manager| {
-            manager
-                .store
-                .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
-                .ok()
-                .flatten()
-        })
-        .await
-        .map(|setting| metadata_worker_count(setting.as_deref()));
-        let Ok(metadata_workers) = configured else {
-            tracing::error!("探测 worker 启动配置步骤失败");
-            bootstrap.workers_started.store(false, Ordering::SeqCst);
-            return;
-        };
         if bootstrap.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        start_workers(&bootstrap, metadata_workers);
+        start_workers(&bootstrap);
         if let Err(error) = step(&bootstrap, |manager| manager.fill_dispatch_windows()).await {
             tracing::error!(%error, "探测初始派发失败");
         }
@@ -108,49 +140,7 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     true
 }
 
-/// Default metadata probe workers when `probe.concurrency` is unset.
-pub(crate) const DEFAULT_METADATA_WORKERS: usize = 1;
-/// Upper bound for `probe.concurrency`.
-pub(crate) const MAX_METADATA_WORKERS: usize = 8;
-/// STRM sources allow exactly one read at a time.
-pub(crate) const REMOTE_READ_LIMIT: usize = 1;
-/// Pause after each remote read before the next one is admitted.
-pub(crate) const REMOTE_READ_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// `probe.concurrency` → metadata worker count (default 1, clamped 1..=8).
-pub(crate) fn metadata_worker_count(setting: Option<&str>) -> usize {
-    setting
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_METADATA_WORKERS)
-        .min(MAX_METADATA_WORKERS)
-}
-
-#[cfg(test)]
-mod concurrency_tests {
-    use super::*;
-
-    #[test]
-    fn probe_concurrency_defaults_to_one_and_is_clamped() {
-        assert_eq!(metadata_worker_count(None), 1);
-        assert_eq!(metadata_worker_count(Some("0")), 1);
-        assert_eq!(metadata_worker_count(Some("junk")), 1);
-        assert_eq!(metadata_worker_count(Some(" 6 ")), 6);
-        assert_eq!(metadata_worker_count(Some("99")), 8);
-    }
-
-    /// STRM sources allow one read at a time: the gate is pinned to one
-    /// remote read with a 500ms cooldown, whatever probe.concurrency says.
-    #[test]
-    fn remote_reads_are_serial_with_a_500ms_cooldown() {
-        assert_eq!(REMOTE_READ_LIMIT, 1);
-        assert_eq!(REMOTE_READ_COOLDOWN, std::time::Duration::from_millis(500));
-    }
-}
-
-fn start_workers(manager: &Arc<ProbeManager>, metadata_workers: usize) {
-    // STRM limit: one remote read at a time across all workers, 500ms apart.
-    marker::media_read::configure_remote_reads(REMOTE_READ_LIMIT, REMOTE_READ_COOLDOWN);
+fn start_workers(manager: &Arc<ProbeManager>) {
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
         return;
@@ -158,14 +148,14 @@ fn start_workers(manager: &Arc<ProbeManager>, metadata_workers: usize) {
     workers.push(tokio::spawn(run_fingerprint_worker(manager.clone())));
     workers.push(tokio::spawn(super::analysis::run(manager.clone())));
     workers.push(tokio::spawn(run_window_dispatcher(manager.clone())));
-    for _ in 0..metadata_workers {
+    for _ in 0..crate::probe_settings::MAX_METADATA_WORKERS {
         let manager = manager.clone();
         workers.push(tokio::spawn(run_metadata_worker(manager)));
     }
     drop(workers);
     manager.wake.notify_waiters();
     tracing::info!(
-        metadata_workers,
+        metadata_workers = manager.probe_settings.lock().metadata_workers,
         fingerprint_workers = 1,
         "【媒体探测】高优先级媒体信息队列与低优先级声纹队列已启动"
     );
@@ -198,16 +188,16 @@ where
 
 async fn run_metadata_worker(manager: Arc<ProbeManager>) {
     loop {
-        let id = recv_id(&manager).await;
-
-        let Some(id) = id else { break };
-        let pending = MetadataStageGuard(manager.clone());
+        let Some((id, permit, pending)) = next_metadata_work(&manager).await else {
+            break;
+        };
         if manager.shutting_down.load(Ordering::SeqCst) {
             manager.seen.lock().remove(&id.ledger_id);
             continue;
         }
         let (handed_off, owns_running) = process_metadata(&manager, &id).await;
         drop(pending);
+        drop(permit);
         if !handed_off {
             retry_dispatch(&manager, &id, owns_running).await;
         }

@@ -55,6 +55,9 @@ pub struct ApiState {
     pub(crate) file_stats: Arc<dyn crate::file_stat_read::FileStatRead>,
     /// 文件系统观察 seam（verify / prune / watcher）；生产默认真实实现，测试可注入。
     pub(crate) library_files: Arc<dyn crate::library_presence::LibraryFileRead>,
+    pub(crate) theintrodb_negative: Arc<crate::theintrodb_lookup::NegativeCache>,
+    pub(crate) theintrodb_factory: Arc<dyn crate::theintrodb_lookup::ClientFactory>,
+    pub(crate) theintrodb_inflight: Arc<crate::theintrodb_lookup::InFlight>,
     pub(crate) chapter_probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
     /// 播放时钟 seam（生产为真实系统毫秒时钟；测试可注入假时钟）。
     pub(crate) playback_clock: Arc<dyn crate::playback_events::PlaybackClock>,
@@ -158,6 +161,14 @@ fn apply_admin_bootstrap(
 }
 
 impl ApiState {
+    pub fn with_theintrodb_factory(
+        mut self,
+        factory: Arc<dyn crate::theintrodb_lookup::ClientFactory>,
+    ) -> Self {
+        self.theintrodb_factory = factory;
+        self
+    }
+
     pub fn with_chapter_probe(
         mut self,
         probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
@@ -303,6 +314,9 @@ impl ApiState {
             )),
             file_stats: Arc::new(crate::file_stat_read::LocalFileStatRead),
             library_files: Arc::new(crate::library_presence::SystemLibraryFileRead),
+            theintrodb_negative: Arc::new(Default::default()),
+            theintrodb_factory: Arc::new(crate::theintrodb_lookup::HttpClientFactory),
+            theintrodb_inflight: Arc::new(Default::default()),
             chapter_probe: Arc::new(crate::marker_resolver::FfprobeChapters),
             playback_clock: Arc::new(crate::playback_events::SystemPlaybackClock),
             job_updates: Arc::new(crate::job_updates::JobUpdates::new()),

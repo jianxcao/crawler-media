@@ -13,6 +13,8 @@ API + Jellyfin 兼容服务是单个 Rust 二进制（`crates/api`）。前端�
 
 ## 本地运行
 
+媒体信息读取速度可在「设置 → 刮削与整理 → 媒体信息探测」调整：媒体信息并发默认 1、共享远程并发默认 1、远程读取间隔默认 500ms。保存持久化并立即控制后续任务，活动读取继续完成；降低并发后等待活动数下降再准入。完整范围、权限和 API 见[探测设置契约](api-contracts/probe-settings.md)。声纹开关与媒体信息、截图及 TheIntroDB 查询独立，关闭声纹不代表停止所有远程视频读取。
+
 ```bash
 # 1. 后端（数据目录默认 ./data，可用 CRAWLER_MEDIA_DATA 覆盖）
 cargo run -p api --bin crawler-media -- serve

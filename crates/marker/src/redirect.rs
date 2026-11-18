@@ -2,8 +2,9 @@
 //!
 //! ffprobe/ffmpeg re-request the STRM URL on every seek, and each request
 //! re-runs the redirector. Resolving the 302 once and handing the target to
-//! ffmpeg removes those round trips. Any failure falls back to the original
-//! URL, so the cache can only save work, never break a read.
+//! ffmpeg removes those round trips. Successful direct responses are cached too,
+//! so a source without redirects is not preflighted on every read. Failures
+//! fall back to the original URL and are never cached as successful lookups.
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -40,7 +41,14 @@ impl RedirectCache {
     /// Redirect target for `url`, or `url` itself when it does not redirect
     /// or cannot be resolved right now.
     pub fn resolve(&self, url: &str) -> String {
+        let started = Instant::now();
         if let Some(target) = self.fresh(url) {
+            tracing::debug!(
+                cache_hit = true,
+                redirected = target != url,
+                elapsed_ms = started.elapsed().as_millis(),
+                "STRM target resolution completed"
+            );
             return target;
         }
         match self.fetch_location(url) {
@@ -54,10 +62,21 @@ impl RedirectCache {
                     }
                 }
                 entries.insert(url.to_string(), (target.clone(), Instant::now() + self.ttl));
-                tracing::debug!(%url, "STRM redirect resolved and cached");
+                tracing::debug!(
+                    cache_hit = false,
+                    redirected = target != url,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "STRM target resolution completed"
+                );
                 target
             }
-            None => url.to_string(),
+            None => {
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "STRM target resolution fell back to the original input"
+                );
+                url.to_string()
+            }
         }
     }
 
@@ -73,14 +92,28 @@ impl RedirectCache {
     }
 
     fn fetch_location(&self, url: &str) -> Option<String> {
-        let response = self
+        let response = match self
             .agent
             .get(url)
             .header("User-Agent", crate::active_probe_ua())
             .header("Range", "bytes=0-0")
             .call()
-            .ok()?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error_kind = ?std::mem::discriminant(&error),
+                    "STRM target resolution failed; using original input");
+                return None;
+            }
+        };
+        if response.status().is_success() {
+            return Some(url.to_string());
+        }
         if !response.status().is_redirection() {
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "STRM target resolution returned an unexpected status; using original input"
+            );
             return None;
         }
         let location = response.headers().get("location")?.to_str().ok()?.trim();

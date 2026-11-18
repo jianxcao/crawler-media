@@ -29,7 +29,20 @@ impl crate::LibraryConnection<'_> {
         }
         crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
         let before = read_file_summary_facts(&tx, &id)?;
+        let previous_duration: Option<i64> = tx.query_row(
+            "SELECT duration_ms FROM library_files WHERE file_id=?1",
+            params![id],
+            |row| row.get(0),
+        )?;
         write_quality_tx(&tx, &id, p)?;
+        if p.duration_ms
+            .is_some_and(|duration| Some(duration) != previous_duration)
+        {
+            tx.execute(
+                "DELETE FROM file_markers WHERE file_id=?1 AND source='theintrodb'",
+                params![id],
+            )?;
+        }
         if let Some(details) = p.details {
             let merged = merge_details_tx(&tx, &id, p.expected, details)?;
             upsert_file_details(&tx, &id, &merged)?;

@@ -44,7 +44,7 @@
 
 Media 的权威身份与别名位于 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 是单值投影，不代表完整别名集合。`Store::update_media` 保留未被本次编辑替换的别名，并在事务中更新相关卡片。
 
-章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。TheIntroDB 未经本文件验证的范围只作候选，不写正式标记或用于播放 overlay。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。
+章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。启用 TheIntroDB 后，云端结果可作为明确的 `theintrodb` 来源写入当前文件标记并用于播放 overlay；它不表示本文件声纹 `verified`，也不触发声纹或其他音频读取。仅对单文件单集、已知当前文件时长、v4 响应坐标一致、已知 release 群组时长与文件时长差不超过 300,000ms，且合法范围位于文件时长内的结果采纳。请求使用 `duration_ms`、`details=true`、`merge_unknown=false`；云端未匹配时会回退热门 release，客户端必须检查 `group_duration_ms`，未知或不匹配的范围仍是候选。已有正式标记（含人工锁和更高可信来源）优先，发布仍复查当前文件版本、时长和覆盖。`no_submissions` 是正常缺少云端提交，`episode_not_found` / `media_not_found` 是身份或坐标不匹配，旧路由 404、认证、网络及响应错误不能记录为已确认没有标记。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。
 
 章节详情接口必须指定有效可播的 `file_id`；TV 还须提供完整 `season`/`episode`，电影省略季集。`GET /libraries/{id}/items/{item_id}/chapters` 保持数组响应；`POST .../chapters/refresh` 返回选中文件的章节，指纹任务仍覆盖整季；条目 `/probe` 仍覆盖全部文件。服务端先验证 Library 可见性、Media、file/Unit 和登记版本，拒绝错误组合，不接受路径或自动改选其他版本。
 
@@ -100,6 +100,8 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 前端 `web/lib/api/libraries.ts` 把 202 与 200 分成 `updateLibrary` 的 `{kind:"operation"}` / `{kind:"library"}` 两种结果；`updateLibraryAndWait` 负责轮询到终态。`assignLibraryFilesToTitle`（`POST /reidentify`）仍是单次同步 200，不参与这套轮询。
 
 **重新识别契约（唯一形状）**：`GET /libraries/{id}/items/{item_id}/reidentification-preview` 返回 `media_item_id`、`source_revision`，每组 `files: [{file_id, revision, source_version}]`。`POST /reidentify` 只接受 `{media_item_id, source_revision, title_ref, files:[{file_id, revision, source_version}]}`（未知字段 400）；files 非空、无重复、revision>0、source_version 非空、全属 `media_item_id`，否则 400；版本或 source_revision 过期返回 409 且不移动任何文件，服务器从不补当前版本。分集 DTO 输出 `played`。Media 别名查询的 source 只认 `tmdb|douban|tvdb|bangumi|anilist`。
+
+预览对尚未绑定任何外部 ID 的 Movie/TV 才搜索候选，搜索在 Store 读快照释放后执行；候选同类型、与已知年份一致，按 TMDB ID 去重并最多返回 20 个。多个候选 `code=ambiguous`，零候选 `no_match`，上游搜索失败 `tmdb_unreachable`；单候选 `code=null` 仍须确认，不能冒充已绑定身份。已绑定身份 `source=current` 直接回显且不重复搜索。预览不修改 Media、文件版本或 NFO；通过现有 `POST /reidentify` 选定候选后持久化。界面候选显示 TMDB ID 以区分同名同年份项，详见[身份复核](../design/metadata-identity-review.md)。
 
 ### Media 合并操作
 

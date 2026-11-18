@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { BrandLoader } from "@/components/brand-loader";
+import { ProbeSettingsCard } from "@/components/probe-settings-card";
 import { useToast } from "@/components/feedback";
 import { CheckIcon, PlusIcon, XIcon } from "@/components/icons";
 import {
@@ -22,7 +23,7 @@ import {
  * 空字段 = 跟随默认；保存即生效，存量需整库刷新生效（提示文案）。
  */
 
-type TabId = "metadata" | "images" | "naming" | "mirror" | "markers";
+type TabId = "metadata" | "images" | "naming" | "mirror" | "markers" | "probe";
 
 const TABS: { id: TabId; label: string; hint: string }[] = [
   { id: "metadata", label: "元数据", hint: "语言优先级与分级地区" },
@@ -30,6 +31,7 @@ const TABS: { id: TabId; label: string; hint: string }[] = [
   { id: "naming", label: "命名与整理", hint: "入库文件名模板" },
   { id: "mirror", label: "目录写入", hint: "侧车文件（NFO / 图片）写不写" },
   { id: "markers", label: "片头片尾", hint: "TheIntroDB 云端片头片尾标记库与自动跳过" },
+  { id: "probe", label: "媒体信息探测", hint: "媒体信息并发与远程读取速度" },
 ];
 
 const LANGUAGE_OPTIONS = [
@@ -327,7 +329,7 @@ export function ScrapeSettingsSection() {
               onChange={(v) => set("theintrodb_enabled", v)}
             />
             <div className="mt-4 space-y-2">
-              <label className="text-sub font-medium text-white/80">TheIntroDB API Key</label>
+              <label className="text-sub font-medium text-white/80">TheIntroDB API Key（可选）</label>
               <input
                 type="password"
                 className={INPUT_CLASS}
@@ -345,7 +347,7 @@ export function ScrapeSettingsSection() {
                 >
                   theintrodb.org
                 </a>{" "}
-                注册并获取免费 API Key。配置后系统在识别剧集时优先从云端拉取片头时间戳，自动向 Infuse 等客户端提供「跳过片头」能力。
+                查询片头片尾标记无需 API Key，可选填写账户密钥。启用后系统在识别剧集时优先从云端拉取片头时间戳，自动向 Infuse 等客户端提供「跳过片头」能力。
               </p>
             </div>
           </Group>
@@ -376,7 +378,9 @@ export function ScrapeSettingsSection() {
         </div>
       )}
 
-      <div className="mt-8 flex items-center gap-3">
+      {tab === "probe" && <ProbeSettingsCard />}
+
+      {tab !== "probe" && <div className="mt-8 flex items-center gap-3">
         <button
           type="button"
           onClick={save}
@@ -386,7 +390,7 @@ export function ScrapeSettingsSection() {
           {busy ? "保存中…" : "保存设置"}
         </button>
         {!dirty && <span className="text-caption text-white/40">没有未保存的修改</span>}
-      </div>
+      </div>}
     </div>
   );
 }

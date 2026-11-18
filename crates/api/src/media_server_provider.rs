@@ -683,6 +683,14 @@ impl MediaServerProvider for ApiServerProvider {
         device_id: &str,
         snapshot: &MediaItemSnapshot,
     ) -> Result<String, String> {
+        if let Some(unit) = snapshot.unit {
+            crate::theintrodb_lookup::schedule_file_lookup(
+                self.state.clone(),
+                snapshot.file.clone(),
+                unit,
+                snapshot.media.clone(),
+            );
+        }
         let snapshot = snapshot.clone();
         let device_id = device_id.to_owned();
         self.run_sync(move |provider| {

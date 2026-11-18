@@ -84,7 +84,7 @@ python3 scripts/with-build-lock.py --exclusive target/release/fingerprint-bench 
 
 每个 stdout Media 行和 `<run-id>.json` 的 `media[]` 都给 `independent_episode_count`、`file_count`、`elapsed_ms`、`terminal_status`、`wallclock_complete`、`frame_targets`、`ready_frames`。报告首次和复用刷新分别的实际值。计时从 enqueue 前到该 Media 的识别、探测释放、所有要求的 scene JPEG 终态且成功解码；哈希、导入、工具发现、编译和 teardown 不在 Media 时钟内。失败/缺图 elapsed 只列诊断，不能作为完整耗时；无截图目标应明确报 0，不声称执行过 JPEG。application cold 不代表 OS cache cold。阶段和可能重叠，不能求和代替墙钟。`measurement_complete` 是网络流量完整性，不等于 `wallclock_complete`；未知 input_bytes 为 null。
 
-每次同时产出 `<run-id>-predictions.json`，它才是页面/CLI 的 predictions 输入。不得把 STRM 内容当完整远程 hash；即使 `--allow-remote`，未验证远程完整源仍产出 unverified/error。远程媒体只使用已授权来源，并协调已有读取任务，保持 REMOTE_READ_LIMIT=1 / REMOTE_READ_COOLDOWN=500ms；不启动或重启其他测试正在使用的实例。
+每次同时产出 `<run-id>-predictions.json`，它才是页面/CLI 的 predictions 输入。不得把 STRM 内容当完整远程 hash；即使 `--allow-remote`，未验证远程完整源仍产出 unverified/error。远程媒体只使用已授权来源，并协调已有读取任务。实例探测并发与间隔可在界面配置；真实验收沿用默认远程并发 1、间隔 500ms，除非用户明确授权调整。不启动或重启其他测试正在使用的实例。
 
 ### 按 Intro/Outro 分开判读产物
 

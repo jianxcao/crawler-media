@@ -202,54 +202,52 @@ async fn session_chapters(
     // Chapters decorate the session grant; a contended Store must not fail it.
     let file_id = file.file_id;
     let expected = file.version.clone();
-    let cached_chapters = match store_read(state, &[store::Db::Library], move |store| {
-        let coverage = store.file_coverage_by_id(file_id).ok().flatten()?;
-        if coverage.file.version != expected || !coverage.units.contains(&unit) {
-            return None;
-        }
-        let mut cached = store
-            .get_cached_chapters(&file_id.to_string())
-            .ok()
-            .flatten();
-        if let Some(ref mut chapters) = cached {
-            let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
-            crate::marker_resolver::append_marker_chapters(
-                chapters,
-                marker.as_ref(),
-                coverage.file.duration_ms,
-            );
-        }
-        cached
-    })
-    .await
-    {
-        Ok(cached) => cached,
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                "读取章节缓存失败，本次按待生成返回；章节仍在后台生成"
-            );
-            None
-        }
-    };
-    let pending = cached_chapters.is_none();
-    if pending {
-        let state = state.clone();
-        let file = file.clone();
-        let media = media.clone();
-        tokio::spawn(async move {
-            let file_id = file.file_id;
-            let coverage = store_read(&state, &[store::Db::Library], move |store| {
-                store.file_coverage_by_id(file_id).ok().flatten()
-            })
-            .await;
-            if let Ok(Some(coverage)) = coverage {
-                let _ = crate::marker_resolver::resolve_item_chapters(
-                    &state, &coverage, unit, &media, None,
-                )
-                .await;
+    let factory = state.theintrodb_factory.clone();
+    let (cached_chapters, configured, has_marker) =
+        match store_read(state, &[store::Db::Library, store::Db::App], move |store| {
+            let coverage = store.file_coverage_by_id(file_id).ok().flatten()?;
+            if coverage.file.version != expected || !coverage.units.contains(&unit) {
+                return None;
             }
-        });
+            let mut cached = store
+                .get_cached_chapters(&file_id.to_string())
+                .ok()
+                .flatten();
+            if let Some(ref mut chapters) = cached {
+                let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
+                crate::marker_resolver::append_marker_chapters(
+                    chapters,
+                    marker.as_ref(),
+                    coverage.file.duration_ms,
+                );
+            }
+            let marker = crate::marker_resolver::unit_marker(store, &coverage, unit);
+            Some((
+                cached,
+                crate::theintrodb_lookup::configured_client(store, factory.as_ref()),
+                marker.is_some(),
+            ))
+        })
+        .await
+        {
+            Ok(Some(captured)) => captured,
+            Ok(None) => (None, None, false),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "读取章节缓存失败，本次按待生成返回；章节仍在后台生成"
+                );
+                (None, None, false)
+            }
+        };
+    let pending = cached_chapters.is_none() || (configured.is_some() && !has_marker);
+    if pending {
+        crate::theintrodb_lookup::schedule_file_lookup(
+            state.clone(),
+            file.clone(),
+            unit,
+            media.clone(),
+        );
     }
     let chapters = cached_chapters
         .unwrap_or_default()

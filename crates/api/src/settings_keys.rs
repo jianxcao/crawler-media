@@ -32,8 +32,8 @@ pub const CDP_ENABLED: &str = "cdp.enabled";
 pub const CDP_URL: &str = "cdp.url";
 /// Obscura install policy ("preinstalled" or "download").
 pub const OBSCURA_INSTALL: &str = "obscura.install";
-/// 媒体信息探测 worker 并发数（默认 1；上限 8）。声纹使用独立的单 worker 队列。
-pub const PROBE_CONCURRENCY: &str = "probe.concurrency";
+/// 媒体信息并发、远程读取并发与间隔的完整 JSON 设置。
+pub const PROBE_SETTINGS: &str = "probe.settings";
 /// 系统全局统一 User-Agent（默认 crawler-media/0.1.0）。
 pub const GLOBAL_USER_AGENT: &str = "network.user_agent";
 /// G-H1 air-date gate for scheduled TV searches ("0"/"false" disables; default on).

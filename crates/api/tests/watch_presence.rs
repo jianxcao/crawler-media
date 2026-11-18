@@ -137,6 +137,12 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
 #[tokio::test]
 async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     let fix = PresenceFixture::new();
+    // Record the actual source identity before simulating disappearance.
+    std::fs::write(
+        fix.root.join("video.strm"),
+        b"http://example.com/video.m3u8",
+    )
+    .unwrap();
     let (_media_id, row) = fix.insert_media_and_ledger("video.strm");
 
     // Populate the probe cache through the public writer: the fixture is a probed file.
@@ -159,6 +165,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
 
     // Mark missing
     let path = PathBuf::from(&row.path);
+    std::fs::remove_file(&path).unwrap();
     let tracker = Arc::new(api::fs_watcher::StrmGraceTracker::default());
     tracker.on_created_or_modified(&path, Some("http://example.com/video.m3u8"));
     api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(path.clone())]);

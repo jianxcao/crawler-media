@@ -46,6 +46,7 @@ pub(crate) mod playback_device_target;
 pub(crate) mod playback_logs;
 pub(crate) mod playback_stats;
 pub(crate) mod playback_views;
+pub(crate) mod probe_settings;
 pub(crate) mod proxy_settings;
 pub(crate) mod reidentify;
 pub(crate) mod request_observation;

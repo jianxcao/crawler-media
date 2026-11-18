@@ -32,7 +32,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 - **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。实际数据库 writer 不允许嵌套（debug/release 均检查）；跨库不承诺原子提交。Jobs reservation 是有界准入门，不占实际 writer。
 - **统一读池**：`store::ReaderPool`（`crates/store/src/library_read/`），app/subscribe/library/cache 容量分别为 4/2/8/2（`crates/store/src/open.rs`）。API 读走 `store_read` / `store_read_handle`；`Store::with_read_snapshot`（`crates/store/src/read_scope.rs`）显式声明所读库，按 library → app → subscribe → cache 稳定顺序准入，同阶段每库复用一个 lease/快照，读不拿 writer 锁；各库快照不是跨库原子快照。
 - **Jobs 连接**：`jobs::Queue` 持有 jobs.db 唯一 writer；API 的 `jobs_readers`（`crates/api/src/jobs_readers.rs`）使用独立容量 2 的严格只读 `ReaderPool`，通过 `jobs::QueueRead` 查询。
-- **远程读闸门**：`marker::media_read::configure_remote_reads(REMOTE_READ_LIMIT, REMOTE_READ_COOLDOWN)`，在 `crates/api/src/probe_manager/worker.rs` 配置。
+- **探测设置与远程读闸门**：`crates/api/src/probe_settings.rs` 保存完整的 `probe.settings`；`ProbeManager` 启动加载并通过 `marker::media_read::configure_remote_reads` 动态应用远程准入。
 - **图片代理**：`crates/api/src/http/image_proxy.rs`（+`runtime.rs`，`IMAGE_CONCURRENCY = 8`）。
 - **任务 SSE 流**：`crates/api/src/http/jobs.rs`（`Sse::new(ReceiverStream)`）。
 - **路由表**：`crates/api/src/http/mod.rs`（`/api/v1`）+ `http/routes/{mod,member,admin}.rs`。API 约定：`docs/api-contracts/self.md`。
@@ -46,7 +46,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
    - 读永不拿 writer 锁（走 `store_read`）。
    - 写锁粒度最小，只包住真正的写。
    - 任何锁都不得跨 `.await`、网络或文件 IO 持有。
-4. **不可改的常量**：strm media-info probe 并发必须保持 1（`REMOTE_READ_LIMIT = 1`），远程读冷却 500ms（`REMOTE_READ_COOLDOWN`）。不要调整。
+4. **探测默认值与配置**：媒体信息 worker 默认 1、远程读取并发默认 1、远程读取间隔默认 500ms。管理员可在界面配置；两个并发均为 1~8，间隔为 0~60000ms。保存即对后续任务生效，降低并发不打断活动读取，也不能让新任务超过新上限。默认值不能被无关改动提高。
 5. **删除 Library（ADR-0012）**：先隐藏 → 立即取消该库所有任务 → 删除 → 清理孤儿 Media（含 favorites / playback 进度）。某 Media 最后一个文件被删时，其 favorites / 进度一并清除。
 6. **Git**：只在当前分支提交；绝不 push `main`，绝不 force push，未经询问不开 PR。不要提交 `docs/test-reports/`、`.e2e/`，不要夹带无关改动。
 7. **静态图片端点不鉴权**：`/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*`、`/libraries/{id}/cover` 必须留在 public router（`<img>` 不带 `Authorization`）。需要用户上下文时注入 `Option<axum::Extension<Option<domain::UserId>>>`。Jellyfin 视频流按 Jellyfin 协议鉴权。
@@ -56,7 +56,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 
 - 普通 cargo / test / build 最多同时运行**两组**，统一用 `python3 scripts/with-build-lock.py COMMAND [ARG ...]` 包装；它使用 `/tmp/cm-cargo.lock` 和 `/tmp/cm-cargo-2.lock`，并强制子命令 `TMPDIR=/tmp`。已占用第一个锁的旧任务也计入上限；旧任务退出前不要按全局 `-j8` 预算估算剩余容量。
 - 每组普通 cargo 用 `-j4`，测试用 `-- --test-threads=4`。最终 workspace 套件和正式性能测量用包装器 `--exclusive` 独占两槽，cargo `-j8`、测试 `-- --test-threads=8`。
-- subagent 可以并行改代码；build/test 必须经包装器受两槽上限约束。115 远程读取仍为并发 1、冷却 500ms，不得调整。
+- subagent 可以并行改代码；build/test 必须经包装器受两槽上限约束。真实 115 验收沿用默认远程并发 1、间隔 500ms；未经用户明确授权不得为加速验收提高并发或降低间隔。
 - 优先跑定向测试（`-p <crate>`、`--test <name>`、测试名过滤）；全量套件只在最后跑一次，带 `--no-fail-fast`。
 - 临时文件放 `/tmp`，用完删除。
 

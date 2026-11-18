@@ -178,7 +178,7 @@ async fn selected_file_markers_are_isolated_in_chapters_jellyfin_and_playback() 
 }
 
 #[tokio::test]
-async fn theintrodb_candidate_without_file_validation_is_not_published_or_overlaid() {
+async fn theintrodb_candidate_without_known_file_duration_is_not_published_or_overlaid() {
     use std::io::{Read, Write};
     let tmp = tempfile::tempdir().unwrap();
     let store = api::Store::open(tmp.path().join("data")).unwrap();
@@ -240,7 +240,7 @@ async fn theintrodb_candidate_without_file_validation_is_not_published_or_overla
                     let mut request = [0_u8; 4096];
                     let read = stream.read(&mut request).unwrap();
                     assert!(read > 0, "candidate lookup must send an HTTP request");
-                    let body = r#"{"segments":[{"type":"intro","start":10,"end":70}]}"#;
+                    let body = r#"{"tvdb_id":169,"type":"tv","season":1,"episode":1,"group_duration_ms":2700000,"intro":[{"start_ms":10000,"end_ms":70000}]}"#;
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                     return;
                 }
@@ -276,7 +276,7 @@ async fn theintrodb_candidate_without_file_validation_is_not_published_or_overla
     server.join().unwrap();
     assert!(
         chapters.is_empty(),
-        "unverified candidate cannot become a chapter overlay"
+        "unknown file duration cannot select a safe release for chapter overlay"
     );
     assert!(
         store

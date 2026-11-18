@@ -146,6 +146,8 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | TRF-02 | P0 | 将高置信度与低置信度文件放入 intake Watch directory；运行一次 intake；对 Unidentified 项手动 claim 后再次运行。 | 可识别文件 Transfer 到目标 Library；Unidentified 留在待处理列表，不按猜测移动；claim 后使用明确 Media 重新执行。 |
 | SCR-01 | P1 | 对刚 Transfer 的文件、已有 Library 文件和单独路径分别执行 Scrape；打开输出目录检查 NFO 与 artwork。 | 每种入口都按开关生成/更新 sidecar；关闭 mirror 写入时不创建 NFO/artwork；已有文件不会被无关内容覆盖。 |
 | SCR-02 | P1 | 修改 Metadata source 语言、图片候选语言/质量、Naming template、目录写入和片头片尾标记偏好；运行 Scrape 后检查 Library 与 Playback。 | 新设置只影响后续预期操作；封面/背景候选符合语言与质量偏好；标记与章节呈现在支持的接口，数据源缺失时有提示。 |
+| SCR-03 | P0 | 用同名同年份、不同 TMDB ID 的本地 Catalog fixture 扫描后，打开条目「修正识别结果」，选择第二个候选并确认，再重新打开与重扫。 | 初次预览列出各候选与 TMDB ID，提示需确认且不修改原身份；确认后绑定所选 ID，之后保留。无候选与 Catalog 暂不可达显示不同原因，不能自动选第一个。 |
+| SCR-04 | P0 | 对已有有效媒体信息的 STRM 发送重复文件事件及 Watcher 首次观察，再替换为另一 URL；暂停旧源探测后释放。 | 未变源保留媒体信息；真实源变化推进版本并产生持久探测任务，旧源结果与旧义务 ACK 均不能覆盖或消费新源工作。 |
 | DUP-01 | P1 | 从重复文件页比较同一 Media 的多个版本，保留一个并删除另一个。 | 标识、路径、probe 信息和选择结果清楚；删除确认对应正确文件；Library ledger、文件和容量统计同步。 |
 
 #### Library removal 自动化辅助验收与未覆盖项
@@ -169,6 +171,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | SET-09 | P1 | 打开系统日志；按等级、时间和关键字过滤；等待 fake Job 写入新记录；查看错误上下文。 | 新日志可见且顺序合理；过滤组合生效；错误含关联 Job/Site/Downloader 信息；高频刷新不会阻断操作。 |
 | SET-10 | P1 | 打开定时 Job、Transfer、缓存页面；查看计划、运行记录和缓存项；对一个测试项手动运行、刷新或清理。 | 页面状态与定义/执行记录分开；操作有确认和结果；清理只影响目标测试项；记录可追踪。 |
 | SET-11 | P1 | 用管理员和成员分别打开 collections、activity、tasks、transfers、jobs、cache、settings 深层路由及其操作入口。 | 菜单显隐、路由守卫和后端授权一致；没有“只隐藏按钮但 API 仍允许”的越权。 |
+| SET-12 | P0 | 打开「媒体信息探测」分区，检查默认值；使用隔离本地 fixture 修改媒体信息并发、远程并发与间隔，保存、刷新、重启；运行中调低并发。 | 默认 1/1/500ms，两个并发范围 1–8，间隔 0–60000ms；非法值不能保存。保存即对后续读取生效，活动任务不被中断且新任务不超过调低后的上限；重启保留配置，普通成员不能修改。 |
 
 ### Web Playback
 
@@ -180,6 +183,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | PLAY-04 | P1 | 播放 TV Media 连续 episode，执行上一集/下一集、自动播放、手动标记已观看；模拟 stalled、网络恢复和无法播放文件。 | 切换目标正确；自动播放遵从偏好；用户观看状态同步；故障恢复可继续，无法恢复时提供 VidHub 等外部 Playback 入口。 |
 | PLAY-05 | P1 | 打开 Playback 统计、播放设备、近期活动与播放日志；按 User、时间和 Media 查看。 | 数据只属于当前 User；客户端、Media、时间与时长对应实际播放；无数据时有空状态。 |
 | PLAY-06 | P2 | 在支持的浏览器测试 PiP、返回恢复、播放会话释放和长时间播放；用 soak fixture 持续运行。 | PiP 和回到页面行为稳定；关闭播放后会话和占用释放；长时间运行无明显进度漂移或画面冻结。 |
+| PLAY-07 | P0 | 开启 TheIntroDB、关闭声纹，用本地 v4 HTTP fixture 提供与当前文件时长相符的 intro/credits，再测试无提交、错误版本与人工锁。 | 云端范围按 `theintrodb` 来源持久化并出现在当前文件播放章节，不读取音频；未知时长、错误 release、超界或坐标错误不发布，人工锁与已有正式来源优先。旧空章节缓存不能永久阻止查询，正常无提交与 HTTP/鉴权错误可区分。 |
 
 ### VidHub app：Jellyfin-compatible 接入和显示
 

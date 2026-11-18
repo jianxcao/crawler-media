@@ -222,6 +222,25 @@ fn gate_limit_can_be_raised_at_runtime() {
 }
 
 #[test]
+fn changing_cooldown_updates_waiting_reads_without_restarting_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = remote(dir.path());
+    let gate = MediaReadGate::new(1, Duration::from_secs(5));
+    gate.read(&path, &WorkControl::default(), || Ok(()))
+        .unwrap();
+    gate.configure(1, Duration::ZERO);
+    let control = WorkControl::default();
+    let cancel = control.clone();
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        cancel.cancel();
+    });
+    let result = gate.read(&path, &control, || Ok(42));
+    watchdog.join().unwrap();
+    assert_eq!(result.unwrap(), 42);
+}
+
+#[test]
 fn direct_chapter_probe_waits_for_shared_remote_admission_and_cancels() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("local-only.strm");

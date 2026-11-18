@@ -20,7 +20,7 @@
 
 Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、倒排与 Playback 放在同一 `library.db`，使事实和受影响摘要可以同事务更新。Media 可以没有文件；最后一个 Library 文件删除后，若没有 Collection 或 Subscribe 保留该 Media，则清理孤儿 Media 及其 favorites、观看状态和进度。仍被其他文件或上述业务引用保留的 Media 按 [ADR-0012](0012-library-removal.md) 处理。
 
-文件显式持有 `library_id/root_id/path_key`，归属在写入时确定并重验当前最深根，普通读消费登记事实。原始 Playback 单元与物理源绑定恢复包区分；文件版本 CAS 阻止旧工作发布。正式片头片尾标记由 `file_markers` 按 `(file_id, season, episode)` 保存，并钉住 `file_revision/source_version`；Whole 是 `(-1,-1)`。所有消费者只读取当前版本与覆盖匹配的标记，人工锁不跨版本，文件删除级联清理标记。比较证据可以跨 Library，整季任务只发布任务成员，结果与完成状态同一 Library 事务提交。TheIntroDB 的未验证范围只是候选，不写正式标记、不叠加到播放章节。冷轨道/章节不复制到完整浏览投影；卡片、协议 genre/person 成员、静态分类边际计数与稀疏用户摘要是必要冗余，写路径负责同事务差量维护，Integrity 操作负责从原始事实修复。
+文件显式持有 `library_id/root_id/path_key`，归属在写入时确定并重验当前最深根，普通读消费登记事实。原始 Playback 单元与物理源绑定恢复包区分；文件版本 CAS 阻止旧工作发布。正式片头片尾标记由 `file_markers` 按 `(file_id, season, episode)` 保存，并钉住 `file_revision/source_version`；Whole 是 `(-1,-1)`。所有消费者只读取当前版本与覆盖匹配的标记，人工锁不跨版本，文件删除级联清理标记。比较证据可以跨 Library，整季任务只发布任务成员，结果与完成状态同一 Library 事务提交。TheIntroDB 是用户显式启用的独立云端标记来源（`source=theintrodb`），不等同于本文件声纹验证。仅在单文件单集、已知当前文件时长、v4 返回坐标一致且已知 release 群组时长与本文件相差不超过官方匹配窗口 300,000ms、范围合法且位于本文件时长内时采纳；未知/不匹配结果仍只是候选。云端发布复用文件版本、覆盖、Library 生命周期屏障和人工锁保护，不触发音频读取、不覆盖已有章节/声纹/人工标记。冷轨道/章节不复制到完整浏览投影；卡片、协议 genre/person 成员、静态分类边际计数与稀疏用户摘要是必要冗余，写路径负责同事务差量维护，Integrity 操作负责从原始事实修复。
 
 每库只有一个 writer 连接及其独立 Mutex，SQL 分批 COMMIT 不自动释放该锁；读请求通过统一只读池借出连接，同阶段每库复用一个 lease 和快照，不取得 writer 锁。磁盘/网络观察须锁外进行，根迁移、删除与修复需要持久游标、公平调度和有界窗口。静态分类计数、协议实体与用户摘要通过投影维护，列表使用 keyset 分页；过滤组合的实际成本仍须以规模测试和性能闸门验证。
 

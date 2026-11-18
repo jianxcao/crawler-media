@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 use crate::http::library::require_visible_library;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
-use crate::scrape_store::ScrapeStoreExt;
 use std::str::FromStr;
 
 mod images;
@@ -150,13 +149,6 @@ fn covers_season(row: &domain::FileCoverage, season: u32) -> bool {
     })
 }
 
-fn theintrodb_client(store: &crate::Store) -> Option<crate::theintrodb::TheIntroDbClient> {
-    let config = store.get_scrape_config().ok()?;
-    let effective = &config.effective;
-    (effective.theintrodb_enabled && effective.theintrodb_api_key.is_some())
-        .then(|| crate::theintrodb::TheIntroDbClient::new(effective.theintrodb_api_key.clone()))
-}
-
 struct ChapterTarget {
     row: domain::FileCoverage,
     unit: domain::UnitKey,
@@ -173,6 +165,7 @@ async fn capture_target(
     user: Option<domain::UserId>,
     query: ChapterQuery,
 ) -> Result<ChapterTarget, Response> {
+    let factory = state.theintrodb_factory.clone();
     super::store_wait::store_read(state, &[store::Db::Library, store::Db::App], move |store| {
         let library = require_visible_library(store, &id, user)?;
         let media = store
@@ -196,7 +189,7 @@ async fn capture_target(
                 "条目没有在位文件",
             )
         })?;
-        let theintrodb = theintrodb_client(store);
+        let theintrodb = crate::theintrodb_lookup::configured_client(store, factory.as_ref());
         Ok(ChapterTarget {
             row,
             unit,

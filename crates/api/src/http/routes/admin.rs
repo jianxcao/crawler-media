@@ -8,8 +8,8 @@ use crate::http::{
     downloaders, file_delete, fs, job_maintenance, jobs, library, library_admin, library_artwork,
     library_chapters, library_config, library_delete, library_deletion, library_duplicates,
     library_housekeeping, library_operations, library_organize, library_presence, library_scan,
-    media, media_operations, metadata_language, notify, playback, reidentify, rule_sets,
-    scrape_settings, settings, sites, system_logs, transfer_settings, users,
+    media, media_operations, metadata_language, notify, playback, probe_settings, reidentify,
+    rule_sets, scrape_settings, settings, sites, system_logs, transfer_settings, users,
 };
 use crate::management::ApiState;
 
@@ -275,6 +275,10 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
         .route("/playback/policy", put(playback::put_policy))
         // directory + settings + notify（写入）
         .route("/settings/transfer", patch(transfer_settings::patch))
+        .route(
+            "/settings/probe",
+            get(probe_settings::get).put(probe_settings::put),
+        )
         .route("/notify/config", put(notify::put_config))
         .route("/notify/test", post(notify::test))
         .route(

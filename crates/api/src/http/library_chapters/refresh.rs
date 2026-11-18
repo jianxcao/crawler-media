@@ -60,6 +60,7 @@ pub(crate) async fn refresh_item_chapters(
         );
     }
 
+    state.theintrodb_negative.invalidate(row.file.file_id);
     let refreshed = if media.kind == domain::MediaKind::Tv {
         crate::marker_resolver::resolve_item_chapters(&state, &row, unit, &media, theintrodb_client)
             .await

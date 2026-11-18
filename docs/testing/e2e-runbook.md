@@ -53,7 +53,7 @@ crawler-media/
 验收前记录实际代码与构建身份，刷新 `crates/api/build.rs` 的构建戳后按锁规则构建，核对 `/api/v1/health` 与实际被测二进制一致。运行报告需要可追溯身份，但本手册不固定某个提交为永久验收依据。
 
 1. 通过公开设置 API 配置必要的 Metadata source，验证连接。验证失败保留错误，不能只因稍后 curl 成功就认定产品链路正常。
-2. 真实 STRM 可使用现有 pan-302 服务；其项目通过 `sh run.sh` 启动。先检查 STRM 实际目标及已有监听，沿用已授权服务，保持远程读并发 1、冷却 500ms；不为加速验收提高并发。
+2. 真实 STRM 可使用现有 pan-302 服务；其项目通过 `sh run.sh` 启动。先检查 STRM 实际目标及已有监听，沿用已授权服务。记录「设置 → 刮削与整理 → 媒体信息探测」的三个实际值；默认媒体信息并发 1、共享远程并发 1、间隔 500ms。验收沿用默认值，不为加速验收提高并发或降低间隔；配置变更用隔离本地源验证，结束后恢复原值。设置范围与热生效见[探测设置契约](../api-contracts/probe-settings.md)。
 3. 将选定的真实 STRM 树和 NFO/图片/字幕复制到隔离路径，建立 Movie/TV Library；另准备可本地播放的真实视频及浏览器可解码的 STRM。
 4. 扫描并逐文件核对路径、Media/Season/Episode、别名、数量和覆盖，不以总数相等代替身份集合相等。记录所有 probe 的 queued/running/succeeded/failed/cancelled 终态及每个来源，队列未排空不算全来源成功。
 5. 检查媒体信息、音轨、字幕、片头片尾、章节图与完整元数据。`complete.py`、`probestat.sh`、`resid.py` 是诊断辅助，先核对其 URL、凭据和数据路径配置。
@@ -62,6 +62,8 @@ crawler-media/
 8. 每个阶段记录首帧、响应、任务终态、错误与来源清单。STRM 错误持续增长或 pan-302 连续 5xx 时停止本轮负载并定位，不继续堆积请求。
 
 网络耗时拆分使用实际 timings：远程闸门等待、首 PCM、PCM 读取等待、Chromaprint CPU。对照 302 URL、解析出的直链和本地文件时保持相同音轨与时间窗口，并保护敏感完整 URL。差值只说明观察区间，不自动证明代理或上游根因。
+
+批量任务停服修复时使用 `./start-test.sh stop`，保留数据库、STRM、NFO、图片和日志；再次启动用 `./start-test.sh start --no-clean`。恢复前核对数据目录与健康检查构建身份，分别检查 Scan/Scrape 与持久 probe 队列，不能以元数据刮削结束推断媒体信息已完成。确认源未变而丢失媒体信息时，通过管理员 `POST /api/v1/libraries/{id}/media-info/refresh` 的 `mode:"missing"` 补排，不删除数据库或伪造成功结果。分页请求使用同一 `request_id`，以响应的 `next_cursor` 作为后续 `after`；已存在有效结果会被跳过。
 
 ## 页面与 VidHub
 

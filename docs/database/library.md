@@ -1179,7 +1179,7 @@ CREATE TABLE media_episodes (
 
 ## file_markers
 
-精确文件版本与单元的片头片尾标记及人工锁。所有读取同时核对 library_files 的当前 revision/source_version 与登记覆盖；锁定行也不能跨源版本。Whole 使用 (-1,-1)，不同文件即使覆盖同一集也不共享范围。仅 checked 事务发布，TheIntroDB 未经本文件验证的候选不能写入或用于正式 overlay。
+精确文件版本与单元的片头片尾标记及人工锁。所有读取同时核对 library_files 的当前 revision/source_version 与登记覆盖；锁定行也不能跨源版本。Whole 使用 (-1,-1)，不同文件即使覆盖同一集也不共享范围。仅 checked 事务发布。用户显式启用 TheIntroDB 时，可将 v4 云端时间戳作为独立 `theintrodb` 来源用于正式 overlay；它不表示本文件声纹验证，且必须满足单集、已知且匹配的文件/release 时长、坐标、边界与版本条件。详见 [标记优化设计](../design/marker-optimization.md#theintrodb-云端来源)。
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
 |---|---|---:|---|---|---|

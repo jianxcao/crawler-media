@@ -25,14 +25,16 @@ struct ResolveSnapshot {
     row: FileCoverage,
     unit: UnitKey,
     media: Media,
-    /// 章节解析缓存：None = 从未探测；Some(任意) = 已有结果（含空结果），
-    /// 命中后直接返回，避免无章节媒体每次播放都重跑 ffprobe / 声纹 / 云端。
+    /// Physical chapter cache, including known-empty embedded chapters.
+    /// Cloud absence is cached separately with a bounded TTL and full identity.
     cached: Option<Vec<ChapterMarker>>,
     existing_marker: Option<StoredFileMarker>,
     duration_ms: Option<i64>,
     detect_intros: bool,
     theintrodb: Option<TheIntroDbClient>,
     probe: std::sync::Arc<dyn ChapterProbe>,
+    negative: std::sync::Arc<crate::theintrodb_lookup::NegativeCache>,
+    now_ms: i64,
 }
 
 struct ResolveOutput {
@@ -104,6 +106,7 @@ pub async fn force_refresh_item_chapters(
             error_kind = "unit_time_mapping_unsupported", "chapter refresh requires unit time mapping");
         return Err(ChapterRefreshError::UnitTimeMappingUnsupported);
     }
+    state.theintrodb_negative.invalidate(row.file.file_id);
     let expected = row.clone();
     let expected_media = media.clone();
     let worker = state.clone();
@@ -160,9 +163,8 @@ fn clear_for_refresh(
         .map_err(ChapterRefreshError::SourceChanged)?
 }
 
-/// Return persisted markers when source detection is disabled, but do not run
-/// embedded chapter or TheIntroDB lookup in this synchronous resolver. Audio
-/// fingerprint extraction runs independently in the background probe queue.
+/// Return current file-local chapter markers; enabled TheIntroDB lookups run
+/// without audio reads and publish through the same source/lifecycle barriers.
 pub async fn resolve_item_chapters(
     state: &ApiState,
     row: &FileCoverage,
@@ -181,6 +183,17 @@ pub async fn resolve_item_chapters(
             return Vec::new();
         }
     };
+    resolve_item_chapters_reserved(state, row, unit, media, theintrodb, reservation).await
+}
+
+pub(crate) async fn resolve_item_chapters_reserved(
+    state: &ApiState,
+    row: &FileCoverage,
+    unit: UnitKey,
+    media: &Media,
+    theintrodb: Option<TheIntroDbClient>,
+    reservation: crate::blocking_budget::Reservation,
+) -> Vec<ChapterMarker> {
     let state = state.clone();
     let row = row.clone();
     let media = media.clone();
@@ -205,7 +218,7 @@ fn resolve_item_chapters_blocking(
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Vec<ChapterMarker> {
-    let _lease = match state
+    let lease = match state
         .library_work()
         .acquire_bounded(&state.store, &row.file.library_id.to_string())
     {
@@ -219,7 +232,11 @@ fn resolve_item_chapters_blocking(
     let Some(snapshot) = snapshot(state, row, unit, media, theintrodb) else {
         return Vec::new();
     };
-    if let Some(mut cached) = snapshot.cached.clone() {
+    if let Some(mut cached) = snapshot
+        .cached
+        .clone()
+        .filter(|_| !cloud_lookup_needed(&snapshot))
+    {
         append_marker_chapters(
             &mut cached,
             snapshot.existing_marker.as_ref(),
@@ -227,8 +244,8 @@ fn resolve_item_chapters_blocking(
         );
         return cached;
     }
-    let output = resolve_without_store(snapshot);
-    let mut chapters = output.chapters;
+    let mut output = resolve_without_store(&snapshot);
+    let mut chapters = std::mem::take(&mut output.chapters);
     if crate::fingerprint_job::source::observe_source(row).is_err() {
         return Vec::new();
     }
@@ -237,24 +254,26 @@ fn resolve_item_chapters_blocking(
         expected: row.file.version.clone(),
         presence: domain::FilePresence::Present,
     }];
-    let publication = crate::http::store_wait::with_foreground_store(state, |store| {
-        store.library_write_with_error(
-            |error| error.to_string(),
+    let publication = lease.publish(|| {
+        Ok(crate::http::store_wait::with_foreground_store(
+            state,
             |store| {
-                crate::fingerprint_job::source::ensure_source_recorded_on(store, row)?;
-                store
-                    .publish_file_chapters_checked(
-                        row,
-                        unit,
-                        &members,
-                        &output.markers,
-                        output.cacheable.then_some(chapters.as_slice()),
-                    )
-                    .map_err(|error| error.to_string())?;
-                Ok(())
+                store.library_write_with_error(
+                    |error| error.to_string(),
+                    |store| {
+                        publish_resolved(store, &snapshot, &mut output, &mut chapters, &members)
+                    },
+                )
             },
-        )
+        ))
     });
+    let publication = match publication {
+        Ok(publication) => publication,
+        Err(error) => {
+            tracing::warn!(%error, file_id=%row.file.file_id, "chapter lifecycle publication rejected");
+            return Vec::new();
+        }
+    };
     match publication {
         Ok(Ok(())) => state.chapter_frames.notify_pending(),
         Ok(Err(error)) => {
@@ -277,6 +296,61 @@ fn resolve_item_chapters_blocking(
         chapters.sort_by_key(|chapter| chapter.start_ms);
     }
     chapters
+}
+
+fn publish_resolved(
+    store: &store::LibraryConnection<'_>,
+    snapshot: &ResolveSnapshot,
+    output: &mut ResolveOutput,
+    chapters: &mut Vec<ChapterMarker>,
+    members: &[store::SourceObservation],
+) -> Result<(), String> {
+    let row = &snapshot.row;
+    let unit = snapshot.unit;
+    crate::fingerprint_job::source::ensure_source_recorded_on(store, row)?;
+    let cloud = output
+        .markers
+        .iter()
+        .any(|marker| marker.source == "theintrodb");
+    if cloud {
+        let current = store
+            .file_coverage_by_id(row.file.file_id)
+            .map_err(|error| error.to_string())?;
+        if current.is_none_or(|current| current.file.duration_ms != snapshot.duration_ms) {
+            return Err("cloud marker duration changed during lookup".into());
+        }
+        if !cloud_identity_matches(store, row, &snapshot.media)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("cloud marker Media identity changed during lookup".into());
+        }
+    }
+    let current_chapters = store
+        .get_cached_chapters(&row.file.file_id.to_string())
+        .map_err(|error| error.to_string())?;
+    if current_chapters != snapshot.cached
+        && let Some(current) = current_chapters
+    {
+        *chapters = current;
+        if cloud && let Some(marker) = marker_from_chapter_ranges(row, unit, chapters) {
+            output.markers = vec![marker];
+        }
+    }
+    // Publications made during HTTP keep their priority, including a new manual lock.
+    let markers = if unit_marker_on(store, row, unit).is_none() {
+        output.markers.as_slice()
+    } else {
+        &[]
+    };
+    store
+        .publish_file_chapters_checked(
+            row,
+            unit,
+            members,
+            markers,
+            output.cacheable.then_some(chapters.as_slice()),
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn snapshot(
@@ -320,121 +394,171 @@ fn snapshot(
         detect_intros,
         theintrodb,
         probe: state.chapter_probe.clone(),
+        negative: state.theintrodb_negative.clone(),
+        now_ms: crate::playback_events::PlaybackClock::now_ms(state.playback_clock.as_ref()),
     })
 }
 
-fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
-    let mut markers = Vec::new();
-    let mut chapters = Vec::new();
-    let mut marker = snapshot.existing_marker.clone();
-    let coordinates =
-        marker_coordinates(snapshot.media.kind, snapshot.unit, snapshot.row.units.len());
-    tracing::info!(
-        media = %snapshot.media.title,
-        ?coordinates,
-        path = %snapshot.row.file.path.display(),
-        "【片头片尾】缓存未命中，后台异步执行单集章节探测"
-    );
-    // STRM 同步解析不做内嵌章节探测：ffprobe 对远程 URL 每次最多等 30s，
-    // 会拖慢 PlaybackInfo/详情页请求。STRM 的片头片尾走 TheIntroDB 云端
-    // 与后台探测任务的声纹（不阻塞请求）。
+fn cloud_lookup_needed(snapshot: &ResolveSnapshot) -> bool {
+    snapshot.detect_intros
+        && snapshot.row.units.len() == 1
+        && snapshot.existing_marker.is_none()
+        && snapshot.media.kind == MediaKind::Tv
+        && snapshot.theintrodb.is_some()
+        && snapshot.media.tmdb_id.is_some()
+        && snapshot.unit.episode_coordinates().is_some()
+        && snapshot
+            .cached
+            .as_ref()
+            .is_none_or(|chapters| marker_from_chapters(snapshot, chapters).is_none())
+}
+
+fn cloud_identity_matches(
+    store: &store::LibraryConnection<'_>,
+    row: &FileCoverage,
+    expected: &Media,
+) -> Result<bool, store::StoreError> {
+    let Some(current) = store.file_coverage_by_id(row.file.file_id)? else {
+        return Ok(false);
+    };
+    if current.file.media_id != expected.id || current.file.version != row.file.version {
+        return Ok(false);
+    }
+    let Some(media) = store.get_media(expected.id)? else {
+        return Ok(false);
+    };
+    Ok(media.kind == expected.kind && media.tmdb_id == expected.tmdb_id)
+}
+
+fn resolve_without_store(snapshot: &ResolveSnapshot) -> ResolveOutput {
     let is_strm = snapshot
         .row
         .file
         .path
         .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    if is_strm {
-        tracing::info!(
-            media = %snapshot.media.title,
-            path = %snapshot.row.file.path.display(),
-            "【片头片尾】STRM 同步解析跳过 ffprobe 章节探测（避免阻塞请求），走 TheIntroDB / 后台声纹"
-        );
-        if snapshot.detect_intros
-            && snapshot.row.units.len() == 1
-            && marker.is_none()
-            && snapshot.media.kind == MediaKind::Tv
-        {
-            let _candidate = lookup_theintrodb_candidate(&snapshot);
-        }
-        return ResolveOutput {
-            chapters,
-            markers,
-            cacheable: true,
-        };
-    }
-
-    let probed = snapshot.probe.probe(&snapshot.row.file.path);
-    if let Some(ref probed) = probed {
-        chapters = annotate_chapters(probed);
-        tracing::info!(
-            media = %snapshot.media.title,
-            path = %snapshot.row.file.path.display(),
-            count = chapters.len(),
-            "【片头片尾】内嵌章节探测成功"
-        );
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"));
+    let (mut chapters, cacheable) = if let Some(cached) = &snapshot.cached {
+        (cached.clone(), true)
+    } else if is_strm {
+        // Cloud lookup never opens a remote Media stream or extracts audio.
+        (Vec::new(), true)
     } else {
-        tracing::warn!(
-            media = %snapshot.media.title,
-            path = %snapshot.row.file.path.display(),
-            "【片头片尾】内嵌章节探测失败（文件不可达 / 远程超时）"
-        );
-    }
-    let has_intro = chapters
-        .iter()
-        .any(|chapter| chapter.marker_type == Some(MarkerType::IntroStart));
-    if snapshot.detect_intros
-        && snapshot.row.units.len() == 1
-        && marker.is_none()
-        && !has_intro
-        && snapshot.media.kind == MediaKind::Tv
+        match snapshot.probe.probe(&snapshot.row.file.path) {
+            Some(chapters) => (annotate_chapters(&chapters), true),
+            None => {
+                tracing::warn!(file_id=%snapshot.row.file.file_id, "embedded chapter probe failed");
+                (Vec::new(), false)
+            }
+        }
+    };
+    let mut markers = Vec::new();
+    if snapshot.detect_intros && snapshot.row.units.len() == 1 && snapshot.existing_marker.is_none()
     {
-        let _candidate = lookup_theintrodb_candidate(&snapshot);
-    }
-    // 声纹比对不在此同步链路执行（避免阻塞请求）：由后台异步探测任务
-    // （ProbeManager）采集单集指纹、同季 ≥2 集后自动比对识别片头。
-    if snapshot.detect_intros && snapshot.row.units.len() == 1 && marker.is_none() {
-        marker = marker_from_chapters(&snapshot, &chapters);
-        if let Some(value) = marker.clone() {
-            markers.push(value);
+        if let Some(marker) = marker_from_chapters(snapshot, &chapters) {
+            markers.push(marker);
+        } else if cloud_lookup_needed(snapshot)
+            && let Some(marker) = lookup_theintrodb_marker(snapshot)
+        {
+            markers.push(marker);
         }
     }
     chapters.sort_by_key(|chapter| chapter.start_ms);
-    tracing::info!(
-        media = %snapshot.media.title,
-        path = %snapshot.row.file.path.display(),
-        chapters = chapters.len(),
-        markers = markers.len(),
-        "【片头片尾】解析完成：章节 {} 条，片头片尾标记 {} 条",
-        chapters.len(),
-        markers.len()
-    );
     ResolveOutput {
         chapters,
         markers,
-        cacheable: probed.is_some(),
+        cacheable,
     }
 }
 
-/// External ranges are candidates only; no file-local verification has run here.
-fn lookup_theintrodb_candidate(
-    snapshot: &ResolveSnapshot,
-) -> Option<crate::theintrodb::MarkerResult> {
+/// Adopt a separate cloud source using the selected release's known duration;
+/// this performs no file-local audio verification and never reports it as such.
+fn lookup_theintrodb_marker(snapshot: &ResolveSnapshot) -> Option<StoredFileMarker> {
     let client = snapshot.theintrodb.as_ref()?;
     let tmdb_id = snapshot.media.tmdb_id.as_deref()?;
     let (season, episode) = snapshot.unit.episode_coordinates()?;
-    match client.get_episode_markers(tmdb_id, season, episode) {
-        Ok(candidate) => candidate,
-        Err(error) => {
-            tracing::warn!(%error,title=%snapshot.media.title,season,episode,"查询 TheIntroDB 失败");
-            None
-        }
+    let key = snapshot
+        .duration_ms
+        .filter(|duration| *duration > 0)
+        .map(|duration_ms| crate::theintrodb_lookup::LookupKey {
+            file_id: snapshot.row.file.file_id,
+            version: snapshot.row.file.version.clone(),
+            unit: snapshot.unit,
+            duration_ms,
+            tmdb_id: tmdb_id.to_string(),
+            configuration: client.cache_scope(),
+        });
+    if key
+        .as_ref()
+        .is_some_and(|key| snapshot.negative.contains(key, snapshot.now_ms))
+    {
+        return None;
     }
+    let candidate = match client.get_episode_markers(tmdb_id, season, episode, snapshot.duration_ms)
+    {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            if let Some(key) = key {
+                snapshot.negative.insert(key, snapshot.now_ms);
+            }
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, title=%snapshot.media.title, season, episode, "查询 TheIntroDB 失败");
+            return None;
+        }
+    };
+    let duration = snapshot.duration_ms.filter(|duration| *duration > 0)?;
+    let group_duration = candidate
+        .group_duration_ms
+        .filter(|duration| *duration > 0)?;
+    // v4 selects within five minutes, but silently falls back to the most
+    // popular release when no cluster matches. Reject that fallback ourselves.
+    if group_duration.abs_diff(duration) > 300_000 {
+        tracing::warn!(file_id=%snapshot.row.file.file_id, duration, group_duration,
+            "TheIntroDB release duration does not match this file; candidate was not adopted");
+        return None;
+    }
+    let intro = candidate.intro_start_ms.zip(candidate.intro_end_ms);
+    let outro = candidate
+        .outro_start_ms
+        .map(|start| (start, candidate.outro_end_ms.unwrap_or(duration)));
+    if intro
+        .into_iter()
+        .chain(outro)
+        .any(|(start, end)| start < 0 || end <= start || end > duration)
+        || intro
+            .zip(outro)
+            .is_some_and(|((_, end), (start, _))| end > start)
+    {
+        tracing::warn!(file_id=%snapshot.row.file.file_id, "TheIntroDB candidate exceeds this file or has conflicting ranges");
+        return None;
+    }
+    Some(StoredFileMarker {
+        file_id: snapshot.row.file.file_id,
+        version: snapshot.row.file.version.clone(),
+        unit: snapshot.unit,
+        intro_start_ms: intro.map(|range| range.0),
+        intro_end_ms: intro.map(|range| range.1),
+        outro_start_ms: outro.map(|range| range.0),
+        outro_end_ms: outro.map(|range| range.1),
+        source: "theintrodb".into(),
+        locked: false,
+        updated_at: 0,
+    })
 }
 
 fn marker_from_chapters(
     snapshot: &ResolveSnapshot,
+    chapters: &[ChapterMarker],
+) -> Option<StoredFileMarker> {
+    marker_coordinates(snapshot.media.kind, snapshot.unit, snapshot.row.units.len())?;
+    marker_from_chapter_ranges(&snapshot.row, snapshot.unit, chapters)
+}
+
+fn marker_from_chapter_ranges(
+    row: &FileCoverage,
+    unit: UnitKey,
     chapters: &[ChapterMarker],
 ) -> Option<StoredFileMarker> {
     let intro = chapters
@@ -443,11 +567,10 @@ fn marker_from_chapters(
     let outro = chapters
         .iter()
         .find(|chapter| chapter.marker_type == Some(MarkerType::CreditsStart));
-    marker_coordinates(snapshot.media.kind, snapshot.unit, snapshot.row.units.len())?;
     (intro.is_some() || outro.is_some()).then(|| StoredFileMarker {
-        file_id: snapshot.row.file.file_id,
-        version: snapshot.row.file.version.clone(),
-        unit: snapshot.unit,
+        file_id: row.file.file_id,
+        version: row.file.version.clone(),
+        unit,
         intro_start_ms: intro.map(|chapter| chapter.start_ms),
         intro_end_ms: intro.map(|chapter| chapter.end_ms),
         outro_start_ms: outro.map(|chapter| chapter.start_ms),

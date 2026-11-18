@@ -20,6 +20,41 @@ impl api::marker_resolver::ChapterProbe for FakeChapters {
     }
 }
 
+#[tokio::test]
+async fn playback_without_cloud_settings_still_discovers_local_chapters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, media, row, state) = whole_tv_fixture(&tmp);
+    let app = router(state);
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/playback/sessions",
+            Some("management-secret"),
+            serde_json::json!({"media_item_id": media.id, "file_id": row.file.file_id}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(chapters) = store
+            .get_cached_chapters(&row.file.file_id.to_string())
+            .unwrap()
+        {
+            assert!(
+                !chapters.is_empty(),
+                "local embedded chapters must reach playback cache"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "local chapter lookup was not scheduled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 fn whole_tv_fixture(
     tmp: &tempfile::TempDir,
 ) -> (api::Store, Media, domain::FileCoverage, api::ApiState) {

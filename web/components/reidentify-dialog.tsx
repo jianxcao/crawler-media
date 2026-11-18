@@ -51,6 +51,7 @@ const SOURCE_LABELS: Record<string, string> = {
   path_tag: "目录名的 tmdbid 标记",
   nfo: "NFO",
   resolved: "名称解析 + TMDB 收敛",
+  current: "已保存的身份",
 };
 
 /** 没命中的失败分类 → 一句人话（与待识别清单的标签同源，措辞按本场景调整）。 */
@@ -115,7 +116,7 @@ export function ReidentifyDialog({
       <div className="border-b border-white/[0.07] px-5 py-3.5">
         <h2 className="text-body-lg font-semibold text-[var(--text)]">修正识别结果</h2>
         <p className="mt-1 text-caption leading-relaxed text-[var(--text-muted)]">
-          已重走识别链。下面是机器给出的结论——
+          已确认身份会保留，待识别条目会查询候选。
           <span className="text-white/80">采纳、自己搜一个、或标为非独立作品都由你定</span>
           ，关掉这个窗口则不会有任何改动。
         </p>
@@ -385,7 +386,7 @@ function GroupRow({
           </div>
         ) : (
           <p className="text-sub leading-relaxed text-[var(--text-muted)]">
-            没能认出来
+            待确认身份
             {outcome.code ? `（${CODE_LABELS[outcome.code] ?? outcome.code}）` : ""}
             {outcome.reason ? `：${outcome.reason}` : "。"}
           </p>
@@ -424,6 +425,7 @@ function GroupRow({
             >
               {c.title}
               {c.year ? ` (${c.year})` : ""}
+              <span className="ml-1.5 text-caption text-[var(--text-muted)]">TMDB #{c.tmdb_id}</span>
             </button>
           ))}
         </div>

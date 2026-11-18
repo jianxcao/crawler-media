@@ -17,7 +17,7 @@ fn test_proxy_whitelist_domains() {
     assert!(should_use_proxy_for_url("https://graphql.anilist.co"));
     assert!(should_use_proxy_for_url("https://api.bgm.tv/subject/123"));
     assert!(should_use_proxy_for_url(
-        "https://api.theintrodb.org/v3/shows/123"
+        "https://api.theintrodb.org/v4/media?tmdb_id=123&season=1&episode=1"
     ));
 
     // Excluded: Douban (always bypass by default)

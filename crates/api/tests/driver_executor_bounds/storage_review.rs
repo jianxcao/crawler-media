@@ -71,7 +71,10 @@ fn configured_metadata_concurrency_runs_two_gated_probes() {
     let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     store
         .as_ref()
-        .put_setting("probe.concurrency", "2")
+        .put_setting(
+            "probe.settings",
+            r#"{"metadata_workers":2,"remote_concurrency":1,"remote_cooldown_ms":500}"#,
+        )
         .unwrap();
     let first = seed_probe_candidate_in(&store);
     let second = seed_probe_candidate_in(&store);

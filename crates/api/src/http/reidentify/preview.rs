@@ -1,6 +1,6 @@
 use crate::{
     ApiState, Store,
-    http::{err, library::preferred_coverage, ok, store_wait},
+    http::{err, ok, store_wait},
 };
 use axum::{
     extract::{Path, State},
@@ -10,6 +10,8 @@ use axum::{
 use domain::{FileCoverage, LibraryId, Media, MediaId, MediaKind};
 use serde_json::{Value, json};
 use std::path::Path as FsPath;
+
+mod candidates;
 
 pub(crate) async fn preview(
     State(state): State<ApiState>,
@@ -33,10 +35,31 @@ pub(crate) async fn preview(
             Err(error) => return error.response(),
         };
     let files = state.file_stats.clone();
-    match crate::http::fs::read_work(&state, move || {
-        render(media, coverages, revision, files.as_ref())
+    let selected = crate::http::library::preferred_coverage(&coverages);
+    let selected_file_id = selected.map(|coverage| coverage.file.file_id);
+    let poster_file = selected.map(|coverage| coverage.file.clone());
+    let has_poster = match crate::http::fs::read_work(&state, move || {
+        poster_file.and_then(|file| crate::http::library::poster_path_with(&file, files.as_ref()))
     })
     .await
+    {
+        Ok(poster) => poster.is_some(),
+        Err(error) => return crate::http::library::browse_work_error(error),
+    };
+    let poster_url = if has_poster {
+        selected_file_id.map(|file_id| crate::http::library::artwork_url("posters", file_id))
+    } else {
+        None
+    };
+    let catalog = state.catalog.clone();
+    // `capture` returned owned facts and released its reader snapshot. Catalog
+    // and filesystem IO below hold no Store reader or writer lease.
+    match state
+        .http_work
+        .run(crate::http::library::BROWSE_DEADLINE, move || {
+            render(media, coverages, revision, poster_url, catalog.as_ref())
+        })
+        .await
     {
         Ok(response) => response,
         Err(error) => crate::http::library::browse_work_error(error),
@@ -73,7 +96,8 @@ fn render(
     media: Media,
     coverages: Vec<FileCoverage>,
     source_revision: i64,
-    files: &dyn crate::file_stat_read::FileStatRead,
+    poster_url: Option<String>,
+    catalog: &dyn crate::catalog::Catalog,
 ) -> Response {
     let search_seed = coverages
         .iter()
@@ -85,29 +109,17 @@ fn render(
         })
         .next()
         .unwrap_or_else(|| media.title.clone());
-    let selected = preferred_coverage(&coverages);
-    let poster =
-        selected.and_then(|coverage| crate::http::library::poster_path_with(&coverage.file, files));
-    let poster_url = selected
-        .filter(|_| poster.is_some())
-        .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id));
+    let (outcome, unreachable) = if coverages.is_empty() {
+        (Value::Null, false)
+    } else {
+        candidates::outcome(&media, &search_seed, poster_url.clone(), catalog)
+    };
     let groups: Vec<Value> = if coverages.is_empty() {
         Vec::new()
     } else {
         vec![json!({
             "key": media.id.to_string(),
-            "outcome": {
-                "media_item_id": media.id.to_string(),
-                "tmdb_id": media.tmdb_id,
-                "title": media.title,
-                "year": media.year,
-                "poster_url": poster_url.clone(),
-                "source": "current",
-                "same_as_current": true,
-                "reason": null,
-                "code": null,
-                "candidates": [],
-            },
+            "outcome": outcome,
             "files": coverages.iter().map(|coverage| json!({
                 "file_id": coverage.file.file_id.to_string(),
                 "revision": coverage.file.version.revision,
@@ -126,7 +138,7 @@ fn render(
         "groups": groups,
         "skipped_missing": 0,
         "pinned_identity": false,
-        "unreachable": false,
+        "unreachable": unreachable,
         "search_seed": search_seed,
         "media_item_id": media.id.to_string(),
         "source_revision": source_revision,

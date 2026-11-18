@@ -92,7 +92,45 @@ pub(crate) fn advance_to_new_content(
         ],
     )?;
     crate::library::delete_file_meta_for_ledger(tx, &file_id_str)?;
-    super::publish::enqueue_probe(tx, file_id, now_ms)
+    cancel_previous_source_work(tx, &file_id_str)?;
+    // A dispatcher may still hold the obligation it assessed for the previous
+    // source. Give this generation a distinct receipt even when the clock did
+    // not advance, so that dispatcher's late ACK cannot consume the new work.
+    tx.execute(
+        "INSERT INTO file_probe_obligations (file_id, created_at_ms, reason)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(file_id) DO UPDATE SET
+             created_at_ms = excluded.created_at_ms, reason = excluded.reason",
+        params![
+            file_id_str,
+            now_ms,
+            format!("source_changed:{new_revision}")
+        ],
+    )?;
+    Ok(())
+}
+
+/// Active work captured before the source CAS cannot cover the new content.
+/// Retain its terminal history while releasing the per-file active reservation.
+fn cancel_previous_source_work(tx: &rusqlite::Connection, file_id: &str) -> Result<(), StoreError> {
+    let jobs = tx
+        .prepare(
+            "SELECT u.job_id FROM probe_job_units u JOIN probe_jobs j ON j.id=u.job_id
+             WHERE u.file_id=?1 AND u.status IN ('queued','running')
+               AND j.status IN ('queued','running')",
+        )?
+        .query_map([file_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for job in jobs {
+        tx.execute(
+            "UPDATE probe_job_units SET status='cancelled', error='source changed'
+             WHERE job_id=?1 AND file_id=?2 AND status IN ('queued','running')",
+            params![job, file_id],
+        )?;
+        crate::probe_analysis::transfer_reconciliation(tx, &job, file_id)?;
+        crate::ledger_cleanup::probe_unit_retirement::resync_probe_job(tx, &job)?;
+    }
+    Ok(())
 }
 
 /// First-bind evidence that the observed bytes are the ones placed: the row

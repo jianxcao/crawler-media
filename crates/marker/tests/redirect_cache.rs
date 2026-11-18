@@ -69,3 +69,34 @@ fn invalidated_entry_is_resolved_again() {
     cache.resolve(&url);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn direct_sources_reuse_the_observed_target_until_invalidation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/video.mkv", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for (index, stream) in listener.incoming().enumerate() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let response = if index == 0 {
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 0\r\n\r\n"
+            } else {
+                "HTTP/1.1 302 Found\r\nLocation: http://cdn.invalid/new-target\r\nContent-Length: 0\r\n\r\n"
+            };
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let cache = RedirectCache::new(Duration::from_secs(60));
+    assert_eq!(cache.resolve(&url), url);
+    assert_eq!(
+        cache.resolve(&url),
+        url,
+        "direct targets also need a reusable observation"
+    );
+    cache.invalidate(&url);
+    assert_eq!(cache.resolve(&url), "http://cdn.invalid/new-target");
+}

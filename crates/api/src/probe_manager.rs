@@ -117,6 +117,9 @@ pub struct ProbeManager {
     /// that are not on the selected page.
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
+    probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
+    metadata_admission: Mutex<worker::MetadataAdmission>,
+    metadata_capacity: Notify,
     shutting_down: Arc<AtomicBool>,
     shutdown_signal: tokio::sync::watch::Sender<bool>,
     shutdown_lock: tokio::sync::Mutex<()>,
@@ -158,6 +161,7 @@ impl ProbeManager {
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Result<Self, store::StoreError> {
         let channels = dispatch::channels();
+        let settings = crate::probe_settings::ProbeSettings::load(&store)?;
         let (shutdown_signal, _) = tokio::sync::watch::channel(false);
         let data_dir = store.data_dir().to_path_buf();
         let store_key = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
@@ -192,6 +196,11 @@ impl ProbeManager {
             )),
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
+            probe_settings: Mutex::new(settings),
+            metadata_admission: Mutex::new(worker::MetadataAdmission::new(
+                settings.metadata_workers,
+            )),
+            metadata_capacity: Notify::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
             shutdown_signal,
             shutdown_lock: tokio::sync::Mutex::new(()),
@@ -265,6 +274,21 @@ impl ProbeManager {
 
     pub fn try_start_workers(self: &Arc<Self>) -> bool {
         worker::try_start(self)
+    }
+
+    pub(crate) fn apply_probe_settings(&self, settings: crate::probe_settings::ProbeSettings) {
+        let mut current = self.probe_settings.lock();
+        *current = settings;
+        self.configure_probe_admission(settings);
+    }
+
+    fn configure_probe_admission(&self, settings: crate::probe_settings::ProbeSettings) {
+        self.metadata_admission.lock().limit = settings.metadata_workers;
+        marker::media_read::configure_remote_reads(
+            settings.remote_concurrency,
+            Duration::from_millis(settings.remote_cooldown_ms),
+        );
+        self.metadata_capacity.notify_waiters();
     }
 
     pub async fn shutdown_workers(&self) -> Result<(), String> {

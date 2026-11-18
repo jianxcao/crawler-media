@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use crate::{ProbeTarget, WorkControl};
 
 const CANCELLATION_POLL: Duration = Duration::from_millis(25);
-/// Default remote reads in flight; the probe manager re-configures this from
-/// `probe.concurrency` at startup.
+/// Default remote reads in flight; instance probe settings may change this.
 pub const DEFAULT_REMOTE_READ_LIMIT: usize = 1;
 /// STRM sources: pause between remote reads.
 pub const DEFAULT_REMOTE_READ_COOLDOWN: Duration = Duration::from_millis(500);
@@ -28,6 +27,7 @@ struct State {
     limit: usize,
     cooldown: Duration,
     available_at: Instant,
+    last_finished: Option<Instant>,
     next_ticket: u64,
     waiting: VecDeque<u64>,
 }
@@ -44,6 +44,7 @@ impl MediaReadGate {
                 limit: limit.max(1),
                 cooldown,
                 available_at: Instant::now(),
+                last_finished: None,
                 next_ticket: 0,
                 waiting: VecDeque::new(),
             }),
@@ -56,6 +57,9 @@ impl MediaReadGate {
         let mut state = self.lock();
         state.limit = limit.max(1);
         state.cooldown = cooldown;
+        if let Some(finished) = state.last_finished {
+            state.available_at = finished + cooldown;
+        }
         self.changed.notify_all();
     }
 
@@ -125,13 +129,15 @@ impl Drop for MediaReadPermit<'_> {
         if let Some(gate) = self.gate {
             let mut state = gate.lock();
             state.active = state.active.saturating_sub(1);
-            state.available_at = Instant::now() + state.cooldown;
+            let finished = Instant::now();
+            state.last_finished = Some(finished);
+            state.available_at = finished + state.cooldown;
             gate.changed.notify_all();
         }
     }
 }
 
-/// Configure the process-wide gate (startup, from `probe.concurrency`).
+/// Configure admission for subsequent reads without interrupting active reads.
 pub fn configure_remote_reads(limit: usize, cooldown: Duration) {
     REMOTE_READS.configure(limit, cooldown);
 }

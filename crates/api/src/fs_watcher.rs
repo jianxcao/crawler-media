@@ -9,11 +9,11 @@ use notify_debouncer_mini::{DebouncedEvent, new_debouncer};
 use parking_lot::Mutex;
 
 use crate::management::ApiState;
-use crate::media_server_provider::items::unit_columns;
 
 mod directory;
 mod lifecycle;
 pub(crate) mod presence;
+mod source;
 /// STRM 延迟删除条目：记录删除时间戳与删除前的流媒体 URL。
 #[derive(Clone, Debug)]
 pub struct PendingStrmDeletion {
@@ -619,8 +619,8 @@ fn note_present_path(
     }
     if is_strm {
         let current_url = library::read_strm_url(path);
-        if tracker.on_created_or_modified(path, current_url.as_deref()) {
-            invalidate_strm_caches(state, path);
+        tracker.on_created_or_modified(path, current_url.as_deref());
+        if source::observe_change(state, path) {
             *scrape_needed = true;
             if let Some(root) = realtime_library_root_for_path(state, path) {
                 let target_dir = entry_scan_target_dir(&root, path);
@@ -642,57 +642,6 @@ fn note_present_path(
 fn note_present_path_presence(state: &ApiState, path: &Path) {
     if let Err(e) = presence::observe_event(state, path) {
         tracing::warn!(path = %path.display(), error = ?e, "Watcher 恢复标记失败");
-    }
-}
-
-/// strm 文件内容（远程 URL）变化时，清掉旧 URL 的派生缓存：
-/// - file_meta（视频/音轨/字幕流信息，探测缓存）
-/// - cached chapters（内嵌章节缓存）
-/// - file_markers（片头片尾标记）
-///
-/// 这些缓存按 ledger 行挂载，清理后下次访问详情页/播放时会按新 URL 重新探测。
-fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
-    let path_str = path.display().to_string();
-    let store = state.store.as_ref();
-    let Ok(Some(coverage)) = store.file_coverage_by_path(&path_str) else {
-        return;
-    };
-    let ledger_id = coverage.file.file_id.to_string();
-    let file_id = coverage.file.file_id;
-    let mut cleared = 0;
-    if store.delete_file_meta_by_ledger_id(&ledger_id).is_ok() {
-        cleared += 1;
-    }
-    if store.clear_cached_chapters(&ledger_id).is_ok() {
-        cleared += 1;
-    }
-    // 只清当前文件各单元未锁定的标记：电视剧各集共用 media_id，绝不能删整部剧；用户手动锁定标记保留。
-    // 旧实现只覆盖按路径取到的那一条 (file, unit) 行；现在按该文件的全部单元扇出，
-    // 单单元文件（121 文件 / 121 单元）逐字等价，多单元文件清得更全。
-    let mut units = coverage.units.clone();
-    units.sort_by_key(|unit| (unit.season, unit.episode));
-    for unit in units {
-        let (season, episode) = unit_columns((unit.season, unit.episode));
-        let is_locked = store
-            .get_file_marker(file_id, unit)
-            .ok()
-            .flatten()
-            .map(|m| m.locked)
-            .unwrap_or(false);
-        if is_locked || store.delete_file_marker(file_id, unit).is_err() {
-            continue;
-        }
-        cleared += 1;
-        tracing::info!(
-            path = %path_str,
-            season = ?season,
-            episode = ?episode,
-            cleared,
-            "【STRM】检测到 strm 内容变化，已清空该集旧探测缓存（流信息/章节/片头片尾），下次访问将按新 URL 重新探测"
-        );
-    }
-    if cleared == 0 {
-        tracing::debug!(path = %path_str, "【STRM】内容变化但没有可清理的探测缓存");
     }
 }
 

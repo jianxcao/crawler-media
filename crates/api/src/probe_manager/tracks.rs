@@ -292,8 +292,12 @@ fn read_tracks_with_nfo(
     let season = single_season(&unit.row);
     let episode = single_episode(&unit.row);
     let probe_ledger_id = unit.row.file.file_id.to_string();
+    let read_started = Instant::now();
     match engine.probe(&tracks_path, control) {
         Ok((tracks, duration_ms)) => {
+            tracing::debug!(ledger_id = %probe_ledger_id,
+                elapsed_ms = read_started.elapsed().as_millis(),
+                "【媒体信息】远程准入与流信息读取完成");
             if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
                 return None;
             }
@@ -303,6 +307,7 @@ fn read_tracks_with_nfo(
                 return None;
             }
             if has_streams {
+                let nfo_started = Instant::now();
                 if let Err(error) = control.publish(|| {
                     library::write_streamdetails_into_nfo(
                         &nfo_path,
@@ -321,6 +326,7 @@ fn read_tracks_with_nfo(
                         nfo_path = %nfo_path.display(),
                         error = %error,
                         elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                        nfo_elapsed_ms = nfo_started.elapsed().as_millis() as u64,
                         "【媒体信息】写入 NFO 流信息失败"
                     );
                 } else {
@@ -331,6 +337,7 @@ fn read_tracks_with_nfo(
                         ledger_id = %probe_ledger_id,
                         nfo_path = %nfo_path.display(),
                         elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                        nfo_elapsed_ms = nfo_started.elapsed().as_millis() as u64,
                         "【媒体信息】NFO 流信息写入完成或无需更新"
                     );
                 }

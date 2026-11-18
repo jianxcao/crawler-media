@@ -48,6 +48,16 @@ AAC-LC、44100/48000Hz、双声道、1024 native samples/frame、已验证 ASC �
 
 边界政策身份与 capture profile 分开。分析规则变化应重新分析有效原始证据；源、音轨或采集格式变化才使采样缓存失效。实际协议中的 mapping/profile 标识是校验内容，不是文档的历史验收锚点。
 
+## TheIntroDB 云端来源
+
+TheIntroDB 开关授权使用云端时间戳，声纹开关独立；禁用声纹不影响云端查询，也不会为了采用云端结果读取音频。`source=theintrodb` 表示云端采纳，不代表本文件声纹 `verified`。已有正式标记优先。
+
+按官方 [v4 OpenAPI](https://theintrodb.org/openapi.yaml) 使用 `GET /v4/media`，传 TMDB id、成对的 season/episode、已知本文件 `duration_ms`、`details=true`、`merge_unknown=false`。API key 可选；配置后用 `Authorization: Bearer`。匿名只返回已接受的提交；带 key 可能包含该用户自己的待审提交并赋予 10 倍权重。响应 intro/credits 为毫秒数组；Intro 的 null start 表示零，Credits 的 null end 以已知文件时长补齐，零长表示无该段。当前单范围标记无法无损表达一个 kind 的多段，因此该 kind 不采纳，不把多个区间连成一个跳过范围。
+
+采纳须满足：单文件单集、当前文件时长为正、响应 type/season/episode 一致、群组时长已知且与文件时长差不超过官方 5 分钟匹配窗口、每个区间非负/递增且不超出文件结束、Intro 与 Outro 不重叠。官方选择器无匹配时会退回最热门 release，因此发送时长并不充分，必须检查 `group_duration_ms`。这些是云端信任条件，不证明两种剪辑的边界完全相同。未知时长、错误坐标、缺少已知 release 时长或范围冲突不能发布。
+
+发布重用文件版本、来源观察、覆盖与 Library 生命周期屏障；写入前再次检查文件仍绑定查询时的 Media、该 Media 当前的类型与 TMDB ID、文件时长及正式标记，不能覆盖查询期间新发布的人工锁、章节或声纹结果。物理章节空缓存不表示云端已经确认无数据。明确 `no_submissions` 与成功但没有任何范围的响应均作为负结果，以 `(file_id, FileVersion, UnitKey, duration_ms, TMDB ID, client configuration scope)` 为身份写入进程内负缓存，TTL 为 5 分钟、最多 4096 项；配置修订变化会形成不同的配置身份，显式 refresh 会清除该文件的负结果。错误、时长未知及有范围但未通过采纳校验的候选不缓存。播放与章节 API 在后台按需调度查询，不阻塞 PlaybackInfo。`no_submissions` 表示真实 Media/集暂时没有可返回提交；`episode_not_found` 和 `media_not_found` 反映映射问题；其他 HTTP、鉴权、网络和响应失败单独记录，不能宣称标记已完成。云端数据是否存在由第三方提交覆盖决定，接通 API 不能保证每集有结果。
+
 ## Intro 与 Outro 独立发布
 
 每种 kind 独立保存 decision、status、reason 和是否保留同源既有结果。整体结果可为全部 resolved、partial 或全部 uncertain；存在未解决 kind 时不能报告两种标记都完成。
@@ -72,7 +82,7 @@ adaptive Intro 搜索窗口为 `[0,180]`、`[120,420]`、`[300,600]` 秒，并�
 
 ## 缓存与计算复用
 
-远程读取固定并发 1、冷却 500ms。提速来自复用有效证据、缩小窗口和减少重复分析，不增加源站并发。
+远程读取默认并发 1、间隔 500ms，媒体信息默认单 worker。管理员可以通过[探测设置](../api-contracts/probe-settings.md)调整媒体信息并发、远程读取并发和间隔，保存后对后续任务生效，活动读取继续完成。默认提速依靠复用有效证据、缩小窗口和减少重复分析；真实远程验收沿用默认限速，除非用户明确授权调整。
 
 采样缓存身份包含文件/源、音轨、PCM/算法 profile、精确窗口和时间映射；分析阈值属于独立政策。热缓存重分析应能只做本地工作，手动 refresh 不等于无条件重新远程采集。
 
