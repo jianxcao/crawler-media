@@ -297,3 +297,41 @@ test("phase 5a: watch-stats-panel, media-track-rows, api/subscriptions, media-ac
     assert.equal(existsSync(path.join(WEB_DIR, rel)), true, `Missing pure helper: ${rel}`);
   }
 });
+
+test("phase 5b: playback api, library-manage-view, library-filter-bar, search-command, and subscribe-dialog are decomposed and zero files exceed 800 lines", () => {
+  for (const [rel, maxLines] of [
+    ["lib/api/playback.ts", 520],
+    ["components/library-manage-view.tsx", 550],
+    ["components/library-filter-bar.tsx", 380],
+    ["components/search-command.tsx", 480],
+    ["components/subscribe-dialog.tsx", 420],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+
+  for (const rel of [
+    "lib/api/playback-types.ts",
+    "lib/library-manage-helpers.ts",
+    "lib/library-filter-helpers.ts",
+    "lib/search-palette.ts",
+    "lib/subscribe-dialog-helpers.ts",
+  ]) {
+    assert.equal(existsSync(path.join(WEB_DIR, rel)), true, `Missing pure helper: ${rel}`);
+  }
+
+  const eslintConfig = readFileSync(path.join(WEB_DIR, "eslint.config.mjs"), "utf8");
+  assert.doesNotMatch(eslintConfig, /\b1150\b/);
+
+  const oversized = [];
+  for (const dirName of ["app", "components", "lib"]) {
+    for (const file of collectFilesMatching(path.join(WEB_DIR, dirName), /\.(ts|tsx)$/)) {
+      const lines = readFileSync(file, "utf8").split("\n").length;
+      if (lines > 800) {
+        oversized.push(`${path.relative(WEB_DIR, file)}: ${lines}`);
+      }
+    }
+  }
+  assert.deepEqual(oversized, []);
+});

@@ -55,19 +55,6 @@ export default tseslint.config(
     },
   },
   {
-    // 既有尚未拆分的历史文件锁定 1150 行棘轮上限，只准降不准继续膨胀（余下 5 个交由 Phase 5B 处理）。
-    files: [
-      "lib/api/playback.ts",
-      "components/library-manage-view.tsx",
-      "components/library-filter-bar.tsx",
-      "components/search-command.tsx",
-      "components/subscribe-dialog.tsx",
-    ],
-    rules: {
-      "max-lines": ["error", { max: 1150, skipBlankLines: false, skipComments: false }],
-    },
-  },
-  {
     // lib/ 保持纯领域逻辑与 API 通信，禁止反向依赖 components/ 或 app/ 视图层。
     files: ["lib/**/*.{ts,tsx}"],
     rules: {
