@@ -389,52 +389,43 @@ impl LibraryWorkRegistry {
 
     /// Registry -> Store serializes switch publication with optional admission.
     /// WorkControl gates are cancelled only after both guards have been dropped.
-    pub(crate) fn set_optional_settings(
+    pub(crate) fn configure_settings<T>(
         &self,
         state: &ApiState,
         library_id: &str,
-        detect: Option<bool>,
-        fingerprint: Option<bool>,
-    ) -> Result<Result<(), store::StoreError>, axum::response::Response> {
-        let controls = {
+        write: impl FnOnce(&store::Store) -> Result<(T, bool, Option<String>), store::StoreError>,
+    ) -> Result<Result<T, store::StoreError>, axum::response::Response> {
+        let (value, controls) = {
             let mut entries = self
                 .entries
                 .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
                 .ok_or_else(crate::http::store_wait::busy_response)?;
-            let disabling = crate::http::store_wait::with_foreground_store(state, |store| {
-                store.library_write(|store| {
-                    let current = store
-                        .get_library(library_id)?
-                        .ok_or_else(|| store::StoreError::Missing(library_id.into()))?;
-                    let detect = detect.unwrap_or(current.detect_intros);
-                    let fingerprint = fingerprint.unwrap_or(current.enable_fingerprint);
-                    let disabling = (current.detect_intros && !detect)
-                        || (current.enable_fingerprint && !fingerprint);
-                    store.set_library_intro_settings(library_id, detect, fingerprint)?;
-                    Ok(disabling)
-                })
-            })?;
-            let disabling = match disabling {
+            let committed = crate::http::store_wait::with_foreground_store(state, write)?;
+            let (value, disabling, operation_id) = match committed {
                 Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             };
-            if disabling {
-                entries
-                    .entry(library_id.into())
-                    .or_default()
+            let reconfiguring = operation_id.is_some();
+            let entry = entries.entry(library_id.into()).or_default();
+            if reconfiguring {
+                entry.blocked_by = operation_id;
+            }
+            let controls = if disabling || reconfiguring {
+                entry
                     .controls
                     .values()
-                    .filter(|(kind, _)| *kind != LibraryWorkKind::Ordinary)
+                    .filter(|(kind, _)| reconfiguring || *kind != LibraryWorkKind::Ordinary)
                     .map(|(_, control)| control.clone())
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
-            }
+            };
+            (value, controls)
         };
         for control in controls {
             control.cancel();
         }
-        Ok(Ok(()))
+        Ok(Ok(value))
     }
     pub fn freeze(
         &self,

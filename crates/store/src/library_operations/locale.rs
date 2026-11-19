@@ -23,9 +23,6 @@ pub(crate) fn apply_locale(
         return Ok(BatchOutcome::Done);
     };
     let trimmed = locale.trim();
-    if trimmed.is_empty() {
-        return Err(StoreError::Invalid("display locale cannot be empty".into()));
-    }
     // Idempotent on every batch: a resumed operation re-asserts the same target.
     tx.execute(
         "UPDATE libraries SET display_locale = ?2 WHERE library_id = ?1",

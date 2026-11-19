@@ -750,6 +750,8 @@ fn initial_zero_scope_is_rejected_after_reconfiguration() {
     assert!(store.get_file_version(file.file_id).unwrap().is_some());
 }
 
+#[path = "library_reconfiguration/atomic.rs"]
+mod atomic;
 #[path = "library_reconfiguration/locale.rs"]
 mod locale;
 

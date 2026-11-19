@@ -20,7 +20,7 @@ pub struct MetadataLanguageState {
 
 pub(crate) fn default_locale(db: &Connection) -> Result<Option<String>, StoreError> {
     Ok(db.query_row(
-        "SELECT default_locale FROM library_query_config WHERE id=1",
+        "SELECT COALESCE(default_locale,'zh-CN') FROM library_query_config WHERE id=1",
         [],
         |r| r.get(0),
     )?)

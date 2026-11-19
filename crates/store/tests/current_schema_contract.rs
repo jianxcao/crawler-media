@@ -14,14 +14,14 @@ fn previous_library_analysis_layout_is_refused_without_touching_the_database() {
     let dir = tempfile::tempdir().unwrap();
     drop(Store::open(dir.path()).unwrap());
     let conn = Connection::open(dir.path().join("library.db")).unwrap();
-    conn.pragma_update(None, "user_version", 5).unwrap();
+    conn.pragma_update(None, "user_version", 6).unwrap();
     drop(conn);
     let before = hashes(dir.path());
     let error = match Store::open(dir.path()) {
         Ok(_) => panic!("old Library layout is refused"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("user_version 6"));
+    assert!(error.to_string().contains("user_version 7"));
     assert_eq!(hashes(dir.path()), before);
 }
 

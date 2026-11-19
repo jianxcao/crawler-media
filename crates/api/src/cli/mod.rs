@@ -31,14 +31,17 @@ impl HttpTransport {
 }
 
 impl Transport for HttpTransport {
-    async fn send(
+    async fn send_envelope(
         &self,
         method: &str,
         path: &str,
         body: Option<Value>,
     ) -> Result<(u16, Value), String> {
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
-        let agent = ureq::Agent::new_with_defaults();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
         let auth = format!("Bearer {}", self.token);
         let result = match (method, body) {
             ("GET", None) => agent.get(&url).header("authorization", &auth).call(),
@@ -61,13 +64,7 @@ impl Transport for HttpTransport {
             ("DELETE", None) => agent.delete(&url).header("authorization", &auth).call(),
             _ => return Err(format!("unsupported CLI method {method}")),
         };
-        match result {
-            Ok(resp) => {
-                let (status, body) = read_response(resp)?;
-                Ok((status, unwrap_data(body)))
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        read_response(result.map_err(|error| error.to_string())?)
     }
 }
 
@@ -86,12 +83,26 @@ fn read_response(resp: ureq::http::Response<ureq::Body>) -> Result<(u16, Value),
 }
 
 pub trait Transport {
-    fn send(
+    /// Return the complete response envelope, including pagination metadata.
+    fn send_envelope(
         &self,
         method: &str,
         path: &str,
         body: Option<Value>,
     ) -> impl Future<Output = Result<(u16, Value), String>> + Send;
+
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> impl Future<Output = Result<(u16, Value), String>> + Send {
+        let response = self.send_envelope(method, path, body);
+        async move {
+            let (status, body) = response.await?;
+            Ok((status, unwrap_data(body)))
+        }
+    }
 }
 
 /// v1 信封：成功体在 `data`。非对象或没有 `data` 时原样返回。

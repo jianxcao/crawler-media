@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 
 use super::Transport;
 
@@ -123,22 +124,50 @@ pub async fn list_library(transport: &impl Transport) -> Result<String, String> 
         if id.is_empty() {
             continue;
         }
-        let (status, body) = transport
-            .send("GET", &format!("/api/v1/libraries/{id}/items"), None)
-            .await?;
-        if status != 200 {
-            continue;
-        }
-        for item in body.as_array().unwrap_or(&Vec::new()) {
-            let title = item["title"].as_str().unwrap_or("-");
-            let item_kind = item["kind"].as_str().unwrap_or(kind);
-            out.push_str(&format!("{title}\t{item_kind}\n"));
-        }
+        append_library_items(transport, id, kind, &mut out).await?;
     }
     if out.is_empty() {
         return Ok("No Media\n".into());
     }
     Ok(out)
+}
+
+async fn append_library_items(
+    transport: &impl Transport,
+    id: &str,
+    kind: &str,
+    out: &mut String,
+) -> Result<(), String> {
+    let base = format!("/api/v1/libraries/{id}/items");
+    let mut path = base.clone();
+    let mut cursors = HashSet::new();
+    loop {
+        let (status, body) = transport.send_envelope("GET", &path, None).await?;
+        if status != 200 || body["ok"] != true {
+            return Err(format!("library items failed: {status} {body}"));
+        }
+        let items = body["data"]
+            .as_array()
+            .ok_or("library items response data is not a list")?;
+        for item in items {
+            let title = item["title"].as_str().unwrap_or("-");
+            let item_kind = item["kind"].as_str().unwrap_or(kind);
+            out.push_str(&format!("{title}\t{item_kind}\n"));
+        }
+        match body.get("next_cursor") {
+            Some(Value::Null) => return Ok(()),
+            Some(Value::String(cursor)) if !cursor.is_empty() => {
+                if !cursors.insert(cursor.clone()) {
+                    return Err("library items response repeated cursor".into());
+                }
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("cursor", cursor)
+                    .finish();
+                path = format!("{base}?{query}");
+            }
+            _ => return Err("library items response has invalid next_cursor".into()),
+        }
+    }
 }
 
 pub async fn list_downloads(transport: &impl Transport) -> Result<String, String> {

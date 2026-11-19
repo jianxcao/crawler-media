@@ -177,6 +177,83 @@ fn fresh_layout_reopens_without_old_files() {
 }
 
 #[test]
+fn open_at_resolves_data_and_app_paths_against_the_working_directory() {
+    const CHILD: &str = "STORE_RELATIVE_OPEN_AT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let cwd = std::env::current_dir().unwrap();
+        for (data, app) in [
+            ("nested/data".into(), "custom/application.sqlite".into()),
+            (cwd.join("absolute-data"), "application.sqlite".into()),
+            ("other/data".into(), cwd.join("external/app.sqlite")),
+        ] {
+            let expected_data = cwd.join(&data);
+            let expected_app = cwd.join(&app);
+            let store = Store::open_at(&data, &app).unwrap();
+            assert_eq!(store.data_dir(), expected_data);
+            assert_eq!(store.sqlite_path(), expected_app);
+            assert_eq!(store.app_db_path(), expected_app);
+            assert_eq!(store.cache_db_path(), expected_data.join("cache.db"));
+            assert_eq!(
+                store.library_covers_dir(),
+                expected_data.join("library/covers")
+            );
+            assert_eq!(
+                store.db_paths(),
+                vec![
+                    expected_app.clone(),
+                    expected_data.join("cache.db"),
+                    expected_data.join("library.db"),
+                    expected_data.join("subscribe.db"),
+                ]
+            );
+            assert!(store.db_paths().iter().all(|path| path.is_file()));
+            assert!(!expected_data.join("app.db").exists());
+            let libraries = store.list_libraries().unwrap();
+            assert_eq!(libraries.len(), 2);
+            for library in &libraries {
+                let suffix = match library.kind {
+                    MediaKind::Movie => "movies",
+                    MediaKind::Tv => "tv",
+                    other => panic!("unexpected seeded Library kind {other:?}"),
+                };
+                assert_eq!(
+                    library.root_paths,
+                    vec![expected_data.join("library").join(suffix)]
+                );
+            }
+            store.put_setting("relative-open-at", "persisted").unwrap();
+            drop(store);
+            let reopened = Store::open_at(&data, &app).unwrap();
+            assert_eq!(
+                reopened.get_setting("relative-open-at").unwrap().as_deref(),
+                Some("persisted")
+            );
+            assert_eq!(reopened.list_libraries().unwrap(), libraries);
+        }
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "open_at_resolves_data_and_app_paths_against_the_working_directory",
+            "--test-threads=4",
+            "--nocapture",
+        ])
+        .current_dir(tmp.path())
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
 fn wrong_layout_is_rejected_without_mutation() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");

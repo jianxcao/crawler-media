@@ -33,6 +33,7 @@ Path(os.environ["START_TEST_OBSERVED"]).write_text(json.dumps({{
     "data": str(data),
     "downloads": os.environ["CRAWLER_MEDIA_QB_PATH_MAP"],
     "pid": os.getpid(),
+    "allow_multi_instance": os.environ.get("CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE"),
 }}))
 print("backend stdout", flush=True)
 HTTPServer(("127.0.0.1", int(os.environ["BACKEND_PORT"])), Health).serve_forever()
@@ -52,12 +53,14 @@ class StartupPathsTests(unittest.TestCase):
             ROOT / "scripts/with-build-lock.py",
             self.repo / "scripts/with-build-lock.py",
         )
-        # Build a tiny local crate; never compile or start the real application.
-        (self.repo / "Cargo.toml").write_text(
-            '[package]\nname="api"\nversion="0.0.0"\nedition="2024"\n'
-            '[lib]\npath="lib.rs"\n'
-        )
-        (self.repo / "lib.rs").write_text("")
+        # The script prepends $HOME/.cargo/bin; keep its build entirely fake.
+        self.home = self.directory / "home"
+        cargo = self.home / ".cargo/bin/cargo"
+        cargo.parent.mkdir(parents=True)
+        cargo.write_text("#!/bin/sh\nexit 0\n")
+        cargo.chmod(0o755)
+        locks = self.directory / "build-locks"
+        locks.mkdir()
         binary = self.repo / "target/debug/crawler-media"
         binary.parent.mkdir(parents=True)
         binary.write_text(BACKEND.format(python=sys.executable))
@@ -70,10 +73,13 @@ class StartupPathsTests(unittest.TestCase):
             if key not in {
                 "TEST_ROOT", "DATA_DIR", "LOG_DIR", "QB_HOST_DOWNLOADS",
                 "MOCK_SITE_PY", "CLEAN_LOGS", "CARGO_TARGET_DIR",
+                "CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE",
             }
         }
         self.env.update(
             TEST_ROOT=str(self.runtime),
+            HOME=str(self.home),
+            CM_BUILD_LOCK_DIR=str(locks),
             START_TEST_OBSERVED=str(self.observed),
             TOKEN="test-token",
             ADMIN_PASSWORD="test-password",
@@ -113,7 +119,7 @@ class StartupPathsTests(unittest.TestCase):
 
     def test_default_status_reports_the_downloads_layout_without_creating_it(self):
         self.env.pop("TEST_ROOT")
-        base = Path.home() / "Downloads/crawler-media"
+        base = self.home / "Downloads/crawler-media"
         before = {path: path.exists() for path in [base / "log", base / "run", base / "qb"]}
         output = self.invoke("status")
         self.assertIn(str(base / "data"), output)
@@ -139,6 +145,18 @@ class StartupPathsTests(unittest.TestCase):
         )
         self.assertFalse((self.repo / "data").exists())
         self.assertFalse((self.repo / ".test-logs").exists())
+
+    def test_restart_leaves_multi_instance_unset_by_default(self):
+        self.invoke("restart")
+        self.assertIsNone(json.loads(self.observed.read_text())["allow_multi_instance"])
+
+    def test_restart_preserves_explicit_multi_instance_disabled(self):
+        self.invoke("restart", CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE="0")
+        self.assertEqual(json.loads(self.observed.read_text())["allow_multi_instance"], "0")
+
+    def test_restart_preserves_explicit_multi_instance_enabled(self):
+        self.invoke("restart", CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE="1")
+        self.assertEqual(json.loads(self.observed.read_text())["allow_multi_instance"], "1")
 
     def test_absolute_data_override_is_passed_unchanged(self):
         data = self.directory / "isolated data"

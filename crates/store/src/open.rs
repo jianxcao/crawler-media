@@ -16,8 +16,8 @@ impl Store {
         Self::open_files(data_dir.as_ref(), sqlite_path)
     }
     fn open_files(data_dir: &Path, app_path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let data_dir = data_dir.to_path_buf();
-        let app_path = app_path.as_ref().to_path_buf();
+        let data_dir = std::path::absolute(data_dir)?;
+        let app_path = std::path::absolute(app_path)?;
         std::fs::create_dir_all(&data_dir)?;
         if let Some(parent) = app_path.parent() {
             std::fs::create_dir_all(parent)?;

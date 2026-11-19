@@ -17,7 +17,7 @@ fn root_id_of(store: &Store, library_id: &str, path: &Path) -> String {
 }
 
 /// R19: one PATCH that changes both roots and locale commits both; the locale is never
-/// silently dropped because a roots branch ran. An empty locale is refused before freezing.
+/// silently dropped because a roots branch ran. Empty roots are refused before freezing.
 #[test]
 fn roots_and_locale_commit_together() {
     let tmp = tempfile::tempdir().unwrap();
@@ -34,8 +34,8 @@ fn roots_and_locale_commit_together() {
             operation_id: uuid::Uuid::new_v4().to_string(),
             library_id: lib_id,
             expected_revision,
-            root_paths: Some(requested_roots.clone()),
-            display_locale: Some("  ".into()),
+            root_paths: Some(Vec::new()),
+            display_locale: Some("en-US".into()),
         },
         1_000,
     );

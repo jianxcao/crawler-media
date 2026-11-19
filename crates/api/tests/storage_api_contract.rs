@@ -6,6 +6,9 @@ use axum::http::StatusCode;
 use fixture::PresenceFixture;
 use serde_json::{Value, json};
 
+#[path = "storage_api_contract/library_patch.rs"]
+mod library_patch;
+
 #[tokio::test]
 async fn transfer_settings_patch_is_cas_and_null_clears_without_touching_roots() {
     let f = PresenceFixture::new();

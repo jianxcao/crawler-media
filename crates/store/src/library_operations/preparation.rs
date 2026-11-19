@@ -21,13 +21,6 @@ impl LibraryReconfiguration {
                 "library reconfiguration cannot drop every root".into(),
             ));
         }
-        if self
-            .display_locale
-            .as_deref()
-            .is_some_and(|locale| locale.trim().is_empty())
-        {
-            return Err(StoreError::Invalid("display locale cannot be empty".into()));
-        }
         Ok(PreparedLibraryReconfiguration {
             request: self.clone(),
             roots: self

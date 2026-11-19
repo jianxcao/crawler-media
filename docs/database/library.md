@@ -4,7 +4,7 @@
 
 [返回数据库总览](README.md)
 
-唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=6`。本库保存权威事实，不可按缓存清空。
+唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=7`。本库保存权威事实，不可按缓存清空。
 
 结构为 **66张业务表（含1张FTS5虚拟表）、668字段、115个显式命名索引、45组FK、133个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；668字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为70、物理声明字段678。字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，复核方法见[数据库总览](README.md#结构复核方法)。
 
@@ -409,7 +409,7 @@ Library 配置、显示语言、访问范围、生命周期与完整性状态；
 | `lifecycle_state` | `TEXT` | — | 是 | `'ready'` | 见本表生产定义。 |
 | `config_revision` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `integrity_state` | `TEXT` | — | 是 | `'unknown'` | 见本表生产定义。 |
-| `display_locale` | `TEXT` | — | 是 | `'zh-CN'` | 见本表生产定义。 |
+| `display_locale` | `TEXT` | — | 是 | `''` | 空串继承实例语言；非空为单库覆盖。实例未配置语言时有效默认值为 `zh-CN`。 |
 | `is_default` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `sort_order` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `access_mode` | `TEXT` | — | 是 | `'everyone'` | 见本表生产定义。 |
@@ -434,7 +434,7 @@ CREATE TABLE libraries (
  library_id TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('movie','tv','video')), name TEXT NOT NULL,
  lifecycle_state TEXT NOT NULL DEFAULT 'ready' CHECK(lifecycle_state IN ('ready','frozen','draining','reindexing','failed')),
  config_revision INTEGER NOT NULL DEFAULT 0, integrity_state TEXT NOT NULL DEFAULT 'unknown' CHECK(integrity_state IN ('unknown','clean','failed')),
- display_locale TEXT NOT NULL DEFAULT 'zh-CN', is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)), sort_order INTEGER NOT NULL DEFAULT 0,
+ display_locale TEXT NOT NULL DEFAULT '', is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)), sort_order INTEGER NOT NULL DEFAULT 0,
  access_mode TEXT NOT NULL DEFAULT 'everyone', admin_visible INTEGER NOT NULL DEFAULT 1,
  member_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(member_ids_json)),
  detect_intros INTEGER NOT NULL DEFAULT 0, enable_fingerprint INTEGER NOT NULL DEFAULT 0,

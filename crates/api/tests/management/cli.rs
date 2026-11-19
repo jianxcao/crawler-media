@@ -16,7 +16,7 @@ pub(super) struct RouterTransport {
 }
 
 impl Transport for RouterTransport {
-    async fn send(
+    async fn send_envelope(
         &self,
         method: &str,
         path: &str,
@@ -46,12 +46,6 @@ impl Transport for RouterTransport {
             Value::Null
         } else {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        let value = match value {
-            Value::Object(mut map) if map.get("ok").and_then(Value::as_bool) == Some(true) => {
-                map.remove("data").unwrap_or(Value::Null)
-            }
-            other => other,
         };
         Ok((status, value))
     }

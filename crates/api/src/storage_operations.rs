@@ -68,14 +68,44 @@ impl std::fmt::Display for StorageOperationError {
 ///
 /// The `202` body and the poll answer share [`operation_json`], so a client can POST and
 /// immediately poll the same shape. At least one field must be set; an empty `root_paths`
-/// list counts as "not set" because dropping every root is never a reconfiguration.
+/// list is rejected because dropping every root is never a reconfiguration.
 pub fn begin_library_reconfiguration(
     state: &ApiState,
     library_id: &str,
     request: ReconfigurationRequest,
 ) -> Result<Value, StorageOperationError> {
-    let root_paths = request.root_paths.filter(|roots| !roots.is_empty());
-    if root_paths.is_none() && request.display_locale.is_none() {
+    let kind = if request.root_paths.is_some() {
+        "roots"
+    } else {
+        "locale"
+    };
+    let prepared = prepare_library_reconfiguration(state, library_id, request)?;
+    let now_ms = state.playback_clock.now_ms();
+    let started = operation_write(state, |store| {
+        store.begin_library_reconfiguration_prepared(&prepared, now_ms)
+    });
+    let status = started.map_err(|error| reconfiguration_error(state, library_id, error))?;
+    let operation_id = status.operation_id.clone();
+    state.library_work.block(library_id, &operation_id);
+    spawn_driver(state, &operation_id, library_id);
+    tracing::info!(%operation_id, %library_id, kind, state = %status.state, "Library 重配置已受理");
+    Ok(operation_json(&LibraryOperationView {
+        operation_id,
+        library_id: library_id.to_string(),
+        kind: kind.into(),
+        state: status.state,
+        cursor: None,
+        error: status.error,
+        updated_at_ms: now_ms,
+    }))
+}
+
+pub(crate) fn prepare_library_reconfiguration(
+    state: &ApiState,
+    library_id: &str,
+    request: ReconfigurationRequest,
+) -> Result<store::library_operations::PreparedLibraryReconfiguration, StorageOperationError> {
+    if request.root_paths.is_none() && request.display_locale.is_none() {
         return Err(StorageOperationError::Invalid(
             "root_paths or display_locale is required".into(),
         ));
@@ -100,65 +130,40 @@ pub fn begin_library_reconfiguration(
         });
     }
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let now_ms = state.playback_clock.now_ms();
     // 上面的 `get_library` 已经确认该 id 存在，因此解析失败只可能来自畸形输入，
     // 一律按“不存在”回答，绝不 panic。
     let library_ref = domain::LibraryId::from_str(library_id)
         .map_err(|_| StorageOperationError::MissingLibrary)?;
-    let prepared = LibraryReconfiguration {
-        operation_id: operation_id.clone(),
+    LibraryReconfiguration {
+        operation_id,
         library_id: library_ref,
         expected_revision,
-        root_paths: root_paths
-            .clone()
+        root_paths: request
+            .root_paths
             .map(|roots| roots.into_iter().map(std::path::PathBuf::from).collect()),
-        display_locale: request.display_locale.clone(),
+        display_locale: request.display_locale,
     }
     .prepare()
-    .map_err(StorageOperationError::Store)?;
-    let started = operation_write(state, |store| {
-        store.begin_library_reconfiguration_prepared(&prepared, now_ms)
-    });
-    let status = match started {
-        Ok(status) => status,
-        // Another request began between the check above and the CAS (or the revision moved
-        // under us): report the operation that won instead of pretending we started one.
-        Err(StorageOperationError::Store(StoreError::Protected(_))) => {
+    .map_err(StorageOperationError::Store)
+}
+
+pub(crate) fn reconfiguration_error(
+    state: &ApiState,
+    library_id: &str,
+    error: StorageOperationError,
+) -> StorageOperationError {
+    match error {
+        StorageOperationError::Store(StoreError::Protected(_)) => {
             let operation_id =
                 operation_read(state, |store| store.active_library_operation(library_id))
                     .unwrap_or_else(|error| {
                         tracing::warn!(%library_id, %error, "重配置冲突后读取活动操作失败");
                         None
                     });
-            return Err(StorageOperationError::Reindexing { operation_id });
+            StorageOperationError::Reindexing { operation_id }
         }
-        Err(error) => return Err(error),
-    };
-    // `block` only after the Store committed the freeze: the registry mirror must never
-    // refuse writes for an operation that does not exist.
-    state.library_work.block(library_id, &operation_id);
-    spawn_driver(state, &operation_id, library_id);
-    let kind = if root_paths.is_some() {
-        "roots"
-    } else {
-        "locale"
-    };
-    tracing::info!(
-        %operation_id,
-        %library_id,
-        kind = kind,
-        state = %status.state,
-        "Library 重配置已受理"
-    );
-    Ok(operation_json(&LibraryOperationView {
-        operation_id,
-        library_id: library_id.to_string(),
-        kind: kind.into(),
-        state: status.state,
-        cursor: None,
-        error: status.error,
-        updated_at_ms: now_ms,
-    }))
+        error => error,
+    }
 }
 
 /// The JSON shape shared by the `202` body and `GET .../operations/{operation_id}`.
@@ -466,7 +471,7 @@ fn operation_write<T>(
         .map_err(map_store_error)
 }
 
-fn map_store_error(error: StoreError) -> StorageOperationError {
+pub(crate) fn map_store_error(error: StoreError) -> StorageOperationError {
     match error {
         StoreError::ReadBusy
         | StoreError::ReadClosed

@@ -47,7 +47,7 @@ docker compose up --build
 
 回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器全局并发默认 3，同一可注册域按公共后缀表串行。每个会话创建独立 BrowserContext，结束时 dispose；不发送 cookie 删除/清空命令，也不修改第三方浏览器的默认上下文。Site cookie 以当前 URL 经 `Network.setCookies` 做 host-only 注入，并经 `Network.getCookies{urls}` 定向回读；当前 Obscura 的回读另限制 path=`/`。不支持 BrowserContext 的端点在导航前失败并回退 HTTP。公共后缀 cookie 拒收能力缺少实测证据，不能宣称已验证。浏览器会话不使用 Site 代理，`maintenance_via = browser` 与 Site 代理在保存时互斥。实现见 `crates/indexer/src/cdp_page.rs`，验证方法见 [ADR-0007](adr/0007-cdp-browser-opt-in.md)。
 
-**数据库启动边界**：Store 初始化空文件并重开匹配五文件生产定义的数据库。启动在写入前只读核对文件身份与生产 DDL 的表/索引/视图定义（含约束），不自动修复不同定义。`library.db` 为 `application_id=1129139249`、`user_version=6`，其余身份见[数据库字典](database/README.md)。首次评估使用独立空数据目录；已有目录不被启动过程重置。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；Profile `render` 不控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema/definitions.rs`。
+**数据库启动边界**：Store 初始化空文件并重开匹配五文件生产定义的数据库。启动在写入前只读核对文件身份与生产 DDL 的表/索引/视图定义（含约束），不自动修复不同定义。`library.db` 为 `application_id=1129139249`、`user_version=7`，其余身份见[数据库字典](database/README.md)。v7 的 Library 语言默认继承实例配置，v6 目录不匹配当前定义；保留原目录及一致备份，使用独立空目录验收，不自动迁移。首次评估使用独立空数据目录；已有目录不被启动过程重置。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；Profile `render` 不控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema/definitions.rs`。
 
 验证环境使用独立数据目录。在仓库根目录指定一个尚未用于实例的路径启动，例如：
 

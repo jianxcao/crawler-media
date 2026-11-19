@@ -347,7 +347,7 @@ fn nfo_fields_for(
 ) -> Result<MetadataFields, StoreError> {
     let locale: Option<String> = tx
         .query_row(
-            "SELECT COALESCE(NULLIF(TRIM(display_locale),''),(SELECT default_locale FROM library_query_config WHERE id=1),'') FROM libraries WHERE library_id = ?1",
+            "SELECT COALESCE(NULLIF(TRIM(display_locale),''),(SELECT default_locale FROM library_query_config WHERE id=1),'zh-CN') FROM libraries WHERE library_id = ?1",
             params![lib],
             |r| r.get(0),
         )
@@ -391,7 +391,7 @@ fn adopted_for_library(
 ) -> Result<Option<Adopted>, StoreError> {
     let locale: Option<String> = tx
         .query_row(
-            "SELECT COALESCE(NULLIF(TRIM(display_locale),''),(SELECT default_locale FROM library_query_config WHERE id=1),'') FROM libraries WHERE library_id = ?1",
+            "SELECT COALESCE(NULLIF(TRIM(display_locale),''),(SELECT default_locale FROM library_query_config WHERE id=1),'zh-CN') FROM libraries WHERE library_id = ?1",
             params![lib],
             |r| r.get(0),
         )

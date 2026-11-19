@@ -204,12 +204,6 @@ fn failed_default_locale_retains_owner_and_retries_same_cursor() {
 #[test]
 fn inherited_language_changes_cards_preserves_explicit_locale_and_stamps_new_library() {
     let (tmp, store, library, ids) = setup_count(1);
-    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute(
-        "UPDATE libraries SET display_locale='' WHERE library_id=?1",
-        [library.to_string()],
-    )
-    .unwrap();
     for (locale, title) in [("en-US", "English"), ("zh-CN", "中文")] {
         let fields =
             serde_json::from_value(serde_json::json!({"title":{"state":"value","value":title}}))
@@ -234,6 +228,18 @@ fn inherited_language_changes_cards_preserves_explicit_locale_and_stamps_new_lib
             &[],
         )
         .unwrap();
+    let media = ids[0].parse().unwrap();
+    assert_library_title(&store, library, media, "中文");
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media,
+            path: "/explicit/movie.mkv".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    set_library_locale(&store, explicit.id.parse().unwrap(), "zh-CN", "explicit");
     let changed = store
         .change_metadata_language(0, "en-US", "change", 0)
         .unwrap();
@@ -259,37 +265,107 @@ fn inherited_language_changes_cards_preserves_explicit_locale_and_stamps_new_lib
             "succeeded"
         );
     }
-    let title: String = db
-        .query_row(
-            "SELECT title FROM library_items WHERE library_id=?1",
-            [library.to_string()],
-            |r| r.get(0),
-        )
+    assert_library_title(&store, library, media, "English");
+    assert_library_title(&store, explicit.id.parse().unwrap(), media, "中文");
+    set_library_locale(&store, explicit.id.parse().unwrap(), "", "inherit");
+    assert_library_title(&store, explicit.id.parse().unwrap(), media, "English");
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media,
+            path: "/new/movie.mkv".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_library_title(&store, new.id.parse().unwrap(), media, "English");
+    let cleared = store
+        .change_metadata_language(1, "", "clear-default", 2)
         .unwrap();
-    assert_eq!(title, "English");
-    let explicit_locale: String = db
-        .query_row(
-            "SELECT display_locale FROM libraries WHERE library_id=?1",
-            [explicit.id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(explicit_locale, "zh-CN");
-    let inherited: String = db
-        .query_row(
-            "SELECT display_locale FROM libraries WHERE library_id=?1",
-            [library.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(inherited, "");
+    for operation in cleared.operations {
+        assert_eq!(
+            query_model_support::finish(&store, &operation.operation_id).0,
+            "succeeded"
+        );
+    }
+    for library in [
+        library,
+        explicit.id.parse().unwrap(),
+        new.id.parse().unwrap(),
+    ] {
+        assert_library_title(&store, library, media, "中文");
+    }
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     let revisions:(i64,i64)=db.query_row("SELECT query_config_revision,query_projection_revision=item_revision FROM library_items WHERE library_id=?1",[library.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(revisions, (1, 1));
+    assert_eq!(revisions, (2, 1));
     query_model_support::run(&store, library, false, "oracle");
     assert!(
         !store
             .library_integrity_report("oracle")
             .unwrap()
             .has_issues()
+    );
+}
+
+fn set_library_locale(
+    store: &store::Store,
+    library: domain::LibraryId,
+    locale: &str,
+    operation: &str,
+) {
+    store
+        .begin_library_reconfiguration(
+            &store::LibraryReconfiguration {
+                operation_id: operation.into(),
+                library_id: library,
+                expected_revision: store.library_config_revision(&library.to_string()).unwrap(),
+                root_paths: None,
+                display_locale: Some(locale.into()),
+            },
+            0,
+        )
+        .unwrap();
+    assert_eq!(query_model_support::finish(store, operation).0, "succeeded");
+}
+
+fn assert_library_title(
+    store: &store::Store,
+    library: domain::LibraryId,
+    media: domain::MediaId,
+    title: &str,
+) {
+    use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
+    let page = store
+        .library_item_page(&LibraryQuery {
+            library_id: library,
+            user_id: None,
+            filter: BrowseFilter::default(),
+            order: BrowseOrder::Title,
+            descending: false,
+            page: BrowsePage::Offset {
+                start: 0,
+                limit: 10,
+            },
+            include_total: false,
+        })
+        .unwrap();
+    assert_eq!(page.items[0].title, title);
+    let detail = store
+        .library_item_detail(library, media, "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.item.title, title);
+    assert_eq!(
+        detail.metadata.title,
+        domain::FieldValue::Value(title.into())
+    );
+    let protocol = store
+        .protocol_page_metadata(library, media, domain::EntityScope::Work, None)
+        .unwrap();
+    assert_eq!(protocol.title, domain::FieldValue::Value(title.into()));
+    let hydrated = store.page_hydration(&[detail.files[0].file_id]).unwrap();
+    assert_eq!(
+        hydrated[&detail.files[0].file_id].fields[&domain::EntityScope::Work].title,
+        domain::FieldValue::Value(title.into())
     );
 }

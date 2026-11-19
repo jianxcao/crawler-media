@@ -4,6 +4,55 @@ mod support;
 
 use support::{Fixture, create_job, runtime};
 
+#[test]
+fn rejected_reconfiguration_does_not_cancel_optional_jobs() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let fixture = Fixture::new();
+    let ordinary = fixture.state.acquire_library_work(&fixture.target).unwrap();
+    runtime().block_on(async {
+        for root in ["relative-test", "/uncovered-optional-library"] {
+            let response = api::management::router(fixture.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/api/v1/libraries/{}", fixture.target))
+                        .header("Authorization", "Bearer management-secret")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "name": "Rejected", "detect_intros": false,
+                                "enable_fingerprint": false, "root_paths": [root],
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let store = fixture.state.store();
+            for job in &fixture.jobs {
+                assert_eq!(
+                    store.get_probe_job(&job.id).unwrap().unwrap().status,
+                    job.initial
+                );
+                assert_eq!(
+                    store.probe_job_units(&job.id).unwrap()[0].status,
+                    job.initial
+                );
+            }
+            let library = store.get_library(&fixture.target).unwrap().unwrap();
+            assert_eq!(library.name, "target");
+            assert!(library.detect_intros && library.enable_fingerprint);
+            assert!(!ordinary.control().is_cancelled());
+        }
+    });
+}
+
 fn disabling_optional_work(field: &str) {
     let fixture = Fixture::new();
     let ordinary = fixture.state.acquire_library_work(&fixture.target).unwrap();

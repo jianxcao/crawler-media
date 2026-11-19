@@ -158,6 +158,23 @@ impl Store {
         })
     }
 
+    pub fn reconfigure_library_with<T>(
+        &self,
+        prepared: &PreparedLibraryReconfiguration,
+        now_ms: i64,
+        settings: impl FnOnce(&crate::LibraryConnection<'_>) -> Result<T, StoreError>,
+    ) -> Result<(T, OperationStatus), StoreError> {
+        let library_id = prepared.request.library_id.to_string();
+        self.library_write(|db| {
+            if self.writers.has_rename_publication(&library_id) {
+                return Err(StoreError::WriteBusy);
+            }
+            let value = settings(db)?;
+            let operation = db.begin_library_reconfiguration_prepared(prepared, now_ms)?;
+            Ok((value, operation))
+        })
+    }
+
     /// Advance one reconfiguration operation by at most `max_media` Media.
     ///
     /// `max_media` is an interface contract, not a hint: a value outside `1..=100` is

@@ -370,9 +370,11 @@ impl crate::LibraryConnection<'_> {
             )?;
         }
         tx.commit()?;
-        crate::path_key::reload_root_aliases(self.library)?;
-        if let Err(error) = self.drain_one_root_batch() {
-            tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+        if prepared_roots.is_some() {
+            crate::path_key::reload_root_aliases(self.library)?;
+            if let Err(error) = self.drain_one_root_batch() {
+                tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+            }
         }
         self.get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))

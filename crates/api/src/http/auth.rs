@@ -139,12 +139,11 @@ fn query_token(request: &Request) -> Option<String> {
         return None;
     }
     uri.query().and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
+        url::form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
             (key.eq_ignore_ascii_case("api_key")
                 || key.eq_ignore_ascii_case("apikey")
                 || key.eq_ignore_ascii_case("token"))
-            .then(|| value.to_string())
+            .then(|| value.into_owned())
         })
     })
 }
