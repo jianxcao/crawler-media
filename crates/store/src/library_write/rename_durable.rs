@@ -316,6 +316,16 @@ impl Store {
         self.with_library_read(|db| db.list_due_file_rename_ids(now))
     }
 
+    /// Capture the startup recovery set, including intents still in backoff.
+    pub fn file_rename_recovery_schedule(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        self.with_library_read(|db| db.file_rename_recovery_schedule())
+    }
+
+    /// Look up the latest persisted retry time for one already captured intent.
+    pub fn file_rename_retry_at(&self, id: &str) -> Result<Option<i64>, StoreError> {
+        self.with_library_read(|db| db.file_rename_retry_at(id))
+    }
+
     /// A bounded recovery window; release the Store between windows and disk work.
     pub fn list_due_file_rename_ids_limited(
         &self,

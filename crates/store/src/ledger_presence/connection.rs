@@ -12,21 +12,20 @@ impl crate::LibraryConnection<'_> {
         let mut result = LedgerPresenceResult::default();
         let mut batch = crate::library_write::presence::PresenceBatch::default();
         let mut seen = HashSet::new();
+        let mut deleted_media = HashSet::new();
         for obs in observations {
             if !seen.insert(obs.file.file.file_id) {
                 result.skipped += 1;
                 continue;
             }
-            apply_observation(&tx, obs, mode, now, &mut result, &mut batch)?;
+            if apply_observation(&tx, obs, mode, now, &mut result, &mut batch)?
+                == Some(LedgerPresenceOutcome::Deleted)
+            {
+                deleted_media.insert(obs.file.file.media_id);
+            }
         }
         batch.settle(&tx)?;
-        if result.deleted > 0 {
-            let candidates: HashSet<domain::MediaId> = observations
-                .iter()
-                .map(|obs| obs.file.file.media_id)
-                .collect();
-            crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &candidates)?;
-        }
+        crate::library_write::orphan_media::purge_orphan_media_in_tx(&tx, &deleted_media)?;
 
         tx.commit()?;
         Ok(result)

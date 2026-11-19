@@ -114,6 +114,14 @@ impl Store {
         self.with_library_read(|db| db.pending_probe_dispatch_ids(stage, limit))
     }
 
+    /// Pending metadata work excluding STRM sources while remote reads are paused.
+    pub fn pending_local_metadata_dispatch_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProbeDispatchId>, StoreError> {
+        self.with_library_read(|db| db.pending_local_metadata_dispatch_ids(limit))
+    }
+
     /// Same read as [`Self::pending_probe_dispatch_ids`], additionally reporting the SQLite
     /// VM steps it consumed, so tests can assert the refill cost as a counter.
     #[doc(hidden)]

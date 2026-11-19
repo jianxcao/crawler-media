@@ -189,6 +189,29 @@ async fn selected_library_visibility_change_does_not_leak_page() {
 }
 
 #[tokio::test]
+async fn search_hints_reselect_after_library_access_is_revoked() {
+    let mut fixture = tv_fixture(1, 1);
+    let library = fixture.library_id.clone();
+    let store = fixture.state.store();
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |page| {
+            if !page.items.is_empty() {
+                store
+                    .update_library(&library, None, None, Some(("everyone", false, &[])))
+                    .unwrap();
+            }
+        }));
+    let body = get_json(
+        &router(fixture.state.clone()),
+        "/Search/Hints?SearchTerm=Show000",
+    )
+    .await;
+    assert_eq!(body["SearchHints"], serde_json::json!([]));
+    assert_eq!(body["TotalRecordCount"], 0);
+}
+
+#[tokio::test]
 async fn hydrated_rows_include_selected_playback_assertions() {
     let fixture = tv_fixture(1, 1);
     let media = media_for_title(&fixture.state, "Show000").to_string();

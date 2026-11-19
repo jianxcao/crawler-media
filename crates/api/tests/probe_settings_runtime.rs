@@ -139,7 +139,7 @@ async fn remote_pause_survives_restart(state_before: api::ApiState, root: &std::
 }
 
 async fn paused_metadata_requeues_on_shutdown(root: &std::path::Path) {
-    let (first, mut waiting, mut reads) = state_with_gated_tracks(root).await;
+    let (first, _waiting, mut reads) = state_with_gated_tracks(root).await;
     let app = api::router(first.clone());
     remote_reads_request(&app, "PUT", json!({"paused": true})).await;
     let store = first.store();
@@ -162,11 +162,16 @@ async fn paused_metadata_requeues_on_shutdown(root: &std::path::Path) {
         "https://fixture.invalid/video.mkv",
     );
     let ledger_id = row.file.file_id.to_string();
-    tokio::time::timeout(Duration::from_secs(3), waiting.recv())
-        .await
-        .unwrap()
+    let local = queue_movie(&first, &store, root, 1);
+    let result = tokio::time::timeout(Duration::from_secs(2), reads.recv()).await;
+    if result.is_err() {
+        first.probe.shutdown_workers().await.unwrap();
+    }
+    let (started, release) = result
+        .expect("local metadata blocked behind paused STRM")
         .unwrap();
-    assert!(reads.try_recv().is_err());
+    assert_eq!(started, local.file.path);
+    release.send(()).unwrap();
     first.probe.shutdown_workers().await.unwrap();
     assert_eq!(
         store
@@ -177,12 +182,8 @@ async fn paused_metadata_requeues_on_shutdown(root: &std::path::Path) {
         "queued"
     );
 
-    let (restarted, mut waiting, mut reads) = state_with_gated_tracks(root).await;
+    let (restarted, _waiting, mut reads) = state_with_gated_tracks(root).await;
     let app = api::router(restarted.clone());
-    tokio::time::timeout(Duration::from_secs(3), waiting.recv())
-        .await
-        .unwrap()
-        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(100), reads.recv())
             .await
@@ -197,6 +198,58 @@ async fn paused_metadata_requeues_on_shutdown(root: &std::path::Path) {
     release.send(()).unwrap();
     restarted.probe.shutdown_workers().await.unwrap();
     assert!(store.get_file_meta(&ledger_id).unwrap().is_some());
+}
+
+async fn pausing_a_gate_waiter_releases_the_metadata_worker(root: &std::path::Path) {
+    let (state, mut waiting, mut reads) = state_with_gated_tracks(root).await;
+    let app = api::router(state.clone());
+    let store = state.store();
+    let occupied_gate = marker::media_read::acquire_media_read(
+        &root.join("occupied.strm"),
+        &marker::WorkControl::default(),
+    )
+    .unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Remote",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let remote = queue_movie_source(
+        &state,
+        &store,
+        &root.join("waiting.strm"),
+        0,
+        "https://fixture.invalid/video.mkv",
+    );
+    tokio::time::timeout(Duration::from_secs(2), waiting.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    remote_reads_request(&app, "PUT", json!({"paused": true})).await;
+    drop(occupied_gate);
+
+    let local = queue_movie(&state, &store, root, 1);
+    let (started, release) = tokio::time::timeout(Duration::from_secs(2), reads.recv())
+        .await
+        .expect("a paused STRM gate waiter must release the metadata slot")
+        .unwrap();
+    assert_eq!(started, local.file.path);
+    release.send(()).unwrap();
+    state.probe.shutdown_workers().await.unwrap();
+    assert_eq!(
+        store
+            .active_probe_unit_for_ledger(&remote.file.file_id.to_string())
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued",
+        "pausing a pending remote read must preserve its durable work"
+    );
 }
 
 async fn state_with_gated_tracks(
@@ -621,6 +674,7 @@ async fn older_metadata_waiters_start_before_newer_queued_files() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_settings_persist_validate_and_apply_without_restart() {
+    let _serial = PROCESS_GATE.lock().await;
     // Both scenarios use process-wide remote settings, so keep them within one
     // test instead of allowing parallel runtimes to change each other's gate.
     older_metadata_waiters_start_before_newer_queued_files().await;
@@ -681,5 +735,62 @@ async fn probe_settings_persist_validate_and_apply_without_restart() {
     .await
     .unwrap();
     remote_pause_survives_restart(restarted, root.path()).await;
+}
+
+static PROCESS_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_remote_jobs_allow_local_metadata() {
+    let _serial = PROCESS_GATE.lock().await;
     paused_metadata_requeues_on_shutdown(tempfile::tempdir().unwrap().path()).await;
+    pausing_a_gate_waiter_releases_the_metadata_worker(tempfile::tempdir().unwrap().path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promoted_standby_uses_recent_remote_pause() {
+    let _serial = PROCESS_GATE.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let primary = state(root.path());
+    let standby = api::ApiState::new_arc_with_admin_bootstrap_writable(
+        primary.store(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(root.path().join("dl"))),
+        api::bootstrap_credentials::AdminBootstrapAction::Keep {
+            cli_token: "management-secret".into(),
+        },
+        false,
+    )
+    .unwrap();
+    remote_reads_request(
+        &api::router(primary.clone()),
+        "PUT",
+        json!({"paused": true}),
+    )
+    .await;
+    assert_eq!(
+        remote_reads_request(&api::router(primary.clone()), "GET", Value::Null).await,
+        json!({"paused": true})
+    );
+    primary.probe.shutdown_workers().await.unwrap();
+    assert_eq!(
+        remote_reads_request(&api::router(standby.clone()), "GET", Value::Null).await,
+        json!({"paused": true})
+    );
+    standby.ensure_writable_runtime_started().unwrap();
+
+    let path = root.path().join("movie.strm");
+    let stop = marker::WorkControl::default();
+    let waiter = tokio::task::spawn_blocking({
+        let stop = stop.clone();
+        move || marker::media_read::acquire_media_read(&path, &stop).is_ok()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stop.cancel();
+    let admitted = waiter.await.unwrap();
+    standby.probe.shutdown_workers().await.unwrap();
+    assert!(!admitted, "takeover ignored the saved pause");
 }

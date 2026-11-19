@@ -87,7 +87,7 @@ pub(crate) async fn start_session(
                 .map(|sub| {
                     sub.get("delivery_url")
                         .and_then(|u| u.as_str())
-                        .map(|url| format!("{url}?api_key={token}"))
+                        .map(|url| format!("{url}?{}", playback_query(&[("api_key", &token)])))
                         .unwrap_or_default()
                 })
                 .collect()
@@ -143,9 +143,7 @@ async fn load_session_io(
     })
     .await
     .unwrap_or_else(|_| {
-        let fallback_url = format!(
-            "/api/v1/playback/sessions/{play_session_id}/stream?device_id={device_id}&api_key={token}"
-        );
+        let fallback_url = playback_stream_url(play_session_id, device_id, token);
         (fallback_url, session_source_json(file, None))
     })
 }
@@ -216,8 +214,19 @@ fn session_stream_url(
     if is_strm && let Some(direct_url) = library::read_strm_url(&file.path) {
         return direct_url;
     }
+    playback_stream_url(play_session_id, device_id, token)
+}
+
+fn playback_query<'a>(pairs: &[(&'a str, &'a str)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.extend_pairs(pairs.iter().copied());
+    serializer.finish()
+}
+
+fn playback_stream_url(play_session_id: &str, device_id: &str, token: &str) -> String {
     format!(
-        "/api/v1/playback/sessions/{play_session_id}/stream?device_id={device_id}&api_key={token}"
+        "/api/v1/playback/sessions/{play_session_id}/stream?{}",
+        playback_query(&[("device_id", device_id), ("api_key", token)])
     )
 }
 

@@ -286,7 +286,7 @@ async fn session_stream_serves_valid_video_bytes_with_range_support() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "media_item_id": media.to_string(),
-                        "device_id": "web-player",
+                        "device_id": "TV+Living&Room",
                     }))
                     .unwrap(),
                 ))

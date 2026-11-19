@@ -86,6 +86,11 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
         tracing::warn!("【媒体探测】当前不在 Tokio runtime 上下文，探测 worker 未启动");
         return false;
     }
+    if manager.workers_started.load(Ordering::SeqCst) {
+        manager.wake.notify_waiters();
+        return true;
+    }
+    let (persisted_settings, persisted_remote_reads) = read_persisted_admission_settings(manager);
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
         return false;
@@ -103,12 +108,26 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     let recovery_deferred = manager.recovery_deferred.swap(false, Ordering::SeqCst);
     manager.workers_started.store(true, Ordering::SeqCst);
     manager.shutdown_signal.send_replace(false);
+    if let Some(settings) = persisted_settings {
+        *manager.probe_settings.lock() = settings;
+    }
+    if let Some(settings) = persisted_remote_reads {
+        *manager.remote_reads_paused.lock() = settings.paused;
+    } else {
+        // A standby must not start remote reads with a stale, more permissive
+        // in-memory value when persisted admission state cannot be read.
+        *manager.remote_reads_paused.lock() = true;
+    }
     {
         let settings = manager.probe_settings.lock();
         manager.configure_probe_admission(*settings);
     }
     {
         let paused = manager.remote_reads_paused.lock();
+        manager.remote_reads_wait_stopped.store(
+            *paused || manager.shutting_down.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         marker::media_read::set_remote_reads_paused(*paused);
     }
     let bootstrap = manager.clone();
@@ -144,6 +163,25 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     });
     workers.push(handle);
     true
+}
+
+fn read_persisted_admission_settings(
+    manager: &ProbeManager,
+) -> (
+    Option<crate::probe_settings::ProbeSettings>,
+    Option<crate::probe_settings::RemoteReadsSettings>,
+) {
+    let settings = crate::probe_settings::ProbeSettings::load(&manager.store)
+        .map_err(
+            |error| tracing::error!(%error, "启动探测 worker 时读取媒体信息设置失败，沿用内存设置"),
+        )
+        .ok();
+    let remote_reads = crate::probe_settings::RemoteReadsSettings::load(&manager.store)
+        .map_err(|error| {
+            tracing::error!(%error, "启动探测 worker 时读取远程读取设置失败，先暂停远程读取")
+        })
+        .ok();
+    (settings, remote_reads)
 }
 
 fn start_workers(manager: &Arc<ProbeManager>) {
@@ -328,7 +366,7 @@ async fn process_metadata(
         .as_ref()
         .map(|lease| lease.control().clone())
         .unwrap_or_default()
-        .with_read_stop(manager.shutting_down.clone());
+        .with_read_stop(manager.remote_reads_wait_stopped.clone());
     let outcome = probe::probe_metadata(&manager, &unit, &control).await;
     let still_ready = step(&manager, {
         let unit = unit.clone();

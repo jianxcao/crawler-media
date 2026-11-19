@@ -677,19 +677,43 @@ fn explicit_tv_refresh_works_with_switches_off_but_automatic_force_does_not() {
         .unwrap();
     let manager = ProbeManager::new(store).unwrap();
     assert_eq!(
-        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Tv, true),
+        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Tv, true).unwrap(),
         Some(180)
     );
     assert_eq!(
-        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Tv, false),
+        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Tv, false).unwrap(),
         None
     );
     assert_eq!(
-        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Movie, true),
+        fingerprint_duration_for_store(&manager.store, &library.id, MediaKind::Movie, true).unwrap(),
         None
     );
     assert_eq!(
-        fingerprint_duration_for_store(&manager.store, "missing", MediaKind::Tv, true),
+        fingerprint_duration_for_store(&manager.store, "missing", MediaKind::Tv, true).unwrap(),
         None
     );
+}
+
+#[test]
+fn fingerprint_duration_propagates_scrape_settings_read_errors() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let library = store
+        .create_library(
+            MediaKind::Tv,
+            "Manual",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    rusqlite::Connection::open(store.data_dir().join("library.db"))
+        .unwrap()
+        .execute("DELETE FROM scrape_settings WHERE singleton=1", [])
+        .unwrap();
+
+    let result = fingerprint_duration_for_store(&store, &library.id, MediaKind::Tv, true);
+
+    assert!(result.is_err(), "unreadable settings must remain retryable");
 }

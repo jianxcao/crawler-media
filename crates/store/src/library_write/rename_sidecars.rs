@@ -6,6 +6,7 @@
 //! the intent. Publication, references and source deletion read only the persisted
 //! decision. Destinations are written no-clobber (hard link), so a competitor that
 //! appears after observation is never overwritten.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
@@ -74,20 +75,20 @@ const ARTWORK_KINDS: &[&str] = &[
 ];
 const ARTWORK_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "tbn"];
 
-fn is_artwork_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let Some((stem, ext)) = lower.rsplit_once('.') else {
-        return false;
-    };
-    if !ARTWORK_EXTS.contains(&ext) {
-        return false;
+/// Returns the exact video or folder prefix, or an empty prefix for bare artwork names.
+fn artwork_prefix(name: &str) -> Option<&str> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if !ARTWORK_EXTS
+        .iter()
+        .any(|known| ext.eq_ignore_ascii_case(known))
+    {
+        return None;
     }
-    ARTWORK_KINDS.iter().any(|kind| {
-        stem == *kind
-            || stem
-                .strip_suffix(kind)
-                .is_some_and(|prefix| prefix.ends_with('-') && prefix.len() > 1)
-    })
+    let (prefix, kind) = stem.rsplit_once('-').unwrap_or(("", stem));
+    ARTWORK_KINDS
+        .iter()
+        .any(|known| kind.eq_ignore_ascii_case(known))
+        .then_some(prefix)
 }
 
 /// Lock-free observation (one `read_dir`): artwork beside `from` when the video
@@ -104,17 +105,35 @@ pub(crate) fn observe_directory_artwork(from: &Path, to: &Path, out: &mut Vec<Re
     let Ok(entries) = std::fs::read_dir(from_dir) else {
         return;
     };
+    let mut video_stems = HashSet::new();
+    let mut artwork = Vec::new();
     for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        let path = entry.path();
+        if library::is_video_file(&path) {
+            if let Some(stem) = path.file_stem() {
+                video_stems.insert(stem.to_owned());
+            }
+        } else if let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && artwork_prefix(name).is_some()
+            && path.is_file()
+        {
+            artwork.push(path);
+        }
+    }
+    for source in artwork {
+        let Some(name) = source.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let source = from_dir.join(&name);
-        if !is_artwork_name(&name) || !source.is_file() || out.iter().any(|s| s.from == source) {
+        let prefix = artwork_prefix(name).unwrap_or("");
+        if out.iter().any(|s| s.from == source) {
             continue;
         }
-        let target_name = match name.strip_prefix(from_stem) {
-            Some(rest) if !from_stem.is_empty() => format!("{to_stem}{rest}"),
-            _ => name.clone(),
+        let target_name = if !prefix.is_empty() && prefix == from_stem {
+            format!("{to_stem}{}", &name[prefix.len()..])
+        } else if !prefix.is_empty() && video_stems.contains(std::ffi::OsStr::new(prefix)) {
+            continue;
+        } else {
+            name.to_string()
         };
         out.push(RenameSidecar {
             kind: "artwork".into(),
@@ -247,21 +266,53 @@ pub(crate) fn classify_shared_sidecars(
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let siblings = sibling_files(tx, file_id, dir)?;
+    let alternate_same_stem = alternate_video_same_stem(tx, file_id, dir, from_video)?;
     for side in sidecars.iter_mut() {
         let own_stem = side
             .from
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| !stem.is_empty() && n.starts_with(stem));
-        if own_stem || side.from.parent() != Some(dir) {
-            continue;
-        }
-        if siblings || referenced_elsewhere(tx, file_id, &side.from)? {
+            .is_some_and(|name| {
+                !stem.is_empty()
+                    && (side.from.file_stem() == from_video.file_stem()
+                        || artwork_prefix(name) == Some(stem))
+            });
+        if ((!own_stem || alternate_same_stem) && side.from.parent() == Some(dir) && siblings)
+            || referenced_elsewhere(tx, file_id, &side.from)?
+        {
             side.action = SidecarAction::Copy;
             tracing::info!(file_id, sidecar = %side.from.display(), "shared sidecar will be copied, source kept");
         }
     }
     Ok(())
+}
+
+fn alternate_video_same_stem(
+    tx: &Connection,
+    file_id: &str,
+    dir: &Path,
+    from_video: &Path,
+) -> Result<bool, StoreError> {
+    let dir_key = crate::path_key::canonical_recorded_key(tx, &dir.to_string_lossy());
+    let prefix = format!("{}/", dir_key.trim_end_matches('/'));
+    let upper = format!("{}0", dir_key.trim_end_matches('/'));
+    let mut stmt = tx.prepare(
+        "SELECT path_key FROM library_files
+         WHERE file_id <> ?1 AND path_key >= ?2 AND path_key < ?3",
+    )?;
+    let paths = stmt
+        .query_map(params![file_id, prefix, upper], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let current_key = crate::path_key::canonical_recorded_key(tx, &from_video.to_string_lossy());
+    let current_stem = Path::new(&current_key).file_stem();
+    Ok(paths.iter().any(|path| {
+        let candidate = Path::new(path);
+        candidate.parent() == Some(Path::new(&dir_key))
+            && candidate.file_stem() == current_stem
+            && library::is_video_file(candidate)
+    }))
 }
 
 fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, StoreError> {
@@ -334,16 +385,16 @@ pub(crate) fn apply_sidecar(side: &mut RenameSidecar) -> Result<bool, StoreError
 }
 
 fn copy_sidecar(side: &RenameSidecar) -> Result<(), StoreError> {
-    let name = side
+    let parent = side
         .to
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("sidecar");
-    let temp = side.to.with_file_name(format!(".{name}.partial.tmp"));
-    std::fs::copy(&side.from, &temp)?;
-    // No-clobber publish: link fails with AlreadyExists instead of replacing.
-    let linked = std::fs::hard_link(&temp, &side.to);
-    let _ = std::fs::remove_file(&temp);
-    linked?;
+        .parent()
+        .ok_or_else(|| StoreError::Invalid("sidecar destination has no parent".into()))?;
+    let mut source = std::fs::File::open(&side.from)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut source, staged.as_file_mut())?;
+    staged
+        .as_file()
+        .set_permissions(source.metadata()?.permissions())?;
+    std::fs::hard_link(staged.path(), &side.to)?;
     Ok(())
 }

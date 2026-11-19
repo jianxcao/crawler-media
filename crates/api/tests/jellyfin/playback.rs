@@ -632,6 +632,13 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        if method == "GET" {
+            assert_eq!(response.status(), StatusCode::OK);
+            let detail = json(response).await;
+            assert_eq!(detail["Name"], "Remote Episode");
+            assert!(detail.get("MediaSources").is_none());
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

@@ -17,7 +17,7 @@ impl Fetcher for NoFetch {
 
 #[tokio::test]
 async fn startup_resumes_planned_and_disk_staged_rename_intents() {
-    for crash_after_disk in [false, true] {
+    for (crash_after_disk, in_backoff) in [(false, false), (true, false), (true, true)] {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("movies");
         std::fs::create_dir_all(&root).unwrap();
@@ -64,6 +64,12 @@ async fn startup_resumes_planned_and_disk_staged_rename_intents() {
         if crash_after_disk {
             store::library_write::execute_rename_disk(&request).unwrap();
         }
+        if in_backoff {
+            let now = store::unix_now();
+            store
+                .record_file_rename_failure(&request.rename_id, now - 57, "temporary I/O failure")
+                .unwrap();
+        }
         drop(store);
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
@@ -75,11 +81,7 @@ async fn startup_resumes_planned_and_disk_staged_rename_intents() {
         .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let done = state
-                    .store()
-                    .list_due_file_rename_ids(2)
-                    .unwrap()
-                    .is_empty();
+                let done = state.store().load_file_rename(&request.rename_id).is_err();
                 if done {
                     break;
                 }
@@ -87,7 +89,7 @@ async fn startup_resumes_planned_and_disk_staged_rename_intents() {
             }
         })
         .await
-        .expect("startup must finish the durable intent");
+        .expect("startup must finish the durable intent, including a retry that comes due");
         let shared = state.store();
         let store = shared.as_ref();
         let after = store

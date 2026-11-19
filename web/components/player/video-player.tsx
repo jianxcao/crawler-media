@@ -28,7 +28,7 @@ import {
   reportPlaybackMetricOnUnload,
 } from "@/lib/api/playback";
 import { type AutoplayOutcome, attemptAutoplay, shouldAttemptAutoplay } from "@/lib/player/autoplay";
-import { shouldHeartbeat } from "@/lib/player/heartbeat";
+import { startPlaybackHeartbeats } from "@/lib/player/heartbeat";
 import {
   DIRECT_SHORTFALL_SAMPLES,
   bandwidthDegradeWanted,
@@ -1479,17 +1479,10 @@ export function VideoPlayer(props: VideoPlayerProps) {
         })
         .catch(() => undefined);
     }
-    const keepAlive = shouldHeartbeat({
-      phase: state.phase,
-      announced: reportedStartRef.current === startKey,
-      paused: video?.paused === true,
-    });
-    if (!keepAlive) return;
-    const timer = window.setInterval(
-      () => sendProgress(video?.paused ?? undefined),
-      PROGRESS_INTERVAL_MS,
+    if (!video) return;
+    return startPlaybackHeartbeats(
+      state.phase, reportedStartRef.current === startKey, video, sendProgress, PROGRESS_INTERVAL_MS,
     );
-    return () => window.clearInterval(timer);
     // unit 是对象字面量，按内容比较
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.phase, video, unitKey, trackRefs, sendProgress]);

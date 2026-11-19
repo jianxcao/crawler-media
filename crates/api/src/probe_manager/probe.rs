@@ -72,6 +72,9 @@ async fn probe_metadata_inner(
     control: &library::WorkControl,
 ) -> MetadataOutcome {
     let path = PathBuf::from(&unit.row.file.path);
+    let is_strm = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"));
     let source_path = path.clone();
     let source_version = match mgr
         .dispatch_work
@@ -87,6 +90,14 @@ async fn probe_metadata_inner(
     let media_duration_ms =
         match super::tracks::probe_tracks_and_store(mgr, unit, &source_version, control).await {
             Ok(duration_ms) => duration_ms,
+            // A pause stops queued gate waiters without cancelling an already
+            // admitted read. If a STRM waiter was released by that pause,
+            // retain its durable unit for the next resume instead of failing it.
+            Err(super::tracks::TrackProbeError::Failed)
+                if is_strm && mgr.remote_reads_are_paused() =>
+            {
+                return MetadataOutcome::Retry;
+            }
             Err(super::tracks::TrackProbeError::Failed) => return MetadataOutcome::Failed,
             Err(super::tracks::TrackProbeError::Retry) => return MetadataOutcome::Retry,
         };
@@ -102,7 +113,11 @@ async fn probe_metadata_inner(
         })
         .await;
     let duration = match duration {
-        Ok(duration) => duration,
+        Ok(Ok(duration)) => duration,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "声纹配置读取失败，保留探测失败结果供重试");
+            return MetadataOutcome::Retry;
+        }
         Err(error) => {
             tracing::warn!(?error, "声纹配置读取繁忙，保留探测失败结果供重试");
             return MetadataOutcome::Retry;
@@ -197,23 +212,21 @@ pub(super) fn fingerprint_duration_for_store(
     library_id: &str,
     kind: MediaKind,
     explicit_refresh: bool,
-) -> Option<u32> {
-    let configured = store
-        .get_library(library_id)
-        .ok()
-        .flatten()
-        .is_some_and(|library| {
-            explicit_refresh || (library.detect_intros && library.enable_fingerprint)
-        });
-    let available = store.library_accepts_work(library_id).ok().unwrap_or(false);
+) -> Result<Option<u32>, store::StoreError> {
+    let configured = store.get_library(library_id)?.is_some_and(|library| {
+        explicit_refresh || (library.detect_intros && library.enable_fingerprint)
+    });
+    let available = store.library_accepts_work(library_id)?;
     let enabled = kind == MediaKind::Tv && configured && available;
-    enabled.then(|| {
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(Some(
         store
-            .get_scrape_config()
-            .ok()
-            .map(|c| c.effective.fingerprint_duration_secs)
-            .unwrap_or(180)
-    })
+            .get_scrape_config()?
+            .effective
+            .fingerprint_duration_secs,
+    ))
 }
 
 pub(super) async fn probe_fingerprint_and_store_detailed(

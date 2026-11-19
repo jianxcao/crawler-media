@@ -107,6 +107,28 @@ impl crate::LibraryConnection<'_> {
         self.list_due_file_rename_ids_limited(now, usize::MAX)
     }
 
+    pub(super) fn file_rename_recovery_schedule(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT next_retry_at, rename_id FROM pending_file_renames
+             WHERE phase IN ('planned','disk_applied','library_published','references_applied')
+             ORDER BY next_retry_at, created_at_ms, rename_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub(super) fn file_rename_retry_at(&self, id: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .library
+            .query_row(
+                "SELECT next_retry_at FROM pending_file_renames WHERE rename_id = ?1
+                 AND phase IN ('planned','disk_applied','library_published','references_applied')",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn list_due_file_rename_ids_limited(
         &self,
         now: i64,

@@ -19,6 +19,7 @@ rusqlite = { workspace = true, features = ["functions", "trace", "hooks"] }
 media.workspace = true
 marker.workspace = true
 uuid.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,7 +33,6 @@ unicode-normalization.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 jobs.workspace = true
-tempfile.workspace = true
 # Integration tests are separate crates and cannot see `#[cfg(test)]` items, so the
 # package enables its own test-support seam for them.
 store = { path = ".", features = ["test-support"] }

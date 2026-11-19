@@ -174,13 +174,13 @@ fn explicit_alias_root_keeps_artwork_used_by_a_sibling_file() {
 }
 
 #[test]
-fn alias_artwork_reference_from_another_directory_keeps_the_source() {
+fn alias_stem_artwork_reference_from_another_directory_keeps_the_source() {
     use store::library_write::{FilePublication, WriteScope};
 
     let fx = fixture_with_alias(true);
     let src = fx.a.join("Media");
     let moved = episode(&fx, &src, 1);
-    let poster = src.join("poster.jpg");
+    let poster = src.join("S01E01-poster.jpg");
     std::fs::write(&poster, b"shared poster").unwrap();
     let mut other = episode(&fx, &fx.a.join("Other"), 2);
     other.poster_path = Some(poster.clone());
@@ -213,7 +213,7 @@ fn alias_artwork_reference_from_another_directory_keeps_the_source() {
         .unwrap();
     assert_eq!(remaining.file.poster_path, Some(poster));
     assert_eq!(
-        std::fs::read(fx.b.join("Media/poster.jpg")).unwrap(),
+        std::fs::read(fx.b.join("Media/S01E01-poster.jpg")).unwrap(),
         b"shared poster"
     );
 }
@@ -562,4 +562,70 @@ fn synchronous_rename_failure_becomes_due_in_unix_seconds() {
     db.execute_batch("DROP TRIGGER fail_sync_leftover").unwrap();
     assert_eq!(fx.store.resume_pending_file_renames(now + 120).unwrap(), 1);
     assert_eq!(fx.store.list_pending_file_deletions().unwrap().len(), 1);
+}
+
+#[test]
+fn rename_leaves_artwork_of_an_episode_with_a_longer_stem_in_place() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let sibling = episode(&fx, &src, 10);
+    let name = format!(
+        "{}-poster.jpg",
+        sibling.path.file_stem().unwrap().to_str().unwrap()
+    );
+    std::fs::write(src.join(&name), b"sibling").unwrap();
+    let dest = fx.b.join("Show");
+    begin(&fx, &file, &dest.join("Renamed.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
+    assert_eq!(std::fs::read(src.join(&name)).unwrap(), b"sibling");
+    assert!(!dest.join("Renamed0-poster.jpg").exists());
+    assert!(!dest.join(&name).exists());
+}
+
+#[test]
+fn copying_shared_artwork_preserves_other_destination_files() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    episode(&fx, &src, 2);
+    std::fs::write(src.join("poster.jpg"), b"poster").unwrap();
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    let existing = dest.join(".poster.jpg.partial.tmp");
+    std::fs::write(&existing, b"independent").unwrap();
+    begin(&fx, &file, &dest.join("Moved.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
+    assert_eq!(std::fs::read(dest.join("poster.jpg")).unwrap(), b"poster");
+    assert_eq!(std::fs::read(existing).unwrap(), b"independent");
+}
+
+#[test]
+fn alternate_video_with_the_same_stem_keeps_shared_artwork() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let alternate = file.path.with_extension("mp4");
+    std::fs::write(&alternate, b"another encode").unwrap();
+    publish_fixture_file(
+        &fx.store,
+        &FixtureFile {
+            media_id: fx.media,
+            path: alternate.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let artwork = src.join("S01E01-poster.jpg");
+    std::fs::write(&artwork, b"poster").unwrap();
+    let dest = fx.b.join("Show");
+    begin(&fx, &file, &dest.join("Renamed.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
+    assert_eq!(
+        std::fs::read(dest.join("Renamed-poster.jpg")).unwrap(),
+        b"poster"
+    );
+    assert_eq!(std::fs::read(artwork).unwrap(), b"poster");
 }

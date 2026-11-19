@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldHeartbeat } from "../lib/player/heartbeat.ts";
+import { shouldHeartbeat, startPlaybackHeartbeats } from "../lib/player/heartbeat.ts";
 
 /**
  * 进度心跳的准入判定。
@@ -44,4 +44,22 @@ test("未暂停时仍只在播放阶段心跳（拖动/缓冲不打断原行为�
   assert.equal(shouldHeartbeat({ phase: "seeking", announced: true, paused: false }), false);
   assert.equal(shouldHeartbeat({ phase: "buffering", announced: true, paused: false }), false);
   assert.equal(shouldHeartbeat({ phase: "ended", announced: true, paused: false }), false);
+});
+
+test("缓冲时按暂停，后续每拍都能为已开始的会话保活", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const video = { paused: false };
+  const reports = [];
+  const stop = startPlaybackHeartbeats(
+    "buffering", true, video, (paused) => reports.push(paused), 10_000,
+  );
+  t.mock.timers.tick(10_000);
+  assert.deepEqual(reports, []);
+  video.paused = true;
+  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(10_000);
+  assert.deepEqual(reports, [true, true]);
+  stop();
+  t.mock.timers.tick(10_000);
+  assert.deepEqual(reports, [true, true]);
 });

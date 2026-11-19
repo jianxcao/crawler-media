@@ -687,3 +687,45 @@ fn old_generation_never_marks_or_prunes_republished_file() {
         assert!(store.missing_at_by_path().unwrap().is_empty());
     }
 }
+
+#[test]
+fn stale_observation_keeps_media_when_another_file_is_purged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let (library, root) = create_library(&store, tmp.path());
+    let register = |title: &str| {
+        let mut media = sample_media(MediaId::new());
+        media.title = title.into();
+        store.insert_media(&media).unwrap();
+        media.id
+    };
+    let original = register("Original");
+    let replacement = register("Reidentified");
+    let removed = register("Removed");
+    let mut observations = Vec::new();
+    for (name, media) in [("a.mkv", original), ("b.mkv", removed)] {
+        let path = tmp.path().join(name);
+        let file = publish_file(
+            &store,
+            &library,
+            &root,
+            media,
+            path.to_str().unwrap(),
+            FilePublication::Published,
+            LedgerId::new(),
+        );
+        let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        observations.push(observation(&store, coverage, None, FilePresence::Missing));
+        if media == original {
+            store
+                .rebind_scanned_ledger(file.file_id, replacement)
+                .unwrap();
+        }
+    }
+    let result = store
+        .apply_ledger_presence(&observations, LedgerPresenceMode::Purge, 100)
+        .unwrap();
+    assert_eq!((result.skipped, result.deleted), (1, 1));
+    assert!(store.get_media(removed).unwrap().is_none());
+    assert!(store.get_media(original).unwrap().is_some());
+}

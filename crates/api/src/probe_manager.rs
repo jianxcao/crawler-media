@@ -121,6 +121,7 @@ pub struct ProbeManager {
     workers_started: AtomicBool,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
+    remote_reads_wait_stopped: Arc<AtomicBool>,
     metadata_admission: Mutex<worker::MetadataAdmission>,
     metadata_capacity: Notify,
     shutting_down: Arc<AtomicBool>,
@@ -226,6 +227,7 @@ impl ProbeManager {
             workers_started: AtomicBool::new(false),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
+            remote_reads_wait_stopped: Arc::new(AtomicBool::new(remote_reads.paused)),
             metadata_admission: Mutex::new(worker::MetadataAdmission::new(
                 settings.metadata_workers,
             )),
@@ -320,7 +322,17 @@ impl ProbeManager {
     pub(crate) fn apply_remote_reads_pause(&self, paused: bool) {
         let mut current = self.remote_reads_paused.lock();
         *current = paused;
+        self.remote_reads_wait_stopped.store(
+            paused || self.shutting_down.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         marker::media_read::set_remote_reads_paused(paused);
+        drop(current);
+        self.wake.notify_waiters();
+    }
+
+    pub(crate) fn remote_reads_are_paused(&self) -> bool {
+        *self.remote_reads_paused.lock()
     }
 
     fn configure_probe_admission(&self, settings: crate::probe_settings::ProbeSettings) {

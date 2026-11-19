@@ -2,6 +2,30 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    pub fn pending_local_metadata_dispatch_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProbeDispatchId>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT u.job_id, u.file_id
+             FROM probe_job_units u
+             JOIN probe_jobs j ON j.id = u.job_id
+             JOIN library_files f ON f.file_id = u.file_id
+             WHERE u.stage = 'metadata' AND u.status = 'queued'
+               AND j.status IN ('queued', 'running')
+               AND lower(f.display_path) NOT LIKE '%.strm'
+             ORDER BY u.job_id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(ProbeDispatchId {
+                job_id: row.get(0)?,
+                ledger_id: row.get(1)?,
+                stage: ProbeDispatchStage::Metadata,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn pending_probe_dispatch_ids(
         &self,
         stage: ProbeDispatchStage,

@@ -325,7 +325,14 @@ pub(super) async fn item_by_id(
     let source = if snapshot.is_series {
         None
     } else {
-        Some(super::media::media_source(&snapshot, &snapshot.protocol_id()).await?)
+        match super::media::media_source(&snapshot, &snapshot.protocol_id()).await {
+            Ok(source) => Some(source),
+            // A published STRM entry remains a valid catalog item while its
+            // sidecar is temporarily empty or unreadable. Omit only the
+            // optional source; the item itself is still addressable.
+            Err(StatusCode::NOT_FOUND) => None,
+            Err(error) => return Err(error),
+        }
     };
     let mut item = item_dto_json(snapshot);
     if let Some(source) = source {

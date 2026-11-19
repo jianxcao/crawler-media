@@ -19,6 +19,7 @@ impl crate::LibraryConnection<'_> {
         let Some((library_id, previous_media, kind)) = current else {
             return Err(StoreError::Missing(format!("file {ledger_id}")));
         };
+        crate::library_write::ensure_library_writable(&tx, &library_id)?;
         ensure_media_writable(&tx, media_id)?;
         ensure_kind_matches(&tx, media_id, &kind)?;
         if previous_media == media_id.to_string() {

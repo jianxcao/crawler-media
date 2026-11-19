@@ -52,6 +52,8 @@ impl ProbeManager {
                     return Ok(());
                 }
                 self.shutting_down.store(true, Ordering::SeqCst);
+                self.remote_reads_wait_stopped
+                    .store(true, Ordering::Release);
                 self.shutdown_signal.send_replace(true);
                 std::mem::take(&mut *workers)
             };
@@ -106,6 +108,8 @@ impl ProbeManager {
         }
         let _workers = self.workers.lock();
         self.shutting_down.store(false, Ordering::SeqCst);
+        self.remote_reads_wait_stopped
+            .store(*self.remote_reads_paused.lock(), Ordering::Release);
         Ok(())
     }
 
@@ -310,9 +314,11 @@ impl ProbeManager {
             return;
         }
         let store = self.store.as_ref();
-        let ids = match store
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, METADATA_WINDOW + 1)
-        {
+        let ids = match if self.remote_reads_are_paused() {
+            store.pending_local_metadata_dispatch_ids(METADATA_WINDOW + 1)
+        } else {
+            store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, METADATA_WINDOW + 1)
+        } {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取媒体信息派发窗口失败");

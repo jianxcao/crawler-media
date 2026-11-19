@@ -113,7 +113,7 @@ fn apply_observation(
     now: i64,
     result: &mut LedgerPresenceResult,
     batch: &mut crate::library_write::presence::PresenceBatch,
-) -> Result<(), StoreError> {
+) -> Result<Option<LedgerPresenceOutcome>, StoreError> {
     let file = &obs.file.file;
     let file_id = file.file_id.to_string();
     let publication: Option<String> = tx
@@ -138,7 +138,7 @@ fn apply_observation(
         .optional()?;
     let Some(publication) = publication else {
         result.skipped += 1;
-        return Ok(());
+        return Ok(None);
     };
     crate::library_write::ensure_library_writable(tx, &file.library_id.to_string())?;
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[file.library_id])?;
@@ -160,11 +160,11 @@ fn apply_observation(
     };
     let Some(outcome) = outcome else {
         result.skipped += 1;
-        return Ok(());
+        return Ok(None);
     };
     if outcome == LedgerPresenceOutcome::Published && obs.observed_source.is_none() {
         result.skipped += 1;
-        return Ok(());
+        return Ok(None);
     }
     let now_ms = now.checked_mul(1_000).ok_or_else(|| {
         StoreError::Invalid("presence timestamp exceeds milliseconds range".into())
@@ -207,7 +207,7 @@ fn apply_observation(
     });
     tracing::info!(file_id, ?outcome, "Applied Library file presence");
 
-    Ok(())
+    Ok(Some(outcome))
 }
 
 #[path = "ledger_presence/connection.rs"]

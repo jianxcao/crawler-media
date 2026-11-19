@@ -42,6 +42,69 @@ fn durable_counts(store: &Store) -> (i64, i64) {
 }
 
 #[test]
+fn paused_remote_refill_can_select_local_metadata_behind_strm_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let media_id = MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: MediaKind::Movie,
+            title: "Remote Gate".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let root = temp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let mut ids = Vec::new();
+    for (name, path) in [("remote", "A.strm"), ("local", "B.mkv")] {
+        let path = root.join(path);
+        std::fs::write(&path, b"fixture").unwrap();
+        let fixture = FixtureFile {
+            media_id,
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let published = store::test_support::publish_fixture_file(&store, &fixture).unwrap();
+        ids.push((name, published.file_id.to_string()));
+    }
+    for (name, ledger_id) in &ids {
+        let specs = [spec(ledger_id)];
+        store
+            .create_probe_job(
+                &format!("{name}-job"),
+                "media_probe",
+                "media",
+                None,
+                name,
+                &specs,
+            )
+            .unwrap();
+    }
+
+    let queued = store.pending_local_metadata_dispatch_ids(8).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].ledger_id, ids[1].1);
+}
+
+#[test]
 fn large_pending_recovery_loads_only_dispatch_windows() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();

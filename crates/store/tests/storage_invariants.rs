@@ -340,6 +340,23 @@ fn rebind_moves_the_file_and_rebuilds_both_cards() {
         .expect("the new media must gain the card");
     assert_eq!(moved.file_count, 1);
     assert_eq!(moved.preferred_file_id, Some(file.file_id));
+
+    library(&store, "Another", MediaKind::Movie, "/other");
+    let removal = store.begin_library_removal(&lib.id).unwrap();
+    assert!(matches!(
+        store.rebind_scanned_ledger(file.file_id, source.id),
+        Err(store::StoreError::Protected(_))
+    ));
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    assert_eq!(
+        store
+            .clean_library_removal(&removal.operation_id)
+            .unwrap()
+            .state,
+        "succeeded"
+    );
 }
 
 /// A publication that only repeats the same facts must not advance the file revision,

@@ -40,3 +40,19 @@ export function shouldHeartbeat({ phase, announced, paused }: HeartbeatCondition
   if (paused) return announced && HEARTBEAT_PHASES.has(phase);
   return phase === "playing";
 }
+
+/** Pause can change while a buffering or seeking phase stays active. */
+export function startPlaybackHeartbeats(
+  phase: PlayerPhase,
+  announced: boolean,
+  video: Pick<HTMLVideoElement, "paused">,
+  report: (paused: boolean) => void,
+  intervalMs: number,
+): (() => void) | undefined {
+  if (!announced || !HEARTBEAT_PHASES.has(phase)) return;
+  const timer = setInterval(() => {
+    const paused = video.paused;
+    if (shouldHeartbeat({ phase, announced, paused })) report(paused);
+  }, intervalMs);
+  return () => clearInterval(timer);
+}

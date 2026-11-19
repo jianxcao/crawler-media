@@ -12,6 +12,36 @@ pub(in crate::media_server_provider) async fn hints(
     limit: usize,
 ) -> Result<ServerItemPage, String> {
     let deadline = Instant::now() + SELECTION_DEADLINE;
+    for attempt in 0..2 {
+        let observed_access = run_store_query_stage(&provider.state, deadline, move |store| {
+            Ok(store.authorized_library_ids(user)?)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        let page = hints_attempt(provider, user, term, offset, limit, deadline).await?;
+        let current_access = run_store_query_stage(&provider.state, deadline, move |store| {
+            Ok(store.authorized_library_ids(user)?)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        if current_access == observed_access {
+            return Ok(page);
+        }
+        if attempt == 0 {
+            tracing::warn!(%user, "Jellyfin Library access changed during search hints; retrying selection");
+        }
+    }
+    Err("Library access changed during search hints".into())
+}
+
+async fn hints_attempt(
+    provider: &ApiServerProvider,
+    user: UserId,
+    term: &str,
+    offset: usize,
+    limit: usize,
+    deadline: Instant,
+) -> Result<ServerItemPage, String> {
     let term = term.to_owned();
     let result = run_store_query_stage(&provider.state, deadline, move |store| {
         let page = store.protocol_search_hints(user, &term, offset, limit)?;
