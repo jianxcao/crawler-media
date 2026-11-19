@@ -273,7 +273,7 @@ async fn check_restored_presence() {
                 .unwrap()
         );
         for id in &ids {
-            assert!(store.start_probe_unit("presence-race", id).unwrap());
+            assert!(store.start_probe_unit("presence-race", id, store::ProbeDispatchStage::Metadata).unwrap());
         }
         restore_first_presence(store, &harness);
         assert!(

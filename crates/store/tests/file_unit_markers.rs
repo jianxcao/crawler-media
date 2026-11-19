@@ -480,7 +480,9 @@ fn television_whole_refresh_preserves_first_episode_marker() {
             }],
         )
         .unwrap();
-    store.start_probe_unit("whole-job", &id).unwrap();
+    store
+        .start_probe_unit("whole-job", &id, store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store
         .finish_probe_unit("whole-job", &id, true, None)
         .unwrap();

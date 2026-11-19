@@ -227,7 +227,7 @@ fn season_coverage_work_ignores_other_season_files() {
     let store = Store::open(dir.path()).unwrap();
     let (small, before) = store.with_stats(StatsScope::Library, || {
         store
-            .file_coverage_in_library_season(library, media, 1)
+            .file_coverage_in_library_season(library, media, 1, store::FileReadScope::AllRecorded)
             .unwrap()
     });
     insert(2, 100, 10_000);
@@ -236,7 +236,7 @@ fn season_coverage_work_ignores_other_season_files() {
     let store = Store::open(dir.path()).unwrap();
     let (large, after) = store.with_stats(StatsScope::Library, || {
         store
-            .file_coverage_in_library_season(library, media, 1)
+            .file_coverage_in_library_season(library, media, 1, store::FileReadScope::AllRecorded)
             .unwrap()
     });
     assert_eq!(small.len(), 2);

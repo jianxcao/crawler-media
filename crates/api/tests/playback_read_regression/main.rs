@@ -6,5 +6,8 @@ mod support;
 
 mod activity_and_stream;
 mod common;
+mod episode_publication;
+mod episode_scope;
 mod favorites;
+mod page_restore;
 mod stream_credentials;

@@ -22,7 +22,7 @@ fn fixture() -> Fx {
     std::fs::create_dir_all(&b).unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     // One Library with two roots (cross-root same-Library), plus a sibling Library.
-    store
+    let a_library = store
         .create_library(
             MediaKind::Movie,
             "A",
@@ -34,7 +34,7 @@ fn fixture() -> Fx {
         .unwrap();
     let other = tmp.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
-    store
+    let b_library = store
         .create_library(
             MediaKind::Movie,
             "B",
@@ -44,6 +44,18 @@ fn fixture() -> Fx {
             &[],
         )
         .unwrap();
+    // A has two roots, so creation's single batch can leave B's migration queued.
+    // Complete fixture ownership before exercising rename publication barriers.
+    store.drain_root_reassignments().unwrap();
+    for library in [&a_library, &b_library] {
+        assert!(
+            store
+                .root_reassignments_for_library(&library.id)
+                .unwrap()
+                .iter()
+                .all(|operation| operation.state == "succeeded")
+        );
+    }
     let media = MediaId::new();
     store
         .insert_media(&Media {

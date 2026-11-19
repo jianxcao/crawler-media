@@ -53,7 +53,8 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         let unit = unit.clone();
         move |manager| {
             source_ready(manager, &unit)
-                && (!work.start_job || start_persisted_unit(manager, &unit))
+                && (!work.start_job
+                    || start_persisted_unit(manager, &unit, store::ProbeDispatchStage::Fingerprint))
         }
     })
     .await

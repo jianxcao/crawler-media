@@ -124,11 +124,16 @@ fn load_episode_snapshot(
             .has_file_in_library(library, media.id)
             .map_err(episode_store_error)?;
         let rows = match season {
-            Some(season) => store.file_coverage_in_library_season(library, media.id, season),
+            Some(season) => store.file_coverage_in_library_season(
+                library,
+                media.id,
+                season,
+                store::FileReadScope::Playable,
+            ),
             None => store.file_coverage_in_library(
                 library,
                 Some(media.id),
-                store::FileReadScope::AllRecorded,
+                store::FileReadScope::Playable,
             ),
         }
         .map_err(episode_store_error)?;

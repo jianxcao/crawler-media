@@ -32,6 +32,7 @@ export interface QoeSummary {
 }
 
 export type QoeEvent =
+  | { type: "suspend" }
   | { type: "play-requested"; at: number }
   | { type: "first-frame"; at: number }
   | { type: "waiting"; at: number }
@@ -118,6 +119,8 @@ export function liveStats(state: State): QoeLiveStats {
 /** 纯归约：事件进、状态出。没有副作用，因此可以直接表驱动单测。 */
 export function reduceQoe(state: State, event: QoeEvent): State {
   switch (event.type) {
+    case "suspend":
+      return { ...state, lastTickAt: null, waitingSince: null, inSeek: false, seekStartedAt: null };
     case "play-requested":
       return { ...state, requestedAt: event.at };
     case "first-frame":

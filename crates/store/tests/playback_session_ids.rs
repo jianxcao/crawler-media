@@ -151,3 +151,6 @@ fn expiry_keeps_active_and_is_bounded_500() {
         "expected 1 remaining old closed + 1 active + 1 new pending"
     );
 }
+
+#[path = "playback_session_ids/renewal.rs"]
+mod renewal;

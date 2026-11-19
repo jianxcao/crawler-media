@@ -132,7 +132,11 @@ fn cancelled_unit_cannot_reuse_a_cached_fingerprint() {
                 .unwrap()
         );
         for id in [&ledger_id, &other_id] {
-            assert!(store.start_probe_unit("delete-job", id).unwrap());
+            assert!(
+                store
+                    .start_probe_unit("delete-job", id, store::ProbeDispatchStage::Metadata)
+                    .unwrap()
+            );
         }
         store
             .cancel_probe_unit("delete-job", &ledger_id, "source missing")

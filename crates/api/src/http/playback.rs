@@ -28,6 +28,7 @@ mod heartbeat_input;
 mod request;
 mod selection;
 mod session;
+mod session_renewal;
 pub(crate) use heartbeat::progress;
 use selection::row_for;
 pub(crate) use session::{session_stream, start_session};

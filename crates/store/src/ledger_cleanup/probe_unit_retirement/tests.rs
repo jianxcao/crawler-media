@@ -82,7 +82,9 @@ fn deleting_a_ledger_retires_its_unit_and_keeps_the_job_completable() {
             &units,
         )
         .unwrap();
-    store.start_probe_unit("job-1", &first_id).unwrap();
+    store
+        .start_probe_unit("job-1", &first_id, crate::ProbeDispatchStage::Metadata)
+        .unwrap();
 
     store.delete_ledger_path(&first.path).unwrap();
 
@@ -119,7 +121,9 @@ fn deleting_the_last_ledger_terminalizes_the_job_instead_of_stranding_it() {
             &units,
         )
         .unwrap();
-    store.start_probe_unit("job-2", &first_id).unwrap();
+    store
+        .start_probe_unit("job-2", &first_id, crate::ProbeDispatchStage::Metadata)
+        .unwrap();
 
     store.delete_ledger_path(&first.path).unwrap();
 
@@ -148,7 +152,9 @@ fn a_late_unit_finish_does_not_resurrect_a_retired_job() {
             &units,
         )
         .unwrap();
-    store.start_probe_unit("job-4", &first_id).unwrap();
+    store
+        .start_probe_unit("job-4", &first_id, crate::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.delete_ledger_path(&first.path).unwrap();
     assert_eq!(
         store.get_probe_job("job-4").unwrap().unwrap().status,
@@ -193,7 +199,9 @@ fn prefix_job(
             &units,
         )
         .unwrap();
-    store.start_probe_unit(job_id, &first_id).unwrap();
+    store
+        .start_probe_unit(job_id, &first_id, crate::ProbeDispatchStage::Metadata)
+        .unwrap();
     store
         .finish_probe_unit_with_status(
             job_id,
@@ -203,7 +211,9 @@ fn prefix_job(
             (prefix_status != "succeeded").then_some("prefix unit did not succeed"),
         )
         .unwrap();
-    store.start_probe_unit(job_id, &second_id).unwrap();
+    store
+        .start_probe_unit(job_id, &second_id, crate::ProbeDispatchStage::Metadata)
+        .unwrap();
     (store, first.path.clone(), second.path.clone())
 }
 

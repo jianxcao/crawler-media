@@ -124,3 +124,7 @@ impl Store {
 
 #[path = "session_ids/connection.rs"]
 mod connection;
+
+#[path = "session_ids/renewal.rs"]
+mod renewal;
+pub use renewal::PlaybackRenewalError;

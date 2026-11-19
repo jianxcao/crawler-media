@@ -170,6 +170,7 @@ fn root_operations_respect_frozen_owner_and_snapshot_overlap() {
             &[],
         )
         .unwrap();
+    store.drain_root_reassignments().unwrap();
     let frozen_extra = store
         .list_library_roots()
         .unwrap()

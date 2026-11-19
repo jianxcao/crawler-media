@@ -114,6 +114,318 @@ async fn strict_language_contract_and_legacy_credentials_are_atomic() {
 }
 
 #[tokio::test]
+async fn unchanged_language_preserves_admitted_work() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = stage(&temp);
+    let app = router(state.clone());
+    let first = app
+        .clone()
+        .oneshot(json_request(
+            "PATCH",
+            "/api/v1/settings/metadata-language",
+            serde_json::json!({"expected_revision":0,"language":"en-US"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let changed = body_json(first).await;
+    for operation in changed["data"]["operations"].as_array().unwrap() {
+        let poll = format!(
+            "/api/v1/libraries/{}/operations/{}",
+            operation["library_id"].as_str().unwrap(),
+            operation["operation_id"].as_str().unwrap()
+        );
+        wait_for_operation(&app, &poll).await;
+    }
+    let completed = app
+        .clone()
+        .oneshot(request("GET", "/api/v1/settings/metadata-language"))
+        .await
+        .unwrap();
+    let baseline = body_json(completed).await;
+    let library = state
+        .store()
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap();
+    let work = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Ok(work) = state.acquire_library_work(&library.id) {
+                break work;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "PATCH",
+            "/api/v1/settings/metadata-language",
+            serde_json::json!({"expected_revision":1,"language":" en-US "}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let current = body_json(response).await;
+    assert_eq!(current["data"]["revision"], 1);
+    assert_eq!(
+        current["data"]["operations"],
+        baseline["data"]["operations"]
+    );
+    assert!(!work.control().is_cancelled());
+}
+
+#[tokio::test]
+async fn unchanged_language_keeps_pending_and_failed_operations_untouched() {
+    for failed in [false, true] {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let state = stage(&temp);
+        let library = state
+            .store()
+            .default_library(domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap();
+        let work = state.acquire_library_work(&library.id).unwrap();
+        let changed = state
+            .store()
+            .change_metadata_language(0, "en-US", "same", 1)
+            .unwrap();
+        if failed {
+            for operation in &changed.operations {
+                state
+                    .store()
+                    .fail_library_operation_if_owned(&operation.operation_id, "fixture failure", 2)
+                    .unwrap();
+            }
+        }
+        let app = router(state.clone());
+        let baseline = body_json(
+            app.clone()
+                .oneshot(request("GET", "/api/v1/settings/metadata-language"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let response = app
+            .oneshot(json_request(
+                "PATCH",
+                "/api/v1/settings/metadata-language",
+                serde_json::json!({"expected_revision":1,"language":"en-US"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["data"], baseline["data"]);
+        assert!(!work.control().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn accepted_language_operations_wait_for_capacity() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = stage(&temp);
+    for index in 0..14 {
+        let root = temp.path().join(format!("movie-{index}"));
+        std::fs::create_dir_all(&root).unwrap();
+        state
+            .store()
+            .create_library(
+                domain::MediaKind::Movie,
+                &format!("Movie {index}"),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let reservations = [
+        state.fs_work.try_reserve().unwrap(),
+        state.fs_work.try_reserve().unwrap(),
+    ];
+    let app = router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "PATCH",
+            "/api/v1/settings/metadata-language",
+            serde_json::json!({"expected_revision":0,"language":"en-US"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = body_json(response).await;
+    let operations = body["data"]["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 16);
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    drop(reservations);
+    for operation in operations {
+        let library = operation["library_id"].as_str().unwrap();
+        let id = operation["operation_id"].as_str().unwrap();
+        let poll = format!("/api/v1/libraries/{library}/operations/{id}");
+        wait_for_operation(&app, &poll).await;
+        assert_eq!(
+            state.store().library_lifecycle_state(library).unwrap(),
+            "ready"
+        );
+    }
+}
+
+#[tokio::test]
+async fn accepted_language_operations_compete_for_two_capacity_slots() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = stage(&temp);
+    for index in 0..14 {
+        let root = temp.path().join(format!("movie-{index}"));
+        std::fs::create_dir_all(&root).unwrap();
+        state
+            .store()
+            .create_library(
+                domain::MediaKind::Movie,
+                &format!("Movie {index}"),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let app = router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "PATCH",
+            "/api/v1/settings/metadata-language",
+            serde_json::json!({"expected_revision":0,"language":"en-US"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = body_json(response).await;
+    let operations = body["data"]["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 16);
+    for operation in operations {
+        let library = operation["library_id"].as_str().unwrap();
+        let id = operation["operation_id"].as_str().unwrap();
+        wait_for_operation(
+            &app,
+            &format!("/api/v1/libraries/{library}/operations/{id}"),
+        )
+        .await;
+        assert_eq!(
+            state.store().library_lifecycle_state(library).unwrap(),
+            "ready"
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_recovery_waits_for_capacity_for_sixteen_operations() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let state = stage(&temp);
+    for index in 0..14 {
+        let root = temp.path().join(format!("movie-{index}"));
+        std::fs::create_dir_all(&root).unwrap();
+        state
+            .store()
+            .create_library(
+                domain::MediaKind::Movie,
+                &format!("Movie {index}"),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let changed = state
+        .store()
+        .change_metadata_language(0, "en-US", "recovery", 1)
+        .unwrap();
+    assert_eq!(changed.operations.len(), 16);
+    let operations = changed
+        .operations
+        .into_iter()
+        .map(|operation| (operation.library_id.to_string(), operation.operation_id))
+        .collect::<Vec<_>>();
+    drop(state);
+
+    let restarted = stage(&temp);
+    let reservations = [
+        restarted.fs_work.try_reserve().unwrap(),
+        restarted.fs_work.try_reserve().unwrap(),
+    ];
+    api::storage_operations::resume_library_reconfigurations(&restarted).unwrap();
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    drop(reservations);
+    let app = router(restarted.clone());
+    for (library, operation) in operations {
+        wait_for_operation(
+            &app,
+            &format!("/api/v1/libraries/{library}/operations/{operation}"),
+        )
+        .await;
+        assert_eq!(
+            restarted.store().library_lifecycle_state(&library).unwrap(),
+            "ready"
+        );
+    }
+}
+
+#[test]
+fn driver_failure_cas_persists_only_for_the_current_frozen_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = stage(&temp);
+    let changed = state
+        .store()
+        .change_metadata_language(0, "ja", "failure-cas", 0)
+        .unwrap();
+    let operation = &changed.operations[0];
+    assert!(
+        state
+            .store()
+            .fail_library_operation_if_owned(&operation.operation_id, "driver stopped", 20)
+            .unwrap()
+    );
+    let failed = state
+        .store()
+        .library_operation_view(&operation.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error.as_deref(), Some("driver stopped"));
+    assert_eq!(
+        state
+            .store()
+            .library_lifecycle_state(&operation.library_id.to_string())
+            .unwrap(),
+        "reindexing"
+    );
+    assert!(
+        !state
+            .store()
+            .fail_library_operation_if_owned(&operation.operation_id, "overwrite", 30)
+            .unwrap()
+    );
+    assert_eq!(
+        state
+            .store()
+            .library_operation_view(&operation.operation_id)
+            .unwrap()
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("driver stopped")
+    );
+}
+
+#[tokio::test]
 async fn retry_validates_library_owner_and_failed_state() {
     let temp = tempfile::tempdir().unwrap();
     let state = stage(&temp);
@@ -142,24 +454,7 @@ async fn retry_validates_library_owner_and_failed_state() {
     );
     let res = app.clone().oneshot(request("POST", &route)).await.unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
-    let wrong = format!(
-        "/api/v1/libraries/{}/operations/{}/retry",
-        changed
-            .operations
-            .iter()
-            .find(|other| other.library_id != library_id)
-            .unwrap()
-            .library_id,
-        operation.operation_id
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(request("POST", &wrong))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
+    assert_foreign_retry_missing(&app, &changed, library_id, &operation.operation_id).await;
     let db = rusqlite::Connection::open(temp.path().join("data/library.db")).unwrap();
     db.execute(
         "UPDATE library_operations SET state='failed',error='fault' WHERE operation_id=?1",
@@ -171,6 +466,12 @@ async fn retry_validates_library_owner_and_failed_state() {
     assert_eq!(
         body_json(res).await["data"]["operation_id"],
         operation.operation_id
+    );
+    let running = app.clone().oneshot(request("POST", &route)).await.unwrap();
+    assert_eq!(running.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(running).await["error"]["code"],
+        "library.operation_running"
     );
     let arbitrary = format!("/api/v1/libraries/{}", operation.library_id);
     // The narrow retry exception does not admit normal writes while draining.
@@ -203,6 +504,18 @@ async fn retry_validates_library_owner_and_failed_state() {
         ),
     )
     .await;
+    assert!(
+        !state
+            .store()
+            .fail_library_operation_if_owned(&operation.operation_id, "late failure", 2)
+            .unwrap()
+    );
+    let finished = state
+        .store()
+        .library_operation_view(&operation.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.state, "succeeded");
     let res = app
         .oneshot(json_request(
             "PATCH",
@@ -220,6 +533,31 @@ async fn retry_validates_library_owner_and_failed_state() {
             .unwrap()
             .name,
         "after retry"
+    );
+}
+
+async fn assert_foreign_retry_missing(
+    app: &axum::Router,
+    changed: &store::MetadataLanguageState,
+    library: domain::LibraryId,
+    operation: &str,
+) {
+    let other = changed
+        .operations
+        .iter()
+        .find(|other| other.library_id != library)
+        .unwrap();
+    let route = format!(
+        "/api/v1/libraries/{}/operations/{operation}/retry",
+        other.library_id
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("POST", &route))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
     );
 }
 
@@ -338,3 +676,6 @@ async fn completed_language_operations_obey_thirty_day_retention() {
         assert_eq!(view.updated_at_ms, NOW);
     }
 }
+
+#[path = "metadata_language_operation/driver_failure.rs"]
+mod driver_failure;

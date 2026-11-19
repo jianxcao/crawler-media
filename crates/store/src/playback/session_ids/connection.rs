@@ -24,91 +24,12 @@ impl crate::LibraryConnection<'_> {
         now: i64,
         role: domain::UserRole,
     ) -> Result<String, StoreError> {
-        let play_session_id = uuid::Uuid::new_v4().to_string();
-        let user_str = user_id.to_string();
-        let item_id_str = ledger_id.to_string();
-
         let tx = crate::write_tx(self.library)?;
-        crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
-
-        let cutoff = now - 2_592_000;
-        tx.execute(
-            "DELETE FROM playback_session_ids
-             WHERE rowid IN (
-                 SELECT rowid FROM playback_session_ids
-                 WHERE issued_at < ?1 AND state IN ('pending', 'closed')
-                 ORDER BY issued_at ASC LIMIT 500
-             )",
-            params![cutoff],
+        let id = issue_on(
+            &tx, user_id, device_id, ledger_id, media_id, unit, version, now, role, None,
         )?;
-
-        let max_gen: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(generation), 0) FROM playback_session_ids WHERE user_id = ?1 AND device_id = ?2",
-            params![user_str, device_id],
-            |r| r.get(0),
-        )?;
-        let generation = max_gen + 1;
-
-        let file_info: Option<(String, String, i64, String)> = tx
-            .query_row(
-                "SELECT media_id, library_id, file_revision, source_version
-                 FROM library_files WHERE file_id = ?1 AND presence_state = 'present'
-                   AND publication_state = 'published'",
-                params![item_id_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        let Some((file_media, library_id, revision, source_version)) = file_info else {
-            return Err(StoreError::Missing(format!("playable file {ledger_id}")));
-        };
-        if !crate::library_read::authorized_ids_on(&tx, user_id, role)?.contains(&library_id) {
-            return Err(StoreError::Protected(format!(
-                "library {library_id} is not visible"
-            )));
-        }
-        if file_media != media_id.to_string()
-            || revision != version.revision
-            || source_version != version.source_version
-        {
-            return Err(StoreError::Protected(format!(
-                "playback source changed for {ledger_id}"
-            )));
-        }
-        let coverage_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_file_units
-             WHERE file_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4)",
-            params![item_id_str, media_id.to_string(), unit.season, unit.episode],
-            |r| r.get(0),
-        )?;
-        if !coverage_exists {
-            return Err(StoreError::Missing(format!(
-                "source does not cover {unit:?}"
-            )));
-        }
-        let (config_revision, lifecycle): (i64, String) = tx.query_row(
-            "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",
-            params![library_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if lifecycle != "ready" {
-            return Err(StoreError::Protected(format!(
-                "library {library_id} is not ready"
-            )));
-        }
-
-        tx.execute(
-            "INSERT INTO playback_session_ids
-                (user_id, device_id, play_session_id, item_id, media_id, season, episode,
-                 file_id, file_revision, source_version, library_id, config_revision, timeline_mode,
-                 issued_at, generation, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'full_file', ?13, ?14, 'pending')",
-            params![user_str, device_id, play_session_id, item_id_str, media_id.to_string(),
-                unit.season, unit.episode, item_id_str, version.revision, version.source_version,
-                library_id, config_revision, now, generation],
-        )?;
-
         tx.commit()?;
-        Ok(play_session_id)
+        Ok(id)
     }
 
     pub fn play_session_binding(
@@ -258,4 +179,105 @@ impl crate::LibraryConnection<'_> {
 
         Ok(true)
     }
+}
+
+/// Caller owns the transaction, so renewal authorization and insertion are atomic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn issue_on(
+    conn: &rusqlite::Connection,
+    user_id: UserId,
+    device_id: &str,
+    ledger_id: LedgerId,
+    media_id: domain::MediaId,
+    unit: domain::UnitKey,
+    version: &domain::FileVersion,
+    now: i64,
+    role: domain::UserRole,
+    expected_config_revision: Option<i64>,
+) -> Result<String, StoreError> {
+    let play_session_id = uuid::Uuid::new_v4().to_string();
+    let user_str = user_id.to_string();
+    let item_id_str = ledger_id.to_string();
+
+    crate::library_write::publish::ensure_media_writable(conn, media_id)?;
+
+    let max_gen: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(generation), 0) FROM playback_session_ids WHERE user_id = ?1 AND device_id = ?2",
+            params![user_str, device_id],
+            |r| r.get(0),
+        )?;
+    let generation = max_gen + 1;
+
+    let cutoff = now - 2_592_000;
+    conn.execute(
+        "DELETE FROM playback_session_ids
+             WHERE rowid IN (
+                 SELECT rowid FROM playback_session_ids
+                 WHERE issued_at < ?1 AND state IN ('pending', 'closed')
+                 ORDER BY issued_at ASC LIMIT 500
+             )",
+        params![cutoff],
+    )?;
+
+    let file_info: Option<(String, String, i64, String)> = conn
+        .query_row(
+            "SELECT media_id, library_id, file_revision, source_version
+                 FROM library_files WHERE file_id = ?1 AND presence_state = 'present'
+                   AND publication_state = 'published'",
+            params![item_id_str],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((file_media, library_id, revision, source_version)) = file_info else {
+        return Err(StoreError::Missing(format!("playable file {ledger_id}")));
+    };
+    if !crate::library_read::authorized_ids_on(conn, user_id, role)?.contains(&library_id) {
+        return Err(StoreError::Protected(format!(
+            "library {library_id} is not visible"
+        )));
+    }
+    if file_media != media_id.to_string()
+        || revision != version.revision
+        || source_version != version.source_version
+    {
+        return Err(StoreError::Protected(format!(
+            "playback source changed for {ledger_id}"
+        )));
+    }
+    let coverage_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_file_units
+             WHERE file_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4)",
+        params![item_id_str, media_id.to_string(), unit.season, unit.episode],
+        |r| r.get(0),
+    )?;
+    if !coverage_exists {
+        return Err(StoreError::Missing(format!(
+            "source does not cover {unit:?}"
+        )));
+    }
+    let (config_revision, lifecycle): (i64, String) = conn.query_row(
+        "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",
+        params![library_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if lifecycle != "ready"
+        || expected_config_revision.is_some_and(|expected| expected != config_revision)
+    {
+        return Err(StoreError::Protected(format!(
+            "library {library_id} is not ready"
+        )));
+    }
+
+    conn.execute(
+            "INSERT INTO playback_session_ids
+                (user_id, device_id, play_session_id, item_id, media_id, season, episode,
+                 file_id, file_revision, source_version, library_id, config_revision, timeline_mode,
+                 issued_at, generation, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'full_file', ?13, ?14, 'pending')",
+            params![user_str, device_id, play_session_id, item_id_str, media_id.to_string(),
+                unit.season, unit.episode, item_id_str, version.revision, version.source_version,
+                library_id, config_revision, now, generation],
+        )?;
+
+    Ok(play_session_id)
 }

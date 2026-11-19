@@ -184,7 +184,11 @@ fn assert_metadata_advances_to_fingerprint(store: &Store, first: &store::ProbeDi
     // Metadata -> fingerprint is persisted, not guessed from memory.
     assert!(
         store
-            .start_probe_unit(&first.job_id, &first.ledger_id)
+            .start_probe_unit(
+                &first.job_id,
+                &first.ledger_id,
+                store::ProbeDispatchStage::Metadata
+            )
             .unwrap()
     );
     assert!(
@@ -215,7 +219,11 @@ fn assert_metadata_advances_to_fingerprint(store: &Store, first: &store::ProbeDi
     );
     assert!(
         store
-            .start_probe_unit(&first.job_id, &first.ledger_id)
+            .start_probe_unit(
+                &first.job_id,
+                &first.ledger_id,
+                store::ProbeDispatchStage::Fingerprint
+            )
             .unwrap()
     );
     store

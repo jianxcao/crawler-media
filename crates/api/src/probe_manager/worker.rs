@@ -330,7 +330,10 @@ async fn process_metadata(
     };
     let ready = step(&manager, {
         let unit = unit.clone();
-        move |manager| source_ready(manager, &unit) && start_persisted_unit(manager, &unit)
+        move |manager| {
+            source_ready(manager, &unit)
+                && start_persisted_unit(manager, &unit, store::ProbeDispatchStage::Metadata)
+        }
     })
     .await;
     if !ready.unwrap_or(false) {
@@ -646,11 +649,15 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
     }
 }
 
-fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
+fn start_persisted_unit(
+    manager: &ProbeManager,
+    unit: &ProbeUnit,
+    stage: store::ProbeDispatchStage,
+) -> bool {
     let ledger_id = unit.row.file.file_id.to_string();
     let store = manager.store.as_ref();
     let started = match unit.job_id.as_deref() {
-        Some(job_id) => store.start_probe_unit(job_id, &ledger_id),
+        Some(job_id) => store.start_probe_unit(job_id, &ledger_id, stage),
         None => {
             tracing::error!(ledger_id, "队列单元缺少任务 ID，无法启动持久化任务");
             return false;

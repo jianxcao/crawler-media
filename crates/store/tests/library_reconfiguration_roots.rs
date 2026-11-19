@@ -6,6 +6,11 @@ use domain::MediaKind;
 use store::Store;
 use store::library_operations::LibraryReconfiguration;
 
+#[path = "library_reconfiguration_roots/conflicts.rs"]
+mod conflicts;
+#[path = "library_reconfiguration_roots/retries.rs"]
+mod retries;
+
 fn root_id_of(store: &Store, library_id: &str, path: &Path) -> String {
     store
         .list_library_roots()

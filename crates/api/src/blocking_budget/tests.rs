@@ -51,3 +51,28 @@ async fn cancelled_request_keeps_its_acquired_permit_until_the_worker_exits() {
     .unwrap();
     assert_eq!(before_release, 0);
 }
+
+#[tokio::test]
+async fn reservation_waits_for_capacity_and_cancellation_releases_queue_position() {
+    let budget = Arc::new(BlockingBudget::new(1));
+    let held = budget.try_reserve().unwrap();
+    let waiting_budget = budget.clone();
+    let waiting = tokio::spawn(async move { waiting_budget.reserve_until_available().await });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    drop(held);
+    let reservation = waiting.await.unwrap().unwrap();
+    assert_eq!(budget.available_permits(), 0);
+    drop(reservation);
+
+    let held = budget.try_reserve().unwrap();
+    let waiting_budget = budget.clone();
+    let waiting = tokio::spawn(async move { waiting_budget.reserve_until_available().await });
+    tokio::task::yield_now().await;
+    waiting.abort();
+    assert!(matches!(waiting.await, Err(error) if error.is_cancelled()));
+    drop(held);
+    let reservation = budget.reserve_until_available().await.unwrap();
+    drop(reservation);
+    assert_eq!(budget.available_permits(), 1);
+}

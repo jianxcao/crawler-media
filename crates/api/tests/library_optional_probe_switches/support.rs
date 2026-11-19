@@ -107,7 +107,15 @@ impl Fixture {
                     if status == "running" {
                         assert!(
                             store
-                                .start_probe_unit(&id, &file.file_id.to_string())
+                                .start_probe_unit(
+                                    &id,
+                                    &file.file_id.to_string(),
+                                    if kind == "fingerprint_probe" {
+                                        store::ProbeDispatchStage::Fingerprint
+                                    } else {
+                                        store::ProbeDispatchStage::Metadata
+                                    }
+                                )
                                 .unwrap()
                         );
                     }

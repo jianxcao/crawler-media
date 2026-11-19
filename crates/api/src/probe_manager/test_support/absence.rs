@@ -144,9 +144,15 @@ pub(in crate::probe_manager) fn handoff_cached(
             cache.media_duration_ms,
         )
         .unwrap();
-    store.start_probe_unit(job, &file).unwrap();
+    store
+        .start_probe_unit(job, &file, store::ProbeDispatchStage::Metadata)
+        .unwrap();
     assert!(store.advance_probe_unit_to_fingerprint(job, &file).unwrap());
-    assert!(store.start_probe_unit(job, &file).unwrap());
+    assert!(
+        store
+            .start_probe_unit(job, &file, store::ProbeDispatchStage::Fingerprint)
+            .unwrap()
+    );
     let policy = marker::SamplingPolicy {
         full_window_duration_secs: cache.sample_duration_secs,
         ..Default::default()

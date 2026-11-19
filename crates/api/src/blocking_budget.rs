@@ -68,6 +68,16 @@ impl BlockingBudget {
         }
     }
 
+    /// Wait until a worker slot is available. Dropping the future cancels the wait.
+    pub async fn reserve_until_available(&self) -> Result<Reservation, BlockingError> {
+        self.permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map(|permit| Reservation { permit })
+            .map_err(|error| BlockingError::Worker(error.to_string()))
+    }
+
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
     ///
     /// 超时不会中止 `work`（也不会提前释放 permit）；调用方必须把

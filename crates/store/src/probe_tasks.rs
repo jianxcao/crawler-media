@@ -153,8 +153,15 @@ impl Store {
         self.with_library_read(|db| db.probe_job_units(job_id))
     }
 
-    pub fn start_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
-        self.with_library_write(|db| db.start_probe_unit(job_id, ledger_id))
+    /// Claim exactly the queued dispatch stage observed by this worker.
+    /// Analysis ownership uses `claim_probe_analysis` and its claim token.
+    pub fn start_probe_unit(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        stage: crate::ProbeDispatchStage,
+    ) -> Result<bool, StoreError> {
+        self.with_library_write(|db| db.start_probe_unit(job_id, ledger_id, stage))
     }
 
     /// Requeue only the interrupted unit while its job is still active.

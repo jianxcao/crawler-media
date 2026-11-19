@@ -79,6 +79,18 @@ impl Fixture {
                 &[],
             )
             .unwrap();
+        // Default-root reconfiguration also queues ownership work. Finish setup's
+        // root migrations before these tests exercise Subscribe detachment.
+        store.drain_root_reassignments().unwrap();
+        for library in [&default, &removed] {
+            assert!(
+                store
+                    .root_reassignments_for_library(&library.id)
+                    .unwrap()
+                    .iter()
+                    .all(|operation| operation.state == "succeeded")
+            );
+        }
         store.set_default_library(&removed.id).unwrap();
         store.set_transfer_mode("copy").unwrap();
         store.set_scrape_enabled(false).unwrap();

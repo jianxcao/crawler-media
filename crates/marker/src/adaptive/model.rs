@@ -84,10 +84,7 @@ pub fn is_constant_or_silent(words: &[u32]) -> bool {
     }
     // Check silence (majority 0s)
     let zeros = words.iter().filter(|&&w| w == 0).count();
-    if zeros as f64 / words.len() as f64 > 0.95 {
-        return true;
-    }
-    false
+    zeros as f64 / words.len() as f64 > 0.95
 }
 
 pub fn build_season_models(

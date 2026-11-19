@@ -25,6 +25,11 @@ pub(crate) fn apply_root_batch(
     cursor: &mut OperationCursor,
     batch: usize,
 ) -> Result<BatchOutcome, StoreError> {
+    super::root_conflicts::ensure_root_keys_available(
+        tx,
+        library,
+        requested.iter().map(|root| root.path_key.as_str()),
+    )?;
     ensure_root_rows(tx, library, requested)?;
 
     if !cursor.files_done {

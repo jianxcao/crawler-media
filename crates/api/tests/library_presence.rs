@@ -192,7 +192,7 @@ async fn symlink_alias_of_owned_root_cannot_create_ambiguous_scope() {
             &[],
         )
         .unwrap_err();
-    assert!(err.to_string().contains("UNIQUE"), "{err}");
+    assert!(matches!(err, store::StoreError::Conflict(_)), "{err}");
 }
 
 #[tokio::test]

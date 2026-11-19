@@ -95,7 +95,11 @@ fn run_restored_anchor_capture_test() {
                 .unwrap()
         );
         for id in &ids {
-            assert!(store.start_probe_unit("adaptive-cancel", id).unwrap());
+            assert!(
+                store
+                    .start_probe_unit("adaptive-cancel", id, store::ProbeDispatchStage::Metadata)
+                    .unwrap()
+            );
         }
     }
     for unit in &mut f.units {
@@ -260,7 +264,8 @@ fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
             .unwrap()
         );
         for key in &keys[..2] {
-            st.start_probe_unit("cancel-last", key).unwrap();
+            st.start_probe_unit("cancel-last", key, store::ProbeDispatchStage::Metadata)
+                .unwrap();
             st.finish_probe_unit("cancel-last", key, true, None)
                 .unwrap();
         }

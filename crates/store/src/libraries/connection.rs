@@ -125,6 +125,7 @@ impl crate::LibraryConnection<'_> {
         match_rules: &[serde_json::Value],
         default_filter_id: Option<&str>,
     ) -> Result<Library, StoreError> {
+        let tx = crate::write_tx(self.library)?;
         self.ensure_removal_keys_available(roots.entries.iter().map(|(_, key)| key.as_str()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let sort_order = self.next_sort_order()?;
@@ -147,7 +148,6 @@ impl crate::LibraryConnection<'_> {
         let match_rules_json = serde_json::to_string(match_rules)?;
         // The library row and its roots commit together: a rejected root must
         // not leave behind a Library the caller never successfully created.
-        let tx = crate::write_tx(self.library)?;
         tx.execute(
             "INSERT INTO libraries
                 (library_id, kind, name, is_default, sort_order, access_mode, admin_visible, member_ids_json, match_rules_json, default_filter_id)
@@ -313,19 +313,24 @@ impl crate::LibraryConnection<'_> {
         match_rules: Option<&[serde_json::Value]>,
         default_filter_id: Option<Option<&str>>,
     ) -> Result<Library, StoreError> {
+        let tx = crate::write_tx(self.library)?;
         self.ensure_library_mutable(id)?;
         let Some(library) = self.get_library(id)? else {
             return Err(StoreError::Missing(format!("library {id}")));
         };
         if let Some(roots) = prepared_roots {
             self.ensure_removal_keys_available(roots.entries.iter().map(|(_, key)| key.as_str()))?;
+            crate::library_operations::root_conflicts::ensure_root_keys_available(
+                &tx,
+                id,
+                roots.entries.iter().map(|(_, key)| key.as_str()),
+            )?;
             let proposed: Vec<std::path::PathBuf> =
                 roots.entries.iter().map(|(_, key)| key.into()).collect();
             self.ensure_recorded_files_stay_under(&library, &proposed)?;
         }
         // One transaction for the row updates and the root replacement, so a
         // rejected root cannot leave a partially updated Library behind.
-        let tx = crate::write_tx(self.library)?;
         if let Some(name) = name
             && !name.trim().is_empty()
         {

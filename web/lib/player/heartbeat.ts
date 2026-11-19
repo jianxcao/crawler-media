@@ -48,9 +48,11 @@ export function startPlaybackHeartbeats(
   video: Pick<HTMLVideoElement, "paused">,
   report: (paused: boolean) => void,
   intervalMs: number,
+  suspended: () => boolean = () => false,
 ): (() => void) | undefined {
   if (!announced || !HEARTBEAT_PHASES.has(phase)) return;
   const timer = setInterval(() => {
+    if (suspended()) return;
     const paused = video.paused;
     if (shouldHeartbeat({ phase, announced, paused })) report(paused);
   }, intervalMs);

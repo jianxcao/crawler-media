@@ -77,6 +77,54 @@ fn nested_library_reassigns_unidentified_without_files_in_resumable_batches() {
 }
 
 #[test]
+fn removal_waits_for_unidentified_root_reassignment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let parent_root = base.join("parent");
+    let nested_root = parent_root.join("nested");
+    std::fs::create_dir_all(&nested_root).unwrap();
+    let data = base.join("data");
+    let store = Store::open(&data).unwrap();
+    let parent = create_library(&store, "Parent", &parent_root);
+    for index in 0..101 {
+        store
+            .insert_unidentified(
+                nested_root
+                    .join(format!("u{index:03}"))
+                    .display()
+                    .to_string(),
+                Confidence::Low,
+            )
+            .unwrap();
+    }
+    set_root_reassign_batch_budget(Some(1));
+    let nested = create_library(&store, "Nested", &nested_root);
+    set_root_reassign_batch_budget(None);
+    assert_eq!(
+        count(&Connection::open(data.join("library.db")).unwrap(), &parent),
+        1
+    );
+    assert_eq!(
+        count(&Connection::open(data.join("library.db")).unwrap(), &nested),
+        100
+    );
+
+    assert!(matches!(
+        store.begin_library_removal(&parent),
+        Err(store::StoreError::Protected(_))
+    ));
+    store.drain_root_reassignments().unwrap();
+    assert_eq!(
+        count(&Connection::open(data.join("library.db")).unwrap(), &parent),
+        0
+    );
+    assert_eq!(
+        count(&Connection::open(data.join("library.db")).unwrap(), &nested),
+        101
+    );
+}
+
+#[test]
 fn inserting_an_extra_root_reassigns_unidentified_to_its_default_library() {
     let tmp = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(tmp.path()).unwrap();

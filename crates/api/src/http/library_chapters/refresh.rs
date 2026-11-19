@@ -262,7 +262,12 @@ pub(crate) async fn probe_status(
                 .parse::<domain::LibraryId>()
                 .map_err(|error| chapter_store_error(error.into()))?;
             let rows = store
-                .file_coverage_in_library_season(library_id, media_id, season)
+                .file_coverage_in_library_season(
+                    library_id,
+                    media_id,
+                    season,
+                    store::FileReadScope::AllRecorded,
+                )
                 .map_err(chapter_store_error)?;
             let visible = rows.iter().any(|row| {
                 covers_season(row, season) && row.file.library_id.to_string() == library.id

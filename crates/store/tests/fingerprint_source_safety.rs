@@ -239,9 +239,13 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
             &units,
         )
         .unwrap();
-    store.start_probe_unit("job", &ids[0]).unwrap();
+    store
+        .start_probe_unit("job", &ids[0], store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.finish_probe_unit("job", &ids[0], true, None).unwrap();
-    store.start_probe_unit("job", &ids[1]).unwrap();
+    store
+        .start_probe_unit("job", &ids[1], store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.cancel_probe_job("job", "file_deleted").unwrap();
     let job = store.get_probe_job("job").unwrap().unwrap();
     assert_eq!(job.status, "cancelled");
@@ -257,7 +261,11 @@ fn batch_cancellation_is_terminal_preserves_completed_units_and_releases_scope()
         persisted.iter().filter(|u| u.status == "cancelled").count(),
         2
     );
-    assert!(!store.start_probe_unit("job", &ids[2]).unwrap());
+    assert!(
+        !store
+            .start_probe_unit("job", &ids[2], store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
     assert!(store.active_probe_job_for_scope("scope").unwrap().is_none());
     assert!(
         store
@@ -329,7 +337,9 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
         )
         .unwrap();
     for unit in &units {
-        store.start_probe_unit("job", unit.ledger_id).unwrap();
+        store
+            .start_probe_unit("job", unit.ledger_id, store::ProbeDispatchStage::Metadata)
+            .unwrap();
         store
             .finish_probe_unit("job", unit.ledger_id, true, None)
             .unwrap();
@@ -425,7 +435,9 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         )
         .unwrap();
     for unit in &units {
-        store.start_probe_unit("job", unit.ledger_id).unwrap();
+        store
+            .start_probe_unit("job", unit.ledger_id, store::ProbeDispatchStage::Metadata)
+            .unwrap();
         store
             .finish_probe_unit("job", unit.ledger_id, true, None)
             .unwrap();
@@ -506,7 +518,9 @@ fn partial_refresh_rejects_a_changed_comparison_source_outside_its_lease() {
             }],
         )
         .unwrap();
-    store.start_probe_unit("job", &id).unwrap();
+    store
+        .start_probe_unit("job", &id, store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.finish_probe_unit("job", &id, true, None).unwrap();
     let snapshots = store
         .source_snapshots(&[first_file.file_id, other_file.file_id])

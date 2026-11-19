@@ -1,4 +1,7 @@
-use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use domain::{
+    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey, User, UserId, UserRole,
+};
+use store::playback::PlaybackMutation;
 use store::test_support::FixtureFile;
 use store::{Store, StoredFileMarker};
 
@@ -74,6 +77,84 @@ fn remove(store: &Store, library_id: &str) -> store::LibraryRemoval {
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
     done
+}
+
+#[test]
+fn removing_parent_keeps_nested_media_playback_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let parent_root = temp.path().join("movies");
+    let nested_root = parent_root.join("nested");
+    std::fs::create_dir_all(&nested_root).unwrap();
+    library(&store, "Parent", &parent_root);
+    let parent_id = store
+        .list_libraries()
+        .unwrap()
+        .into_iter()
+        .find(|library| library.name == "Parent")
+        .unwrap()
+        .id;
+    let movie = media(&store, "Shared TV Media");
+    let path = nested_root.join("episode.mkv");
+    std::fs::write(&path, b"keep nested bytes").unwrap();
+    let fixture = ledger(&store, &movie, &path);
+    let file_id = fixture.file_id.unwrap();
+    let file = store.file_coverage_by_id(file_id).unwrap().unwrap().file;
+
+    let user_id = UserId::new();
+    store
+        .insert_user(&User {
+            id: user_id,
+            login: "nested-history".into(),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
+    store
+        .mutate_playback(
+            movie.id,
+            &PlaybackMutation::marks(user_id, 1, 1, Some(true), Some(true)),
+            1_000,
+        )
+        .unwrap();
+    store
+        .upsert_unit_for_source(
+            user_id,
+            movie.id,
+            UnitKey::new(1, 1),
+            domain::PhysicalSourceId {
+                file_id,
+                revision: file.version.revision,
+            },
+            12_345,
+            None,
+            None,
+            Some(60_000),
+            None,
+            None,
+            false,
+            2_000,
+        )
+        .unwrap();
+
+    library(&store, "Nested", &nested_root);
+    store.drain_root_reassignments().unwrap();
+    let nested_id = store
+        .list_libraries()
+        .unwrap()
+        .into_iter()
+        .find(|library| library.name == "Nested")
+        .unwrap()
+        .id;
+    remove(&store, &parent_id);
+
+    let coverage = store.file_coverage_by_id(file_id).unwrap().unwrap();
+    assert_eq!(coverage.file.library_id.to_string(), nested_id);
+    assert_eq!(std::fs::read(path).unwrap(), b"keep nested bytes");
+    let state = store.unit_state(user_id, movie.id, 1, 1).unwrap().unwrap();
+    assert_eq!(state.position_ms, 12_345);
+    assert!(state.played);
+    assert!(state.favorite);
 }
 
 #[test]

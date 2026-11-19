@@ -268,13 +268,21 @@ impl crate::LibraryConnection<'_> {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn start_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
+    pub fn start_probe_unit(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        stage: crate::ProbeDispatchStage,
+    ) -> Result<bool, StoreError> {
+        if stage == crate::ProbeDispatchStage::Analysis {
+            return Ok(false);
+        }
         let tx = crate::write_tx(self.library)?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = 'running'
-             WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'
+             WHERE job_id = ?1 AND file_id = ?2 AND stage = ?3 AND status = 'queued'
              AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
-            params![job_id, ledger_id],
+            params![job_id, ledger_id, stage.as_str()],
         )?;
         if changed > 0 {
             tx.execute(

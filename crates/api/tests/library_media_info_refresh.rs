@@ -365,7 +365,9 @@ fn retrying_the_same_force_request_does_not_reprobe_a_completed_file() {
             .id,
         job
     );
-    store.start_probe_unit(&job, &id).unwrap();
+    store
+        .start_probe_unit(&job, &id, store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.finish_probe_unit(&job, &id, true, None).unwrap();
     store.finish_probe_job(&job, true, None).unwrap();
     let (status, replay) = fixture.refresh(body);
@@ -432,7 +434,9 @@ fn replay_keeps_files_skipped_for_active_work_skipped_after_that_work_finishes()
             .id,
         job
     );
-    store.start_probe_unit(&job, &id).unwrap();
+    store
+        .start_probe_unit(&job, &id, store::ProbeDispatchStage::Metadata)
+        .unwrap();
     store.finish_probe_unit(&job, &id, true, None).unwrap();
     store.finish_probe_job(&job, true, None).unwrap();
     let (status, replay) = fixture.refresh(body);

@@ -438,7 +438,9 @@ fn deleting_a_file_retires_queued_probe_work() {
             }],
         )
         .unwrap();
-    store.start_probe_unit("job-delete", &unit_id).unwrap();
+    store
+        .start_probe_unit("job-delete", &unit_id, store::ProbeDispatchStage::Metadata)
+        .unwrap();
 
     store
         .delete_files(library.id.parse().unwrap(), &[file.file_id])

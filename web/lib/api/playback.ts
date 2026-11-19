@@ -598,6 +598,8 @@ export interface PlaybackSession {
 }
 
 interface DecideBody extends PlaybackUnit {
+  /** BFCache 自动恢复时，必须校验的原成员播放会话。 */
+  resume_from_play_session_id?: string;
   file_id?: string;
   capability: ClientCapability;
   /** 运行期降档回路：带上已失败的档位，服务端跳过它们（§6.3） */

@@ -612,7 +612,8 @@ fn seed_store(
     )
     .unwrap();
     for key in &keys {
-        st.start_probe_unit("review9-job", key).unwrap();
+        st.start_probe_unit("review9-job", key, store::ProbeDispatchStage::Metadata)
+            .unwrap();
         st.finish_probe_unit("review9-job", key, true, None)
             .unwrap();
     }

@@ -20,7 +20,11 @@ fn add_running_job(store: &store::Store, job: &str, file: &str) {
             )
             .unwrap()
     );
-    assert!(store.start_probe_unit(job, file).unwrap());
+    assert!(
+        store
+            .start_probe_unit(job, file, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
 }
 
 #[tokio::test]

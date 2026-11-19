@@ -58,12 +58,11 @@ pub(crate) async fn patch(
                     work_state.playback_clock.now_ms(),
                 )
             })?;
-            if let Ok(value) = &result {
+            if let Ok(value) = &result
+                && value.revision != expected_revision
+            {
                 for operation in &value.operations {
                     let library = operation.library_id.to_string();
-                    work_state
-                        .library_work
-                        .block(&library, &operation.operation_id);
                     crate::storage_operations::spawn_driver(
                         &work_state,
                         &operation.operation_id,

@@ -118,7 +118,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
 
     assert!(
         !store.as_ref()
-            .start_probe_unit(&stale_job, &unit.row.file.file_id.to_string())
+            .start_probe_unit(&stale_job, &unit.row.file.file_id.to_string(), store::ProbeDispatchStage::Metadata)
             .unwrap()
     );
     manager.finish(&stale, true);
@@ -162,7 +162,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
         .unwrap();
     assert!(
         store.as_ref()
-            .start_probe_unit(&persisted.job_id, &ledger_id)
+            .start_probe_unit(&persisted.job_id, &ledger_id, store::ProbeDispatchStage::Metadata)
             .unwrap()
     );
     drop(manager);
@@ -264,7 +264,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
     let ledger_id = metadata_unit.row.file.file_id.to_string();
     assert!(
         store.as_ref()
-            .start_probe_unit(&metadata_job_id, &ledger_id)
+            .start_probe_unit(&metadata_job_id, &ledger_id, store::ProbeDispatchStage::Metadata)
             .unwrap()
     );
     manager.metadata_stage_finished();

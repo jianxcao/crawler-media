@@ -572,7 +572,7 @@ fn file_root_id_is(
 
 /// Half-open key range holding every path strictly below `root_key` on a component
 /// boundary.
-fn component_range(root_key: &str) -> (String, String) {
+pub(crate) fn component_range(root_key: &str) -> (String, String) {
     let base = root_key.trim_end_matches('/');
     (format!("{base}/"), format!("{base}0"))
 }

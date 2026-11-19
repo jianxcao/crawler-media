@@ -29,6 +29,7 @@ import {
 } from "@/lib/api/playback";
 import { type AutoplayOutcome, attemptAutoplay, shouldAttemptAutoplay } from "@/lib/player/autoplay";
 import { startPlaybackHeartbeats } from "@/lib/player/heartbeat";
+import { bindPlaybackPageLifecycle } from "@/lib/player/page-lifecycle";
 import {
   DIRECT_SHORTFALL_SAMPLES,
   bandwidthDegradeWanted,
@@ -303,6 +304,15 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const subtitleTouchedRef = useRef(false);
   const playSessionIdRef = useRef<string | null>(null);
   const eventSequenceRef = useRef<number>(0);
+  const pageGenerationRef = useRef(0);
+  const pageSuspendedRef = useRef(false);
+  const heartbeatStopRef = useRef<(() => void) | undefined>(undefined);
+  const currentPageRef = useRef({ unitKey, state });
+  currentPageRef.current = { unitKey, state };
+  const pageRestoreRef = useRef<{
+    unitKey: string; playSessionId: string | null;
+    audioTrack?: string; subtitleTrack?: string;
+  } | null>(null);
   // 惰性初始化从 localStorage 读：字幕调好的字号/位置不该每次进来都重调
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle>(loadSubtitleStyle);
   /** 画质上限（max_height）。null = 自动。持久化，弱网用户不必每部片重选 */
@@ -903,6 +913,11 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     startedKeyRef.current = null;
     reportedStartRef.current = null;
+    playSessionIdRef.current = null;
+    eventSequenceRef.current = 0;
+    pageRestoreRef.current = null;
+    pageSuspendedRef.current = false;
+    pageGenerationRef.current += 1;
     setPositionMs(0);
     setBufferedEndMs(null);
     setResume(null);
@@ -938,6 +953,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 决策 / 降档 / 换会话：三种都是「去后端要一个能播的地址」。 */
   useEffect(() => {
     const phase = state.phase;
+    if (pageSuspendedRef.current) return;
     if (phase !== "deciding" && phase !== "degrading" && phase !== "session-starting") return;
 
     // 指纹必须覆盖**全部**会影响请求参数的依赖（quality 也在内）：漏一项的
@@ -948,9 +964,16 @@ export function VideoPlayer(props: VideoPlayerProps) {
     startedKeyRef.current = key;
 
     let cancelled = false;
+    const pageGeneration = pageGenerationRef.current;
+    const attempt = state.attempt;
+    const restore = pageRestoreRef.current?.unitKey === unitKey ? pageRestoreRef.current : null;
+    const obsolete = () => cancelled || pageSuspendedRef.current
+      || pageGeneration !== pageGenerationRef.current
+      || currentPageRef.current.unitKey !== unitKey || currentPageRef.current.state.attempt !== attempt;
     void (async () => {
       try {
         if (!capabilityRef.current) capabilityRef.current = await getCapabilitySnapshot();
+        if (obsolete()) return;
         pendingFileMsRef.current = state.startMs ?? 0;
         // 首帧从"用户要求播放"这一刻算起，而不是从会话就位算起——
         // 决策与起会话的耗时正是首帧延迟的大头
@@ -958,13 +981,15 @@ export function VideoPlayer(props: VideoPlayerProps) {
         const session = await startPlaybackSession(
           {
             ...unit,
+            resume_from_play_session_id: apiRef.current.progress === "server"
+              ? restore?.playSessionId ?? undefined : undefined,
             capability: capabilityRef.current,
             failed_tiers: state.failedTiers,
             // null = 服务端接续播点；显式值（seek 重开 / 换轨 / ?t=）原样发
             start_ms: state.startMs ?? undefined,
             max_height: quality ?? undefined,
-            audio_track: requestedAudio ?? undefined,
-            subtitle_track: requestedSubtitle ?? undefined,
+            audio_track: restore?.audioTrack ?? requestedAudio ?? undefined,
+            subtitle_track: restore?.subtitleTrack ?? requestedSubtitle ?? undefined,
             // 上一路引擎量到的线路速度：服务端据此压转码码率（§C）。首次
             // 起播还没有读数，服务端按阶梯值；重开（seek 换会话 / 缺粮重开
             // / 换轨）时才带得上——正是外网用户最需要它的时刻
@@ -972,13 +997,14 @@ export function VideoPlayer(props: VideoPlayerProps) {
           },
           apiRef.current,
         );
-        if (cancelled) {
+        if (obsolete()) {
           // 请求已被超越（退出播放器/切集/换参数重发）：响应里可能带着一个
           // 刚拉起的转码会话，此后没有任何代码会认领它——心跳只认落进状态机
           // 的会话。后端没有「结束会话」路由，这路 ffmpeg 只能等服务端空闲
           // 回收（同文件重开有 stop_for_file 兜底），这里不做额外处理。
           return;
         }
+        pageRestoreRef.current = null;
         playSessionIdRef.current = session.play_session_id;
         eventSequenceRef.current = 0;
         if (session.decision.outcome === "consent") {
@@ -1003,6 +1029,10 @@ export function VideoPlayer(props: VideoPlayerProps) {
           // 绝不能沿用之前保存的片长（例如 90 分钟合并集片长泄露到 45 分钟独立源）。
           pendingFileMsRef.current = session.start_ms;
           setPositionMs(session.start_ms);
+          subtitleTouchedRef.current = false;
+          setSelectedSubtitle(null);
+          setRequestedAudio(null);
+          setRequestedSubtitle(null);
           if (session.watch) {
             setResume(session.watch);
           } else {
@@ -1020,7 +1050,14 @@ export function VideoPlayer(props: VideoPlayerProps) {
         }
         dispatch({ type: "session", session });
       } catch (error) {
-        if (cancelled) return;
+        if (obsolete()) return;
+        pageRestoreRef.current = null;
+        const response = error instanceof Error && "details" in error
+          ? error.details as { error?: { code?: string } } | null : null;
+        if (response?.error?.code === "playback.ended_by_admin") {
+          onEndedByAdmin();
+          return;
+        }
         dispatch({
           type: "fatal",
           message: error instanceof Error ? error.message : "播放启动失败",
@@ -1055,7 +1092,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
    * `shouldAttemptAutoplay` 里，有单测。
    */
   const tryAutoplay = useCallback(async () => {
-    if (!video) return;
+    if (!video || pageSuspendedRef.current) return;
     if (
       !shouldAttemptAutoplay({
         wanted: wantsPlayRef.current,
@@ -1282,7 +1319,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     const session = state.session;
     if (!video || !session) return;
-    const isCurrentSession = () => activeSessionRef.current === session;
+    const isCurrentSession = () => !pageSuspendedRef.current && activeSessionRef.current === session;
     const onPlaying = () => {
       if (!isCurrentSession()) return;
       setPaused(false);
@@ -1423,7 +1460,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const sendProgress = useCallback(
     (paused: boolean | undefined) => {
       const playSessionId = playSessionIdRef.current;
-      if (!playSessionId) return;
+      if (!playSessionId || pageSuspendedRef.current) return;
       eventSequenceRef.current += 1;
       void reportPlaybackProgress(
         {
@@ -1438,7 +1475,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
         apiRef.current,
       )
         .then((watch) => {
-          if (watch.ended_by_admin) onEndedByAdmin();
+          if (playSessionIdRef.current === playSessionId && !pageSuspendedRef.current && watch.ended_by_admin) onEndedByAdmin();
         })
         .catch(() => undefined);
     },
@@ -1459,7 +1496,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
    */
   useEffect(() => {
     const playSessionId = playSessionIdRef.current;
-    if (!playSessionId) return;
+    if (!playSessionId || pageSuspendedRef.current) return;
     const startKey = `${unitKey}:${playSessionId}`;
     if (state.phase === "playing" && reportedStartRef.current !== startKey) {
       reportedStartRef.current = startKey;
@@ -1475,14 +1512,17 @@ export function VideoPlayer(props: VideoPlayerProps) {
         apiRef.current,
       )
         .then((watch) => {
-          if (watch.ended_by_admin) onEndedByAdmin();
+          if (playSessionIdRef.current === playSessionId && !pageSuspendedRef.current && watch.ended_by_admin) onEndedByAdmin();
         })
         .catch(() => undefined);
     }
     if (!video) return;
-    return startPlaybackHeartbeats(
+    const stop = startPlaybackHeartbeats(
       state.phase, reportedStartRef.current === startKey, video, sendProgress, PROGRESS_INTERVAL_MS,
+      () => pageSuspendedRef.current,
     );
+    heartbeatStopRef.current = stop;
+    return () => { stop?.(); if (heartbeatStopRef.current === stop) heartbeatStopRef.current = undefined; };
     // unit 是对象字面量，按内容比较
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.phase, video, unitKey, trackRefs, sendProgress]);
@@ -1495,7 +1535,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     if (!video) return;
     const report = (paused: boolean) => {
-      if (reportedStartRef.current !== `${unitKey}:${playSessionIdRef.current ?? ""}`) return;
+      if (pageSuspendedRef.current || reportedStartRef.current !== `${unitKey}:${playSessionIdRef.current ?? ""}`) return;
       sendProgressRef.current(paused);
     };
     const onPlaying = () => report(false);
@@ -1537,6 +1577,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
       if (reportedStartRef.current === null || !playSessionId) return;
       // 停止之后再到的暂停 / 心跳不能再上报：服务端会把刚结束的会话重建回来
       reportedStartRef.current = null;
+      playSessionIdRef.current = null;
       eventSequenceRef.current += 1;
       void reportPlaybackProgress(
         {
@@ -1556,31 +1597,82 @@ export function VideoPlayer(props: VideoPlayerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitKey]);
 
-  /** 关标签页/切走：进度用 sendBeacon 补发。 */
-  useEffect(() => {
-    const onPageHide = () => {
-      const playSessionId = playSessionIdRef.current;
-      if (reportedStartRef.current !== null && playSessionId) {
+  /** BFCache 只挂起；返回时从持久前驱签发新 SID 和流地址。 */
+  useEffect(() => bindPlaybackPageLifecycle(window, {
+    snapshot: () => ({
+      unitKey: currentPageRef.current.unitKey,
+      // Reporting is cleared before renewal; authorization still belongs to its predecessor
+      // until the replacement grant is bound, including another cache trip while in flight.
+      playSessionId: playSessionIdRef.current ?? (pageRestoreRef.current?.unitKey === unitKey
+        ? pageRestoreRef.current.playSessionId : null),
+      phase: currentPageRef.current.state.phase,
+      positionMs: video && currentPageRef.current.state.session
+        ? toFileMs(video.currentTime, startMsRef.current) : pendingFileMsRef.current,
+      wantsPlay: wantsPlayRef.current,
+      announced: reportedStartRef.current !== null,
+      endedByAdmin: endedByAdminRef.current,
+    }),
+    suspend: (saved) => {
+      pageGenerationRef.current += 1;
+      pageSuspendedRef.current = !saved.endedByAdmin && !["error", "consent", "ended", "idle"].includes(saved.phase);
+      heartbeatStopRef.current?.();
+      heartbeatStopRef.current = undefined;
+      if (saved.announced && saved.playSessionId) {
         eventSequenceRef.current += 1;
-        reportPlaybackProgressOnUnload(
-          {
-            ...unit,
-            event: "stop",
-            position_ms: positionRef.current,
-            play_session_id: playSessionId,
-            event_sequence: eventSequenceRef.current,
-            ...trackRefsRef.current(),
-          },
-          apiRef.current,
-        );
+        reportPlaybackProgressOnUnload({
+          ...unit, event: "progress", paused: true, position_ms: saved.positionMs,
+          play_session_id: saved.playSessionId, event_sequence: eventSequenceRef.current,
+          ...trackRefsRef.current(),
+        }, apiRef.current);
+      }
+      qoe({ type: "suspend" });
+      video?.pause();
+    },
+    restore: (saved) => {
+      const tracks = trackRefsRef.current();
+      if (pageRestoreRef.current?.unitKey !== saved.unitKey
+        || pageRestoreRef.current.playSessionId !== saved.playSessionId) {
+        pageRestoreRef.current = {
+          unitKey: saved.unitKey, playSessionId: saved.playSessionId,
+          audioTrack: tracks.audio_track, subtitleTrack: tracks.subtitle_track,
+        };
+      }
+      playSessionIdRef.current = null;
+      reportedStartRef.current = null;
+      eventSequenceRef.current = 0;
+      wantsPlayRef.current = saved.wantsPlay;
+      pageSuspendedRef.current = false;
+      pendingFileMsRef.current = saved.positionMs;
+      setPositionMs(saved.positionMs);
+      dispatch({ type: "restart", startMs: saved.positionMs });
+    },
+    stop: (saved) => {
+      pageGenerationRef.current += 1;
+      pageSuspendedRef.current = true;
+      pageRestoreRef.current = null;
+      heartbeatStopRef.current?.();
+      heartbeatStopRef.current = undefined;
+      reportedStartRef.current = null;
+      playSessionIdRef.current = null;
+      if (saved.announced && saved.playSessionId) {
+        eventSequenceRef.current += 1;
+        reportPlaybackProgressOnUnload({
+          ...unit, event: "stop", position_ms: saved.positionMs,
+          play_session_id: saved.playSessionId, event_sequence: eventSequenceRef.current,
+          ...trackRefsRef.current(),
+        }, apiRef.current);
       }
       const metric = qoeSnapshotRef.current();
       if (metric) reportPlaybackMetricOnUnload(metric, apiRef.current);
-    };
-    window.addEventListener("pagehide", onPageHide);
-    return () => window.removeEventListener("pagehide", onPageHide);
+      qoeRef.current = initialQoe();
+    },
+    // unit 的内容由 unitKey 标识，避免对象字面量使事件绑定重置快照。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unitKey]);
+  }), [unitKey, video]);
+
+  useEffect(() => {
+    if (["error", "consent", "ended", "idle"].includes(state.phase)) pageRestoreRef.current = null;
+  }, [state.phase]);
 
   /**
    * 首帧只能用 `requestVideoFrameCallback` 量。
@@ -3537,7 +3629,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
               <div className="mt-6 flex justify-center gap-3">
                 <button
                   type="button"
-                  onClick={() => dispatch({ type: "request", startMs: positionRef.current })}
+                  onClick={() => {
+                    endedByAdminRef.current = false;
+                    wantsPlayRef.current = true;
+                    pageRestoreRef.current = null;
+                    dispatch({ type: "request", startMs: positionRef.current });
+                  }}
                   className="rounded-full bg-[var(--player-accent)] px-6 py-2.5 text-[14px] font-semibold text-black transition-colors hover:bg-[var(--player-accent-hover)]"
                 >
                   重试

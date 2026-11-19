@@ -185,7 +185,11 @@ fn two_season_refresh_setup(
             .unwrap()
     );
     for unit_id in &unit_ids {
-        assert!(store.start_probe_unit(job_id, unit_id).unwrap());
+        assert!(
+            store
+                .start_probe_unit(job_id, unit_id, crate::ProbeDispatchStage::Metadata)
+                .unwrap()
+        );
         store
             .finish_probe_unit(job_id, unit_id, true, None)
             .unwrap();

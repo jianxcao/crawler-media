@@ -2,6 +2,37 @@
 use super::*;
 
 impl crate::LibraryConnection<'_> {
+    pub fn fail_library_operation_if_owned(
+        &self,
+        operation_id: &str,
+        message: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.library)?;
+        let changed = tx.execute(
+            "UPDATE library_operations
+             SET state = 'failed', error = ?2, updated_at_ms = ?3
+             WHERE operation_id = ?1
+               AND state IN ('planned', 'frozen', 'draining', 'applying', 'checking')
+               AND EXISTS (
+                   SELECT 1 FROM libraries l
+                   WHERE l.library_id = library_operations.library_id
+                     AND l.lifecycle_state = 'reindexing'
+                     AND l.config_revision = library_operations.expected_revision + 1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM library_operations other
+                   WHERE other.library_id = library_operations.library_id
+                     AND other.operation_id <> library_operations.operation_id
+                     AND other.state <> 'succeeded'
+                     AND (other.state <> 'failed' OR other.kind IN ('roots', 'locale', 'integrity', 'default_locale'))
+               )",
+            params![operation_id, message, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     pub fn begin_library_reconfiguration_prepared(
         &self,
         prepared: &PreparedLibraryReconfiguration,
@@ -14,8 +45,8 @@ impl crate::LibraryConnection<'_> {
         // `lifecycle_state`, so the removal row — not the lifecycle — is what refuses a
         // second owner. Without this, a Library being deleted is frozen again for a
         // migration that then fights the removal for the same files.
-        self.ensure_library_mutable(&library)?;
         let tx = crate::write_tx(self.library)?;
+        self.ensure_library_mutable(&library)?;
         if let Some(roots) = &prepared {
             self.ensure_removal_keys_available(roots.iter().map(|root| root.path_key.as_str()))?;
         }
@@ -40,6 +71,13 @@ impl crate::LibraryConnection<'_> {
             return Err(StoreError::Protected(format!(
                 "library {library} lifecycle is {lifecycle}"
             )));
+        }
+        if let Some(roots) = &prepared {
+            root_conflicts::ensure_root_keys_available(
+                &tx,
+                &library,
+                roots.iter().map(|root| root.path_key.as_str()),
+            )?;
         }
         if let Some(prepared) = &prepared
             && roots::has_uncovered_rows(&tx, &library, prepared)?

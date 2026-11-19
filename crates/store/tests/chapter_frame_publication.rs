@@ -334,7 +334,11 @@ fn refresh_job_completion_and_current_frames_commit_from_the_same_marker_facts()
             )
             .unwrap()
     );
-    assert!(f.store.start_probe_unit(job, &id).unwrap());
+    assert!(
+        f.store
+            .start_probe_unit(job, &id, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
     f.store.finish_probe_unit(job, &id, true, None).unwrap();
     let replacement = MarkerResultReplacement {
         media_id: f.file.media_id,

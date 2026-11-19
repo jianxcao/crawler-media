@@ -218,14 +218,30 @@ pub fn analysis_job(s: &retry::ProbeScenario, mode: &str, refresh: bool) -> Stri
                 .put_probe_sampling_plan(&job, &id, &plan.to_string())
                 .unwrap()
         );
-        assert!(s.store.start_probe_unit(&job, &id).unwrap());
+        assert!(
+            s.store
+                .start_probe_unit(
+                    &job,
+                    &id,
+                    if refresh {
+                        store::ProbeDispatchStage::Metadata
+                    } else {
+                        store::ProbeDispatchStage::Fingerprint
+                    }
+                )
+                .unwrap()
+        );
         if refresh {
             assert!(
                 s.store
                     .advance_probe_unit_to_fingerprint(&job, &id)
                     .unwrap()
             );
-            assert!(s.store.start_probe_unit(&job, &id).unwrap());
+            assert!(
+                s.store
+                    .start_probe_unit(&job, &id, store::ProbeDispatchStage::Fingerprint)
+                    .unwrap()
+            );
         }
         let request = store::ProbeAnalysisRequest {
             dispatch: store::ProbeDispatchId {

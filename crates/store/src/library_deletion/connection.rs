@@ -57,7 +57,9 @@ impl crate::LibraryConnection<'_> {
         if let Some(existing) = existing {
             return Ok(existing);
         }
-        crate::library_operations::integrity_guard::ensure_no_operation(&tx, id.parse()?)?;
+        let library_id = id.parse()?;
+        crate::library_operations::integrity_guard::ensure_no_operation(&tx, library_id)?;
+        crate::library_operations::integrity_guard::ensure_no_root_reassignment(&tx, library_id)?;
         let (kind, revision): (String, i64) = tx
             .query_row(
                 "SELECT kind,config_revision FROM libraries WHERE library_id=?1",

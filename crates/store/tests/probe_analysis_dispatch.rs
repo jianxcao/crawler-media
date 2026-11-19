@@ -11,6 +11,8 @@ mod cancellation;
 mod model_followups;
 #[path = "probe_analysis_dispatch/reconciliation.rs"]
 mod reconciliation;
+#[path = "probe_analysis_dispatch/stage_ownership.rs"]
+mod stage_ownership;
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -85,7 +87,11 @@ impl Fixture {
                 )
                 .unwrap()
         );
-        assert!(self.store.start_probe_unit(&job, &ledger).unwrap());
+        assert!(
+            self.store
+                .start_probe_unit(&job, &ledger, store::ProbeDispatchStage::Fingerprint)
+                .unwrap()
+        );
         let cache = store::FingerprintCacheEntry {
             cache_key: format!("capture-{episode}"),
             algorithm_version: 1,
@@ -596,7 +602,11 @@ fn refresh_capture_failure_finishes_ready_analysis_without_publishing_partial_ba
     for request in &mut requests {
         request.dispatch.job_id = "refresh".into();
         f.store
-            .start_probe_unit("refresh", &request.dispatch.ledger_id)
+            .start_probe_unit(
+                "refresh",
+                &request.dispatch.ledger_id,
+                store::ProbeDispatchStage::Metadata,
+            )
             .unwrap();
         assert!(
             f.store
@@ -605,7 +615,11 @@ fn refresh_capture_failure_finishes_ready_analysis_without_publishing_partial_ba
         );
         assert!(
             f.store
-                .start_probe_unit("refresh", &request.dispatch.ledger_id)
+                .start_probe_unit(
+                    "refresh",
+                    &request.dispatch.ledger_id,
+                    store::ProbeDispatchStage::Fingerprint
+                )
                 .unwrap()
         );
     }
@@ -679,13 +693,21 @@ fn refresh_survivor_finishes_successfully_after_other_participant_is_cancelled()
     let request = &mut requests[1];
     request.dispatch.job_id = "refresh".into();
     f.store
-        .start_probe_unit("refresh", &request.dispatch.ledger_id)
+        .start_probe_unit(
+            "refresh",
+            &request.dispatch.ledger_id,
+            store::ProbeDispatchStage::Metadata,
+        )
         .unwrap();
     f.store
         .advance_probe_unit_to_fingerprint("refresh", &request.dispatch.ledger_id)
         .unwrap();
     f.store
-        .start_probe_unit("refresh", &request.dispatch.ledger_id)
+        .start_probe_unit(
+            "refresh",
+            &request.dispatch.ledger_id,
+            store::ProbeDispatchStage::Fingerprint,
+        )
         .unwrap();
     let participant = f.store.prepare_probe_analysis(request).unwrap();
     assert!(

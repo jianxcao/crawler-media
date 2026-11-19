@@ -31,11 +31,13 @@ impl crate::LibraryConnection<'_> {
         library: LibraryId,
         media: MediaId,
         season: u32,
+        scope: FileReadScope,
     ) -> Result<Vec<FileCoverage>, StoreError> {
         let sql = format!(
             "SELECT {LIBRARY_FILE_COLUMNS}, u.season, u.episode
             FROM library_file_units u JOIN library_files f ON f.file_id=u.file_id
-            WHERE u.library_id=?1 AND u.media_id=?2 AND u.season=?3"
+            WHERE u.library_id=?1 AND u.media_id=?2 AND u.season=?3{}",
+            file_scope_predicate(scope)
         );
         self.read_coverage(
             &sql,
@@ -148,13 +150,7 @@ impl crate::LibraryConnection<'_> {
         media: Option<MediaId>,
         scope: FileReadScope,
     ) -> Result<Vec<FileCoverage>, StoreError> {
-        let predicate = match scope {
-            FileReadScope::Playable => {
-                " AND f.publication_state = 'published' AND f.presence_state = 'present'"
-            }
-            FileReadScope::Published => " AND f.publication_state = 'published'",
-            FileReadScope::AllRecorded => "",
-        };
+        let predicate = file_scope_predicate(scope);
         let media_filter = if media.is_some() {
             " AND f.media_id = ?2"
         } else {
@@ -300,5 +296,15 @@ impl crate::LibraryConnection<'_> {
             }
             _ => false,
         })
+    }
+}
+
+fn file_scope_predicate(scope: FileReadScope) -> &'static str {
+    match scope {
+        FileReadScope::Playable => {
+            " AND f.publication_state = 'published' AND f.presence_state = 'present'"
+        }
+        FileReadScope::Published => " AND f.publication_state = 'published'",
+        FileReadScope::AllRecorded => "",
     }
 }

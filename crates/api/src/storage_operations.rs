@@ -86,7 +86,6 @@ pub fn begin_library_reconfiguration(
     });
     let status = started.map_err(|error| reconfiguration_error(state, library_id, error))?;
     let operation_id = status.operation_id.clone();
-    state.library_work.block(library_id, &operation_id);
     spawn_driver(state, &operation_id, library_id);
     tracing::info!(%operation_id, %library_id, kind, state = %status.state, "Library 重配置已受理");
     Ok(operation_json(&LibraryOperationView {
@@ -237,7 +236,6 @@ pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
             );
             continue;
         }
-        state.library_work.block(&view.library_id, &operation_id);
         spawn_driver(state, &operation_id, &view.library_id);
     }
     Ok(())
@@ -427,7 +425,6 @@ pub fn begin_library_integrity(
         Err(error) => return Err(error),
     };
 
-    state.library_work.block(library_id, &operation_id);
     spawn_driver(state, &operation_id, library_id);
     let kind = if repair {
         "integrity-repairs"
@@ -447,7 +444,7 @@ pub fn begin_library_integrity(
 
 mod driver;
 use driver::current_view;
-pub(crate) use driver::spawn_driver;
+pub(crate) use driver::{spawn_claimed_driver, spawn_driver};
 
 fn operation_read<T>(
     state: &ApiState,

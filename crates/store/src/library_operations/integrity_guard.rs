@@ -172,11 +172,47 @@ pub(crate) fn ensure_no_root_reassignment(
     tx: &Connection,
     library: LibraryId,
 ) -> Result<(), StoreError> {
-    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM root_reassignment_state r WHERE r.state<>'succeeded' AND (r.library_id=?1 OR EXISTS(SELECT 1 FROM library_files f WHERE f.library_id=?1 AND (f.path_key=r.root_key OR substr(f.path_key,1,length(r.root_key)+1)=r.root_key||'/'))))", [library.to_string()], |r| r.get(0))?;
-    if pending {
-        return Err(StoreError::Protected(format!(
-            "library {library} has a root reassignment"
-        )));
+    let pending: Vec<(String, String, String)> = tx
+        .prepare(
+            "SELECT kind,root_key,library_id FROM root_reassignment_state
+             WHERE state<>'succeeded'",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (kind, root_key, target_library) in pending {
+        if target_library == library.to_string() {
+            return Err(StoreError::Protected(format!(
+                "library {library} has a root reassignment"
+            )));
+        }
+        let (low, high) = crate::roots::component_range(&root_key);
+        let source_files: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM library_files
+                WHERE library_id=?1 AND kind=?2 AND path_key=?3
+             ) OR EXISTS(
+                SELECT 1 FROM library_files
+                WHERE library_id=?1 AND kind=?2 AND path_key>=?4 AND path_key<?5
+             )",
+            rusqlite::params![library.to_string(), kind, root_key, low, high],
+            |row| row.get(0),
+        )?;
+        let unidentified: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM unidentified
+                WHERE library_id=?1 AND path_key=?2
+             ) OR EXISTS(
+                SELECT 1 FROM unidentified
+                WHERE library_id=?1 AND path_key>=?3 AND path_key<?4
+             )",
+            rusqlite::params![library.to_string(), root_key, low, high],
+            |row| row.get(0),
+        )?;
+        if source_files || unidentified {
+            return Err(StoreError::Protected(format!(
+                "library {library} has a root reassignment"
+            )));
+        }
     }
     Ok(())
 }

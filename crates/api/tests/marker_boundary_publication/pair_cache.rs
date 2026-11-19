@@ -103,7 +103,7 @@ async fn adaptive_cache_on_and_off_publish_identical_file_results() {
 async fn ordinary(s: &ProbeScenario) -> store::ProbeJob {
     let row = &s.ledgers[0];
     assert!(s.manager.enqueue(unit(row, false)));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let job = s
                 .store
@@ -117,8 +117,14 @@ async fn ordinary(s: &ProbeScenario) -> store::ProbeJob {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
-    .await
-    .unwrap()
+    .await;
+    match completed {
+        Ok(job) => job,
+        Err(error) => {
+            report_completion_timeout(s, "ordinary").await;
+            panic!("ordinary completion timed out: {error}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -183,7 +189,7 @@ pub(super) async fn refresh(s: &ProbeScenario) -> store::ProbeJob {
         ),
         s.ledgers.len()
     );
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(job) = s
                 .store
@@ -200,8 +206,78 @@ pub(super) async fn refresh(s: &ProbeScenario) -> store::ProbeJob {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
-    .await
-    .unwrap()
+    .await;
+    match completed {
+        Ok(job) => job,
+        Err(error) => {
+            report_completion_timeout(s, "marker_refresh").await;
+            panic!("marker refresh completion timed out: {error}");
+        }
+    }
+}
+
+async fn report_completion_timeout(s: &ProbeScenario, phase: &str) {
+    eprintln!(
+        "probe timeout: phase={phase} clock_ms={} workers={} queued_dispatch={}",
+        s.clock.now_ms(),
+        s.manager.worker_count(),
+        s.manager.queued_ledger_count(),
+    );
+    let latest = if phase == "marker_refresh" {
+        s.store
+            .latest_marker_refresh_for_season(&s.media_id.to_string(), 1)
+    } else {
+        s.store
+            .latest_probe_job_for_scope(&format!("ledger:{}", s.ledgers[0].file.file_id))
+    };
+    match latest {
+        Ok(Some(job)) => {
+            eprintln!(
+                "probe timeout job: id={} status={} completed={} total={} failed={} started_at_ms={:?} finished_at_ms={:?}",
+                job.id,
+                job.status,
+                job.completed,
+                job.total,
+                job.failed,
+                job.started_at_ms,
+                job.finished_at_ms,
+            );
+            let units = s.store.probe_job_units(&job.id).map(|units| {
+                units
+                    .into_iter()
+                    .map(|unit| (unit.ledger_id, unit.status, unit.stage))
+                    .collect::<Vec<_>>()
+            });
+            eprintln!("probe timeout units: {units:?}");
+        }
+        missing => eprintln!("probe timeout job lookup: {missing:?}"),
+    }
+    eprintln!(
+        "probe timeout analysis_queue: {:?}",
+        s.store.pending_probe_analysis_keys(None, 16),
+    );
+    let held = s
+        .ledgers
+        .iter()
+        .map(|row| row.file.file_id.to_string())
+        .filter(|id| s.manager.holds_dispatch_id(id))
+        .collect::<Vec<_>>();
+    eprintln!("probe timeout held_dispatch_ids: {held:?}");
+    let libraries = s
+        .ledgers
+        .iter()
+        .map(|row| row.file.library_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    for library in libraries {
+        eprintln!(
+            "probe timeout Library: id={library} lifecycle={:?}",
+            s.store.library_lifecycle_state(&library),
+        );
+    }
+    eprintln!(
+        "probe timeout worker_shutdown: {:?}",
+        s.manager.shutdown_workers().await,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

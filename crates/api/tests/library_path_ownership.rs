@@ -35,7 +35,7 @@ fn root_path_is_globally_unique_across_libraries() {
         &[],
     );
     assert!(
-        matches!(duplicate, Err(api::store::StoreError::Sqlite(_))),
+        matches!(duplicate, Err(api::store::StoreError::Conflict(_))),
         "two Libraries must not share a root path"
     );
     assert_eq!(

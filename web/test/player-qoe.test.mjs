@@ -186,3 +186,18 @@ test("播了三秒以上或者出过画就值得上报", () => {
     true,
   );
 });
+
+test("BFCache suspension excludes cached time from watched and rebuffer totals", () => {
+  const s = run([
+    { type: "tick", at: 1000, playing: true },
+    { type: "tick", at: 2000, playing: true },
+    { type: "waiting", at: 2100 },
+    { type: "suspend" },
+    { type: "playing", at: 303000 },
+    { type: "tick", at: 304000, playing: true },
+    { type: "tick", at: 305000, playing: true },
+  ]);
+  assert.equal(s.watched_ms, 2000);
+  assert.equal(s.rebuffer_ms, 0);
+  assert.equal(s.rebuffer_count, 0);
+});

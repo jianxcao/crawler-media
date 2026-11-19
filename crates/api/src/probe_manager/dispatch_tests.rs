@@ -172,7 +172,11 @@ fn overflowed_metadata_window_preserves_fifo_order_and_blocks_live_line_jumping(
         assert!(
             store
                 .as_ref()
-                .start_probe_unit(&first.job_id, &first.ledger_id)
+                .start_probe_unit(
+                    &first.job_id,
+                    &first.ledger_id,
+                    store::ProbeDispatchStage::Metadata
+                )
                 .unwrap()
         );
         *manager.metadata_rx.lock() = Some(rx);
@@ -199,7 +203,11 @@ fn overflowed_metadata_window_preserves_fifo_order_and_blocks_live_line_jumping(
             assert!(
                 store
                     .as_ref()
-                    .start_probe_unit(&item.job_id, &item.ledger_id)
+                    .start_probe_unit(
+                        &item.job_id,
+                        &item.ledger_id,
+                        store::ProbeDispatchStage::Metadata
+                    )
                     .unwrap()
             );
             manager.metadata_stage_finished();

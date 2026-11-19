@@ -28,6 +28,11 @@ impl Store {
         library: &str,
         roots: &PreparedLibraryRoots,
     ) -> Result<(), StoreError> {
+        crate::library_operations::root_conflicts::ensure_root_keys_available(
+            conn,
+            library,
+            roots.entries.iter().map(|(_, key)| key.as_str()),
+        )?;
         let mut statement =
             conn.prepare("SELECT root_id,display_path FROM library_roots WHERE library_id=?1")?;
         let existing = statement

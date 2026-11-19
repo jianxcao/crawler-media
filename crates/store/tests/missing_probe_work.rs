@@ -159,7 +159,11 @@ fn missing_verdict_cancels_work_and_keeps_every_file_fact() {
             fixture.media_id,
         );
         if running {
-            assert!(store.start_probe_unit("probe", &ledger_id).unwrap());
+            assert!(
+                store
+                    .start_probe_unit("probe", &ledger_id, store::ProbeDispatchStage::Metadata)
+                    .unwrap()
+            );
         }
 
         let result = observe(
@@ -208,7 +212,11 @@ fn pruning_a_missing_file_cancels_queued_and_running_units() {
             fixture.media_id,
         );
         if running {
-            assert!(store.start_probe_unit("probe", &ledger_id).unwrap());
+            assert!(
+                store
+                    .start_probe_unit("probe", &ledger_id, store::ProbeDispatchStage::Metadata)
+                    .unwrap()
+            );
         }
         observe(
             store,
@@ -470,8 +478,16 @@ fn retrying_one_probe_unit_preserves_other_running_work() {
         fixture.media_id,
     );
     job(store, "second", "media_probe", second_id, fixture.media_id);
-    assert!(store.start_probe_unit("first", &first).unwrap());
-    assert!(store.start_probe_unit("second", &second).unwrap());
+    assert!(
+        store
+            .start_probe_unit("first", &first, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
+    assert!(
+        store
+            .start_probe_unit("second", &second, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
 
     assert!(store.retry_probe_unit("first", &first).unwrap());
     assert_eq!(store.probe_job_units("first").unwrap()[0].status, "queued");
@@ -479,7 +495,11 @@ fn retrying_one_probe_unit_preserves_other_running_work() {
         store.probe_job_units("second").unwrap()[0].status,
         "running"
     );
-    assert!(store.start_probe_unit("first", &first).unwrap());
+    assert!(
+        store
+            .start_probe_unit("first", &first, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
     store.cancel_probe_job("first", "deleted").unwrap();
     assert!(!store.retry_probe_unit("first", &first).unwrap());
     assert_eq!(
@@ -509,7 +529,11 @@ fn fingerprint_handoff_rolls_back_metadata_completion_when_enqueue_fails() {
         fixture.file_id,
         fixture.media_id,
     );
-    assert!(store.start_probe_unit("metadata", &file).unwrap());
+    assert!(
+        store
+            .start_probe_unit("metadata", &file, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
     let db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
     db.execute_batch(
         "CREATE TRIGGER fail_fingerprint BEFORE INSERT ON probe_jobs

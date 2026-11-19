@@ -441,7 +441,7 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(StoreError::Sqlite(_))),
+            matches!(result, Err(StoreError::Conflict(_))),
             "duplicate root path_key must be rejected: {result:?}"
         );
         let libraries = store.list_libraries().unwrap();

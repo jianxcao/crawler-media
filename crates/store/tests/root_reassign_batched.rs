@@ -100,6 +100,80 @@ fn nested_root_reassigns_in_bounded_batches_and_resumes_after_crash() {
     assert!(pending_root_reassignments(&store).is_empty());
 }
 
+#[test]
+fn removal_waits_for_nested_root_reassignment() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let data = tmp.path().join("data");
+    let parent = std::fs::canonicalize(tmp.path()).unwrap().join("parent");
+    let nested = parent.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store = Store::open(&data).unwrap();
+    let parent_library = store
+        .create_library(
+            MediaKind::Movie,
+            "Parent",
+            &[parent.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let mut ids = Vec::new();
+    for index in 0..250 {
+        let path = nested.join(format!("{index:03}.mkv"));
+        std::fs::write(&path, b"media").unwrap();
+        let id = media(&store);
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id: id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ids.push(id);
+    }
+    set_root_reassign_batch_budget(Some(1));
+    let created = store.create_library(
+        MediaKind::Movie,
+        "Nested",
+        &[nested.to_str().unwrap()],
+        "everyone",
+        true,
+        &[],
+    );
+    set_root_reassign_batch_budget(None);
+    let nested_library = created.unwrap();
+    assert_eq!(owned_by(&store, &parent_library.id), 150);
+    assert_eq!(owned_by(&store, &nested_library.id), 100);
+
+    let rejected = store.begin_library_removal(&parent_library.id);
+    assert!(matches!(rejected, Err(store::StoreError::Protected(_))));
+    assert!(store.get_library(&parent_library.id).unwrap().is_some());
+    assert_eq!(owned_by(&store, &parent_library.id), 150);
+    drop(store);
+
+    let store = Store::open(&data).unwrap();
+    store.drain_root_reassignments().unwrap();
+    let removal = store.begin_library_removal(&parent_library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(owned_by(&store, &nested_library.id), 250);
+    for id in ids {
+        assert!(store.get_media(id).unwrap().is_some());
+    }
+    for index in 0..250 {
+        assert_eq!(
+            std::fs::read(nested.join(format!("{index:03}.mkv"))).unwrap(),
+            b"media",
+        );
+    }
+}
+
 /// F02: one Media with files in two directories, past the 100-file batch, must keep
 /// the episode NFO of a directory the first batch has not moved yet.
 #[test]

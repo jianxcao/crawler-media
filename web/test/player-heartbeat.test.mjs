@@ -63,3 +63,15 @@ test("缓冲时按暂停，后续每拍都能为已开始的会话保活", (t) =
   t.mock.timers.tick(10_000);
   assert.deepEqual(reports, [true, true]);
 });
+
+test("a cached page suppresses heartbeats synchronously before effects are cleaned", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let suspended = false;
+  const reports = [];
+  const stop = startPlaybackHeartbeats("playing", true, { paused: true }, paused => reports.push(paused), 10_000, () => suspended);
+  t.mock.timers.tick(10_000);
+  suspended = true;
+  t.mock.timers.tick(30_000);
+  assert.deepEqual(reports, [true]);
+  stop();
+});

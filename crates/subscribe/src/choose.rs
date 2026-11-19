@@ -276,11 +276,7 @@ pub fn target_reached(owned: &Release, target: &Release) -> bool {
     }
 
     // specified target dimensions must be nonempty
-    if specified == 0 {
-        return false;
-    }
-
-    true
+    specified != 0
 }
 
 /// Ordered Wash-cut comparison dimensions configured on the Filter.

@@ -62,8 +62,11 @@ impl Store {
         library: LibraryId,
         media: MediaId,
         season: u32,
+        scope: FileReadScope,
     ) -> Result<Vec<FileCoverage>, StoreError> {
-        self.with_library_read(|db| db.file_coverage_in_library_season(library, media, season))
+        self.with_library_read(|db| {
+            db.file_coverage_in_library_season(library, media, season, scope)
+        })
     }
 
     /// 按路径取文件覆盖（扫描入库时判断「已记录」用）。

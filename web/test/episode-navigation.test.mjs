@@ -26,6 +26,22 @@ test("nextOwnedEpisode finds next owned episode in the same season", () => {
   assert.equal(next?.episode_number, 3);
 });
 
+test("nextOwnedEpisode skips a pending episode until it is published", () => {
+  const episodesBeforePublication = [
+    { season_number: 1, episode_number: 1, owned: true },
+    { season_number: 1, episode_number: 2, owned: false },
+    { season_number: 1, episode_number: 3, owned: true },
+  ];
+  assert.equal(nextOwnedEpisode(episodesBeforePublication, 1, 1)?.episode_number, 3);
+
+  const episodesAfterPublication = [
+    { season_number: 1, episode_number: 1, owned: true },
+    { season_number: 1, episode_number: 2, owned: true },
+    { season_number: 1, episode_number: 3, owned: true },
+  ];
+  assert.equal(nextOwnedEpisode(episodesAfterPublication, 1, 1)?.episode_number, 2);
+});
+
 test("prevOwnedEpisode does not leak episodes from another season", () => {
   const episodes = [
     { season_number: 2, episode_number: 1, owned: true },

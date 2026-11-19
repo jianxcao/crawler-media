@@ -155,6 +155,7 @@ impl crate::LibraryConnection<'_> {
         path: &str,
         key: &str,
     ) -> Result<LibraryRoot, StoreError> {
+        let tx = crate::write_tx(self.library)?;
         let id = uuid::Uuid::new_v4().to_string();
         let library = self
             .default_library(kind)?
@@ -162,8 +163,12 @@ impl crate::LibraryConnection<'_> {
         self.ensure_library_mutable(&library.id)?;
 
         self.ensure_removal_keys_available([key])?;
+        crate::library_operations::root_conflicts::ensure_root_keys_available(
+            &tx,
+            &library.id,
+            [key],
+        )?;
         let sort_order = self.roots_of(&library.id)?.len() as i32;
-        let tx = crate::write_tx(self.library)?;
         tx.execute(
             "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
              VALUES (?1, ?2, ?5, ?3, 1, ?4)",

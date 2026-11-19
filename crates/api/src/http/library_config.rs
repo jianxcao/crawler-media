@@ -170,6 +170,9 @@ fn create_library_record(
 }
 
 fn create_error(error: StoreError) -> Response {
+    if let StoreError::Conflict(message) = error {
+        return err(StatusCode::CONFLICT, "library.root_conflict", &message);
+    }
     err(
         StatusCode::BAD_REQUEST,
         "library.invalid_roots",
@@ -279,6 +282,9 @@ pub(crate) async fn patch_library(
             super::library_operations::reindexing_conflict(operation_id.as_deref())
         }
         Err(StorageOperationError::Store(StoreError::Missing(_))) => missing_library(),
+        Err(StorageOperationError::Store(StoreError::Conflict(message))) => {
+            err(StatusCode::CONFLICT, "library.root_conflict", &message)
+        }
         Err(StorageOperationError::Store(StoreError::Invalid(message))) => err(
             StatusCode::BAD_REQUEST,
             "library.invalid_operation",

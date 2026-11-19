@@ -32,12 +32,7 @@ impl Transport for RouterTransport {
                 body.map(|value| value.to_string()).unwrap_or_default(),
             ))
             .map_err(|err| err.to_string())?;
-        let response = self
-            .app
-            .clone()
-            .oneshot(request)
-            .await
-            .map_err(|err| err.to_string())?;
+        let response = self.app.clone().oneshot(request).await.unwrap();
         let status = response.status().as_u16();
         let bytes = to_bytes(response.into_body(), 1024 * 1024)
             .await

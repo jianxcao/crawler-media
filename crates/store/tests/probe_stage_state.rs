@@ -117,7 +117,11 @@ fn admitted_capture_owns_receipt_without_relaxing_timed_retry_admission() {
             )
             .unwrap()
     );
-    assert!(store.start_probe_unit("explicit", &ledger).unwrap());
+    assert!(
+        store
+            .start_probe_unit("explicit", &ledger, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
     assert!(
         !claim("explicit"),
         "metadata admission cannot own a capture receipt"
@@ -128,7 +132,11 @@ fn admitted_capture_owns_receipt_without_relaxing_timed_retry_admission() {
             .unwrap()
     );
     assert!(!claim("explicit"), "queued capture has no stage ownership");
-    assert!(store.start_probe_unit("explicit", &ledger).unwrap());
+    assert!(
+        store
+            .start_probe_unit("explicit", &ledger, store::ProbeDispatchStage::Fingerprint)
+            .unwrap()
+    );
     assert!(!store.claim_probe_stage(&key, "background", 1).unwrap());
     assert!(claim("explicit"));
     assert!(
@@ -175,7 +183,11 @@ fn partial_job_is_terminal_after_reopen() {
             )
             .unwrap()
     );
-    assert!(store.start_probe_unit(job_id, &ledger_id).unwrap());
+    assert!(
+        store
+            .start_probe_unit(job_id, &ledger_id, store::ProbeDispatchStage::Fingerprint)
+            .unwrap()
+    );
 
     // Finish unit with partial outcome: succeeded=false, but custom status "partial"
     let (job_result, changed, all_done) = store

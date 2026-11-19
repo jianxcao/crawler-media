@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "root_operations.rs"]
+mod root_operations;
+
 async fn listed_library(f: &PresenceFixture) -> Value {
     let (status, body) = f
         .request("GET", "/api/v1/libraries?scope=admin", Some(&f.admin_token))
@@ -293,4 +296,110 @@ async fn operation_winning_after_middleware_admission_refuses_all_patch_fields()
         assert_eq!(current.name, "Movies");
         assert!(current.detect_intros && current.enable_fingerprint);
     }
+}
+
+#[tokio::test]
+async fn delete_rejected_by_root_reassignment_keeps_library_visible_and_work_active() {
+    let f = PresenceFixture::new();
+    let nested = f.root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store = f.state.store();
+    for index in 0..101 {
+        store
+            .insert_unidentified(
+                nested
+                    .join(format!("unmatched-{index:03}.mkv"))
+                    .display()
+                    .to_string(),
+                domain::Confidence::Low,
+            )
+            .unwrap();
+    }
+    store::test_support::set_root_reassign_batch_budget(Some(1));
+    let destination = store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Nested",
+            &[nested.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store::test_support::set_root_reassign_batch_budget(None);
+    let destination_root = store
+        .root_reassignments_for_library(&destination.id)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let db = rusqlite::Connection::open(f.dir.path().join("data/library.db")).unwrap();
+    db.execute(
+        "UPDATE root_reassignment_state SET state='failed' WHERE library_id=?1",
+        [&destination.id],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM pending_root_reassignments WHERE kind=?1 AND root_key=?2",
+        rusqlite::params![domain::MediaKind::Movie.as_str(), destination_root.root_key],
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .root_reassignments_for_library(&destination.id)
+            .unwrap()[0]
+            .state,
+        "failed"
+    );
+    let direct = store.begin_library_removal(&destination.id);
+    assert!(matches!(direct, Err(store::StoreError::Protected(_))));
+    let work = f.state.acquire_library_work(&destination.id).unwrap();
+    let revision = store.library_config_revision(&destination.id).unwrap();
+
+    let (status, response) = f
+        .request(
+            "DELETE",
+            &format!("/api/v1/libraries/{}", destination.id),
+            Some(&f.admin_token),
+        )
+        .await;
+
+    assert_eq!(
+        store
+            .root_reassignments_for_library(&destination.id)
+            .unwrap()[0]
+            .state,
+        "failed"
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{response}");
+    assert_eq!(response["error"]["code"], "library.protected");
+    let (listed_status, listed) = f
+        .request("GET", "/api/v1/libraries?scope=admin", Some(&f.admin_token))
+        .await;
+    assert_eq!(listed_status, StatusCode::OK);
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == destination.id)
+    );
+    assert_eq!(
+        store.library_config_revision(&destination.id).unwrap(),
+        revision
+    );
+    assert!(!work.control().is_cancelled());
+    assert!(
+        store
+            .removal_for_library(&destination.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .root_reassignments_for_library(&destination.id)
+            .unwrap()
+            .len(),
+        1
+    );
 }

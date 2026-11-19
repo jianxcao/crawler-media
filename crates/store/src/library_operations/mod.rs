@@ -63,6 +63,9 @@ pub(crate) mod integrity_guard;
 mod integrity_query;
 mod locale;
 mod preparation;
+mod root_retry;
+pub use root_retry::RootOperationRetryError;
+pub(crate) mod root_conflicts;
 mod root_keys;
 pub use preparation::PreparedLibraryReconfiguration;
 mod roots;
@@ -130,6 +133,18 @@ fn decode_operation_cursor(raw: Option<String>) -> Result<Option<serde_json::Val
 }
 
 impl Store {
+    /// Mark the current unfinished owner failed without overwriting a terminal result.
+    pub fn fail_library_operation_if_owned(
+        &self,
+        operation_id: &str,
+        message: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_library_write(|db| {
+            db.fail_library_operation_if_owned(operation_id, message, now_ms)
+        })
+    }
+
     /// Persist a reconfiguration intent and freeze the Library for it.
     ///
     /// `expected_revision` is a real CAS on `libraries.config_revision`; a stale

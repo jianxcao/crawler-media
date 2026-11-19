@@ -25,6 +25,10 @@ pub(crate) async fn start_session(
         Ok(selection) => selection,
         Err(error) => return error.response(),
     };
+    let previous_session_id = match super::session_renewal::previous_session(&body) {
+        Ok(previous) => previous,
+        Err(error) => return error.response(),
+    };
     // Review L2: session selection resolves the ledger row; a contended lock must
     // not park the worker that serves every other request on this runtime.
     let (file, media, resolved, tracks) = match store_read(
@@ -68,7 +72,15 @@ pub(crate) async fn start_session(
         .get("device_id")
         .and_then(|v| v.as_str())
         .unwrap_or("web-player");
-    let play_session_id = match issue_binding(&state, user_id, device_id, resolved.clone()).await {
+    let play_session_id = match issue_binding(
+        &state,
+        user_id,
+        device_id,
+        resolved.clone(),
+        previous_session_id,
+    )
+    .await
+    {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -79,20 +91,7 @@ pub(crate) async fn start_session(
     let (stream_url, source) = load_session_io(&file, &play_session_id, device_id, &token).await;
     let (chapters, chapters_pending) =
         session_chapters(&state, &file, resolved.target.unit, &media).await;
-    let subtitle_urls: Vec<String> = decision
-        .get("subtitles")
-        .and_then(|s| s.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|sub| {
-                    sub.get("delivery_url")
-                        .and_then(|u| u.as_str())
-                        .map(|url| format!("{url}?{}", playback_query(&[("api_key", &token)])))
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let subtitle_urls = session_subtitle_urls(&decision, &token);
     let resume_status = resume_status_name(resolved.status);
     let watch = json!({
         "position_ms": resolved.start_ms,
@@ -118,6 +117,25 @@ pub(crate) async fn start_session(
         "title": media.title,
     }))
     .into_response()
+}
+
+fn session_subtitle_urls(decision: &Value, token: &str) -> Vec<String> {
+    decision
+        .get("subtitles")
+        .and_then(Value::as_array)
+        .map(|subtitles| {
+            subtitles
+                .iter()
+                .map(|subtitle| {
+                    subtitle
+                        .get("delivery_url")
+                        .and_then(Value::as_str)
+                        .map(|url| format!("{url}?{}", playback_query(&[("api_key", token)])))
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn load_session_io(
@@ -172,6 +190,7 @@ async fn issue_binding(
     user: domain::UserId,
     device: &str,
     resolved: crate::store::ResolvedResume,
+    previous_session_id: Option<String>,
 ) -> Result<String, Response> {
     let file = resolved.target.file.clone();
     let media_id = resolved.target.media_id;
@@ -180,6 +199,10 @@ async fn issue_binding(
     let now = state.playback_clock.now_ms() / 1000;
     let device = device.to_string();
     let issued = store_write(state, move |store| {
+        if let Some(previous) = previous_session_id {
+            return store.renew_play_session(user, &device, &previous, &resolved, now)
+                .map_err(super::session_renewal::renewal_error);
+        }
             store
                 .issue_play_session(
                     user,
