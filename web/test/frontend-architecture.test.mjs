@@ -132,3 +132,17 @@ test("library-detail-view and library-item-detail-view are decomposed", () => {
   assert.equal(existsSync(path.join(WEB_DIR, "lib/library-detail-helpers.ts")), true);
   assert.equal(existsSync(path.join(WEB_DIR, "lib/library-item-format.ts")), true);
 });
+
+test("subscription-inspector-view, video-player, and player-controls are decomposed", () => {
+  for (const [rel, maxLines] of [
+    ["components/subscription-inspector-view.tsx", 400],
+    ["components/player/video-player.tsx", 400],
+    ["components/player/player-controls.tsx", 400],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+  assert.equal(existsSync(path.join(WEB_DIR, "lib/subscription-inspector.ts")), true);
+  assert.equal(existsSync(path.join(WEB_DIR, "lib/player/player-ui.ts")), true);
+});
