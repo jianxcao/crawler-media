@@ -55,13 +55,8 @@ export default tseslint.config(
     },
   },
   {
-    // 既有尚未拆分的历史文件锁定 1150 行棘轮上限，只准降不准继续膨胀。
+    // 既有尚未拆分的历史文件锁定 1150 行棘轮上限，只准降不准继续膨胀（余下 5 个交由 Phase 5B 处理）。
     files: [
-      "components/watch-stats-panel.tsx",
-      "components/media-track-rows.tsx",
-      "lib/api/subscriptions.ts",
-      "components/media-activity-section.tsx",
-      "components/discover-view.tsx",
       "lib/api/playback.ts",
       "components/library-manage-view.tsx",
       "components/library-filter-bar.tsx",

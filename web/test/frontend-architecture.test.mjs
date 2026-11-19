@@ -274,3 +274,26 @@ test("modularized component subdirectories stay under 600 lines per file and esl
   assert.match(eslintConfig, /["']max-lines["']/);
   assert.match(eslintConfig, /["']no-restricted-imports["']/);
 });
+
+test("phase 5a: watch-stats-panel, media-track-rows, api/subscriptions, media-activity-section, and discover-view are decomposed", () => {
+  for (const [rel, maxLines] of [
+    ["components/watch-stats-panel.tsx", 300],
+    ["components/media-track-rows.tsx", 550],
+    ["lib/api/subscriptions.ts", 550],
+    ["components/media-activity-section.tsx", 400],
+    ["components/discover-view.tsx", 450],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+
+  for (const rel of [
+    "lib/api/subscription-types.ts",
+    "lib/media-track-format.ts",
+    "lib/watch-stats-helpers.ts",
+    "lib/media-activity-helpers.ts",
+  ]) {
+    assert.equal(existsSync(path.join(WEB_DIR, rel)), true, `Missing pure helper: ${rel}`);
+  }
+});
