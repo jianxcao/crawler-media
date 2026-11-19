@@ -98,7 +98,10 @@ test("both views wire lifecycle status and persistent retry UI", async () => {
     assert.match(source, /<LibraryRemovalNotice/);
     assert.doesNotMatch(source, /removeLibraryAndWait/);
   }
-  const detail = await readFile(new URL("../components/library-detail-view.tsx", import.meta.url), "utf8");
+  const detail = await readFile(
+    new URL("../components/library-detail/use-library-wall-controller.ts", import.meta.url),
+    "utf8",
+  );
   assert.match(detail, /canManageLibraries \? \{ manage: true \}/);
   const hook = await readFile(new URL("../lib/use-library-removal.ts", import.meta.url), "utf8");
   assert.match(hook, /controller\.abort\(\)/);

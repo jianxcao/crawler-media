@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
@@ -71,14 +71,51 @@ async function renderLibrary(unidentified = []) {
       flattenGallery: () => [],
     },
   };
-  const source = readFileSync(new URL("../components/library-detail-view.tsx", import.meta.url), "utf8");
+  const entryUrl = new URL("../components/library-detail-view.tsx", import.meta.url);
+  const real = new Set(["@/lib/library-detail-helpers", "@/lib/library-filter"]);
+  const loaded = new Map();
+  function resolveFile(baseUrl, specifier) {
+    const raw = specifier.startsWith("@/")
+      ? new URL(`../${specifier.slice(2)}`, import.meta.url)
+      : new URL(specifier, baseUrl);
+    for (const suffix of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+      const candidate = new URL(`${raw.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module ${specifier} from ${baseUrl.href}`);
+  }
+  function loadVmModule(name, fromUrl = entryUrl) {
+    if (mocks[name]) return mocks[name];
+    const isRelative = name.startsWith("./") || name.startsWith("../");
+    if (!isRelative && !real.has(name)) return fallback;
+    const targetUrl = resolveFile(fromUrl, name);
+    if (loaded.has(targetUrl.href)) return loaded.get(targetUrl.href).exports;
+    const src = readFileSync(targetUrl, "utf8");
+    const compiled = ts.transpileModule(src, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+    const mod = { exports: {} };
+    loaded.set(targetUrl.href, mod);
+    vm.runInNewContext(compiled, {
+      module: mod,
+      exports: mod.exports,
+      require: (dep) => loadVmModule(dep, targetUrl),
+      URLSearchParams,
+      window: { location: { search: "" } },
+    });
+    return mod.exports;
+  }
+  const source = readFileSync(entryUrl, "utf8");
   const code = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(code, {
-    module, exports: module.exports, require: (name) => mocks[name] ?? fallback,
-    URLSearchParams, window: { location: { search: "" } },
+    module,
+    exports: module.exports,
+    require: (name) => loadVmModule(name, entryUrl),
+    URLSearchParams,
+    window: { location: { search: "" } },
   });
   function render() {
     index = 0;
@@ -91,14 +128,32 @@ async function renderLibrary(unidentified = []) {
   return render();
 }
 
+function expand(tree) {
+  if (tree && typeof tree === "object" && !Array.isArray(tree) && typeof tree.type === "function") {
+    try {
+      return expand(tree.type(tree.props));
+    } catch {
+      return tree;
+    }
+  }
+  return tree;
+}
 function elements(tree) {
   if (Array.isArray(tree)) return tree.flatMap(elements);
   if (!tree || typeof tree !== "object") return [];
-  return [tree, ...elements(tree.props?.children)];
+  const resolved = expand(tree);
+  if (Array.isArray(resolved)) return resolved.flatMap(elements);
+  if (!resolved || typeof resolved !== "object") return [];
+  return [resolved, ...elements(resolved.props?.children)];
 }
 function text(tree) {
   if (Array.isArray(tree)) return tree.map(text).join("");
-  if (tree && typeof tree === "object") return text(tree.props?.children);
+  if (tree && typeof tree === "object") {
+    const resolved = expand(tree);
+    if (Array.isArray(resolved)) return resolved.map(text).join("");
+    if (resolved && typeof resolved === "object") return text(resolved.props?.children);
+    return typeof resolved === "string" || typeof resolved === "number" ? String(resolved) : "";
+  }
   return typeof tree === "string" || typeof tree === "number" ? String(tree) : "";
 }
 

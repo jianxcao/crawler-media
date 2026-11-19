@@ -1,6 +1,7 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import test from 'node:test';
 import React from 'react';
 import ts from 'typescript';
 import { createLibraryItemProbe } from '../lib/library-item-probe.ts';
@@ -13,6 +14,16 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 function elements(tree) {
   if (Array.isArray(tree)) return tree.flatMap(elements);
   if (!tree || typeof tree !== 'object') return [];
+  if (typeof tree.type === 'function' && tree.type !== noop) {
+    try {
+      const rendered = tree.type(tree.props);
+      return rendered && typeof rendered === 'object'
+        ? [tree, ...elements(rendered), ...elements(tree.props?.children)]
+        : [tree, ...elements(tree.props?.children)];
+    } catch {
+      return [tree, ...elements(tree.props?.children)];
+    }
+  }
   return [tree, ...elements(tree.props?.children)];
 }
 
@@ -42,10 +53,47 @@ test('item probe button submits without an episode selection after effect setup-
     '@/lib/use-media-query': { useIsMobile: () => false },
     '@/lib/image-proxy': { cachedImageUrl: () => '' },
   };
-  const source = await readFile(new URL('../components/library-item-detail-view.tsx', import.meta.url), 'utf8');
+  const entryUrl = new URL('../components/library-item-detail-view.tsx', import.meta.url);
+  const real = new Set(['@/lib/library-item-format', '@/lib/format']);
+  const modules = new Map();
+  function resolveFile(baseUrl, specifier) {
+    const raw = specifier.startsWith('@/')
+      ? new URL(`../${specifier.slice(2)}`, import.meta.url)
+      : new URL(specifier, baseUrl);
+    for (const suffix of ['', '.tsx', '.ts', '/index.tsx', '/index.ts']) {
+      const candidate = new URL(`${raw.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module ${specifier} from ${baseUrl.href}`);
+  }
+  function loadLocalModule(specifier, fromUrl = entryUrl) {
+    const targetUrl = resolveFile(fromUrl, specifier);
+    if (modules.has(targetUrl.href)) return modules.get(targetUrl.href).exports;
+    const src = readFileSync(targetUrl, 'utf8');
+    const js = ts.transpileModule(src, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const mod = { exports: {} };
+    modules.set(targetUrl.href, mod);
+    new Function('require', 'module', 'exports', js)((dependency) => {
+      if (mocks[dependency]) return mocks[dependency];
+      if (dependency.startsWith('./') || dependency.startsWith('../') || real.has(dependency)) {
+        return loadLocalModule(dependency, targetUrl);
+      }
+      return fallback;
+    }, mod, mod.exports);
+    return mod.exports;
+  }
+  const source = await readFile(entryUrl, 'utf8');
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', code)((dependency) => mocks[dependency] ?? fallback, module, module.exports);
+  new Function('require', 'module', 'exports', code)((dependency) => {
+    if (mocks[dependency]) return mocks[dependency];
+    if (dependency.startsWith('./') || dependency.startsWith('../') || real.has(dependency)) {
+      return loadLocalModule(dependency, entryUrl);
+    }
+    return fallback;
+  }, module, module.exports);
   const tree = module.exports.LibraryItemDetailView({ libraryId: 'library', mediaItemId: 'whole-item' });
   const cleanups = effects.map((effect) => effect());
   cleanups.forEach((cleanup) => { if (typeof cleanup === 'function') cleanup(); });

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import React, { act } from "react";
 import { create } from "react-test-renderer";
@@ -129,8 +129,13 @@ export function libraryDetailHarness({
     },
   };
   const real = new Set([
-    "@/lib/poll-reconcile", "@/lib/library-wall-index", "@/lib/wall-sort",
-    "@/lib/library-detail-snapshot", "@/lib/session-snapshot",
+    "@/lib/poll-reconcile",
+    "@/lib/library-wall-index",
+    "@/lib/wall-sort",
+    "@/lib/library-detail-snapshot",
+    "@/lib/session-snapshot",
+    "@/lib/library-detail-helpers",
+    "@/lib/library-filter",
   ]);
   if (realRecall) {
     delete mocks["@/lib/use-wall-recall"];
@@ -138,18 +143,41 @@ export function libraryDetailHarness({
     real.add("@/lib/use-wall-recall");
     real.add("@/lib/library-wall-recall");
   }
-  function loadModule(name) {
+  function resolveFile(baseUrl, specifier) {
+    const raw = specifier.startsWith("@/")
+      ? new URL(`../../${specifier.slice(2)}`, import.meta.url)
+      : new URL(specifier, baseUrl);
+    for (const suffix of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+      const candidate = new URL(`${raw.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module ${specifier} from ${baseUrl.href}`);
+  }
+  function loadModule(name, fromUrl = import.meta.url) {
+    const baseUrl = typeof fromUrl === "string" ? new URL(fromUrl) : fromUrl;
     if (mocks[name]) return mocks[name];
-    if (modules.has(name)) return modules.get(name).exports;
-    if (name !== "component" && !real.has(name)) return fallback;
-    const path = name === "component" ? "../../components/library-detail-view.tsx" : `../../${name.slice(2)}.ts`;
-    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    const isRelative = name.startsWith("./") || name.startsWith("../");
+    if (name !== "component" && !real.has(name) && !isRelative) return fallback;
+    const targetUrl =
+      name === "component"
+        ? new URL("../../components/library-detail-view.tsx", import.meta.url)
+        : resolveFile(baseUrl, name);
+    if (modules.has(targetUrl.href)) return modules.get(targetUrl.href).exports;
+    const source = readFileSync(targetUrl, "utf8");
     const js = ts.transpileModule(source, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        jsx: ts.JsxEmit.ReactJSX,
+      },
     }).outputText;
     const module = { exports: {} };
-    modules.set(name, module);
-    new Function("require", "module", "exports", js)(loadModule, module, module.exports);
+    modules.set(targetUrl.href, module);
+    new Function("require", "module", "exports", js)(
+      (dep) => loadModule(dep, targetUrl),
+      module,
+      module.exports,
+    );
     return module.exports;
   }
   const { LibraryDetailView } = loadModule("component");

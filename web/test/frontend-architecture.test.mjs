@@ -119,3 +119,16 @@ test("library-form-dialog, rule-sets-panel, and downloader-config-section are de
   }
   assert.equal(existsSync(path.join(WEB_DIR, "lib/rule-set-summary.ts")), true);
 });
+
+test("library-detail-view and library-item-detail-view are decomposed", () => {
+  for (const [rel, maxLines] of [
+    ["components/library-detail-view.tsx", 400],
+    ["components/library-item-detail-view.tsx", 400],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+  assert.equal(existsSync(path.join(WEB_DIR, "lib/library-detail-helpers.ts")), true);
+  assert.equal(existsSync(path.join(WEB_DIR, "lib/library-item-format.ts")), true);
+});
