@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { setImmediate } from "node:timers/promises";
 import ts from "typescript";
 import * as requestSignal from "../lib/request-signal.mjs";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 async function loadModule(path, imports) {
   const source = await readFile(new URL(path, import.meta.url), "utf8");
@@ -34,7 +35,7 @@ const http = await loadModule("../lib/http.ts", {
   "@/lib/ui-prefs-cache": uiPrefsCache,
   "@/lib/request-signal.mjs": requestSignal,
 });
-const libraries = await loadModule("../lib/api/libraries.ts", {
+const libraries = loadLibrariesApi({
   "@/lib/http": http,
   "@/lib/library-removal": removals,
   "@/lib/library-operations": operations,

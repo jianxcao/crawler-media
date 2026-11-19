@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 /**
  * 浏览列表的分页契约：键集游标（`cursor` → `next_cursor`），`offset` 已删除。
@@ -11,21 +10,19 @@ import ts from "typescript";
  * 被正确读出来」——不然游标拿不到，第二页永远翻不过去。
  */
 
-async function loadLibraries(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} };
-  new Function("require", "module", "exports", js)((dependency) => {
-    if (dependency === "@/lib/http") return { request, resolveRequestUrl: (path) => path };
-    if (dependency.endsWith("library-filter")) return { filterQuery: (filter, query) => {
-      if (filter?.genre) query.set("g", filter.genre);
-    } };
-    if (dependency.endsWith("media-types")) return {};
-    return {};
-  }, module, module.exports);
-  return module.exports;
+function loadLibraries(request) {
+  return loadLibrariesApi(
+    {
+      "@/lib/http": { request, resolveRequestUrl: (path) => path },
+      "@/lib/library-filter": {
+        filterQuery: (filter, query) => {
+          if (filter?.genre) query.set("g", filter.genre);
+        },
+      },
+      "@/lib/media-types": {},
+    },
+    { fallbackEmpty: true },
+  );
 }
 
 const envelope = (data, meta = {}) => ({ ok: true, data, ...meta });

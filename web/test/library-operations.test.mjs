@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import ts from "typescript";
 import { waitForLibraryOperation, operationLabel } from "../lib/library-operations.ts";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 const operation = (state, extra = {}) => ({
   operation_id: "op",
@@ -84,22 +84,15 @@ test("operation states have visible copy", () => {
 });
 
 async function loadApi(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} };
   const removals = await import("../lib/library-removal.ts");
   const operations = await import("../lib/library-operations.ts");
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/lib/http") return { request, resolveRequestUrl: (path) => path };
-    if (name === "@/lib/library-removal") return { waitForLibraryRemoval: removals.waitForLibraryRemoval };
-    if (name === "@/lib/library-operations") return operations;
-    if (name === "@/lib/library-file-pages") {
-      return { collectAllFilePages: async (firstPage) => firstPage.files };
-    }
-    if (name === "@/lib/library-filter") return {};
-    throw new Error(`Unexpected import ${name}`);
-  }, module, module.exports);
-  return module.exports;
+  return loadLibrariesApi({
+    "@/lib/http": { request, resolveRequestUrl: (path) => path },
+    "@/lib/library-removal": { waitForLibraryRemoval: removals.waitForLibraryRemoval },
+    "@/lib/library-operations": operations,
+    "@/lib/library-file-pages": { collectAllFilePages: async (firstPage) => firstPage.files },
+    "@/lib/library-filter": {},
+  });
 }
 
 const library = { id: "lib", name: "电影", kind: "movie", root_paths: ["/media"] };

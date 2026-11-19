@@ -94,3 +94,15 @@ test("search-results is decomposed without HitView/AttrView shims or duplicate f
   assert.doesNotMatch(source, /\binterface AttrView\b/);
   assert.doesNotMatch(source, /\bfunction formatBytes\b/);
 });
+
+test("site-config-section, task-center-view, and api/libraries are decomposed", () => {
+  for (const [rel, maxLines] of [
+    ["components/site-config-section.tsx", 400],
+    ["components/task-center-view.tsx", 400],
+    ["lib/api/libraries.ts", 100],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+});

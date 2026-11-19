@@ -61,7 +61,7 @@ test("job action callers refresh snapshots instead of upserting acknowledgements
 });
 
 test("active job cards never present a previous finish as the active run's end", async () => {
-  const source = await readWeb("components/task-center-view.tsx");
+  const source = await readWeb("components/task-center/job-feed-items.tsx");
   const activeCard = source.match(/function ActiveJobFeedItem\([\s\S]*?\n}\n/);
   assert.ok(activeCard, "active job card exists");
   assert.match(activeCard[0], /job\.last_status === "queued"/);

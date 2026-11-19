@@ -1,20 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
-async function loadLibraries(request, cryptoApi = globalThis.crypto) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} };
-  new Function("require", "module", "exports", "crypto", js)((dependency) => {
-    if (dependency === "@/lib/http") return { request, resolveRequestUrl: (p) => p };
-    if (dependency.endsWith("library-filter")) return { filterQuery: () => undefined };
-    return {};
-  }, module, module.exports, cryptoApi);
-  return module.exports;
+function loadLibraries(request, cryptoApi = globalThis.crypto) {
+  return loadLibrariesApi(
+    {
+      "@/lib/http": { request, resolveRequestUrl: (p) => p },
+      "@/lib/library-filter": { filterQuery: () => undefined },
+    },
+    { cryptoApi, fallbackEmpty: true },
+  );
 }
 
 const envelope = (data) => ({ ok: true, data });
