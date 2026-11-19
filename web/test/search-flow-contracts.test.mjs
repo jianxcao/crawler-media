@@ -85,17 +85,17 @@ test("title snapshot DTO maps provider and snake_case fields into media search i
 });
 
 test("media search renders every supported metadata source and keeps torrent categories", async () => {
-  const [mediaTypes, mediaResults, torrentResults] = await Promise.all([
+  const [mediaTypes, mediaResults, torrentActions] = await Promise.all([
     readWeb("lib/media-types.ts"),
     readWeb("components/media-search-results.tsx"),
-    readWeb("components/search-results.tsx"),
+    readWeb("components/search/torrent-actions.tsx"),
   ]);
 
   for (const source of ["tmdb", "douban", "tvdb", "bangumi", "anilist"]) {
     assert.ok(mediaTypes.includes(`"${source}"`), `MediaSource includes ${source}`);
     assert.ok(mediaResults.includes(`"${source}"`), `search UI renders ${source}`);
   }
-  assert.match(torrentResults, /category: hit\.category/);
+  assert.match(torrentActions, /category: hit\.category/);
 });
 
 test("torrent search endpoint permits the empty keyword used by browse mode", async () => {

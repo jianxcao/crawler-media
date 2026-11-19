@@ -85,3 +85,12 @@ test("heavy routes use React.lazy and layouts wrap Outlet in Suspense", () => {
   assert.match(appLayoutSource, /<Suspense\b[\s\S]*?<Outlet\s*\/>[\s\S]*?<\/Suspense>/);
   assert.match(playLayoutSource, /<Suspense\b[\s\S]*?<Outlet\s*\/>[\s\S]*?<\/Suspense>/);
 });
+
+test("search-results is decomposed without HitView/AttrView shims or duplicate formatBytes", () => {
+  const source = readFileSync(path.join(WEB_DIR, "components/search-results.tsx"), "utf8");
+  const lines = source.split("\n").length;
+  assert.ok(lines <= 500, `Expected search-results.tsx <= 500 lines, got ${lines}`);
+  assert.doesNotMatch(source, /\binterface HitView\b/);
+  assert.doesNotMatch(source, /\binterface AttrView\b/);
+  assert.doesNotMatch(source, /\bfunction formatBytes\b/);
+});
