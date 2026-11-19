@@ -33,8 +33,6 @@ import { imageUrl } from "@/lib/image-proxy";
 import { useJobs } from "@/lib/jobs";
 import { usePermissions } from "@/lib/permissions";
 import { subscriptionStatus, subscriptionStatusMeta } from "@/lib/subscription-ui";
-import { useTheme } from "@/lib/ui-prefs";
-import { useIsMobile } from "@/lib/use-media-query";
 import { usePageTitle } from "@/lib/use-page-title";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
@@ -170,9 +168,6 @@ export function useSubscriptionInspector({
   usePageTitle(detail?.media.title);
 
   const navFallback = { label: "我的订阅", href: "/subscriptions" };
-  const themeId = useTheme().id;
-  const isMobile = useIsMobile();
-  const isNfDesktop = themeId === "netflix" && !isMobile;
   const back = useBackNavigation(navFallback.href);
 
   const detailStatus = detail ? subscriptionStatus(detail) : "active";
@@ -384,7 +379,6 @@ export function useSubscriptionInspector({
     ruleSetName,
     searchJob,
     navFallback,
-    isNfDesktop,
     back,
     detailStatus,
     meta,

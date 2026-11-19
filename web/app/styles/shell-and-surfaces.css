@@ -1,0 +1,500 @@
+/*
+ * 【全站约定】backdrop-filter 一律只写标准属性，不要手写 -webkit- 前缀行。
+ *
+ * 构建期 Tailwind v4 的 Lightning CSS 会按浏览器目标自动补前缀（产物里两条都在）；
+ * 但源码里如果自己写了 -webkit-backdrop-filter，它会认为「作者已指定前缀形式」，
+ * 压缩时把标准属性整条丢掉，只留 -webkit- 那条。而新版 Chrome（148 起实测）
+ * 已移除 -webkit-backdrop-filter 别名，于是**打包产物里所有毛玻璃/蒙版模糊全失效**，
+ * dev 模式（不压缩、两条都在）却一切正常——这正是「本地好好的、镜像里不对」的成因。
+ * 同理只影响 backdrop-filter；mask-image 等前缀属性不受此规则约束。
+ */
+
+/*
+ * 站点铺底：默认为固定色调的深石墨蓝渐变底（public/backdrop-default.jpg，
+ * 由构建脚本生成的斜向渐变 + 左上冷光晕 + 防色带噪声），用户可在外观设置换成
+ * 自己的图。其上叠一层冷调 radial-gradient 光晕 + 竖向暗渐变蒙版：
+ *   1) 蒙版压暗底图，保证半透明玻璃面板与文字始终可读；
+ *   2) 冷色光晕（靛蓝 / 淡紫 / 青）与银冷主题呼应。
+ * 这张图同时被液态玻璃着色器采样做折射（见 lib/glass.ts 的 BACKDROP），二者须为同一张。
+ */
+body::before {
+  content: "";
+  position: fixed;
+  /* 底边向下超出视口 --vp-overshoot，铺到屏幕物理底边（见变量处的说明） */
+  inset: 0 0 calc(-1 * var(--vp-overshoot)) 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 48% at 16% 8%, rgba(96, 130, 220, 0.18), transparent 62%),
+    radial-gradient(54% 44% at 88% 14%, rgba(140, 104, 214, 0.14), transparent 60%),
+    radial-gradient(64% 58% at 80% 92%, rgba(64, 150, 186, 0.13), transparent 64%),
+    linear-gradient(180deg, rgba(9, 11, 17, 0.1) 0%, rgba(6, 7, 13, 0.32) 100%),
+    /* --backdrop-image 由 BackdropProvider 按用户上传的图动态写入；未设置时回退到内置色调底图。
+       顶部对齐（center top）而不是居中：与影片详情页的沉浸覆盖层同一口径
+       （lib/backdrop.tsx 的 backgroundPosition，两处必须一致）。两层铺的是同一块视口、
+       只是图不同，锚点不一样的话进出详情页时画面会整体上下挪一下；对齐之后只是换图。
+       裁切上也更划算——宽屏配竖图时 cover 按宽度放大、纵向溢出，居中会把天空和人物头顶
+       一起切掉，顶部对齐切的是画面下沿，而下沿本来就压在内容与底部操作区底下。 */
+    var(--backdrop-image, url("/backdrop-default.jpg")) center top / cover no-repeat;
+  background-color: var(--bg);
+}
+
+/*
+ * 影片详情页（媒体库条目 / 发现页条目）的「剧照 → 纯黑」渐变板。
+ *
+ * 剧照本身是全站背景（BackdropProvider 的沉浸覆盖层，随页面进入淡入、
+ * 离开淡出），详情页自己不再画任何 Hero 图层；这层渐变挂在页面的滚动容器上，
+ * 顶部一段完全透明让剧照直出，从标题上方开始逐级压暗，到基础信息之后落成
+ * 纯黑并一直铺到内容底部。
+ *
+ * 为什么挂在滚动容器的 background 上、而不是内容层的 div：
+ *   - .scroll-thin 在 WebKit 下是占位的经典滚动条（9px），绝对定位 / 普通流
+ *     的子元素都盖不到滚动条轨道那一条，轨道透明就会漏出一条原图；元素自身
+ *     的 background 覆盖的是 border-box，连轨道一起盖住；
+ *   - background-attachment: local 让渐变随内容一起滚动、并以整个可滚动
+ *     高度为 100%，短内容时也至少铺满容器，底部不会露出剧照。
+ * 渐变起点 --detail-ambient-top = 剧照横幅可视高度（--detail-hero-h 与
+ * --detail-hero-min-h 取大）− 内容层上提量（-mt-28 = 112px），色阶与原先
+ * 内容层上的渐变完全一致。横幅高度与渐变起点必须严格同步（起点一错，标题
+ * 就会压在亮图上或横幅下沿露出一截渐变断层），所以页面侧的氛围留白 spacer
+ * 也从同一组变量取值（h-[var(--detail-hero-h)]）——改高度只改变量，两处不会漂移。
+ */
+.detail-ambient {
+  --detail-hero-h: 30vh;
+  --detail-hero-min-h: 180px;
+  --detail-ambient-top: calc(max(var(--detail-hero-h), var(--detail-hero-min-h)) - 112px);
+  background-image: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0) var(--detail-ambient-top),
+    rgba(0, 0, 0, 0.16) calc(var(--detail-ambient-top) + 42px),
+    rgba(0, 0, 0, 0.34) calc(var(--detail-ambient-top) + 78px),
+    rgba(0, 0, 0, 0.55) calc(var(--detail-ambient-top) + 120px),
+    rgba(0, 0, 0, 0.73) calc(var(--detail-ambient-top) + 165px),
+    rgba(0, 0, 0, 0.87) calc(var(--detail-ambient-top) + 210px),
+    rgba(0, 0, 0, 0.96) calc(var(--detail-ambient-top) + 255px),
+    #000 calc(var(--detail-ambient-top) + 315px),
+    #000 100%
+  );
+  background-attachment: local;
+  background-repeat: no-repeat;
+}
+@media (max-width: 767px) {
+  .detail-ambient {
+    --detail-hero-h: 22vh;
+    --detail-hero-min-h: 120px;
+  }
+  /* 手机有页内剧照 Hero 时（两个详情页的 mobileHeroSrc）：页面上的剧照由
+     Hero 来画，滚动容器直接铺黑。全站背景仍换成同一张剧照（侧栏玻璃要折射它），但它在
+     竖屏上是按高度放大、只剩中间一条的裁切，由这层黑底整个挡住，不在页面上露出来 */
+  .detail-ambient.detail-ambient--hero {
+    background: #000;
+  }
+}
+
+/*
+ * 氛围页的加载/错误兜底底板。
+ *
+ * 「氛围页」（首页与两个影片详情页，见 app-shell 的 isHome）刻意不铺全局蒙版，
+ * 让背景大图直出。但详情页在**拿到数据之前**没有沉浸背景可铺，此时页面上只有
+ * 一句加载/错误文案，直接压在用户自己配的壁纸上——壁纸一亮，浅灰文案就没了。
+ * 这些兜底态自己带一层底，与全局蒙版同色系，读得清且不破坏氛围页的观感。
+ */
+.ambient-fallback {
+  background: rgb(5 7 12 / 0.72);
+  backdrop-filter: blur(12px);
+}
+
+/*
+ * 全屏背景蒙版：铺在背景大图之上、内容之下的深色模糊层，
+ * z-index 介于 body::before(0) 与 .app-shell(10) 之间：压住背景、托住其上的内容与侧栏。
+ * 全站统一只有这一档（除「新任务」首页大图直出外，所有页面一律铺它，
+ * 显隐由 app-shell 统一控制，新增页面自动继承、无需登记）。
+ * 模糊度与压暗程度由用户偏好驱动（ui.preferences.scrim → --scrim-blur /
+ * --scrim-dark，见 lib/ui-prefs.tsx），设置里的滑杆全站即时生效；
+ * 变量未就绪时兜底为出厂默认值（压暗 0.69 + 模糊 13px，背景大图化为朦胧色块），
+ * 须与 lib/api/ui.ts 的 DEFAULT_UI_PREFS 及后端 ScrimUiPrefs 的默认值一致。
+ */
+.page-scrim,
+.search-palette-overlay {
+  background: rgb(5 7 12 / var(--scrim-dark, 0.69));
+  backdrop-filter: blur(var(--scrim-blur, 13px));
+}
+.page-scrim {
+  position: fixed;
+  /* 与背景大图同样铺到屏幕物理底边，否则底部会漏出一条未压暗的原图 */
+  inset: 0 0 calc(-1 * var(--vp-overshoot)) 0;
+  z-index: 5;
+  pointer-events: none;
+  animation: page-scrim-in 240ms ease both;
+  /* 注意：这里不能给 backdrop-filter / background-color 加 transition——
+     Chromium 对「仅因 CSS 变量变化引起的属性变化」不会正确走过渡，
+     值会卡在旧档不更新（滑杆拖不动的元凶）。全站现在只有一档蒙版，
+     值只在用户拖滑杆时变化，本就要即时跟手，无需过渡。 */
+}
+@keyframes page-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Toast 回执（components/feedback.tsx）：自下方轻浮入，与玻璃面板同源的进场语言 */
+.toast-item {
+  animation: toast-in 280ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-item {
+    animation: none;
+  }
+}
+
+/*
+ * 沉浸页蒙版（Agent 对话页）：与 .page-scrim 同层同显隐逻辑，但完全不透明——
+ * 密集文本页整页不允许透出背景大图。底色用中性近黑（不带全站的冷蓝调），
+ * 对齐桌面端 AI 产品的阅读配色（见下方 .immersive-theme）。
+ */
+.page-solid {
+  position: fixed;
+  inset: 0 0 calc(-1 * var(--vp-overshoot)) 0;
+  z-index: 5;
+  pointer-events: none;
+  background: #0f0f10;
+  animation: page-scrim-in 240ms ease both;
+}
+/* 沉浸路由标记（immersive-route）：layout.tsx 的内联脚本在首帧绘制前打上、
+   AppShell 在客户端路由切换时同步。/sessions/[id] 下背景大图的伪元素整个不渲染
+   （不渲染 = 浏览器不会下载这张图），纯色层直接实底、不做淡入——
+   强刷对话页时不会闪出背景图。 */
+html.immersive-route body::before {
+  content: none;
+  /* 仅 content:none 不够——Chromium 仍会解析未生成伪元素的 background 并
+     预取图片（包括 --backdrop-image 变量更新时）。置空才真正不发请求 */
+  background: none;
+}
+html.immersive-route .page-solid {
+  animation: none;
+}
+
+/*
+ * —— 沉浸页阅读主题（Agent 对话容器） ——
+ * 模仿 ChatGPT/Codex 桌面端的阅读版式：中性灰阶文字（去掉全站冷白的蓝调）、
+ * 系统字体栈（Latin 走 SF Pro/Segoe，中文照旧 PingFang）。只在对话页容器内
+ * 覆盖文字变量，全站其他页面的冷调玻璃语言不受影响。
+ */
+.immersive-theme {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui,
+    "PingFang SC", "Segoe UI", sans-serif;
+  --text: #ececec;
+  --text-muted: rgba(236, 236, 236, 0.6);
+  --text-faint: rgba(236, 236, 236, 0.38);
+  /* 工具调用标签：中性主题下去掉银蓝调，用浅灰承接 code 质感 */
+  --accent-2: #c9cdd3;
+  color: var(--text);
+}
+
+/*
+ * a 的默认观感（继承文字色、无下划线）与 preflight 同向，但 text-decoration
+ * 档位不同（none 而非 inherit）。必须写在 @layer base 里：无 @layer 的普通
+ * 规则优先级永远高于任何 @layer，而 Tailwind 的工具类都在 @layer utilities
+ * （与下方 button cursor 规则同一坑，2026-09-16 实测踩中——顶栏导航链接的
+ * text-[var(--accent)] 激活红被这条无层规则压成继承色，红色高亮不生效）。
+ */
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+/*
+ * 按钮只保留「手型光标」这一条 —— Tailwind v4 的 preflight 不再给 button 设
+ * cursor，所以这条必须自己补。
+ *
+ * 必须写在 @layer base 里：无 @layer 的普通规则优先级永远高于任何 @layer，
+ * 而 Tailwind 的工具类都在 @layer utilities。此前这条规则没有 layer，
+ * 导致直接写在 <button> 上的 text-xs / font-semibold / text-[var(--...)] /
+ * disabled:cursor-not-allowed 等工具类全部失效（按钮一律退回继承 body 的
+ * 14px / 400 字重 / 全不透明文字色）。
+ *
+ * 原先这里还有 font: inherit 和 color: inherit —— 与 preflight 完全重复
+ * （见 tailwindcss/preflight.css 的 button 规则），已删除。
+ */
+@layer base {
+  button {
+    cursor: pointer;
+  }
+}
+
+/*
+ * 统一的键盘聚焦环（去色的冷光，借鉴 Bing 蓝环手法）。
+ * 注意：不含 input/textarea —— 文本输入的聚焦指示改由其外层容器承载
+ * （见 .field-shell / .composer-shell），避免「框中又套一个内环」的双环问题。
+ */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/*
+ * 文本输入容器：聚焦(:focus-within)时由「容器」统一显示一圈细指示环，
+ * 内部 input/textarea 自身已 outline-none（不各画各的），从根本上消除嵌套双环。
+ * 用无 @layer 的普通规则书写，保证稳定压过 Tailwind 工具类。
+ */
+.field-shell {
+  transition: box-shadow 160ms ease, background-color 160ms ease;
+}
+.field-shell:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-ring) 55%, transparent);
+}
+/* composer 静止即带投影，聚焦时叠加指示环并加深投影（保留投影不闪断） */
+.composer-shell {
+  transition: box-shadow 160ms ease;
+  /* 玻璃 composer 折射任意背景图，正文/占位字统一垫一层极淡暗影托底：
+     暗图下几乎不可见，亮图、花图下把字从纹理里托出来（text-shadow 可继承） */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+.composer-shell:focus-within {
+  box-shadow:
+    0 8px 30px rgba(0, 0, 0, 0.32),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-ring) 55%, transparent);
+}
+
+/* composer 输入框里的技能 token（Lexical SkillTokenNode）：
+   与会话气泡里的技能 chip 同一视觉语言，行内原子实体、整体删除 */
+.skill-token-chip {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  padding: 1px 6px;
+  margin: 0 1px;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+
+/* 数字等宽（时间、计数），排版更整齐 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* 横滚海报行：隐藏原生滚动条（翻页交给两侧箭头与触控板横扫），保持画面干净 */
+.scroll-none {
+  scrollbar-width: none;
+}
+.scroll-none::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * 页面级滚动容器的底部安全区让位（配合上文「主区底部不整体让位」的约定）：
+ * 给「直接铺满主区、一滚到底」的那层 overflow-y-auto 加本类，在滚动内容
+ * 末尾追加一段 Home 指示条高度的空白——内容照常从指示条下方穿过（原生
+ * App 的观感），滚到头时最后一行又能完全露出、不被指示条压住。
+ * 用 ::after 占位而非改 padding：不与各页自己的 pb-* 打架；
+ * 非全面屏设备与桌面端 env() 解析为 0，占位高度为零、无副作用。
+ */
+.scroll-safe::after {
+  content: "";
+  display: block;
+  height: var(--safe-bottom);
+}
+
+/* —— 滚动条全局兜底（Windows / Linux） ——
+   macOS 是悬浮式滚动条（overlay，不滚不显示），开发时看不出问题；
+   Windows / Linux 的经典滚动条约 17px 宽、常驻占位，落在暗色玻璃界面上
+   非常抢眼，且全站几十处滚动容器不可能逐个挂 .scroll-thin。这里用零优先级
+   的通配规则统一细化。注意只用标准属性（Chromium 121+ / Firefox 支持，
+   老内核退化为原生深色滚动条，可接受）；不能全局写 ::-webkit-scrollbar——
+   一旦命中，macOS 的 overlay 行为就会被替换成常驻自绘滚动条。 */
+:where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+/* —— 细滚动条 —— */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 9px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: content-box;
+}
+
+/*
+ * —— AI 回复正文的 Markdown 排版（components/markdown.tsx） ——
+ * 颜色全部走 CSS 变量，在 .immersive-theme 内自动切到中性灰阶。
+ * 字号走语义 token 的阅读正文档（桌面 15px / 移动 17px），行高 28px 两档通用
+ * （15px 下约 1.85、17px 下约 1.65，均在舒适阅读区间），保证切换渲染器不跳版式。
+ */
+.markdown {
+  font-size: var(--text-body-lg);
+  line-height: 28px;
+  color: var(--text);
+  word-break: break-word;
+}
+/*
+ * 紧凑档：Markdown 嵌在卡片里当"说明文字"用时（更新说明等），阅读正文档
+ * 会比周边的 text-sub 大出一大截、显得喧宾夺主。只压字号与行高，排版规则
+ * （标题层级、列表缩进、代码块）完全复用上面那套，两处不会走样。
+ */
+.markdown--compact {
+  font-size: var(--text-sub);
+  line-height: 1.75;
+  color: var(--text-muted);
+}
+.markdown--compact h1,
+.markdown--compact h2,
+.markdown--compact h3,
+.markdown--compact h4 {
+  color: var(--text);
+}
+.markdown > * + * {
+  margin-top: 0.75em;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-weight: 600;
+  line-height: 1.4;
+}
+.markdown > * + h1,
+.markdown > * + h2,
+.markdown > * + h3,
+.markdown > * + h4 {
+  margin-top: 1.4em;
+}
+.markdown h1 {
+  font-size: 1.25em;
+}
+.markdown h2 {
+  font-size: 1.15em;
+}
+.markdown h3,
+.markdown h4 {
+  font-size: 1.05em;
+}
+.markdown ul,
+.markdown ol {
+  padding-left: 1.5em;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li + li {
+  margin-top: 0.3em;
+}
+.markdown li > ul,
+.markdown li > ol {
+  margin-top: 0.3em;
+}
+/* GFM 任务列表：去掉原生序号缩进，checkbox 顶替列表符 */
+.markdown li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.5em;
+}
+.markdown input[type="checkbox"] {
+  margin-right: 0.45em;
+  vertical-align: -0.1em;
+}
+.markdown a {
+  color: #8ab4ff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(138, 180, 255, 0.4);
+}
+.markdown a:hover {
+  text-decoration-color: currentColor;
+}
+.markdown code {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86em;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 5px;
+  padding: 0.15em 0.4em;
+}
+.markdown pre {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+.markdown pre code {
+  background: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: var(--text-sub);
+}
+.markdown blockquote {
+  border-left: 3px solid rgba(255, 255, 255, 0.14);
+  padding-left: 0.9em;
+  color: var(--text-muted);
+}
+.markdown hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin: 1.4em 0;
+}
+.markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.93em;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 12px;
+  text-align: left;
+}
+.markdown th {
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/*
+ * —— 工具调用卡片里的代码展示（components/highlighted-code.tsx） ——
+ * shiki 输出的 <pre> 自带主题底色，这里压掉让它贴合卡片自身的玻璃底；
+ * 长命令/长参数强制换行完整展示，超长内容由卡片外层限高滚动。
+ */
+.code-highlight pre {
+  margin: 0;
+  padding: 4px 0;
+  background: transparent !important;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--text-caption);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

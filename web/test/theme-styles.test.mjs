@@ -2,7 +2,22 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+const css = await loadBundledCss(new URL("../app/globals.css", import.meta.url));
+
+async function loadBundledCss(entryUrl) {
+  const source = await readFile(entryUrl, "utf8");
+  const lines = source.split("\n");
+  const resolved = [];
+  for (const line of lines) {
+    const match = line.match(/^@import\s+"(\.[^"]+)";\s*$/);
+    if (match) {
+      resolved.push(await loadBundledCss(new URL(match[1], entryUrl)));
+    } else {
+      resolved.push(line);
+    }
+  }
+  return resolved.join("\n");
+}
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const prefs = await readFile(new URL("../lib/ui-prefs.tsx", import.meta.url), "utf8");
 const themes = await readFile(new URL("../lib/themes.ts", import.meta.url), "utf8");

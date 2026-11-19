@@ -5,10 +5,16 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronRightIcon } from "@/components/icons";
 
 /**
- * 电影与分集简介共用的四行摘要。只有真实发生溢出时才出现展开入口；
+ * 电影、分集与在线详情共用的四行简介。只有真实发生溢出时才出现展开入口；
  * 文案切换时先恢复折叠，再按新文案重新测量。
  */
-export function ExpandablePlot({ text }: { text: string }) {
+export function ExpandablePlot({
+  text,
+  selectable = false,
+}: {
+  text: string;
+  selectable?: boolean;
+}) {
   const paragraphRef = useRef<HTMLParagraphElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -40,7 +46,7 @@ export function ExpandablePlot({ text }: { text: string }) {
     <div className="max-w-3xl">
       <p
         ref={paragraphRef}
-        className={`text-on-image text-body-lg leading-7 text-white/78 ${
+        className={`${selectable ? "selectable " : ""}text-on-image text-body-lg leading-7 text-white/78 ${
           expanded ? "" : "line-clamp-4"
         }`}
       >
@@ -63,7 +69,7 @@ export function ExpandablePlot({ text }: { text: string }) {
   );
 }
 
-/** 外部信息源链接：新窗口打开站点词条，样式与「在 TMDB 打开核对」保持一致。 */
+/** 外部信息源链接：固定在正文底部，新窗口打开站点词条。 */
 export function SourceLink({ href, label }: { href: string; label: string }) {
   return (
     <a

@@ -3,9 +3,8 @@
 import { Link } from "react-router-dom";
 
 import { BrandLoader } from "@/components/brand-loader";
+import { DetailPageNav } from "@/components/detail-page-nav";
 import { ArrowLeftIcon } from "@/components/icons";
-import { NetflixBackButton } from "@/components/netflix/back-button";
-import { PageNav } from "@/components/page-nav";
 import { SubscriptionAdjustDialog } from "@/components/subscription-adjust-dialog";
 import { SubscriptionCancelDialog } from "@/components/subscription-cancel-dialog";
 import { UpgradeRunDialog } from "@/components/upgrade-run-dialog";
@@ -35,11 +34,7 @@ export function SubscriptionInspectorView({
   if (c.failed) {
     return (
       <div className="flex h-full flex-col">
-        {c.isNfDesktop ? (
-          <NetflixBackButton onBack={c.back} />
-        ) : (
-          <PageNav title="" fallback={c.navFallback} />
-        )}
+        <DetailPageNav title="" fallback={c.navFallback} onBack={c.back} />
         <div className="flex flex-1 flex-col items-center justify-center gap-4">
           <p className="text-body text-[var(--text-muted)]">未能加载该订阅，可能已被删除。</p>
           <Link to="/subscriptions" replace className="btn-glass px-4 py-2 text-ui font-medium">
@@ -54,11 +49,7 @@ export function SubscriptionInspectorView({
   if (!detail) {
     return (
       <div className="flex h-full flex-col">
-        {c.isNfDesktop ? (
-          <NetflixBackButton onBack={c.back} />
-        ) : (
-          <PageNav title="" fallback={c.navFallback} />
-        )}
+        <DetailPageNav title="" fallback={c.navFallback} onBack={c.back} />
         <div className="flex flex-1 items-center justify-center gap-2.5 text-ui text-[var(--text-muted)]">
           <BrandLoader className="size-5" />
           正在加载订阅详情…
@@ -71,15 +62,12 @@ export function SubscriptionInspectorView({
 
   return (
     <div className="scroll-thin scroll-safe flex-1 overflow-y-auto px-6 pb-12 max-md:px-4">
-      {c.isNfDesktop ? (
-        <NetflixBackButton onBack={c.back} />
-      ) : (
-        <PageNav
-          title={detail.media.title}
-          fallback={c.navFallback}
-          className="-mx-6 max-md:-mx-4"
-        />
-      )}
+      <DetailPageNav
+        title={detail.media.title}
+        fallback={c.navFallback}
+        onBack={c.back}
+        className="-mx-6 max-md:-mx-4"
+      />
 
       {notice && (
         <div

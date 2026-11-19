@@ -1,0 +1,207 @@
+/* 自托管可变字体(官方 InterVariable.woff2):构建不联网拉 Google Fonts。 */
+@font-face {
+  font-family: "Inter Variable";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-display: swap;
+  font-weight: 100 900;
+}
+:root {
+  --font-inter: "Inter Variable", sans-serif;
+}
+
+/*
+ * —— 语义字号 token（全站唯一的字号来源） ——
+ *
+ * 全站文字一律使用下面这套语义档位（text-micro / text-caption / … / text-title-lg），
+ * 不要再写 text-[13px] 这类任意 px 值：任意值是孤立的魔法数字，无法统一适配终端。
+ *
+ * 工作原理：@theme 里的 --text-* 会生成同名工具类（如 text-ui），且编译产物是
+ * font-size: var(--text-ui) 的变量引用（Tailwind v4 行为，已实测验证）——因此
+ * 只需在下方移动端媒体查询里覆盖 :root 变量，即可让全站字号整体换档，
+ * 组件无需逐处写 max-md: 断点。
+ *
+ * 两档取值：
+ * - 桌面档：延续原先的紧凑排版（信息密度优先，鼠标 + 大屏近距离阅读）；
+ * - 移动档：对齐 iOS 人机界面规范（HIG）的动态字体默认档——正文 Body 17pt、
+ *   Callout 16pt、Footnote 13pt、最小可读 Caption2 11pt（Web 上 1pt ≈ 1 CSS px）。
+ *
+ * 档位语义（桌面 → 移动）：
+ * - text-micro    10 → 11   徽标、角标、分组小标题等最小信息（移动端不允许再小）
+ * - text-caption  11 → 13   次要说明、时间戳、元数据
+ * - text-sub      12 → 14   辅助正文、表单说明、次级标签
+ * - text-ui       13 → 16   导航项、菜单项、按钮、列表行标题（UI 控件主文字）
+ * - text-body     14 → 16   正文基准（body 默认字号、气泡、输入框）
+ * - text-body-lg  15 → 17   阅读正文（Markdown、详情简介），移动端对齐 iOS Body
+ * - text-title-sm 16 → 17   小标题
+ * - text-title    17 → 20   区块 / 弹窗标题
+ * - text-title-lg 19 → 22   页面大标题
+ *
+ * 注意：这里刻意不定义 --text-*--line-height 配套变量——定义了工具类就会
+ * 同时输出 line-height，与现状「行高继承 body 1.5 或由 leading-* 显式指定」
+ * 的排版行为不一致，会引起全站布局抖动。
+ */
+@theme {
+  --text-micro: 10px;
+  --text-caption: 11px;
+  --text-sub: 12px;
+  --text-ui: 13px;
+  --text-body: 14px;
+  --text-body-lg: 15px;
+  --text-title-sm: 16px;
+  --text-title: 17px;
+  --text-title-lg: 19px;
+}
+
+/* 移动端换档：整体抬到 iOS HIG 的可读标准（断点与全站移动端约定一致，767px） */
+@media (max-width: 767px) {
+  :root {
+    --text-micro: 11px;
+    --text-caption: 13px;
+    --text-sub: 14px;
+    --text-ui: 16px;
+    --text-body: 16px;
+    --text-body-lg: 17px;
+    --text-title-sm: 17px;
+    --text-title: 20px;
+    --text-title-lg: 22px;
+  }
+}
+
+/*
+ * Crawler Media 控制台 —— 冷调「银玻璃」主题（液态玻璃 · Bing 式氛围底）
+ * ------------------------------------------------------------------
+ * 设计语言：沉浸式左右分区（参考 Codex 桌面端）+ 半透明「液态玻璃」表面。
+ * - 背景：不用照片，改用纯 CSS 冷调「抽象光斑」（多层 radial-gradient 光晕），
+ *   透过半透明玻璃面板隐约透出，复刻 Bing「大图氛围底」的空间纵深感。
+ * - 表面：更透、更强的背景模糊 —— 玻璃质感是视觉主角，让底部冷光渗上来。
+ * - 强调：不用彩色。以「冷银高光」替代原先的影院红→琥珀，克制、专业、通透。
+ *   （参考 Bing 无边框 + 极软阴影 + 冷色聚焦环的处理。）
+ * - 字体：拉丁/数字用 Inter，中文交给系统 PingFang SC。
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* —— 分层表面（冷调近黑；比原先更透，以透出底部光斑 = 更强玻璃感） —— */
+  --bg: #0a0b10;
+  --surface-sidebar: rgba(20, 22, 30, 0.55);
+  --surface-main: rgba(13, 15, 21, 0.42);
+  --surface-raised: rgba(30, 33, 43, 0.74); /* 浮层：菜单 / 卡片 */
+  --surface-inset: rgba(255, 255, 255, 0.05); /* 内嵌：输入框 */
+
+  /* —— 文本层级（冷白） —— */
+  --text: #f3f5f9;
+  --text-muted: rgba(243, 245, 249, 0.62);
+  --text-faint: rgba(243, 245, 249, 0.36);
+
+  /* —— 描边（更柔，趋近 Bing 的「无边 + 软阴影」） —— */
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.15);
+
+  /* —— 强调：近乎无色 · 银玻璃（冷银高光，不用彩色） —— */
+  --accent: #cdd6e6; /* 冷银 */
+  --accent-strong: #eef2f8; /* 亮银高光 */
+  --accent-2: #9fb0c9; /* 银蓝暗侧 */
+  --accent-soft: rgba(205, 214, 230, 0.14);
+  --accent-ring: rgba(200, 218, 255, 0.55); /* 聚焦环：极淡冷光（借鉴 Bing 蓝环，但去色） */
+
+  /* —— 行内玻璃填充（可点击行的 hover / active） —— */
+  --glass-fill: rgba(255, 255, 255, 0.04);
+  --glass-fill-hover: rgba(255, 255, 255, 0.075);
+  --glass-fill-active: rgba(255, 255, 255, 0.12);
+
+  /*
+   * —— 状态语义色（冷调对齐） ——
+   * 全站的状态点、状态胶囊、状态文字一律从这四档里取色，不要再就地写十六进制：
+   * 同一个「正常」曾经在不同页面是四种不同的绿，用户根本无法把颜色当信号读。
+   *
+   * 判断口径只有一句：这个颜色是在说「系统状态」还是「你该做什么」——
+   * 只有后者才配用 --danger。
+   *
+   * - --ok      成了：在库、已启用、已收齐、连接正常、整理完成
+   * - --info    正在进行 / 提示性：下载中、同步中、追踪中、待复核
+   * - --warn    要注意，但系统还在自己处理：等待资源、部分异常、待识别、已暂停
+   * - --danger  要你处理：失败、未读通知、需要处理的任务
+   *
+   * 「没有 / 已停用 / 未定档」不占状态色，用中性灰——它不承载信号，深浅按所在
+   * 位置的可读性挑即可，不必统一到某一个值。
+   * 尚未开始的预告态（如订阅首页的「预计入库」）同样不占状态色——颜色要留给
+   * 真正发生了的事，否则满屏都是重点就等于没有重点。
+   *
+   * 这四个是**信号色**：用在状态点、状态文字、浅底胶囊和进度条上。它们的亮度
+   * 是按「深底上的小色块要显眼」调的，反过来当实心底压白字就不够看了——
+   * 白字压 --danger 只有 2.8:1，达不到 4.5:1。因此实心底 + 白字（危险操作
+   * 按钮、未读计数徽标）另走下面这对更深的红，它们是操作色不是状态色。
+   *
+   * --ok 取 #4ade80 而不是更冷的 #5fd39a：全站 50 多处「在库 / 已连接 /
+   * 已收齐」本来就是这个绿，token 该描述现实，而不是和现实唱反调。
+   */
+  --ok: #4ade80;
+  --info: #7fb0ff;
+  --warn: #f5c451;
+  --danger: #ff6b6b;
+
+  /* 实心红底 + 白字专用（白字对比度 5.8:1）。只做底色，不要拿去写文字或圆点 */
+  --danger-solid: #c73838;
+  --danger-solid-hover: #d64545;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+  /* —— 安全区（刘海 / 胶囊 / 底部指示条） ——
+     layout.tsx 里 viewport-fit=cover 让页面铺满整块屏幕后，凡是「贴边固定」
+     的元素（移动端顶栏、抽屉、底部输入区、全屏弹层）都要用这几个变量把内容
+     让开系统占用的区域。非刘海设备与桌面端一律解析为 0，写了不产生副作用。 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* 移动端顶栏高度：抽屉、页面吸顶元素都以它为基准让位 */
+  --mobile-topbar-h: 52px;
+
+  /* PageNav 吸顶雾的渐变（银玻璃蓝黑）：page-nav.tsx 的内联 style 引用它，
+     Netflix 主题在覆盖组里换成纯黑系——内联 style 无法被 CSS 选择器压过，
+     必须走变量 */
+  --page-fog: linear-gradient(
+    180deg,
+    rgba(9, 11, 16, 0.72) 0%,
+    rgba(9, 11, 16, 0.46) 46%,
+    rgba(9, 11, 16, 0) 100%
+  );
+
+  /* —— iOS 独立 App 的「视口比屏幕矮一截」补偿量 ——
+     iOS 在 apple-mobile-web-app-status-bar-style=black-translucent 下，
+     把整个文档**整体上移**到状态栏底下（这正是顶部沉浸的实现方式），但视口
+     高度并不随之增加：视口顶边贴住屏幕物理顶边，底边却比屏幕物理底边高出
+     整整一个 safe-top。那一截不属于视口，页面里任何 position: fixed; inset: 0
+     的铺底层都够不着，于是露出 <body> 背景色（--bg），看上去就是屏幕底部
+     一条与状态栏等高的黑条——iPhone 全面屏 PWA 实测：黑条高度 == safe-top。
+
+     解决办法不是「让内容避开它」（上一版按底部安全区处理，方向就错了：
+     这一截在视口之外，safe-area-inset-bottom 在此模式下恒为 0，怎么让位都没用），
+     而是让铺底层**向下超出视口** var(--vp-overshoot)，一直铺到屏幕物理底边。
+     UI 本身仍留在视口内，天然就在 Home 指示条上方，无需再额外让位。
+
+     只在 iOS 的独立 App 形态下补偿，见下方媒体查询；其余场景恒为 0。 */
+  --vp-overshoot: 0px;
+
+  /* —— 软键盘占高 ——
+     iOS 弹软键盘不改布局视口（100dvh 纹丝不动），满屏高的外壳因此有一大截
+     被压在键盘底下，贴底的输入行整个看不见。这个变量由
+     components/viewport-keyboard.tsx 按「布局视口 - 可视视口」实时写入，
+     外壳高度减掉它（见 app-shell.tsx），键盘弹出时整个界面收缩到键盘之上。
+     没有键盘时恒为 0，桌面端永不改动。 */
+  --keyboard-inset: 0px;
+}
+
+/* display-mode: standalone 限定「加到主屏后独立打开」（浏览器内访问不受影响）；
+   -webkit-touch-callout 是 iOS WebKit 独有特性（macOS Safari 不支持），
+   两者相与即「iOS PWA」。Android PWA、桌面端与浏览器标签页一律不补偿。 */
+@media (display-mode: standalone) {
+  @supports (-webkit-touch-callout: none) {
+    :root {
+      --vp-overshoot: var(--safe-top);
+    }
+  }
+}

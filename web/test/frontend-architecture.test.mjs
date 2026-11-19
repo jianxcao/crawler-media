@@ -146,3 +146,131 @@ test("subscription-inspector-view, video-player, and player-controls are decompo
   assert.equal(existsSync(path.join(WEB_DIR, "lib/subscription-inspector.ts")), true);
   assert.equal(existsSync(path.join(WEB_DIR, "lib/player/player-ui.ts")), true);
 });
+
+function collectFilesMatching(dir, pattern) {
+  const results = [];
+  if (!existsSync(dir)) return results;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectFilesMatching(full, pattern));
+    } else if (entry.isFile() && pattern.test(entry.name)) {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
+test("media-detail-view is decomposed and shares MediaDetailScaffold & DetailPageNav", () => {
+  const mediaDetailSource = readFileSync(
+    path.join(WEB_DIR, "components/media-detail-view.tsx"),
+    "utf8",
+  );
+  const mediaDetailLines = mediaDetailSource.split("\n").length;
+  assert.ok(
+    mediaDetailLines <= 300,
+    `Expected components/media-detail-view.tsx <= 300 lines, got ${mediaDetailLines}`,
+  );
+
+  for (const rel of [
+    "components/detail-page-nav.tsx",
+    "components/media-detail/media-detail-scaffold.tsx",
+    "components/media-detail/detail-metadata-widgets.tsx",
+    "lib/media-detail-helpers.ts",
+  ]) {
+    assert.equal(existsSync(path.join(WEB_DIR, rel)), true, `Missing shared file: ${rel}`);
+  }
+
+  for (const removedRel of [
+    "components/library-item/item-metadata-widgets.tsx",
+    "components/library-item/item-detail-fallback.tsx",
+  ]) {
+    assert.equal(
+      existsSync(path.join(WEB_DIR, removedRel)),
+      false,
+      `Duplicate module should be removed: ${removedRel}`,
+    );
+  }
+
+  const componentFiles = collectFilesMatching(
+    path.join(WEB_DIR, "components"),
+    /\.(ts|tsx)$/,
+  );
+  const defSites = [];
+  for (const file of componentFiles) {
+    const content = readFileSync(file, "utf8");
+    if (/\bfunction\s+(?:ExpandablePlot|SourceLink)\b/.test(content)) {
+      defSites.push(path.relative(WEB_DIR, file));
+    }
+  }
+  assert.deepEqual(defSites, ["components/media-detail/detail-metadata-widgets.tsx"]);
+});
+
+test("detail views do not branch on theme or NetflixBackButton directly", () => {
+  const forbidden = /\b(?:useTheme|NetflixBackButton)\b/;
+  for (const rel of [
+    "components/library-item-detail-view.tsx",
+    "components/library-item/use-library-item-controller.ts",
+    "components/media-detail-view.tsx",
+    "components/media-detail/use-media-detail.ts",
+    "components/subscription-inspector-view.tsx",
+    "components/subscription-inspector/use-subscription-inspector.ts",
+  ]) {
+    const content = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    assert.doesNotMatch(
+      content,
+      forbidden,
+      `${rel} should use DetailPageNav / MediaDetailScaffold instead of useTheme / NetflixBackButton`,
+    );
+  }
+});
+
+test("globals.css is split into modular stylesheets under app/styles", () => {
+  const globalsPath = path.join(WEB_DIR, "app/globals.css");
+  const globalsSource = readFileSync(globalsPath, "utf8");
+  const globalsLines = globalsSource.split("\n").length;
+  assert.ok(globalsLines <= 50, `Expected app/globals.css <= 50 lines, got ${globalsLines}`);
+
+  const imports = [...globalsSource.matchAll(/@import\s+"(\.\/styles\/[^"]+)";/g)].map(
+    (m) => m[1],
+  );
+  assert.ok(
+    imports.length >= 6,
+    `Expected >= 6 @import "./styles/..." modules, got ${imports.length}`,
+  );
+  for (const relImport of imports) {
+    const target = path.resolve(path.dirname(globalsPath), relImport);
+    assert.equal(existsSync(target), true, `Missing stylesheet module: ${relImport}`);
+  }
+
+  const styleFiles = collectFilesMatching(path.join(WEB_DIR, "app/styles"), /\.css$/);
+  for (const styleFile of styleFiles) {
+    const lines = readFileSync(styleFile, "utf8").split("\n").length;
+    assert.ok(
+      lines <= 800,
+      `Expected ${path.relative(WEB_DIR, styleFile)} <= 800 lines, got ${lines}`,
+    );
+  }
+});
+
+test("modularized component subdirectories stay under 600 lines per file and eslint enforces guardrails", () => {
+  const componentsDir = path.join(WEB_DIR, "components");
+  const subdirs = readdirSync(componentsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(componentsDir, entry.name));
+
+  const oversized = [];
+  for (const subdir of subdirs) {
+    for (const file of collectFilesMatching(subdir, /\.(ts|tsx)$/)) {
+      const lines = readFileSync(file, "utf8").split("\n").length;
+      if (lines > 600) {
+        oversized.push(`${path.relative(WEB_DIR, file)}: ${lines}`);
+      }
+    }
+  }
+  assert.deepEqual(oversized, []);
+
+  const eslintConfig = readFileSync(path.join(WEB_DIR, "eslint.config.mjs"), "utf8");
+  assert.match(eslintConfig, /["']max-lines["']/);
+  assert.match(eslintConfig, /["']no-restricted-imports["']/);
+});

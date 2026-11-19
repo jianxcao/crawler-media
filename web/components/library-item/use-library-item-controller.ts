@@ -24,7 +24,6 @@ import { fileResolutionLabel, sortHdrFormats } from "@/lib/library-item-format";
 import type { MediaItem } from "@/lib/media-types";
 import { usePermissions } from "@/lib/permissions";
 import { waitForSimilar } from "@/lib/similar-read";
-import { useTheme } from "@/lib/ui-prefs";
 import { useIsMobile } from "@/lib/use-media-query";
 import { usePageTitle } from "@/lib/use-page-title";
 
@@ -171,39 +170,6 @@ export function useLibraryItemController({
 
   const { setOverrideBackdrop } = useBackdrop();
   const isMobile = useIsMobile();
-  const isNfDesktop = useTheme().id === "netflix" && !isMobile;
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const hasDetail = detail !== null;
-  useEffect(() => {
-    if (!isNfDesktop) return;
-    const root = document.documentElement;
-    root.classList.add("nf-hero-live");
-    const el = scrollRef.current;
-    if (!el) {
-      return () => {
-        root.classList.remove("nf-hero-live");
-        root.style.removeProperty("--nf-hero-recede");
-      };
-    }
-    let frame = 0;
-    const sync = () => {
-      frame = 0;
-      const range = Math.max(320, el.clientHeight * 0.75);
-      const progress = Math.min(1, Math.max(0, el.scrollTop / range));
-      root.style.setProperty("--nf-hero-recede", progress.toFixed(3));
-    };
-    const onScroll = () => {
-      if (!frame) frame = window.requestAnimationFrame(sync);
-    };
-    sync();
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      if (frame) window.cancelAnimationFrame(frame);
-      root.classList.remove("nf-hero-live");
-      root.style.removeProperty("--nf-hero-recede");
-    };
-  }, [isNfDesktop, hasDetail]);
 
   const immersiveUrl = imageUrl(detail?.backdrop_url ?? detail?.poster_url ?? null);
   useEffect(() => {
@@ -219,7 +185,6 @@ export function useLibraryItemController({
     : fromRecent
       ? { label: "媒体库", href: "/library" }
       : { label: library?.name ?? "库存", href: `/library/${libraryId}` };
-  const hidePageNav = isNfDesktop;
   const back = useBackNavigation(navFallback.href);
 
   const mediaTmdbId = detail?.tmdb_id;
@@ -348,9 +313,7 @@ export function useLibraryItemController({
     canManageLibraries,
     navigate,
     toast,
-    scrollRef,
     isMobile,
-    hidePageNav,
     navFallback,
     back,
     isMovie,
@@ -358,9 +321,6 @@ export function useLibraryItemController({
     scrapingNow: kicking,
     refreshError,
     immersiveUrl,
-    mobileHeroSrc: immersiveUrl,
-    mobileHeroHeight: "min(115vw, 62svh)",
-    showMobileHero: isMobile && immersiveUrl !== "",
     trackFiles,
     availableTrackFiles,
     explicitTrackFileId,
