@@ -7,7 +7,7 @@ const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const prefs = await readFile(new URL("../lib/ui-prefs.tsx", import.meta.url), "utf8");
 const themes = await readFile(new URL("../lib/themes.ts", import.meta.url), "utf8");
 const emptyState = await readFile(new URL("../components/content-empty-state.tsx", import.meta.url), "utf8");
-const mockData = await readFile(new URL("../lib/mock-data.ts", import.meta.url), "utf8");
+const settingsSectionsSource = await readFile(new URL("../lib/settings-sections.ts", import.meta.url), "utf8");
 const settingsView = await readFile(new URL("../components/settings-view.tsx", import.meta.url), "utf8");
 
 function themeBlock(id) {
@@ -51,13 +51,10 @@ test("paper is applied before the first paint and uses a matching browser chrome
   assert.match(prefs, /paper: "#eef1f6"/);
 });
 
-test("empty and disabled states stay neutral while run states use signal tokens", () => {
+test("empty and disabled states stay neutral", () => {
   assert.match(css, /:where\(button, input, select, textarea\):disabled/);
   assert.match(emptyState, /bg-\[var\(--text-faint\)\]/);
   assert.doesNotMatch(emptyState, /bg-\[var\(--ok\)\]/);
-  assert.match(mockData, /running: \{ label: "运行中", color: "var\(--info\)" \}/);
-  assert.match(mockData, /done: \{ label: "已完成", color: "var\(--ok\)" \}/);
-  assert.match(mockData, /failed: \{ label: "失败", color: "var\(--danger\)" \}/);
 });
 
 test("disabled buttons neutralize bright fills and avoid double-fading text-faint across themes", () => {
@@ -78,7 +75,7 @@ test("disabled buttons neutralize bright fills and avoid double-fading text-fain
 
 
 test("settings keeps a saved theme selector for every registered theme", () => {
-  assert.match(mockData, /id: "appearance", label: "外观"/);
+  assert.match(settingsSectionsSource, /id: "appearance", label: "外观"/);
   assert.match(settingsView, /THEMES\.map\(\(theme\) =>/);
   assert.match(settingsView, /aria-pressed=\{selected\}/);
   assert.match(settingsView, /savePrefs\(\{ \.\.\.prefs, theme: themeId \}\)/);

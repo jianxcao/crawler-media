@@ -2,7 +2,7 @@ import { Navigate, useParams, useSearchParams } from "react-router-dom";
 
 import { SettingsPanel } from "@/components/settings-view";
 import { NotFound } from "@/src/not-found";
-import { settingsSections } from "@/lib/mock-data";
+import { settingsSections } from "@/lib/settings-sections";
 
 /** 设置分区（/settings/[section]）：概览 / 个人信息 / 外观 / 站点 / 下载器 等。 */
 export default function SettingsSectionPage() {

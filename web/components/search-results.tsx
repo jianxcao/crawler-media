@@ -49,6 +49,7 @@ import {
 import { cachedImageUrl } from "@/lib/image-proxy";
 import { layoutPosterGrid } from "@/lib/wall-window";
 import { usePermissions } from "@/lib/permissions";
+import type { SearchQuery } from "@/lib/search-url";
 import { formatDateTime, formatRelativeTime } from "@/lib/time";
 import { useScrollRestoration } from "@/lib/use-scroll-restoration";
 
@@ -198,17 +199,6 @@ function toHitView(hit: TorrentHit): HitView {
     image_urls: [],
     attrs: releaseToAttrs(hit.release),
   };
-}
-
-export interface SearchQuery {
-  keyword: string;
-  /** 搜索范围（标签换算而来）：展示名 + 分类/站点组合 */
-  scope: SearchScope;
-  /**
-   * 快照预览：非空时不发起实时搜索，改为加载该条历史留存的结果快照
-   * （页顶提示条标注快照年龄，可一键切回实时搜索）。
-   */
-  snapshotId?: string;
 }
 
 export interface SearchResultsProps {

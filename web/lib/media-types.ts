@@ -2,8 +2,7 @@
  * 影视数据的前端核心类型（发现页 / 详情页 / 订阅页共用）。
  *
  * 这些形态即组件的渲染契约：后端 /discover 接口返回 snake_case 字段，
- * 由 lib/api/discover.ts 映射成这里的 camelCase；lib/mock-media.ts 的
- * 遗留模拟数据（订阅页仍在用）也遵循同一套类型。
+ * 由 lib/api/discover.ts 映射成这里的 camelCase。
  */
 
 export type MediaType = "movie" | "tv";

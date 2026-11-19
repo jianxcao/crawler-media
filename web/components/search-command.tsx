@@ -22,6 +22,7 @@ import {
 import { useSearchAccess } from "@/lib/search-access";
 import { historyReplayOptions, isMediaHistoryProvider } from "@/lib/search-history";
 import { useSearchPrefs } from "@/lib/search-prefs";
+import type { SearchSubmitOptions } from "@/lib/search-url";
 import { formatRelativeTime } from "@/lib/time";
 
 /**
@@ -39,14 +40,6 @@ import { formatRelativeTime } from "@/lib/time";
  * 提交与回放都走 onSearch：关键词 + 范围 + { vertical, snapshotId }，由上层
  * 编码进 /search 的 URL。历史点击按记录自身垂直回放已保存的结果快照。
  */
-
-/** 提交搜索的附加选项：目标垂直 + 历史快照回放。 */
-export interface SearchSubmitOptions {
-  /** 落地垂直；缺省 = 站点资源（torrent），与老调用方行为一致 */
-  vertical?: SearchVertical;
-  /** 非空 = 预览该条历史的结果快照（点历史记录进入），而非发起实时搜索 */
-  snapshotId?: string;
-}
 
 export interface SearchCommandProps {
   /** 提交搜索的回调：关键词 + 搜索范围（标签换算而来）。由上层负责落地展示。 */

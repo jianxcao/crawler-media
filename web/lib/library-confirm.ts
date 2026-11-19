@@ -1,4 +1,4 @@
-import type { ConfirmCheckbox, ConfirmOptions } from "@/components/feedback";
+import type { ConfirmCheckbox, ConfirmOptions } from "@/lib/confirm-types";
 
 /**
  * 扫描库 / 刷新元数据的二次确认文案——三处入口共用一份，口径一致：

@@ -1,41 +1,50 @@
-import { StrictMode } from "react";
+import { StrictMode, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 
 import RootLayout from "@/app/layout";
 import AppLayout from "@/app/(app)/layout";
 import PlayLayout from "@/app/play/layout";
-import LoginPage from "@/app/login/page";
-import HealthPage from "@/app/health/page";
 import HomePage from "@/app/(app)/page";
-import ActivityPage from "@/app/(app)/activity/page";
-import { MediaTransferView } from "@/components/media-transfer-view";
-import { ScheduledJobsView } from "@/components/scheduled-jobs-view";
-import { CatalogCacheView } from "@/components/catalog-cache-view";
-import CollectionsPage from "@/app/(app)/collections/page";
-import CollectionDetailPage from "@/app/(app)/collections/[id]/page";
-import DiscoverPage from "@/app/(app)/discover/[type]/page";
-import DiscoveryCollectionPage from "@/app/(app)/discover/[type]/collections/[provider]/[collectionId]/page";
-import HighScorePage from "@/app/(app)/discover/movie/high-score/page";
-import Top250Page from "@/app/(app)/discover/movie/top250/page";
-import DiscoveredPersonPage from "@/app/(app)/discover/people/[id]/page";
-import LibraryPage from "@/app/(app)/library/page";
-import LibraryDetailPage from "@/app/(app)/library/[id]/page";
-import LibraryItemDetailPage from "@/app/(app)/library/[id]/item/[mediaItemId]/page";
-import LibraryCustomizePage from "@/app/(app)/library/customize/page";
-import FavoritesPage from "@/app/(app)/library/favorites/page";
-import LibraryManagePage from "@/app/(app)/library/manage/page";
-import MediaDetailPage from "@/app/(app)/media/[type]/[id]/page";
-import DoubanMediaDetailPage from "@/app/(app)/media/douban/[id]/page";
-import MyPage from "@/app/(app)/my/page";
-import SearchPage from "@/app/(app)/search/page";
-import SettingsIndexPage from "@/app/(app)/settings/page";
-import SettingsSectionPage from "@/app/(app)/settings/[section]/page";
-import SubscriptionsPageRoute from "@/app/(app)/subscriptions/page";
-import SubscriptionDetailPage from "@/app/(app)/subscriptions/[id]/page";
-import TasksRedirectPage from "@/app/(app)/tasks/page";
-import PlayPage from "@/app/play/[mediaItemId]/[[...unit]]/page";
 import { NotFound } from "@/src/not-found";
+
+const LoginPage = lazy(() => import("@/app/login/page"));
+const HealthPage = lazy(() => import("@/app/health/page"));
+const ActivityPage = lazy(() => import("@/app/(app)/activity/page"));
+const MediaTransferView = lazy(() =>
+  import("@/components/media-transfer-view").then((m) => ({ default: m.MediaTransferView })),
+);
+const ScheduledJobsView = lazy(() =>
+  import("@/components/scheduled-jobs-view").then((m) => ({ default: m.ScheduledJobsView })),
+);
+const CatalogCacheView = lazy(() =>
+  import("@/components/catalog-cache-view").then((m) => ({ default: m.CatalogCacheView })),
+);
+const CollectionsPage = lazy(() => import("@/app/(app)/collections/page"));
+const CollectionDetailPage = lazy(() => import("@/app/(app)/collections/[id]/page"));
+const DiscoverPage = lazy(() => import("@/app/(app)/discover/[type]/page"));
+const DiscoveryCollectionPage = lazy(
+  () => import("@/app/(app)/discover/[type]/collections/[provider]/[collectionId]/page"),
+);
+const HighScorePage = lazy(() => import("@/app/(app)/discover/movie/high-score/page"));
+const Top250Page = lazy(() => import("@/app/(app)/discover/movie/top250/page"));
+const DiscoveredPersonPage = lazy(() => import("@/app/(app)/discover/people/[id]/page"));
+const LibraryPage = lazy(() => import("@/app/(app)/library/page"));
+const LibraryDetailPage = lazy(() => import("@/app/(app)/library/[id]/page"));
+const LibraryItemDetailPage = lazy(() => import("@/app/(app)/library/[id]/item/[mediaItemId]/page"));
+const LibraryCustomizePage = lazy(() => import("@/app/(app)/library/customize/page"));
+const FavoritesPage = lazy(() => import("@/app/(app)/library/favorites/page"));
+const LibraryManagePage = lazy(() => import("@/app/(app)/library/manage/page"));
+const MediaDetailPage = lazy(() => import("@/app/(app)/media/[type]/[id]/page"));
+const DoubanMediaDetailPage = lazy(() => import("@/app/(app)/media/douban/[id]/page"));
+const MyPage = lazy(() => import("@/app/(app)/my/page"));
+const SearchPage = lazy(() => import("@/app/(app)/search/page"));
+const SettingsIndexPage = lazy(() => import("@/app/(app)/settings/page"));
+const SettingsSectionPage = lazy(() => import("@/app/(app)/settings/[section]/page"));
+const SubscriptionsPageRoute = lazy(() => import("@/app/(app)/subscriptions/page"));
+const SubscriptionDetailPage = lazy(() => import("@/app/(app)/subscriptions/[id]/page"));
+const TasksRedirectPage = lazy(() => import("@/app/(app)/tasks/page"));
+const PlayPage = lazy(() => import("@/app/play/[mediaItemId]/[[...unit]]/page"));
 
 /**
  * Next App Router 路由表 → react-router 对照:

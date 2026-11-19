@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useEffect } from "react";
 
 import { NetflixSettingsIndex } from "@/components/netflix/settings-index";
-import { settingsSections } from "@/lib/mock-data";
+import { settingsSections } from "@/lib/settings-sections";
 import { useIsMobile } from "@/lib/use-media-query";
 import { useThemeState } from "@/lib/ui-prefs";
 

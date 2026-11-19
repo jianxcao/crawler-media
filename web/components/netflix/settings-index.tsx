@@ -3,7 +3,8 @@
 import { useNavigate } from "react-router-dom";
 
 import { ChevronRightIcon } from "@/components/icons";
-import { settingsSectionGroupsFor } from "@/lib/mock-data";
+import { SETTINGS_SECTION_ICON } from "@/components/settings-section-icons";
+import { settingsSectionGroupsFor } from "@/lib/settings-sections";
 import { useSession } from "@/lib/session";
 
 /**
@@ -34,7 +35,7 @@ export function NetflixSettingsIndex() {
             {/* 概览组不设标题（label 为空串），空标题不渲染小节头 */}
             {group.label && <p className="group-label px-3 pb-1.5">{group.label}</p>}
             {group.items.map((section) => {
-              const Icon = section.icon;
+              const Icon = SETTINGS_SECTION_ICON[section.id];
               return (
                 <button
                   key={section.id}

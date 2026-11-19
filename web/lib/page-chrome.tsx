@@ -2,7 +2,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 
-import type { SearchSubmitOptions } from "@/components/search-command";
+import type { SearchSubmitOptions } from "@/lib/search-url";
 import type { SearchScope } from "@/lib/categories";
 
 /** 提交搜索的回调，签名与 AppShell 的 handleSearch 一致。 */
