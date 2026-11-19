@@ -195,7 +195,7 @@ test("reidentify keeps its synchronous contract and is never polled", async () =
 });
 
 test("the edit dialog waits for the accepted operation and shows its phase", async () => {
-  const source = await readFile(new URL("../components/library-form-dialog.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../components/library-form/edit-library-dialog.tsx", import.meta.url), "utf8");
   assert.match(source, /updateLibraryAndWait\(library\.id, payload/);
   assert.match(source, /onProgress: \(operation\) => setPending\(operationLabel\(operation\)\)/);
   assert.match(source, /busy \? \(pending \?\? "保存中…"\) : "保存"/);

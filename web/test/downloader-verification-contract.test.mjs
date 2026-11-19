@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
@@ -7,18 +7,48 @@ import ts from "typescript";
 
 const require = createRequire(import.meta.url);
 function load(relative, mocks = {}) {
-  const filename = new URL(relative, import.meta.url);
-  const code = ts.transpileModule(readFileSync(filename, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-    fileName: filename.pathname,
-  }).outputText;
-  const module = { exports: {} };
-  vm.runInNewContext(code, {
-    module, exports: module.exports,
-    require: (name) => name in mocks ? mocks[name] : require(name),
-    window: { location: { search: "" } }, URLSearchParams, console,
-  }, { filename: filename.pathname });
-  return module.exports;
+  const cache = new Map();
+
+  function resolveLocal(specifier, parentUrl) {
+    let target = null;
+    if (specifier.startsWith("@/components/settings/downloaders/")) {
+      target = new URL(`../${specifier.slice(2)}`, import.meta.url);
+    } else if (specifier.startsWith("./") || specifier.startsWith("../")) {
+      target = new URL(specifier, parentUrl);
+    }
+    if (!target) return null;
+    for (const suffix of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+      const candidate = new URL(`${target.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    return null;
+  }
+
+  function loadModule(fileUrl) {
+    if (cache.has(fileUrl.href)) return cache.get(fileUrl.href).exports;
+    const mod = { exports: {} };
+    cache.set(fileUrl.href, mod);
+    const code = ts.transpileModule(readFileSync(fileUrl, "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+      fileName: fileUrl.pathname,
+    }).outputText;
+    vm.runInNewContext(code, {
+      module: mod,
+      exports: mod.exports,
+      require: (name) => {
+        if (name in mocks) return mocks[name];
+        const localUrl = resolveLocal(name, fileUrl);
+        if (localUrl) return loadModule(localUrl);
+        return require(name);
+      },
+      window: { location: { search: "" } },
+      URLSearchParams,
+      console,
+    }, { filename: fileUrl.pathname });
+    return mod.exports;
+  }
+
+  return loadModule(new URL(relative, import.meta.url));
 }
 const verification = load("../lib/downloader-verification.ts");
 const row = (extra = {}) => ({

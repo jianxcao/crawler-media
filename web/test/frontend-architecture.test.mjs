@@ -106,3 +106,16 @@ test("site-config-section, task-center-view, and api/libraries are decomposed", 
     assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
   }
 });
+
+test("library-form-dialog, rule-sets-panel, and downloader-config-section are decomposed", () => {
+  for (const [rel, maxLines] of [
+    ["components/library-form-dialog.tsx", 100],
+    ["components/rule-sets-panel.tsx", 300],
+    ["components/downloader-config-section.tsx", 300],
+  ]) {
+    const source = readFileSync(path.join(WEB_DIR, rel), "utf8");
+    const lines = source.split("\n").length;
+    assert.ok(lines <= maxLines, `Expected ${rel} <= ${maxLines} lines, got ${lines}`);
+  }
+  assert.equal(existsSync(path.join(WEB_DIR, "lib/rule-set-summary.ts")), true);
+});
