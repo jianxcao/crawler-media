@@ -19,7 +19,7 @@
 import type { PlayerPhase } from "./machine.ts";
 
 /** 会话还活着、可以喂心跳的阶段：播放中，以及暂停后可能停留的拖动 / 缓冲。 */
-const HEARTBEAT_PHASES = new Set<PlayerPhase>(["playing", "buffering", "seeking"]);
+const HEARTBEAT_PHASES = new Set<PlayerPhase>(["playing", "buffering", "ready", "seeking"]);
 
 export interface HeartbeatConditions {
   /** 播放器当前阶段（见 lib/player/machine.ts）。 */

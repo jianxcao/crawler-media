@@ -4,6 +4,10 @@ use super::*;
 impl crate::SubscribeConnection<'_> {
     pub fn detach_subscribes_from_library(&self, library: LibraryId) -> Result<usize, StoreError> {
         let tx = crate::write_tx(self.subscribe)?;
+        tx.execute(
+            "INSERT INTO subscribe_library_fences(library_id) VALUES(?1) ON CONFLICT DO NOTHING",
+            [library.to_string()],
+        )?;
         let detached = tx.execute(
             "UPDATE subscribes SET library_id=NULL WHERE library_id=?1",
             [library.to_string()],

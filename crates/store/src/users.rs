@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use domain::{User, UserId, UserRole};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use super::{Store, StoreError};
@@ -173,6 +173,79 @@ fn apply_cli_token_tx(
 }
 
 impl crate::writers::App<'_> {
+    pub fn user_removal_pending(&self, user_id: UserId) -> Result<bool, StoreError> {
+        removal_record_exists(self.app, user_id)
+    }
+    /// Atomically persist the removal fence, disable the User and revoke sessions.
+    pub fn accept_user_removal(
+        &self,
+        user_id: UserId,
+        record_key: &str,
+        record_json: &str,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.app)?;
+        let user = super::app_auth::get_user_on(&tx, user_id)?
+            .ok_or_else(|| StoreError::Missing(format!("user {user_id}")))?;
+        if user.role == UserRole::Admin {
+            return Err(StoreError::Protected("不能删除管理员".into()));
+        }
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+            params![record_key],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Err(StoreError::Conflict("用户删除操作已存在".into()));
+        }
+        tx.execute(
+            "UPDATE users SET enabled=0 WHERE id=?1",
+            params![user_id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id=?1",
+            params![user_id.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2)",
+            params![record_key, record_json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_user_removal_disabling(
+        &self,
+        user_id: UserId,
+        record_key: &str,
+        record_json: &str,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.app)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                params![record_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.is_none() {
+            return Err(StoreError::Missing(format!("user removal {user_id}")));
+        }
+        tx.execute(
+            "UPDATE users SET enabled=0 WHERE id=?1",
+            params![user_id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id=?1",
+            params![user_id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE settings SET value=?1 WHERE key=?2",
+            params![record_json, record_key],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn seed_admin_with_hash(
         &self,
         user_id: UserId,
@@ -233,6 +306,7 @@ impl crate::writers::App<'_> {
         prepared: &crate::password::PreparedPassword,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.app)?;
+        ensure_user_not_removing(&tx, user.id)?;
         let cli_token: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
@@ -407,6 +481,9 @@ impl crate::writers::App<'_> {
 
     pub fn save_user(&self, user: &User) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.app)?;
+        if user.enabled {
+            ensure_user_not_removing(&tx, user.id)?;
+        }
         tx.execute(
             "UPDATE users SET login = ?1, enabled = ?2, role = ?3 WHERE id = ?4",
             params![
@@ -529,6 +606,14 @@ impl crate::writers::App<'_> {
             return Ok(None);
         }
         let tx = crate::write_tx(self.app)?;
+        let removing: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+            params![format!("user_removal.{user_id}")],
+            |row| row.get(0),
+        )?;
+        if removing {
+            return Ok(None);
+        }
         let active = tx
             .query_row(
                 "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
@@ -551,6 +636,21 @@ impl crate::writers::App<'_> {
         tx.commit()?;
         Ok(Some(token))
     }
+}
+
+fn removal_record_exists(conn: &Connection, user_id: UserId) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+        params![format!("user_removal.{user_id}")],
+        |row| row.get(0),
+    )?)
+}
+
+fn ensure_user_not_removing(conn: &Connection, user_id: UserId) -> Result<(), StoreError> {
+    if removal_record_exists(conn, user_id)? {
+        return Err(StoreError::Conflict("用户删除操作尚未完成".into()));
+    }
+    Ok(())
 }
 
 mod app_access;

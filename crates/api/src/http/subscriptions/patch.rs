@@ -132,6 +132,9 @@ fn persist_subscription(
         .as_ref()
         .update_nonoverlapping_subscribe(subscribe)
     {
+        if let crate::store::StoreError::Conflict(message) = error {
+            return Err(err(StatusCode::CONFLICT, "subscription.conflict", &message));
+        }
         if let crate::store::StoreError::SubscribeOverlap { subscribe_id } = error {
             return Err(err(
                 StatusCode::CONFLICT,

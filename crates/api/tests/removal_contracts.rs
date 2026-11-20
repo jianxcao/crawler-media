@@ -157,3 +157,6 @@ async fn user_recovery_rejects_unknown_record_version() {
 async fn user_recovery_resumes_supported_record_version() {
     assert_recovery_version(Some(1)).await;
 }
+
+#[path = "removal_contracts/boundary.rs"]
+mod boundary;

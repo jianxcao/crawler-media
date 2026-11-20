@@ -138,7 +138,7 @@ fn a_non_current_subscribe_definition_is_not_adopted() {
             !message.contains("storage-cutover-rebuild.sh"),
             "current layout errors must not suggest historical rebuilds: {message}"
         );
-        for required in ["subscribe", "user_version 1", "separate empty directory"] {
+        for required in ["subscribe", "user_version 2", "separate empty directory"] {
             assert!(message.contains(required), "missing {required}: {message}");
         }
         assert_eq!(

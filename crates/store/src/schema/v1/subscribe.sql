@@ -15,6 +15,7 @@ CREATE INDEX subscribe_reference_pending ON subscribe_reference_ops(state,epoch)
 CREATE INDEX subscribe_reference_media_pending ON subscribe_reference_ops(media_id,epoch) WHERE state IN ('creating','retained');
 CREATE UNIQUE INDEX subscribe_creating_id ON subscribe_reference_ops(subscribe_id) WHERE state IN ('creating','retained');
 CREATE TABLE subscribe_merge_fences(media_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL);
+CREATE TABLE subscribe_library_fences(library_id TEXT PRIMARY KEY NOT NULL);
 
 CREATE TABLE subscribe_merge_controls(operation_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('active','finished')));
 

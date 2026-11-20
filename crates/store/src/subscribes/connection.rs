@@ -308,6 +308,7 @@ impl crate::SubscribeConnection<'_> {
     }
 
     pub fn update_subscribe(&self, subscribe: &Subscribe) -> Result<(), StoreError> {
+        super::admission::ensure_library_open(self.subscribe, subscribe.library_id)?;
         let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
             Coverage::Movie => ("movie", None, None, None),
             Coverage::Tv {

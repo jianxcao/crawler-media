@@ -158,59 +158,23 @@ fn update_library_id(
     let Some(maybe_id) = library_id else {
         return Ok(());
     };
-    let Some(raw) = maybe_id.as_deref().filter(|s| !s.is_empty()) else {
-        subscribe.library_id = None;
-        return Ok(());
-    };
-    let id = domain::LibraryId::from_str(raw).map_err(|_| {
-        err(
-            StatusCode::BAD_REQUEST,
-            "subscription.invalid",
-            "library_id 无效",
-        )
-    })?;
-    match store.get_library(raw) {
-        Ok(Some(lib)) => {
-            let media = store
-                .get_media(subscribe.media_id)
-                .map_err(|e| {
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &e.to_string(),
-                    )
-                })?
-                .ok_or_else(|| {
-                    err(
-                        StatusCode::NOT_FOUND,
-                        "subscription.missing",
-                        "订阅关联的影视不存在",
-                    )
-                })?;
-            if lib.kind != media.kind {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "subscription.invalid",
-                    "订阅媒体类型与目标库类型不匹配",
-                ));
-            }
-            subscribe.library_id = Some(id);
-        }
-        Ok(None) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "subscription.invalid",
-                "指定的媒体库不存在",
-            ));
-        }
-        Err(error) => {
-            return Err(err(
+    let media = store
+        .get_media(subscribe.media_id)
+        .map_err(|error| {
+            err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
-            ));
-        }
-    }
+            )
+        })?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "subscription.missing",
+                "订阅关联的影视不存在",
+            )
+        })?;
+    subscribe.library_id = super::library_target::resolve(store, maybe_id.as_deref(), media.kind)?;
     Ok(())
 }
 

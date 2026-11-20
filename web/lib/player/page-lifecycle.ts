@@ -18,7 +18,7 @@ export interface PlaybackPageHandlers {
 }
 
 const RESUMABLE = new Set<PlayerPhase>([
-  "playing", "buffering", "seeking", "deciding", "degrading", "session-starting",
+  "playing", "buffering", "ready", "seeking", "deciding", "degrading", "session-starting",
 ]);
 
 /** Pair one persisted hide with one show, while the same page still owns the grant. */

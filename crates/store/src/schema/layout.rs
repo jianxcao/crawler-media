@@ -11,7 +11,7 @@ pub const LIBRARY_APPLICATION_ID: u32 = 1129139249;
 pub const SUBSCRIBE_APPLICATION_ID: u32 = 1129139250;
 pub const V1_USER_VERSION: i64 = 1;
 pub const LIBRARY_USER_VERSION: i64 = 7;
-pub const SUBSCRIBE_USER_VERSION: i64 = 1;
+pub const SUBSCRIBE_USER_VERSION: i64 = 2;
 
 pub const APP_DDL: &str = include_str!("v1/app.sql");
 pub const LIBRARY_DDL: &str = include_str!("v1/library.sql");
@@ -78,11 +78,24 @@ pub(super) fn layout_error(name: &str, message: String) -> StoreError {
 
 /// Validate the sole source-response cache definition.
 pub fn validate_cache_layout(conn: &Connection) -> Result<(), StoreError> {
-    media::response_cache::validate_schema(conn).map_err(|error| {
-        StoreError::Invalid(format!(
-            "cache database schema mismatch: {error}. cache.db must match the sole current definition; \
-             startup does not rebuild or import data (see docs/deploy.md)"
-        ))
+    media::response_cache::validate_schema(conn).map_err(|error| match error {
+        media::response_cache::CacheDbError::InvalidLayout(message) => {
+            StoreError::LayoutMismatch(format!(
+                "cache database schema mismatch: {message}. cache.db must match the sole current definition; \
+                 startup does not rebuild or import data (see docs/deploy.md)"
+            ))
+        }
+        media::response_cache::CacheDbError::UnsupportedVersion { found, supported } => {
+            StoreError::LayoutMismatch(format!(
+                "cache database schema mismatch: unsupported cache schema version (found {found}, supported {supported}). cache.db must match the sole current definition; \
+                 startup does not rebuild or import data (see docs/deploy.md)"
+            ))
+        }
+        media::response_cache::CacheDbError::Sqlite(error) => StoreError::Sqlite(error),
+        media::response_cache::CacheDbError::Io(error) => StoreError::Io(error),
+        media::response_cache::CacheDbError::UnknownSource(source) => {
+            StoreError::Invalid(format!("unknown cache source during schema validation: {source}"))
+        }
     })
 }
 

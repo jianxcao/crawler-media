@@ -4,6 +4,26 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
 
+pub(crate) fn ensure_library_open(
+    conn: &Connection,
+    library: Option<domain::LibraryId>,
+) -> Result<(), StoreError> {
+    if let Some(library) = library {
+        let closed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM subscribe_library_fences WHERE library_id=?1)",
+            [library.to_string()],
+            |row| row.get(0),
+        )?;
+        if closed {
+            tracing::warn!(library_id = %library, "Subscribe binding rejected after Library removal");
+            return Err(StoreError::Conflict(format!(
+                "Library {library} 已删除，无法绑定 Subscribe"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_nonoverlapping(
     conn: &Connection,
     candidate: &Subscribe,
@@ -56,6 +76,7 @@ pub(crate) fn insert_row(
     generation: &str,
     epoch: i64,
 ) -> Result<(), StoreError> {
+    ensure_library_open(subscribe_conn, subscribe.library_id)?;
     let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
         Coverage::Movie => ("movie", None, None, None),
         Coverage::Tv {

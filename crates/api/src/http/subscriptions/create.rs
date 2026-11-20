@@ -183,6 +183,11 @@ fn persist_subscription(
             Err(crate::subscribe_create::CreateError::Store(store::StoreError::WriteBusy)) => {
                 return crate::http::store_wait::busy_response();
             }
+            Err(crate::subscribe_create::CreateError::Store(store::StoreError::Conflict(
+                message,
+            ))) => {
+                return err(StatusCode::CONFLICT, "subscription.conflict", &message);
+            }
             Err(crate::subscribe_create::CreateError::Admission(
                 crate::jobs_writer::JobsMutationError::Acquire(error),
             )) => {
@@ -239,6 +244,15 @@ fn subscribe_from_input(
         .map(|f| f.keep_old_versions)
         .unwrap_or(false);
     let effective_keep_old = body.keep_old_versions.unwrap_or(filter_keep_old);
+    let library_id = super::library_target::resolve(
+        store,
+        body.library_id.as_deref(),
+        if matches!(coverage, Coverage::Movie) {
+            MediaKind::Movie
+        } else {
+            MediaKind::Tv
+        },
+    )?;
     Ok(Subscribe {
         id: SubscribeId::new(),
         user_id,
@@ -251,11 +265,7 @@ fn subscribe_from_input(
         wash_cut_filter_id: optional_filter_id(&store, body.wash_cut_filter_id.as_deref())?,
         full_season_pack: body.full_season_pack,
         downloader_id: optional_downloader_id(&store, body.downloader_id.as_deref())?,
-        library_id: body
-            .library_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| domain::LibraryId::from_str(s).ok()),
+        library_id,
         tracking_state: "active".into(),
         follow_future: body.follow_future,
         search_interval_secs: match body.search_interval_secs {

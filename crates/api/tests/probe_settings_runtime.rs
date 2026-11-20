@@ -771,5 +771,7 @@ async fn paused_remote_jobs_allow_local_metadata() {
 #[path = "probe_settings_runtime/pause_requeue.rs"]
 mod pause_requeue;
 
+#[path = "probe_settings_runtime/stale_startup.rs"]
+mod stale_startup;
 #[path = "probe_settings_runtime/standby.rs"]
 mod standby;

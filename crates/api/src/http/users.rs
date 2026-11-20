@@ -122,6 +122,11 @@ pub(crate) async fn update_user(
             let Some(mut user) = app.get_user(id)? else {
                 return Ok(None);
             };
+            if app.user_removal_pending(id)? {
+                return Err(store::StoreError::Conflict(
+                    "用户删除操作尚未完成，不能修改用户资料".into(),
+                ));
+            }
             if body.enabled == Some(false) && user.role == UserRole::Admin {
                 return Err(store::StoreError::Protected("不能停用管理员".into()));
             }
@@ -149,6 +154,9 @@ pub(crate) async fn update_user(
                 "user.credential_conflict",
                 &message,
             ),
+            Err(store::StoreError::Conflict(message)) => {
+                err(StatusCode::CONFLICT, "user.removal_pending", &message)
+            }
             Err(error) => {
                 tracing::error!(%error, user_id = %id, "更新用户信息或凭据失败");
                 err(

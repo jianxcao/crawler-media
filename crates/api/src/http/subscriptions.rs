@@ -16,6 +16,7 @@ use crate::http::{err, ok};
 use crate::management::ApiState;
 
 mod create;
+mod library_target;
 mod types;
 pub(crate) use create::create_subscription;
 pub(crate) mod deletion;

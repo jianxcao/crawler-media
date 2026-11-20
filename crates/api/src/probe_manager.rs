@@ -61,6 +61,8 @@ mod locking_tests;
 #[cfg(test)]
 mod publish_version_tests;
 #[cfg(test)]
+mod settings_publish_tests;
+#[cfg(test)]
 mod test_support;
 
 /// 一个待探测单元（对应一个文件的覆盖事实 `FileCoverage`：文件 + 单元）。
@@ -121,6 +123,8 @@ pub struct ProbeManager {
     workers_started: AtomicBool,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
+    settings_publish_lock: Mutex<()>,
+    settings_revision: AtomicU64,
     remote_reads_wait_stopped: Arc<AtomicBool>,
     metadata_admission: Mutex<worker::MetadataAdmission>,
     metadata_capacity: Notify,
@@ -227,6 +231,8 @@ impl ProbeManager {
             workers_started: AtomicBool::new(false),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
+            settings_publish_lock: Mutex::new(()),
+            settings_revision: AtomicU64::new(0),
             remote_reads_wait_stopped: Arc::new(AtomicBool::new(remote_reads.paused)),
             metadata_admission: Mutex::new(worker::MetadataAdmission::new(
                 settings.metadata_workers,
@@ -314,12 +320,24 @@ impl ProbeManager {
     }
 
     pub(crate) fn apply_probe_settings(&self, settings: crate::probe_settings::ProbeSettings) {
+        let _publish = self.settings_publish_lock.lock();
+        self.apply_probe_settings_locked(settings);
+        self.settings_revision.fetch_add(1, Ordering::Release);
+    }
+
+    fn apply_probe_settings_locked(&self, settings: crate::probe_settings::ProbeSettings) {
         let mut current = self.probe_settings.lock();
         *current = settings;
         self.configure_probe_admission(settings);
     }
 
     pub(crate) fn apply_remote_reads_pause(&self, paused: bool) {
+        let _publish = self.settings_publish_lock.lock();
+        self.apply_remote_reads_pause_locked(paused);
+        self.settings_revision.fetch_add(1, Ordering::Release);
+    }
+
+    fn apply_remote_reads_pause_locked(&self, paused: bool) {
         let mut current = self.remote_reads_paused.lock();
         *current = paused;
         self.remote_reads_wait_stopped.store(
@@ -329,6 +347,28 @@ impl ProbeManager {
         marker::media_read::set_remote_reads_paused(paused);
         drop(current);
         self.wake.notify_waiters();
+    }
+
+    pub(crate) fn settings_revision(&self) -> u64 {
+        self.settings_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn apply_startup_settings_if_unchanged(
+        &self,
+        observed_revision: u64,
+        settings: Option<crate::probe_settings::ProbeSettings>,
+        remote_reads: Option<crate::probe_settings::RemoteReadsSettings>,
+    ) -> bool {
+        let _publish = self.settings_publish_lock.lock();
+        if self.settings_revision.load(Ordering::Acquire) != observed_revision {
+            return false;
+        }
+        if let Some(settings) = settings {
+            self.apply_probe_settings_locked(settings);
+        }
+        self.apply_remote_reads_pause_locked(remote_reads.is_none_or(|settings| settings.paused));
+        self.settings_revision.fetch_add(1, Ordering::Release);
+        true
     }
 
     pub(crate) fn remote_reads_are_paused(&self) -> bool {

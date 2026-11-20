@@ -305,6 +305,16 @@ test("连续重试每次都递增，第二次重试同样发得出去", () => {
   }
 });
 
+test("a ready paused stream is interactive without pretending it has played", () => {
+  const buffering = run([{ type: "request", startMs: 0 }, { type: "session", session: planSession(0) }]);
+  const ready = playerReducer(buffering, { type: "ready" });
+  assert.equal(ready.phase, "ready");
+  assert.equal(isBusy(ready.phase), false);
+  assert.equal(ready.session, buffering.session);
+  assert.equal(playerReducer(ready, { type: "playing" }).phase, "playing");
+  assert.equal(playerReducer(ready, { type: "buffering" }).phase, "buffering");
+});
+
 test("报错态是终态：video 元素的迟到事件顶不掉它", () => {
   // 解码失败后媒体元素并不安静，playing/ended/seeking 仍可能各自再飞一发。
   // 这些事件当时无条件改写 phase，报错浮层被顶掉——用户看到提示闪几秒，
@@ -314,7 +324,7 @@ test("报错态是终态：video 元素的迟到事件顶不掉它", () => {
     { type: "fatal", message: "这一档的码流浏览器解不了" },
   ]);
   assert.equal(failed.phase, "error");
-  for (const stray of [{ type: "playing" }, { type: "ended" }, { type: "seeking" }, { type: "buffering" }]) {
+  for (const stray of [{ type: "ready" }, { type: "playing" }, { type: "ended" }, { type: "seeking" }, { type: "buffering" }]) {
     const after = playerReducer(failed, stray);
     assert.equal(after.phase, "error", `${stray.type} 不该改写报错态`);
     assert.equal(after.error?.message, "这一档的码流浏览器解不了");
@@ -326,7 +336,7 @@ test("同意弹窗同理：等用户拍板期间不被播放事件挤掉", () =>
   consent.decision = { ...consent.decision, outcome: "consent" };
   const waiting = run([{ type: "request", startMs: 0 }, { type: "session", session: consent }]);
   assert.equal(waiting.phase, "consent");
-  for (const stray of [{ type: "playing" }, { type: "ended" }, { type: "seeking" }]) {
+  for (const stray of [{ type: "ready" }, { type: "playing" }, { type: "ended" }, { type: "seeking" }]) {
     assert.equal(playerReducer(waiting, stray).phase, "consent", `${stray.type} 不该关掉弹窗`);
   }
 });

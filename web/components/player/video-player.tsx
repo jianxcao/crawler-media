@@ -1376,7 +1376,13 @@ export function VideoPlayer(props: VideoPlayerProps) {
     };
     // 「现在应该能播了」的两个时机：挂流那一次可能太早，这两次是补刀
     const onReady = () => {
-      if (isCurrentSession()) void tryAutoplay();
+      if (!isCurrentSession()) return;
+      // 暂停恢复的新会话不会触发 playing；真正可播放后交还按钮，继续等用户点击。
+      if (!wantsPlayRef.current && video.paused && video.readyState >= 3) {
+        setPaused(true);
+        dispatch({ type: "ready" });
+      }
+      void tryAutoplay();
     };
 
     video.addEventListener("playing", onPlaying);

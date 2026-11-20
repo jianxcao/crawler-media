@@ -90,6 +90,7 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
         manager.wake.notify_waiters();
         return true;
     }
+    let settings_revision = manager.settings_revision();
     let (persisted_settings, persisted_remote_reads) = read_persisted_admission_settings(manager);
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
@@ -108,28 +109,16 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     let recovery_deferred = manager.recovery_deferred.swap(false, Ordering::SeqCst);
     manager.workers_started.store(true, Ordering::SeqCst);
     manager.shutdown_signal.send_replace(false);
-    if let Some(settings) = persisted_settings {
-        *manager.probe_settings.lock() = settings;
-    }
-    if let Some(settings) = persisted_remote_reads {
-        *manager.remote_reads_paused.lock() = settings.paused;
-    } else {
-        // A standby must not start remote reads with a stale, more permissive
-        // in-memory value when persisted admission state cannot be read.
-        *manager.remote_reads_paused.lock() = true;
-    }
-    {
-        let settings = manager.probe_settings.lock();
-        manager.configure_probe_admission(*settings);
-    }
-    {
-        let paused = manager.remote_reads_paused.lock();
-        manager.remote_reads_wait_stopped.store(
-            *paused || manager.shutting_down.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        marker::media_read::set_remote_reads_paused(*paused);
-    }
+    // Discard the persisted snapshot if an HTTP save was published while it loaded.
+    manager.apply_startup_settings_if_unchanged(
+        settings_revision,
+        persisted_settings,
+        persisted_remote_reads,
+    );
+    manager.remote_reads_wait_stopped.store(
+        manager.remote_reads_are_paused() || manager.shutting_down.load(Ordering::Acquire),
+        Ordering::Release,
+    );
     let bootstrap = manager.clone();
     let handle = tokio::spawn(async move {
         if recovery_deferred {

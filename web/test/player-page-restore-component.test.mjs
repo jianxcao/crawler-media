@@ -1,3 +1,4 @@
+/* global Event */
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mountPlayer } from "./support/player-renderer.mjs";
@@ -30,7 +31,7 @@ test("production component renews each cached grant with saved position and a fr
   } catch (error) { await ui.unmount(); throw error; }
 });
 
-test("a user pause survives renewal and only the new SID starts on explicit play", async () => {
+test("a paused renewal exposes its play control only when ready and starts on the user's click", async () => {
   const ui = await mountPlayer();
   try {
     await ui.pause();
@@ -38,10 +39,43 @@ test("a user pause survives renewal and only the new SID starts on explicit play
     assert.equal(ui.video.paused, true);
     assert.equal(ui.calls[1].resume_from_play_session_id, "sid-1");
     assert.equal(ui.reports.filter(report => report.play_session_id === "sid-2").length, 0);
-    await ui.play();
+    await ui.flush(() => {
+      ui.video.readyState = 1;
+      ui.video.dispatchEvent(new Event("loadedmetadata"));
+    });
+    assert.equal(ui.renderer.root.findByType("PlayerCenterControls").props.visible, false);
+    await ui.flush(() => {
+      ui.video.readyState = 3;
+      ui.video.dispatchEvent(new Event("canplay"));
+    });
+    const controls = ui.renderer.root.findByType("PlayerCenterControls");
+    assert.equal(controls.props.paused, true);
+    assert.equal(controls.props.visible, true);
+    assert.equal(ui.reports.filter(report => report.play_session_id === "sid-2").length, 0);
+    await ui.flush(() => controls.props.onTogglePlay());
+    assert.equal(ui.video.paused, false);
     const started = ui.reports.find(report => report.play_session_id === "sid-2");
     assert.equal(started.event, "start");
     assert.equal(started.event_sequence, 1);
+  } finally { await ui.unmount(); }
+});
+
+test("a ready paused renewal can make another cache trip before the user plays", async () => {
+  const ui = await mountPlayer();
+  try {
+    await ui.pause();
+    for (const predecessor of ["sid-1", "sid-2"]) {
+      await ui.event("pagehide"); await ui.event("pageshow");
+      assert.equal(ui.calls.at(-1).resume_from_play_session_id, predecessor);
+      await ui.flush(() => {
+        ui.video.readyState = 3;
+        ui.video.dispatchEvent(new Event("canplay"));
+      });
+      assert.equal(ui.video.paused, true);
+      assert.equal(ui.renderer.root.findByType("PlayerCenterControls").props.visible, true);
+    }
+    assert.equal(ui.calls.length, 3);
+    assert.equal(ui.reports.some(report => report.play_session_id !== "sid-1"), false);
   } finally { await ui.unmount(); }
 });
 

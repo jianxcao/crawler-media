@@ -16,7 +16,7 @@ test("正在播：心跳照常跑", () => {
 });
 
 test("暂停中：无论阶段停在播放 / 拖动 / 缓冲，心跳都不能停", () => {
-  for (const phase of ["playing", "seeking", "buffering"]) {
+  for (const phase of ["playing", "seeking", "buffering", "ready"]) {
     assert.equal(
       shouldHeartbeat({ phase, announced: true, paused: true }),
       true,
@@ -28,6 +28,7 @@ test("暂停中：无论阶段停在播放 / 拖动 / 缓冲，心跳都不能�
 test("还没报过 start 的会话不喂：否则服务端会凭空建出一条播放会话", () => {
   assert.equal(shouldHeartbeat({ phase: "buffering", announced: false, paused: true }), false);
   assert.equal(shouldHeartbeat({ phase: "playing", announced: false, paused: true }), false);
+  assert.equal(shouldHeartbeat({ phase: "ready", announced: false, paused: true }), false);
 });
 
 test("暂停但阶段已经了结/出错：不喂", () => {

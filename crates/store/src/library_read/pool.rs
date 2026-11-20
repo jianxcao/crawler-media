@@ -261,13 +261,27 @@ impl Inner {
                 Ok(())
             }
             Err(error) => {
-                tracing::error!(
-                    path = %self.path.display(),
-                    database = self.database,
-                    error = %error,
-                    "reader layout rejected; closing pool"
-                );
-                self.close();
+                // A request budget may interrupt the schema scan itself.  That
+                // only means this validation attempt did not finish; it is not
+                // evidence that the database layout is invalid.  Close the
+                // pool only after the validator has positively reported a
+                // layout refusal (the identity check has its own fence).
+                if error.is_layout_refusal() {
+                    tracing::error!(
+                        path = %self.path.display(),
+                        database = self.database,
+                        error = %error,
+                        "reader layout rejected; closing pool"
+                    );
+                    self.close();
+                } else {
+                    tracing::debug!(
+                        path = %self.path.display(),
+                        database = self.database,
+                        error = %error,
+                        "reader layout validation did not complete"
+                    );
+                }
                 Err(error)
             }
         }

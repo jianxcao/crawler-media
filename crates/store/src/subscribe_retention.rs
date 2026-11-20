@@ -31,6 +31,7 @@ impl Store {
         let generation = SubscribeId::new().to_string();
         self.with_writer(Db::Subscribe,|conn| {
             let tx=crate::write_tx(conn)?;
+            crate::subscribes::admission::ensure_library_open(&tx, subscribe.library_id)?;
             if tx.query_row("SELECT EXISTS(SELECT 1 FROM subscribes WHERE id=?1)",[subscribe.id.to_string()],|r|r.get::<_,bool>(0))? {
                 return Err(StoreError::Protected(format!("Subscribe {} already exists",subscribe.id)));
             }

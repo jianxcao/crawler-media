@@ -2,11 +2,11 @@
 
 [返回数据库总览](README.md)
 
-文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是生产 DDL 字段字典；结构复核方法见[数据库总览](README.md#结构复核方法)。
+文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 2`。这是生产 DDL 字段字典；结构复核方法见[数据库总览](README.md#结构复核方法)。
 
 `subscribes.created_at` / `updated_at` 为 INTEGER Unix 毫秒，写入须显式提供非 NULL 时间戳。Store 对生产 DDL 的表/索引定义进行只读预检，不导入数据或改写已有不同定义。
 
-共 **9 张业务表、67 字段、7 个显式命名索引、3 外键、7 CHECK、0 触发器**。
+共 **10 张业务表、68 字段、7 个显式命名索引、3 外键、7 CHECK、0 触发器**。
 
 ## 表目录
 
@@ -14,6 +14,7 @@
 - [subscribe_facts](#subscribe_facts) — 5 个字段
 - [subscribe_wanted](#subscribe_wanted) — 9 个字段
 - [pending_downloads](#pending_downloads) — 13 个字段
+- [subscribe_library_fences](#subscribe_library_fences) — 已删除 Library 的永久 Subscribe 绑定关闭记录
 - [subscribe_jobs_cleanup](#subscribe_jobs_cleanup)、[subscribe_reference_ops](#subscribe_reference_ops)、[subscribe_merge_fences](#subscribe_merge_fences)、[subscribe_merge_controls](#subscribe_merge_controls)、[subscribe_recovery_cursor](#subscribe_recovery_cursor) — 持久引用及恢复状态
 
 业务创建先记录 generation/epoch，Library 保留引用后确认，再提交 Subscribe。删除与精确 generation 的释放和 Jobs 清理意图同事务记录；跨库恢复按有界窗口处理。关闭的 generation 不可重开。API 时间输出为经过范围检查的固定24字符 UTC 毫秒格式，坏持久值返回错误。
@@ -227,4 +228,18 @@ CREATE TABLE subscribe_reference_ops(epoch INTEGER PRIMARY KEY AUTOINCREMENT,sub
 CREATE UNIQUE INDEX subscribe_creating_id ON subscribe_reference_ops(subscribe_id) WHERE state IN ('creating','retained');
 CREATE INDEX subscribe_reference_media_pending ON subscribe_reference_ops(media_id,epoch) WHERE state IN ('creating','retained');
 CREATE INDEX subscribe_reference_pending ON subscribe_reference_ops(state,epoch);
+```
+
+## subscribe_library_fences
+
+Library 删除跨文件完成时，Subscribe 库先在同一事务写入关闭记录，再将既有 Subscribe 解绑。创建和更新的最终 Subscribe writer 检查此表，因此延迟或旧快照都不能恢复已删除 Library 的绑定。记录长期保留，Library ID 不可复用为 Subscribe 目标。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `library_id` | `TEXT` | 1 | 是 | 无 | 被永久关闭的 Library 身份。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE subscribe_library_fences(library_id TEXT PRIMARY KEY NOT NULL);
 ```

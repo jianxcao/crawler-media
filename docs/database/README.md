@@ -15,7 +15,7 @@
 |---|---|---:|---:|---|---|
 | [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、设置、搜索快照、实例锁 | 否 |
 | [library.db](library.md) | 1129139249 / 7 | 66 | 668 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
-| [subscribe.db](subscribe.md) | 1129139250 / 1 | 9 | 67 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
+| [subscribe.db](subscribe.md) | 1129139250 / 2 | 10 | 68 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
 | [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应 | 是，受控清理 |
 | [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 6 | 39 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 

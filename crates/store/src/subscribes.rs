@@ -353,7 +353,13 @@ impl Store {
     }
 
     pub fn update_subscribe(&self, subscribe: &Subscribe) -> Result<(), StoreError> {
-        self.with_subscribe_write(|db| db.update_subscribe(subscribe))
+        self.with_writer(crate::Db::Subscribe, |conn| {
+            let tx = crate::write_tx(conn)?;
+            let db = crate::SubscribeConnection { subscribe: &tx };
+            db.update_subscribe(subscribe)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Decide coverage admission and update while owning the Subscribe writer.

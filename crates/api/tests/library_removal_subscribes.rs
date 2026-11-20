@@ -1,6 +1,8 @@
 //! Task 6: actual HTTP removal and completed Transfer use the same-kind default.
 #[path = "library_removal_subscribes/completion.rs"]
 mod completion;
+#[path = "library_removal_subscribes/fence.rs"]
+mod fence;
 #[path = "library_removal_subscribes/support.rs"]
 mod support;
 use axum::http::StatusCode;

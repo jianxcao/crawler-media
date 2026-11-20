@@ -23,6 +23,7 @@ export type PlayerPhase =
   | "deciding"
   | "session-starting"
   | "buffering"
+  | "ready"
   | "playing"
   | "seeking"
   | "degrading"
@@ -47,7 +48,7 @@ export function awaitsUserDecision(phase: PlayerPhase): boolean {
 
 /** 只有这些阶段仍绑定着一条可接受媒体事件的当前会话。 */
 function acceptsMediaEvent(phase: PlayerPhase): boolean {
-  return phase === "buffering" || phase === "playing" || phase === "seeking" || phase === "ended";
+  return phase === "buffering" || phase === "ready" || phase === "playing" || phase === "seeking" || phase === "ended";
 }
 
 /** 最高兜底档：软件转码。连败两次后直接跳到它，不再逐级试。 */
@@ -115,6 +116,8 @@ export type PlayerEvent =
   /** 用户在同意弹窗里点了「继续」：重新决策，这次服务端会给出软转计划 */
   | { type: "consent-granted" }
   | { type: "buffering" }
+  /** 当前会话已能播放，但用户仍要求暂停；不代表已开始播放。 */
+  | { type: "ready" }
   | { type: "playing" }
   | { type: "seeking" }
   /** seek 越出已转区间：换会话，位置不变 */
@@ -202,8 +205,13 @@ export function playerReducer(state: PlayerState, event: PlayerEvent): PlayerSta
     case "buffering":
       // 播放中途的缓冲不该把状态打回起播阶段（会让 UI 闪一下"正在启动"），
       // 只有已经出过画之后才认这条。
-      return state.phase === "playing" || state.phase === "seeking"
+      return state.phase === "playing" || state.phase === "seeking" || state.phase === "ready"
         ? { ...state, phase: "buffering" }
+        : state;
+
+    case "ready":
+      return state.phase === "buffering" && state.session !== null
+        ? { ...state, phase: "ready" }
         : state;
 
     case "playing":

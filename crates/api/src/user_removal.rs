@@ -40,34 +40,11 @@ impl UserRemovalService {
         Self { state }
     }
 
-    /// Accept a removal without driving it: the record is persisted and the `disabling`
-    /// phase (disable + revoke tokens) runs right away, so the User loses access before the
-    /// caller answers. The returned record is what `DELETE` reports; the remaining phases
-    /// run in [`UserRemovalService::continue_removal`].
+    /// Accept a removal without driving cleanup: persist its record, disable the User and
+    /// revoke sessions in one App transaction. The returned record is what `DELETE` reports;
+    /// the remaining phases run in [`UserRemovalService::continue_removal`].
     pub fn accept(&self, user_id: UserId) -> Result<UserRemovalRecord, UserRemovalError> {
-        let record = self.accept_record(user_id)?;
-        if record.phase != "disabling" {
-            return Ok(record);
-        }
-        crate::http::store_wait::with_foreground_store(&self.state, |store| {
-            let mut record = record;
-            match run_phase(store, user_id, "disabling") {
-                Ok(Some(next)) => {
-                    record.phase = next.into();
-                    record.error = None;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(%user_id, operation_id = %record.operation_id, %error, "User removal disabling failed");
-                    record.error = Some(error);
-                }
-            }
-            record.updated_at = crate::job_loop::unix_now();
-            write_record(store, user_id, &record)?;
-            Ok(record)
-        })
-        .map_err(UserRemovalError::Admission)?
-        .map_err(UserRemovalError::Operation)
+        self.accept_record(user_id)
     }
 
     /// Drive an accepted removal to its end (or to a recorded failure).
@@ -79,30 +56,25 @@ impl UserRemovalService {
 
     fn accept_record(&self, user_id: UserId) -> Result<UserRemovalRecord, UserRemovalError> {
         crate::http::store_wait::with_foreground_store(&self.state, |store| {
-            let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
-            if user_id == admin_id {
-                return Err("Cannot delete admin user".into());
-            }
-            match read_record(store, user_id)? {
-                Some(record) => Ok(record),
-                None => {
-                    store
-                        .get_user(user_id)
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| "User not found".to_string())?;
-                    let record = UserRemovalRecord {
-                        version: RECORD_VERSION,
-                        operation_id: uuid::Uuid::new_v4().to_string(),
-                        user_id: user_id.to_string(),
-                        phase: "disabling".into(),
-                        cursor: None,
-                        error: None,
-                        updated_at: crate::job_loop::unix_now(),
-                    };
-                    write_record(store, user_id, &record)?;
-                    Ok(record)
+            let key = record_key(user_id);
+            let result = store.writers().with_app(|app| {
+                if let Some(raw) = app.get_setting(&key)? {
+                    return decode_record(&raw).map_err(store::StoreError::Invalid);
                 }
-            }
+                let record = UserRemovalRecord {
+                    version: RECORD_VERSION,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    user_id: user_id.to_string(),
+                    phase: "cleaning".into(),
+                    cursor: None,
+                    error: None,
+                    updated_at: crate::job_loop::unix_now(),
+                };
+                let json = serde_json::to_string(&record)?;
+                app.accept_user_removal(user_id, &key, &json)?;
+                Ok(record)
+            });
+            result.map_err(|error| error.to_string())
         })
         .map_err(UserRemovalError::Admission)?
         .map_err(UserRemovalError::Operation)
@@ -112,6 +84,19 @@ impl UserRemovalService {
         let operation_id = record.operation_id.clone();
         let store = self.state.store.as_ref();
         loop {
+            if record.phase == "disabling" {
+                record.phase = "cleaning".into();
+                record.error = None;
+                record.updated_at = crate::job_loop::unix_now();
+                let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+                store
+                    .writers()
+                    .with_app(|app| {
+                        app.finish_user_removal_disabling(user_id, &record_key(user_id), &json)
+                    })
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
             let step = run_phase(&store, user_id, &record.phase);
             match step {
                 Ok(Some(next)) => {
