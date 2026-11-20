@@ -125,7 +125,7 @@ async fn send_playback(
     token: &str,
     media_id: MediaId,
     event: &str,
-) -> axum::response::Response {
+) -> (axum::response::Response, String) {
     // `playback_sessions` 绑定签发的 `play_session_id`：progress 之前先签发。
     let issued = app
         .clone()
@@ -143,6 +143,17 @@ async fn send_playback(
         .as_str()
         .unwrap()
         .to_string();
+    let response = report_playback(app, token, media_id, event, &session).await;
+    (response, session)
+}
+
+async fn report_playback(
+    app: &axum::Router,
+    token: &str,
+    media_id: MediaId,
+    event: &str,
+    session: &str,
+) -> axum::response::Response {
     app.clone()
         .oneshot(request(
             "POST",
@@ -162,11 +173,10 @@ async fn same_web_device_id_is_scoped_per_user_and_revoke_is_unsupported() {
     let (alice_id, alice) = create_member(&app, "device-alice").await;
     let (bob_id, bob) = create_member(&app, "device-bob").await;
     let media_id = seed_movie(&tmp, &[alice_id, bob_id]);
-    for (id, token) in [(alice_id, &alice), (bob_id, &bob)] {
-        assert_eq!(
-            send_playback(&app, token, media_id, "start").await.status(),
-            StatusCode::OK
-        );
+    let (alice_start, alice_session) = send_playback(&app, &alice, media_id, "start").await;
+    let (bob_start, bob_session) = send_playback(&app, &bob, media_id, "start").await;
+    for (id, token, response) in [(alice_id, &alice, alice_start), (bob_id, &bob, bob_start)] {
+        assert_eq!(response.status(), StatusCode::OK);
         let activity = app
             .clone()
             .oneshot(request(
@@ -218,13 +228,13 @@ async fn same_web_device_id_is_scoped_per_user_and_revoke_is_unsupported() {
         json_body(revoked).await["error"]["code"],
         "playback.unsupported"
     );
-    let alice_report = send_playback(&app, &alice, media_id, "progress").await;
+    let alice_report = report_playback(&app, &alice, media_id, "progress", &alice_session).await;
     assert_eq!(alice_report.status(), StatusCode::OK);
     assert_eq!(
         json_body(alice_report).await["data"]["ended_by_admin"],
         true
     );
-    let bob_report = send_playback(&app, &bob, media_id, "progress").await;
+    let bob_report = report_playback(&app, &bob, media_id, "progress", &bob_session).await;
     assert_eq!(bob_report.status(), StatusCode::OK);
     assert_eq!(json_body(bob_report).await["data"]["ended_by_admin"], false);
 }

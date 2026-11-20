@@ -241,6 +241,36 @@ fn changing_cooldown_updates_waiting_reads_without_restarting_the_gate() {
 }
 
 #[test]
+fn pausing_remote_reads_releases_waiters_without_interrupting_active_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let active_path = remote(directory.path()).with_file_name("active.strm");
+    let waiting_path = remote(directory.path()).with_file_name("waiting.strm");
+    let active =
+        marker::media_read::acquire_media_read(&active_path, &WorkControl::default()).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = marker::media_read::acquire_media_read(&waiting_path, &WorkControl::default())
+            .map(|_| ());
+        done_tx.send(result).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(25));
+    marker::media_read::set_remote_reads_paused(true);
+    let result = done_rx.recv_timeout(Duration::from_millis(100));
+    drop(active);
+    marker::media_read::set_remote_reads_paused(false);
+    waiter.join().unwrap();
+    assert_eq!(
+        result
+            .expect("pause must release the blocked gate waiter")
+            .unwrap_err(),
+        marker::media_read::READ_WAIT_STOPPED
+    );
+}
+
+#[test]
 fn direct_chapter_probe_waits_for_shared_remote_admission_and_cancels() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("local-only.strm");

@@ -400,6 +400,7 @@ impl ChapterFrameService {
     /// Sync by design: the caller runs it on the blocking pool (see [`Self::fill_window`]).
     fn fill_window_sync(&self) -> Result<usize, String> {
         let _fill = self.fill_lock.lock();
+        let remote_reads_paused = marker::media_read::remote_reads_paused();
         let (capacity, after) = {
             let inner = self.inner.lock();
             (
@@ -422,6 +423,20 @@ impl ChapterFrameService {
         let mut claimed = 0;
         for task in pending {
             cursor = Some(task.id.clone());
+            if remote_reads_paused
+                && self
+                    .store
+                    .file_coverage_by_id(task.file_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|file| {
+                        file.file
+                            .path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
+                    })
+            {
+                continue;
+            }
             let owned = self
                 .store
                 .as_ref()

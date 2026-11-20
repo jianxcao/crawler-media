@@ -2,6 +2,8 @@
 pub enum LibraryError {
     #[error("Library work cancelled")]
     Cancelled,
+    #[error("remote media read stopped before admission")]
+    ReadWaitStopped,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("ffprobe failed: {0}")]

@@ -238,11 +238,6 @@ fn reparent_file(
         params![file_id, library],
         |r| r.get(0),
     )?;
-    let previous: String = tx.query_row(
-        "SELECT root_id FROM library_files WHERE file_id = ?1",
-        params![file_id],
-        |row| row.get(0),
-    )?;
     let Some(root) = longest_root(&path_key, requested) else {
         // A file outside every requested root keeps its current owner; the caller
         // decides later whether to remove it, so a reconfiguration never silently
@@ -254,15 +249,8 @@ fn reparent_file(
         "UPDATE library_files SET root_id = ?2 WHERE file_id = ?1",
         params![file_id, root_id],
     )?;
-    // Scoped metadata inputs carry the same ownership fact; unidentified rows move in
-    // their own pass.
-    tx.execute(
-        "UPDATE library_metadata_inputs SET root_id = ?2
-         WHERE library_id = ?3 AND (path_key IN
-             (SELECT path_key FROM library_files WHERE file_id = ?1)
-             OR root_id = ?4)",
-        params![file_id, root_id, library, previous],
-    )?;
+    // Metadata inputs have an independent bounded path pass after the file batches.
+    // Updating them here would touch every input under the previous root per file.
     Ok(())
 }
 

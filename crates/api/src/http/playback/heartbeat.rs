@@ -178,10 +178,28 @@ fn classify_heartbeat(
         Some(id) => store.play_session_binding(heartbeat.user_id, device, id)?,
         None => None,
     };
-    let session_ended = previous.as_ref().is_some_and(|session| session.admin_ended);
-    let admin_ended = session_ended
-        || (event != "start"
-            && store.device_was_admin_ended(heartbeat.user_id, device, heartbeat.now, 10)?);
+    let live_admin_ended = match (session_id.as_deref(), binding.as_ref()) {
+        (Some(session_id), Some(binding)) => store.live_play_session_was_admin_ended(
+            heartbeat.user_id,
+            device,
+            session_id,
+            binding.generation,
+        )?,
+        _ => false,
+    };
+    let archived_admin_ended = event != "start"
+        && match (session_id.as_deref(), binding.as_ref()) {
+            (Some(session_id), Some(binding)) => store.archived_play_session_was_admin_ended(
+                heartbeat.user_id,
+                device,
+                session_id,
+                binding.generation,
+                heartbeat.now,
+                10,
+            )?,
+            _ => false,
+        };
+    let admin_ended = live_admin_ended || archived_admin_ended;
     let identity = crate::playback_events::PlaybackEventIdentity {
         play_session_id: session_id,
         event_sequence: heartbeat.body["event_sequence"].as_i64(),

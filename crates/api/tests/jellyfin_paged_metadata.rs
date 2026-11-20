@@ -509,3 +509,5 @@ mod next_up;
 mod paged;
 #[path = "jellyfin_paged_metadata/scope.rs"]
 mod scope;
+#[path = "jellyfin_paged_metadata/snapshot.rs"]
+mod snapshot;

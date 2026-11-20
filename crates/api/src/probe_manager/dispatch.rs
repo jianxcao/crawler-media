@@ -360,9 +360,15 @@ impl ProbeManager {
             return;
         }
         let store = self.store.as_ref();
-        let ids = match store
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, FINGERPRINT_WINDOW + 1)
-        {
+        let ids = match if self.remote_reads_are_paused() {
+            store.pending_local_probe_dispatch_ids(
+                ProbeDispatchStage::Fingerprint,
+                FINGERPRINT_WINDOW + 1,
+            )
+        } else {
+            store
+                .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, FINGERPRINT_WINDOW + 1)
+        } {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取声纹派发窗口失败");

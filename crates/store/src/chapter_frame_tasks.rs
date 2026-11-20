@@ -91,6 +91,11 @@ impl Store {
         self.with_library_write(|db| db.finish_chapter_frame_attempt(id, attempt, results))
     }
 
+    /// Requeue a paused remote-read claim only if its current attempt fence matches.
+    pub fn defer_chapter_frame_attempt(&self, id: &str, attempt: u64) -> Result<bool, StoreError> {
+        self.with_library_write(|db| db.defer_chapter_frame_attempt(id, attempt))
+    }
+
     pub fn recover_chapter_frame_tasks(&self) -> Result<usize, StoreError> {
         self.with_library_write(|db| db.recover_chapter_frame_tasks())
     }

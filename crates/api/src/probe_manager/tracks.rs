@@ -122,9 +122,7 @@ pub(super) async fn probe_tracks_and_store(
     {
         return Ok(Some(cached));
     }
-    let (tracks, duration_ms) = read_tracks(mgr, unit, started_at, control)
-        .await
-        .map_err(|()| TrackProbeError::Failed)?;
+    let (tracks, duration_ms) = read_tracks(mgr, unit, started_at, control).await?;
     let unit_for_write = unit.clone();
     let tracks_for_write = tracks.clone();
     let version = source_version.to_string();
@@ -225,7 +223,7 @@ async fn read_tracks(
     unit: &ProbeUnit,
     started_at: Instant,
     control: &library::WorkControl,
-) -> Result<(library::Tracks, Option<i64>), ()> {
+) -> Result<(library::Tracks, Option<i64>), TrackProbeError> {
     let ledger_id = unit.row.file.file_id.to_string();
     let path = &unit.row.file.path;
     let probe_unit = unit.clone();
@@ -236,15 +234,16 @@ async fn read_tracks(
     })
     .await;
     let tracks = match tracks_result {
-        Ok(Some(tracks_and_duration)) => tracks_and_duration,
-        Ok(None) => {
+        Ok(Ok(Some(tracks_and_duration))) => tracks_and_duration,
+        Ok(Ok(None)) => {
             mgr.timings.record_media_info(
                 unit.job_id.as_deref(),
                 started_at.elapsed().as_millis() as u64,
                 false,
             );
-            return Err(());
+            return Err(TrackProbeError::Failed);
         }
+        Ok(Err(error)) => return Err(error),
         Err(error) => {
             tracing::error!(
                 %error,
@@ -261,7 +260,7 @@ async fn read_tracks(
                 started_at.elapsed().as_millis() as u64,
                 false,
             );
-            return Err(());
+            return Err(TrackProbeError::Failed);
         }
     };
     Ok(tracks)
@@ -282,9 +281,9 @@ fn read_tracks_with_nfo(
     probe_started_at: Instant,
     control: &library::WorkControl,
     engine: &dyn TracksProbe,
-) -> Option<(library::Tracks, Option<i64>)> {
+) -> Result<Option<(library::Tracks, Option<i64>)>, TrackProbeError> {
     if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
-        return None;
+        return Ok(None);
     }
     let tracks_path = PathBuf::from(&unit.row.file.path);
     let nfo_path = tracks_path.with_extension("nfo");
@@ -299,12 +298,12 @@ fn read_tracks_with_nfo(
                 elapsed_ms = read_started.elapsed().as_millis(),
                 "【媒体信息】远程准入与流信息读取完成");
             if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
-                return None;
+                return Ok(None);
             }
             let has_streams =
                 tracks.video.is_some() || !tracks.audio.is_empty() || !tracks.subtitles.is_empty();
             if control.is_cancelled() {
-                return None;
+                return Ok(None);
             }
             if has_streams {
                 let nfo_started = Instant::now();
@@ -352,8 +351,9 @@ fn read_tracks_with_nfo(
                     "【媒体信息】探测成功但没有发现视频、音轨或字幕流"
                 );
             }
-            Some((tracks, duration_ms))
+            Ok(Some((tracks, duration_ms)))
         }
+        Err(library::LibraryError::ReadWaitStopped) => Err(TrackProbeError::Retry),
         Err(error) => {
             tracing::warn!(
                 media_id = %media_id,
@@ -365,7 +365,7 @@ fn read_tracks_with_nfo(
                 elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
                 "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
             );
-            None
+            Ok(None)
         }
     }
 }

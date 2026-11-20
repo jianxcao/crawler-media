@@ -282,6 +282,56 @@ impl crate::LibraryConnection<'_> {
         Ok(exists)
     }
 
+    pub fn live_play_session_was_admin_ended(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        play_session_id: &str,
+        generation: i64,
+    ) -> Result<bool, StoreError> {
+        let exists: bool = self.library.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM playback_sessions s
+                 JOIN playback_session_ids p
+                   ON p.user_id = s.user_id AND p.device_id = s.device_id
+                  AND p.play_session_id = s.play_session_id AND p.generation = s.generation
+                 WHERE s.user_id = ?1 AND s.device_id = ?2 AND s.play_session_id = ?3
+                   AND p.generation = ?4 AND s.admin_ended != 0
+             )",
+            params![user_id.to_string(), device_id, play_session_id, generation],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    pub fn archived_play_session_was_admin_ended(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        play_session_id: &str,
+        generation: i64,
+        now: i64,
+        window_secs: i64,
+    ) -> Result<bool, StoreError> {
+        let cutoff = now - window_secs;
+        let exists: bool = self.library.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM playback_logs
+                 WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3
+                   AND generation = ?4 AND ended_at >= ?5 AND admin_ended != 0
+             )",
+            params![
+                user_id.to_string(),
+                device_id,
+                play_session_id,
+                generation,
+                cutoff
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
     pub fn sweep_stale_sessions(&self, now: i64, timeout_secs: i64) -> Result<usize, StoreError> {
         let cutoff = now - timeout_secs;
         let session_keys: Vec<(UserId, String)> = {

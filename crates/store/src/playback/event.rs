@@ -349,27 +349,31 @@ fn write_unit_facts(
 
 /// Did an admin end this device's playback, so a later event must not restart it?
 ///
-/// Two sources, both owned by the store: the live row may still be flagged `admin_ended` (the
-/// admin ended it while it was live), or the archived play log left the device marker behind
-/// within [`ADMIN_ENDED_WINDOW_SECS`]. A `start` is a *new* session and stays allowed unless
-/// the live row is still flagged; this mirrors the guard the HTTP route ran before calling
-/// the store, now inside the transaction that owns the session state.
+/// The live row or recent archived log must match this exact issued session generation. A
+/// newer session on the same device is unaffected by an older session's admin-end marker. A
+/// `start` may only be stopped by its own still-live admin-ended row; archived-session markers
+/// apply to later progress/stop events.
 fn admin_ended_session(
     store: &crate::LibraryConnection<'_>,
     event: &BoundPlaybackEvent,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
-    let flagged = store
-        .get_session(event.user_id, &event.device_id)?
-        .is_some_and(|session| session.admin_ended);
-    let marker = event.event_type != PlaybackEventType::Playing
-        && store.device_was_admin_ended(
+    let live = store.live_play_session_was_admin_ended(
+        event.user_id,
+        &event.device_id,
+        &event.session_id,
+        event.generation,
+    )?;
+    let archived = event.event_type != PlaybackEventType::Playing
+        && store.archived_play_session_was_admin_ended(
             event.user_id,
             &event.device_id,
+            &event.session_id,
+            event.generation,
             now_ms / 1000,
             ADMIN_ENDED_WINDOW_SECS,
         )?;
-    Ok(flagged || marker)
+    Ok(live || archived)
 }
 
 /// A new `PlaySessionId` on the same (user, device) supersedes the live row of the old one:

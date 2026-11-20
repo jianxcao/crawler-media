@@ -73,6 +73,41 @@ impl Store {
         self.with_library_read(|db| db.device_was_admin_ended(user_id, device_id, now, window_secs))
     }
 
+    /// Check whether this exact live session generation was ended by an administrator.
+    pub fn live_play_session_was_admin_ended(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        play_session_id: &str,
+        generation: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_library_read(|db| {
+            db.live_play_session_was_admin_ended(user_id, device_id, play_session_id, generation)
+        })
+    }
+
+    /// Check whether this exact archived session generation was ended recently by an administrator.
+    pub fn archived_play_session_was_admin_ended(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        play_session_id: &str,
+        generation: i64,
+        now: i64,
+        window_secs: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_library_read(|db| {
+            db.archived_play_session_was_admin_ended(
+                user_id,
+                device_id,
+                play_session_id,
+                generation,
+                now,
+                window_secs,
+            )
+        })
+    }
+
     /// Close every session whose heartbeat is older than the timeout.
     pub fn sweep_stale_sessions(&self, now: i64, timeout_secs: i64) -> Result<usize, StoreError> {
         self.with_library_write(|db| db.sweep_stale_sessions(now, timeout_secs))

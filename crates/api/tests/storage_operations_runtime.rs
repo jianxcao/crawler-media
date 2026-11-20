@@ -143,6 +143,14 @@ fn publish_one(
         library_id,
         config_revision: 0,
     };
+    let observations = store.nfo_input_observer().observe(
+        &file.path,
+        file.kind,
+        &[UnitKey::WHOLE],
+        "zh-CN",
+        &file.version,
+        scope.config_revision,
+    );
     store
         .publish_files(
             &scope,
@@ -150,7 +158,7 @@ fn publish_one(
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
-                nfo_observation: None,
+                nfo_observation: Some(&observations),
                 probe_required: false,
             }],
             1_000,
@@ -164,29 +172,6 @@ struct Seeded {
     media_id: MediaId,
     file_id: LedgerId,
     old_root: PathBuf,
-}
-
-/// 旧根下已经解析过的 NFO 观测：换根时它必须跟着文件一起改归属，不能留在旧根上，
-/// 否则 Library 的元数据输入会和它的 LibraryFile 指向两个不同的根。
-/// 文件级观测与 LibraryFile 共用 `path_key`（`roots.rs` 的 re-parent 正是按它迁移）。
-fn seed_nfo_input(
-    temp: &tempfile::TempDir,
-    library_id: &str,
-    media_id: MediaId,
-    root_id: &str,
-    path_key: &str,
-) {
-    let conn = rusqlite::Connection::open(temp.path().join("data").join("library.db")).unwrap();
-    conn.execute(
-        "INSERT INTO library_metadata_inputs
-            (library_id, media_id, entity_scope, season, episode, locale, input_key,
-             root_id, path_key, parse_state, source_version, fields_json,
-             present_fields_json, provenance_json, revision)
-         VALUES (?1, ?2, 'work', -1, -1, 'zh-CN', 'movie.nfo', ?3, ?4,
-                 'valid', 'v1', '{}', '[]', '{}', 1)",
-        rusqlite::params![library_id, media_id.to_string(), root_id, path_key],
-    )
-    .unwrap();
 }
 
 fn seed_library(state: &ApiState, temp: &tempfile::TempDir) -> Seeded {
@@ -207,17 +192,16 @@ fn seed_library(state: &ApiState, temp: &tempfile::TempDir) -> Seeded {
     let root_id = root_id_of(store, &library.id, &old_root);
     let media = media(store, "00000000-0000-0000-0000-0000000000c1");
     let file_path = old_root.join("movie.mkv");
+    std::fs::write(&file_path, b"video").unwrap();
+    std::fs::write(
+        file_path.with_extension("nfo"),
+        "<movie><title>Show</title></movie>",
+    )
+    .unwrap();
     let file_id = publish_one(
         store,
         library.id.parse().unwrap(),
         &media,
-        &root_id,
-        file_path.to_str().unwrap(),
-    );
-    seed_nfo_input(
-        temp,
-        &library.id,
-        media.id,
         &root_id,
         file_path.to_str().unwrap(),
     );
@@ -357,8 +341,8 @@ async fn patch_with_roots_is_accepted_and_migrates_files() {
     let nfo: (String, String) = {
         let conn = rusqlite::Connection::open(temp.path().join("data").join("library.db")).unwrap();
         conn.query_row(
-            "SELECT library_id, root_id FROM library_metadata_inputs WHERE input_key = 'movie.nfo'",
-            [],
+            "SELECT library_id, root_id FROM library_metadata_inputs WHERE media_id = ?1",
+            [seeded.media_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()

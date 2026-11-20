@@ -12,6 +12,52 @@ use tower::ServiceExt;
 use super::common::*;
 use store::test_support::{FixtureFile, publish_fixture_file};
 
+async fn heartbeat(
+    app: &axum::Router,
+    media_id: domain::MediaId,
+    file_id: LedgerId,
+    device_id: &str,
+    session_id: &str,
+    event: &str,
+    position_ms: i64,
+) -> Value {
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/playback/progress",
+            Some("management-secret"),
+            json!({
+                "event_sequence": next_playback_sequence(),
+                "media_item_id": media_id.to_string(),
+                "file_id": file_id.to_string(),
+                "device_id": device_id,
+                "play_session_id": session_id,
+                "event": event,
+                "position_ms": position_ms,
+                "duration_ms": 100000
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_data(response).await
+}
+
+async fn end_device_session(app: &axum::Router, device_id: &str) {
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/playback/activity/sessions/{device_id}/end"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 pub(super) fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
         requests: Mutex::new(Vec::new()),
@@ -130,6 +176,82 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
         store.get_session(user_id, device_id).unwrap().is_none(),
         "已被管理员结束的会话绝不能在后续 progress 心跳中自动复活！(G03)"
     );
+}
+
+#[tokio::test]
+async fn archived_admin_ended_session_does_not_end_a_new_session_on_same_device() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let (store, media, file_id) = seed_movie(&tmp);
+    let user_id = store.admin_user_id().unwrap();
+    let device_id = "device-restarted";
+    let old_session =
+        super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
+
+    heartbeat(
+        &app,
+        media.id,
+        file_id,
+        device_id,
+        &old_session,
+        "start",
+        1000,
+    )
+    .await;
+
+    end_device_session(&app, device_id).await;
+
+    let late_old = heartbeat(
+        &app,
+        media.id,
+        file_id,
+        device_id,
+        &old_session,
+        "progress",
+        2000,
+    )
+    .await;
+    assert_eq!(late_old["ended_by_admin"], true);
+    assert!(store.get_session(user_id, device_id).unwrap().is_none());
+
+    let new_session =
+        super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
+    heartbeat(
+        &app,
+        media.id,
+        file_id,
+        device_id,
+        &new_session,
+        "start",
+        3000,
+    )
+    .await;
+    let still_late_old = heartbeat(
+        &app,
+        media.id,
+        file_id,
+        device_id,
+        &old_session,
+        "progress",
+        2500,
+    )
+    .await;
+    assert_eq!(still_late_old["ended_by_admin"], true);
+
+    let progress_new = heartbeat(
+        &app,
+        media.id,
+        file_id,
+        device_id,
+        &new_session,
+        "progress",
+        4000,
+    )
+    .await;
+    assert_eq!(progress_new["ended_by_admin"], false);
+    let live = store.get_session(user_id, device_id).unwrap().unwrap();
+    assert_eq!(live.play_session_id.as_deref(), Some(new_session.as_str()));
+    assert_eq!(live.position_ms, 4000);
 }
 
 #[tokio::test]

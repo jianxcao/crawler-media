@@ -11,7 +11,7 @@ const CANCELLATION_POLL: Duration = Duration::from_millis(25);
 pub const DEFAULT_REMOTE_READ_LIMIT: usize = 1;
 /// STRM sources: pause between remote reads.
 pub const DEFAULT_REMOTE_READ_COOLDOWN: Duration = Duration::from_millis(500);
-pub const READ_WAIT_STOPPED: &str = "Remote media read stopped during shutdown";
+pub const READ_WAIT_STOPPED: &str = "Remote media read stopped before admission";
 static REMOTE_READS: LazyLock<MediaReadGate> =
     LazyLock::new(|| MediaReadGate::new(DEFAULT_REMOTE_READ_LIMIT, DEFAULT_REMOTE_READ_COOLDOWN));
 
@@ -103,7 +103,7 @@ impl MediaReadGate {
                 tracing::debug!(path = %path.display(), "Remote media read cancelled while waiting");
                 return Err("Library work cancelled".into());
             }
-            if state.shutting_down || control.read_wait_stopped() {
+            if state.shutting_down || state.paused || control.read_wait_stopped() {
                 state.waiting.retain(|waiting| *waiting != ticket);
                 self.changed.notify_all();
                 return Err(READ_WAIT_STOPPED.into());
@@ -162,6 +162,11 @@ pub fn configure_remote_reads(limit: usize, cooldown: Duration) {
 /// Pause or resume admission while letting active reads complete.
 pub fn set_remote_reads_paused(paused: bool) {
     REMOTE_READS.set_paused(paused);
+}
+
+/// Whether background remote-read admission is paused.
+pub fn remote_reads_paused() -> bool {
+    REMOTE_READS.lock().paused
 }
 
 /// Release background reads waiting at the gate as the process exits.

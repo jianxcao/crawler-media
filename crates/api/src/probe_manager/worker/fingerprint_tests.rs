@@ -4,6 +4,9 @@ use parking_lot::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[path = "fingerprint_pause_tests.rs"]
+mod pause;
+
 fn fixture() -> (tempfile::TempDir, Arc<crate::Store>, ProbeUnit) {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::Store::open(directory.path().join("data")).unwrap();

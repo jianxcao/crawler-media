@@ -128,7 +128,17 @@ impl ApiServerProvider {
         {
             return Ok(None);
         }
-        let bound_source = if media_source_id.is_none() {
+        let explicit_source = match media_source_id {
+            Some(media_source_id) => {
+                let Some(source) = domain::PhysicalSourceId::from_wire_string(media_source_id)
+                else {
+                    return Ok(None);
+                };
+                Some(source)
+            }
+            None => None,
+        };
+        let bound_source = if explicit_source.is_none() {
             if let Some(session_id) = play_session_id {
                 let Some(source) = self.session_physical_source(user_id, device_id, session_id)?
                 else {
@@ -141,49 +151,18 @@ impl ApiServerProvider {
         } else {
             None
         };
+        let preferred_source = explicit_source.as_ref().or(bound_source.as_ref());
         let entry = self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-            items::resolve_entry_with_source(store, Some(user_id), id, bound_source.as_ref())
+            items::resolve_entry_with_source(store, Some(user_id), id, preferred_source)
         })?;
         let Some(entry) = entry else {
             return Ok(None);
         };
 
-        let file = if let Some(msid) = media_source_id {
-            // Only the versioned `f1_<file>_<revision>` shape advertised by
-            // PlaybackInfo is accepted; a bare file UUID is not a MediaSourceId.
-            let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
-                return Ok(None);
-            };
-            let Some(file) =
-                self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-                    let Some(file) = store
-                        .visible_file(user_id, physical.file_id)
-                        .map_err(|e| e.to_string())?
-                    else {
-                        return Ok(None);
-                    };
-                    let covers = store
-                        .file_covers_unit(
-                            physical.file_id,
-                            entry.media.id,
-                            domain::UnitKey::new(entry.unit.0, entry.unit.1),
-                        )
-                        .map_err(|e| e.to_string())?;
-                    if !covers
-                        || file.media_id != entry.media.id
-                        || file.version.revision != physical.revision
-                    {
-                        return Ok(None);
-                    }
-                    Ok(Some(file))
-                })?
-            else {
-                return Ok(None);
-            };
-            file
-        } else {
-            entry.file.clone()
-        };
+        // Resolve an explicit source through the requested typed item's playable entries.
+        // For Season IDs this makes the source's own covered Episode the logical target,
+        // rather than reusing whichever Episode is currently preferred for the Season.
+        let file = entry.file.clone();
         if let Some(session_id) = play_session_id
             && !self.stream_matches_binding(user_id, device_id, session_id, &entry, &file)?
         {

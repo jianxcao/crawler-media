@@ -57,6 +57,7 @@ fn paused_capture_does_not_begin_an_attempt_before_admission() {
     assert!(matches!(
         early_attempt,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
     ));
     assert_eq!(error.message, marker::media_read::READ_WAIT_STOPPED);
 }

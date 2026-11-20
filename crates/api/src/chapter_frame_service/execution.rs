@@ -77,6 +77,11 @@ impl ChapterFrameService {
         if self.shutting_down.load(Ordering::SeqCst) || marker::media_read::remote_reads_stopping()
         {
             // Leave the row `running`; shutdown() requeues it after the join.
+        } else if matches!(
+            &outcome,
+            Ok((Err(error), _, _)) if error == marker::media_read::READ_WAIT_STOPPED
+        ) {
+            self.defer_read(&claim, publish_request, task_started).await;
         } else {
             let (results, frame_ms, file_publish_ms) = match outcome {
                 Ok((Ok(results), frame_ms, publish_ms)) => {
@@ -123,6 +128,32 @@ impl ChapterFrameService {
         self.finish_memory(&claim);
     }
 
+    async fn defer_read(
+        &self,
+        claim: &ChapterFrameClaim,
+        request: ChapterFrameRequest,
+        started: std::time::Instant,
+    ) {
+        let applied = self.defer_task(claim).await;
+        self.record_measurement(ChapterFrameMeasurement {
+            file_id: claim.task.file_id,
+            task_id: claim.task.id.clone(),
+            generation: claim.generation.clone(),
+            attempt: claim.attempt,
+            frame_ms: None,
+            publish_ms: None,
+            task_ms: started.elapsed().as_millis() as u64,
+            adopted: applied,
+        });
+        if applied.is_some() {
+            self.cleanup_retired_candidates(claim.clone(), request)
+                .await;
+        }
+        if applied == Some(true) {
+            self.notify.notify_waiters();
+        }
+    }
+
     async fn resolve_target(
         self: &Arc<Self>,
         task: &ChapterFrameTask,
@@ -160,6 +191,32 @@ impl ChapterFrameService {
             duration_ms,
             lease,
         })
+    }
+
+    /// Return a paused remote-read attempt to the durable queue using its exact fence.
+    async fn defer_task(&self, claim: &ChapterFrameClaim) -> Option<bool> {
+        let id = claim.task.id.clone();
+        let attempt = claim.attempt;
+        let logged = id.clone();
+        let outcome = store_blocking(self.store.clone(), move |store| {
+            store.defer_chapter_frame_attempt(&id, attempt)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(applied)) => {
+                tracing::info!(task=%logged, generation=%claim.generation, attempt, applied,
+                    "章节帧任务因远程读取暂停而重新排队");
+                Some(applied)
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, task=%logged, "章节帧任务暂停重排队失败");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(?error, task=%logged, "章节帧任务暂停重排队未写入：worker 失败");
+                None
+            }
+        }
     }
 
     /// Write the task's terminal state off the executor. A contended lock keeps the

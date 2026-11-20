@@ -99,7 +99,7 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
             }
             control
         })
-        .with_read_stop(manager.shutting_down.clone());
+        .with_read_stop(manager.remote_reads_wait_stopped.clone());
     // The full-window and adaptive pipelines include synchronous source reads
     // and SQL between awaits. Drive the whole future on one bounded worker;
     // the permit stays with it until its final publication has really finished.

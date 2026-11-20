@@ -114,7 +114,7 @@ async fn remote_pause_survives_restart(state_before: api::ApiState, root: &std::
             Ok::<_, String>(())
         }
     });
-    // Bound the lifetime of the blocking waiter even if the test fails.
+    // A gate regression must fail promptly instead of leaving a blocking thread parked.
     let deadline = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
         control.cancel();
@@ -125,16 +125,32 @@ async fn remote_pause_survives_restart(state_before: api::ApiState, root: &std::
         &marker::WorkControl::default(),
     )
     .unwrap();
+    let stopped = waiting.await.unwrap().unwrap_err();
+    deadline.abort();
+    assert_eq!(stopped, marker::media_read::READ_WAIT_STOPPED);
     assert_eq!(
         remote_reads_request(&app, "PUT", json!({"paused": false})).await,
         json!({"paused": false})
     );
-    let resumed = tokio::time::timeout(Duration::from_secs(1), entered).await;
-    waiting.await.unwrap().unwrap();
-    deadline.abort();
     assert_eq!(paused, json!({"paused": true}));
-    assert!(held.is_err(), "STRM read started while paused");
-    resumed.unwrap().unwrap();
+    assert!(
+        !matches!(held, Ok(Ok(()))),
+        "STRM read started while paused"
+    );
+    assert_eq!(stopped, marker::media_read::READ_WAIT_STOPPED);
+    let (resumed_tx, resumed) = tokio::sync::oneshot::channel();
+    let path = root.join("remote.strm");
+    let read = tokio::task::spawn_blocking(move || {
+        let permit =
+            marker::media_read::acquire_media_read(&path, &marker::WorkControl::default())?;
+        let _ = resumed_tx.send(());
+        Ok::<_, String>(permit)
+    });
+    tokio::time::timeout(Duration::from_secs(1), resumed)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(read.await.unwrap().unwrap());
     restarted.probe.shutdown_workers().await.unwrap();
 }
 
@@ -442,8 +458,14 @@ impl api::probe_manager::TracksProbe for GatedTracks {
         control: &library::WorkControl,
     ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
         self.waiting.send(()).unwrap();
-        let _permit = marker::media_read::acquire_media_read(path, control.signal())
-            .map_err(library::LibraryError::Probe)?;
+        let _permit =
+            marker::media_read::acquire_media_read(path, control.signal()).map_err(|error| {
+                if error == marker::media_read::READ_WAIT_STOPPED {
+                    library::LibraryError::ReadWaitStopped
+                } else {
+                    library::LibraryError::Probe(error)
+                }
+            })?;
         self.reads.probe(path, control)
     }
 }
@@ -746,51 +768,8 @@ async fn paused_remote_jobs_allow_local_metadata() {
     pausing_a_gate_waiter_releases_the_metadata_worker(tempfile::tempdir().unwrap().path()).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn promoted_standby_uses_recent_remote_pause() {
-    let _serial = PROCESS_GATE.lock().await;
-    let root = tempfile::tempdir().unwrap();
-    let primary = state(root.path());
-    let standby = api::ApiState::new_arc_with_admin_bootstrap_writable(
-        primary.store(),
-        indexer::ProfileSet::load(None).unwrap(),
-        Arc::new(common::Fixtures {
-            requests: Mutex::new(Vec::new()),
-            bodies: HashMap::new(),
-        }),
-        Arc::new(MemoryDownloader::new(root.path().join("dl"))),
-        api::bootstrap_credentials::AdminBootstrapAction::Keep {
-            cli_token: "management-secret".into(),
-        },
-        false,
-    )
-    .unwrap();
-    remote_reads_request(
-        &api::router(primary.clone()),
-        "PUT",
-        json!({"paused": true}),
-    )
-    .await;
-    assert_eq!(
-        remote_reads_request(&api::router(primary.clone()), "GET", Value::Null).await,
-        json!({"paused": true})
-    );
-    primary.probe.shutdown_workers().await.unwrap();
-    assert_eq!(
-        remote_reads_request(&api::router(standby.clone()), "GET", Value::Null).await,
-        json!({"paused": true})
-    );
-    standby.ensure_writable_runtime_started().unwrap();
+#[path = "probe_settings_runtime/pause_requeue.rs"]
+mod pause_requeue;
 
-    let path = root.path().join("movie.strm");
-    let stop = marker::WorkControl::default();
-    let waiter = tokio::task::spawn_blocking({
-        let stop = stop.clone();
-        move || marker::media_read::acquire_media_read(&path, &stop).is_ok()
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    stop.cancel();
-    let admitted = waiter.await.unwrap();
-    standby.probe.shutdown_workers().await.unwrap();
-    assert!(!admitted, "takeover ignored the saved pause");
-}
+#[path = "probe_settings_runtime/standby.rs"]
+mod standby;

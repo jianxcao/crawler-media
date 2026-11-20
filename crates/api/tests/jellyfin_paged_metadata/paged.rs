@@ -730,7 +730,7 @@ async fn name_ties_keep_a_stable_order() {
 }
 
 /// 一部剧的已采纳元数据（Task 7 采纳面）：简介/工作室/类型三个字段。
-fn adopt_show_metadata(state: &ApiState, media: MediaId) {
+pub(super) fn adopt_show_metadata(state: &ApiState, media: MediaId) {
     let fields = domain::MetadataFields {
         overview: domain::FieldValue::Value("adopted plot".into()),
         studios: domain::FieldValue::Value(vec!["Studio X".into()]),
@@ -763,47 +763,4 @@ fn adopt_show_metadata(state: &ApiState, media: MediaId) {
     let store = state.store();
     let store = store.as_ref();
     store.adopt_metadata(&adoption, 1).unwrap();
-}
-
-/// 页内元数据取库内快照（Task 8 观测 + Task 7 采纳），现场 NFO 不参与渲染。
-///
-/// 观测输入只在 `publish_fixture_file` 时采集，所以 `publish_fixture_file` 之后写下的 sidecar 只可能
-/// 被「现场读 NFO」看到；坏 sidecar 也不得改变同一页的响应。
-#[tokio::test]
-async fn page_metadata_uses_composed_snapshot_and_ignores_live_nfo() {
-    let fixture = tv_fixture(1, 1);
-    let media = media_for_title(&fixture.state, "Show000");
-    adopt_show_metadata(&fixture.state, media);
-    let sidecar = fixture.roots[0].join("Show000").join("tvshow.nfo");
-    std::fs::write(
-        &sidecar,
-        b"<tvshow><plot>live plot</plot><studio>Live Studio</studio><genre>Comedy</genre></tvshow>",
-    )
-    .unwrap();
-    let app = router(fixture.state.clone());
-    let uri = format!(
-        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Series&SortBy=SortName",
-        fixture.library_id
-    );
-    let listing = get_json(&app, &uri).await;
-    assert_eq!(items(&listing).len(), 1, "{listing}");
-    assert_eq!(
-        items(&listing)[0]["Overview"],
-        "adopted plot",
-        "页内简介必须用库内合成值：{listing}"
-    );
-    assert_eq!(
-        items(&listing)[0]["Studios"][0]["Name"],
-        "Studio X",
-        "页内工作室必须用库内合成值：{listing}"
-    );
-    assert_eq!(
-        items(&listing)[0]["Genres"][0],
-        "Drama",
-        "页内类型必须用库内合成值：{listing}"
-    );
-
-    std::fs::write(&sidecar, b"<tvshow><plot>broken").unwrap();
-    let after = get_json(&app, &uri).await;
-    assert_eq!(after, listing, "坏 NFO 不得改变页内元数据");
 }

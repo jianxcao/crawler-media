@@ -217,6 +217,24 @@ impl crate::LibraryConnection<'_> {
         Ok(true)
     }
 
+    pub fn defer_chapter_frame_attempt(&self, id: &str, attempt: u64) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.library)?;
+        let Some(mut current) = snapshot(&tx, id)? else {
+            return Ok(false);
+        };
+        if current.status.state != ChapterFrameState::Running || current.status.attempt != attempt {
+            return Ok(false);
+        }
+        current.status.state = ChapterFrameState::Queued;
+        for target in current.targets.iter_mut().filter(|target| !target.ready) {
+            target.candidate = None;
+            target.error = None;
+        }
+        save(&tx, &current)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn recover_chapter_frame_tasks(&self) -> Result<usize, StoreError> {
         let tx = crate::write_tx(self.library)?;
         let ids = tx

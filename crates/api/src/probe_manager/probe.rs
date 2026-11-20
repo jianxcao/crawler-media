@@ -72,9 +72,6 @@ async fn probe_metadata_inner(
     control: &library::WorkControl,
 ) -> MetadataOutcome {
     let path = PathBuf::from(&unit.row.file.path);
-    let is_strm = path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"));
     let source_path = path.clone();
     let source_version = match mgr
         .dispatch_work
@@ -90,14 +87,6 @@ async fn probe_metadata_inner(
     let media_duration_ms =
         match super::tracks::probe_tracks_and_store(mgr, unit, &source_version, control).await {
             Ok(duration_ms) => duration_ms,
-            // A pause stops queued gate waiters without cancelling an already
-            // admitted read. If a STRM waiter was released by that pause,
-            // retain its durable unit for the next resume instead of failing it.
-            Err(super::tracks::TrackProbeError::Failed)
-                if is_strm && mgr.remote_reads_are_paused() =>
-            {
-                return MetadataOutcome::Retry;
-            }
             Err(super::tracks::TrackProbeError::Failed) => return MetadataOutcome::Failed,
             Err(super::tracks::TrackProbeError::Retry) => return MetadataOutcome::Retry,
         };

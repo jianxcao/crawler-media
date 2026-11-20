@@ -119,7 +119,17 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<ProbeDispatchId>, StoreError> {
-        self.with_library_read(|db| db.pending_local_metadata_dispatch_ids(limit))
+        self.pending_local_probe_dispatch_ids(ProbeDispatchStage::Metadata, limit)
+    }
+
+    /// Pending dispatch IDs whose files are local, for stages that must keep
+    /// making progress while remote reads are paused.
+    pub fn pending_local_probe_dispatch_ids(
+        &self,
+        stage: ProbeDispatchStage,
+        limit: usize,
+    ) -> Result<Vec<ProbeDispatchId>, StoreError> {
+        self.with_library_read(|db| db.pending_local_probe_dispatch_ids(stage, limit))
     }
 
     /// Same read as [`Self::pending_probe_dispatch_ids`], additionally reporting the SQLite

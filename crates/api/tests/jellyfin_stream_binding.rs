@@ -108,6 +108,83 @@ fn stream_uri(f: &Fixture, source: &str, session: &str, device: &str) -> String 
     )
 }
 
+fn publish_season_episode(
+    root: &Path,
+    store: &Store,
+    media_id: MediaId,
+    episode: u32,
+    file_id: LedgerId,
+    bytes: &[u8],
+) -> domain::LibraryFile {
+    let dir = root.join("data/library/tv/Season Binding");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("S01E{episode:02}.mkv"));
+    std::fs::write(&path, bytes).unwrap();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id,
+            path: path.display().to_string(),
+            season: Some(1),
+            episode: Some(episode),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+fn season_fixture(root: &Path) -> (axum::Router, MediaId, LedgerId) {
+    let store = Store::open(root.join("data")).unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Season Binding".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let file_a =
+        LedgerId::from_uuid(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap());
+    publish_season_episode(root, &store, media.id, 1, file_a, b"AAAA-EP-A");
+    let app = router(
+        ApiState::new(
+            store,
+            "admin-token".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(root.join("stage"))),
+        )
+        .unwrap(),
+    );
+    (app, media.id, file_a)
+}
+
+async fn stream_season_source(
+    app: &axum::Router,
+    season_id: &str,
+    source_id: &str,
+    session_id: &str,
+) -> (StatusCode, Vec<u8>) {
+    get(
+        app,
+        "GET",
+        &format!(
+            "/Videos/{season_id}/stream?MediaSourceId={source_id}&PlaySessionId={session_id}&DeviceId=tv-1"
+        ),
+        "tv-1",
+    )
+    .await
+}
+
 fn publish_new_preferred_source(root: &Path, f: &Fixture) -> String {
     let store = Store::open(root.join("data")).unwrap();
     let item = domain::TypedItemId::from_wire_string(&f.item_id).unwrap();
@@ -192,6 +269,76 @@ async fn unspecified_stream_source_follows_session_after_preference_changes() {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_ne!(bytes, b"BBBB");
     }
+}
+
+#[tokio::test]
+async fn season_stream_keeps_the_explicit_episode_bound_to_its_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media_id, file_a) = season_fixture(tmp.path());
+    let episode_id = domain::TypedItemId::Unit {
+        media: media_id,
+        key: domain::UnitKey::new(1, 1),
+    }
+    .to_wire_string();
+    let season_id = domain::TypedItemId::Season {
+        media: media_id,
+        season: 1,
+    }
+    .to_wire_string();
+    let (status, body) = get(
+        &app,
+        "POST",
+        &format!("/Items/{episode_id}/PlaybackInfo"),
+        "tv-1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap();
+    let source_a = info["MediaSources"][0]["Id"].as_str().unwrap();
+    assert_eq!(
+        source_a,
+        domain::PhysicalSourceId {
+            file_id: file_a,
+            revision: 1,
+        }
+        .to_wire_string()
+    );
+
+    let file_b =
+        LedgerId::from_uuid(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
+    let published_b = publish_season_episode(
+        tmp.path(),
+        &Store::open(tmp.path().join("data")).unwrap(),
+        media_id,
+        2,
+        file_b,
+        b"BBBB-EP-B",
+    );
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let preferred = store
+        .playable_entries(
+            store.admin_user_id().unwrap(),
+            &domain::TypedItemId::Season {
+                media: media_id,
+                season: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(preferred[0].file.file_id, file_b);
+
+    let (status, bytes) = stream_season_source(&app, &season_id, source_a, session).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(bytes, b"AAAA");
+
+    let source_b = domain::PhysicalSourceId {
+        file_id: published_b.file_id,
+        revision: published_b.version.revision,
+    }
+    .to_wire_string();
+    let (status, bytes) = stream_season_source(&app, &season_id, &source_b, session).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_ne!(bytes, b"AAAA");
 }
 
 #[tokio::test]

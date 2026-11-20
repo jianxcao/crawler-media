@@ -396,6 +396,24 @@ pub(crate) async fn delete_library(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Response {
+    // The durable freeze and the handoff to the removal driver are one logical
+    // operation. Own that sequence in a task that survives a client disconnect;
+    // awaiting its JoinHandle still preserves the ordinary HTTP response.
+    let worker = state.clone();
+    match tokio::spawn(async move { delete_library_inner(worker, id).await }).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "Library 删除准备任务失败");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.removal",
+                "Library 删除操作启动失败",
+            )
+        }
+    }
+}
+
+async fn delete_library_inner(state: ApiState, id: String) -> Response {
     let worker = state.clone();
     let preflight = match state
         .http_work
