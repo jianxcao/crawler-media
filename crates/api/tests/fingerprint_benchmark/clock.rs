@@ -8,6 +8,13 @@ pub(super) fn run(session: BenchmarkSession) -> BenchmarkRun {
     session.run().unwrap()
 }
 
+/// Hold the first analysis quiet-window tick until every registered file has
+/// reached `ProbeDispatchStage::Analysis`, making single-batch analysis deterministic.
+pub(super) fn run_when_all_ready(session: BenchmarkSession) -> BenchmarkRun {
+    let _analysis_clock = AnalysisClock::advance_when_all_ready(&session);
+    session.run().unwrap()
+}
+
 pub(super) struct MeasurementClock {
     origin: Instant,
     deadline: Duration,
@@ -56,6 +63,19 @@ pub(super) struct AnalysisClock {
 
 impl AnalysisClock {
     pub(super) fn advance(session: &BenchmarkSession) -> Self {
+        Self::spawn(session, None)
+    }
+
+    pub(super) fn advance_when_all_ready(session: &BenchmarkSession) -> Self {
+        let files: Vec<String> = session
+            .registered_files()
+            .iter()
+            .map(|row| row.file.file_id.to_string())
+            .collect();
+        Self::spawn(session, Some(files))
+    }
+
+    fn spawn(session: &BenchmarkSession, wait_for_all: Option<Vec<String>>) -> Self {
         let clock = Arc::new(api::probe_manager::clock::FakeClock::new(0));
         let manager = session.state.probe.clone();
         manager.set_clock(clock.clone());
@@ -64,11 +84,28 @@ impl AnalysisClock {
         let done = stop.clone();
         let worker = std::thread::spawn(move || {
             let mut now = 0;
+            let mut first_batch_released = wait_for_all.is_none();
             while !done.load(Ordering::SeqCst) {
-                if !store
-                    .pending_probe_analysis_keys(None, 1)
-                    .unwrap()
-                    .is_empty()
+                if !first_batch_released && let Some(files) = wait_for_all.as_ref() {
+                    let all_in_analysis = !files.is_empty()
+                        && files.iter().all(|file_id| {
+                            store
+                                .active_probe_unit_for_ledger(file_id)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|unit| {
+                                    unit.stage == store::ProbeDispatchStage::Analysis
+                                })
+                        });
+                    if all_in_analysis {
+                        first_batch_released = true;
+                    }
+                }
+                if first_batch_released
+                    && !store
+                        .pending_probe_analysis_keys(None, 1)
+                        .unwrap()
+                        .is_empty()
                 {
                     now += 2_000;
                     clock.set(now);

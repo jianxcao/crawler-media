@@ -26,6 +26,12 @@ impl crate::LibraryConnection<'_> {
         observations: Option<&[crate::metadata::NfoObservation]>,
     ) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
+        if crate::library_write::rename_guard::has_active_file_rename(
+            &tx,
+            &expected.file_id.to_string(),
+        )? {
+            return Ok(false);
+        }
         context.validate(&tx, &expected.path, expected.kind)?;
         ensure_media_writable(&tx, expected.media_id)?;
         if expected.library_id != context.library_id || expected.root_id != context.root_id {

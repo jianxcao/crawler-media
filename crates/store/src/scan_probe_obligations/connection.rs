@@ -48,6 +48,15 @@ impl crate::LibraryConnection<'_> {
         for (scanned, context) in rows.iter().zip(contexts) {
             let kind = media_kind(&tx, scanned.media_id)?;
             context.validate(&tx, Path::new(&scanned.path), kind)?;
+            let path_key = crate::path_key::canonical_recorded_key(&tx, &scanned.path);
+            if crate::library_write::rename_guard::path_key_claimed_by_active_rename(
+                &tx, &path_key, None,
+            )? {
+                return Err(StoreError::Protected(format!(
+                    "path {} is claimed by an active rename",
+                    scanned.path
+                )));
+            }
             let library_id = context.library_id.to_string();
             ensure_media_writable(&tx, scanned.media_id)?;
             let file = scanned_file(scanned, context);

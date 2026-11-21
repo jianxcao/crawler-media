@@ -329,3 +329,53 @@ async fn explicit_invalid_sources_are_refused_without_a_session() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn p2_5_tv_media_only_sessions_and_decide_select_same_single_episode_and_bind_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, target) = fixture(&tmp, true);
+    let media_item_id = target["media_item_id"].as_str().unwrap().to_string();
+    let media_only = json!({
+        "media_item_id": media_item_id,
+        "device_id": "tv-media-only-device"
+    });
+
+    let decide_res = post(&app, "decide", media_only.clone()).await;
+    assert_eq!(decide_res.status(), StatusCode::OK);
+    let decided = json_data(decide_res).await;
+
+    let session_res = post(&app, "sessions", media_only.clone()).await;
+    assert_eq!(
+        session_res.status(),
+        StatusCode::OK,
+        "TV /sessions with only media_item_id must match /decide instead of looking up (-1,-1)"
+    );
+    let session = json_data(session_res).await;
+    assert_eq!(session["file_id"], decided["file_id"]);
+    assert_eq!(session["season_number"], decided["season_number"]);
+    assert_eq!(session["episode_number"], decided["episode_number"]);
+
+    let play_session_id = session["play_session_id"].as_str().unwrap().to_string();
+    let prog_res = post(
+        &app,
+        "progress",
+        json!({
+            "media_item_id": media_item_id,
+            "play_session_id": play_session_id,
+            "device_id": "tv-media-only-device",
+            "position_ms": 33_000,
+            "duration_ms": 120_000,
+            "event": "start",
+            "event_sequence": next_playback_sequence(),
+        }),
+    )
+    .await;
+    assert_eq!(prog_res.status(), StatusCode::OK);
+
+    // Resuming with only media_item_id picks the same episode and restores 33s progress
+    let resumed_res = post(&app, "sessions", media_only).await;
+    assert_eq!(resumed_res.status(), StatusCode::OK);
+    let resumed = json_data(resumed_res).await;
+    assert_eq!(resumed["file_id"], session["file_id"]);
+    assert_eq!(resumed["start_ms"], 33_000);
+}

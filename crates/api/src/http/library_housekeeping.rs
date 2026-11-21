@@ -380,6 +380,7 @@ fn apply_reconciliation(
             })
             .map_err(store::StoreError::Conflict)?;
         let _publication = state.store.apply_file_rename(&request, now)?;
+        state.probe.wake_dispatch();
         Ok(())
     })();
     result.map_err(|error: store::StoreError| {

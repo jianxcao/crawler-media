@@ -149,18 +149,25 @@ fn insert_request(
     now: i64,
 ) -> Result<(), StoreError> {
     let sidecars_json = sidecars_json(&request.sidecars)?;
+    let from_str = request.from_path.to_string_lossy();
+    let to_str = request.to_path.to_string_lossy();
+    let from_key = crate::path_key::canonical_recorded_key(tx, &from_str);
+    let to_key = crate::path_key::canonical_recorded_key(tx, &to_str);
     tx.execute(
             "INSERT INTO pending_file_renames
-                (rename_id, file_id, from_path, to_path, expected_revision, expected_source_version,
+                (rename_id, file_id, from_path, from_path_key, to_path, to_path_key,
+                 expected_revision, expected_source_version,
                  from_library_id, from_root_id, to_library_id, to_root_id, sidecars_json, phase,
-                 source_size, source_device, source_inode, source_mtime_ns,
+                 source_size, source_device, source_inode, source_mtime_ns, source_digest,
                  from_config_revision, to_config_revision, created_at_ms, updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'planned',?12,?13,?14,?15,?16,?17,?18*1000,?18*1000)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'planned',?14,?15,?16,?17,?18,?19,?20,?21*1000,?21*1000)",
             params![
                 request.rename_id,
                 request.file_id.to_string(),
-                request.from_path.to_string_lossy(),
-                request.to_path.to_string_lossy(),
+                from_str,
+                from_key,
+                to_str,
+                to_key,
                 request.expected.revision,
                 request.expected.source_version,
                 request.from_library_id.to_string(),
@@ -172,6 +179,7 @@ fn insert_request(
                 request.source_evidence.device as i64,
                 request.source_evidence.inode as i64,
                 request.source_evidence.mtime_ns,
+                request.source_evidence.source_digest,
                 request.from_config_revision,
                 request.to_config_revision,
                 now,

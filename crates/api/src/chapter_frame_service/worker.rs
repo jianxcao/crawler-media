@@ -86,7 +86,8 @@ fn extract_frame(
     let staged = target.with_file_name(format!(".chapter-{}.jpg", uuid::Uuid::new_v4()));
     let mut command = Command::new(ffmpeg);
     command.args(["-y", "-ss", &format!("{:.3}", midpoint as f64 / 1000.0)]);
-    ProbeTarget::from_path(video).apply_ffmpeg_input(&mut command);
+    let probe_target = ProbeTarget::from_path(video);
+    probe_target.apply_ffmpeg_input(&mut command);
     command.args([
         "-frames:v",
         "1",
@@ -108,6 +109,7 @@ fn extract_frame(
         }
     };
     if !output.status.success() {
+        probe_target.invalidate_redirect();
         remove_file(&staged);
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }

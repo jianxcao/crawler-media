@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+httpdate.workspace = true
 rusty-chromaprint = "0.3"
 thiserror.workspace = true
 serde.workspace = true

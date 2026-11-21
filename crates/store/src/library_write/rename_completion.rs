@@ -1,7 +1,8 @@
 //! Owned filesystem observations for the final rename publication.
 use std::path::PathBuf;
 
-use super::rename_durable::FileRenameRequest;
+use super::rename_durable::{FileRenameRequest, RenameSidecar};
+use super::rename_sidecars::{SidecarAction, SidecarSourceIdentity};
 use crate::{Store, StoreError};
 
 pub struct RenameCompletionPlan {
@@ -10,13 +11,17 @@ pub struct RenameCompletionPlan {
 
 pub struct ObservedRenameCompletion {
     pub(super) request: FileRenameRequest,
+    pub(super) effective_sidecars: Vec<RenameSidecar>,
+    pub(super) reverted_missing_targets: Vec<(PathBuf, PathBuf)>,
     pub(super) source: Option<library::SourceObservation>,
     pub(super) leftovers: Vec<ObservedSidecarDeletion>,
 }
 
 pub(super) struct ObservedSidecarDeletion {
     pub path: PathBuf,
-    pub identity: Option<(u64, Option<u64>)>,
+    pub source_identity: SidecarSourceIdentity,
+    pub target_path: PathBuf,
+    pub target_identity: SidecarSourceIdentity,
 }
 
 impl RenameCompletionPlan {
@@ -28,26 +33,59 @@ impl RenameCompletionPlan {
         } else {
             None
         };
-        let leftovers = request
-            .sidecars
-            .iter()
-            .filter_map(|side| {
-                if !side.action.deletes_source() || side.from == side.to {
-                    return None;
-                }
-                let expected = side.source_identity.as_ref()?;
-                let current = std::fs::symlink_metadata(&side.from).ok()?;
-                if !expected.matches(&current) {
-                    return None;
-                }
-                Some(ObservedSidecarDeletion {
+        let mut effective_sidecars = request.sidecars.clone();
+        let mut reverted_missing_targets = Vec::new();
+        let mut leftovers = Vec::new();
+        for side in effective_sidecars.iter_mut() {
+            if !side.action.deletes_source() || side.from == side.to {
+                continue;
+            }
+            let Some(expected_source) = side.source_identity.clone() else {
+                continue;
+            };
+            let Ok(current_source) = std::fs::symlink_metadata(&side.from) else {
+                continue;
+            };
+            if !expected_source.matches(&current_source) {
+                continue;
+            }
+            let target_meta = std::fs::symlink_metadata(&side.to);
+            let target_missing = matches!(
+                &target_meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            );
+            let verified_target = side.target_identity.clone().filter(|expected_target| {
+                target_meta
+                    .as_ref()
+                    .is_ok_and(|meta| expected_target.matches(meta))
+            });
+            if let Some(target_identity) = verified_target {
+                leftovers.push(ObservedSidecarDeletion {
                     path: side.from.clone(),
-                    identity: Some(expected.deletion_identity()),
-                })
-            })
-            .collect();
+                    source_identity: expected_source,
+                    target_path: side.to.clone(),
+                    target_identity,
+                });
+            } else {
+                tracing::warn!(
+                    rename_id = %request.rename_id,
+                    from = %side.from.display(),
+                    to = %side.to.display(),
+                    target_missing,
+                    "sidecar destination missing or changed before completion; keeping original source"
+                );
+                if target_missing {
+                    reverted_missing_targets.push((side.from.clone(), side.to.clone()));
+                }
+                side.action = SidecarAction::KeepSource;
+                side.source_identity = None;
+                side.target_identity = None;
+            }
+        }
         Ok(ObservedRenameCompletion {
             request,
+            effective_sidecars,
+            reverted_missing_targets,
             source,
             leftovers,
         })
@@ -98,12 +136,23 @@ fn observe_verified_destination(
             request.to_path.display()
         )));
     }
-    library::observe_open_source(&request.to_path, &file, &fd_meta).map_err(|error| {
-        StoreError::Protected(format!(
-            "rename {}: observe destination: {error}",
-            request.rename_id
-        ))
-    })
+    let observed =
+        library::observe_open_source(&request.to_path, &file, &fd_meta).map_err(|error| {
+            StoreError::Protected(format!(
+                "rename {}: observe destination: {error}",
+                request.rename_id
+            ))
+        })?;
+    if let Some(expected_digest) = receipt.source_digest.as_deref()
+        && observed.content_digest.as_deref() != Some(expected_digest)
+    {
+        return Err(StoreError::Protected(format!(
+            "rename {}: destination {} content digest changed",
+            request.rename_id,
+            request.to_path.display()
+        )));
+    }
+    Ok(observed)
 }
 
 impl Store {

@@ -121,6 +121,7 @@ fn probe_tracks_controlled_program(
     target.apply_input(&mut command);
     let output = control.output(&mut command)?;
     if !output.status.success() {
+        target.invalidate_redirect();
         return Err(LibraryError::Probe(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));

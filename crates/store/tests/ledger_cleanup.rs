@@ -162,7 +162,7 @@ fn deleting_a_file_removes_only_its_derived_rows() {
     let conn = library_db(tmp.path());
     for file in [&deleted, &kept] {
         conn.execute(
-            "INSERT INTO scrape_sidecars (file_id, kind, path) VALUES (?1, 'nfo', ?2)",
+            "INSERT INTO scrape_sidecars (file_id, kind, path, path_key) VALUES (?1, 'nfo', ?2, ?2)",
             rusqlite::params![
                 file.file_id.to_string(),
                 format!("{}.nfo", file.path.display())
@@ -339,7 +339,7 @@ fn derived_delete_failure_rolls_back_every_row() {
 
     let conn = library_db(tmp.path());
     conn.execute(
-        "INSERT INTO scrape_sidecars (file_id, kind, path) VALUES (?1, 'nfo', '/movies/Matrix.nfo')",
+        "INSERT INTO scrape_sidecars (file_id, kind, path, path_key) VALUES (?1, 'nfo', '/movies/Matrix.nfo', '/movies/Matrix.nfo')",
         [file.file_id.to_string()],
     )
     .unwrap();

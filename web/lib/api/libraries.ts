@@ -845,24 +845,25 @@ function refreshReceiptOf(data: Record<string, unknown>): MetadataRefreshReceipt
 // 媒体库列表与条目
 // ---------------------------------------------------------------------------
 
+export type ListLibrariesOptions = RequestInit & { manage?: boolean; scope?: string };
+
 /**
  * 列出全部媒体库（可按类型过滤）。
  * GET /libraries → [{id, name, kind, root_paths, is_default, stats}]
  */
 export function listLibraries(
   kind?: LibraryKind,
-  options?: RequestInit | { manage?: boolean; scope?: string },
+  options?: ListLibrariesOptions,
 ): Promise<MediaLibrary[]> {
   const params = new URLSearchParams();
   if (kind) params.set("kind", kind);
   let init: RequestInit | undefined = undefined;
   if (options) {
-    if ("manage" in options && options.manage) {
-      params.set("manage", "1");
-    } else if ("scope" in options && options.scope) {
-      params.set("scope", options.scope);
-    } else {
-      init = options as RequestInit;
+    const { manage, scope, ...rest } = options;
+    if (manage) params.set("manage", "1");
+    if (scope) params.set("scope", scope);
+    if (Object.values(rest).some((value) => value !== undefined)) {
+      init = rest;
     }
   }
   const suffix = params.size > 0 ? `?${params}` : "";
@@ -872,8 +873,11 @@ export function listLibraries(
 }
 
 /** 获取单个媒体库详情（无 GET /libraries/{id} 端点，从列表取；找不到返回空壳）。 */
-export async function getLibrary(id: string): Promise<MediaLibrary> {
-  const libs = await listLibraries();
+export async function getLibrary(
+  id: string,
+  options?: ListLibrariesOptions,
+): Promise<MediaLibrary> {
+  const libs = await listLibraries(undefined, options);
   return libs.find((lib) => lib.id === id) ?? emptyLibrary();
 }
 
@@ -927,9 +931,43 @@ export function getLibraryOperation(
   });
 }
 
+/** 重试已失败的持久化库操作（POST /libraries/{id}/operations/{operation_id}/retry，空请求体从原游标继续）。 */
+export function retryLibraryOperation(
+  libraryId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<LibraryOperation> {
+  signal?.throwIfAborted();
+  return unwrap(
+    request<ApiEnvelope<unknown>>(
+      `/libraries/${libraryId}/operations/${encodeURIComponent(operationId)}/retry`,
+      { method: "POST", signal },
+    ),
+  ).then((raw) => {
+    const operation = libraryOperationFrom(raw);
+    if (!operation) throw new Error("媒体库操作状态缺失");
+    return operation;
+  });
+}
+
+/** 从 409 library.reindexing 错误响应里提取可恢复/可轮询的 operation_id。 */
+export function reindexingOperationId(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const status = "status" in error ? (error as { status?: unknown }).status : undefined;
+  if (status !== 409) return null;
+  const details = "details" in error ? (error as { details?: unknown }).details : undefined;
+  if (!details || typeof details !== "object" || !("error" in details)) return null;
+  const inner = (details as { error?: unknown }).error;
+  if (!inner || typeof inner !== "object") return null;
+  const code = "code" in inner ? (inner as { code?: unknown }).code : undefined;
+  const operationId = "operation_id" in inner ? (inner as { operation_id?: unknown }).operation_id : undefined;
+  if (code !== "library.reindexing") return null;
+  return typeof operationId === "string" && operationId.length > 0 ? operationId : null;
+}
+
 /**
  * 更新并等到真正生效：换目录的 202 只表示「已受理并冻结」，必须轮询到 succeeded，
- * 再用列表里的最新事实重新读库（没有 GET /libraries/{id}）。
+ * 再用管理列表里的最新事实重新读库（没有 GET /libraries/{id}）。
  */
 export async function updateLibraryAndWait(
   id: string,
@@ -943,7 +981,22 @@ export async function updateLibraryAndWait(
     (operationId, signal) => getLibraryOperation(id, operationId, signal),
     options,
   );
-  return getLibrary(id);
+  return getLibrary(id, { manage: true, signal: options.signal });
+}
+
+/** 重试已失败的操作并等到真正生效，再重新读取该库最新配置。 */
+export async function retryLibraryOperationAndWait(
+  libraryId: string,
+  operationId: string,
+  options: OperationWaitOptions = {},
+): Promise<MediaLibrary> {
+  const accepted = await retryLibraryOperation(libraryId, operationId, options.signal);
+  await waitForLibraryOperation(
+    accepted,
+    (opId, signal) => getLibraryOperation(libraryId, opId, signal),
+    options,
+  );
+  return getLibrary(libraryId, { manage: true, signal: options.signal });
 }
 
 /** 设为该类型的默认库（PUT /libraries/{id}/default）。 */
@@ -1232,24 +1285,42 @@ export async function startLibraryScan(
 }
 
 
-/** 自有 API 的整理预览形状（后端返回 from/to）。 */
+/** 自有 API 的整理预览形状（后端按所选目标库和目标根返回 from/to）。 */
 export interface OrganizeRenameEntry {
+  file_id?: string;
   from: string;
   to: string;
-  title: string;
-  kind: string;
+  title?: string;
+  kind?: string;
 }
 
 export interface OrganizePreviewResult {
-  total: number;
+  library_id?: string;
+  root?: string;
+  total?: number;
   already_ok: number;
-  skips: number;
+  skips?: number;
+  skipped?: number;
   renames: OrganizeRenameEntry[];
 }
 
-/** 预览整理计划（GET /libraries/{id}/organize-preview：按命名模板算目标名）。 */
-export async function previewLibraryOrganize(id: string): Promise<OrganizePreviewResult> {
-  return unwrap(request<ApiEnvelope<OrganizePreviewResult>>(`/libraries/${id}/organize-preview`));
+export interface OrganizePreviewOptions {
+  targetLibraryId?: string;
+  targetRoot?: string;
+  signal?: AbortSignal;
+}
+
+/** 预览整理计划（GET /libraries/{id}/organize-preview：按目标库/目标根与命名模板算目标名）。 */
+export async function previewLibraryOrganize(
+  id: string,
+  options: OrganizePreviewOptions = {},
+): Promise<OrganizePreviewResult> {
+  const params = new URLSearchParams();
+  if (options.targetLibraryId) params.set("target_library_id", options.targetLibraryId);
+  if (options.targetRoot) params.set("target_root", options.targetRoot);
+  const suffix = params.size > 0 ? `?${params}` : "";
+  const init = options.signal ? { signal: options.signal } : undefined;
+  return unwrap(request<ApiEnvelope<OrganizePreviewResult>>(`/libraries/${id}/organize-preview${suffix}`, init));
 }
 
 /** 开始整理（POST /libraries/{id}/organize：应用预览确认的重命名）。 */
@@ -2008,7 +2079,8 @@ export async function applyRootConsolidations(
   roots: string[],
   options: OperationWaitOptions = {},
 ): Promise<{ consolidated: number; roots: string[] }> {
-  const before = await getLibrary(libraryId);
+  const before = await getLibrary(libraryId, { manage: true, signal: options.signal });
+  if (!before.id) throw new Error("媒体库不存在");
   const removed = new Set(roots);
   const remaining = before.root_paths.filter((path) => !removed.has(path));
   if (remaining.length === 0) throw new Error("媒体库至少需要一个目录");

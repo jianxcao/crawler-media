@@ -379,6 +379,7 @@ async fn a_new_file_without_own_mixed_position_reference_starts_with_bounded_fal
         .store
         .analysis_season_files_page(s.media_id, 1, None, 16)
         .unwrap()
+        .0
         .into_iter()
         .find(|row| row.units.iter().any(|unit| unit.episode == 4))
         .unwrap();

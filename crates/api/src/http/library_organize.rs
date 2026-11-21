@@ -3,10 +3,11 @@
 //! image gallery.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 
@@ -53,16 +54,30 @@ fn release_for(coverage: &domain::FileCoverage) -> domain::Release {
 }
 
 /// GET /libraries/{id}/organize-preview — target names for every owned file
-/// under the library's naming template.
+/// under the selected destination library/root and naming template.
 pub(crate) async fn preview_organize(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    let target_library_id = query
+        .get("target_library_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let target_root = query
+        .get("target_root")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let state_for_work = state.clone();
     let work = state
         .http_work
         .run(ORGANIZE_READ_DEADLINE, move || {
-            preview_organize_inner(&state_for_work, &id)
+            preview_organize_inner(
+                &state_for_work,
+                &id,
+                target_library_id.as_deref(),
+                target_root.as_deref(),
+            )
         })
         .await;
     match work {
@@ -71,12 +86,58 @@ pub(crate) async fn preview_organize(
     }
 }
 
-fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
+fn preview_organize_inner(
+    state: &ApiState,
+    id: &str,
+    target_library_id: Option<&str>,
+    target_root: Option<&str>,
+) -> Response {
     let store = state.store.as_ref();
     let Some(library) = store.get_library(id).ok().flatten() else {
         return missing_library();
     };
-    let pattern = match store.naming_pattern(library.kind) {
+    let destination = match target_library_id {
+        Some(target_id) if target_id != library.id => {
+            let Some(target) = store.get_library(target_id).ok().flatten() else {
+                return missing_library();
+            };
+            if target.kind != library.kind {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "organize.invalid",
+                    "目标媒体库与源媒体库类型不一致",
+                );
+            }
+            if target.root_paths.is_empty() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "organize.invalid",
+                    "目标媒体库没有可用的根目录",
+                );
+            }
+            target
+        }
+        _ => library.clone(),
+    };
+    let primary = match target_root {
+        Some(requested) => {
+            let requested_key = store::path_key::normalize_path_key(requested);
+            let matched = destination.root_paths.iter().find(|root| {
+                let raw = root.to_string_lossy();
+                raw == requested || store::path_key::normalize_path_key(&raw) == requested_key
+            });
+            let Some(root) = matched else {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "organize.invalid",
+                    "目标根目录不属于所选媒体库",
+                );
+            };
+            root.clone()
+        }
+        None => destination.root_paths.first().cloned().unwrap_or_default(),
+    };
+    let pattern = match store.naming_pattern(destination.kind) {
         Ok(pattern) => pattern,
         Err(error) => {
             return err(
@@ -86,7 +147,6 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
             );
         }
     };
-    let primary = library.root_paths.first().cloned().unwrap_or_default();
     let mut renames = Vec::new();
     let mut already_ok = 0usize;
     let mut skips = 0usize;
@@ -109,11 +169,12 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
                 continue;
             }
         };
-        if target.to_string_lossy() == row.path.to_string_lossy() {
+        if destination.id == library.id && target.to_string_lossy() == row.path.to_string_lossy() {
             already_ok += 1;
             continue;
         }
         renames.push(json!({
+            "file_id": row.file_id.to_string(),
             "from": row.path,
             "to": target.display().to_string(),
             "title": media.title,
@@ -121,6 +182,8 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
         }));
     }
     ok(json!({
+        "library_id": destination.id,
+        "root": primary.display().to_string(),
         "total": renames.len() + already_ok + skips,
         "already_ok": already_ok,
         "skips": skips,

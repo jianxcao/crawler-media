@@ -100,3 +100,47 @@ fn direct_sources_reuse_the_observed_target_until_invalidation() {
     cache.invalidate(&url);
     assert_eq!(cache.resolve(&url), "http://cdn.invalid/new-target");
 }
+
+#[test]
+fn rotating_targets_honor_no_store_and_short_max_age_and_invalidation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first_line = String::new();
+            let _ = reader.read_line(&mut first_line);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let response = if first_line.contains("/no-store") {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://cdn.invalid/no-store-{n}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://cdn.invalid/short-{n}\r\nCache-Control: max-age=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let cache = RedirectCache::new(Duration::from_secs(300));
+    let no_store_url = format!("http://{addr}/no-store");
+    let first = cache.resolve(&no_store_url);
+    let second = cache.resolve(&no_store_url);
+    assert_ne!(first, second, "no-store redirects must resolve every time");
+
+    let short_url = format!("http://{addr}/short");
+    let short_a = cache.resolve(&short_url);
+    assert_eq!(cache.resolve(&short_url), short_a, "fresh within max-age=1");
+    std::thread::sleep(Duration::from_millis(1100));
+    let short_b = cache.resolve(&short_url);
+    assert_ne!(short_a, short_b, "must re-resolve once max-age=1 expires");
+}

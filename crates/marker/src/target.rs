@@ -137,6 +137,13 @@ impl ProbeTarget {
     pub fn apply_ffmpeg_input(&self, cmd: &mut Command) {
         self.apply_ffmpeg_input_with_seek(cmd, 0);
     }
+
+    /// Drop any cached redirect for a remote target after an upstream read failure.
+    pub fn invalidate_redirect(&self) {
+        if let Self::Remote(url) = self {
+            crate::redirect::invalidate_remote(url);
+        }
+    }
 }
 
 pub(crate) fn is_strm_path(path: &Path) -> bool {

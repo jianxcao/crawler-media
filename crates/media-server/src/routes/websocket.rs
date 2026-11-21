@@ -12,7 +12,7 @@ use crate::AuthUser;
 
 #[derive(Default, Deserialize)]
 pub(super) struct SocketQuery {
-    #[serde(default, rename = "deviceId", alias = "DeviceId")]
+    #[serde(default, rename = "deviceId", alias = "DeviceId", alias = "device_id")]
     device_id: Option<String>,
 }
 
@@ -24,8 +24,9 @@ pub(super) async fn connect(
 ) -> impl IntoResponse {
     let receiver = state.data_changes.subscribe();
     let provider = state.provider.clone();
+    let device_id = user.device_id.clone().or(query.device_id);
     upgrade
-        .on_upgrade(move |socket| run_socket(socket, user, receiver, query.device_id, provider))
+        .on_upgrade(move |socket| run_socket(socket, user, receiver, device_id, provider))
         .into_response()
 }
 

@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import React, { act } from "react";
+import { create } from "react-test-renderer";
 import ts from "typescript";
-import { waitForLibraryOperation, operationLabel } from "../lib/library-operations.ts";
+import {
+  LibraryOperationError,
+  waitForLibraryOperation,
+  operationLabel,
+} from "../lib/library-operations.ts";
+
+const require = createRequire(import.meta.url);
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const webRoot = fileURLToPath(new URL("../", import.meta.url));
 
 const operation = (state, extra = {}) => ({
   operation_id: "op",
@@ -34,7 +48,7 @@ test("a freshly accepted operation is polled even when its first read is failed"
   assert.equal(result.state, "succeeded");
 });
 
-test("a later failure surfaces the backend error and stops polling", async () => {
+test("a later failure surfaces the backend error as LibraryOperationError with operation_id and stops polling", async () => {
   let calls = 0;
   await assert.rejects(
     waitForLibraryOperation(operation("applying"), async () => {
@@ -44,11 +58,18 @@ test("a later failure surfaces the backend error and stops polling", async () =>
     /boom/,
   );
   assert.equal(calls, 1);
+  const failedOp = operation("failed", { operation_id: "op-fail", cursor: "batch-2", error: "迁移失败" });
   await assert.rejects(
-    waitForLibraryOperation(operation("applying"), async () => operation("failed", { error: "迁移失败" }), {
+    waitForLibraryOperation(operation("applying", { operation_id: "op-fail" }), async () => failedOp, {
       intervalMs: 0,
     }),
-    /迁移失败/,
+    (err) => {
+      assert.ok(err instanceof LibraryOperationError);
+      assert.equal(err.operationId, "op-fail");
+      assert.deepEqual(err.operation, failedOp);
+      assert.match(err.message, /迁移失败/);
+      return true;
+    },
   );
 });
 
@@ -110,7 +131,7 @@ test("root consolidation uses the current root operation and waits for completio
   const api = await loadApi(async (path, init = {}) => {
     const method = init.method ?? "GET";
     requests.push({ path, method });
-    if (path === "/libraries") {
+    if (path === "/libraries?manage=1") {
       return { ok: true, data: [{ ...library, root_paths: changed ? ["/media"] : ["/media", "/duplicate"] }] };
     }
     if (method === "PATCH") {
@@ -125,7 +146,7 @@ test("root consolidation uses the current root operation and waits for completio
   const result = await api.applyRootConsolidations("lib", ["/duplicate"], { intervalMs: 0 });
   assert.deepEqual(result, { consolidated: 1, roots: ["/media"] });
   assert.deepEqual(requests.map((r) => r.path), [
-    "/libraries", "/libraries/lib", "/libraries/lib/operations/op", "/libraries",
+    "/libraries?manage=1", "/libraries/lib", "/libraries/lib/operations/op", "/libraries?manage=1",
   ]);
 });
 
@@ -152,7 +173,7 @@ test("a synchronous field update still returns the library", async () => {
   assert.equal(updated.library.name, "新名字");
 });
 
-test("updateLibraryAndWait polls the operation then re-reads the library", async () => {
+test("updateLibraryAndWait polls the operation then re-reads the library via manage=1", async () => {
   const requests = [];
   const api = await loadApi(async (path, init = {}) => {
     requests.push({ path, method: init.method ?? "GET" });
@@ -165,7 +186,7 @@ test("updateLibraryAndWait polls the operation then re-reads the library", async
   assert.deepEqual(requests, [
     { path: "/libraries/lib", method: "PATCH" },
     { path: "/libraries/lib/operations/op-1", method: "GET" },
-    { path: "/libraries", method: "GET" },
+    { path: "/libraries?manage=1", method: "GET" },
   ]);
 });
 
@@ -230,4 +251,287 @@ test("unidentified claim sends only the explicit identify_and_transfer action", 
       action: { type: "identify_and_transfer", title: "X", kind: "movie", year: 2001, tmdb_id: "7" },
     },
   }]);
+});
+
+test("retryLibraryOperation sends POST .../operations/{id}/retry with no body and retryLibraryOperationAndWait polls same ID", async () => {
+  const requests = [];
+  const controller = new AbortController();
+  const states = ["applying", "succeeded"];
+  const api = await loadApi(async (reqPath, init = {}) => {
+    requests.push({ path: reqPath, method: init.method ?? "GET", body: init.body, signal: init.signal });
+    if (init.method === "POST") {
+      return { ok: true, data: { operation_id: "op/1", state: "failed" } };
+    }
+    if (reqPath.includes("/operations/")) {
+      return { ok: true, data: { operation_id: "op/1", kind: "roots", state: states.shift(), cursor: "c2", error: null } };
+    }
+    if (reqPath === "/libraries?manage=1") {
+      return { ok: true, data: [{ ...library, root_paths: ["/media2"] }] };
+    }
+    return { ok: true, data: [] };
+  });
+
+  const updated = await api.retryLibraryOperationAndWait("lib", "op/1", {
+    intervalMs: 0,
+    signal: controller.signal,
+  });
+  assert.deepEqual(updated.root_paths, ["/media2"]);
+  assert.deepEqual(
+    requests.map(({ path: reqPath, method, body }) => ({ path: reqPath, method, body })),
+    [
+      { path: "/libraries/lib/operations/op%2F1/retry", method: "POST", body: undefined },
+      { path: "/libraries/lib/operations/op%2F1", method: "GET", body: undefined },
+      { path: "/libraries/lib/operations/op%2F1", method: "GET", body: undefined },
+      { path: "/libraries?manage=1", method: "GET", body: undefined },
+    ],
+  );
+  assert.ok(requests.every((r) => r.signal === controller.signal));
+});
+
+test("reindexingOperationId extracts operation_id from 409 library.reindexing errors only", async () => {
+  const api = await loadApi(async () => ({ ok: true, data: [] }));
+  assert.equal(
+    api.reindexingOperationId({
+      status: 409,
+      details: { ok: false, error: { code: "library.reindexing", operation_id: "op-frozen" } },
+    }),
+    "op-frozen",
+  );
+  assert.equal(
+    api.reindexingOperationId({
+      status: 409,
+      details: { ok: false, error: { code: "library.root_conflict", operation_id: "op-x" } },
+    }),
+    null,
+  );
+  assert.equal(
+    api.reindexingOperationId({
+      status: 500,
+      details: { ok: false, error: { code: "library.reindexing", operation_id: "op-x" } },
+    }),
+    null,
+  );
+  assert.equal(api.reindexingOperationId(new Error("plain")), null);
+});
+
+test("hidden library (admin_visible=false) works for applyRootConsolidations, updateLibraryAndWait, and retryLibraryOperationAndWait", async () => {
+  const controller = new AbortController();
+  let roots = ["/media", "/dup"];
+  const hiddenLibrary = () => ({ ...library, id: "hidden", admin_visible: false, root_paths: roots });
+  const requests = [];
+  const api = await loadApi(async (reqPath, init = {}) => {
+    requests.push({ path: reqPath, method: init.method ?? "GET", signal: init.signal });
+    if (reqPath === "/libraries") return { ok: true, data: [] };
+    if (reqPath === "/libraries?manage=1") return { ok: true, data: [hiddenLibrary()] };
+    if (init.method === "PATCH") {
+      const body = JSON.parse(init.body);
+      roots = body.root_paths;
+      return { ok: true, data: operation("frozen", { operation_id: "op-hidden" }) };
+    }
+    if (init.method === "POST" && reqPath.endsWith("/retry")) {
+      return { ok: true, data: { operation_id: "op-hidden", state: "failed" } };
+    }
+    if (reqPath === "/libraries/hidden/operations/op-hidden") {
+      return { ok: true, data: operation("succeeded", { operation_id: "op-hidden" }) };
+    }
+    throw new Error(`Unexpected request ${reqPath}`);
+  });
+
+  const consolidated = await api.applyRootConsolidations("hidden", ["/dup"], {
+    intervalMs: 0,
+    signal: controller.signal,
+  });
+  assert.deepEqual(consolidated, { consolidated: 1, roots: ["/media"] });
+
+  const updated = await api.updateLibraryAndWait("hidden", { root_paths: ["/media2"] }, {
+    intervalMs: 0,
+    signal: controller.signal,
+  });
+  assert.equal(updated.id, "hidden");
+  assert.deepEqual(updated.root_paths, ["/media2"]);
+
+  const retried = await api.retryLibraryOperationAndWait("hidden", "op-hidden", {
+    intervalMs: 0,
+    signal: controller.signal,
+  });
+  assert.equal(retried.id, "hidden");
+  assert.deepEqual(retried.root_paths, ["/media2"]);
+
+  assert.equal(requests.some((r) => r.path === "/libraries"), false, "must never read default browse /libraries");
+  assert.ok(requests.every((r) => r.signal === controller.signal), "must forward signal even with manage=1");
+
+  await assert.rejects(
+    api.applyRootConsolidations("missing-lib", ["/dup"], { intervalMs: 0 }),
+    /媒体库不存在/,
+  );
+});
+
+function loadEditDialog(apiOverrides) {
+  const filename = path.join(webRoot, "components/library-form-dialog.tsx");
+  const js = ts.transpileModule(readFileSync(filename, "utf8"), {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      jsx: ts.JsxEmit.ReactJSX,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const opsSource = ts.transpileModule(
+    readFileSync(path.join(webRoot, "lib/library-operations.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const opsMod = { exports: {} };
+  new Function("require", "module", "exports", opsSource)(require, opsMod, opsMod.exports);
+
+  const icon = () => React.createElement("span");
+  const mod = { exports: {} };
+  new Function("require", "module", "exports", js)((name) => {
+    if (name === "@/components/modal") {
+      return { Modal: ({ children }) => React.createElement("div", { "data-modal": true }, children) };
+    }
+    if (name === "@/components/directory-picker") return { DirectoryPicker: () => null };
+    if (name === "@/components/tooltip") return { Tooltip: ({ children }) => children };
+    if (name === "@/components/icons") {
+      return { CheckIcon: icon, ChevronDownIcon: icon, FolderIcon: icon, InfoIcon: icon, PlusIcon: icon, XIcon: icon };
+    }
+    if (name === "@/components/library-kind-meta") {
+      return { LIBRARY_KIND_META: { movie: { label: "电影", Icon: icon }, tv: { label: "剧集", Icon: icon }, video: { label: "其他", Icon: icon } } };
+    }
+    if (name === "@/lib/library-operations") return opsMod.exports;
+    if (name === "@/lib/api/members") return { listMembers: async () => [] };
+    if (name === "@/lib/api/subscriptions") return { listRuleSets: async () => [] };
+    if (name === "@/lib/api/libraries") {
+      return {
+        createLibrary: async () => { throw new Error("unexpected createLibrary"); },
+        listLibraryRoutingOptions: async () => ({ movie_genres: [], tv_genres: [], region_presets: [], country_names: {} }),
+        reindexingOperationId: (error) => {
+          if (!error || typeof error !== "object" || error.status !== 409) return null;
+          const inner = error.details?.error;
+          return inner?.code === "library.reindexing" && typeof inner.operation_id === "string" ? inner.operation_id : null;
+        },
+        ...apiOverrides,
+      };
+    }
+    return require(name);
+  }, mod, mod.exports);
+  return { LibraryFormDialog: mod.exports.LibraryFormDialog, LibraryOperationError: opsMod.exports.LibraryOperationError };
+}
+
+test("EditLibraryDialog preserves failed operation_id and retries via POST .../operations/{id}/retry without re-sending PATCH", async () => {
+  const events = [];
+  let savedLib = null;
+  let DialogError;
+  const api = {
+    updateLibraryAndWait: async (id, payload) => {
+      events.push({ kind: "patch", id, payload });
+      throw new DialogError({
+        operation_id: "op-77",
+        kind: "roots",
+        state: "failed",
+        cursor: "batch-3",
+        error: "磁盘暂时不可用",
+      });
+    },
+    retryLibraryOperationAndWait: async (id, opId) => {
+      events.push({ kind: "retry", id, opId });
+      return { ...library, root_paths: ["/media2"] };
+    },
+    getLibraryOperation: async () => { throw new Error("unexpected getLibraryOperation"); },
+  };
+  const loaded = loadEditDialog(api);
+  DialogError = loaded.LibraryOperationError;
+
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(loaded.LibraryFormDialog, {
+        state: { ...library, stats: { item_count: 0, file_count: 0, total_size_bytes: 0 }, access_mode: "everyone", admin_visible: true, is_default: false, root_missing: false, member_ids: [] },
+        onClose() {},
+        onSaved(saved) { savedLib = saved; },
+      }),
+    );
+  });
+
+  try {
+    const findButton = (label) =>
+      renderer.root.findAllByType("button").find((b) => b.children.join("") === label);
+
+    await act(async () => { findButton("保存").props.onClick(); });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "patch");
+    assert.match(JSON.stringify(renderer.toJSON()), /磁盘暂时不可用/);
+    assert.equal(findButton("保存"), undefined, "save button must not send a doomed PATCH while failedOperation is active");
+    const retryBtn = findButton("重试操作");
+    assert.ok(retryBtn, "must show retry action when operation fails");
+
+    await act(async () => { retryBtn.props.onClick(); });
+    assert.deepEqual(
+      events.map((e) => ({ kind: e.kind, id: e.id, opId: e.opId })),
+      [
+        { kind: "patch", id: "lib", opId: undefined },
+        { kind: "retry", id: "lib", opId: "op-77" },
+      ],
+    );
+    assert.deepEqual(savedLib?.root_paths, ["/media2"]);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test("EditLibraryDialog recovers failed operation_id from 409 library.reindexing and retries it", async () => {
+  const events = [];
+  let savedLib = null;
+  const loaded = loadEditDialog({
+    updateLibraryAndWait: async (id) => {
+      events.push({ kind: "patch", id });
+      throw Object.assign(new Error("媒体库正在重建索引，请稍后重试"), {
+        status: 409,
+        details: { ok: false, error: { code: "library.reindexing", operation_id: "op-frozen" } },
+      });
+    },
+    getLibraryOperation: async (id, opId) => {
+      events.push({ kind: "get-op", id, opId });
+      return { operation_id: opId, kind: "roots", state: "failed", cursor: "batch-1", error: "IO 写入失败" };
+    },
+    retryLibraryOperationAndWait: async (id, opId) => {
+      events.push({ kind: "retry", id, opId });
+      return { ...library, root_paths: ["/media2"] };
+    },
+  });
+
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(loaded.LibraryFormDialog, {
+        state: { ...library, stats: { item_count: 0, file_count: 0, total_size_bytes: 0 }, access_mode: "everyone", admin_visible: true, is_default: false, root_missing: false, member_ids: [] },
+        onClose() {},
+        onSaved(saved) { savedLib = saved; },
+      }),
+    );
+  });
+
+  try {
+    const findButton = (label) =>
+      renderer.root.findAllByType("button").find((b) => b.children.join("") === label);
+
+    await act(async () => { findButton("保存").props.onClick(); });
+    assert.match(JSON.stringify(renderer.toJSON()), /IO 写入失败/);
+    const retryBtn = findButton("重试操作");
+    assert.ok(retryBtn);
+
+    await act(async () => { retryBtn.props.onClick(); });
+    assert.deepEqual(events, [
+      { kind: "patch", id: "lib" },
+      { kind: "get-op", id: "lib", opId: "op-frozen" },
+      { kind: "retry", id: "lib", opId: "op-frozen" },
+    ]);
+    assert.deepEqual(savedLib?.root_paths, ["/media2"]);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test("LibraryManageView uses manage=1 in DuplicatesPanel and reloads after root consolidation", async () => {
+  const source = await readFile(new URL("../components/library-manage-view.tsx", import.meta.url), "utf8");
+  assert.match(source, /function DuplicatesPanel[\s\S]*?listLibraries\(undefined,\s*\{\s*manage:\s*true\s*\}\)/);
+  assert.match(source, /onConsolidate:[\s\S]*?consolidateLibrary\([\s\S]*?reload\(\)/);
 });

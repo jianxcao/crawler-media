@@ -98,7 +98,12 @@ CREATE TABLE library_files (
  confidence TEXT NOT NULL CHECK(confidence IN ('high','low')), filter_score INTEGER, release_quality TEXT,
  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0), tracks_version INTEGER NOT NULL DEFAULT 0,
  poster_path TEXT, backdrop_path TEXT, still_path TEXT,
+ poster_path_key TEXT, backdrop_path_key TEXT, still_path_key TEXT,
+ parent_dir_key TEXT GENERATED ALWAYS AS (CASE WHEN rtrim(path_key, replace(path_key, '/', '')) = '/' THEN '/' ELSE substr(rtrim(path_key, replace(path_key, '/', '')), 1, length(rtrim(path_key, replace(path_key, '/', ''))) - 1) END) VIRTUAL,
  has_poster INTEGER NOT NULL DEFAULT 0, has_backdrop INTEGER NOT NULL DEFAULT 0, has_still INTEGER NOT NULL DEFAULT 0,
+ CHECK((poster_path IS NULL) = (poster_path_key IS NULL)),
+ CHECK((backdrop_path IS NULL) = (backdrop_path_key IS NULL)),
+ CHECK((still_path IS NULL) = (still_path_key IS NULL)),
  UNIQUE(file_id,library_id,media_id),
  FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id),
  FOREIGN KEY(library_id,kind) REFERENCES libraries(library_id,kind), FOREIGN KEY(media_id,kind) REFERENCES media(media_id,kind)
@@ -111,6 +116,10 @@ CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE INDEX files_roster_stats ON library_files(library_id,presence_state,publication_state,path_key);
 CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE missing_at IS NOT NULL;
+CREATE INDEX files_parent_dir_key ON library_files(parent_dir_key,path_key,file_id);
+CREATE INDEX files_poster_path_key ON library_files(poster_path_key,file_id) WHERE poster_path_key IS NOT NULL;
+CREATE INDEX files_backdrop_path_key ON library_files(backdrop_path_key,file_id) WHERE backdrop_path_key IS NOT NULL;
+CREATE INDEX files_still_path_key ON library_files(still_path_key,file_id) WHERE still_path_key IS NOT NULL;
 CREATE TABLE file_details (
  file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,
  source_revision INTEGER NOT NULL, source_version TEXT NOT NULL, tracks_version INTEGER NOT NULL,
@@ -425,7 +434,28 @@ CREATE TABLE library_removal_files (
  PRIMARY KEY(operation_id,file_id)
 );
 CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
-CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,library_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_deletions (
+ path TEXT PRIMARY KEY NOT NULL,
+ path_key TEXT NOT NULL,
+ deletion_id TEXT NOT NULL,
+ reason TEXT NOT NULL,
+ scope TEXT NOT NULL CHECK(scope IN ('media_with_leftovers','exact_path')),
+ attempts INTEGER NOT NULL DEFAULT 0,
+ next_retry_at INTEGER NOT NULL DEFAULT 0,
+ last_error TEXT,
+ file_id TEXT,
+ library_id TEXT,
+ file_size INTEGER,
+ file_device INTEGER,
+ file_inode INTEGER,
+ file_mtime_ns INTEGER,
+ require_target_path TEXT,
+ require_target_size INTEGER,
+ require_target_device INTEGER,
+ require_target_inode INTEGER,
+ require_target_mtime_ns INTEGER,
+ companion_file_id TEXT
+);
 CREATE UNIQUE INDEX pending_deletions_path_key ON pending_file_deletions(path_key);
 CREATE INDEX pending_deletions_library ON pending_file_deletions(library_id,path_key);
 -- Store::list_due_file_deletions reads the retry window; the caller orders by
@@ -445,7 +475,9 @@ CREATE TABLE pending_file_renames (
  rename_id TEXT PRIMARY KEY NOT NULL,
  file_id TEXT NOT NULL,
  from_path TEXT NOT NULL,
+ from_path_key TEXT NOT NULL,
  to_path TEXT NOT NULL,
+ to_path_key TEXT NOT NULL,
  expected_revision INTEGER NOT NULL,
  expected_source_version TEXT NOT NULL,
  from_library_id TEXT NOT NULL,
@@ -459,6 +491,7 @@ CREATE TABLE pending_file_renames (
  source_device INTEGER NOT NULL,
  source_inode INTEGER NOT NULL,
  source_mtime_ns INTEGER NOT NULL,
+ source_digest TEXT,
  dest_size INTEGER,
  dest_device INTEGER,
  dest_inode INTEGER,
@@ -474,7 +507,11 @@ CREATE TABLE pending_file_renames (
 );
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
 CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
-CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
+CREATE UNIQUE INDEX pending_file_renames_active_file ON pending_file_renames(file_id) WHERE phase <> 'failed';
+CREATE UNIQUE INDEX pending_file_renames_active_to ON pending_file_renames(to_path_key) WHERE phase <> 'failed';
+CREATE INDEX pending_file_renames_active_from ON pending_file_renames(from_path_key) WHERE phase <> 'failed';
+CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(file_id,kind));
+CREATE INDEX scrape_sidecars_path_key ON scrape_sidecars(path_key,file_id);
 CREATE TABLE unidentified (unidentified_id TEXT NOT NULL,library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,confidence TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(library_id,path_key),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
 CREATE UNIQUE INDEX unidentified_identity ON unidentified(unidentified_id);
 CREATE INDEX unidentified_path_seek ON unidentified(path_key,unidentified_id);

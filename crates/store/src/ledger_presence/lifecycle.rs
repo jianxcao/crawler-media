@@ -53,7 +53,7 @@ pub(super) fn source_missing(
     Ok(())
 }
 
-pub(super) fn source_restored(
+pub(crate) fn source_restored(
     tx: &Connection,
     file_id: &str,
     now_ms: i64,

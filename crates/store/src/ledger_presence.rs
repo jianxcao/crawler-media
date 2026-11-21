@@ -6,6 +6,7 @@
 use domain::{FileCoverage, FileVersion, LedgerId};
 use std::collections::HashSet;
 mod lifecycle;
+pub(crate) use lifecycle::source_restored;
 mod read;
 mod watcher_read;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -140,6 +141,11 @@ fn apply_observation(
         result.skipped += 1;
         return Ok(None);
     };
+    if crate::library_write::rename_guard::has_active_file_rename(tx, &file_id)? {
+        tracing::debug!(file_id, "跳过活动整理中的文件存在性变更");
+        result.skipped += 1;
+        return Ok(None);
+    }
     crate::library_write::ensure_library_writable(tx, &file.library_id.to_string())?;
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[file.library_id])?;
     crate::library_write::ensure_media_writable(tx, file.media_id)?;

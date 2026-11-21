@@ -82,25 +82,44 @@ pub(super) fn execute<G>(
     Ok((receipt(request)?, publication))
 }
 
-/// `to` carries the source inode, the kept staging inode, or the recorded receipt.
+/// `to` carries the verified source identity, the kept staging inode, or the recorded receipt.
 fn owns_destination(request: &FileRenameRequest, staging: &Path) -> Result<bool, StoreError> {
     let Some(dest) = stat(&request.to_path)? else {
         return Ok(false);
     };
-    if request.source_evidence.same_inode(&dest) {
-        return Ok(true);
-    }
     if request
-        .disk_receipt
-        .as_ref()
-        .is_some_and(|receipt| receipt.same_inode(&dest))
+        .source_evidence
+        .matches_file(&request.to_path, &dest)?
     {
         return Ok(true);
     }
-    Ok(stat(staging)?.is_some_and(|staged| {
-        use std::os::unix::fs::MetadataExt;
-        staged.is_file() && staged.dev() == dest.dev() && staged.ino() == dest.ino()
-    }))
+    if let Some(receipt) = request.disk_receipt.as_ref()
+        && receipt.matches_file(&request.to_path, &dest)?
+    {
+        return Ok(true);
+    }
+    let Some(staged) = stat(staging)? else {
+        return Ok(false);
+    };
+    use std::os::unix::fs::MetadataExt;
+    if !(staged.is_file()
+        && staged.dev() == dest.dev()
+        && staged.ino() == dest.ino()
+        && staged.len() == request.source_evidence.size_bytes)
+    {
+        return Ok(false);
+    }
+    if let Some(expected_digest) = request.source_evidence.source_digest.as_deref() {
+        let observed = library::observe_source(&request.to_path).map_err(|error| {
+            StoreError::Protected(format!(
+                "rename {} target {}: {error}",
+                request.rename_id,
+                request.to_path.display()
+            ))
+        })?;
+        return Ok(observed.content_digest.as_deref() == Some(expected_digest));
+    }
+    Ok(true)
 }
 
 fn receipt(request: &FileRenameRequest) -> Result<RenameDiskReceipt, StoreError> {
@@ -109,7 +128,11 @@ fn receipt(request: &FileRenameRequest) -> Result<RenameDiskReceipt, StoreError>
     })?;
     Ok(RenameDiskReceipt {
         rename_id: request.rename_id.clone(),
-        destination: RenameSourceEvidence::observed(request.expected.clone(), &dest),
+        destination: RenameSourceEvidence::observed(
+            request.expected.clone(),
+            &dest,
+            request.source_evidence.source_digest.clone(),
+        ),
     })
 }
 

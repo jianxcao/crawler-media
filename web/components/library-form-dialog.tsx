@@ -15,17 +15,21 @@ import { LIBRARY_KIND_META } from "@/components/library-kind-meta";
 import { Modal } from "@/components/modal";
 import { Tooltip } from "@/components/tooltip";
 import {
+  type LibraryOperation,
   type LibraryPayload,
   type LibraryUpdatePayload,
   type MatchRule,
   type MediaLibrary,
   type RoutingOptions,
   createLibrary,
+  getLibraryOperation,
   listLibraryRoutingOptions,
+  reindexingOperationId,
+  retryLibraryOperationAndWait,
   updateLibraryAndWait,
   type LibraryAccessMode,
 } from "@/lib/api/libraries";
-import { operationLabel } from "@/lib/library-operations";
+import { LibraryOperationError, operationLabel } from "@/lib/library-operations";
 import { listMembers, type MemberView } from "@/lib/api/members";
 import { listRuleSets, type RuleSet } from "@/lib/api/subscriptions";
 import type { LibraryKind } from "@/lib/media-types";
@@ -1106,11 +1110,20 @@ function EditLibraryDialog({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [failedOperation, setFailedOperation] = useState<LibraryOperation | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const routingOptions = useRoutingOptions();
 
   useEffect(() => {
     void listRuleSets().then(setRuleSets).catch(() => {});
   }, []);
+
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
 
   const ready = name.trim().length > 0 && roots.length > 0;
   const missing = [name.trim() ? null : "名称", roots.length > 0 ? null : "根目录"].filter(
@@ -1119,8 +1132,68 @@ function EditLibraryDialog({
   const scope = scopeSummary(library.kind, regions, genres, routingOptions);
   const { label: kindLabel, Icon: KindIcon } = LIBRARY_KIND_META[library.kind];
 
+  const handleOperationError = async (err: unknown, signal: AbortSignal) => {
+    if (signal.aborted) return;
+    if (err instanceof LibraryOperationError) {
+      setFailedOperation(err.operation);
+      setError(err.message);
+      return;
+    }
+    const opId = reindexingOperationId(err);
+    if (opId) {
+      try {
+        const operation = await getLibraryOperation(library.id, opId, signal);
+        if (signal.aborted) return;
+        if (operation.state === "failed") {
+          setFailedOperation(operation);
+          setError(operation.error ?? (err instanceof Error ? err.message : "媒体库操作失败，可重新尝试"));
+          return;
+        }
+      } catch {
+        if (signal.aborted) return;
+      }
+    }
+    setError(err instanceof Error ? err.message : "保存失败");
+  };
+
+  const retryOperation = () => {
+    if (!failedOperation || busy) return;
+    const operationId = failedOperation.operation_id;
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    setBusy(true);
+    setError(null);
+    setPending("正在重试操作…");
+    void retryLibraryOperationAndWait(library.id, operationId, {
+      signal: controller.signal,
+      onProgress: (operation) =>
+        setPending(operation.state === "failed" ? "正在重试操作…" : operationLabel(operation)),
+    })
+      .then((saved) => {
+        if (controller.signal.aborted) return;
+        setFailedOperation(null);
+        onSaved(saved);
+      })
+      .catch((err) => handleOperationError(err, controller.signal))
+      .finally(() => {
+        if (abortRef.current === controller) abortRef.current = null;
+        if (!controller.signal.aborted) {
+          setBusy(false);
+          setPending(null);
+        }
+      });
+  };
+
   const submit = () => {
+    if (failedOperation) {
+      retryOperation();
+      return;
+    }
     if (!ready || busy) return;
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
     setBusy(true);
     setError(null);
     setPending(null);
@@ -1145,13 +1218,21 @@ function EditLibraryDialog({
       enable_fingerprint: enableFingerprint,
     };
     void updateLibraryAndWait(library.id, payload, {
+      signal: controller.signal,
       onProgress: (operation) => setPending(operationLabel(operation)),
     })
-      .then(onSaved)
-      .catch((e) => setError((e as Error).message))
+      .then((saved) => {
+        if (controller.signal.aborted) return;
+        setFailedOperation(null);
+        onSaved(saved);
+      })
+      .catch((err) => handleOperationError(err, controller.signal))
       .finally(() => {
-        setBusy(false);
-        setPending(null);
+        if (abortRef.current === controller) abortRef.current = null;
+        if (!controller.signal.aborted) {
+          setBusy(false);
+          setPending(null);
+        }
       });
   };
 
@@ -1404,14 +1485,25 @@ function EditLibraryDialog({
               <button type="button" onClick={onClose} className="btn-glass h-9 px-4 text-ui font-medium">
                 取消
               </button>
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!ready || busy}
-                className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
-              >
-                {busy ? (pending ?? "保存中…") : "保存"}
-              </button>
+              {failedOperation ? (
+                <button
+                  type="button"
+                  onClick={retryOperation}
+                  disabled={busy}
+                  className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
+                >
+                  {busy ? (pending ?? "重试中…") : "重试操作"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!ready || busy}
+                  className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
+                >
+                  {busy ? (pending ?? "保存中…") : "保存"}
+                </button>
+              )}
             </div>
           </div>
         </div>

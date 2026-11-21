@@ -31,6 +31,9 @@ pub struct RenameSidecar {
     /// Native source identity captured when `Move`/`AlreadyIdentical` was decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<SidecarSourceIdentity>,
+    /// Native destination identity verified when `AlreadyIdentical` or placed on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_identity: Option<SidecarSourceIdentity>,
 }
 
 /// Persisted rename / re-parent intent.
@@ -199,6 +202,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         let super::rename_completion::ObservedRenameCompletion {
             request,
+            effective_sidecars,
+            reverted_missing_targets,
             source,
             leftovers,
         } = observed;
@@ -212,7 +217,14 @@ impl Store {
             let source = source.ok_or_else(|| {
                 StoreError::Protected("missing rename destination observation".into())
             })?;
-            self.publish_rename_library(&request, &source, now)?;
+            self.publish_rename_library(&request, &effective_sidecars, &source, now)?;
+        } else if !reverted_missing_targets.is_empty() {
+            self.with_library_write(|db| {
+                db.revert_vanished_sidecar_references(
+                    &request.file_id.to_string(),
+                    &reverted_missing_targets,
+                )
+            })?;
         }
         self.apply_rename_references(&request, &leftovers, now)
     }
@@ -220,10 +232,13 @@ impl Store {
     fn publish_rename_library(
         &self,
         request: &FileRenameRequest,
+        effective_sidecars: &[RenameSidecar],
         observed: &library::SourceObservation,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.with_library_write(|db| db.publish_rename_library(request, observed, now))
+        self.with_library_write(|db| {
+            db.publish_rename_library(request, effective_sidecars, observed, now)
+        })
     }
 
     /// Converge subscribe.db path facts (idempotent), then acknowledge.
@@ -234,6 +249,7 @@ impl Store {
         now: i64,
     ) -> Result<(), StoreError> {
         let rename_id = request.rename_id.as_str();
+        let file_id = request.file_id.to_string();
         let from_str = request.from_path.to_string_lossy();
         let to_str = request.to_path.to_string_lossy();
         if let Err(error) = self.rewrite_fact_paths(request.media_id, &from_str, &to_str) {
@@ -255,13 +271,20 @@ impl Store {
         // destination). Shared and retained sources are never queued.
         for leftover in leftovers {
             let path = &leftover.path;
+            let path_str = path.to_string_lossy();
             if let Err(error) = self.with_library_write(|db| {
-                db.enqueue_file_deletion_owned(
-                    &path.to_string_lossy(),
-                    "rename-left-behind-sidecar",
-                    leftover.identity,
-                    Some(request.from_library_id),
-                )
+                db.enqueue_file_deletion(crate::pending_file_deletions::EnqueueFileDeletion {
+                    path: &path_str,
+                    reason: "rename-left-behind-sidecar",
+                    scope: crate::FileDeletionScope::ExactPath,
+                    file_size: Some(leftover.source_identity.size_bytes),
+                    file_device: Some(leftover.source_identity.device),
+                    file_inode: Some(leftover.source_identity.inode),
+                    file_mtime_ns: Some(leftover.source_identity.mtime_ns),
+                    owner: Some(request.from_library_id),
+                    require_target: Some((&leftover.target_path, &leftover.target_identity)),
+                    companion_file_id: Some(&file_id),
+                })
             }) {
                 tracing::error!(rename_id, path = %path.display(), %error,
                     "left-behind sidecar enqueue failed; rename intent kept for retry");
@@ -399,6 +422,7 @@ pub(super) fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
             to: to_parent.join(format!("{to_stem}.nfo")),
             action: SidecarAction::Move,
             source_identity,
+            target_identity: None,
         });
     }
     out
@@ -677,6 +701,7 @@ pub(super) fn merge_registered_sidecars(
             to,
             action: SidecarAction::Move,
             source_identity,
+            target_identity: None,
         });
     }
 }
@@ -689,9 +714,12 @@ fn migrate_scrape_sidecars(
     for side in sidecars {
         let from = side.from.to_string_lossy().into_owned();
         let to = side.to.to_string_lossy().into_owned();
+        let from_key = crate::path_key::canonical_recorded_key(tx, &from);
+        let to_key = crate::path_key::canonical_recorded_key(tx, &to);
         tx.execute(
-            "UPDATE scrape_sidecars SET path = ?3 WHERE file_id = ?1 AND path = ?2",
-            params![file_id, from, to],
+            "UPDATE scrape_sidecars SET path = ?3, path_key = ?4
+             WHERE file_id = ?1 AND path_key = ?2",
+            params![file_id, from_key, to, to_key],
         )?;
     }
     Ok(())
@@ -705,13 +733,18 @@ fn rewrite_artwork_paths(
     for side in sidecars {
         let from = side.from.to_string_lossy().into_owned();
         let to = side.to.to_string_lossy().into_owned();
+        let from_key = crate::path_key::canonical_recorded_key(tx, &from);
+        let to_key = crate::path_key::canonical_recorded_key(tx, &to);
         tx.execute(
             "UPDATE library_files SET
-                poster_path = CASE WHEN poster_path = ?2 THEN ?3 ELSE poster_path END,
-                backdrop_path = CASE WHEN backdrop_path = ?2 THEN ?3 ELSE backdrop_path END,
-                still_path = CASE WHEN still_path = ?2 THEN ?3 ELSE still_path END
+                poster_path = CASE WHEN poster_path_key = ?2 THEN ?3 ELSE poster_path END,
+                poster_path_key = CASE WHEN poster_path_key = ?2 THEN ?4 ELSE poster_path_key END,
+                backdrop_path = CASE WHEN backdrop_path_key = ?2 THEN ?3 ELSE backdrop_path END,
+                backdrop_path_key = CASE WHEN backdrop_path_key = ?2 THEN ?4 ELSE backdrop_path_key END,
+                still_path = CASE WHEN still_path_key = ?2 THEN ?3 ELSE still_path END,
+                still_path_key = CASE WHEN still_path_key = ?2 THEN ?4 ELSE still_path_key END
              WHERE file_id = ?1",
-            params![file_id, from, to],
+            params![file_id, from_key, to, to_key],
         )?;
     }
     Ok(())

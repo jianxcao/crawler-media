@@ -354,3 +354,208 @@ fn frozen_library_preserves_queued_sidecars_without_file_rows() {
     retry_queued_deletions(&f.store).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), b"metadata");
 }
+
+#[test]
+fn p1_2_consuming_leftover_fanart_keeps_preserved_poster_and_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = Store::open(base.join("data")).unwrap();
+    let a = base.join("a");
+    let b = base.join("b");
+    for (name, root) in [("A", &a), ("B", &b)] {
+        std::fs::create_dir_all(root).unwrap();
+        store
+            .create_library(
+                MediaKind::Tv,
+                name,
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let media = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: media,
+            kind: MediaKind::Tv,
+            title: "Show".into(),
+            year: Some(2020),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let src = a.join("Show");
+    let dst = b.join("Show");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    let from = src.join("S01E01.mkv");
+    let to = dst.join("S01E01.mkv");
+    std::fs::write(&from, b"video").unwrap();
+    std::fs::write(src.join("poster.jpg"), b"source-poster").unwrap();
+    std::fs::write(src.join("fanart.jpg"), b"same-fanart").unwrap();
+    std::fs::write(dst.join("poster.jpg"), b"dest-poster").unwrap();
+    std::fs::write(dst.join("fanart.jpg"), b"same-fanart").unwrap();
+    let file = store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media,
+            path: from.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    store
+        .record_file_artwork(
+            file.file_id,
+            &file.version,
+            &store::library_write::FileArtwork {
+                poster: Some(&src.join("poster.jpg")),
+                backdrop: Some(&src.join("fanart.jpg")),
+                still: None,
+            },
+        )
+        .unwrap();
+
+    let req = store
+        .begin_file_rename(file.file_id, &file.version, &from, &to, 1)
+        .unwrap();
+    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    store.record_rename_disk(&receipt, 2).unwrap();
+    store.complete_file_rename(&req.rename_id, 3).unwrap();
+
+    let due = store.list_due_file_deletions(i64::MAX).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].scope, store::FileDeletionScope::ExactPath);
+
+    // Consume queue twice (covers idempotent repeated consumption)
+    retry_queued_deletions(&store).unwrap();
+    retry_queued_deletions(&store).unwrap();
+
+    assert!(store.list_pending_file_deletions().unwrap().is_empty());
+    assert!(!src.join("fanart.jpg").exists(), "old fanart consumed");
+    assert_eq!(
+        std::fs::read(src.join("poster.jpg")).unwrap(),
+        b"source-poster",
+        "preserved old poster must NOT be pruned"
+    );
+    assert_eq!(
+        std::fs::read(dst.join("poster.jpg")).unwrap(),
+        b"dest-poster",
+        "destination poster intact"
+    );
+    assert_eq!(
+        std::fs::read(dst.join("fanart.jpg")).unwrap(),
+        b"same-fanart",
+        "destination fanart intact"
+    );
+    let updated = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(
+        updated.file.poster_path.as_deref(),
+        Some(src.join("poster.jpg").as_path())
+    );
+    assert_eq!(
+        updated.file.backdrop_path.as_deref(),
+        Some(dst.join("fanart.jpg").as_path())
+    );
+}
+
+#[test]
+fn p1_3_consuming_queued_nfo_deletion_preserves_source_if_target_vanishes_or_changes() {
+    for mode in ["delete", "replace", "intact"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let store = Store::open(base.join("data")).unwrap();
+        let a = base.join("a");
+        let b = base.join("b");
+        for (name, root) in [("A", &a), ("B", &b)] {
+            std::fs::create_dir_all(root).unwrap();
+            store
+                .create_library(
+                    MediaKind::Movie,
+                    name,
+                    &[root.to_str().unwrap()],
+                    "everyone",
+                    true,
+                    &[],
+                )
+                .unwrap();
+        }
+        let media = MediaId::new();
+        store
+            .insert_media(&Media {
+                id: media,
+                kind: MediaKind::Movie,
+                title: "Dune".into(),
+                year: Some(2021),
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let src = a.join("Dune");
+        let dst = b.join("Dune");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let from = src.join("Dune.mkv");
+        let from_nfo = src.join("Dune.nfo");
+        let to = dst.join("Dune.mkv");
+        let to_nfo = dst.join("Dune.nfo");
+        std::fs::write(&from, b"video").unwrap();
+        std::fs::write(&from_nfo, b"<movie><title>Dune</title></movie>").unwrap();
+        std::fs::write(&to_nfo, b"<movie><title>Dune</title></movie>").unwrap();
+        let file = store::test_support::publish_fixture_file(
+            &store,
+            &store::test_support::FixtureFile {
+                media_id: media,
+                path: from.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let req = store
+            .begin_file_rename(file.file_id, &file.version, &from, &to, 1)
+            .unwrap();
+        let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+        store.record_rename_disk(&receipt, 2).unwrap();
+        store.complete_file_rename(&req.rename_id, 3).unwrap();
+        assert_eq!(store.list_pending_file_deletions().unwrap().len(), 1);
+
+        // Mutate target AFTER queueing, BEFORE background deletion worker consumes it
+        match mode {
+            "delete" => std::fs::remove_file(&to_nfo).unwrap(),
+            "replace" => std::fs::write(&to_nfo, b"<movie><title>Other</title></movie>").unwrap(),
+            "intact" => {}
+            _ => unreachable!(),
+        }
+
+        retry_queued_deletions(&store).unwrap();
+        assert!(store.list_pending_file_deletions().unwrap().is_empty());
+        if mode == "intact" {
+            assert!(!from_nfo.exists(), "intact target allows deleting old NFO");
+            assert_eq!(
+                std::fs::read(&to_nfo).unwrap(),
+                b"<movie><title>Dune</title></movie>"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(&from_nfo).unwrap(),
+                b"<movie><title>Dune</title></movie>",
+                "mode={mode}: old NFO must be preserved when target vanished/changed before unlink"
+            );
+        }
+    }
+}

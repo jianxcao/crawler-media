@@ -180,10 +180,19 @@ impl ScanContext<'_> {
         if files.is_empty() && changed.is_empty() {
             return Ok(ChunkTotals::default());
         }
-        let filtered = self
+        let filtered: Vec<_> = self
             .scan_scope
             .filter_transferred(files)
-            .map_err(presence_failure)?;
+            .map_err(presence_failure)?
+            .into_iter()
+            .filter(|file| {
+                !self
+                    .state
+                    .store
+                    .path_claimed_by_active_rename(&file.path)
+                    .unwrap_or(false)
+            })
+            .collect();
         let scanned = filtered.len();
         let plan = self
             .lease

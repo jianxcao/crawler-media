@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -50,10 +50,6 @@ impl SidecarSourceIdentity {
             && meta.ino() == self.inode
             && mtime_ns(meta) == self.mtime_ns
     }
-
-    pub(crate) fn deletion_identity(&self) -> (u64, Option<u64>) {
-        (self.size_bytes, Some(self.inode))
-    }
 }
 
 /// Durable per-sidecar decision. Persisted in `sidecars_json` (required).
@@ -85,11 +81,12 @@ impl SidecarAction {
 }
 
 /// Lock-free observation of one sidecar destination against its source, plus
-/// the native identity of the source when it exists as a regular file.
+/// the native identity of the source and identical destination when present.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ObservedSidecarTarget {
     pub(crate) comparison: TargetComparison,
     pub(crate) source_identity: Option<SidecarSourceIdentity>,
+    pub(crate) target_identity: Option<SidecarSourceIdentity>,
 }
 
 /// Lock-free observation of one sidecar destination against its source.
@@ -191,6 +188,7 @@ pub(crate) fn observe_directory_artwork(from: &Path, to: &Path, out: &mut Vec<Re
             to: to_dir.join(target_name),
             action: SidecarAction::Move,
             source_identity,
+            target_identity: None,
         });
     }
 }
@@ -210,12 +208,14 @@ fn compare_target(from: &Path, to: &Path) -> ObservedSidecarTarget {
             return ObservedSidecarTarget {
                 comparison: TargetComparison::SourceAbsent,
                 source_identity: None,
+                target_identity: None,
             };
         }
         Err(error) => {
             return ObservedSidecarTarget {
                 comparison: TargetComparison::Unknown(format!("{}: {error}", from.display())),
                 source_identity: None,
+                target_identity: None,
             };
         }
         Ok(meta) if !meta.is_file() => {
@@ -225,27 +225,50 @@ fn compare_target(from: &Path, to: &Path) -> ObservedSidecarTarget {
                     from.display()
                 )),
                 source_identity: None,
+                target_identity: None,
             };
         }
         Ok(meta) => SidecarSourceIdentity::from_meta(&meta),
     };
-    let comparison = match std::fs::symlink_metadata(to) {
+    let (comparison, target_identity) = match std::fs::symlink_metadata(to) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            TargetComparison::DestinationAbsent
+            (TargetComparison::DestinationAbsent, None)
         }
-        Err(error) => TargetComparison::Unknown(format!("{}: {error}", to.display())),
-        Ok(meta) if !meta.is_file() => {
-            TargetComparison::Unknown(format!("{} is not a regular file", to.display()))
-        }
-        Ok(_) => match same_bytes(from, to) {
-            Ok(true) => TargetComparison::Identical,
-            Ok(false) => TargetComparison::Different,
-            Err(error) => TargetComparison::Unknown(error.to_string()),
+        Err(error) => (
+            TargetComparison::Unknown(format!("{}: {error}", to.display())),
+            None,
+        ),
+        Ok(meta) if !meta.is_file() => (
+            TargetComparison::Unknown(format!("{} is not a regular file", to.display())),
+            None,
+        ),
+        Ok(to_meta) => match same_bytes(from, to) {
+            Ok(true) => {
+                let target_id = SidecarSourceIdentity::from_meta(&to_meta).filter(|id| {
+                    std::fs::symlink_metadata(to)
+                        .ok()
+                        .is_some_and(|after| id.matches(&after))
+                });
+                if target_id.is_some() {
+                    (TargetComparison::Identical, target_id)
+                } else {
+                    (
+                        TargetComparison::Unknown(format!(
+                            "{} changed during compare",
+                            to.display()
+                        )),
+                        None,
+                    )
+                }
+            }
+            Ok(false) => (TargetComparison::Different, None),
+            Err(error) => (TargetComparison::Unknown(error.to_string()), None),
         },
     };
     ObservedSidecarTarget {
         comparison,
         source_identity,
+        target_identity,
     }
 }
 
@@ -325,6 +348,15 @@ pub(crate) fn decide_for_execution(
         } else {
             None
         };
+        side.target_identity = if side.action == SidecarAction::AlreadyIdentical {
+            seen.target_identity.clone()
+        } else if side.action.deletes_source()
+            && matches!(seen.comparison, TargetComparison::SourceAbsent)
+        {
+            side.target_identity.clone()
+        } else {
+            None
+        };
     }
     Ok(())
 }
@@ -373,52 +405,48 @@ fn alternate_video_same_stem(
     from_video: &Path,
 ) -> Result<bool, StoreError> {
     let dir_key = crate::path_key::canonical_recorded_key(tx, &dir.to_string_lossy());
-    let prefix = format!("{}/", dir_key.trim_end_matches('/'));
-    let upper = format!("{}0", dir_key.trim_end_matches('/'));
+    let current_key = crate::path_key::canonical_recorded_key(tx, &from_video.to_string_lossy());
+    let Some(current_stem) = Path::new(&current_key).file_stem().and_then(|s| s.to_str()) else {
+        return Ok(false);
+    };
+    let base = dir_key.trim_end_matches('/');
+    // '.' (0x2e) .. '/' (0x2f) bounds every `<dir>/<stem>.<ext>` path in `dir`.
+    let lower = format!("{base}/{current_stem}.");
+    let upper = format!("{base}/{current_stem}/");
     let mut stmt = tx.prepare(
         "SELECT path_key FROM library_files
-         WHERE file_id <> ?1 AND path_key >= ?2 AND path_key < ?3",
+         WHERE parent_dir_key = ?2 AND path_key >= ?3 AND path_key < ?4 AND file_id <> ?1",
     )?;
-    let paths = stmt
-        .query_map(params![file_id, prefix, upper], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let current_key = crate::path_key::canonical_recorded_key(tx, &from_video.to_string_lossy());
-    let current_stem = Path::new(&current_key).file_stem();
-    Ok(paths.iter().any(|path| {
-        let candidate = Path::new(path);
-        candidate.parent() == Some(Path::new(&dir_key))
-            && candidate.file_stem() == current_stem
+    let mut rows = stmt.query(params![file_id, dir_key, lower, upper])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        let candidate = Path::new(&path);
+        if candidate.file_stem() == Some(std::ffi::OsStr::new(current_stem))
             && library::is_video_file(candidate)
-    }))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, StoreError> {
     let dir_key = crate::path_key::canonical_recorded_key(tx, &dir.to_string_lossy());
-    let prefix = format!("{}/", dir_key.trim_end_matches('/'));
-    // `'/' + 1 == '0'`: the half-open range covers every key under `prefix`.
-    let upper = format!("{}0", dir_key.trim_end_matches('/'));
-    let mut stmt = tx.prepare(
-        "SELECT path_key FROM library_files WHERE file_id <> ?1 AND path_key >= ?2 AND path_key < ?3",
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_files WHERE parent_dir_key = ?2 AND file_id <> ?1)",
+        params![file_id, dir_key],
+        |r| r.get(0),
     )?;
-    let keys = stmt
-        .query_map(params![file_id, prefix, upper], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let dir_key = PathBuf::from(prefix.trim_end_matches('/'));
-    Ok(keys
-        .iter()
-        .any(|k| Path::new(k).parent() == Some(dir_key.as_path())))
+    Ok(exists)
 }
 
 fn referenced_elsewhere(tx: &Connection, file_id: &str, path: &Path) -> Result<bool, StoreError> {
     let path = crate::path_key::canonical_recorded_key(tx, &path.to_string_lossy());
     let used: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files WHERE file_id <> ?1
-                        AND (norm_path_key(poster_path) = ?2 OR norm_path_key(backdrop_path) = ?2
-                             OR norm_path_key(still_path) = ?2))
-             OR EXISTS(SELECT 1 FROM scrape_sidecars
-                       WHERE file_id <> ?1 AND norm_path_key(path) = ?2)",
+        "SELECT EXISTS(SELECT 1 FROM library_files WHERE poster_path_key = ?2 AND file_id <> ?1)
+             OR EXISTS(SELECT 1 FROM library_files WHERE backdrop_path_key = ?2 AND file_id <> ?1)
+             OR EXISTS(SELECT 1 FROM library_files WHERE still_path_key = ?2 AND file_id <> ?1)
+             OR EXISTS(SELECT 1 FROM scrape_sidecars WHERE path_key = ?2 AND file_id <> ?1)",
         params![file_id, path],
         |r| r.get(0),
     )?;
@@ -466,15 +494,20 @@ pub(crate) fn apply_sidecar_with_mode(
         side.source_identity = None;
     }
     match placed {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            side.target_identity = SidecarSourceIdentity::observe(&side.to);
+            Ok(false)
+        }
         Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if same_bytes(&side.from, &side.to).unwrap_or(false) {
+                side.target_identity = SidecarSourceIdentity::observe(&side.to);
                 return Ok(false);
             }
             tracing::warn!(from = %side.from.display(), to = %side.to.display(),
                 "destination sidecar appeared after observation; not overwritten, source kept");
             side.action = SidecarAction::KeepSource;
             side.source_identity = None;
+            side.target_identity = None;
             Ok(true)
         }
         Err(error) => Err(error),

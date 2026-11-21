@@ -13,7 +13,7 @@ import { LibraryFormDialog } from "@/components/library-form-dialog";
 import { LibraryCoverModal } from "@/components/library-cover-modal";
 import { LibraryOrganizeDialog } from "@/components/library-organize-dialog";
 import { LibraryMediaInfoDialog } from "@/components/library-media-info-dialog";
-import type { OrganizeRenameRequest } from "@/lib/library-organize";
+import { canOpenOrganizeDialog, type OrganizeRenameRequest } from "@/lib/library-organize";
 import {
   type LibraryRowActions,
   type LibraryRowDrag,
@@ -259,7 +259,7 @@ export function LibraryManageView() {
         });
       },
       onOrganize: (library) => {
-        void previewOrganize(library, toast).then((preview) => {
+        void previewOrganize(library, libraries ?? [], toast).then((preview) => {
           if (preview) setOrganizing({ library, preview });
         });
       },
@@ -267,14 +267,16 @@ export function LibraryManageView() {
         void reconcileLibrary(library, toast, confirm);
       },
       onConsolidate: (library) => {
-        void consolidateLibrary(library, toast, confirm);
+        void consolidateLibrary(library, toast, confirm).then((consolidated) => {
+          if (consolidated) reload();
+        });
       },
       onCoverModal: (library: MediaLibrary) => {
         setCoverModalLibrary(library);
       },
       onReorder: isMobile ? () => setReorderOpen(true) : undefined,
     }),
-    [confirm, isMobile, navigate, reload, run, toast, removal],
+    [confirm, isMobile, libraries, navigate, reload, run, toast, removal],
   );
 
   // —— 拖拽排序（桌面端、未筛选时）——
@@ -715,14 +717,15 @@ function ReorderDialog({
   );
 }
 
-/** 整理文件名第一步：预览按命名模板算出的目标名；无可整理文件时直接提示。 */
+/** 整理文件名第一步：预览按命名模板算出的目标名；无可整理文件且无其他目标可选时直接提示。 */
 async function previewOrganize(
   library: MediaLibrary,
+  libraries: readonly MediaLibrary[],
   toast: ReturnType<typeof useToast>,
 ): Promise<OrganizePreviewResult | null> {
   try {
     const preview = await previewLibraryOrganize(library.id);
-    if (preview.renames.length === 0) {
+    if (!canOpenOrganizeDialog(library, libraries, preview)) {
       toast.success(
         preview.already_ok > 0 ? `「${library.name}」文件名已符合模板` : `「${library.name}」没有可整理的文件`,
       );
@@ -786,12 +789,12 @@ async function consolidateLibrary(
   library: MediaLibrary,
   toast: ReturnType<typeof useToast>,
   confirm: ReturnType<typeof useConfirm>,
-) {
+): Promise<boolean> {
   try {
     const { duplicates } = await previewRootConsolidation(library.id);
     if (duplicates.length === 0) {
       toast.success(`「${library.name}」没有重复的根目录`);
-      return;
+      return false;
     }
     const mergeRoots = duplicates.map((d) => d.merge);
     const ok = await confirm({
@@ -799,11 +802,13 @@ async function consolidateLibrary(
       description: duplicates.map((d) => `${d.merge} → 保留 ${d.keep}`).join("；"),
       confirmLabel: "归并",
     });
-    if (!ok) return;
+    if (!ok) return false;
     const result = await applyRootConsolidations(library.id, mergeRoots);
     toast.success(`已归并 ${result.consolidated} 个根目录`);
+    return true;
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "根目录归并失败");
+    return false;
   }
 }
 
@@ -820,7 +825,7 @@ function DuplicatesPanel() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void listLibraries()
+    void listLibraries(undefined, { manage: true })
       .then((libs) => {
         setLibraries(libs);
         if (libs.length > 0) setLibraryId(libs[0].id);

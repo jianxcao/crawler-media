@@ -43,6 +43,7 @@ pub fn extract_frame_with_ffmpeg(
         }
     };
     if !output.status.success() {
+        target.invalidate_redirect();
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail = detail.chars().take(500).collect::<String>();
         tracing::warn!(
@@ -88,6 +89,7 @@ pub fn probe_duration_with_ffprobe(path: &std::path::Path, ffprobe: &str) -> Opt
         }
     };
     if !output.status.success() {
+        target.invalidate_redirect();
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::warn!(
             path = %path.display(),

@@ -74,23 +74,41 @@ pub(crate) fn record_file_artwork_in(
     super::publish::ensure_media_writable(tx, media_id)?;
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[library_id])?;
     let before = read_file_summary_facts(tx, &file_id_str)?;
+    let poster = artwork
+        .poster
+        .map(|path| path.to_string_lossy().to_string());
+    let backdrop = artwork
+        .backdrop
+        .map(|path| path.to_string_lossy().to_string());
+    let still = artwork.still.map(|path| path.to_string_lossy().to_string());
+    let poster_key = poster
+        .as_deref()
+        .map(|path| crate::path_key::canonical_recorded_key(tx, path));
+    let backdrop_key = backdrop
+        .as_deref()
+        .map(|path| crate::path_key::canonical_recorded_key(tx, path));
+    let still_key = still
+        .as_deref()
+        .map(|path| crate::path_key::canonical_recorded_key(tx, path));
     tx.execute(
         "UPDATE library_files SET
             poster_path = COALESCE(?1, poster_path),
             backdrop_path = COALESCE(?2, backdrop_path),
             still_path = COALESCE(?3, still_path),
-            has_poster = MAX(has_poster, ?4),
-            has_backdrop = MAX(has_backdrop, ?5),
-            has_still = MAX(has_still, ?6)
-         WHERE file_id = ?7",
+            poster_path_key = COALESCE(?4, poster_path_key),
+            backdrop_path_key = COALESCE(?5, backdrop_path_key),
+            still_path_key = COALESCE(?6, still_path_key),
+            has_poster = MAX(has_poster, ?7),
+            has_backdrop = MAX(has_backdrop, ?8),
+            has_still = MAX(has_still, ?9)
+         WHERE file_id = ?10",
         params![
-            artwork
-                .poster
-                .map(|path| path.to_string_lossy().to_string()),
-            artwork
-                .backdrop
-                .map(|path| path.to_string_lossy().to_string()),
-            artwork.still.map(|path| path.to_string_lossy().to_string()),
+            poster,
+            backdrop,
+            still,
+            poster_key,
+            backdrop_key,
+            still_key,
             i64::from(artwork.poster.is_some()),
             i64::from(artwork.backdrop.is_some()),
             i64::from(artwork.still.is_some()),

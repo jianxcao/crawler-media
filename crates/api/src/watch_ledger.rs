@@ -49,6 +49,13 @@ pub(crate) fn plan_paths(
 ) -> Result<ScanLedgerPlan, String> {
     let mut plan = ScanLedgerPlan::new(store);
     for file in paths {
+        if store
+            .path_claimed_by_active_rename(&file.path)
+            .map_err(|e| e.to_string())?
+        {
+            tracing::debug!(path = %file.path.display(), "跳过正在整理中的扫描路径");
+            continue;
+        }
         if plan.reuse(store, &file.path, true)? {
             continue;
         }
@@ -87,6 +94,13 @@ pub(crate) fn plan_video_paths(
 ) -> Result<ScanLedgerPlan, String> {
     let mut plan = ScanLedgerPlan::new(store);
     for path in paths {
+        if store
+            .path_claimed_by_active_rename(&path)
+            .map_err(|e| e.to_string())?
+        {
+            tracing::debug!(path = %path.display(), "跳过正在整理中的扫描视频路径");
+            continue;
+        }
         if plan.reuse(store, &path, false)? {
             continue;
         }

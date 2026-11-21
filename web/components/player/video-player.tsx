@@ -15,6 +15,7 @@ import {
   DEFAULT_PLAYBACK_SCOPE,
   type PlaybackApiScope,
   type PlaybackChapterMark,
+  type PlaybackSession,
   fetchPlaybackChapters,
   type PlaybackUnit,
   type PlaybackWatchState,
@@ -248,6 +249,25 @@ function unitKeyOf(unit: PlaybackUnit): string {
   return `${unit.media_item_id}/${unit.season_number ?? 0}/${unit.episode_number ?? 0}`;
 }
 
+function isStructuredHttpError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const status = "status" in error ? (error as { status?: unknown }).status : undefined;
+  if (typeof status === "number" && status >= 400) return true;
+  const details = "details" in error ? (error as { details?: unknown }).details : undefined;
+  if (details && typeof details === "object" && "error" in details) {
+    const inner = (details as { error?: unknown }).error;
+    if (
+      inner
+      && typeof inner === "object"
+      && "code" in inner
+      && typeof (inner as { code?: unknown }).code === "string"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function VideoPlayer(props: VideoPlayerProps) {
   const {
     unit,
@@ -315,6 +335,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
     renewedFromPlaySessionId?: string | null;
     deviceId?: string;
     audioTrack?: string; subtitleTrack?: string;
+  } | null>(null);
+  const inFlightRenewalRef = useRef<{
+    unitKey: string;
+    deviceId: string;
+    predecessorSid: string;
+    promise: Promise<PlaybackSession>;
   } | null>(null);
   // 惰性初始化从 localStorage 读：字幕调好的字号/位置不该每次进来都重调
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle>(loadSubtitleStyle);
@@ -919,6 +945,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     playSessionIdRef.current = null;
     eventSequenceRef.current = 0;
     pageRestoreRef.current = null;
+    inFlightRenewalRef.current = null;
     pageSuspendedRef.current = false;
     pageGenerationRef.current += 1;
     setPositionMs(0);
@@ -974,19 +1001,59 @@ export function VideoPlayer(props: VideoPlayerProps) {
     const obsolete = () => cancelled || pageSuspendedRef.current
       || pageGeneration !== pageGenerationRef.current
       || currentPageRef.current.unitKey !== unitKey || currentPageRef.current.state.attempt !== attempt;
+    const promotePredecessor = (fromSid: string, nextSid: string) => {
+      if (
+        !endedByAdminRef.current
+        && apiRef.current.progress === "server"
+        && currentPageRef.current.unitKey === unitKey
+        && getPlayerDeviceId() === requestDeviceId
+        && pageRestoreRef.current?.unitKey === unitKey
+        && pageRestoreRef.current.playSessionId === fromSid
+        && (!pageRestoreRef.current.deviceId || pageRestoreRef.current.deviceId === requestDeviceId)
+      ) {
+        pageRestoreRef.current = {
+          ...pageRestoreRef.current,
+          playSessionId: nextSid,
+          renewedFromPlaySessionId:
+            pageRestoreRef.current.renewedFromPlaySessionId ?? fromSid,
+        };
+      }
+    };
     void (async () => {
       try {
         if (!capabilityRef.current) capabilityRef.current = await getCapabilitySnapshot();
         if (obsolete()) return;
+        let predecessorSid = apiRef.current.progress === "server"
+          ? restore?.playSessionId ?? null
+          : null;
+        if (
+          predecessorSid
+          && inFlightRenewalRef.current
+          && inFlightRenewalRef.current.unitKey === unitKey
+          && inFlightRenewalRef.current.deviceId === requestDeviceId
+          && inFlightRenewalRef.current.predecessorSid === predecessorSid
+        ) {
+          const inFlight = inFlightRenewalRef.current;
+          try {
+            const priorSession = await inFlight.promise;
+            if (obsolete()) return;
+            if (priorSession.play_session_id && getPlayerDeviceId() === requestDeviceId) {
+              promotePredecessor(predecessorSid, priorSession.play_session_id);
+              predecessorSid = priorSession.play_session_id;
+            }
+          } catch (priorError) {
+            if (obsolete()) return;
+            if (isStructuredHttpError(priorError)) throw priorError;
+          }
+        }
         pendingFileMsRef.current = state.startMs ?? 0;
         // 首帧从"用户要求播放"这一刻算起，而不是从会话就位算起——
         // 决策与起会话的耗时正是首帧延迟的大头
         qoe({ type: "play-requested", at: performance.now() });
-        const session = await startPlaybackSession(
+        const requestPromise = startPlaybackSession(
           {
             ...unit,
-            resume_from_play_session_id: apiRef.current.progress === "server"
-              ? restore?.playSessionId ?? undefined : undefined,
+            resume_from_play_session_id: predecessorSid ?? undefined,
             capability: capabilityRef.current,
             failed_tiers: state.failedTiers,
             // null = 服务端接续播点；显式值（seek 重开 / 换轨 / ?t=）原样发
@@ -1001,29 +1068,28 @@ export function VideoPlayer(props: VideoPlayerProps) {
           },
           apiRef.current,
         );
+        if (predecessorSid) {
+          inFlightRenewalRef.current = {
+            unitKey,
+            deviceId: requestDeviceId,
+            predecessorSid,
+            promise: requestPromise,
+          };
+        }
+        let session: PlaybackSession;
+        try {
+          session = await requestPromise;
+        } finally {
+          if (inFlightRenewalRef.current?.promise === requestPromise) {
+            inFlightRenewalRef.current = null;
+          }
+        }
         if (obsolete()) {
-          // 如果页面只是再次进入 BFCache 挂起，而服务端已经从同一前驱签发了下一代
-          // 会话（A -> B），则把 B 保留到本页同一设备同一单元的下次恢复，避免下次
-          // pageshow 仍拿旧前驱 A 去续签而触发 409 resume_superseded。
-          if (
-            !cancelled
-            && pageSuspendedRef.current
-            && !endedByAdminRef.current
-            && apiRef.current.progress === "server"
-            && currentPageRef.current.unitKey === unitKey
-            && restore?.playSessionId
-            && session.play_session_id
-            && getPlayerDeviceId() === requestDeviceId
-            && pageRestoreRef.current?.unitKey === unitKey
-            && pageRestoreRef.current.playSessionId === restore.playSessionId
-            && (!pageRestoreRef.current.deviceId || pageRestoreRef.current.deviceId === requestDeviceId)
-          ) {
-            pageRestoreRef.current = {
-              ...pageRestoreRef.current,
-              playSessionId: session.play_session_id,
-              renewedFromPlaySessionId:
-                pageRestoreRef.current.renewedFromPlaySessionId ?? restore.playSessionId,
-            };
+          // 如果页面在途经历再次 BFCache 挂起或恢复，而服务端已经从同一前驱签发了下一代
+          // 会话（A -> B），则把 B 保留到本页同一设备同一单元，避免后续恢复仍拿旧前驱 A
+          // 去续签而触发 409 resume_superseded。
+          if (predecessorSid && session.play_session_id) {
+            promotePredecessor(predecessorSid, session.play_session_id);
           }
           // 其他超越情形（退出播放器/切集/换参数重发）：响应里可能带着一个刚拉起的
           // 转码会话，此后没有任何代码会认领它，交由服务端空闲回收。
@@ -1692,6 +1758,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
       pageGenerationRef.current += 1;
       pageSuspendedRef.current = true;
       pageRestoreRef.current = null;
+      inFlightRenewalRef.current = null;
       heartbeatStopRef.current?.();
       heartbeatStopRef.current = undefined;
       reportedStartRef.current = null;
@@ -1713,7 +1780,10 @@ export function VideoPlayer(props: VideoPlayerProps) {
   }), [unitKey, video]);
 
   useEffect(() => {
-    if (["error", "consent", "ended", "idle"].includes(state.phase)) pageRestoreRef.current = null;
+    if (["error", "consent", "ended", "idle"].includes(state.phase)) {
+      pageRestoreRef.current = null;
+      inFlightRenewalRef.current = null;
+    }
   }, [state.phase]);
 
   /**
@@ -3675,6 +3745,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
                     endedByAdminRef.current = false;
                     wantsPlayRef.current = true;
                     pageRestoreRef.current = null;
+                    inFlightRenewalRef.current = null;
                     dispatch({ type: "request", startMs: positionRef.current });
                   }}
                   className="rounded-full bg-[var(--player-accent)] px-6 py-2.5 text-[14px] font-semibold text-black transition-colors hover:bg-[var(--player-accent-hover)]"

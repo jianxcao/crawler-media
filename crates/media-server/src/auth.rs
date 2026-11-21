@@ -74,11 +74,11 @@ pub async fn authenticate(
 
 fn request_device_id(request: &Request) -> Option<String> {
     protocol_value(request.headers(), "X-Emby-Device-Id", "DeviceId").or_else(|| {
-        request.uri().query()?.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
+        url::form_urlencoded::parse(request.uri().query()?.as_bytes()).find_map(|(key, value)| {
+            let trimmed = value.trim();
             ((key.eq_ignore_ascii_case("DeviceId") || key.eq_ignore_ascii_case("device_id"))
-                && !value.trim().is_empty())
-            .then(|| value.trim().to_string())
+                && !trimmed.is_empty())
+            .then(|| trimmed.to_string())
         })
     })
 }
@@ -189,12 +189,11 @@ fn request_token(request: &Request) -> Option<String> {
                 .and_then(|value| value.to_str().ok())
         });
     let query_token = request.uri().query().and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
+        url::form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
             (key.eq_ignore_ascii_case("api_key")
                 || key.eq_ignore_ascii_case("apikey")
                 || key.eq_ignore_ascii_case("token"))
-            .then(|| value.to_string())
+            .then(|| value.into_owned())
         })
     });
     authorization

@@ -67,19 +67,18 @@ fn observed_rows(
     let mut rows = Vec::new();
     let mut cursor = None;
     loop {
-        let page =
+        let (page, next_cursor) =
             manager
                 .store
                 .analysis_season_files_page(key.media_id, key.season, cursor, 16)?;
-        let Some(last) = page.last() else {
+        let Some(next) = next_cursor else {
             break;
         };
-        cursor = Some((
-            crate::probe_manager::require_episode_coordinates(last)?.1 as i32,
-            last.file.library_id.to_string(),
-            last.file.file_id.to_string(),
-        ));
+        cursor = Some(next);
         for row in page {
+            if row.units.len() != 1 || row.units[0].is_whole() {
+                continue;
+            }
             match crate::fingerprint_job::source::observe_source(&row) {
                 Ok(()) => rows.push(row),
                 Err(reason) if crate::fingerprint_job::source::is_file_deleted(&reason) => {}

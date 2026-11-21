@@ -172,7 +172,7 @@ fn path_aliases_share_one_deletion_owner_and_lookup_stays_bounded() {
     conn.execute_batch("BEGIN").unwrap();
     for n in 0..10_000 {
         let path = format!("/unrelated/{n}.mkv");
-        conn.execute("INSERT INTO pending_file_deletions(path,path_key,deletion_id,reason) VALUES (?1,?1,?1,'noise')",[path]).unwrap();
+        conn.execute("INSERT INTO pending_file_deletions(path,path_key,deletion_id,reason,scope) VALUES (?1,?1,?1,'noise','media_with_leftovers')",[path]).unwrap();
     }
     conn.execute_batch("COMMIT").unwrap();
     let (after, large) = store.with_stats(store::stats::StatsScope::Library, || {

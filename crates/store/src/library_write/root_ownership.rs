@@ -56,18 +56,28 @@ pub(crate) fn ensure_root_owns_path(
     // Both ownership barriers share one statement. The deletion lookup is an
     // exact unique-index seek, so a publication batch does not add a SQL round
     // trip per file or scan unrelated deletion intents.
-    let (deleting, nested): (bool, bool) = tx.query_row(
+    let file_id = file.file_id.to_string();
+    let (deleting, renaming, nested): (bool, bool, bool) = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pending_file_deletions WHERE path_key=?3),
+                EXISTS(SELECT 1 FROM pending_file_renames WHERE phase <> 'failed' AND to_path_key=?3 AND file_id<>?4)
+                    OR EXISTS(SELECT 1 FROM pending_file_renames WHERE phase <> 'failed' AND from_path_key=?3 AND file_id<>?4),
                 EXISTS(SELECT 1 FROM library_roots r JOIN libraries l USING(library_id)
                   WHERE r.enabled=1 AND l.kind=?2 AND length(r.path_key)>length(?1)
                     AND (?3=r.path_key OR substr(?3,1,length(r.path_key)+1)=r.path_key||'/'))",
-        params![root_key, file.kind.as_str(), file_key],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        params![root_key, file.kind.as_str(), file_key, file_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     if deleting {
         tracing::warn!(path = %file.path.display(), "拒绝修改由持久删除意图持有的路径");
         return Err(StoreError::Protected(format!(
             "path {} has a deletion owner",
+            file.path.display()
+        )));
+    }
+    if renaming {
+        tracing::warn!(path = %file.path.display(), "拒绝修改由活动整理意图持有的路径");
+        return Err(StoreError::Protected(format!(
+            "path {} has an active rename owner",
             file.path.display()
         )));
     }

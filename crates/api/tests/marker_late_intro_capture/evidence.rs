@@ -244,6 +244,7 @@ async fn stable_model_predicts_only_the_next_files_late_window() {
         .store
         .analysis_season_files_page(s.media_id, 1, None, 16)
         .unwrap()
+        .0
         .into_iter()
         .find(|r| r.units.iter().any(|u| u.episode == 4))
         .unwrap();

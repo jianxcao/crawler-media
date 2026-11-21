@@ -31,7 +31,7 @@ fn ensure_no_placement_or_rename(
 ) -> Result<(), StoreError> {
     let (published, renaming): (bool, bool) = tx.query_row(
         "SELECT publication_state='published', EXISTS(SELECT 1 FROM pending_file_renames r
-            WHERE r.file_id=f.file_id) FROM library_files f WHERE f.file_id=?1",
+            WHERE r.file_id=f.file_id AND r.phase <> 'failed') FROM library_files f WHERE f.file_id=?1",
         [file.file_id.to_string()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;

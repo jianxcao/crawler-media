@@ -85,7 +85,10 @@ pub use library_paths::path_under_root;
 mod library_scope;
 pub use library_scope::{LibraryPathResolver, LibraryPathScope, StrictOwner};
 mod subscribe_library_snapshot;
-pub use pending_file_deletions::{MAX_FILE_DELETION_ATTEMPTS, QueuedFileDeletion, file_identity};
+pub use pending_file_deletions::{
+    FileDeletionScope, MAX_FILE_DELETION_ATTEMPTS, QueuedFileDeletion, RequiredDeletionTarget,
+    file_identity,
+};
 pub use subscribe_library_snapshot::SubscribeLibrarySnapshot;
 mod subscribe_library;
 pub use subscribe_library::{

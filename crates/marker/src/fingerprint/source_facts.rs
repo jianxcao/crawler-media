@@ -57,10 +57,12 @@ pub(crate) fn inspect(
         "-of",
         "json",
     ]);
-    crate::ProbeTarget::from_path(path).apply_input(&mut command);
+    let target = crate::ProbeTarget::from_path(path);
+    target.apply_input(&mut command);
     let output =
         super::bounded_output::output(&mut command, deadline_ms.max(1), control).map_err(fail)?;
     if !output.status.success() {
+        target.invalidate_redirect();
         return Err(fail(super::sanitize_stderr(&String::from_utf8_lossy(
             &output.stderr,
         ))));

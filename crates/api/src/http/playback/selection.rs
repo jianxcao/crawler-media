@@ -48,6 +48,40 @@ fn selected_media(
         .ok_or(SelectionError::Unavailable)
 }
 
+fn resolve_concrete_item(
+    store: &crate::Store,
+    media: &domain::Media,
+    selection: &PlaybackSelection,
+    user_id: Option<domain::UserId>,
+) -> Result<TypedItemId, SelectionError> {
+    let item = target_item(store, media, selection)?;
+    if media.kind != domain::MediaKind::Tv
+        || selection.file_id.is_some()
+        || !matches!(item, TypedItemId::Work(_))
+    {
+        return Ok(item);
+    }
+    let entries = match user_id {
+        Some(user_id) => store.playable_entries(user_id, &item),
+        None => store.published_entries_for_item(&item),
+    }
+    .map_err(|_| SelectionError::Unavailable)?;
+    if let Some(chosen) = entries
+        .iter()
+        .filter(|entry| !entry.unit.is_whole())
+        .min_by_key(|entry| (entry.unit.season, entry.unit.episode))
+    {
+        return Ok(TypedItemId::Unit {
+            media: media.id,
+            key: chosen.unit,
+        });
+    }
+    if entries.iter().any(|entry| entry.unit.is_whole()) {
+        return Ok(item);
+    }
+    Err(SelectionError::Unavailable)
+}
+
 /// Resolve a session request. An explicit source must be visible, present and cover
 /// the target, or the request is refused; only an omitted source is chosen automatically.
 pub(super) fn resolve_playback_for(
@@ -56,7 +90,7 @@ pub(super) fn resolve_playback_for(
     user_id: domain::UserId,
 ) -> Result<(domain::LibraryFile, domain::Media, ResolvedResume), SelectionError> {
     let media = selected_media(store, selection)?;
-    let item = target_item(store, &media, selection)?;
+    let item = resolve_concrete_item(store, &media, selection, Some(user_id))?;
     let preferred_source = match selection.file_id {
         None => None,
         Some(file_id) => {
@@ -112,7 +146,7 @@ pub(super) fn row_for(
 ) -> Result<(domain::LibraryFile, domain::Media, i32, i32), SelectionError> {
     let selection = parse_selection(body)?;
     let media = selected_media(store, &selection)?;
-    let item = target_item(store, &media, &selection)?;
+    let item = resolve_concrete_item(store, &media, &selection, user_id)?;
     let entries = match user_id {
         Some(user_id) => store.playable_entries(user_id, &item),
         None => store.published_entries_for_item(&item),

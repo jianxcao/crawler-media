@@ -52,8 +52,7 @@ impl Store {
     ) -> Result<ProtocolEntityPage, StoreError> {
         let allowed = authorized(self, Some(request.user_id))?;
         self.with_read(crate::Db::Library,|tx|{
-            let mut ids=visible(tx,&allowed)?;
-            if let Some(library)=request.library_id{ids.retain(|id|id==&library.to_string());}
+            let ids = visible_scoped(tx, &allowed, request.library_id)?;
             let mut counts=BTreeMap::<String,i64>::new();
             let mut stmt=tx.prepare_cached("SELECT value,SUM(member_count) FROM library_query_counts WHERE library_id IN (SELECT value FROM json_each(?1)) AND surface='protocol_entity' AND dimension=?2 GROUP BY value")?;
             for row in stmt.query_map(params![serde_json::to_string(&ids)?,request.kind.key()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?{let (name,count)=row?;counts.insert(name,count);}
@@ -116,7 +115,70 @@ pub(super) fn visible(
     tx: &Connection,
     allowed: &Option<HashSet<String>>,
 ) -> Result<Vec<String>, StoreError> {
-    let rows=tx.prepare_cached("SELECT library_id,lifecycle_state FROM libraries l WHERE NOT EXISTS(SELECT 1 FROM library_removals r WHERE r.library_id=l.library_id AND r.state!='succeeded') ORDER BY library_id")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+    visible_scoped(tx, allowed, None)
+}
+
+pub(super) fn visible_scoped(
+    tx: &Connection,
+    allowed: &Option<HashSet<String>>,
+    target_library: Option<LibraryId>,
+) -> Result<Vec<String>, StoreError> {
+    let target_id = target_library.map(|id| id.to_string());
+    let rows = tx
+        .prepare_cached(
+            "SELECT library_id, lifecycle_state FROM libraries l
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM library_removals r
+                 WHERE r.library_id = l.library_id AND r.state != 'succeeded'
+             )
+             ORDER BY library_id",
+        )?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut ids = Vec::new();
+    for (id, state) in rows {
+        if target_id.as_deref().is_some_and(|target| target != id) {
+            continue;
+        }
+        if allowed.as_ref().is_some_and(|a| !a.contains(&id)) {
+            continue;
+        }
+        if state == "reindexing" {
+            return Err(StoreError::QueryUnavailable {
+                library_id: id.parse()?,
+            });
+        }
+        if matches!(state.as_str(), "frozen" | "draining") {
+            continue;
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+pub(super) fn visible_for_media(
+    tx: &Connection,
+    allowed: &Option<HashSet<String>>,
+    media: MediaId,
+) -> Result<Vec<String>, StoreError> {
+    let media_id = media.to_string();
+    let rows = tx
+        .prepare_cached(
+            "SELECT l.library_id, l.lifecycle_state FROM libraries l
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM library_removals r
+                 WHERE r.library_id = l.library_id AND r.state != 'succeeded'
+             )
+               AND (
+                   EXISTS (SELECT 1 FROM library_files f WHERE f.library_id = l.library_id AND f.media_id = ?1)
+                   OR EXISTS (SELECT 1 FROM library_items i WHERE i.library_id = l.library_id AND i.media_id = ?1)
+               )
+             ORDER BY l.library_id",
+        )?
+        .query_map([&media_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut ids = Vec::new();
     for (id, state) in rows {
         if allowed.as_ref().is_some_and(|a| !a.contains(&id)) {

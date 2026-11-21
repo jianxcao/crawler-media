@@ -391,3 +391,169 @@ test("late renewal cannot be claimed after switching episodes or changing device
     } finally { await ui.unmount(); }
   }
 });
+
+test("consecutive BFCache round trips await an in-flight renewal settling AFTER pageshow #2 and chain B -> C", async () => {
+  const server = createGenerationalServer();
+  let deliverB;
+  const pendingB = new Promise(resolve => { deliverB = resolve; });
+  let mintedB;
+  const ui = await mountPlayer({
+    grant: (body, attempt) => {
+      if (attempt === 2) {
+        mintedB = server.issue(body);
+        return pendingB;
+      }
+      return server.issue(body);
+    },
+  });
+  try {
+    await ui.seek(42_000);
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls.length, 2);
+    assert.equal(ui.calls[1].resume_from_play_session_id, "sid-1");
+    assert.equal(mintedB.play_session_id, "sid-2");
+    await ui.event("pagehide");
+    await ui.event("pageshow");
+    assert.equal(ui.calls.length, 2, "must not fire a duplicate sid-1 renewal while Request #1 is in flight");
+    await ui.flush(() => deliverB(mintedB));
+    assert.equal(ui.calls.length, 3);
+    assert.equal(ui.calls[2].resume_from_play_session_id, "sid-2");
+    assert.equal(ui.calls[2].start_ms, 42_000);
+    assert.equal(ui.calls[2].audio_track, "audio-1");
+    assert.equal(ui.engines.at(-1).options.streamUrl, "/stream/sid-3");
+    const started = ui.reports.find(report => report.play_session_id === "sid-3");
+    assert.ok(started, "restored session must report progress under sid-3");
+    assert.equal(started.event_sequence, 1);
+  } finally { await ui.unmount(); }
+});
+
+for (const [label, trigger, expectedMessage] of [
+  ["admin termination", server => server.endByAdmin(), /管理员已结束本次播放/],
+  ["takeover by another page", server => server.takeoverFromOtherPage(), /newer playback selected/],
+]) {
+  test(`in-flight renewal settling AFTER pageshow #2 still fails cleanly after ${label}`, async () => {
+    const server = createGenerationalServer();
+    let deliverB;
+    const pendingB = new Promise(resolve => { deliverB = resolve; });
+    let mintedB;
+    const ui = await mountPlayer({
+      grant: (body, attempt) => {
+        if (attempt === 2) {
+          mintedB = server.issue(body);
+          return pendingB;
+        }
+        return server.issue(body);
+      },
+    });
+    try {
+      await ui.seek(42_000);
+      await ui.event("pagehide"); await ui.event("pageshow");
+      await ui.event("pagehide");
+      trigger(server);
+      await ui.event("pageshow");
+      assert.equal(ui.calls.length, 2, "must await Request #1 before sending next renewal");
+      await ui.flush(() => deliverB(mintedB));
+      assert.equal(ui.calls.length, 3);
+      assert.equal(ui.calls[2].resume_from_play_session_id, "sid-2");
+      assert.match(JSON.stringify(ui.renderer.toJSON()), expectedMessage);
+      assert.equal(ui.engines.length, 1);
+      assert.equal(ui.reports.some(report => report.play_session_id === "sid-3"), false);
+    } finally { await ui.unmount(); }
+  });
+}
+
+test("structured HTTP error from Request #1 settling AFTER pageshow #2 fails without duplicating sid-1", async () => {
+  let failB;
+  const pendingB = new Promise((_resolve, reject) => { failB = reject; });
+  const ui = await mountPlayer({
+    grant: (_body, attempt) => {
+      if (attempt === 1) return {
+        play_session_id: "sid-1", session_id: null, stream_url: "/stream/sid-1", start_ms: 0,
+        decision: { outcome: "plan", tier: 0, file_id: "file-1", container: "mp4", video: { action: "copy" }, audio: { action: "copy", track_ref: "audio-1" }, subtitles: [], audio_tracks: [] },
+        subtitle_urls: [], watch: { position_ms: 0, duration_ms: 1000_000 }, source: null,
+      };
+      if (attempt === 2) return pendingB;
+      throw new Error("unexpected third request");
+    },
+  });
+  try {
+    await ui.event("pagehide"); await ui.event("pageshow");
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls.length, 2);
+    await ui.flush(() => failB(Object.assign(new Error("ended"), {
+      status: 409, details: { error: { code: "playback.ended_by_admin" } },
+    })));
+    assert.equal(ui.calls.length, 2);
+    assert.match(JSON.stringify(ui.renderer.toJSON()), /管理员已结束本次播放/);
+    assert.equal(ui.engines.length, 1);
+  } finally { await ui.unmount(); }
+});
+
+test("transport/abort failure of Request #1 settling AFTER pageshow #2 retries with sid-1", async () => {
+  const server = createGenerationalServer();
+  let failB;
+  const pendingB = new Promise((_resolve, reject) => { failB = reject; });
+  const ui = await mountPlayer({
+    grant: (body, attempt) => {
+      if (attempt === 2) return pendingB;
+      return server.issue(body);
+    },
+  });
+  try {
+    await ui.seek(42_000);
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls[1].resume_from_play_session_id, "sid-1");
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls.length, 2);
+    await ui.flush(() => failB(new Error("network aborted")));
+    assert.equal(ui.calls.length, 3);
+    assert.equal(ui.calls[2].resume_from_play_session_id, "sid-1");
+    assert.equal(ui.calls[2].start_ms, 42_000);
+    assert.equal(ui.calls[2].audio_track, "audio-1");
+    assert.equal(ui.engines.at(-1).options.streamUrl, "/stream/sid-2");
+    assert.ok(ui.reports.some(report => report.play_session_id === "sid-2" && report.event === "start"));
+  } finally { await ui.unmount(); }
+});
+
+test("late renewal settling AFTER pageshow #2 cannot be claimed after deviceId change or episode navigation", async () => {
+  for (const mode of ["device-change", "navigate"]) {
+    const server = createGenerationalServer();
+    let deliverB;
+    const pendingB = new Promise(resolve => { deliverB = resolve; });
+    let mintedB;
+    const ui = await mountPlayer({
+      grant: (body, attempt) => {
+        if (attempt === 2) {
+          mintedB = server.issue(body);
+          return pendingB;
+        }
+        return server.issue(body);
+      },
+    });
+    try {
+      await ui.event("pagehide"); await ui.event("pageshow");
+      await ui.event("pagehide");
+      if (mode === "device-change") {
+        ui.setDeviceId("device-2");
+        await ui.event("pageshow");
+        assert.equal(ui.calls.length, 3, "a changed device must not await or claim the old device's renewal");
+        assert.equal(ui.calls[2].resume_from_play_session_id, "sid-1");
+        assert.match(JSON.stringify(ui.renderer.toJSON()), /newer playback selected/);
+        await ui.flush(() => deliverB(mintedB));
+        assert.equal(ui.engines.length, 1);
+      } else {
+        await ui.event("pageshow");
+        await ui.navigate();
+        const callsBeforeDeliver = ui.calls.length;
+        await ui.flush(() => deliverB(mintedB));
+        assert.equal(ui.calls.length, callsBeforeDeliver, "late renewal from previous unit must not trigger another session request");
+        assert.ok(ui.calls.slice(2).length >= 1);
+        assert.ok(
+          ui.calls.slice(2).every(c => c.media_item_id === "next-media" && c.resume_from_play_session_id === undefined),
+          "navigation to next-media must not inherit previous unit's renewal predecessor",
+        );
+        assert.notEqual(ui.engines.at(-1).options.streamUrl, "/stream/sid-2");
+      }
+    } finally { await ui.unmount(); }
+  }
+});

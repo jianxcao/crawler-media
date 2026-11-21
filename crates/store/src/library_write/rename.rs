@@ -22,6 +22,8 @@ pub(crate) struct Owned {
     pub kind: String,
     pub revision: i64,
     pub source_version: String,
+    pub presence_state: String,
+    pub missing_at: Option<i64>,
 }
 
 impl Store {
@@ -80,7 +82,7 @@ pub(crate) fn load_owned(
     from: &str,
 ) -> Result<Owned, StoreError> {
     tx.query_row(
-        "SELECT library_id, root_id, media_id, kind, file_revision, source_version
+        "SELECT library_id, root_id, media_id, kind, file_revision, source_version, presence_state, missing_at
          FROM library_files
          WHERE file_id = ?1 AND path_key = norm_path_key(?2)",
         params![id, from],
@@ -92,6 +94,8 @@ pub(crate) fn load_owned(
                 kind: r.get(3)?,
                 revision: r.get(4)?,
                 source_version: r.get(5)?,
+                presence_state: r.get(6)?,
+                missing_at: r.get(7)?,
             })
         },
     )

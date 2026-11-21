@@ -671,3 +671,81 @@ fn finish_integrity(store: &Store, operation: &str) {
     }
     panic!("Integrity did not finish");
 }
+
+#[test]
+fn p2_11_scoped_entities_and_seasons_ignore_unrelated_reindexing_library() {
+    let f = Fixture::new();
+    let movie_a = f.library("ready-movies", MediaKind::Movie);
+    let tv_a = f.library("ready-tv", MediaKind::Tv);
+    let b = f.library("reindexing-movies", MediaKind::Movie);
+    let tv_b = f.library("reindexing-tv", MediaKind::Tv);
+    let film_a = f.media(MediaKind::Movie, "Ready Film");
+    let film_b = f.media(MediaKind::Movie, "Reindexing Film");
+    let show_a = f.media(MediaKind::Tv, "Ready Show");
+    let show_b = f.media(MediaKind::Tv, "Reindexing Show");
+    f.publish(movie_a, film_a, "Drama", "Studio A", &[]);
+    f.publish(b, film_b, "Comedy", "Studio B", &[]);
+    f.publish(tv_a, show_a, "Drama", "Studio A", &[UnitKey::new(1, 1)]);
+    f.publish(tv_b, show_b, "Comedy", "Studio B", &[UnitKey::new(1, 1)]);
+
+    // Put Library B and TV B into reindexing via begin_library_reconfiguration
+    for (lib, op) in [(b, "reindex-b"), (tv_b, "reindex-tv-b")] {
+        let rev = f.store.library_config_revision(&lib.to_string()).unwrap();
+        f.store
+            .begin_library_reconfiguration(
+                &store::LibraryReconfiguration {
+                    operation_id: op.into(),
+                    library_id: lib,
+                    expected_revision: rev,
+                    root_paths: None,
+                    display_locale: Some("en-US".into()),
+                },
+                1,
+            )
+            .unwrap();
+    }
+
+    // Querying Genres and Studios scoped to ready Library A succeeds with A's entities only
+    for (kind, expected) in [
+        (ProtocolEntityKind::Genre, "Drama"),
+        (ProtocolEntityKind::Studio, "Studio A"),
+    ] {
+        let mut q = f.query(kind);
+        q.library_id = Some(movie_a);
+        let page = f
+            .store
+            .protocol_entities(&q)
+            .expect("scoped query on ready Library A must ignore reindexing Library B");
+        let names: Vec<&str> = page.items.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec![expected]);
+    }
+
+    // Querying Genres scoped to reindexing Library B still returns QueryUnavailable(b)
+    let mut qb = f.query(ProtocolEntityKind::Genre);
+    qb.library_id = Some(b);
+    assert!(matches!(
+        f.store.protocol_entities(&qb),
+        Err(store::StoreError::QueryUnavailable { library_id }) if library_id == b
+    ));
+
+    // Unscoped query across all authorized libraries still returns QueryUnavailable
+    assert!(matches!(
+        f.store
+            .protocol_entities(&f.query(ProtocolEntityKind::Genre)),
+        Err(store::StoreError::QueryUnavailable { .. })
+    ));
+
+    // Seasons for show_a (only in ready Library TV A) succeeds despite reindexing TV B
+    let seasons = f
+        .store
+        .protocol_seasons(f.user, show_a)
+        .expect("seasons for media only in ready TV A must ignore reindexing TV B");
+    assert_eq!(seasons.len(), 1);
+    assert_eq!(seasons[0].season, 1);
+
+    // Seasons for show_b (in reindexing Library TV B) still returns QueryUnavailable(tv_b)
+    assert!(matches!(
+        f.store.protocol_seasons(f.user, show_b),
+        Err(store::StoreError::QueryUnavailable { library_id }) if library_id == tv_b
+    ));
+}

@@ -46,6 +46,27 @@ pub(crate) async fn resume(
         &state,
         &[store::Db::Library, store::Db::App],
         move |store| -> Response {
+            let tv_whole = selection.file_id.is_none()
+                && selection.season_number.is_none()
+                && selection.episode_number.is_none()
+                && store
+                    .get_media(selection.media_item_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|media| media.kind == domain::MediaKind::Tv);
+            if tv_whole {
+                let watch = match watch_json(
+                    store,
+                    user_id,
+                    selection.media_item_id,
+                    UNIT_WHOLE,
+                    UNIT_WHOLE,
+                ) {
+                    Ok(watch) => watch,
+                    Err(response) => return response,
+                };
+                return ok(watch).into_response();
+            }
             let (file, _media, resolved) =
                 match super::selection::resolve_playback_for(store, &selection, user_id) {
                     Ok(resolved) => resolved,

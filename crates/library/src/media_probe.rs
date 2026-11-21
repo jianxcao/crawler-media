@@ -67,9 +67,11 @@ impl MediaProbe for Ffprobe {
             "-of",
             "json",
         ]);
-        ProbeTarget::from_path(path).apply_input(&mut command);
+        let target = ProbeTarget::from_path(path);
+        target.apply_input(&mut command);
         let output = control.output(&mut command)?;
         if !output.status.success() {
+            target.invalidate_redirect();
             return Err(LibraryError::Probe(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ));

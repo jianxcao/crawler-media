@@ -6,6 +6,19 @@ export interface OperationWaitOptions {
   intervalMs?: number;
 }
 
+/** 持久化库操作进入 failed 终态时抛出的结构化错误，携带可重试的 operation_id。 */
+export class LibraryOperationError extends Error {
+  readonly operation: LibraryOperation;
+  readonly operationId: string;
+
+  constructor(operation: LibraryOperation) {
+    super(operation.error ?? "媒体库操作失败，可重新尝试");
+    this.name = "LibraryOperationError";
+    this.operation = operation;
+    this.operationId = operation.operation_id;
+  }
+}
+
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     signal?.throwIfAborted();
@@ -39,7 +52,7 @@ export async function waitForLibraryOperation(
     options.onProgress?.(operation);
     if (operation.state === "succeeded") return operation;
     if (operation.state === "failed" && !isFirst) {
-      throw new Error(operation.error ?? "媒体库操作失败，可重新尝试");
+      throw new LibraryOperationError(operation);
     }
     isFirst = false;
     await pause(options.intervalMs ?? 1000, options.signal);

@@ -16,6 +16,7 @@ pub mod rename;
 mod rename_completion;
 pub mod rename_disk;
 mod rename_durable;
+pub(crate) mod rename_guard;
 mod rename_intent;
 mod rename_phases;
 mod rename_receipt;
@@ -36,7 +37,9 @@ pub(crate) use publish::{
 pub use reassign::*;
 pub(crate) use reduce::*;
 pub use rename_completion::{ObservedRenameCompletion, RenameCompletionPlan};
-pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction};
+pub use rename_durable::{
+    FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction, SidecarSourceIdentity,
+};
 pub use rename_intent::{ObservedRenameIntent, RenameIntentPlan};
 pub use rename_phases::{
     AppliedRenameSidecars, DecidedRenameSidecars, ObservedRenameSidecars, RenameSidecarPlan,

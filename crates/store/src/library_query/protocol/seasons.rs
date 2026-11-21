@@ -16,7 +16,7 @@ impl Store {
     ) -> Result<Vec<ProtocolSeason>, StoreError> {
         let allowed = super::entities::authorized(self, Some(user))?;
         self.with_read(crate::Db::Library,|tx|{
-            let ids=serde_json::to_string(&super::entities::visible(tx,&allowed)?)?;
+            let ids=serde_json::to_string(&super::entities::visible_for_media(tx,&allowed,media)?)?;
             let sql="WITH owned AS (SELECT DISTINCT u.season,u.episode FROM library_units u INDEXED BY units_media_scope
                 WHERE u.media_id=?2 AND u.library_id IN (SELECT value FROM json_each(?3)) AND u.available_file_count>0),
                 marks AS (SELECT o.season,o.episode,COALESCE((SELECT played FROM (

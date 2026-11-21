@@ -224,19 +224,54 @@ impl Store {
         season: u32,
         after: Option<(i32, String, String)>,
         limit: usize,
-    ) -> Result<Vec<domain::FileCoverage>, StoreError> {
+    ) -> Result<(Vec<domain::FileCoverage>, Option<(i32, String, String)>), StoreError> {
         use rusqlite::params;
         self.with_library_read(|db| {
-            let (episode,library,file)=after.unwrap_or((-1,String::new(),String::new()));
-            let mut statement=db.library.prepare("SELECT u.file_id FROM library_file_units u
-                JOIN library_files f ON f.file_id=u.file_id JOIN libraries l ON l.library_id=u.library_id
-                WHERE u.media_id=?1 AND u.season=?2 AND (u.episode,u.library_id,u.file_id)>(?3,?4,?5)
-                AND f.presence_state='present' AND f.publication_state='published' AND l.lifecycle_state='ready'
-                ORDER BY u.episode,u.library_id,u.file_id LIMIT ?6")?;
-            let ids=statement.query_map(params![media.to_string(),season,episode,library,file,limit.min(16) as i64],
-                |row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            ids.iter().map(|id|db.file_coverage_by_id(id.parse()?)?
-                .ok_or_else(||StoreError::Missing("analysis file disappeared".into()))).collect()
+            let (episode, library, file) = after.unwrap_or((-1, String::new(), String::new()));
+            let mut statement = db.library.prepare(
+                "SELECT u.episode, u.library_id, u.file_id FROM library_file_units u
+                 JOIN library_files f ON f.file_id = u.file_id
+                 JOIN libraries l ON l.library_id = u.library_id
+                 WHERE u.media_id = ?1 AND u.season = ?2
+                   AND (u.episode, u.library_id, u.file_id) > (?3, ?4, ?5)
+                   AND f.presence_state = 'present'
+                   AND f.publication_state = 'published'
+                   AND l.lifecycle_state = 'ready'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM library_file_units other
+                       WHERE other.file_id = u.file_id
+                         AND (other.season <> u.season OR other.episode <> u.episode)
+                   )
+                 ORDER BY u.episode, u.library_id, u.file_id LIMIT ?6",
+            )?;
+            let rows = statement
+                .query_map(
+                    params![
+                        media.to_string(),
+                        season,
+                        episode,
+                        library,
+                        file,
+                        limit.min(16) as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, i32>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let next_cursor = rows.last().cloned();
+            let files = rows
+                .iter()
+                .map(|(_, _, id)| {
+                    db.file_coverage_by_id(id.parse()?)?
+                        .ok_or_else(|| StoreError::Missing("analysis file disappeared".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((files, next_cursor))
         })
     }
     pub fn prepare_probe_analysis(

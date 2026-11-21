@@ -41,6 +41,7 @@ fn extract_with_program(
         error.to_string()
     })?;
     if !output.status.success() {
+        target.invalidate_redirect();
         let detail: String = String::from_utf8_lossy(&output.stderr)
             .chars()
             .take(500)

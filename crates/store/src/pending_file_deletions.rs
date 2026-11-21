@@ -32,6 +32,47 @@ pub(crate) fn ensure_path_not_pending_deletion(
 /// retried automatically; it stays listed (with its last error) for the user.
 pub const MAX_FILE_DELETION_ATTEMPTS: i64 = 20;
 
+/// Deletion scope recorded with each durable deletion intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDeletionScope {
+    /// Media file deletion: may prune orphaned sibling sidecars and empty dirs.
+    MediaWithLeftovers,
+    /// Exact verified path only (e.g., rename leftover sidecar): never touch siblings.
+    ExactPath,
+}
+
+impl FileDeletionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MediaWithLeftovers => "media_with_leftovers",
+            Self::ExactPath => "exact_path",
+        }
+    }
+
+    pub fn from_db(raw: &str) -> rusqlite::Result<Self> {
+        match raw {
+            "media_with_leftovers" => Ok(Self::MediaWithLeftovers),
+            "exact_path" => Ok(Self::ExactPath),
+            _ => Err(rusqlite::Error::InvalidColumnType(
+                0,
+                format!("unknown pending_file_deletions scope: {raw}"),
+                rusqlite::types::Type::Text,
+            )),
+        }
+    }
+}
+
+/// Destination proof that must remain intact before a deduplicated source
+/// sidecar deletion may unlink the original file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredDeletionTarget {
+    pub path: String,
+    pub size_bytes: u64,
+    pub device: u64,
+    pub inode: u64,
+    pub mtime_ns: i64,
+}
+
 /// Review M-3: a due deletion together with the identity recorded when it
 /// was queued. The file is only deleted while that identity still holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,10 +80,15 @@ pub struct QueuedFileDeletion {
     pub path: String,
     pub path_key: String,
     pub deletion_id: String,
+    pub scope: FileDeletionScope,
     pub file_id: Option<String>,
     pub library_id: Option<String>,
     pub file_size: Option<u64>,
+    pub file_device: Option<u64>,
     pub file_inode: Option<u64>,
+    pub file_mtime_ns: Option<i64>,
+    pub require_target: Option<RequiredDeletionTarget>,
+    pub companion_file_id: Option<String>,
 }
 
 #[cfg(unix)]
@@ -131,6 +177,15 @@ impl Store {
         self.with_library_write(|db| db.abandon_file_deletion(entry))
     }
 
+    /// Drop a stale deduplicated sidecar deletion whose required target vanished,
+    /// reverting any file/sidecar references still pointing at the vanished target.
+    pub fn abandon_file_deletion_restoring_sidecar(
+        &self,
+        entry: &QueuedFileDeletion,
+    ) -> Result<(), StoreError> {
+        self.with_library_write(|db| db.abandon_file_deletion_restoring_sidecar(entry))
+    }
+
     /// Review L-10: deletions that exhausted their retries, with last error.
     pub fn list_stuck_file_deletions(&self) -> Result<Vec<(String, Option<String>)>, StoreError> {
         self.with_library_read(|db| db.list_stuck_file_deletions())
@@ -170,3 +225,4 @@ impl Store {
 
 #[path = "pending_file_deletions/connection.rs"]
 mod connection;
+pub(crate) use connection::EnqueueFileDeletion;

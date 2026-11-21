@@ -36,7 +36,6 @@ struct Receipt {
 
 pub(crate) async fn refresh_library_media_info(
     State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
     request: Result<Json<RefreshRequest>, JsonRejection>,
 ) -> Response {
@@ -54,7 +53,7 @@ pub(crate) async fn refresh_library_media_info(
     let worker = state.clone();
     match state
         .fs_work
-        .run_to_completion(move || refresh(&worker, user_id, &id, request))
+        .run_to_completion(move || refresh(&worker, &id, request))
         .await
     {
         Ok(Ok(receipt)) => ok(serde_json::json!(receipt)).into_response(),
@@ -63,16 +62,21 @@ pub(crate) async fn refresh_library_media_info(
     }
 }
 
-fn refresh(
-    state: &ApiState,
-    user_id: Option<domain::UserId>,
-    id: &str,
-    request: RefreshRequest,
-) -> Result<Receipt, Response> {
+fn refresh(state: &ApiState, id: &str, request: RefreshRequest) -> Result<Receipt, Response> {
     state.require_writable()?;
     state.require_write_admitted()?;
-    store_wait::with_store_read(state, &[store::Db::Library, store::Db::App], |store| {
-        super::require_visible_library(store, id, user_id)
+    store_wait::with_store_read(state, &[store::Db::Library], |store| {
+        let Some(_) = store.get_library(id).map_err(store_error)? else {
+            return Err(super::missing_library());
+        };
+        if !store.library_accepts_work(id).map_err(store_error)? {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "library.deleting",
+                "Library 正在删除",
+            ));
+        }
+        Ok(())
     })??;
     let library_id = id
         .parse::<LibraryId>()

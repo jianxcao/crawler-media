@@ -87,6 +87,7 @@ python3 scripts/with-build-lock.py pnpm --dir web build
 - 集成测试放 `crates/<name>/tests/`；单测放模块旁 `#[cfg(test)]`。
 - HTTP / TMDB / qB / CDP 通过注入 trait（`Fetcher`、catalog client、`Downloader`、`MediaProbe`）替换为 fake；`cargo test` 不访问外网。
 - 解析器用 golden fixtures（`crates/<name>/tests/fixtures/`）。测试中不启动 Chromium。
+- **本地回环端口测试**：全量 Rust `--workspace` 套件、`pnpm --dir web test`（含 `dev-proxy.test.mjs`）以及绑定 `127.0.0.1` 桩服务的测试（如 `marker/tests/redirect_cache`、`media-server/tests/user_isolation`、`api/tests/review_remediation_site_actions`、`api/tests/fixture_lifecycle`、`api/tests/n2_signal_shutdown`、`api/tests/relative_data_startup` 等）必须在允许本地回环监听的环境中直接执行；不要在禁用回环端口的受限沙盒里跑这些测试或全量套件，否则会报 `EPERM` / `Operation not permitted`，或卡死在本地 HTTP 桩测试。
 
 ## Rust 规范
 

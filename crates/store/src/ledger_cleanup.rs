@@ -53,6 +53,11 @@ pub(crate) fn delete_file_in_tx(conn: &Connection, file_id: &str) -> Result<bool
         [file_id],
     )?;
 
+    conn.execute(
+        "DELETE FROM pending_file_renames WHERE file_id = ?1 AND phase = 'failed'",
+        [file_id],
+    )?;
+
     let changed = conn.execute("DELETE FROM library_files WHERE file_id = ?1", [file_id])?;
     Ok(changed > 0)
 }

@@ -62,9 +62,13 @@ fn matches_stem(name: &OsStr, stem: &OsStr) -> bool {
 }
 
 /// Clean up after `deleted` (already removed) inside Library `root`.
+/// Only media files may trigger adjacent sidecar/directory pruning.
 /// Returns every path removed (files and directories).
 pub fn prune_after_delete(deleted: &Path, root: &Path) -> Vec<PathBuf> {
     let mut removed = Vec::new();
+    if is_sidecar(deleted) {
+        return removed;
+    }
     let (Some(dir), Some(stem)) = (deleted.parent(), deleted.file_stem()) else {
         return removed;
     };

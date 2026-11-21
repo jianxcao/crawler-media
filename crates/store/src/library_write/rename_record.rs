@@ -19,6 +19,7 @@ pub(super) struct RawRename {
     sidecars_json: String,
     phase: String,
     evidence: (i64, i64, i64, i64),
+    source_digest: Option<String>,
     config: (i64, i64),
     media_id: Option<String>,
     receipt: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
@@ -44,6 +45,7 @@ impl RawRename {
             config: (r.get(15)?, r.get(16)?),
             media_id: r.get(17)?,
             receipt: (r.get(18)?, r.get(19)?, r.get(20)?, r.get(21)?),
+            source_digest: r.get(22)?,
         })
     }
 
@@ -63,6 +65,7 @@ impl RawRename {
                 device: device as u64,
                 inode: inode as u64,
                 mtime_ns,
+                source_digest: self.source_digest.clone(),
             }),
             _ => None,
         };
@@ -85,6 +88,7 @@ impl RawRename {
                 device: device as u64,
                 inode: inode as u64,
                 mtime_ns,
+                source_digest: self.source_digest,
             },
             disk_receipt,
             from_config_revision: self.config.0,

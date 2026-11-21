@@ -1,11 +1,11 @@
 /**
  * 整理（organize）目标库选择的纯函数：可选目标 = 当前库 + 同类型、有根目录的其他库；
- * 跨库时把预览算出的目标路径从源库根换到目标库首个根，并带上 `to_library_id`
- * （后端只在条目显式指定目标库时才走跨库持久改挂）。
+ * 最终重命名路径由后端按所选目标库和目标根预览产出，这里只负责组装提交清单
+ * （跨库时附带 `to_library_id`）及判断是否允许打开整理目标选择框。
  *
  * 只允许 `import type`，以便 node --test 直接执行。
  */
-import type { MediaLibrary } from "./api/libraries";
+import type { MediaLibrary, OrganizePreviewResult } from "./api/libraries";
 
 type OrganizeLibrary = Pick<MediaLibrary, "id" | "kind" | "root_paths">;
 
@@ -21,34 +21,28 @@ export function organizeTargets<L extends OrganizeLibrary>(current: L, all: read
   );
 }
 
-function trimSlash(path: string): string {
-  return path.length > 1 ? path.replace(/\/+$/, "") : path;
-}
-
-function underRoot(path: string, root: string): string | null {
-  const r = trimSlash(root);
-  if (path === r) return "";
-  return path.startsWith(`${r}/`) ? path.slice(r.length) : null;
+/**
+ * 源库全量文件已符合模板时，只要存在其他同类型目标库或本库有多个根目录，
+ * 仍允许打开整理对话框选择其他目标库/根目录。
+ */
+export function canOpenOrganizeDialog(
+  library: OrganizeLibrary,
+  libraries: readonly OrganizeLibrary[],
+  preview: Pick<OrganizePreviewResult, "renames" | "already_ok">,
+): boolean {
+  if (preview.renames.length > 0) return true;
+  if (preview.already_ok === 0) return false;
+  const hasCrossLibraryTargets = organizeTargets(library, libraries).some((t) => t.id !== library.id);
+  return hasCrossLibraryTargets || library.root_paths.length > 1;
 }
 
 export function buildOrganizeRenames(
   renames: readonly { from: string; to: string }[],
-  current: OrganizeLibrary,
-  target: OrganizeLibrary,
+  current: Pick<MediaLibrary, "id">,
+  target: Pick<MediaLibrary, "id">,
 ): OrganizeRenameRequest[] {
   if (target.id === current.id) {
     return renames.map(({ from, to }) => ({ from, to }));
   }
-  const destRoot = target.root_paths[0];
-  if (!destRoot) return [];
-  const out: OrganizeRenameRequest[] = [];
-  for (const { from, to } of renames) {
-    const rest = current.root_paths
-      .map((root) => underRoot(to, root))
-      .filter((r): r is string => r != null)
-      .sort((a, b) => a.length - b.length)[0];
-    if (rest == null) continue;
-    out.push({ from, to: `${trimSlash(destRoot)}${rest}`, to_library_id: target.id });
-  }
-  return out;
+  return renames.map(({ from, to }) => ({ from, to, to_library_id: target.id }));
 }

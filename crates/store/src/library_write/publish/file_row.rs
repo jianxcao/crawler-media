@@ -195,12 +195,36 @@ const PLAN_FILE_ROW_SQL: &str = "SELECT file_revision, source_version, presence_
             AND poster_path IS COALESCE(?23, poster_path)
             AND backdrop_path IS COALESCE(?24, backdrop_path)
             AND still_path IS COALESCE(?25, still_path)
+            AND poster_path_key IS COALESCE(norm_path_key(?23), poster_path_key)
+            AND backdrop_path_key IS COALESCE(norm_path_key(?24), backdrop_path_key)
+            AND still_path_key IS COALESCE(norm_path_key(?25), still_path_key)
             AND has_poster IS MAX(has_poster, ?26) AND has_backdrop IS MAX(has_backdrop, ?27)
             AND has_still IS MAX(has_still, ?28),
         0)
      FROM library_files WHERE file_id = ?29";
 
 pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(), StoreError> {
+    let poster = file
+        .poster_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let backdrop = file
+        .backdrop_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let still = file
+        .still_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let poster_key = poster
+        .as_deref()
+        .map(|p| crate::path_key::canonical_recorded_key(tx, p));
+    let backdrop_key = backdrop
+        .as_deref()
+        .map(|p| crate::path_key::canonical_recorded_key(tx, p));
+    let still_key = still
+        .as_deref()
+        .map(|p| crate::path_key::canonical_recorded_key(tx, p));
     tx.execute(
         "INSERT INTO library_files
             (file_id, library_id, root_id, media_id, kind, path_key, display_path,
@@ -208,14 +232,18 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
              size_bytes, stat_known, mtime_ns, created_ns, source_digest,
              source_path, transfer_mode, resolution, codec, hdr, quality_source, confidence,
              filter_score, release_quality, duration_ms, tracks_version,
-             poster_path, backdrop_path, still_path, has_poster, has_backdrop, has_still)
+             poster_path, backdrop_path, still_path,
+             poster_path_key, backdrop_path_key, still_path_key,
+             has_poster, has_backdrop, has_still)
          VALUES
             (?1, ?2, ?3, ?4, ?5, norm_path_key(?6), ?7,
              ?8, ?9, ?10, ?11,
              ?12, ?13, ?14, ?15, ?16,
              ?17, ?18, ?19, ?20, ?21, ?22, ?23,
              ?24, ?25, ?26, ?27,
-             ?28, ?29, ?30, ?31, ?32, ?33)",
+             ?28, ?29, ?30,
+             ?31, ?32, ?33,
+             ?34, ?35, ?36)",
         params![
             file.file_id.to_string(),
             file.library_id.to_string(),
@@ -246,15 +274,12 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
             file.release_quality,
             file.duration_ms,
             file.tracks_version,
-            file.poster_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            file.backdrop_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            file.still_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
+            poster,
+            backdrop,
+            still,
+            poster_key,
+            backdrop_key,
+            still_key,
             i64::from(file.poster_path.is_some()),
             i64::from(file.backdrop_path.is_some()),
             i64::from(file.still_path.is_some()),
@@ -297,6 +322,9 @@ const UPDATE_FILE_ROW_SQL: &str = "UPDATE library_files SET
             poster_path = COALESCE(?23, poster_path),
             backdrop_path = COALESCE(?24, backdrop_path),
             still_path = COALESCE(?25, still_path),
+            poster_path_key = COALESCE(norm_path_key(?23), poster_path_key),
+            backdrop_path_key = COALESCE(norm_path_key(?24), backdrop_path_key),
+            still_path_key = COALESCE(norm_path_key(?25), still_path_key),
             has_poster = MAX(has_poster, ?26),
             has_backdrop = MAX(has_backdrop, ?27),
             has_still = MAX(has_still, ?28)

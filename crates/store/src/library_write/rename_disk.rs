@@ -31,6 +31,9 @@ pub struct RenameSourceEvidence {
     pub device: u64,
     pub inode: u64,
     pub mtime_ns: i64,
+    /// Content digest for `.strm` sources (verified alongside native stat identity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
 }
 
 impl RenameSourceEvidence {
@@ -44,12 +47,16 @@ impl RenameSourceEvidence {
                 path.display()
             )));
         }
+        let observed = library::observe_source(path).map_err(|error| {
+            StoreError::Protected(format!("rename source {}: {error}", path.display()))
+        })?;
         Ok(Self {
             version,
             size_bytes: meta.len(),
             device: meta.dev(),
             inode: meta.ino(),
             mtime_ns: mtime_ns(&meta),
+            source_digest: observed.content_digest,
         })
     }
 
@@ -61,13 +68,18 @@ impl RenameSourceEvidence {
             && mtime_ns(meta) == self.mtime_ns
     }
 
-    pub(super) fn observed(version: FileVersion, meta: &Metadata) -> Self {
+    pub(super) fn observed(
+        version: FileVersion,
+        meta: &Metadata,
+        source_digest: Option<String>,
+    ) -> Self {
         Self {
             version,
             size_bytes: meta.len(),
             device: meta.dev(),
             inode: meta.ino(),
             mtime_ns: mtime_ns(meta),
+            source_digest,
         }
     }
 
@@ -75,13 +87,28 @@ impl RenameSourceEvidence {
         self.is_source(meta)
     }
 
-    /// Same native file (device + inode, and the recorded length so a reused
-    /// inode of a different file does not pass); never size or time alone.
-    pub(super) fn same_inode(&self, meta: &Metadata) -> bool {
-        meta.is_file()
-            && meta.dev() == self.device
-            && meta.ino() == self.inode
-            && meta.len() == self.size_bytes
+    /// Verify native stat identity (device, inode, length, mtime) and `.strm`
+    /// content digest when present. Rejects in-place same-length overwrites.
+    pub(super) fn matches_file(&self, path: &Path, meta: &Metadata) -> Result<bool, StoreError> {
+        if !self.is_source(meta) {
+            return Ok(false);
+        }
+        let Some(expected_digest) = self.source_digest.as_deref() else {
+            return Ok(true);
+        };
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let fd_meta = file.metadata()?;
+        if !self.is_source(&fd_meta) {
+            return Ok(false);
+        }
+        let observed = library::observe_open_source(path, &file, &fd_meta).map_err(|error| {
+            StoreError::Protected(format!("rename target {}: {error}", path.display()))
+        })?;
+        Ok(observed.content_digest.as_deref() == Some(expected_digest))
     }
 }
 

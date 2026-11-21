@@ -19,6 +19,46 @@ fn remove_physical_file(path: &str) -> Result<(), String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeletionReuseCheck {
+    StillValid,
+    Reused,
+    RequiredTargetVanished,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObservedFileIdentity {
+    size: u64,
+    device: Option<u64>,
+    inode: Option<u64>,
+    mtime_ns: Option<i64>,
+}
+
+fn check_required_target(
+    target: &store::RequiredDeletionTarget,
+) -> Result<DeletionReuseCheck, store::StoreError> {
+    let meta = match std::fs::symlink_metadata(&target.path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeletionReuseCheck::RequiredTargetVanished);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !meta.is_file() || meta.len() != target.size_bytes {
+        return Ok(DeletionReuseCheck::Reused);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mtime_ns = meta.mtime().saturating_mul(1_000_000_000) + meta.mtime_nsec();
+        if meta.dev() != target.device || meta.ino() != target.inode || mtime_ns != target.mtime_ns
+        {
+            return Ok(DeletionReuseCheck::Reused);
+        }
+    }
+    Ok(DeletionReuseCheck::StillValid)
+}
+
 /// Review M-3: the path may have been reused by a new import since the
 /// deletion was queued (other file row, or a file with another size/inode).
 ///
@@ -27,19 +67,19 @@ fn remove_physical_file(path: &str) -> Result<(), String> {
 fn queued_path_was_reused(
     store: &Store,
     entry: &store::QueuedFileDeletion,
-) -> Result<bool, store::StoreError> {
+) -> Result<DeletionReuseCheck, store::StoreError> {
     if let Some(library) = &entry.library_id {
         if !store.library_accepts_work(library)? {
-            return Ok(true);
+            return Ok(DeletionReuseCheck::Reused);
         }
     } else if store.file_deletion_blocked(&entry.path_key)? {
-        return Ok(true);
+        return Ok(DeletionReuseCheck::Reused);
     }
     // Retired root aliases no longer participate in SQL key normalization.
     // Resolve caller spelling here, outside database writers, before any unlink.
     let resolved = store::LibraryPathScope::resolve_path(std::path::Path::new(&entry.path))?;
     if entry.library_id.is_none() && store.file_deletion_blocked(&resolved.to_string_lossy())? {
-        return Ok(true);
+        return Ok(DeletionReuseCheck::Reused);
     }
     let current = {
         store
@@ -51,7 +91,7 @@ fn queued_path_was_reused(
     if let Some(row) = &current
         && !store.library_accepts_work(&row.file.library_id.to_string())?
     {
-        return Ok(true);
+        return Ok(DeletionReuseCheck::Reused);
     }
     let file_now = current.as_ref().map(|row| row.file.file_id.to_string());
     let file_changed = match (entry.file_id.as_deref(), file_now.as_deref()) {
@@ -83,12 +123,21 @@ fn queued_path_was_reused(
     };
     let identity_changed = match (observed_identity(&entry.path)?, entry.file_size) {
         (Some(_), None) => true,
-        (Some((size, inode)), Some(queued_size)) => {
-            size != queued_size || matches!((inode, entry.file_inode), (Some(a), Some(b)) if a != b)
+        (Some(observed), Some(queued_size)) => {
+            observed.size != queued_size
+                || matches!((observed.device, entry.file_device), (Some(a), Some(b)) if a != b)
+                || matches!((observed.inode, entry.file_inode), (Some(a), Some(b)) if a != b)
+                || matches!((observed.mtime_ns, entry.file_mtime_ns), (Some(a), Some(b)) if a != b)
         }
         _ => false,
     };
-    Ok(file_changed || identity_changed || source_changed)
+    if file_changed || identity_changed || source_changed {
+        return Ok(DeletionReuseCheck::Reused);
+    }
+    if let Some(target) = &entry.require_target {
+        return check_required_target(target);
+    }
+    Ok(DeletionReuseCheck::StillValid)
 }
 
 /// Drop a stale queue row; the file and its file row are kept.
@@ -168,11 +217,16 @@ fn process_queued_deletion(
         return Ok(());
     }
     match queued_path_was_reused(store, entry) {
-        Ok(true) => {
+        Ok(DeletionReuseCheck::Reused) => {
             abandon_queued_deletion(store, entry)?;
             return Ok(());
         }
-        Ok(false) => {}
+        Ok(DeletionReuseCheck::RequiredTargetVanished) => {
+            tracing::warn!(path = %path, "去重附属文件的目标副本已消失，放弃删除并恢复引用");
+            store.abandon_file_deletion_restoring_sidecar(entry)?;
+            return Ok(());
+        }
+        Ok(DeletionReuseCheck::StillValid) => {}
         Err(error) => {
             tracing::error!(path = %path, %error, "读取待删除文件身份失败，保留删除意图并退避");
             store.record_file_deletion_failure(entry, now, &error.to_string())?;
@@ -206,7 +260,7 @@ fn process_queued_deletion(
             }
         }
     }
-    if completed {
+    if completed && entry.scope == store::FileDeletionScope::MediaWithLeftovers {
         prune_disk_leftovers(store, std::path::Path::new(path));
     }
     Ok(())
@@ -237,20 +291,29 @@ pub(crate) fn prune_disk_leftovers(store: &Store, deleted: &std::path::Path) {
     }
 }
 
-fn observed_identity(path: &str) -> Result<Option<(u64, Option<u64>)>, store::StoreError> {
+fn observed_identity(path: &str) -> Result<Option<ObservedFileIdentity>, store::StoreError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     #[cfg(unix)]
-    let inode = {
+    let (device, inode, mtime_ns) = {
         use std::os::unix::fs::MetadataExt;
-        Some(metadata.ino())
+        (
+            Some(metadata.dev()),
+            Some(metadata.ino()),
+            Some(metadata.mtime().saturating_mul(1_000_000_000) + metadata.mtime_nsec()),
+        )
     };
     #[cfg(not(unix))]
-    let inode = None;
-    Ok(Some((metadata.len(), inode)))
+    let (device, inode, mtime_ns) = (None, None, None);
+    Ok(Some(ObservedFileIdentity {
+        size: metadata.len(),
+        device,
+        inode,
+        mtime_ns,
+    }))
 }
 
 #[derive(Default)]

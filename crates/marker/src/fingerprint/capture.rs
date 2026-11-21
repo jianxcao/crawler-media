@@ -145,6 +145,7 @@ pub(super) fn capture_from_source_with(
     timings.chromaprint_finish_ms = finish_started.elapsed().as_millis();
 
     finish_captured_fingerprint(request, run_res, &mut fingerprinter, timings, started)
+        .inspect_err(|_| crate::ProbeTarget::from_path(&request.path).invalidate_redirect())
 }
 
 fn finish_captured_fingerprint(

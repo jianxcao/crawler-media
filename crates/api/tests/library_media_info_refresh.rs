@@ -455,5 +455,92 @@ fn replay_keeps_files_skipped_for_active_work_skipped_after_that_work_finishes()
     );
 }
 
+#[test]
+fn p2_14_admin_can_refresh_hidden_library_while_member_stays_forbidden() {
+    let fixture = Fixture::new();
+    let store = fixture.state.store();
+    let hidden_root = fixture._tmp.path().join("hidden-movies");
+    std::fs::create_dir_all(&hidden_root).unwrap();
+    let hidden_lib = store
+        .create_library(
+            MediaKind::Movie,
+            "Hidden Movies",
+            &[hidden_root.to_str().unwrap()],
+            "everyone",
+            false,
+            &[],
+        )
+        .unwrap();
+    let movie = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Hidden Film".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&movie).unwrap();
+    let path = hidden_root.join("Hidden.Film.2024.mkv");
+    std::fs::write(&path, b"hidden video").unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: movie.id,
+            path: path.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Real admin user token (user_id = Some(admin_id)), NOT management-secret
+    let admin_id = store.admin_user_id().unwrap();
+    let admin_token = "real-admin-session-token";
+    store.set_user_token(admin_id, admin_token).unwrap();
+    let member = domain::User {
+        id: domain::UserId::new(),
+        login: "member-user".into(),
+        enabled: true,
+        role: domain::UserRole::Member,
+    };
+    store.insert_user(&member).unwrap();
+    let member_token = "real-member-session-token";
+    store.set_user_token(member.id, member_token).unwrap();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let app = router(fixture.state.clone());
+
+    let admin_res = runtime
+        .block_on(app.clone().oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{}/media-info/refresh", hidden_lib.id),
+            Some(admin_token),
+            json!({ "mode": "missing", "request_id": uuid::Uuid::new_v4().to_string() }),
+        )))
+        .unwrap();
+    let admin_status = admin_res.status();
+    let admin_body = runtime.block_on(json_body(admin_res));
+    assert_eq!(
+        admin_status,
+        StatusCode::OK,
+        "admin must be able to refresh admin_visible=false library: {admin_body}"
+    );
+    assert_eq!(admin_body["data"]["queued"], 1);
+
+    let member_res = runtime
+        .block_on(app.oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{}/media-info/refresh", hidden_lib.id),
+            Some(member_token),
+            json!({ "mode": "missing", "request_id": uuid::Uuid::new_v4().to_string() }),
+        )))
+        .unwrap();
+    assert_eq!(member_res.status(), StatusCode::FORBIDDEN);
+}
+
 #[path = "library_media_info_refresh/worker.rs"]
 mod worker;

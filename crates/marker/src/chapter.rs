@@ -97,6 +97,7 @@ pub fn probe_chapters_controlled(
         }
     };
     if !output.status.success() {
+        target.invalidate_redirect();
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::warn!(
             path = %path.display(),

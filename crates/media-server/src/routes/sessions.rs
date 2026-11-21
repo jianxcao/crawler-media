@@ -10,17 +10,17 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub(super) struct ProgressBody {
-    #[serde(default, rename = "ItemId")]
+    #[serde(default, rename = "ItemId", alias = "itemId")]
     item_id: Option<String>,
-    #[serde(default, rename = "PositionTicks")]
+    #[serde(default, rename = "PositionTicks", alias = "positionTicks")]
     position_ticks: Option<i64>,
-    #[serde(default, rename = "IsPaused")]
+    #[serde(default, rename = "IsPaused", alias = "isPaused")]
     is_paused: Option<bool>,
-    #[serde(default, rename = "PlaySessionId")]
+    #[serde(default, rename = "PlaySessionId", alias = "playSessionId")]
     play_session_id: Option<String>,
-    #[serde(default, rename = "EventSequence")]
+    #[serde(default, rename = "EventSequence", alias = "eventSequence")]
     event_sequence: Option<i64>,
-    #[serde(default, rename = "MediaSourceId")]
+    #[serde(default, rename = "MediaSourceId", alias = "mediaSourceId")]
     media_source_id: Option<String>,
 }
 

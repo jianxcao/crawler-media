@@ -81,7 +81,8 @@ pub(super) fn capture(
         "-read_intervals", &interval,
         "-show_packets", "-show_frames", "-show_streams", "-show_format", "-show_data",
         "-show_entries", "packet=stream_index,pts,pos,size,data:packet_side_data=side_data_type,skip_samples,discard_padding:frame=stream_index,pts,pkt_pos,pkt_size,nb_samples:stream=index,codec_name,profile,sample_rate,channels,time_base,extradata,initial_padding:format=format_name,start_time", "-of", "json"]);
-    crate::ProbeTarget::from_path(&request.path).apply_input(&mut command);
+    let target = crate::ProbeTarget::from_path(&request.path);
+    target.apply_input(&mut command);
     let output = super::bounded_output::output_with_input(
         &mut command,
         deadline,
@@ -91,6 +92,7 @@ pub(super) fn capture(
     )
     .map_err(fail)?;
     if !output.status.success() || !output.stderr.is_empty() {
+        target.invalidate_redirect();
         return Err(fail("source demux/decode failed".into()));
     }
     let proof = ledger::prepare(&output.stdout, source).map_err(fail)?;

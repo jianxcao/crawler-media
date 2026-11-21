@@ -22,6 +22,7 @@ impl crate::LibraryConnection<'_> {
     pub(super) fn publish_rename_library(
         &self,
         request: &FileRenameRequest,
+        effective_sidecars: &[RenameSidecar],
         observed: &library::SourceObservation,
         now: i64,
     ) -> Result<(), StoreError> {
@@ -43,9 +44,11 @@ impl crate::LibraryConnection<'_> {
         ensure_rename_libraries_admitted(&tx, request, true)?;
         ensure_media_writable(&tx, request.media_id)?;
         refuse_occupied(&tx, &to_str, &id)?;
+        let was_unavailable = owned.presence_state != "present" || owned.missing_at.is_some();
         let changed = tx.execute(
             "UPDATE library_files
-             SET path_key = norm_path_key(?2), display_path = ?2, root_id = ?3, library_id = ?4
+             SET path_key = norm_path_key(?2), display_path = ?2, root_id = ?3, library_id = ?4,
+                 presence_state = 'present', missing_at = NULL
              WHERE file_id = ?1 AND file_revision = ?5 AND source_version = ?6",
             params![
                 id,
@@ -61,23 +64,25 @@ impl crate::LibraryConnection<'_> {
                 "file {id} changed during rename publish"
             )));
         }
+        let now_ms = now.saturating_mul(1000);
         if observed.source_version != owned.source_version {
             super::super::source::advance_to_new_content(
                 &tx,
                 request.file_id,
                 owned.revision + 1,
                 observed,
-                now.saturating_mul(1000),
+                now_ms,
             )?;
+        } else if was_unavailable {
+            crate::ledger_presence::source_restored(&tx, &id, now_ms)?;
         }
         // Coverage rows carry composite FK (file_id, library_id, media_id).
         tx.execute(
             "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",
             params![id, to_library],
         )?;
-        // References follow only sidecars whose persisted decision placed them.
-        let placed: Vec<RenameSidecar> = request
-            .sidecars
+        // References follow only sidecars whose verified decision placed them.
+        let placed: Vec<RenameSidecar> = effective_sidecars
             .iter()
             .filter(|side| side.action.migrates_references())
             .cloned()
@@ -98,7 +103,45 @@ impl crate::LibraryConnection<'_> {
         if request.to_library_id != request.from_library_id {
             reduce_library_media(&tx, request.to_library_id, request.media_id)?;
         }
+        if effective_sidecars != request.sidecars.as_slice() {
+            tx.execute(
+                "UPDATE pending_file_renames SET sidecars_json = ?2 WHERE rename_id = ?1",
+                params![rename_id, sidecars_json(effective_sidecars)?],
+            )?;
+        }
         set_phase(&tx, rename_id, "library_published", now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn revert_vanished_sidecar_references(
+        &self,
+        file_id: &str,
+        reverted: &[(PathBuf, PathBuf)],
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.library)?;
+        for (from, to) in reverted {
+            let from_str = from.to_string_lossy().into_owned();
+            let to_str = to.to_string_lossy().into_owned();
+            let from_key = crate::path_key::canonical_recorded_key(&tx, &from_str);
+            let to_key = crate::path_key::canonical_recorded_key(&tx, &to_str);
+            tx.execute(
+                "UPDATE scrape_sidecars SET path = ?3, path_key = ?4
+                 WHERE file_id = ?1 AND path_key = ?2",
+                params![file_id, to_key, from_str, from_key],
+            )?;
+            tx.execute(
+                "UPDATE library_files SET
+                    poster_path = CASE WHEN poster_path_key = ?2 THEN ?3 ELSE poster_path END,
+                    poster_path_key = CASE WHEN poster_path_key = ?2 THEN ?4 ELSE poster_path_key END,
+                    backdrop_path = CASE WHEN backdrop_path_key = ?2 THEN ?3 ELSE backdrop_path END,
+                    backdrop_path_key = CASE WHEN backdrop_path_key = ?2 THEN ?4 ELSE backdrop_path_key END,
+                    still_path = CASE WHEN still_path_key = ?2 THEN ?3 ELSE still_path END,
+                    still_path_key = CASE WHEN still_path_key = ?2 THEN ?4 ELSE still_path_key END
+                 WHERE file_id = ?1",
+                params![file_id, to_key, from_str, from_key],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -154,7 +197,8 @@ impl crate::LibraryConnection<'_> {
                         r.to_library_id, r.to_root_id, r.sidecars_json, r.phase,
                         r.source_size, r.source_device, r.source_inode, r.source_mtime_ns,
                         r.from_config_revision, r.to_config_revision, f.media_id,
-                        r.dest_size, r.dest_device, r.dest_inode, r.dest_mtime_ns
+                        r.dest_size, r.dest_device, r.dest_inode, r.dest_mtime_ns,
+                        r.source_digest
                  FROM pending_file_renames r LEFT JOIN library_files f ON f.file_id = r.file_id
                  WHERE r.rename_id = ?1",
                 params![rename_id],

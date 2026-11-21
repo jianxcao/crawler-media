@@ -254,7 +254,7 @@ async fn subtitle_stream(
     };
     let wants_vtt = path.codec.eq_ignore_ascii_case("vtt");
     let client = user.playback_client(&headers);
-    let device_id = query.device_id.as_deref().unwrap_or(&client.device_id);
+    let device_id = client.device_id.as_str();
     // 协议层只调用 provider seam；同步提取与 single-flight 都在 provider 内部。
     match state
         .provider
@@ -292,11 +292,13 @@ async fn subtitle_stream(
 }
 
 #[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
 struct StreamQuery {
+    #[serde(default, rename = "MediaSourceId", alias = "mediaSourceId")]
     media_source_id: Option<String>,
+    #[serde(default, rename = "PlaySessionId", alias = "playSessionId")]
     play_session_id: Option<String>,
-    device_id: Option<String>,
+    #[serde(default, rename = "DeviceId", alias = "deviceId", alias = "device_id")]
+    _device_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -314,7 +316,7 @@ async fn stream(
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 取流").await?;
 
     let client = user.playback_client(&headers);
-    let device_id = query.device_id.as_deref().unwrap_or(&client.device_id);
+    let device_id = client.device_id.as_str();
 
     let (path, is_strm) = state
         .provider
