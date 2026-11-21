@@ -211,9 +211,9 @@ for (const [code, message] of [
   ["playback.ended_by_admin", "管理员已结束本次播放"],
   ["playback.resume_superseded", "newer playback selected"],
 ]) {
-  test(`a second cache trip during renewal retains predecessor authorization for ${code}`, async () => {
-    let finish;
-    const pending = new Promise(resolve => { finish = resolve; });
+  test(`a second cache trip with an aborted renewal retains predecessor authorization for ${code}`, async () => {
+    let fail;
+    const pending = new Promise((_resolve, reject) => { fail = reject; });
     const ui = await mountPlayer({ grant: (body, attempt) => {
       if (attempt === 1) return {
         play_session_id: "original", session_id: null, stream_url: "/original", start_ms: 0,
@@ -233,7 +233,7 @@ for (const [code, message] of [
       await ui.event("pagehide"); await ui.event("pageshow");
       assert.equal(ui.calls[1].resume_from_play_session_id, "original");
       await ui.event("pagehide");
-      await ui.flush(() => finish(ui.session("obsolete-renewal", 42_000)));
+      await ui.flush(() => fail(new Error("aborted while cached")));
       await ui.event("pageshow");
       assert.equal(ui.calls.length, 3);
       assert.equal(ui.calls[2].resume_from_play_session_id, "original");
@@ -245,3 +245,149 @@ for (const [code, message] of [
     } finally { await ui.unmount(); }
   });
 }
+
+function createGenerationalServer() {
+  let nextId = 0;
+  let latestGen = 0;
+  let endedByAdmin = false;
+  const sessions = new Map();
+  const mint = (startMs) => {
+    const sid = `sid-${++nextId}`;
+    latestGen += 1;
+    sessions.set(sid, { gen: latestGen });
+    return {
+      play_session_id: sid, session_id: null, stream_url: `/stream/${sid}`, start_ms: startMs ?? 0,
+      decision: {
+        outcome: "plan", tier: 0, file_id: "file-1", container: "mp4",
+        video: { action: "copy" }, audio: { action: "copy", track_ref: "audio-1" },
+        subtitles: [], audio_tracks: [],
+      },
+      subtitle_urls: [], watch: { position_ms: startMs ?? 0, duration_ms: 1000_000 }, source: null,
+    };
+  };
+  return {
+    issue(body) {
+      if (body.resume_from_play_session_id) {
+        if (endedByAdmin) {
+          throw Object.assign(new Error("管理员已结束本次播放"), {
+            status: 409, details: { error: { code: "playback.ended_by_admin" } },
+          });
+        }
+        const prev = sessions.get(body.resume_from_play_session_id);
+        if (!prev || prev.gen < latestGen) {
+          throw Object.assign(new Error("newer playback selected"), {
+            status: 409, details: { error: { code: "playback.resume_superseded" } },
+          });
+        }
+      }
+      return mint(body.start_ms);
+    },
+    endByAdmin() { endedByAdmin = true; },
+    takeoverFromOtherPage() { latestGen += 1; },
+  };
+}
+
+test("consecutive BFCache round trips promote an in-flight renewal so the second restore resumes from B", async () => {
+  const server = createGenerationalServer();
+  let deliverB;
+  const pendingB = new Promise(resolve => { deliverB = resolve; });
+  let mintedB;
+  const ui = await mountPlayer({
+    grant: (body, attempt) => {
+      if (attempt === 2) {
+        mintedB = server.issue(body);
+        return pendingB;
+      }
+      return server.issue(body);
+    },
+  });
+  try {
+    await ui.seek(42_000);
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls[1].resume_from_play_session_id, "sid-1");
+    assert.equal(mintedB.play_session_id, "sid-2");
+    await ui.event("pagehide");
+    await ui.flush(() => deliverB(mintedB));
+    assert.equal(ui.engines.length, 1, "cached renewal must not attach a stream while suspended");
+    assert.equal(ui.reports.some(report => report.play_session_id === "sid-2"), false);
+    await ui.event("pageshow");
+    assert.equal(ui.calls.length, 3);
+    assert.equal(ui.calls[2].resume_from_play_session_id, "sid-2");
+    assert.equal(ui.calls[2].start_ms, 42_000);
+    assert.equal(ui.calls[2].audio_track, "audio-1");
+    assert.equal(ui.engines.at(-1).options.streamUrl, "/stream/sid-3");
+    const started = ui.reports.find(report => report.play_session_id === "sid-3");
+    assert.ok(started, "restored session must report progress under the current SID");
+    assert.equal(started.event_sequence, 1);
+  } finally { await ui.unmount(); }
+});
+
+for (const [label, trigger, expectedMessage] of [
+  ["admin termination", server => server.endByAdmin(), /管理员已结束本次播放/],
+  ["takeover by another page", server => server.takeoverFromOtherPage(), /newer playback selected/],
+]) {
+  test(`promoted in-flight renewal still fails cleanly after ${label} while cached`, async () => {
+    const server = createGenerationalServer();
+    let deliverB;
+    const pendingB = new Promise(resolve => { deliverB = resolve; });
+    let mintedB;
+    const ui = await mountPlayer({
+      grant: (body, attempt) => {
+        if (attempt === 2) {
+          mintedB = server.issue(body);
+          return pendingB;
+        }
+        return server.issue(body);
+      },
+    });
+    try {
+      await ui.seek(42_000);
+      await ui.event("pagehide"); await ui.event("pageshow");
+      await ui.event("pagehide");
+      await ui.flush(() => deliverB(mintedB));
+      trigger(server);
+      await ui.event("pageshow");
+      assert.equal(ui.calls.length, 3);
+      assert.equal(ui.calls[2].resume_from_play_session_id, "sid-2");
+      assert.match(JSON.stringify(ui.renderer.toJSON()), expectedMessage);
+      assert.equal(ui.engines.length, 1);
+      assert.equal(ui.reports.some(report => report.play_session_id === "sid-3"), false);
+    } finally { await ui.unmount(); }
+  });
+}
+
+test("late renewal cannot be claimed after switching episodes or changing device identity", async () => {
+  for (const mode of ["navigate", "device-change"]) {
+    const server = createGenerationalServer();
+    let deliverB;
+    const pendingB = new Promise(resolve => { deliverB = resolve; });
+    let mintedB;
+    const ui = await mountPlayer({
+      grant: (body, attempt) => {
+        if (attempt === 2) {
+          mintedB = server.issue(body);
+          return pendingB;
+        }
+        return server.issue(body);
+      },
+    });
+    try {
+      await ui.event("pagehide"); await ui.event("pageshow");
+      await ui.event("pagehide");
+      if (mode === "navigate") {
+        await ui.navigate();
+        await ui.flush(() => deliverB(mintedB));
+        assert.equal(ui.calls[2].media_item_id, "next-media");
+        assert.equal(ui.calls[2].resume_from_play_session_id, undefined);
+      } else {
+        ui.setDeviceId("device-2");
+        await ui.flush(() => deliverB(mintedB));
+        await ui.event("pageshow");
+        assert.equal(ui.calls.length, 3);
+        assert.equal(ui.calls[2].resume_from_play_session_id, "sid-1", "a changed device must not claim the old device's late renewal");
+        assert.match(JSON.stringify(ui.renderer.toJSON()), /newer playback selected/);
+        assert.equal(ui.engines.length, 1);
+      }
+    } finally { await ui.unmount(); }
+  }
+});

@@ -211,6 +211,26 @@ pub(super) fn log_rejection(
     }
 }
 
+/// Single source of truth for Library visibility given a user's App-side role
+/// and the current `libraries` row.
+pub(crate) fn library_access_permitted(
+    user: UserId,
+    role: UserRole,
+    access_mode: &str,
+    admin_visible: bool,
+    members_json: &str,
+) -> bool {
+    if role == UserRole::Admin {
+        admin_visible
+    } else if access_mode == "everyone" {
+        true
+    } else {
+        serde_json::from_str::<Vec<String>>(members_json)
+            .unwrap_or_default()
+            .contains(&user.to_string())
+    }
+}
+
 pub(crate) fn authorized_ids_on(
     conn: &Connection,
     user: UserId,
@@ -247,15 +267,7 @@ fn read_roster(
     let mut roster = Vec::new();
     for row in rows {
         let (id, revision, lifecycle, access, admin_visible, members, locale, removed) = row?;
-        let permitted = if role == UserRole::Admin {
-            admin_visible
-        } else if access == "everyone" {
-            true
-        } else {
-            serde_json::from_str::<Vec<String>>(&members)
-                .unwrap_or_default()
-                .contains(&user.to_string())
-        };
+        let permitted = library_access_permitted(user, role, &access, admin_visible, &members);
         if permitted && !removed {
             roster.push(RosterEntry {
                 id: id

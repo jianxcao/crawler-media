@@ -629,3 +629,149 @@ fn alternate_video_with_the_same_stem_keeps_shared_artwork() {
     );
     assert_eq!(std::fs::read(artwork).unwrap(), b"poster");
 }
+
+#[test]
+fn new_nfo_created_at_old_path_after_disk_applied_is_not_queued_for_deletion() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let old_nfo = src.join("S01E01.nfo");
+    std::fs::write(&old_nfo, b"<episodedetails>original</episodedetails>").unwrap();
+    let dest_dir = fx.b.join("Show");
+    let to = dest_dir.join("S01E01.mkv");
+    let new_nfo = dest_dir.join("S01E01.nfo");
+
+    let req = begin(&fx, &file, &to);
+    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+    assert!(!old_nfo.exists(), "original NFO moved with the video");
+    assert_eq!(
+        std::fs::read(&new_nfo).unwrap(),
+        b"<episodedetails>original</episodedetails>"
+    );
+
+    // Another tool creates a brand new NFO at the old path before recovery finishes.
+    std::fs::write(&old_nfo, b"<episodedetails>newly written</episodedetails>").unwrap();
+    fx.store.resume_one_file_rename(&req.rename_id, 3).unwrap();
+
+    assert!(
+        !fx.store
+            .file_deletion_pending(&old_nfo.to_string_lossy())
+            .unwrap(),
+        "newly created NFO at old path must not be queued for deletion"
+    );
+    assert_eq!(
+        std::fs::read(&old_nfo).unwrap(),
+        b"<episodedetails>newly written</episodedetails>"
+    );
+    assert_eq!(
+        std::fs::read(&new_nfo).unwrap(),
+        b"<episodedetails>original</episodedetails>"
+    );
+}
+
+#[test]
+fn replaced_identical_leftover_sidecar_is_not_queued_for_deletion() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let dest_dir = fx.b.join("Show");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let old_nfo = src.join("S01E01.nfo");
+    let new_nfo = dest_dir.join("S01E01.nfo");
+    std::fs::write(&old_nfo, b"same nfo").unwrap();
+    std::fs::write(&new_nfo, b"same nfo").unwrap();
+    let old_poster = src.join("poster.jpg");
+    let new_poster = dest_dir.join("poster.jpg");
+    std::fs::write(&old_poster, b"same poster").unwrap();
+    std::fs::write(&new_poster, b"same poster").unwrap();
+
+    let req = begin(&fx, &file, &dest_dir.join("S01E01.mkv"));
+    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+
+    // Replace old_nfo with an independent file; keep old_poster untouched.
+    let replacement = src.join("replacement.nfo.tmp");
+    std::fs::write(&replacement, b"freshly generated nfo").unwrap();
+    std::fs::rename(&replacement, &old_nfo).unwrap();
+
+    fx.store.resume_one_file_rename(&req.rename_id, 3).unwrap();
+
+    assert!(
+        !fx.store
+            .file_deletion_pending(&old_nfo.to_string_lossy())
+            .unwrap(),
+        "replaced NFO must not be queued for deletion"
+    );
+    assert!(
+        fx.store
+            .file_deletion_pending(&old_poster.to_string_lossy())
+            .unwrap(),
+        "untouched original identical poster leftover must still be queued"
+    );
+    assert_eq!(std::fs::read(&old_nfo).unwrap(), b"freshly generated nfo");
+}
+
+#[test]
+fn cross_device_sidecar_leftover_is_queued_only_while_original_identity_matches() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    let old_nfo = src.join("S01E01.nfo");
+    let old_poster = src.join("poster.jpg");
+    std::fs::write(&old_nfo, b"original nfo").unwrap();
+    std::fs::write(&old_poster, b"original poster").unwrap();
+    let dest_dir = fx.b.join("Show");
+    let to = dest_dir.join("S01E01.mkv");
+
+    let req = begin(&fx, &file, &to);
+    let receipt = store::library_write::execute_rename_disk_copying(&req).unwrap();
+    let plan = fx
+        .store
+        .begin_rename_disk_record(&receipt)
+        .unwrap()
+        .unwrap();
+    let decided = fx.store.decide_rename_disk(plan.observe()).unwrap();
+    // Simulate cross-device sidecar copy: both source and destination exist with original identities.
+    let applied = decided.apply_copying().unwrap();
+    fx.store.finish_rename_disk(applied, 2).unwrap();
+    assert!(old_nfo.is_file() && old_poster.is_file());
+
+    // Replace old_nfo with a new file; keep old_poster as the genuine leftover.
+    let replacement = src.join("new.nfo.tmp");
+    std::fs::write(&replacement, b"brand new nfo").unwrap();
+    std::fs::rename(&replacement, &old_nfo).unwrap();
+
+    // Inject a failure during completion once to also verify recovery replay.
+    let db = rusqlite::Connection::open(fx._tmp.path().join("data/library.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_once_replay BEFORE INSERT ON pending_file_deletions
+         BEGIN SELECT RAISE(ABORT, 'replay once'); END;",
+    )
+    .unwrap();
+    assert!(fx.store.complete_file_rename(&req.rename_id, 3).is_err());
+    db.execute_batch("DROP TRIGGER fail_once_replay").unwrap();
+
+    fx.store.resume_one_file_rename(&req.rename_id, 4).unwrap();
+    assert!(
+        !fx.store
+            .file_deletion_pending(&old_nfo.to_string_lossy())
+            .unwrap(),
+        "replaced cross-device NFO must not be queued"
+    );
+    assert!(
+        fx.store
+            .file_deletion_pending(&old_poster.to_string_lossy())
+            .unwrap(),
+        "genuine cross-device poster leftover must be queued on replay"
+    );
+    assert_eq!(std::fs::read(&old_nfo).unwrap(), b"brand new nfo");
+    assert_eq!(
+        std::fs::read(dest_dir.join("S01E01.nfo")).unwrap(),
+        b"original nfo"
+    );
+    assert_eq!(
+        std::fs::read(dest_dir.join("poster.jpg")).unwrap(),
+        b"original poster"
+    );
+}

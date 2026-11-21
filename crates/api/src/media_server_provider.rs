@@ -628,6 +628,16 @@ impl MediaServerProvider for ApiServerProvider {
             .await
     }
 
+    async fn resolve_playback_file(
+        &self,
+        user_id: UserId,
+        file_id: &str,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        let file_id = file_id.to_owned();
+        self.run_sync(move |provider| provider.resolve_playback_file_sync(user_id, &file_id))
+            .await?
+    }
+
     async fn resolve_stream_source_bound(
         &self,
         user_id: UserId,

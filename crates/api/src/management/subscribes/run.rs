@@ -211,7 +211,7 @@ fn admit_after_search(
         )
     };
     let routed = RoutedDownloader::new(state, Some(&context.subscribe));
-    let (outcome, scrape, library_lease, plan) =
+    let (outcome, baseline_facts, scrape, library_lease, plan) =
         execute(state, id, &context, &routed, torrents, search_keywords)?;
     let completed = outcome.completed;
     let ledger_rows = outcome.files.len();
@@ -225,6 +225,7 @@ fn admit_after_search(
     persist(
         state,
         &context.subscribe,
+        &baseline_facts,
         outcome,
         &routed,
         &library_lease,
@@ -280,6 +281,7 @@ fn execute(
 ) -> Result<
     (
         subscribe::RunOutcome,
+        domain::SubscribeFacts,
         bool,
         crate::library_lifecycle::LibraryWorkLease,
         crate::worker::transfer::TransferPlan,
@@ -370,7 +372,7 @@ fn execute(
         Some(&recorder),
     )?;
     finish_collection(state, context, outcome, &library_lease, &plan)
-        .map(|outcome| (outcome, plan.scrape, library_lease, plan))
+        .map(|outcome| (outcome, facts.facts, plan.scrape, library_lease, plan))
 }
 
 fn finish_collection(
@@ -536,6 +538,7 @@ fn exclude_pending(
 fn persist(
     state: &ApiState,
     expected: &Subscribe,
+    baseline_facts: &domain::SubscribeFacts,
     outcome: subscribe::RunOutcome,
     routed: &RoutedDownloader<'_>,
     lease: &crate::library_lifecycle::LibraryWorkLease,
@@ -631,7 +634,7 @@ fn persist(
             },
         )
         .map_err(ApiError::internal)?;
-        persist_pending(&store, id, &outcome, routed)?;
+        persist_pending(&store, id, baseline_facts, &outcome, routed)?;
         published
     };
     crate::http::file_delete::retry_queued_deletions(&state.store)?;
@@ -642,6 +645,7 @@ fn persist(
 fn persist_pending(
     store: &crate::Store,
     id: SubscribeId,
+    baseline_facts: &domain::SubscribeFacts,
     outcome: &subscribe::RunOutcome,
     routed: &RoutedDownloader<'_>,
 ) -> Result<(), ApiError> {
@@ -673,6 +677,6 @@ fn persist_pending(
     store.mark_pending_imported(id, &transferred)?;
     store.mark_pending_rejected(id, &rejected)?;
     store.mark_pending_rejected(id, &broken_enclosures)?;
-    store.save_subscribe_facts(id, &outcome.facts)?;
+    store.save_subscribe_facts_diff(id, baseline_facts, &outcome.facts)?;
     Ok(())
 }

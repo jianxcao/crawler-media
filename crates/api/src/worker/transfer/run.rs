@@ -52,6 +52,7 @@ fn wanted_slots(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
 fn commit_transfer_outcome(
     state: &ApiState,
     subscribe: &Subscribe,
+    baseline_facts: &SubscribeFacts,
     outcome: &RunOutcome,
     lease: &crate::library_lifecycle::LibraryWorkLease,
     plan: &TransferPlan,
@@ -123,7 +124,7 @@ fn commit_transfer_outcome(
         )?;
 
         store
-            .save_subscribe_facts(subscribe.id, &outcome.facts)
+            .save_subscribe_facts_diff(subscribe.id, baseline_facts, &outcome.facts)
             .map_err(|e| e.to_string())?;
 
         let now = crate::job_loop::unix_now();
@@ -448,6 +449,7 @@ fn transfer_after_idle(
         .parse()
         .map_err(|error| format!("Library id {} 无法作为目标身份: {error}", plan.library_id))?;
 
+    let baseline_facts = facts.clone();
     let added = build_added_input(
         RunInput {
             subscribe: &subscribe,
@@ -508,6 +510,7 @@ fn transfer_after_idle(
         subscribe_id,
         &subscribe,
         &media,
+        &baseline_facts,
         &outcome,
         &library_lease,
         &plan,
@@ -531,11 +534,13 @@ fn arm_hardlink_fallback(state: &ApiState) -> u64 {
 
 /// Finish a collected round: abandon it if the subscription or its lease is
 /// gone, otherwise commit it and report the result.
+#[allow(clippy::too_many_arguments)]
 fn commit_transfer_round(
     state: &ApiState,
     subscribe_id: SubscribeId,
     subscribe: &Subscribe,
     media: &Media,
+    baseline_facts: &SubscribeFacts,
     outcome: &RunOutcome,
     lease: &crate::library_lifecycle::LibraryWorkLease,
     plan: &TransferPlan,
@@ -558,7 +563,8 @@ fn commit_transfer_round(
 
     lease.control().check().map_err(|e| e.to_string())?;
     let ledger_count = outcome.files.len();
-    let published = commit_transfer_outcome(state, subscribe, outcome, lease, plan)?;
+    let published =
+        commit_transfer_outcome(state, subscribe, baseline_facts, outcome, lease, plan)?;
 
     crate::http::library::enqueue_probes_for_files(state, &published);
     let fallbacks = library::hardlink_fallback_count().saturating_sub(fallbacks_before);

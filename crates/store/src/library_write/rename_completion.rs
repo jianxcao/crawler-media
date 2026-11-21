@@ -24,31 +24,26 @@ impl RenameCompletionPlan {
     pub fn observe(self) -> Result<ObservedRenameCompletion, StoreError> {
         let request = self.request;
         let source = if request.phase == "disk_applied" {
-            if !request.to_path.is_file() {
-                return Err(StoreError::Protected(format!(
-                    "rename {}: destination {} missing",
-                    request.rename_id,
-                    request.to_path.display()
-                )));
-            }
-            Some(library::observe_source(&request.to_path).map_err(|error| {
-                StoreError::Protected(format!(
-                    "rename {}: observe destination: {error}",
-                    request.rename_id
-                ))
-            })?)
+            Some(observe_verified_destination(&request)?)
         } else {
             None
         };
         let leftovers = request
             .sidecars
             .iter()
-            .filter(|side| {
-                side.action.deletes_source() && side.from != side.to && side.from.is_file()
-            })
-            .map(|side| ObservedSidecarDeletion {
-                path: side.from.clone(),
-                identity: crate::file_identity(&side.from.to_string_lossy()),
+            .filter_map(|side| {
+                if !side.action.deletes_source() || side.from == side.to {
+                    return None;
+                }
+                let expected = side.source_identity.as_ref()?;
+                let current = std::fs::symlink_metadata(&side.from).ok()?;
+                if !expected.matches(&current) {
+                    return None;
+                }
+                Some(ObservedSidecarDeletion {
+                    path: side.from.clone(),
+                    identity: Some(expected.deletion_identity()),
+                })
             })
             .collect();
         Ok(ObservedRenameCompletion {
@@ -57,6 +52,58 @@ impl RenameCompletionPlan {
             leftovers,
         })
     }
+}
+
+fn observe_verified_destination(
+    request: &FileRenameRequest,
+) -> Result<library::SourceObservation, StoreError> {
+    let receipt = request.disk_receipt.as_ref().ok_or_else(|| {
+        StoreError::Protected(format!(
+            "rename {}: missing persisted disk receipt",
+            request.rename_id
+        ))
+    })?;
+    let path_meta = super::rename_disk::stat(&request.to_path)?.ok_or_else(|| {
+        StoreError::Protected(format!(
+            "rename {}: destination {} missing",
+            request.rename_id,
+            request.to_path.display()
+        ))
+    })?;
+    if !receipt.is_source_meta(&path_meta) {
+        return Err(StoreError::Protected(format!(
+            "rename {}: destination {} no longer matches recorded disk receipt",
+            request.rename_id,
+            request.to_path.display()
+        )));
+    }
+    let file = std::fs::File::open(&request.to_path).map_err(|error| {
+        StoreError::Protected(format!(
+            "rename {}: open destination {}: {error}",
+            request.rename_id,
+            request.to_path.display()
+        ))
+    })?;
+    let fd_meta = file.metadata().map_err(|error| {
+        StoreError::Protected(format!(
+            "rename {}: stat destination {}: {error}",
+            request.rename_id,
+            request.to_path.display()
+        ))
+    })?;
+    if !receipt.is_source_meta(&fd_meta) {
+        return Err(StoreError::Protected(format!(
+            "rename {}: destination {} changed while observing receipt",
+            request.rename_id,
+            request.to_path.display()
+        )));
+    }
+    library::observe_open_source(&request.to_path, &file, &fd_meta).map_err(|error| {
+        StoreError::Protected(format!(
+            "rename {}: observe destination: {error}",
+            request.rename_id
+        ))
+    })
 }
 
 impl Store {

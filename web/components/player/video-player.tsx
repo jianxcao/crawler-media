@@ -39,6 +39,7 @@ import {
   formatBandwidth,
 } from "@/lib/player/bandwidth";
 import { getCapabilitySnapshot } from "@/lib/player/capability";
+import { getPlayerDeviceId } from "@/lib/player/device";
 import type { PlaybackEngine } from "@/lib/player/engine";
 import { createEngine, preloadHlsEngine } from "@/lib/player/engine";
 import { pipSupported } from "@/lib/player/pip";
@@ -311,6 +312,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   currentPageRef.current = { unitKey, state };
   const pageRestoreRef = useRef<{
     unitKey: string; playSessionId: string | null;
+    renewedFromPlaySessionId?: string | null;
+    deviceId?: string;
     audioTrack?: string; subtitleTrack?: string;
   } | null>(null);
   // 惰性初始化从 localStorage 读：字幕调好的字号/位置不该每次进来都重调
@@ -966,6 +969,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     let cancelled = false;
     const pageGeneration = pageGenerationRef.current;
     const attempt = state.attempt;
+    const requestDeviceId = getPlayerDeviceId();
     const restore = pageRestoreRef.current?.unitKey === unitKey ? pageRestoreRef.current : null;
     const obsolete = () => cancelled || pageSuspendedRef.current
       || pageGeneration !== pageGenerationRef.current
@@ -998,10 +1002,31 @@ export function VideoPlayer(props: VideoPlayerProps) {
           apiRef.current,
         );
         if (obsolete()) {
-          // 请求已被超越（退出播放器/切集/换参数重发）：响应里可能带着一个
-          // 刚拉起的转码会话，此后没有任何代码会认领它——心跳只认落进状态机
-          // 的会话。后端没有「结束会话」路由，这路 ffmpeg 只能等服务端空闲
-          // 回收（同文件重开有 stop_for_file 兜底），这里不做额外处理。
+          // 如果页面只是再次进入 BFCache 挂起，而服务端已经从同一前驱签发了下一代
+          // 会话（A -> B），则把 B 保留到本页同一设备同一单元的下次恢复，避免下次
+          // pageshow 仍拿旧前驱 A 去续签而触发 409 resume_superseded。
+          if (
+            !cancelled
+            && pageSuspendedRef.current
+            && !endedByAdminRef.current
+            && apiRef.current.progress === "server"
+            && currentPageRef.current.unitKey === unitKey
+            && restore?.playSessionId
+            && session.play_session_id
+            && getPlayerDeviceId() === requestDeviceId
+            && pageRestoreRef.current?.unitKey === unitKey
+            && pageRestoreRef.current.playSessionId === restore.playSessionId
+            && (!pageRestoreRef.current.deviceId || pageRestoreRef.current.deviceId === requestDeviceId)
+          ) {
+            pageRestoreRef.current = {
+              ...pageRestoreRef.current,
+              playSessionId: session.play_session_id,
+              renewedFromPlaySessionId:
+                pageRestoreRef.current.renewedFromPlaySessionId ?? restore.playSessionId,
+            };
+          }
+          // 其他超越情形（退出播放器/切集/换参数重发）：响应里可能带着一个刚拉起的
+          // 转码会话，此后没有任何代码会认领它，交由服务端空闲回收。
           return;
         }
         pageRestoreRef.current = null;
@@ -1611,6 +1636,9 @@ export function VideoPlayer(props: VideoPlayerProps) {
       // until the replacement grant is bound, including another cache trip while in flight.
       playSessionId: playSessionIdRef.current ?? (pageRestoreRef.current?.unitKey === unitKey
         ? pageRestoreRef.current.playSessionId : null),
+      renewedFromPlaySessionId: playSessionIdRef.current === null
+        && pageRestoreRef.current?.unitKey === unitKey
+        ? pageRestoreRef.current.renewedFromPlaySessionId ?? null : null,
       phase: currentPageRef.current.state.phase,
       positionMs: video && currentPageRef.current.state.session
         ? toFileMs(video.currentTime, startMsRef.current) : pendingFileMsRef.current,
@@ -1636,11 +1664,19 @@ export function VideoPlayer(props: VideoPlayerProps) {
     },
     restore: (saved) => {
       const tracks = trackRefsRef.current();
+      const deviceId = getPlayerDeviceId();
       if (pageRestoreRef.current?.unitKey !== saved.unitKey
         || pageRestoreRef.current.playSessionId !== saved.playSessionId) {
         pageRestoreRef.current = {
           unitKey: saved.unitKey, playSessionId: saved.playSessionId,
+          renewedFromPlaySessionId: null, deviceId,
           audioTrack: tracks.audio_track, subtitleTrack: tracks.subtitle_track,
+        };
+      } else {
+        pageRestoreRef.current = {
+          ...pageRestoreRef.current,
+          renewedFromPlaySessionId: null,
+          deviceId,
         };
       }
       playSessionIdRef.current = null;

@@ -114,13 +114,20 @@ mod tests {
 
 impl ProbeManager {
     pub(crate) fn recover_pending_jobs(&self) {
+        self.recover_pending_jobs_observed(|| {});
+    }
+
+    /// Test seam: `after_refs` runs right after `active_probe_unit_refs` succeeds
+    /// and before per-unit ownership/library checks read from the Library pool.
+    #[doc(hidden)]
+    pub fn recover_pending_jobs_observed(&self, after_refs: impl FnOnce()) {
         if let Err(error) = self.store.reset_running_probe_units() {
             tracing::error!(%error,"恢复探测单元失败");
             self.recovery_deferred.store(true, Ordering::SeqCst);
             return;
         }
         self.retire_missing_source_work();
-        self.repair_removed_window();
+        self.repair_removed_window_observed(after_refs);
         self.recover_completed_jobs();
         self.fill_dispatch_windows();
     }
@@ -130,6 +137,7 @@ impl ProbeManager {
                 Ok(refs) => refs,
                 Err(error) => {
                     tracing::error!(%error,"读取缺失源任务失败");
+                    self.recovery_deferred.store(true, Ordering::SeqCst);
                     return;
                 }
             };
@@ -139,43 +147,75 @@ impl ProbeManager {
             for (job, file) in refs {
                 if let Err(error) = self.store.cancel_probe_unit(&job, &file, "file_missing") {
                     tracing::error!(%error,job,file,"取消缺失源单元失败");
+                    self.recovery_deferred.store(true, Ordering::SeqCst);
                     return;
                 }
                 self.seen.lock().remove(&file);
             }
         }
     }
-    fn repair_removed_window(&self) {
+    fn repair_removed_window_observed(&self, after_refs: impl FnOnce()) {
         let refs = match self.store.active_probe_unit_refs(64) {
             Ok(refs) => refs,
             Err(error) => {
                 tracing::error!(%error,"读取恢复窗口失败");
+                self.recovery_deferred.store(true, Ordering::SeqCst);
                 return;
             }
         };
+        after_refs();
         for (job, file) in refs {
-            let row = file
-                .parse()
-                .ok()
-                .and_then(|id| self.store.file_coverage_by_id(id).ok().flatten());
-            if row.as_ref().is_none_or(|row| {
-                !self
-                    .store
-                    .library_accepts_work(&row.file.library_id.to_string())
-                    .unwrap_or(false)
-            }) {
-                if let Err(error) = self.store.cancel_probe_unit(&job, &file, "Library removed") {
-                    tracing::error!(%error,job,file,"取消删除库参与者失败");
+            let Ok(id) = file.parse::<domain::LedgerId>() else {
+                tracing::error!(job, file, "探测恢复单元文件标识无效，取消该单元");
+                self.cancel_recovered_unit(&job, &file, "Library removed");
+                continue;
+            };
+            let row = match self.store.file_coverage_by_id(id) {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    tracing::info!(job, file, "探测恢复单元文件已不存在，取消该单元");
+                    self.cancel_recovered_unit(&job, &file, "Library removed");
+                    continue;
                 }
-                self.seen.lock().remove(&file);
+                Err(error) => {
+                    tracing::warn!(%error, job, file, "探测恢复读取文件归属暂时失败，保留单元稍后重试");
+                    self.recovery_deferred.store(true, Ordering::SeqCst);
+                    continue;
+                }
+            };
+            let library_id = row.file.library_id.to_string();
+            match self.store.library_accepts_work(&library_id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        job,
+                        file,
+                        library_id,
+                        "探测恢复目标 Library 已停止接收工作，取消该单元"
+                    );
+                    self.cancel_recovered_unit(&job, &file, "Library removed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, job, file, library_id, "探测恢复检查 Library 状态暂时失败，保留单元稍后重试");
+                    self.recovery_deferred.store(true, Ordering::SeqCst);
+                }
             }
         }
+    }
+    fn cancel_recovered_unit(&self, job: &str, file: &str, reason: &str) {
+        if let Err(error) = self.store.cancel_probe_unit(job, file, reason) {
+            tracing::error!(%error, job, file, reason, "取消恢复探测单元失败");
+            self.recovery_deferred.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.seen.lock().remove(file);
     }
     pub(super) fn recover_completed_jobs(&self) {
         let jobs = match self.store.active_completed_probe_jobs(64) {
             Ok(jobs) => jobs,
             Err(error) => {
                 tracing::error!(%error,"读取已完成探测任务失败");
+                self.recovery_deferred.store(true, Ordering::SeqCst);
                 return;
             }
         };

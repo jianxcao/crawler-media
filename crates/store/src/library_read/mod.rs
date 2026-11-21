@@ -7,8 +7,8 @@ mod query;
 mod wait;
 
 pub(crate) use budget::{WriterQueryPolicy, active_query_budget, check_writer_budget};
-pub(crate) use context::authorized_ids_on;
 pub use context::{LibraryReadContext, LibraryReadRequest, ReadCredential};
+pub(crate) use context::{authorized_ids_on, library_access_permitted};
 pub use lease::{QueryBudget, ReaderLease};
 pub use pool::ReaderPool;
 pub use query::LibraryReadResult;

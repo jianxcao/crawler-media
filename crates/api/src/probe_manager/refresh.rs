@@ -130,7 +130,7 @@ impl ProbeManager {
     /// Recheck admission and persist the whole item in one Library transaction.
     fn enqueue_forced_item_refresh_checked(
         &self,
-        mut units: Vec<ProbeUnit>,
+        units: Vec<ProbeUnit>,
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<usize, ProbeEnqueueError> {
         let Some(first) = units.first() else {
@@ -147,86 +147,50 @@ impl ProbeManager {
         }
 
         let is_tv = kind == MediaKind::Tv;
-        if is_tv
-            && units
-                .iter()
-                .any(|unit| super::require_single_unit(&unit.row).is_err())
-        {
-            return Err(ProbeEnqueueError::Persistence);
-        }
-        let job_kind = if is_tv {
-            "marker_refresh"
-        } else {
-            "media_probe"
-        };
-        let scope = if is_tv {
-            format!("marker-refresh:{media_id}:all")
-        } else {
-            format!("manual-probe:{media_id}")
-        };
-        let seasons = units
-            .iter()
-            .filter_map(|unit| single_season(&unit.row))
-            .collect::<HashSet<_>>();
-        let season = (seasons.len() == 1)
-            .then(|| seasons.iter().next().copied())
-            .flatten();
-        let job_id = uuid::Uuid::new_v4().to_string();
-        let ledger_ids = units
-            .iter()
-            .map(|unit| unit.row.file.file_id.to_string())
-            .collect::<Vec<_>>();
-        let specs = units
-            .iter()
-            .zip(&ledger_ids)
-            .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
-                ledger_id,
-                kind: unit.kind.as_str(),
-                force_fingerprint: is_tv,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: is_tv,
-                reuse_media_info_cache: false,
-            })
-            .collect::<Vec<_>>();
-        self.persist_item_refresh(
-            &job_id, job_kind, media_id, season, &scope, &specs, admitted,
-        )?;
+        let batches = build_item_refresh_batches(media_id, is_tv, units);
+        self.persist_item_refresh_batches(media_id, &batches, admitted)?;
 
-        let refresh_id = is_tv.then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed));
         let mut queued = 0;
-        for unit in &mut units {
-            unit.force_fingerprint = is_tv;
-            unit.reuse_fingerprint_cache = false;
-            unit.reuse_media_info_cache = false;
-            unit.overwrite_markers = is_tv;
-            unit.marker_refresh_id = refresh_id;
-            unit.job_id = Some(job_id.clone());
-            self.seen.lock().insert(unit.row.file.file_id.to_string());
-            if self.queue_metadata(unit.clone()).is_ok() {
-                queued += 1;
-            } else {
-                self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+        let mut total = 0;
+        let mut seasons = HashSet::new();
+        for mut batch in batches {
+            let refresh_id = batch
+                .is_marker
+                .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed));
+            total += batch.units.len();
+            for unit in &mut batch.units {
+                if let Some(season) = single_season(&unit.row) {
+                    seasons.insert(season);
+                }
+                unit.force_fingerprint = batch.is_marker;
+                unit.reuse_fingerprint_cache = false;
+                unit.reuse_media_info_cache = false;
+                unit.overwrite_markers = batch.is_marker;
+                unit.marker_refresh_id = refresh_id;
+                unit.job_id = Some(batch.job_id.clone());
+                self.seen.lock().insert(unit.row.file.file_id.to_string());
+                if self.queue_metadata(unit.clone()).is_ok() {
+                    queued += 1;
+                } else {
+                    self.seen.lock().remove(&unit.row.file.file_id.to_string());
+                    tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+                }
             }
         }
         tracing::info!(
             %media_id,
-            job_id,
             seasons = seasons.len(),
             queued,
-            total = units.len(),
+            total,
             "【媒体探测】手动整条目刷新已持久化入队，旧结果保持可见"
         );
         Ok(queued)
     }
-    fn persist_item_refresh(
+
+    fn persist_item_refresh_batches(
         &self,
-        job_id: &str,
-        job_kind: &str,
         media_id: domain::MediaId,
-        season: Option<u32>,
-        scope: &str,
-        specs: &[crate::store::ProbeJobUnitSpec<'_>],
+        batches: &[ItemRefreshBatch],
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
         self.store.library_write_with_error(
@@ -240,35 +204,124 @@ impl ProbeManager {
             },
             |store| {
                 admitted()?;
-                match store.create_probe_job(
-                    job_id,
-                    job_kind,
-                    &media_id.to_string(),
-                    season,
-                    scope,
-                    specs,
-                ) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => {
-                        let conflict = specs.iter().any(|spec| {
-                            store
-                                .active_probe_unit_for_ledger(spec.ledger_id)
-                                .ok()
-                                .flatten()
-                                .is_some()
-                        });
-                        Err(if conflict {
-                            ProbeEnqueueError::AlreadyRunning
-                        } else {
-                            ProbeEnqueueError::Persistence
+                for batch in batches {
+                    let ledger_ids = batch
+                        .units
+                        .iter()
+                        .map(|unit| unit.row.file.file_id.to_string())
+                        .collect::<Vec<_>>();
+                    let specs = batch
+                        .units
+                        .iter()
+                        .zip(&ledger_ids)
+                        .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
+                            ledger_id,
+                            kind: unit.kind.as_str(),
+                            force_fingerprint: batch.is_marker,
+                            reuse_fingerprint_cache: false,
+                            overwrite_markers: batch.is_marker,
+                            reuse_media_info_cache: false,
                         })
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                        Err(ProbeEnqueueError::Persistence)
+                        .collect::<Vec<_>>();
+                    match store.create_probe_job(
+                        &batch.job_id,
+                        batch.job_kind,
+                        &media_id.to_string(),
+                        batch.season,
+                        &batch.scope,
+                        &specs,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let conflict = specs.iter().any(|spec| {
+                                store
+                                    .active_probe_unit_for_ledger(spec.ledger_id)
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                            });
+                            return Err(if conflict {
+                                ProbeEnqueueError::AlreadyRunning
+                            } else {
+                                ProbeEnqueueError::Persistence
+                            });
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
+                            return Err(ProbeEnqueueError::Persistence);
+                        }
                     }
                 }
+                Ok(())
             },
         )
+    }
+}
+
+struct ItemRefreshBatch {
+    job_id: String,
+    job_kind: &'static str,
+    season: Option<u32>,
+    scope: String,
+    is_marker: bool,
+    units: Vec<ProbeUnit>,
+}
+
+fn build_item_refresh_batches(
+    media_id: domain::MediaId,
+    is_tv: bool,
+    units: Vec<ProbeUnit>,
+) -> Vec<ItemRefreshBatch> {
+    if !is_tv {
+        return vec![make_item_refresh_batch(
+            "media_probe",
+            format!("manual-probe:{media_id}"),
+            false,
+            units,
+        )];
+    }
+    let (marker_units, media_only_units): (Vec<_>, Vec<_>) = units
+        .into_iter()
+        .partition(|unit| super::require_single_unit(&unit.row).is_ok());
+    let mut batches = Vec::new();
+    if !marker_units.is_empty() {
+        batches.push(make_item_refresh_batch(
+            "marker_refresh",
+            format!("marker-refresh:{media_id}:all"),
+            true,
+            marker_units,
+        ));
+    }
+    if !media_only_units.is_empty() {
+        batches.push(make_item_refresh_batch(
+            "media_probe",
+            format!("manual-probe:{media_id}"),
+            false,
+            media_only_units,
+        ));
+    }
+    batches
+}
+
+fn make_item_refresh_batch(
+    job_kind: &'static str,
+    scope: String,
+    is_marker: bool,
+    units: Vec<ProbeUnit>,
+) -> ItemRefreshBatch {
+    let seasons = units
+        .iter()
+        .filter_map(|unit| single_season(&unit.row))
+        .collect::<HashSet<_>>();
+    let season = (seasons.len() == 1)
+        .then(|| seasons.iter().next().copied())
+        .flatten();
+    ItemRefreshBatch {
+        job_id: uuid::Uuid::new_v4().to_string(),
+        job_kind,
+        season,
+        scope,
+        is_marker,
+        units,
     }
 }

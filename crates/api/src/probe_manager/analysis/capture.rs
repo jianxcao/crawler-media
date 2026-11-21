@@ -25,17 +25,19 @@ pub(in crate::probe_manager) fn prepare_plan(
         return CapturePlan::parse(&plan, work.media_duration_ms);
     }
     let config = manager.store.get_scrape_config()?;
+    let adaptive = config.effective.fingerprint_sampling_mode == "adaptive";
+    let default_policy = marker::SamplingPolicy::default();
     let plan = CapturePlan {
         searches: vec![],
         selected_samples: vec![],
         policy: marker::SamplingPolicy {
-            full_window_duration_secs: work.duration_secs,
-            max_windows_per_kind: if config.effective.fingerprint_sampling_mode == "adaptive" {
-                3
+            full_window_duration_secs: if adaptive {
+                default_policy.full_window_duration_secs
             } else {
-                2
+                work.duration_secs
             },
-            ..Default::default()
+            max_windows_per_kind: if adaptive { 3 } else { 2 },
+            ..default_policy
         },
         sampling_mode: config.effective.fingerprint_sampling_mode,
     };

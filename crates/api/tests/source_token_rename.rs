@@ -206,20 +206,17 @@ fn destination_with_new_identity_advances_version_and_invalidates() {
         .store
         .begin_file_rename(file.file_id, &file.version, &file.path, &to, 2)
         .unwrap();
+    // Cross-filesystem move is a copy: new inode with recorded disk receipt. Without
+    // byte-identity evidence this must be treated as a new source.
     fx.store
         .load_file_rename(&req.rename_id)
         .and_then(|r| {
-            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+            store::library_write::execute_rename_disk_copying(&r).inspect_err(|e| {
                 let _ = fx.store.record_rename_refusal(&r.rename_id, 3, e);
             })
         })
         .and_then(|rc| fx.store.record_rename_disk(&rc, 3))
         .unwrap();
-    // Cross-filesystem move is a copy: new inode (and here new bytes). Without
-    // byte-identity evidence this must be treated as a new source.
-    let copy = fx.b.join("copy.tmp");
-    std::fs::write(&copy, b"other video").unwrap();
-    std::fs::rename(&copy, &to).unwrap();
     fx.store.complete_file_rename(&req.rename_id, 4).unwrap();
     let after = fx
         .store

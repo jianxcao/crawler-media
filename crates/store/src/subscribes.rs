@@ -426,6 +426,47 @@ impl Store {
         })
     }
 
+    /// Persist only the slots whose score or path changed relative to `baseline`,
+    /// so a concurrent rename on an untouched episode is never overwritten by a
+    /// stale full-subscribe snapshot.
+    pub fn save_subscribe_facts_diff(
+        &self,
+        subscribe_id: SubscribeId,
+        baseline: &SubscribeFacts,
+        updated: &SubscribeFacts,
+    ) -> Result<(), StoreError> {
+        let mut changed = SubscribeFacts::default();
+        let mut quality_only = SubscribeFacts::default();
+        let mut has_slot_changes = false;
+        let mut has_quality_only = false;
+        for ((season, episode), fact) in updated.entries().filter(|(_, fact)| fact.path.is_some()) {
+            let slot_changed = baseline
+                .get(season, episode)
+                .is_none_or(|old| old.score != fact.score || old.path != fact.path);
+            let next_quality = fact.path.as_deref().and_then(|path| updated.quality(path));
+            if slot_changed {
+                if let (Some(path), Some(quality)) = (fact.path.as_deref(), next_quality) {
+                    changed.set_quality(path.to_string(), quality.clone());
+                }
+                changed.upsert(season, episode, fact.clone());
+                has_slot_changes = true;
+            } else if let (Some(path), Some(quality)) = (fact.path.as_deref(), next_quality)
+                && baseline.quality(path) != Some(quality)
+            {
+                quality_only.set_quality(path.to_string(), quality.clone());
+                quality_only.upsert(season, episode, fact.clone());
+                has_quality_only = true;
+            }
+        }
+        if has_quality_only {
+            self.persist_owned_quality(&quality_only)?;
+        }
+        if has_slot_changes {
+            self.save_subscribe_facts(subscribe_id, &changed)?;
+        }
+        Ok(())
+    }
+
     pub fn load_subscribe_facts(
         &self,
         subscribe_id: SubscribeId,

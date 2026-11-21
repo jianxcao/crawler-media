@@ -248,7 +248,11 @@ fn bound_event(
     };
     // Resume values are valid only for the source observed by this request.
     let resolved =
-        store.resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None)?;
+        match store.resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None) {
+            Ok(resolved) => resolved,
+            Err(StoreError::Missing(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
     let same_source = resolved.target.file.file_id == heartbeat.source.file_id
         && resolved.target.file.version.revision == heartbeat.source.revision;
     let position_ms = heartbeat.body["position_ms"]

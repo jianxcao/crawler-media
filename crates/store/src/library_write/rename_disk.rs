@@ -14,7 +14,7 @@
 //!   destination must carry the source inode, the staging inode or the
 //!   persisted receipt identity (see [`super::rename_receipt`]).
 use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirEntryExt, MetadataExt};
 use std::path::Path;
 
 use domain::FileVersion;
@@ -85,8 +85,61 @@ impl RenameSourceEvidence {
     }
 }
 
-fn mtime_ns(meta: &Metadata) -> i64 {
+pub(super) fn mtime_ns(meta: &Metadata) -> i64 {
     meta.mtime().saturating_mul(1_000_000_000) + meta.mtime_nsec()
+}
+
+/// Whether `from` and `to` resolve to the exact same directory entry (rather than
+/// two distinct hard links pointing to the same inode). Handles parent symlinks,
+/// `.` / `..` segments, external hard links (`nlink >= 2`), and case-insensitive
+/// or Unicode-normalizing volumes without mutating the filesystem.
+pub(super) fn same_directory_entry(from: &Path, to: &Path) -> Result<bool, StoreError> {
+    let (Some(from_meta), Some(to_meta)) = (stat(from)?, stat(to)?) else {
+        return Ok(false);
+    };
+    if from_meta.dev() != to_meta.dev() || from_meta.ino() != to_meta.ino() {
+        return Ok(false);
+    }
+    let (Some(from_parent), Some(to_parent)) = (from.parent(), to.parent()) else {
+        return Ok(false);
+    };
+    let (Some(fp_meta), Some(tp_meta)) = (stat_source(from_parent)?, stat_source(to_parent)?)
+    else {
+        return Ok(false);
+    };
+    if fp_meta.dev() != tp_meta.dev() || fp_meta.ino() != tp_meta.ino() {
+        return Ok(false);
+    }
+    let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name()) else {
+        return Ok(false);
+    };
+    if from_name == to_name || from_meta.nlink() < 2 {
+        return Ok(true);
+    }
+    let (mut from_exact, mut to_exact, mut same_ino_count) = (false, false, 0usize);
+    for entry in std::fs::read_dir(from_parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == from_name {
+            from_exact = true;
+        }
+        if name == to_name {
+            to_exact = true;
+        }
+        if entry.ino() == from_meta.ino() {
+            same_ino_count += 1;
+        }
+    }
+    if from_exact && to_exact {
+        return Ok(false);
+    }
+    if same_ino_count <= 1 {
+        return Ok(true);
+    }
+    if std::fs::canonicalize(from)? == std::fs::canonicalize(to)? {
+        return Ok(true);
+    }
+    Ok(from_name.to_string_lossy().to_lowercase() == to_name.to_string_lossy().to_lowercase())
 }
 
 pub(super) fn stat(path: &Path) -> Result<Option<Metadata>, StoreError> {

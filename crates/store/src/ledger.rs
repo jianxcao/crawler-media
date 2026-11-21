@@ -192,32 +192,27 @@ impl Store {
         self.with_library_read(|db| db.ledger_source_path_matches(path, expected))
     }
 
-    /// Rewrite every fact path equal to `from` into `to` for a media's
-    /// subscribes（整理后 wash-cut 的事实路径仍指向新文件）。
+    /// Rewrite every fact path currently equal to `from` into `to` for a media's
+    /// subscribes in one short Subscribe writer transaction (整理后 wash-cut 的事实
+    /// 路径仍指向新文件，且不会覆盖并发升级的其他集或已升级到第三路径的同一集)。
     pub fn rewrite_fact_paths(
         &self,
         media_id: domain::MediaId,
         from: &str,
         to: &str,
     ) -> Result<(), StoreError> {
-        for subscribe in self.list_all_subscribes()? {
-            if subscribe.media_id != media_id {
-                continue;
-            }
-            let mut facts = self.load_subscribe_facts(subscribe.id)?;
-            let mut changed = false;
-            for entry in facts.entries_mut() {
-                let fact = entry.1;
-                if fact.path.as_deref() == Some(from) {
-                    fact.path = Some(to.to_string());
-                    changed = true;
-                }
-            }
-            if changed {
-                self.save_subscribe_facts(subscribe.id, &facts)?;
-            }
-        }
-        Ok(())
+        self.with_writer(crate::Db::Subscribe, |subscribe| {
+            let tx = crate::write_tx(subscribe)?;
+            tx.execute(
+                "UPDATE subscribe_facts
+                 SET path = ?3
+                 WHERE path = ?2
+                   AND subscribe_id IN (SELECT id FROM subscribes WHERE media_id = ?1)",
+                params![media_id.to_string(), from, to],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 }
 

@@ -49,6 +49,12 @@ impl RenameIntentPlan {
                     )));
                 }
             }
+        } else if super::rename_disk::same_directory_entry(&self.from, &self.to)? {
+            return Err(StoreError::Protected(format!(
+                "rename source {} and destination {} refer to the same directory entry",
+                self.from.display(),
+                self.to.display()
+            )));
         }
         let at = if self.reconciliation {
             &self.to

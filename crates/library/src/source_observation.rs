@@ -12,6 +12,7 @@
 //!
 //! Built from one `stat` (plus one read for `.strm`); no hashing for regular files.
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -70,15 +71,41 @@ pub fn current_source_version(path: &Path) -> String {
 pub fn observe_source(path: &Path) -> Result<SourceObservation, LibraryError> {
     let metadata = fs::metadata(path)?;
     let (source_version, content_digest) = encode(path, &metadata)?;
-    Ok(SourceObservation {
+    Ok(build_observation(&metadata, source_version, content_digest))
+}
+
+/// Observe a source from an already-opened file and its `fstat` metadata so
+/// identity verification and content token generation bind to the same file.
+pub fn observe_open_source(
+    path: &Path,
+    mut file: &fs::File,
+    metadata: &fs::Metadata,
+) -> Result<SourceObservation, LibraryError> {
+    let (source_version, content_digest) = if is_strm(path) {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        (format!("strm:{digest}"), Some(digest))
+    } else {
+        encode(path, metadata)?
+    };
+    Ok(build_observation(metadata, source_version, content_digest))
+}
+
+fn build_observation(
+    metadata: &fs::Metadata,
+    source_version: String,
+    content_digest: Option<String>,
+) -> SourceObservation {
+    SourceObservation {
         source_version,
         size_bytes: Some(metadata.len()),
-        modified_ns: Some(modified_ns(&metadata)),
+        modified_ns: Some(modified_ns(metadata)),
         created_ns: metadata
             .created()
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .and_then(|duration| i64::try_from(duration.as_nanos()).ok()),
         content_digest,
-    })
+    }
 }

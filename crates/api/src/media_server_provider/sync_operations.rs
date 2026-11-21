@@ -177,6 +177,37 @@ impl ApiServerProvider {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
         Ok(Some((path, is_strm)))
     }
+
+    pub(super) fn resolve_playback_file_sync(
+        &self,
+        user_id: UserId,
+        file_id: &str,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        let Ok(ledger_id) = file_id.parse::<domain::LedgerId>() else {
+            return Ok(None);
+        };
+        let file = self.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+            let Some(file) = store
+                .visible_file(user_id, ledger_id)
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(None);
+            };
+            let accepts = store
+                .library_accepts_work(&file.library_id.to_string())
+                .map_err(|error| error.to_string())?;
+            Ok(accepts.then_some(file))
+        })?;
+        let Some(file) = file else {
+            return Ok(None);
+        };
+        let path = file.path;
+        let is_strm = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+        Ok(Some((path, is_strm)))
+    }
     pub(super) fn is_device_revoked_sync(
         &self,
         user_id: UserId,

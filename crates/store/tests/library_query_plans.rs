@@ -440,3 +440,39 @@ fn person_filter_resolves_identities_once_and_seeks_both_person_indexes() {
         "the disjunction must be answered by index seeks, not a scan: {text}"
     );
 }
+
+#[test]
+fn root_reconfiguration_keyset_pages_seek_cursor_without_temp_btree() {
+    let (_tmp, conn) = open_library_db();
+    let inputs_plan = plan_text(
+        &conn,
+        "SELECT DISTINCT path_key FROM library_metadata_inputs
+         WHERE library_id = ?1 AND path_key > ?2 ORDER BY path_key ASC LIMIT ?3",
+    );
+    assert!(
+        inputs_plan.contains("metadata_inputs_library_path")
+            && inputs_plan.contains("library_id=? AND path_key>?")
+            && !inputs_plan.contains("TEMP B-TREE"),
+        "metadata_inputs cursor page must seek (library_id, path_key) without temp B-tree: {inputs_plan}"
+    );
+    let files_plan = plan_text(
+        &conn,
+        "SELECT file_id FROM library_files
+         WHERE library_id = ?1 AND file_id > ?2 ORDER BY file_id ASC LIMIT ?3",
+    );
+    assert!(
+        files_plan.contains("files_library_file")
+            && files_plan.contains("library_id=? AND file_id>?")
+            && !files_plan.contains("TEMP B-TREE"),
+        "library_files cursor page must seek (library_id, file_id): {files_plan}"
+    );
+    let unid_plan = plan_text(
+        &conn,
+        "SELECT path_key FROM unidentified
+         WHERE library_id = ?1 AND path_key > ?2 ORDER BY path_key ASC LIMIT ?3",
+    );
+    assert!(
+        unid_plan.contains("library_id=? AND path_key>?") && !unid_plan.contains("TEMP B-TREE"),
+        "unidentified cursor page must seek (library_id, path_key): {unid_plan}"
+    );
+}

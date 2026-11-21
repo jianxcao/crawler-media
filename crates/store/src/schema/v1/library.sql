@@ -154,6 +154,7 @@ CREATE TABLE library_metadata_inputs (
  CHECK((entity_scope='work' AND season=-1 AND episode=-1) OR (entity_scope='season' AND season>=0 AND episode=-1) OR (entity_scope='episode' AND season>=0 AND episode>=0))
 );
 CREATE INDEX metadata_input_path ON library_metadata_inputs(root_id,path_key);
+CREATE INDEX metadata_inputs_library_path ON library_metadata_inputs(library_id,path_key);
 -- `media_id` is an FK to media(media_id) but the PK starts with library_id, so
 -- deleting a media row could not reach its NFO inputs through the PK prefix.
 CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);

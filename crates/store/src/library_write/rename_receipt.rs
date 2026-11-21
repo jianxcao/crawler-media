@@ -64,6 +64,11 @@ pub(super) fn execute<G>(
             request,
             "source no longer matches the planned file",
         )),
+        // Never unlink when `from` and `to` resolve to the exact same directory entry.
+        (Some(_), Some(_)) if super::rename_disk::same_directory_entry(from, to)? => Err(refused(
+            request,
+            "source and destination refer to the same directory entry",
+        )),
         // Crash after link/copy, before the source was removed.
         (Some(_), Some(_)) if owns_destination(request, &staging)? => {
             let publication = admit()?;

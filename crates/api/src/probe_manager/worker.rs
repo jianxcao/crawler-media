@@ -82,6 +82,13 @@ pub(super) async fn wait_for_shutdown(manager: &ProbeManager) {
     }
 }
 pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
+    try_start_observed(manager, || {})
+}
+
+pub(super) fn try_start_observed(
+    manager: &Arc<ProbeManager>,
+    after_settings_loaded: impl FnOnce(),
+) -> bool {
     if tokio::runtime::Handle::try_current().is_err() {
         tracing::warn!("【媒体探测】当前不在 Tokio runtime 上下文，探测 worker 未启动");
         return false;
@@ -92,6 +99,7 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     }
     let settings_revision = manager.settings_revision();
     let (persisted_settings, persisted_remote_reads) = read_persisted_admission_settings(manager);
+    after_settings_loaded();
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
         return false;
@@ -110,14 +118,12 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     manager.workers_started.store(true, Ordering::SeqCst);
     manager.shutdown_signal.send_replace(false);
     // Discard the persisted snapshot if an HTTP save was published while it loaded.
+    // Both `remote_reads_paused` and `remote_reads_wait_stopped` are published
+    // atomically inside `apply_startup_settings_if_unchanged`.
     manager.apply_startup_settings_if_unchanged(
         settings_revision,
         persisted_settings,
         persisted_remote_reads,
-    );
-    manager.remote_reads_wait_stopped.store(
-        manager.remote_reads_are_paused() || manager.shutting_down.load(Ordering::Acquire),
-        Ordering::Release,
     );
     let bootstrap = manager.clone();
     let handle = tokio::spawn(async move {

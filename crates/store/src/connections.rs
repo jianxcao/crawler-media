@@ -6,7 +6,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 pub struct LibraryConnection<'a> {
     pub(crate) library: &'a Connection,
     pub(crate) data_dir: &'a std::path::Path,
-    pub(crate) authorization: Option<(domain::UserId, std::collections::HashSet<String>)>,
+    pub(crate) authorization: Option<(domain::UserId, domain::UserRole)>,
     pub(crate) root_ledger_scans: &'a std::sync::atomic::AtomicUsize,
     pub(crate) media_ledger_reads: &'a std::sync::atomic::AtomicUsize,
 }
@@ -122,14 +122,13 @@ impl Store {
 }
 
 impl LibraryConnection<'_> {
-    pub(crate) fn authorized_library_ids(
+    pub(crate) fn user_role_observation(
         &self,
         user: domain::UserId,
-    ) -> Result<std::collections::HashSet<String>, StoreError> {
+    ) -> Result<domain::UserRole, StoreError> {
         self.authorization
-            .as_ref()
             .filter(|(owner, _)| *owner == user)
-            .map(|(_, ids)| ids.clone())
+            .map(|(_, role)| role)
             .ok_or_else(|| {
                 StoreError::Invalid(
                     "playback scope is missing its owned authorization observation".into(),

@@ -17,7 +17,7 @@ use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
 pub use super::rename_disk::RenameSourceEvidence;
 use super::rename_record::{RawRename, set_phase};
-pub use super::rename_sidecars::SidecarAction;
+pub use super::rename_sidecars::{SidecarAction, SidecarSourceIdentity};
 use crate::{Store, StoreError};
 
 /// One sidecar that must move with the video (NFO / scrape-registered path).
@@ -28,6 +28,9 @@ pub struct RenameSidecar {
     pub to: PathBuf,
     /// Durable decision; see [`SidecarAction`].
     pub action: SidecarAction,
+    /// Native source identity captured when `Move`/`AlreadyIdentical` was decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<SidecarSourceIdentity>,
 }
 
 /// Persisted rename / re-parent intent.
@@ -309,6 +312,7 @@ impl Store {
             _ => None,
         };
         self.complete_file_rename(rename_id, now)
+            .inspect_err(|error| self.log_rename_refusal(rename_id, now, error))
     }
 
     /// Unfinished intents whose retry time (unix seconds) has come.
@@ -388,11 +392,13 @@ pub(super) fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
     // Same-stem NFO beside the video.
     let from_nfo = from_parent.join(format!("{from_stem}.nfo"));
     if from_nfo.is_file() {
+        let source_identity = SidecarSourceIdentity::observe(&from_nfo);
         out.push(RenameSidecar {
             kind: "nfo".into(),
             from: from_nfo,
             to: to_parent.join(format!("{to_stem}.nfo")),
             action: SidecarAction::Move,
+            source_identity,
         });
     }
     out
@@ -664,11 +670,13 @@ pub(super) fn merge_registered_sidecars(
         } else {
             to_parent.join(name)
         };
+        let source_identity = SidecarSourceIdentity::observe(&from);
         sidecars.push(RenameSidecar {
             kind: kind.clone(),
             from,
             to,
             action: SidecarAction::Move,
+            source_identity,
         });
     }
 }

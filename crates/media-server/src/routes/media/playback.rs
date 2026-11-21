@@ -50,7 +50,7 @@ async fn file_fonts(
     tracing::info!(user_id = %user.id, file_id = %id, "读取内嵌字体附件");
     let (path, is_strm) = state
         .provider
-        .resolve_stream_source(user.id, &id)
+        .resolve_playback_file(user.id, &id)
         .await
         .map_err(|e| {
             tracing::error!(%e, user_id = %user.id, file_id = %id, "解析字体文件源失败");
@@ -105,7 +105,7 @@ async fn file_trickplay(
     tracing::info!(user_id = %user.id, file_id = %id, "读取 trickplay 缩略图");
     let (path, is_strm) = state
         .provider
-        .resolve_stream_source(user.id, &id)
+        .resolve_playback_file(user.id, &id)
         .await
         .map_err(|e| {
             tracing::error!(%e, user_id = %user.id, file_id = %id, "解析缩略图文件源失败");

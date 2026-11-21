@@ -88,3 +88,13 @@ test("two cache round trips consume the identity current for each generation", (
   assert.equal(f.state().attempt, 4);
   f.dispose();
 });
+
+test("in-flight renewal promoted while cached restores with the successor identity", () => {
+  const f = fixture({ phase: "session-starting", playSessionId: "sid-1", announced: false });
+  page(f.target, "pagehide");
+  f.change({ playSessionId: "sid-2", renewedFromPlaySessionId: "sid-1" });
+  page(f.target, "pageshow");
+  assert.equal(f.reports.at(-1).event, "restore");
+  assert.equal(f.reports.at(-1).saved.playSessionId, "sid-2");
+  f.dispose();
+});

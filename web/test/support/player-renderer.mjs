@@ -54,6 +54,7 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
   const storage = { getItem: () => null, setItem() {}, removeItem() {} };
   globalThis.localStorage = storage;
   const calls = [], reports = [], metrics = [], engines = [];
+  let deviceId = "device-1";
   const video = new Video();
   const cache = new Map();
   const load = filename => {
@@ -75,6 +76,7 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
         reportPlaybackMetricOnUnload: body => metrics.push(body),
         reportPlaybackClientLog() {},
       };
+      if (name === "@/lib/player/device") return { getPlayerDeviceId: () => deviceId };
       if (name === "@/lib/player/capability") return { getCapabilitySnapshot: async () => ({ mse: "none", native_hls: false, is_mobile: false }) };
       if (name === "@/lib/player/engine") return {
         preloadHlsEngine() {}, createEngine(options) {
@@ -96,6 +98,7 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
   return {
     calls, reports, metrics, engines, video, renderer,
     session,
+    setDeviceId(next) { deviceId = next; },
     async event(type, persisted = true) {
       const event = new Event(type); Object.defineProperty(event, "persisted", { value: persisted });
       await act(async () => target.dispatchEvent(event));

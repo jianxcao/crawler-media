@@ -625,10 +625,10 @@ fn rename_with_changed_destination_bytes_records_obligation_in_milliseconds() {
     let fx = fixture();
     let to = fx.a.join("Replaced.2000.mkv");
     let req = begin(&fx, &to);
-    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    // Cross-device copy creates a new destination inode (so `source_version` advances)
+    // while its identity is legitimately proven by the recorded disk receipt.
+    let receipt = store::library_write::execute_rename_disk_copying(&req).unwrap();
     fx.store.record_rename_disk(&receipt, 2).unwrap();
-    // Simulate destination bytes changing (cross-device copy / new content) before completion.
-    std::fs::write(&to, b"new-video-content").unwrap();
     let now_secs = 1_760_000_000_i64;
     fx.store
         .complete_file_rename(&req.rename_id, now_secs)
@@ -676,3 +676,6 @@ fn rename_migrates_nfo_input_key_so_removing_renamed_nfo_clears_ghost_metadata()
         "deleting the renamed NFO must clear the migrated metadata input without leaving a ghost old-key row"
     );
 }
+
+#[path = "file_rename_durable/subscribe_facts.rs"]
+mod subscribe_facts;

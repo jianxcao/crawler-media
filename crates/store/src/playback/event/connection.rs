@@ -61,11 +61,10 @@ impl crate::LibraryConnection<'_> {
             return Ok(EventOutcome::IgnoredStale);
         }
 
+        let previous = super::super::event_duration::read_event_resume(&tx, event, media_id, unit)?;
+        let duration =
+            super::super::event_duration::effective_event_duration(event, previous.as_ref());
         if let Some(position_ms) = event.position_ms {
-            let previous =
-                super::super::event_duration::read_event_resume(&tx, event, media_id, unit)?;
-            let duration =
-                super::super::event_duration::effective_event_duration(event, previous.as_ref());
             write_unit_facts(
                 self,
                 &tx,
@@ -87,7 +86,7 @@ impl crate::LibraryConnection<'_> {
                 )?;
             }
         }
-        advance_session_state(self, &tx, event, &binding, now_ms)?;
+        advance_session_state(self, &tx, event, &binding, duration, now_ms)?;
 
         if event.position_ms.is_some() {
             self.refresh_user_library_summary(event.user_id, media_id)?;

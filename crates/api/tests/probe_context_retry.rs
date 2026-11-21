@@ -4,6 +4,7 @@
 #[path = "probe_retry_support.rs"]
 mod support;
 
+use api::probe_manager::clock::ProbeClock;
 use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
 use store::{ProbeStage, ProbeStageCompletion, ProbeStageKey};
 use support::ProbeScenario;
@@ -152,4 +153,121 @@ async fn claimed_retry_is_not_redispatched_every_tick() {
     s.set_time_ms(1_061_000);
     assert_eq!(s.dispatch_due(), 0);
     s.drain().await;
+}
+
+fn probe_unit_spec(ledger_id: &str) -> store::ProbeJobUnitSpec<'_> {
+    store::ProbeJobUnitSpec {
+        ledger_id,
+        kind: "tv",
+        force_fingerprint: false,
+        reuse_fingerprint_cache: true,
+        overwrite_markers: false,
+        reuse_media_info_cache: true,
+    }
+}
+
+#[tokio::test]
+async fn reader_pool_busy_during_recovery_preserves_unit_and_deleted_file_is_cancelled() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let s = ProbeScenario::cached_season();
+    s.manager.shutdown_workers().await.unwrap();
+    s.store
+        .as_ref()
+        .put_setting("probe.remote_reads", r#"{"paused":false}"#)
+        .unwrap();
+    let kept_str = s.ledgers[0].file.file_id.to_string();
+    let deleted_str = domain::LedgerId::new().to_string();
+    let media_str = s.ledgers[0].file.media_id.to_string();
+
+    // Persist a valid queued unit and a unit whose file has already been removed.
+    let job_id = "recovery-busy-job";
+    assert!(
+        s.store
+            .as_ref()
+            .create_probe_job(
+                job_id,
+                "probe",
+                &media_str,
+                Some(1),
+                "manual-probe:recovery-busy",
+                &[probe_unit_spec(&kept_str), probe_unit_spec(&deleted_str)],
+            )
+            .unwrap()
+    );
+
+    // Exhaust all Library readers right after `active_probe_unit_refs` succeeds on a
+    // fresh ProbeManager before workers start, so `file_coverage_by_id` fails with ReadBusy.
+    let pool = s.store.as_ref().reader_pool(store::Db::Library);
+    let held_leases: Arc<parking_lot::Mutex<Vec<store::ReaderLease>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let held_for_hook = Arc::clone(&held_leases);
+    let pool_for_hook = Arc::clone(&pool);
+    // Construct without running recovery yet by holding the readers during explicit recovery.
+    let restarted = Arc::new(
+        api::probe_manager::ProbeManager::with_engines_unrecovered(
+            s.store.clone(),
+            s.engine.clone(),
+            s.engine.clone(),
+        )
+        .unwrap(),
+    );
+    restarted.set_clock(s.clock.clone());
+    let mgr = Arc::clone(&restarted);
+    let busy_run = tokio::task::spawn_blocking(move || {
+        mgr.recover_pending_jobs_observed(|| {
+            let mut leases = Vec::new();
+            while let Ok(lease) = pool_for_hook.try_checkout() {
+                leases.push(lease);
+            }
+            assert!(!leases.is_empty(), "must exhaust the Library reader pool");
+            *held_for_hook.lock() = leases;
+        });
+    });
+    busy_run.await.unwrap();
+    held_leases.lock().clear();
+
+    // While readers were temporarily busy, neither unit may have been cancelled.
+    assert_eq!(
+        s.store
+            .as_ref()
+            .active_probe_unit_for_ledger(&kept_str)
+            .unwrap()
+            .expect("busy reader must not cancel valid probe unit")
+            .status,
+        "queued"
+    );
+
+    // Release readers and start workers: the deferred recovery loop must automatically
+    // retry, cancel the genuinely deleted file, and recover & complete the valid unit.
+    assert!(restarted.try_start_workers());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let units = s.store.as_ref().probe_job_units(job_id).unwrap();
+        let kept_done = units
+            .iter()
+            .find(|u| u.ledger_id == kept_str)
+            .is_some_and(|u| u.status == "succeeded");
+        let deleted_cancelled = units
+            .iter()
+            .find(|u| u.ledger_id == deleted_str)
+            .is_some_and(|u| u.status == "cancelled");
+        if kept_done && deleted_cancelled {
+            break;
+        }
+        if units
+            .iter()
+            .any(|u| u.stage == store::ProbeDispatchStage::Analysis)
+        {
+            s.clock.set(s.clock.now_ms() + 2_000);
+            restarted.wake_dispatch();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "recovery did not converge: {units:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    restarted.shutdown_workers().await.unwrap();
 }

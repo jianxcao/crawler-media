@@ -3,6 +3,7 @@ import type { PlayerPhase } from "./machine.ts";
 export interface PlaybackPageSnapshot {
   unitKey: string;
   playSessionId: string | null;
+  renewedFromPlaySessionId?: string | null;
   phase: PlayerPhase;
   positionMs: number;
   wantsPlay: boolean;
@@ -42,10 +43,13 @@ export function bindPlaybackPageLifecycle(
     const snapshot = saved;
     saved = null;
     const current = handlers.snapshot();
-    if (current.unitKey !== snapshot.unitKey || current.playSessionId !== snapshot.playSessionId
+    const sameIdentity = current.playSessionId === snapshot.playSessionId
+      || (snapshot.playSessionId !== null
+        && current.renewedFromPlaySessionId === snapshot.playSessionId);
+    if (current.unitKey !== snapshot.unitKey || !sameIdentity
       || current.endedByAdmin || snapshot.endedByAdmin
       || !RESUMABLE.has(current.phase) || !RESUMABLE.has(snapshot.phase)) return;
-    handlers.restore(snapshot);
+    handlers.restore({ ...snapshot, playSessionId: current.playSessionId });
   };
   target.addEventListener("pagehide", hide);
   target.addEventListener("pageshow", show);

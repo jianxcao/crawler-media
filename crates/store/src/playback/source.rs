@@ -17,17 +17,19 @@ use rusqlite::{OptionalExtension, params_from_iter, types::Value as SqlValue};
 use super::super::maps::parse_id;
 use super::super::{Store, StoreError};
 
-/// `library_files` source columns shared by every read here, in order. The two
-/// trailing columns are the lowest covered unit and the current track revision
-/// (the probe's `file_details` row wins over the revision published on the file
-/// row, which is the only one an unprobed file has).
+/// `library_files` source columns shared by every read here, in order. The
+/// trailing columns select `(u.season, u.episode)` from the exact single row
+/// achieving the lexicographical minimum `(season, episode)` (via SQLite's
+/// single-`MIN()` bare-column guarantee over the monotonic 64-bit key
+/// `(season * 2^32) + episode`), plus the current track revision (the probe's
+/// `file_details` row wins over the revision published on the file row).
 const SOURCE_COLUMNS: &str = "f.file_id, f.library_id, f.root_id, f.media_id, f.kind, \
      f.display_path, f.presence_state, f.publication_state, f.file_revision, f.source_version, \
      f.size_bytes, f.stat_known, f.created_ns, f.mtime_ns, f.source_digest, f.source_path, \
      f.transfer_mode, f.resolution, f.codec, f.hdr, f.quality_source, f.confidence, \
      f.filter_score, f.release_quality, f.duration_ms, f.tracks_version, f.poster_path, \
-     f.backdrop_path, f.still_path, MIN(u.season), MIN(u.episode), \
-     COALESCE(d.tracks_version, f.tracks_version)";
+     f.backdrop_path, f.still_path, u.season, u.episode, \
+     COALESCE(d.tracks_version, f.tracks_version), MIN((u.season * 4294967296) + u.episode)";
 
 const SOURCE_FROM: &str = "FROM library_files f \
      JOIN library_file_units u ON u.file_id = f.file_id \

@@ -7,13 +7,54 @@
 //! decision. Destinations are written no-clobber (hard link), so a competitor that
 //! appears after observation is never overwritten.
 use std::collections::HashSet;
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use super::rename_disk::mtime_ns;
 use super::rename_durable::RenameSidecar;
 use crate::StoreError;
+
+/// Native stat identity of an original sidecar source file captured before any
+/// disk cleanup. Leftover deletion only queues a file still matching this proof.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarSourceIdentity {
+    pub size_bytes: u64,
+    pub device: u64,
+    pub inode: u64,
+    pub mtime_ns: i64,
+}
+
+impl SidecarSourceIdentity {
+    pub(crate) fn observe(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        Self::from_meta(&meta)
+    }
+
+    pub(crate) fn from_meta(meta: &Metadata) -> Option<Self> {
+        meta.is_file().then(|| Self {
+            size_bytes: meta.len(),
+            device: meta.dev(),
+            inode: meta.ino(),
+            mtime_ns: mtime_ns(meta),
+        })
+    }
+
+    pub(crate) fn matches(&self, meta: &Metadata) -> bool {
+        meta.is_file()
+            && meta.len() == self.size_bytes
+            && meta.dev() == self.device
+            && meta.ino() == self.inode
+            && mtime_ns(meta) == self.mtime_ns
+    }
+
+    pub(crate) fn deletion_identity(&self) -> (u64, Option<u64>) {
+        (self.size_bytes, Some(self.inode))
+    }
+}
 
 /// Durable per-sidecar decision. Persisted in `sidecars_json` (required).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +82,14 @@ impl SidecarAction {
     pub(crate) fn deletes_source(self) -> bool {
         matches!(self, Self::Move | Self::AlreadyIdentical)
     }
+}
+
+/// Lock-free observation of one sidecar destination against its source, plus
+/// the native identity of the source when it exists as a regular file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ObservedSidecarTarget {
+    pub(crate) comparison: TargetComparison,
+    pub(crate) source_identity: Option<SidecarSourceIdentity>,
 }
 
 /// Lock-free observation of one sidecar destination against its source.
@@ -135,36 +184,52 @@ pub(crate) fn observe_directory_artwork(from: &Path, to: &Path, out: &mut Vec<Re
         } else {
             name.to_string()
         };
+        let source_identity = SidecarSourceIdentity::observe(&source);
         out.push(RenameSidecar {
             kind: "artwork".into(),
             from: source,
             to: to_dir.join(target_name),
             action: SidecarAction::Move,
+            source_identity,
         });
     }
 }
 
 /// Outside every lock: compare each sidecar's destination with its source by a
 /// bounded streaming read (no whole-file buffers).
-pub(crate) fn observe_targets(sidecars: &[RenameSidecar]) -> Vec<TargetComparison> {
+pub(crate) fn observe_targets(sidecars: &[RenameSidecar]) -> Vec<ObservedSidecarTarget> {
     sidecars
         .iter()
         .map(|side| compare_target(&side.from, &side.to))
         .collect()
 }
 
-fn compare_target(from: &Path, to: &Path) -> TargetComparison {
-    match std::fs::symlink_metadata(from) {
+fn compare_target(from: &Path, to: &Path) -> ObservedSidecarTarget {
+    let source_identity = match std::fs::symlink_metadata(from) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return TargetComparison::SourceAbsent;
+            return ObservedSidecarTarget {
+                comparison: TargetComparison::SourceAbsent,
+                source_identity: None,
+            };
         }
-        Err(error) => return TargetComparison::Unknown(format!("{}: {error}", from.display())),
+        Err(error) => {
+            return ObservedSidecarTarget {
+                comparison: TargetComparison::Unknown(format!("{}: {error}", from.display())),
+                source_identity: None,
+            };
+        }
         Ok(meta) if !meta.is_file() => {
-            return TargetComparison::Unknown(format!("{} is not a regular file", from.display()));
+            return ObservedSidecarTarget {
+                comparison: TargetComparison::Unknown(format!(
+                    "{} is not a regular file",
+                    from.display()
+                )),
+                source_identity: None,
+            };
         }
-        Ok(_) => {}
-    }
-    match std::fs::symlink_metadata(to) {
+        Ok(meta) => SidecarSourceIdentity::from_meta(&meta),
+    };
+    let comparison = match std::fs::symlink_metadata(to) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             TargetComparison::DestinationAbsent
         }
@@ -177,6 +242,10 @@ fn compare_target(from: &Path, to: &Path) -> TargetComparison {
             Ok(false) => TargetComparison::Different,
             Err(error) => TargetComparison::Unknown(error.to_string()),
         },
+    };
+    ObservedSidecarTarget {
+        comparison,
+        source_identity,
     }
 }
 
@@ -220,7 +289,7 @@ pub(crate) fn decide_for_execution(
     file_id: &str,
     from_video: &Path,
     sidecars: &mut [RenameSidecar],
-    observed: &[TargetComparison],
+    observed: &[ObservedSidecarTarget],
 ) -> Result<(), StoreError> {
     for side in sidecars.iter_mut() {
         // Re-derive sharing from scratch, never from a stale persisted decision.
@@ -229,7 +298,7 @@ pub(crate) fn decide_for_execution(
     classify_shared_sidecars(tx, file_id, from_video, sidecars)?;
     for (side, seen) in sidecars.iter_mut().zip(observed) {
         let shared = side.action == SidecarAction::Copy;
-        side.action = match seen {
+        side.action = match &seen.comparison {
             TargetComparison::SourceAbsent | TargetComparison::DestinationAbsent => side.action,
             TargetComparison::Identical if shared => SidecarAction::Copy,
             TargetComparison::Identical => SidecarAction::AlreadyIdentical,
@@ -245,6 +314,16 @@ pub(crate) fn decide_for_execution(
                     side.to.display()
                 ))));
             }
+        };
+        side.source_identity = if side.action.deletes_source() {
+            match seen.comparison {
+                // If the source is already absent, do not invent fresh proof; only keep
+                // previously persisted identity if any (never matches a newly created file).
+                TargetComparison::SourceAbsent => side.source_identity.clone(),
+                _ => seen.source_identity.clone(),
+            }
+        } else {
+            None
         };
     }
     Ok(())
@@ -350,6 +429,13 @@ fn referenced_elsewhere(tx: &Connection, file_id: &str, path: &Path) -> Result<b
 /// recovery. The destination is created no-clobber; a competitor that appeared
 /// after observation turns the decision into `KeepSource` (returned `true`).
 pub(crate) fn apply_sidecar(side: &mut RenameSidecar) -> Result<bool, StoreError> {
+    apply_sidecar_with_mode(side, false)
+}
+
+pub(crate) fn apply_sidecar_with_mode(
+    side: &mut RenameSidecar,
+    force_copy: bool,
+) -> Result<bool, StoreError> {
     if matches!(
         side.action,
         SidecarAction::KeepSource | SidecarAction::AlreadyIdentical
@@ -360,15 +446,25 @@ pub(crate) fn apply_sidecar(side: &mut RenameSidecar) -> Result<bool, StoreError
     if let Some(parent) = side.to.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut source_unlinked = false;
     let placed = match side.action {
-        SidecarAction::Move => match std::fs::hard_link(&side.from, &side.to) {
+        SidecarAction::Move if !force_copy => match std::fs::hard_link(&side.from, &side.to) {
             // Another filesystem: copy; the source is deleted at completion.
             Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_sidecar(side),
-            Ok(()) => std::fs::remove_file(&side.from).map_err(Into::into),
+            Ok(()) => {
+                std::fs::remove_file(&side.from)?;
+                source_unlinked = true;
+                Ok(())
+            }
             Err(error) => Err(error.into()),
         },
         _ => copy_sidecar(side),
     };
+    if source_unlinked {
+        // Source bytes are already gone; clear cleanup proof so a later file
+        // created at `from` can never be mistaken for a leftover.
+        side.source_identity = None;
+    }
     match placed {
         Ok(()) => Ok(false),
         Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -378,6 +474,7 @@ pub(crate) fn apply_sidecar(side: &mut RenameSidecar) -> Result<bool, StoreError
             tracing::warn!(from = %side.from.display(), to = %side.to.display(),
                 "destination sidecar appeared after observation; not overwritten, source kept");
             side.action = SidecarAction::KeepSource;
+            side.source_identity = None;
             Ok(true)
         }
         Err(error) => Err(error),

@@ -51,6 +51,7 @@ impl ProbeManager {
                 if !self.workers_started.swap(false, Ordering::SeqCst) {
                     return Ok(());
                 }
+                let _paused = self.remote_reads_paused.lock();
                 self.shutting_down.store(true, Ordering::SeqCst);
                 self.remote_reads_wait_stopped
                     .store(true, Ordering::Release);
@@ -107,9 +108,10 @@ impl ProbeManager {
             self.metadata_idle.notify_waiters();
         }
         let _workers = self.workers.lock();
+        let paused = self.remote_reads_paused.lock();
         self.shutting_down.store(false, Ordering::SeqCst);
         self.remote_reads_wait_stopped
-            .store(*self.remote_reads_paused.lock(), Ordering::Release);
+            .store(*paused, Ordering::Release);
         Ok(())
     }
 

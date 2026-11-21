@@ -621,3 +621,6 @@ fn refused_activation_of_a_superseded_pending_session_writes_nothing() {
         "a refused activation writes nothing on either row"
     );
 }
+
+#[path = "playback_event_binding/revocation.rs"]
+mod revocation;

@@ -18,7 +18,8 @@ use rusqlite::params;
 use super::RenameDiskReceipt;
 use super::rename_durable::{FileRenameRequest, RenameSidecar, sidecars_json};
 use super::rename_sidecars::{
-    TargetComparison, apply_sidecar, decide_for_execution, observe_targets,
+    ObservedSidecarTarget, apply_sidecar, apply_sidecar_with_mode, decide_for_execution,
+    observe_targets,
 };
 use crate::{Store, StoreError};
 
@@ -31,7 +32,7 @@ pub struct RenameSidecarPlan {
 /// Sidecar targets observed outside every lock and transaction.
 pub struct ObservedRenameSidecars {
     plan: RenameSidecarPlan,
-    observed: Vec<TargetComparison>,
+    observed: Vec<ObservedSidecarTarget>,
 }
 
 /// Persisted sidecar decisions, ready to be applied on disk (no Store needed).
@@ -65,6 +66,20 @@ impl DecidedRenameSidecars {
         }
         // `decide_rename_disk` already persisted the receipt identity. Recovery
         // can prove the destination even if we crash before the phase update.
+        super::rename_receipt::remove_staging(&self.request)?;
+        Ok(AppliedRenameSidecars {
+            request: self.request,
+            sidecars: self.sidecars,
+        })
+    }
+
+    /// Test seam: take the cross-filesystem sidecar copy path on one filesystem
+    /// so leftover source cleanup can be exercised directly.
+    #[doc(hidden)]
+    pub fn apply_copying(mut self) -> Result<AppliedRenameSidecars, StoreError> {
+        for side in self.sidecars.iter_mut() {
+            apply_sidecar_with_mode(side, true)?;
+        }
         super::rename_receipt::remove_staging(&self.request)?;
         Ok(AppliedRenameSidecars {
             request: self.request,

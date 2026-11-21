@@ -75,7 +75,13 @@ pub(super) fn assess_probe_need(
     let sample_duration_secs = store
         .get_scrape_config()
         .ok()
-        .map(|config| config.effective.fingerprint_duration_secs)
+        .map(|config| {
+            if config.effective.fingerprint_sampling_mode == "adaptive" {
+                marker::SamplingPolicy::default().full_window_duration_secs
+            } else {
+                config.effective.fingerprint_duration_secs
+            }
+        })
         .unwrap_or(180);
     let cached_meta = store
         .get_media_info_cache_version(&ledger_id)

@@ -916,6 +916,7 @@ CREATE TABLE library_metadata_inputs (
 
 ```sql
 CREATE INDEX metadata_input_path ON library_metadata_inputs(root_id,path_key);
+CREATE INDEX metadata_inputs_library_path ON library_metadata_inputs(library_id,path_key);
 CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);
 ```
 

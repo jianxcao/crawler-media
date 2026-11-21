@@ -93,6 +93,16 @@ async fn probe_metadata_inner(
     if unit.kind != MediaKind::Tv {
         return MetadataOutcome::Complete;
     }
+    if super::require_single_unit(&unit.row).is_err() {
+        tracing::info!(
+            media_id = %unit.row.file.media_id,
+            ledger_id = %unit.row.file.file_id,
+            path = %path.display(),
+            units = unit.row.units.len(),
+            "【媒体探测】合并剧集文件已完成媒体信息阶段，跳过分集声纹与标记阶段"
+        );
+        return MetadataOutcome::Complete;
+    }
     let library_id = unit.row.file.library_id.to_string();
     let explicit_refresh = unit.marker_refresh_id.is_some();
     let duration = mgr

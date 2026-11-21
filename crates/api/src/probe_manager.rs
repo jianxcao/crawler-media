@@ -174,6 +174,24 @@ impl ProbeManager {
         )
     }
 
+    #[doc(hidden)]
+    pub fn with_engines_unrecovered(
+        store: Arc<Store>,
+        fingerprint_engine: Arc<dyn FingerprintEngine>,
+        capture_engine: Arc<dyn FingerprintCaptureEngine>,
+    ) -> Result<Self, store::StoreError> {
+        Self::with_comparison_session_inner(
+            store,
+            Arc::new(marker::matcher::session::SeasonMatchSession::new(
+                fingerprint_engine,
+                marker::matcher::session::DEFAULT_MAX_PAIRS,
+                marker::matcher::session::DEFAULT_MAX_BYTES,
+            )),
+            capture_engine,
+            false,
+        )
+    }
+
     /// Inject one immutable comparison owner while keeping natural durable job,
     /// capture and publication behavior. Zero bounds select uncached comparison.
     pub fn with_comparison_session(
@@ -252,8 +270,10 @@ impl ProbeManager {
     }
 
     pub(crate) fn recover_deferred(&self) {
-        if self.recovery_deferred.load(Ordering::SeqCst) && store_lease::recover_if_idle(self) {
-            self.recovery_deferred.store(false, Ordering::SeqCst);
+        if self.recovery_deferred.swap(false, Ordering::SeqCst)
+            && !store_lease::recover_if_idle(self)
+        {
+            self.recovery_deferred.store(true, Ordering::SeqCst);
         }
     }
 
@@ -319,6 +339,14 @@ impl ProbeManager {
         worker::try_start(self)
     }
 
+    #[doc(hidden)]
+    pub fn try_start_workers_observed(
+        self: &Arc<Self>,
+        after_settings_loaded: impl FnOnce(),
+    ) -> bool {
+        worker::try_start_observed(self, after_settings_loaded)
+    }
+
     pub(crate) fn apply_probe_settings(&self, settings: crate::probe_settings::ProbeSettings) {
         let _publish = self.settings_publish_lock.lock();
         self.apply_probe_settings_locked(settings);
@@ -349,6 +377,14 @@ impl ProbeManager {
         self.wake.notify_waiters();
     }
 
+    fn sync_remote_reads_wait_stopped_locked(&self) {
+        let paused = self.remote_reads_paused.lock();
+        self.remote_reads_wait_stopped.store(
+            *paused || self.shutting_down.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
+
     pub(crate) fn settings_revision(&self) -> u64 {
         self.settings_revision.load(Ordering::Acquire)
     }
@@ -361,6 +397,7 @@ impl ProbeManager {
     ) -> bool {
         let _publish = self.settings_publish_lock.lock();
         if self.settings_revision.load(Ordering::Acquire) != observed_revision {
+            self.sync_remote_reads_wait_stopped_locked();
             return false;
         }
         if let Some(settings) = settings {

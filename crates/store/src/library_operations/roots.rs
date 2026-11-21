@@ -56,13 +56,24 @@ pub(crate) fn apply_root_batch(
             tx,
             "unidentified",
             "path_key",
+            false,
             library,
             cursor.last_unidentified_path.as_deref(),
             batch,
         )?;
         reparent_paths(tx, "unidentified", "path_key", library, &rows, requested)?;
-        if rows.len() >= batch {
-            cursor.last_unidentified_path = rows.last().cloned();
+        if let Some(last) = rows.last() {
+            cursor.last_unidentified_path = Some(last.clone());
+        }
+        if rows.len() >= batch
+            && has_more_paths(
+                tx,
+                "unidentified",
+                "path_key",
+                library,
+                cursor.last_unidentified_path.as_deref(),
+            )?
+        {
             return Ok(BatchOutcome::More);
         }
         cursor.unidentified_done = true;
@@ -71,6 +82,7 @@ pub(crate) fn apply_root_batch(
         tx,
         "library_metadata_inputs",
         "path_key",
+        true,
         library,
         cursor.last_input_path.as_deref(),
         batch,
@@ -83,35 +95,87 @@ pub(crate) fn apply_root_batch(
         &rows,
         requested,
     )?;
-    if rows.len() >= batch {
-        cursor.last_input_path = rows.last().cloned();
+    if let Some(last) = rows.last() {
+        cursor.last_input_path = Some(last.clone());
+    }
+    if rows.len() >= batch
+        && has_more_paths(
+            tx,
+            "library_metadata_inputs",
+            "path_key",
+            library,
+            cursor.last_input_path.as_deref(),
+        )?
+    {
         return Ok(BatchOutcome::More);
     }
     prune_unreferenced_roots(tx, library, requested)?;
     Ok(BatchOutcome::Done)
 }
 
-/// One keyset page of distinct path keys of `table` owned by the Library.
+/// One keyset page of path keys of `table` owned by the Library.
+/// Separate first-page and cursor-page predicates let SQLite seek `(library_id, path_key)`
+/// directly from the lower bound without a full library scan or temporary B-tree.
 fn next_path_batch(
+    tx: &Connection,
+    table: &str,
+    column: &str,
+    distinct: bool,
+    library: &str,
+    after: Option<&str>,
+    batch: usize,
+) -> Result<Vec<String>, StoreError> {
+    let distinct_kw = if distinct { "DISTINCT " } else { "" };
+    match after {
+        Some(cursor) => {
+            let sql = format!(
+                "SELECT {distinct_kw}{column} FROM {table}
+                 WHERE library_id = ?1 AND {column} > ?2
+                 ORDER BY {column} ASC LIMIT ?3"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![library, cursor, batch as i64], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+        None => {
+            let sql = format!(
+                "SELECT {distinct_kw}{column} FROM {table}
+                 WHERE library_id = ?1
+                 ORDER BY {column} ASC LIMIT ?2"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![library, batch as i64], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+    }
+}
+
+fn has_more_paths(
     tx: &Connection,
     table: &str,
     column: &str,
     library: &str,
     after: Option<&str>,
-    batch: usize,
-) -> Result<Vec<String>, StoreError> {
-    let sql = format!(
-        "SELECT DISTINCT {column} FROM {table}
-         WHERE library_id = ?1 AND (?2 IS NULL OR {column} > ?2)
-         ORDER BY {column} ASC LIMIT ?3"
-    );
-    let mut stmt = tx.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params![library, after, batch as i64], |r| {
-            r.get::<_, String>(0)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+) -> Result<bool, StoreError> {
+    let exists: i64 = match after {
+        Some(cursor) => {
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE library_id = ?1 AND {column} > ?2)"
+            );
+            tx.query_row(&sql, params![library, cursor], |r| r.get(0))?
+        }
+        None => {
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE library_id = ?1)");
+            tx.query_row(&sql, params![library], |r| r.get(0))?
+        }
+    };
+    Ok(exists != 0)
 }
 
 /// Move each path row of `table` to its longest matching requested root.
@@ -202,27 +266,50 @@ fn next_file_batch(
     after: Option<&str>,
     batch: usize,
 ) -> Result<Vec<String>, StoreError> {
-    let mut stmt = tx.prepare(
-        "SELECT file_id FROM library_files
-         WHERE library_id = ?1 AND (?2 IS NULL OR file_id > ?2)
-         ORDER BY file_id ASC
-         LIMIT ?3",
-    )?;
-    let ids = stmt
-        .query_map(params![library, after, batch as i64], |r| {
-            r.get::<_, String>(0)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ids)
+    match after {
+        Some(cursor) => {
+            let mut stmt = tx.prepare(
+                "SELECT file_id FROM library_files
+                 WHERE library_id = ?1 AND file_id > ?2
+                 ORDER BY file_id ASC
+                 LIMIT ?3",
+            )?;
+            let ids = stmt
+                .query_map(params![library, cursor, batch as i64], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ids)
+        }
+        None => {
+            let mut stmt = tx.prepare(
+                "SELECT file_id FROM library_files
+                 WHERE library_id = ?1
+                 ORDER BY file_id ASC
+                 LIMIT ?2",
+            )?;
+            let ids = stmt
+                .query_map(params![library, batch as i64], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ids)
+        }
+    }
 }
 
 fn has_more_files(tx: &Connection, library: &str, after: Option<&str>) -> Result<bool, StoreError> {
-    let exists: i64 = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files
-                       WHERE library_id = ?1 AND (?2 IS NULL OR file_id > ?2))",
-        params![library, after],
-        |r| r.get(0),
-    )?;
+    let exists: i64 = match after {
+        Some(cursor) => tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_files
+                           WHERE library_id = ?1 AND file_id > ?2)",
+            params![library, cursor],
+            |r| r.get(0),
+        )?,
+        None => tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_files WHERE library_id = ?1)",
+            params![library],
+            |r| r.get(0),
+        )?,
+    };
     Ok(exists != 0)
 }
 

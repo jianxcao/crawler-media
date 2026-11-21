@@ -550,6 +550,17 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         id: &str,
     ) -> Result<Option<(PathBuf, bool)>, String>;
 
+    /// Resolve a published, present physical file by its file id (`LedgerId`)
+    /// inside the caller's authorized Libraries (used by file-scoped font and
+    /// trickplay asset endpoints).
+    async fn resolve_playback_file(
+        &self,
+        user_id: UserId,
+        file_id: &str,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        self.resolve_stream_source(user_id, file_id).await
+    }
+
     /// Resolve a stream source for a specific requested physical source (MediaSourceId)
     /// and/or play session id. Default implementation forwards to `resolve_stream_source`.
     async fn resolve_stream_source_bound(

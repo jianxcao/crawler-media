@@ -19,7 +19,8 @@ pub mod sidecar_cleanup;
 pub mod source_observation;
 pub mod subtitles;
 pub use source_observation::{
-    MISSING_SOURCE_VERSION, SourceObservation, current_source_version, observe_source,
+    MISSING_SOURCE_VERSION, SourceObservation, current_source_version, observe_open_source,
+    observe_source,
 };
 mod tracks;
 mod watch;

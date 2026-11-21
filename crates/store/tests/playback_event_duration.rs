@@ -137,3 +137,79 @@ fn new_source_without_duration_does_not_inherit_old_duration() {
         "unknown duration never auto-completes"
     );
 }
+
+#[test]
+fn duration_first_reported_on_stop_is_persisted_in_archived_log_and_unit_state() {
+    let (_tmp, f) = seed();
+    let (session, generation) = issue(&f, &episode(&f, 1), &f.file);
+    let s = (session.as_str(), generation);
+
+    // Progress arrives before duration is known.
+    assert_eq!(
+        commit(
+            &f,
+            &f.file,
+            s,
+            1,
+            30_000,
+            None,
+            PlaybackEventType::Progress,
+            2_000,
+        ),
+        EventOutcome::Applied
+    );
+    // Stop is the first event that reports duration (100s) at 95s (>= 90% completed).
+    assert_eq!(
+        commit(
+            &f,
+            &f.file,
+            s,
+            2,
+            95_000,
+            Some(100_000),
+            PlaybackEventType::Stopped,
+            3_000,
+        ),
+        EventOutcome::Applied
+    );
+
+    let after = unit(&f);
+    assert_eq!(after.duration_ms, Some(100_000));
+    assert!(after.played);
+    assert_eq!(after.play_count, 1);
+
+    let logs = f
+        .store
+        .list_logs(20, None, None, None, 10_000, Some(user()))
+        .unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].duration_ms, Some(100_000));
+    assert!(
+        logs[0].completed,
+        "archived play log must agree with unit played state when Stop supplies duration"
+    );
+    assert_eq!(logs[0].end_position_ms, 95_000);
+
+    // Replaying Stop must not create a second play log or double-count plays.
+    assert_eq!(
+        commit(
+            &f,
+            &f.file,
+            s,
+            3,
+            95_000,
+            Some(100_000),
+            PlaybackEventType::Stopped,
+            4_000,
+        ),
+        EventOutcome::IgnoredStale
+    );
+    assert_eq!(
+        f.store
+            .list_logs(20, None, None, None, 10_000, Some(user()))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(unit(&f).play_count, 1);
+}
