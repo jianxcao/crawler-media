@@ -59,3 +59,28 @@ export function bindPlaybackPageLifecycle(
     target.removeEventListener("pageshow", show);
   };
 }
+
+export function isStructuredHttpError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const status = "status" in error ? (error as { status?: unknown }).status : undefined;
+  if (typeof status === "number" && status >= 400) return true;
+  const details = "details" in error ? (error as { details?: unknown }).details : undefined;
+  if (details && typeof details === "object" && "error" in details) {
+    const inner = (details as { error?: unknown }).error;
+    if (
+      inner &&
+      typeof inner === "object" &&
+      "code" in inner &&
+      typeof (inner as { code?: unknown }).code === "string"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isEndedByAdminError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("details" in error)) return false;
+  const details = error.details as { error?: { code?: string } } | null | undefined;
+  return details?.error?.code === "playback.ended_by_admin";
+}

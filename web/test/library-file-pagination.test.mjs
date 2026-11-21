@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
-import ts from "typescript";
+import { loadLibrariesApi as loadLibrariesBundle } from "./support/load-libraries-api.mjs";
 
 import {
   collectAllFilePages,
@@ -113,21 +112,14 @@ test("缺失/未知文件可查看但不可作为可播版本", () => {
 
 /** 加载真实 `lib/api/libraries.ts`，注入真实分页 collector，只伪造 HTTP request。 */
 async function loadLibrariesApi(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} };
   const pages = await import("../lib/library-file-pages.ts");
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/lib/http") return { request, resolveRequestUrl: (path) => path };
-    if (name === "@/lib/library-file-pages") return pages;
-    if (name === "@/lib/library-removal") return { waitForLibraryRemoval: async () => {} };
-    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async () => {} };
-    if (name === "@/lib/library-filter") return {};
-    throw new Error(`Unexpected import ${name}`);
-  }, module, module.exports);
-  return module.exports;
+  return loadLibrariesBundle({
+    "@/lib/http": { request, resolveRequestUrl: (path) => path },
+    "@/lib/library-file-pages": pages,
+    "@/lib/library-removal": { waitForLibraryRemoval: async () => {} },
+    "@/lib/library-operations": { waitForLibraryOperation: async () => {} },
+    "@/lib/library-filter": {},
+  });
 }
 
 /** 服务端真实形状：首详情给 `next_file_cursor`，续页给 `next_cursor`。 */

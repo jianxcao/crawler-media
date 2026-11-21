@@ -3,7 +3,9 @@
  * manifest、字体 @font-face 都在那里,解析即生效)。这里只挂全站都需要的
  * 组件与样式:液态玻璃样式、全局主题、键盘适配。
  */
+import { Suspense } from "react";
 import { Outlet } from "react-router-dom";
+import { RouteFallback } from "@/components/route-fallback";
 import { ViewportKeyboard } from "@/components/viewport-keyboard";
 
 // 先引入液态玻璃组件自带的样式,再引入本项目的全局深色主题(后者可覆盖前者)。
@@ -15,7 +17,9 @@ export default function RootLayout() {
     <>
       {/* 挂在根布局:登录页等 AppShell 之外的页面也有输入框,同样需要键盘适配 */}
       <ViewportKeyboard />
-      <Outlet />
+      <Suspense fallback={<RouteFallback />}>
+        <Outlet />
+      </Suspense>
     </>
   );
 }

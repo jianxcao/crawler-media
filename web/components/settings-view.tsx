@@ -18,8 +18,9 @@ import { ArrowLeftIcon } from "@/components/icons";
 import { useBackdrop } from "@/lib/backdrop";
 import { sidebarGlass } from "@/lib/glass";
 import { clearPlaybackHistory } from "@/lib/api/playback";
+import { SETTINGS_SECTION_ICON } from "@/components/settings-section-icons";
 import { useSession } from "@/lib/session";
-import { settingsSectionGroupsFor, settingsSections } from "@/lib/mock-data";
+import { settingsSectionGroupsFor, settingsSections } from "@/lib/settings-sections";
 import { useUiPrefs } from "@/lib/ui-prefs";
 import { THEMES } from "@/lib/themes";
 
@@ -76,7 +77,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
             {group.label && <h3 className="group-label mb-1.5 px-2">{group.label}</h3>}
             <div className="space-y-0.5">
               {group.items.map((section) => {
-                const Icon = section.icon;
+                const Icon = SETTINGS_SECTION_ICON[section.id];
                 return (
                   <button
                     key={section.id}
@@ -116,7 +117,7 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
   const allowed = settingsSectionGroupsFor(session.role).flatMap((g) => g.items);
   const section =
     allowed.find((s) => s.id === active) ?? allowed[0] ?? settingsSections[0];
-  const Icon = section.icon;
+  const Icon = SETTINGS_SECTION_ICON[section.id];
 
   // 兜底展示的同时把地址替换成实际分区：URL 与内容一致、侧栏高亮不落空，
   // 刷新/分享当前页也不会再落回一个自己看不到的地址

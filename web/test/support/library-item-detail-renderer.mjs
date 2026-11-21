@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import React, { act } from "react";
 import { create } from "react-test-renderer";
@@ -138,13 +138,35 @@ export function itemDetailHarness({
       }),
     },
   };
-  function compile(path) {
-    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+  const modules = new Map();
+  const real = new Set(["@/lib/library-item-format"]);
+  function resolveFile(baseUrl, specifier) {
+    const raw = specifier.startsWith("@/")
+      ? new URL(`../../${specifier.slice(2)}`, import.meta.url)
+      : new URL(specifier, baseUrl);
+    for (const suffix of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+      const candidate = new URL(`${raw.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module ${specifier} from ${baseUrl.href}`);
+  }
+  function compile(specifier, fromUrl = import.meta.url) {
+    const baseUrl = typeof fromUrl === "string" ? new URL(fromUrl) : fromUrl;
+    const targetUrl = resolveFile(baseUrl, specifier);
+    if (modules.has(targetUrl.href)) return modules.get(targetUrl.href).exports;
+    const source = readFileSync(targetUrl, "utf8");
     const js = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
     }).outputText;
     const module = { exports: {} };
-    new Function("require", "module", "exports", js)((name) => mocks[name] ?? fallback, module, module.exports);
+    modules.set(targetUrl.href, module);
+    new Function("require", "module", "exports", js)((name) => {
+      if (mocks[name]) return mocks[name];
+      if (name.startsWith("./") || name.startsWith("../") || real.has(name)) {
+        return compile(name, targetUrl);
+      }
+      return fallback;
+    }, module, module.exports);
     return module.exports;
   }
   const api = compile("../../lib/api/playback.ts");

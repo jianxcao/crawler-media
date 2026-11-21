@@ -21,7 +21,7 @@
       必须是 body 最前的同步内联脚本,解析即执行,赶在首帧绘制之前。
     -->
     <script>
-      try{if(location.pathname.indexOf("/sessions/")===0){document.documentElement.classList.add("immersive-route")}else{var u=localStorage.getItem("crawler-media.backdrop");if(u&&u.charAt(0)==="/")document.documentElement.style.setProperty("--backdrop-image",'url("'+u+'")')}}catch(e){}
+      try{var u=localStorage.getItem("crawler-media.backdrop");if(u&&u.charAt(0)==="/")document.documentElement.style.setProperty("--backdrop-image",'url("'+u+'")')}catch(e){}
     </script>
     <script>
       try{var p=JSON.parse(localStorage.getItem("crawler-media.ui-prefs")||"null");var t=p&&p.theme;if(t==="paper"||t==="netflix"){document.documentElement.setAttribute("data-theme",t);var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",t==="paper"?"#eef1f6":"#000000")}}catch(e){}

@@ -1,21 +1,19 @@
 "use client";
 
 import { ArtworkImage } from "@/components/artwork-image";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import type { ReactNode } from "react";
 
 import {
   ActivityIcon,
   BookmarkIcon,
   ClockIcon,
   DatabaseIcon,
+  FilmIcon,
   FolderSyncIcon,
   LibraryIcon,
-  MoreIcon,
   PanelLeftIcon,
-  PlusIcon,
+  TvIcon,
 } from "@/components/icons";
-import { useToast } from "@/components/feedback";
 import { JobCenter } from "@/components/job-center";
 import { UserMenu } from "@/components/user-menu";
 import { useBackdrop } from "@/lib/backdrop";
@@ -26,10 +24,10 @@ import { useIsMobile } from "@/lib/use-media-query";
 import { publicEnv } from "@/lib/env";
 import { useSession } from "@/lib/session";
 import { usePermissions } from "@/lib/permissions";
-import { exploreItems } from "@/lib/mock-data";
 import { GlassPanel } from "@/components/glass-panel";
-import { SearchCommand, type SearchSubmitOptions } from "@/components/search-command";
+import { SearchCommand } from "@/components/search-command";
 import type { SearchScope } from "@/lib/categories";
+import type { SearchSubmitOptions } from "@/lib/search-url";
 
 /**
  * 工作台侧边栏。结构（自上而下，对齐 ChatGPT Codex 侧栏的极简版式）：
@@ -50,12 +48,9 @@ export interface SidebarProps {
   collapsed: boolean;
   /** 点击头部开关按钮：在展开 / 折叠间切换 */
   onToggleCollapse: () => void;
-  /** 实色形态：沉浸页（Agent 对话）用——不渲染 WebGL 玻璃、不折射背景大图 */
-  flat?: boolean;
 }
 
-/** 主导航：新会话 / 媒体库 / 探索项 / 订阅 / 活动，合并成一列扁平列表。
- *  「新会话」是 Agent 入口（管理员专属，成员侧隐藏——后端也会 403）。
+/** 主导航：媒体库 / 合集 / 探索项 / 订阅 / 整理 / 任务 / 缓存 / 活动，合并成一列扁平列表。
  *
  *  这个数组的次序就是**内置默认顺序**：用户在「设置 → 外观 → 导航顺序」里排过
  *  的项按个人顺序在前，没排过的（包括版本升级新增的入口）按这里的次序追加在后
@@ -64,7 +59,8 @@ export interface SidebarProps {
 export const SIDEBAR_NAV_ITEMS = [
   { id: "library", label: "媒体库", icon: LibraryIcon },
   { id: "collections", label: "合集", icon: LibraryIcon },
-  ...exploreItems,
+  { id: "explore-movies", label: "发现电影", icon: FilmIcon },
+  { id: "explore-tv", label: "发现剧集", icon: TvIcon },
   { id: "subscriptions", label: "我的订阅", icon: BookmarkIcon },
   { id: "transfers", label: "媒体整理", icon: FolderSyncIcon },
   { id: "jobs", label: "定时任务", icon: ClockIcon },
@@ -99,7 +95,6 @@ export function Sidebar({
   onOpenSettings,
   collapsed,
   onToggleCollapse,
-  flat = false,
 }: SidebarProps) {
   const { backdrop } = useBackdrop();
   // 移动端的搜索入口在全局顶栏上（常驻可见），侧栏里这颗就是重复的。
@@ -110,11 +105,7 @@ export function Sidebar({
   // 基底为 LiquidGlassCard 同款材质；设置页拖动滑杆时经预览草稿实时生效。
   const { prefs } = useUiPrefs();
   const glass = sidebarGlass(prefs.sidebar);
-  // 成员形态做减法：隐藏 Agent 入口（新会话）与「最近会话」组；
-  // 这是界面裁剪，安全边界在后端 require_admin
-  const { session } = useSession();
   const { canSearch } = usePermissions();
-  const isMember = session.role === "member";
   // 个人排序：prefs 已含设置页的未保存草稿，因此在设置页拖动时这里即时跟随
   const visibleNavItems = useVisibleNavItems();
   const navItems = applyNavOrder(visibleNavItems, prefs.nav.order);
@@ -122,10 +113,10 @@ export function Sidebar({
     <>
       {/* 品牌头部。展开：完整字标 + 开合/搜索图标横排；折叠：独立徽标、开合、搜索竖排居中。
           开合按钮与搜索共用同一套图标按钮样式（⌘K 在两种形态下均可唤起搜索）。
-          两种形态的 logo 都是「回首页」入口，等同于点击导航里的「新会话」。 */}
+          两种形态的 logo 都是「回首页」入口，直达媒体库。 */}
       {collapsed ? (
         <div className="flex flex-col items-center gap-2 px-3 pb-3 pt-5">
-          <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
+          <BrandHome onSelect={onSelect} homeId="library">
             <ArtworkImage
               src="/logo-mark.svg"
               alt={publicEnv.appName}
@@ -139,7 +130,7 @@ export function Sidebar({
         </div>
       ) : (
         <div className="flex items-center justify-between px-4 pb-3 pt-4">
-          <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
+          <BrandHome onSelect={onSelect} homeId="library">
             <div className="flex items-center gap-2.5">
               <ArtworkImage
                 src="/logo-mark.svg"
@@ -209,10 +200,6 @@ export function Sidebar({
     </>
   );
 
-  if (flat) {
-    // 沉浸页的实色侧栏：只保留浮起卡片的形状语言，不透玻璃
-    return <div className="panel--sidebar-flat flex h-full flex-col">{body}</div>;
-  }
   return (
     <GlassPanel
       backgroundImage={backdrop}
@@ -229,9 +216,8 @@ export function Sidebar({
   );
 }
 
-/** 头部的侧栏开合按钮：与搜索触发器同款的方形图标按钮 */
 /**
- * 品牌 logo 的「回首页」外壳：点击等同于选中导航里的「新会话」（id: new），
+ * 品牌 logo 的「回首页」外壳：点击回到媒体库首页，
  * 展开态包字标、折叠态包徽标，两处共用同一交互与 hover 反馈。
  */
 function BrandHome({
@@ -240,7 +226,7 @@ function BrandHome({
   children,
 }: {
   onSelect: (id: string) => void;
-  /** 「回首页」的落点：管理员是新会话页，成员是媒体库（成员没有 Agent 入口） */
+  /** 「回首页」的落点（默认媒体库） */
   homeId: string;
   children: ReactNode;
 }) {
@@ -273,6 +259,3 @@ function CollapseToggle({ collapsed, onClick }: { collapsed: boolean; onClick: (
     </button>
   );
 }
-
-/** 触底预加载的提前量：距底部还有这么多像素就取下一页，滚到底时数据已就位。 */
-const LOAD_MORE_THRESHOLD_PX = 120;

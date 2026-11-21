@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
@@ -23,13 +23,44 @@ function load(relative, overrides = {}) {
     "@/lib/language-labels": { languageLabel: (value) => value },
     ...overrides,
   };
-  const filename = new URL(relative, import.meta.url);
-  const module = { exports: {} };
-  const code = ts.transpileModule(readFileSync(filename, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  vm.runInNewContext(code, { module, exports: module.exports, require: (name) => mocks[name] ?? fallback });
-  return module.exports;
+  const cache = new Map();
+
+  function resolveLocal(specifier, parentUrl) {
+    let targetUrl = null;
+    if (specifier.startsWith("@/components/task-center/")) {
+      targetUrl = new URL(`../${specifier.slice(2)}`, import.meta.url);
+    } else if (specifier.startsWith("./") || specifier.startsWith("../")) {
+      targetUrl = new URL(specifier, parentUrl);
+    }
+    if (!targetUrl) return null;
+    for (const suffix of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+      const candidate = new URL(`${targetUrl.href}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    return null;
+  }
+
+  function loadModule(fileUrl) {
+    if (cache.has(fileUrl.href)) return cache.get(fileUrl.href).exports;
+    const mod = { exports: {} };
+    cache.set(fileUrl.href, mod);
+    const code = ts.transpileModule(readFileSync(fileUrl, "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+    vm.runInNewContext(code, {
+      module: mod,
+      exports: mod.exports,
+      require: (name) => {
+        if (name in mocks) return mocks[name];
+        const localUrl = resolveLocal(name, fileUrl);
+        if (localUrl) return loadModule(localUrl);
+        return fallback;
+      },
+    });
+    return mod.exports;
+  }
+
+  return loadModule(new URL(relative, import.meta.url));
 }
 function expand(tree) {
   if (Array.isArray(tree)) return tree.flatMap(expand);

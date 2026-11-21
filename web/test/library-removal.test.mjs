@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import ts from "typescript";
 import { waitForLibraryRemoval, removalLabel } from "../lib/library-removal.ts";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 const operation = (state) => ({ operation_id: "op", library_id: "lib", state, error: null });
 
@@ -55,21 +55,14 @@ test("pre-aborted removal does not fetch status or publish progress", async () =
   }, { signal: controller.signal, onProgress: () => assert.fail("must not publish") }), { name: "AbortError" });
 });
 
-async function loadApi(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} };
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/lib/http") return { request };
-    if (name === "@/lib/library-removal") return { waitForLibraryRemoval };
-    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async (op) => op };
-    if (name === "@/lib/library-filter") return {};
-    if (name === "@/lib/library-file-pages") {
-      return { collectAllFilePages: async (firstPage) => firstPage.files };
-    }
-    throw new Error(`Unexpected import ${name}`);
-  }, module, module.exports);
-  return module.exports;
+function loadApi(request) {
+  return loadLibrariesApi({
+    "@/lib/http": { request },
+    "@/lib/library-removal": { waitForLibraryRemoval },
+    "@/lib/library-operations": { waitForLibraryOperation: async (op) => op },
+    "@/lib/library-filter": {},
+    "@/lib/library-file-pages": { collectAllFilePages: async (firstPage) => firstPage.files },
+  });
 }
 
 test("list API preserves removal JSON for reload resume", async () => {
@@ -105,7 +98,10 @@ test("both views wire lifecycle status and persistent retry UI", async () => {
     assert.match(source, /<LibraryRemovalNotice/);
     assert.doesNotMatch(source, /removeLibraryAndWait/);
   }
-  const detail = await readFile(new URL("../components/library-detail-view.tsx", import.meta.url), "utf8");
+  const detail = await readFile(
+    new URL("../components/library-detail/use-library-wall-controller.ts", import.meta.url),
+    "utf8",
+  );
   assert.match(detail, /canManageLibraries \? \{ manage: true \}/);
   const hook = await readFile(new URL("../lib/use-library-removal.ts", import.meta.url), "utf8");
   assert.match(hook, /controller\.abort\(\)/);

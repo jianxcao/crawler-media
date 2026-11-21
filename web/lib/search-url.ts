@@ -1,9 +1,28 @@
-import type { SearchQuery } from "@/components/search-results";
 import {
   CATEGORY_LABEL,
+  type SearchScope,
   type SearchVertical,
   type TorrentCategory,
 } from "@/lib/categories";
+
+export interface SearchQuery {
+  keyword: string;
+  /** 搜索范围（标签换算而来）：展示名 + 分类/站点组合 */
+  scope: SearchScope;
+  /**
+   * 快照预览：非空时不发起实时搜索，改为加载该条历史留存的结果快照
+   * （页顶提示条标注快照年龄，可一键切回实时搜索）。
+   */
+  snapshotId?: string;
+}
+
+/** 提交搜索的附加选项：目标垂直 + 历史快照回放。 */
+export interface SearchSubmitOptions {
+  /** 落地垂直；缺省 = 站点资源（torrent），与老调用方行为一致 */
+  vertical?: SearchVertical;
+  /** 非空 = 预览该条历史的结果快照（点历史记录进入），而非发起实时搜索 */
+  snapshotId?: string;
+}
 
 /**
  * 搜索页的 URL 序列化：一次搜索的全部输入（关键词 + 范围 + 快照）都编码进

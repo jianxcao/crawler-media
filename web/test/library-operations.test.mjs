@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
   waitForLibraryOperation,
   operationLabel,
 } from "../lib/library-operations.ts";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 const require = createRequire(import.meta.url);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -105,22 +106,15 @@ test("operation states have visible copy", () => {
 });
 
 async function loadApi(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} };
   const removals = await import("../lib/library-removal.ts");
   const operations = await import("../lib/library-operations.ts");
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/lib/http") return { request, resolveRequestUrl: (path) => path };
-    if (name === "@/lib/library-removal") return { waitForLibraryRemoval: removals.waitForLibraryRemoval };
-    if (name === "@/lib/library-operations") return operations;
-    if (name === "@/lib/library-file-pages") {
-      return { collectAllFilePages: async (firstPage) => firstPage.files };
-    }
-    if (name === "@/lib/library-filter") return {};
-    throw new Error(`Unexpected import ${name}`);
-  }, module, module.exports);
-  return module.exports;
+  return loadLibrariesApi({
+    "@/lib/http": { request, resolveRequestUrl: (path) => path },
+    "@/lib/library-removal": { waitForLibraryRemoval: removals.waitForLibraryRemoval },
+    "@/lib/library-operations": operations,
+    "@/lib/library-file-pages": { collectAllFilePages: async (firstPage) => firstPage.files },
+    "@/lib/library-filter": {},
+  });
 }
 
 const library = { id: "lib", name: "电影", kind: "movie", root_paths: ["/media"] };
@@ -223,7 +217,7 @@ test("reidentify keeps its synchronous contract and is never polled", async () =
 });
 
 test("the edit dialog waits for the accepted operation and shows its phase", async () => {
-  const source = await readFile(new URL("../components/library-form-dialog.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../components/library-form/edit-library-dialog.tsx", import.meta.url), "utf8");
   assert.match(source, /updateLibraryAndWait\(library\.id, payload/);
   assert.match(source, /onProgress: \(operation\) => setPending\(operationLabel\(operation\)\)/);
   assert.match(source, /busy \? \(pending \?\? "保存中…"\) : "保存"/);
@@ -367,14 +361,6 @@ test("hidden library (admin_visible=false) works for applyRootConsolidations, up
 });
 
 function loadEditDialog(apiOverrides) {
-  const filename = path.join(webRoot, "components/library-form-dialog.tsx");
-  const js = ts.transpileModule(readFileSync(filename, "utf8"), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      jsx: ts.JsxEmit.ReactJSX,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText;
   const opsSource = ts.transpileModule(
     readFileSync(path.join(webRoot, "lib/library-operations.ts"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
@@ -383,37 +369,59 @@ function loadEditDialog(apiOverrides) {
   new Function("require", "module", "exports", opsSource)(require, opsMod, opsMod.exports);
 
   const icon = () => React.createElement("span");
-  const mod = { exports: {} };
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/components/modal") {
-      return { Modal: ({ children }) => React.createElement("div", { "data-modal": true }, children) };
+  const librariesStub = {
+    createLibrary: async () => { throw new Error("unexpected createLibrary"); },
+    listLibraryRoutingOptions: async () => ({ movie_genres: [], tv_genres: [], region_presets: [], country_names: {} }),
+    reindexingOperationId: (error) => {
+      if (!error || typeof error !== "object" || error.status !== 409) return null;
+      const inner = error.details?.error;
+      return inner?.code === "library.reindexing" && typeof inner.operation_id === "string" ? inner.operation_id : null;
+    },
+    ...apiOverrides,
+  };
+  const resolveFile = (base) => {
+    for (const suffix of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {
+      const candidate = `${base}${suffix}`;
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
     }
-    if (name === "@/components/directory-picker") return { DirectoryPicker: () => null };
-    if (name === "@/components/tooltip") return { Tooltip: ({ children }) => children };
-    if (name === "@/components/icons") {
-      return { CheckIcon: icon, ChevronDownIcon: icon, FolderIcon: icon, InfoIcon: icon, PlusIcon: icon, XIcon: icon };
-    }
-    if (name === "@/components/library-kind-meta") {
-      return { LIBRARY_KIND_META: { movie: { label: "电影", Icon: icon }, tv: { label: "剧集", Icon: icon }, video: { label: "其他", Icon: icon } } };
-    }
-    if (name === "@/lib/library-operations") return opsMod.exports;
-    if (name === "@/lib/api/members") return { listMembers: async () => [] };
-    if (name === "@/lib/api/subscriptions") return { listRuleSets: async () => [] };
-    if (name === "@/lib/api/libraries") {
-      return {
-        createLibrary: async () => { throw new Error("unexpected createLibrary"); },
-        listLibraryRoutingOptions: async () => ({ movie_genres: [], tv_genres: [], region_presets: [], country_names: {} }),
-        reindexingOperationId: (error) => {
-          if (!error || typeof error !== "object" || error.status !== 409) return null;
-          const inner = error.details?.error;
-          return inner?.code === "library.reindexing" && typeof inner.operation_id === "string" ? inner.operation_id : null;
-        },
-        ...apiOverrides,
-      };
-    }
-    return require(name);
-  }, mod, mod.exports);
-  return { LibraryFormDialog: mod.exports.LibraryFormDialog, LibraryOperationError: opsMod.exports.LibraryOperationError };
+    throw new Error(`Cannot resolve module from ${base}`);
+  };
+  const cache = new Map();
+  const loadModule = (filename) => {
+    if (cache.has(filename)) return cache.get(filename).exports;
+    const js = ts.transpileModule(readFileSync(filename, "utf8"), {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText;
+    const mod = { exports: {} };
+    cache.set(filename, mod);
+    new Function("require", "module", "exports", js)((name) => {
+      if (name === "@/components/modal") {
+        return { Modal: ({ children }) => React.createElement("div", { "data-modal": true }, children) };
+      }
+      if (name === "@/components/directory-picker") return { DirectoryPicker: () => null };
+      if (name === "@/components/tooltip") return { Tooltip: ({ children }) => children };
+      if (name === "@/components/icons") {
+        return { CheckIcon: icon, ChevronDownIcon: icon, FolderIcon: icon, InfoIcon: icon, PlusIcon: icon, XIcon: icon };
+      }
+      if (name === "@/components/library-kind-meta") {
+        return { LIBRARY_KIND_META: { movie: { label: "电影", Icon: icon }, tv: { label: "剧集", Icon: icon }, video: { label: "其他", Icon: icon } } };
+      }
+      if (name === "@/lib/library-operations") return opsMod.exports;
+      if (name === "@/lib/api/members") return { listMembers: async () => [] };
+      if (name === "@/lib/api/subscriptions") return { listRuleSets: async () => [] };
+      if (name === "@/lib/api/libraries") return librariesStub;
+      if (name.startsWith("@/")) return loadModule(resolveFile(path.join(webRoot, name.slice(2))));
+      if (name.startsWith(".")) return loadModule(resolveFile(path.resolve(path.dirname(filename), name)));
+      return require(name);
+    }, mod, mod.exports);
+    return mod.exports;
+  };
+  const formDialog = loadModule(path.join(webRoot, "components/library-form-dialog.tsx"));
+  return { LibraryFormDialog: formDialog.LibraryFormDialog, LibraryOperationError: opsMod.exports.LibraryOperationError };
 }
 
 test("EditLibraryDialog preserves failed operation_id and retries via POST .../operations/{id}/retry without re-sending PATCH", async () => {
@@ -531,7 +539,14 @@ test("EditLibraryDialog recovers failed operation_id from 409 library.reindexing
 });
 
 test("LibraryManageView uses manage=1 in DuplicatesPanel and reloads after root consolidation", async () => {
-  const source = await readFile(new URL("../components/library-manage-view.tsx", import.meta.url), "utf8");
-  assert.match(source, /function DuplicatesPanel[\s\S]*?listLibraries\(undefined,\s*\{\s*manage:\s*true\s*\}\)/);
-  assert.match(source, /onConsolidate:[\s\S]*?consolidateLibrary\([\s\S]*?reload\(\)/);
+  const duplicatesSource = await readFile(
+    new URL("../components/library-manage/duplicates-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const manageViewSource = await readFile(
+    new URL("../components/library-manage-view.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(duplicatesSource, /function DuplicatesPanel[\s\S]*?listLibraries\(undefined,\s*\{\s*manage:\s*true\s*\}\)/);
+  assert.match(manageViewSource, /onConsolidate:[\s\S]*?consolidateLibrary\([\s\S]*?reload\(\)/);
 });

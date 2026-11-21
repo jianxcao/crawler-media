@@ -5,7 +5,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { LibrarySearchResults } from "@/components/library-search-results";
 import { MediaSearchResults } from "@/components/media-search-results";
-import { SearchResults, type SearchQuery } from "@/components/search-results";
+import { SearchResults } from "@/components/search-results";
 import { parseGrabSubscriptionId } from "@/lib/grab-subscription";
 import {
   CATEGORY_LABEL,
@@ -17,7 +17,7 @@ import {
 } from "@/lib/categories";
 import { useSearchPrefs } from "@/lib/search-prefs";
 import { useSearchAccess } from "@/lib/search-access";
-import { buildSearchPath, parseSearchQuery } from "@/lib/search-url";
+import { buildSearchPath, parseSearchQuery, type SearchQuery } from "@/lib/search-url";
 import { usePageTitle } from "@/lib/use-page-title";
 
 /**

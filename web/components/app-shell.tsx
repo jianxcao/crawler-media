@@ -12,7 +12,7 @@ const SETTINGS_RETURN_KEY = "crawler-media.settings-return";
 import { FeedbackProvider } from "@/components/feedback";
 import { MenuIcon } from "@/components/icons";
 import { PAGE_NAV_BUTTON_CLASS } from "@/components/page-nav";
-import { SearchCommand, type SearchSubmitOptions } from "@/components/search-command";
+import { SearchCommand } from "@/components/search-command";
 import { SettingsSidebar } from "@/components/settings-view";
 import { Sidebar } from "@/components/sidebar";
 import { SubscribeEntryProvider } from "@/components/subscribe-entry";
@@ -25,10 +25,10 @@ import { BackdropProvider } from "@/lib/backdrop";
 import type { SearchScope } from "@/lib/categories";
 import { PageChromeProvider } from "@/lib/page-chrome";
 import { SearchPrefsProvider } from "@/lib/search-prefs";
-import { buildSearchPath } from "@/lib/search-url";
+import { buildSearchPath, type SearchSubmitOptions } from "@/lib/search-url";
 import { UiPrefsProvider, useTheme } from "@/lib/ui-prefs";
 import { useIsMobile } from "@/lib/use-media-query";
-import { settingsSectionGroupsFor, settingsSections } from "@/lib/mock-data";
+import { settingsSectionGroupsFor, settingsSections } from "@/lib/settings-sections";
 import { usePermissions } from "@/lib/permissions";
 import { publicEnv } from "@/lib/env";
 import { useSession } from "@/lib/session";
@@ -37,16 +37,13 @@ import { useSession } from "@/lib/session";
  * 应用外壳：全站骨架布局，所有导航态由 URL 驱动。
  *
  * 每个页面都是真实路由——刷新保留、可分享、前进后退可用：
- *   /                    银玻璃=新任务氛围页；Netflix 无首页（replace 到 /library，
- *                        原内容首页 Billboard 已并入媒体库页，2026-09 修订）
+ *   /                    重定向到 /library
  *   /library             媒体库（内容的一等入口；Netflix 主题顶部带 Billboard）
- *   /new                 AI 新任务（Netflix 主题的顶栏「＋ 新任务」落点）
  *   /discover/movie|tv   发现电影 / 剧集
  *   /subscriptions       我的订阅
  *   /activity            活动（观看 / 任务）
  *   /media/[type]/[id]   影片详情
  *   /search?q=…          跨站搜索结果（范围/快照都在查询参数里）
- *   /sessions/[id]       AI 会话
  *   /settings/[section]  设置各分区
  *
  * 外壳按主题分两副骨架：
@@ -215,16 +212,6 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
     (isNetflix && pathname === "/library") ||
     /^\/library\/[^/]+\/item\/[^/]+/.test(pathname) ||
     pathname.startsWith("/media/");
-  // Agent 对话页走沉浸模式：蒙版换成完全不透明的 .page-solid，整页盖掉
-  // 背景大图（密集文本页不允许透图）；侧栏切换为实色形态。
-  const isImmersive = pathname.startsWith("/sessions/");
-
-  // 沉浸路由标记：强刷时由 layout.tsx 的内联脚本在首帧绘制前打上（避免闪出
-  // 背景大图），这里负责客户端路由切换时的双向同步——进入 /sessions/[id] 关掉背景
-  // 大图伪元素，离开时恢复其他页面的大图。
-  useEffect(() => {
-    document.documentElement.classList.toggle("immersive-route", isImmersive);
-  }, [isImmersive]);
 
   // 移动端顶栏归属：详情类页面自带 PageNav（返回 + 标题 + 页面操作），
   // 全局顶栏再叠一条就成了两层顶栏，于是把这一行让给页面自己（见 lib/page-chrome.tsx）。
@@ -294,7 +281,6 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
       // 移动端抽屉里没有「折叠成图标窄条」的意义（抽屉本身就是收起态）
       collapsed={!isMobile && sidebarCollapsed}
       onToggleCollapse={isMobile ? () => setDrawerOpen(false) : toggleSidebar}
-      flat={isImmersive}
     />
   );
 
@@ -375,7 +361,7 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
       （--scrim-blur / --scrim-dark，见 lib/ui-prefs.tsx）；唯一例外是
       「新任务」首页——大图直出的氛围页门面，不铺蒙版（见 isHome）。 */}
     {!isHome && (
-      <div className={isImmersive ? "page-solid" : "page-scrim"} aria-hidden="true" />
+      <div className="page-scrim" aria-hidden="true" />
     )}
     {isMobile ? (
       /* —— 移动端骨架：单栏 + 顶栏，侧栏收进覆盖式抽屉 ——

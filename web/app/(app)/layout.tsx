@@ -1,6 +1,8 @@
+import { Suspense } from "react";
 import { Outlet } from "react-router-dom";
 import { AppShell } from "@/components/app-shell";
 import { AuthGate } from "@/components/auth-gate";
+import { RouteFallback } from "@/components/route-fallback";
 import { DownloadTasksProvider } from "@/lib/download-tasks";
 import { JobsProvider } from "@/lib/jobs";
 
@@ -16,7 +18,9 @@ export default function AppLayout() {
       <JobsProvider>
         <DownloadTasksProvider>
           <AppShell>
-            <Outlet />
+            <Suspense fallback={<RouteFallback />}>
+              <Outlet />
+            </Suspense>
           </AppShell>
         </DownloadTasksProvider>
       </JobsProvider>

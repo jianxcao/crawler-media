@@ -1,5 +1,5 @@
 /* global Event, EventTarget */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -56,6 +56,13 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
   const calls = [], reports = [], metrics = [], engines = [];
   let deviceId = "device-1";
   const video = new Video();
+  const resolveFile = base => {
+    for (const suffix of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {
+      const candidate = `${base}${suffix}`;
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module from ${base}`);
+  };
   const cache = new Map();
   const load = filename => {
     if (cache.has(filename)) return cache.get(filename).exports;
@@ -85,8 +92,8 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
         },
       };
       if (name.startsWith("@/components/")) return new Proxy({}, { get: (_, key) => key === "useVideoContentBox" ? () => ({ width: 0, height: 0, bottomInset: 0 }) : String(key) });
-      if (name.startsWith("@/")) return load(path.join(root, `${name.slice(2)}.ts`));
-      if (name.startsWith(".")) return load(path.resolve(path.dirname(filename), name.endsWith(".ts") ? name : `${name}.ts`));
+      if (name.startsWith("@/")) return load(resolveFile(path.join(root, name.slice(2))));
+      if (name.startsWith(".")) return load(resolveFile(path.resolve(path.dirname(filename), name)));
       return require(name);
     }, mod, mod.exports);
     return mod.exports;

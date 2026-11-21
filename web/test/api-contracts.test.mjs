@@ -61,7 +61,7 @@ test("job action callers refresh snapshots instead of upserting acknowledgements
 });
 
 test("active job cards never present a previous finish as the active run's end", async () => {
-  const source = await readWeb("components/task-center-view.tsx");
+  const source = await readWeb("components/task-center/job-feed-items.tsx");
   const activeCard = source.match(/function ActiveJobFeedItem\([\s\S]*?\n}\n/);
   assert.ok(activeCard, "active job card exists");
   assert.match(activeCard[0], /job\.last_status === "queued"/);
@@ -71,13 +71,15 @@ test("active job cards never present a previous finish as the active run's end",
 });
 
 test("downloader path maps preserve UI local/remote direction both ways", async () => {
-  const [api, component] = await Promise.all([
+  const [api, row, form] = await Promise.all([
     readWeb("lib/api/downloaders.ts"),
-    readWeb("components/downloader-config-section.tsx"),
+    readWeb("components/settings/downloaders/downloader-row.tsx"),
+    readWeb("components/settings/downloaders/downloader-form.tsx"),
   ]);
 
   assert.match(api, /\{ from: m\.remote, to: m\.local \}/);
-  assert.match(component, /\{ local: m\.to, remote: m\.from \}/);
+  assert.match(row, /\{ local: m\.to, remote: m\.from \}/);
+  assert.match(form, /\{ local: m\.to, remote: m\.from \}/);
 });
 
 test("downloader limits endpoints preserve instance id parameter", async () => {

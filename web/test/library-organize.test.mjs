@@ -1,7 +1,6 @@
 /* global AbortSignal */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
@@ -15,6 +14,7 @@ import {
   canOpenOrganizeDialog,
   organizeTargets,
 } from "../lib/library-organize.ts";
+import { loadLibrariesApi as loadLibrariesApiModule } from "./support/load-libraries-api.mjs";
 
 const require = createRequire(import.meta.url);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -23,20 +23,13 @@ const webRoot = fileURLToPath(new URL("../", import.meta.url));
 const lib = (id, kind, roots, extra = {}) => ({ id, kind, name: id, root_paths: roots, ...extra });
 
 async function loadLibrariesApi(request) {
-  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
-  const js = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} };
-  new Function("require", "module", "exports", js)((name) => {
-    if (name === "@/lib/http") return { request, resolveRequestUrl: (p) => p };
-    if (name === "@/lib/library-removal") return { waitForLibraryRemoval: async (op) => op };
-    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async (op) => op };
-    if (name === "@/lib/library-file-pages") return { collectAllFilePages: async (p) => p.files };
-    if (name === "@/lib/library-filter") return {};
-    throw new Error(`Unexpected import ${name}`);
-  }, module, module.exports);
-  return module.exports;
+  return loadLibrariesApiModule({
+    "@/lib/http": { request, resolveRequestUrl: (p) => p },
+    "@/lib/library-removal": { waitForLibraryRemoval: async (op) => op },
+    "@/lib/library-operations": { waitForLibraryOperation: async (op) => op },
+    "@/lib/library-file-pages": { collectAllFilePages: async (p) => p.files },
+    "@/lib/library-filter": {},
+  });
 }
 
 function loadOrganizeDialog(previewLibraryOrganize) {

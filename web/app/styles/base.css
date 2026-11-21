@@ -1,0 +1,205 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  /*
+   * 文档撑到屏幕物理高度（视口 + --vp-overshoot）。这一行是底部黑条修复的
+   * 必要组成，不能删：实测仅靠铺底层的负 bottom 越出视口并不可靠——iOS 上
+   * 来回切换几个页面后，WebKit 会不再绘制视口之外的那一截，黑条复现；
+   * 文档本身够高时，这部分才稳定参与绘制。
+   *
+   * 已知代价：文档因此多出一截可滚动区域，overflow: hidden 挡得住用户滚动、
+   * 挡不住 iOS 自己滚——软键盘弹出时系统会滚动窗口去露出聚焦的输入框，
+   * 收起后不还原，整页上移错位。这不能靠删掉本行来治（曾这么干过，黑条
+   * 随即复现），由 components/viewport-keyboard.tsx 把窗口滚回原点。
+   * 两处是一对，改动任一侧前先看懂另一侧。
+   */
+  min-height: calc(100% + var(--vp-overshoot));
+}
+
+html {
+  /* iOS 横屏时会自作主张放大「它认为是正文」的文字，把精排的紧凑布局撑破；
+     锁定为 100% 关掉这个推断（无障碍缩放不受影响，用户捏合仍然有效）。 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* iOS 点按任意可点元素会闪一块系统灰色高亮，与全站自定义的
+     active 态（缩放/白色蒙层）叠在一起很脏，关掉用自己的。 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* iOS 对每次点按都要等一拍判断「是不是双击缩放」，快速连点（翻页、
+   步进按钮）会被误判成缩放手势把页面放大。声明 manipulation 告诉系统
+   这些元素只做点按/平移，判定取消、响应也更跟手。捏合缩放不受影响。
+   video 同理入列：播放器在 video 上自实现双击快进，不声明的话
+   Android Chrome 里双击会和浏览器的双击缩放判定竞争（§播放器触控）。
+
+   **必须写在 @layer base 里**（与下面 button { cursor } 同一条规矩）：不分层
+   的规则永远压过 Tailwind 的 @layer utilities，与特异性无关。此前这条没有
+   layer，播放器进度条上的 `touch-none` 被它压成 manipulation——竖屏沿条拖是
+   横向、页面横向没得滚才碰巧没事；伪横屏容器转了 90°，沿条就是物理竖直方向，
+   浏览器把触摸当翻页手势收走（pointercancel），进度条一动不动。 */
+@layer base {
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  video,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+}
+
+/* —— 装成 App 之后的「不可选中」触感 ——
+   浏览器标签页里长按能选中文字、弹出「拷贝 / 查询」系统菜单，这是网页的
+   正常预期；但加到主屏独立打开后，用户会按原生 App 的直觉去操作——长按
+   导航项、按钮、列表行，只会拖出一片蓝色选区和系统菜单，手感立刻「掉回
+   网页」。原生 App 里这些控件文案本来就是选不中的。
+
+   做法是把外壳整体设为不可选，再把**真正值得复制的内容**放开。放行清单按
+   「语义类别」写而不是逐个组件枚举——枚举永远漏，漏掉的那处就是用户复制
+   不出来的死角：
+   - 表单控件：输入框、文本域、可编辑区；
+   - 机器数据：code / pre / samp，以及全站 .font-mono——本项目里等宽字体
+     就是「路径 / 种子 ID / 文件哈希 / 代理地址」这类要粘到别处去的数据，
+     几十处散落在媒体库详情、下载器配置、导入规则、网络设置里；
+   - 正文容器：.markdown 与 .code-highlight；
+   - 显式标注：.selectable，给不带上述特征的正文用（对话气泡、系统日志、
+     剧情简介、字幕台词、加载失败页的报错等）。
+
+   为什么要这么宽：这是自部署的开源软件，大量用户在局域网 HTTP 下访问，
+   而 Clipboard API 只在安全上下文可用（见 components/copy-button.tsx 的
+   execCommand 回退），全站带复制按钮的地方也只有三处——「长按选中手动
+   复制」往往是用户最后的兜底手段，禁错一处就是真的拿不出来。
+
+   两个限定条件缺一不可：
+   - display-mode: standalone —— 只管「已安装成 App」的形态，浏览器里访问
+     照旧是网页行为，不剥夺用户随手复制的能力；
+   - pointer: coarse —— 只管手指操作的设备，桌面端安装的 PWA 是鼠标 + 键盘，
+     禁选会直接毁掉拖选复制。
+   两者相与即「手机 / 平板上的 PWA」，iOS 与 Android 一并覆盖。
+
+   放开时 user-select 与 -webkit-touch-callout 必须同时重申：前者是继承属性，
+   后者在 iOS 上同样逐级继承，只改一个会剩下另一个继续拦着（典型症状是
+   文字能选中了、长按却还是不弹拷贝菜单）。 */
+@media (display-mode: standalone) and (pointer: coarse) {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  /* :where() 把优先级压到 0，不去和组件自己的选择器抢。注意本段是无层 CSS，
+     整体优先于 Tailwind 的 @layer utilities——同一个元素上再挂 select-none 是
+     盖不住的，要局部剔除就挂到子元素上（user-select 是继承属性，子元素自身
+     的声明必赢）：系统日志整行放开可选、行内时间戳与级别徽标各自挂
+     select-none 把自己排除在选区外，正是这个用法。 */
+  :where(
+    input,
+    textarea,
+    [contenteditable]:not([contenteditable="false"]),
+    code,
+    pre,
+    samp,
+    .font-mono,
+    .markdown,
+    .code-highlight,
+    .selectable
+  ) {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+}
+
+/* —— 原生 <select> 下拉弹层的 Windows 修复 ——
+   弹层由系统/浏览器绘制，Windows 上部分 Chromium（含 WebView）不跟随页面的
+   color-scheme: dark，弹层是系统白底；而选项文字继承页面近白色 --text，
+   结果白底白字完全看不清。修法是双保险：
+   1) 在 select 上显式重申 color-scheme（弹层配色跟随控件自身而非 :root）；
+   2) 给 option/optgroup 显式指定「不透明深色底 + 亮色字」——弹层里半透明
+      背景会叠在系统白底上，必须用实色。 */
+select {
+  color-scheme: dark;
+}
+select option,
+select optgroup {
+  background-color: #161923;
+  color: var(--text);
+}
+
+/* —— Chrome 自动填充配色修正 ——
+   登录/引导页的账号密码框开了 autocomplete，Chrome 自动填充会把输入框刷成
+   浅蓝底 + 深色字（UA 内置样式，普通 background 覆盖不掉），落在暗色玻璃上
+   像坏掉一样，Windows 上尤其常见（密码保存使用率高）。用「无限时长的
+   background-color 过渡」把 UA 的刷底永远拖住，再显式指定文字与光标颜色。
+   Firefox 的自动填充高亮很淡且不可覆盖，无需处理。 */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  transition: background-color 9999999s ease-out;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: 1.5;
+  letter-spacing: -0.005em;
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  /* 移动端浏览器的「橡皮筋」回弹会把整页连同背景大图一起拽动，露出白底。
+     全站本来就是「外壳固定 + 内层容器滚动」，页面级滚动没有存在意义，禁掉。 */
+  overscroll-behavior: none;
+}
+
+/*
+ * —— 移动端全局约定 ——
+ *
+ * 1) 输入控件字号提到 16px：iOS Safari 在聚焦字号 < 16px 的输入框时会强制
+ *    放大整个页面（且不会自动缩回），是移动端最常见的「页面突然歪了」。
+ *    全站输入框在桌面是 12.5~13px 的紧凑排版，这里只在小屏放大，
+ *    不影响桌面观感。用 :where() 保持 0 优先级，组件仍可按需覆盖。
+ * 2) 触摸设备没有 hover：Tailwind v4 的 hover: 变体只在支持悬停的设备上
+ *    生效，于是所有「悬停才浮现」的操作（列表行的下载/详情按钮、卡片上的
+ *    订阅入口、会话行的更多菜单）在手机上永远点不到。给这些元素补一个
+ *    .touch-reveal，在无悬停设备上恒定可见——这是移动端可用性的硬要求。
+ * 3) 触控目标 44pt：iOS HIG 的最小可点面积。视觉上不便放大到 44px 的小按钮
+ *    （会话行的 ⋯、composer 的发送键等）挂 .touch-target，用伪元素在移动端
+ *    把命中区悄悄撑到 44×44——伪元素参与父按钮的点击判定，外观不变。
+ */
+@media (max-width: 767px) {
+  :where(input, textarea, select) {
+    font-size: 16px;
+  }
+
+  .touch-target {
+    position: relative;
+  }
+  .touch-target::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
+@media (hover: none) {
+  .touch-reveal {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    transform: none !important;
+  }
+}

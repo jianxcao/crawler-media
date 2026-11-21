@@ -1,7 +1,8 @@
 "use client";
 
 import { ArrowLeftIcon } from "@/components/icons";
-import { settingsSectionGroupsFor } from "@/lib/mock-data";
+import { SETTINGS_SECTION_ICON } from "@/components/settings-section-icons";
+import { settingsSectionGroupsFor } from "@/lib/settings-sections";
 import { useSession } from "@/lib/session";
 
 /**
@@ -50,7 +51,7 @@ export function NetflixSettingsSidebar({
             {group.label && <h3 className="group-label mb-1.5 px-2.5">{group.label}</h3>}
             <div className="space-y-0.5">
               {group.items.map((section) => {
-                const Icon = section.icon;
+                const Icon = SETTINGS_SECTION_ICON[section.id];
                 const isActive = active === section.id;
                 return (
                   <button

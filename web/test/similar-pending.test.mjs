@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
+import { loadLibrariesApi } from "./support/load-libraries-api.mjs";
 
 async function loadTs(path, dependencies = {}) {
   const source = await readFile(new URL(path, import.meta.url), "utf8");
@@ -18,9 +19,12 @@ const pending = { state: "pending", retry_after_ms: 250 };
 test("similar client preserves explicit pending and forwards request cancellation", async () => {
   const controller = new AbortController();
   const requests = [];
-  const api = await loadTs("../lib/api/libraries.ts", {
-    "@/lib/http": { request: async (path, init) => { requests.push({ path, init }); return { ok: true, data: pending }; } },
-  });
+  const api = loadLibrariesApi(
+    {
+      "@/lib/http": { request: async (path, init) => { requests.push({ path, init }); return { ok: true, data: pending }; } },
+    },
+    { fallbackEmpty: true },
+  );
   assert.deepEqual(await api.fetchItemSimilar("library", "media", controller.signal), pending);
   assert.equal(requests[0].path, "/libraries/library/items/media/similar");
   assert.equal(requests[0].init?.signal, controller.signal);
@@ -94,9 +98,12 @@ test("similar pending poll delays stay bounded without truncating the pending li
 test("similar client rejects old arrays, unknown states, and malformed pending intervals", async () => {
   for (const data of [[], { state: "ready" }, { state: "unknown", items: [] },
     { state: "pending", retry_after_ms: 0 }, { state: "pending", retry_after_ms: NaN }]) {
-    const api = await loadTs("../lib/api/libraries.ts", {
-      "@/lib/http": { request: async () => ({ ok: true, data }) },
-    });
+    const api = loadLibrariesApi(
+      {
+        "@/lib/http": { request: async () => ({ ok: true, data }) },
+      },
+      { fallbackEmpty: true },
+    );
     await assert.rejects(api.fetchItemSimilar("library", "media"), /响应格式错误/);
   }
 });

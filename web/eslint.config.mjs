@@ -50,6 +50,34 @@ export default tseslint.config(
       // vendored 上游代码存在大量存量未用变量(Next 版配置不报),
       // 迁移期降为 warn,不做顺手清理。
       "@typescript-eslint/no-unused-vars": "warn",
+      // 与后端 Rust 硬上限对齐：单文件不超过 800 行，新代码禁止回弹成巨石文件。
+      "max-lines": ["error", { max: 800, skipBlankLines: false, skipComments: false }],
+    },
+  },
+  {
+    // lib/ 保持纯领域逻辑与 API 通信，禁止反向依赖 components/ 或 app/ 视图层。
+    files: ["lib/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "@/components/*",
+                "@/components/**",
+                "@/app/*",
+                "@/app/**",
+                "../components/*",
+                "../components/**",
+                "../../components/*",
+                "../../components/**",
+              ],
+              message: "web/lib/ must not depend on components/ or app/ layers.",
+            },
+          ],
+        },
+      ],
     },
   },
   {

@@ -1,5 +1,7 @@
+import { Suspense } from "react";
 import { Outlet } from "react-router-dom";
 import { AuthGate } from "@/components/auth-gate";
+import { RouteFallback } from "@/components/route-fallback";
 
 /**
  * 播放路由组：**刻意不套工作台外壳**。
@@ -12,7 +14,9 @@ export default function PlayLayout() {
   return (
     <AuthGate>
       <div className="h-dvh w-full overflow-hidden bg-black">
-        <Outlet />
+        <Suspense fallback={<RouteFallback />}>
+          <Outlet />
+        </Suspense>
       </div>
     </AuthGate>
   );
