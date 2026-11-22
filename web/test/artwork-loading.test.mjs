@@ -227,3 +227,56 @@ test("ArtworkImage with loading='eager' starts immediately and skips Intersectio
     await act(async () => { renderer.unmount(); });
   }
 });
+
+test("ArtworkImage hides native broken-icon/alt flash while queued or loading and reveals on load", async () => {
+  const source = readFileSync(new URL("../components/artwork-image.tsx", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const module = { exports: {} };
+  new Function("require", "module", "exports", js)(
+    (name) => (name === "@/lib/artwork-loading" ? artworkLoading : require(name)),
+    module,
+    module.exports,
+  );
+  const { ArtworkImage } = module.exports;
+  const img = new ImageFixture();
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(ArtworkImage, {
+        src: "https://app.invalid/posters/slow.jpg",
+        alt: "天堂旗帜下",
+        loading: "eager",
+      }),
+      { createNodeMock: () => img },
+    );
+  });
+  try {
+    // Before load finishes: must have opacity 0 so browser never flashes broken icon + alt text!
+    assert.equal(renderer.toJSON().props.style?.opacity, 0);
+
+    // Finish loading -> opacity 0 is removed!
+    await act(async () => {
+      img.finish("load");
+    });
+    assert.notEqual(renderer.toJSON().props.style?.opacity, 0);
+
+    // Switch to another URL that fails -> hides broken state instead of showing broken icon!
+    await act(async () => {
+      renderer.update(
+        React.createElement(ArtworkImage, {
+          src: "https://app.invalid/posters/missing.jpg",
+          alt: "天堂旗帜下",
+          loading: "eager",
+        }),
+      );
+    });
+    await act(async () => {
+      img.finish("error");
+    });
+    assert.equal(renderer.toJSON().props.style?.opacity, 0);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});

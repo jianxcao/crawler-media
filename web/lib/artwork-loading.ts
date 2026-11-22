@@ -12,6 +12,7 @@ export function manageArtworkImage(
   image: HTMLImageElement,
   initialPriority = 1,
   onSettled?: () => void,
+  onBitmapState?: (hasBitmap: boolean) => void,
 ) {
   let source: ArtworkSource = {};
   let visible = true;
@@ -24,6 +25,7 @@ export function manageArtworkImage(
   function clearSource() {
     image.removeAttribute("srcset");
     image.removeAttribute("src");
+    if (!disposed) onBitmapState?.(false);
   }
   function release() {
     const previous = lease;
@@ -38,6 +40,9 @@ export function manageArtworkImage(
       else image.removeAttribute("sizes");
       if (next.srcSet) image.setAttribute("srcset", next.srcSet);
       if (next.src) image.src = next.src;
+      if (!disposed && image.complete && image.naturalWidth > 0) {
+        onBitmapState?.(true);
+      }
     }, priority);
   }
   const onLoad = (event: Event) => {
@@ -45,10 +50,13 @@ export function manageArtworkImage(
     loaded = true;
     retry.onLoad();
     release();
+    onBitmapState?.(true);
     onSettled?.();
   };
   const onError = (event: Event) => {
     if (!lease || disposed || !visible) { event.stopImmediatePropagation(); return; }
+    loaded = false;
+    onBitmapState?.(false);
     release();
     if (!retry.onError(event)) onSettled?.();
   };
