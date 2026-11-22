@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildUpcomingScheduleDays,
   groupTodayArrivals,
   subscriptionCollectionMeta,
   subscriptionFullyCollected,
@@ -413,4 +414,86 @@ test("两个不同 UUID 订阅调用 groupTodayArrivals 得到两个独立分组
   assert.equal(groups[0].mediaTitle, "剧集 A");
   assert.equal(groups[1].mediaTitle, "剧集 B");
   assert.notEqual(groups[0].subscriptionId, "NaN");
+});
+
+test("当日已入库条目显示已入库状态，且集号为 0 时回落为全季而非 E00", () => {
+  const now = new Date("2026-11-22T12:00:00Z");
+  const pres = todayArrivalPresentation(
+    todayArrival({ status: "imported", season_number: 1, episode_number: 5 }),
+    undefined,
+    now,
+  );
+  assert.equal(pres.statusLabel, "已入库");
+  assert.equal(pres.timeLabel, "今日入库");
+
+  const packGroups = groupTodayArrivals([
+    presented(todayArrival({ season_number: 1, episode_number: 0, status: "grabbed" }), {
+      statusLabel: "下载中",
+      timeLabel: "时间待更新",
+      estimatedAt: null,
+    }),
+  ]);
+  assert.equal(packGroups[0].episodeLabel, "S01 全季");
+  assert.doesNotMatch(packGroups[0].episodeLabel, /E00/);
+});
+
+test("追剧更新日历按日期聚合未来 7 天排期，与今日动态互不遮挡", () => {
+  const schedule = buildUpcomingScheduleDays([
+    presented(
+      todayArrival({
+        subscription_id: "sub-lj",
+        media_title: "两京十五日",
+        season_number: 1,
+        episode_number: 5,
+        status: "imported",
+        days_ahead: 0,
+        expected_day: "2026-11-22",
+      }),
+      { statusLabel: "已入库", timeLabel: "今日入库", estimatedAt: 100 },
+    ),
+    presented(
+      todayArrival({
+        subscription_id: "sub-lj",
+        media_title: "两京十五日",
+        season_number: 1,
+        episode_number: 9,
+        status: "wanted",
+        days_ahead: 1,
+        expected_day: "2026-11-23",
+      }),
+      { statusLabel: "预计入库", timeLabel: "11月23日 播出", estimatedAt: null },
+    ),
+    presented(
+      todayArrival({
+        subscription_id: "sub-lj",
+        media_title: "两京十五日",
+        season_number: 1,
+        episode_number: 10,
+        status: "wanted",
+        days_ahead: 1,
+        expected_day: "2026-11-23",
+      }),
+      { statusLabel: "预计入库", timeLabel: "11月23日 播出", estimatedAt: null },
+    ),
+    presented(
+      todayArrival({
+        subscription_id: "sub-lj",
+        media_title: "两京十五日",
+        season_number: 1,
+        episode_number: 11,
+        status: "wanted",
+        days_ahead: 2,
+        expected_day: "2026-11-24",
+      }),
+      { statusLabel: "预计入库", timeLabel: "11月24日 播出", estimatedAt: null },
+    ),
+  ]);
+
+  assert.equal(schedule.length, 2);
+  assert.equal(schedule[0].expectedDay, "2026-11-23");
+  assert.equal(schedule[0].daysAhead, 1);
+  assert.equal(schedule[0].items[0].episodeLabel, "S01E09–E10");
+  assert.equal(schedule[1].expectedDay, "2026-11-24");
+  assert.equal(schedule[1].daysAhead, 2);
+  assert.equal(schedule[1].items[0].episodeLabel, "S01E11");
 });

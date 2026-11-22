@@ -167,36 +167,18 @@ impl<H: CatalogGet> Douban<H> {
         })
     }
 
-    /// 豆瓣 subject 详情：抓 `/subject/{id}/` 解析标题/年份/类型。
-    /// 详情页对 kind 无参数，类型从页面「集数」字段自判（剧集 → Tv）。
+    /// 豆瓣 subject 详情：抓移动端 Rexxar JSON `/rexxar/api/v2/movie/{id}?for_mobile=1`
+    /// 解析标题/原名/年份/别名/类型（兼容旧 HTML 测试桩回退）。
     pub fn detail(&self, id: &str) -> Result<Option<Media>, TmdbError> {
-        let (title, year, is_tv) =
-            self.cache
-                .get_or_fetch(&self.http, &format!("/subject/{id}/"), |body| {
-                    parse_detail(body).ok_or_else(|| {
-                        TmdbError::Parse(
-                            "missing Douban subject details; response may require authentication"
-                                .into(),
-                        )
-                    })
-                })?;
-        Ok(Some(Media {
-            id: MediaId::new(),
-            kind: if is_tv {
-                MediaKind::Tv
-            } else {
-                MediaKind::Movie
-            },
-            title,
-            year,
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: None,
-            douban_id: Some(id.to_string()),
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        }))
+        let path = format!("/rexxar/api/v2/movie/{id}?for_mobile=1");
+        match self
+            .cache
+            .get_or_fetch(&self.http, &path, |body| parse_subject_detail(id, body))
+        {
+            Ok(media) => Ok(Some(media)),
+            Err(TmdbError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -304,6 +286,8 @@ struct SuggestHit {
     img: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    #[serde(default)]
+    episode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -365,7 +349,18 @@ fn parse_suggest(kind: MediaKind, body: &str) -> Result<Vec<CatalogHit>, TmdbErr
     let parsed: Vec<SuggestHit> = serde_json::from_str(body)?;
     parsed
         .into_iter()
-        .filter(|hit| matches_kind(kind, hit.kind.as_deref()))
+        .filter(|hit| {
+            let effective = if hit
+                .episode
+                .as_deref()
+                .is_some_and(|ep| !ep.trim().is_empty())
+            {
+                Some("tv")
+            } else {
+                hit.kind.as_deref()
+            };
+            matches_kind(kind, effective)
+        })
         .map(|hit| to_hit(kind, hit.id, hit.title, hit.year, hit.img, None))
         .collect()
 }
@@ -476,6 +471,120 @@ fn encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn parse_subject_detail(id: &str, body: &str) -> Result<Media, TmdbError> {
+    if body.trim_start().starts_with('<') {
+        let (title, year, is_tv) = parse_detail(body).ok_or_else(|| {
+            TmdbError::Parse(
+                "missing Douban subject details; response may require authentication".into(),
+            )
+        })?;
+        return Ok(Media {
+            id: MediaId::new(),
+            kind: if is_tv {
+                MediaKind::Tv
+            } else {
+                MediaKind::Movie
+            },
+            title,
+            year,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: Some(id.to_string()),
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        });
+    }
+    parse_rexxar_detail(id, body)
+}
+
+fn parse_rexxar_detail(id: &str, body: &str) -> Result<Media, TmdbError> {
+    let v = crate::contracts::json(body)?;
+    if v.get("code").and_then(|c| c.as_i64()) == Some(5000)
+        || v.get("msg").and_then(|m| m.as_str()).is_some_and(|m| {
+            let lower = m.to_ascii_lowercase();
+            lower.contains("not_found") || lower.contains("not found") || m.contains("不存在")
+        })
+    {
+        return Err(TmdbError::NotFound(id.to_string()));
+    }
+    if let Some(actual_id) = v.get("id") {
+        let matches = actual_id.as_str().map_or_else(
+            || {
+                actual_id
+                    .as_u64()
+                    .is_some_and(|n| id.parse::<u64>().ok() == Some(n))
+            },
+            |s| s == id,
+        );
+        if !matches {
+            return Err(TmdbError::Parse("mismatched Douban subject id".into()));
+        }
+    }
+    let title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| TmdbError::Parse("missing Douban subject title".into()))?
+        .to_string();
+    let original_title = v
+        .get("original_title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != title)
+        .map(str::to_string);
+    let year = v.get("year").and_then(|y| {
+        y.as_str()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .or_else(|| y.as_u64().and_then(|n| u16::try_from(n).ok()))
+    });
+    let is_tv = rexxar_is_tv(&v);
+    let aliases = v
+        .get("aka")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Media {
+        id: MediaId::new(),
+        kind: if is_tv {
+            MediaKind::Tv
+        } else {
+            MediaKind::Movie
+        },
+        title,
+        year,
+        original_title,
+        aliases,
+        tmdb_id: None,
+        douban_id: Some(id.to_string()),
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    })
+}
+
+fn rexxar_is_tv(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(|s| s.as_str()) == Some("tv")
+        || v.get("subtype").and_then(|s| s.as_str()) == Some("tv")
+        || v.get("is_tv").and_then(|b| b.as_bool()) == Some(true)
+        || v.get("episodes_count")
+            .and_then(|n| n.as_u64())
+            .is_some_and(|n| n > 0)
+        || v.get("episodes_count")
+            .and_then(|s| s.as_str())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 0)
 }
 
 /// 从豆瓣详情页 HTML 提取 (title, year, is_tv)。

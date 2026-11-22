@@ -99,6 +99,13 @@ export function SeasonsSection({
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    if (seasons.length === 0 || seasons.some((s) => s.season_number === activeSeason)) return;
+    const next =
+      seasons.find((s) => s.season_number > 0)?.season_number ?? seasons[0]?.season_number ?? 1;
+    setActiveSeason(next);
+  }, [seasons, activeSeason]);
+
+  useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     fetchTvSeasonEpisodes(mediaId, activeSeason, { signal: controller.signal })
@@ -259,7 +266,7 @@ function DiscoverEpisodeCard({ season, ep }: { season: number; ep: MediaEpisodeD
         {ep.air_date && <p className="mt-0.5 text-micro text-white/40">{ep.air_date}</p>}
         {ep.overview && (
           <p
-            className="mt-1 line-clamp-2 text-caption leading-relaxed text-white/50"
+            className="mt-1 line-clamp-3 text-caption leading-relaxed text-white/55"
             title={ep.overview}
           >
             {ep.overview}

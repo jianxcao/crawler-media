@@ -26,10 +26,16 @@ pub(crate) async fn automation_readiness(
     } else {
         json!({ "key": "sites", "label": "资源站点", "status": "ok", "detail": format!("{} 个站点已启用", sites.len()) })
     };
-    let error_count = libraries
+    let raw_lib_errors = libraries
         .iter()
         .filter(|lib| lib["status"] == "error")
-        .count()
+        .count();
+    let library_error_count = if sites.is_empty() || downloader.is_none() {
+        0
+    } else {
+        raw_lib_errors
+    };
+    let error_count = raw_lib_errors
         + usize::from(sites.is_empty())
         + usize::from(downloader.is_none());
     let warn_count = libraries
@@ -46,6 +52,7 @@ pub(crate) async fn automation_readiness(
     ok(json!({
         "status": status,
         "error_count": error_count,
+        "library_error_count": library_error_count,
         "warn_count": warn_count,
         "sites_configured": !sites.is_empty(),
         "rule_sets_configured": !filters.is_empty(),

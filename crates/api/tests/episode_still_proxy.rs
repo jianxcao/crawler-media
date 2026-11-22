@@ -60,7 +60,7 @@ fn catalog_season_episode_stills_use_the_same_proxy_contract() {
 }
 
 #[test]
-fn season_detail_cache_miss_does_not_origin_fetch() {
+fn season_detail_cache_miss_warms_from_origin_and_proxies_stills_and_overviews() {
     use std::sync::atomic::AtomicUsize;
     let catalog = Arc::new(support::ColdSeason {
         origin_fetches: AtomicUsize::new(0),
@@ -68,7 +68,16 @@ fn season_detail_cache_miss_does_not_origin_fetch() {
     let (_dir, app) = support::catalog_app(catalog.clone());
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let season = get_json(app, "/api/v1/media/tv/123/season/1").await;
-        assert_eq!(season["data"]["episodes"].as_array().unwrap().len(), 0);
-        assert_eq!(catalog.origin_fetches.load(Ordering::SeqCst), 0);
+        let rows = season["data"]["episodes"].as_array().unwrap();
+        assert_eq!(rows.len(), REFERENCES.len());
+        for (episode, _, expected) in REFERENCES {
+            let row = rows
+                .iter()
+                .find(|row| row["episode_number"] == episode)
+                .unwrap();
+            assert_eq!(row["overview"], format!("Synopsis {episode}"));
+            assert_proxy_reference(row["still_url"].as_str().unwrap(), expected);
+        }
+        assert!(catalog.origin_fetches.load(Ordering::SeqCst) >= 1);
     });
 }

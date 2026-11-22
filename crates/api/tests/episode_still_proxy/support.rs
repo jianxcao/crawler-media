@@ -130,11 +130,27 @@ impl Catalog for ColdSeason {
     }
     fn season_details(&self, _: &str, _: u32) -> Result<Vec<media::EpisodeMeta>, String> {
         self.origin_fetches.fetch_add(1, Ordering::SeqCst);
-        Err("season hot path must not origin-fetch".into())
+        Ok(REFERENCES
+            .iter()
+            .map(|(number, path, _)| media::EpisodeMeta {
+                episode_number: *number,
+                name: Some(format!("Episode {number}")),
+                overview: Some(format!("Synopsis {number}")),
+                still_path: Some((*path).into()),
+                air_date: Some(format!("2024-01-0{number}")),
+                ..Default::default()
+            })
+            .collect())
     }
     fn season_episodes(&self, _: &str, _: u32) -> Result<Vec<media::SeasonEpisode>, String> {
         self.origin_fetches.fetch_add(1, Ordering::SeqCst);
-        Err("season hot path must not origin-fetch".into())
+        Ok(REFERENCES
+            .iter()
+            .map(|(number, _, _)| media::SeasonEpisode {
+                episode_number: *number,
+                air_date: Some(format!("2024-01-0{number}")),
+            })
+            .collect())
     }
     fn cached_season_details(
         &self,

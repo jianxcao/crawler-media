@@ -500,3 +500,97 @@ async fn blocked_cached_read_does_not_hold_store_writer() {
         "{rows}"
     );
 }
+
+#[tokio::test]
+async fn arrivals_emit_concrete_season_and_episode_for_grabbed_and_imported_units() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let (subscribe_id, media_id) = seed_admin_tv_with_media(&state, "两京十五日", "203483");
+
+    let root = tmp.path().join("tv");
+    std::fs::create_dir_all(&root).unwrap();
+    let ep5_path = root.join("S01E05.mkv");
+    std::fs::write(&ep5_path, b"video").unwrap();
+    {
+        let store = state.store();
+        let guard = store.as_ref();
+        guard
+            .create_library(
+                MediaKind::Tv,
+                "剧集库",
+                &[root.to_str().unwrap()],
+                "public",
+                true,
+                &[],
+            )
+            .unwrap();
+        guard
+            .record_pending_submission(
+                subscribe_id,
+                1_700_000_000,
+                &store::PendingDownload {
+                    torrent: domain::Torrent {
+                        site_id: domain::SiteId::new(),
+                        title: "Liang.Jing.S01E01-E02.1080p.WEB-DL".into(),
+                        enclosure: "https://example.invalid/1.torrent".into(),
+                        size_bytes: Some(1_000_000),
+                        seeders: Some(10),
+                        free: true,
+                        hr: Some(false),
+                        imdb_id: None,
+                        id: Some("t-1".into()),
+                        leechers: Some(1),
+                        snatched: Some(5),
+                        upload_time: None,
+                        detail_url: None,
+                        category: None,
+                        poster_url: None,
+                    },
+                    release_override: None,
+                    downloader_id: None,
+                    submitted_at: Some(1_700_000_000),
+                },
+            )
+            .unwrap();
+        store::test_support::publish_fixture_file(
+            guard,
+            &store::test_support::FixtureFile {
+                media_id,
+                path: ep5_path.display().to_string(),
+                season: Some(1),
+                episode: Some(5),
+                resolution: Some("1080p".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let app = router(state);
+    let response = app.oneshot(arrivals_request(TOKEN)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rows = json_data(response).await;
+    let items = rows.as_array().unwrap();
+
+    let grabbed: Vec<u64> = items
+        .iter()
+        .filter(|r| r["status"] == "grabbed")
+        .filter_map(|r| r["episode"].as_u64())
+        .collect();
+    assert_eq!(
+        grabbed,
+        vec![1, 2],
+        "grabbed must carry concrete episodes: {items:?}"
+    );
+
+    let imported: Vec<u64> = items
+        .iter()
+        .filter(|r| r["status"] == "imported")
+        .filter_map(|r| r["episode"].as_u64())
+        .collect();
+    assert_eq!(
+        imported,
+        vec![5],
+        "imported must carry concrete episode 5: {items:?}"
+    );
+}

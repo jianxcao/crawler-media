@@ -113,45 +113,79 @@ export function listSubscriptions(
   return unwrap(request<ApiEnvelope<Subscription[]>>(`/subscriptions${query}`, init));
 }
 
+function calendarDaysFromToday(airDate: string | null | undefined, now = new Date()): number {
+  if (!airDate) return 0;
+  const parts = airDate.split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return 0;
+  const [y, m, d] = parts;
+  const targetUtc = Date.UTC(y, m - 1, d);
+  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.max(0, Math.round((targetUtc - todayUtc) / 86_400_000));
+}
+
 /**
- * 今日可能入库（真实）：在途（grabbed）与当日入库（imported）的订阅。
- * 后端按 pending 与 ledger 修改时间计算；无预告/ETA 时相应字段为 null。
+ * 今日可能入库与近期追剧更新预告：在途（grabbed）、当日入库（imported）与未来 7 天待播（wanted）。
  */
 export function listTodaySubscriptionArrivals(
   init?: RequestInit,
 ): Promise<TodaySubscriptionArrival[]> {
   return unwrap(
     request<ApiEnvelope<TodayArrivalItem[]>>("/subscriptions/today-arrivals", init),
-  ).then((items) =>
-    items.map((item) => ({
-      subscription_id: item.subscription_id,
-      wanted_id: "",
-      media_title: item.title,
-      media_kind: item.coverage?.kind === "tv" ? "tv" : "movie",
-      season_number: item.coverage && "season" in item.coverage ? item.coverage.season : 0,
-      episode_number: 0,
-      status: item.status === "imported" ? "imported" : item.status === "grabbed" ? "grabbed" : "wanted",
-      air_date: null,
-      expected_day: "",
-      days_ahead: 0,
-      release_forecast: null,
-      next_probe_at: null,
-      info_hash: item.info_hash ?? null,
-      grabbed_at: item.grabbed_at ?? null,
-      downloaded_at: null,
-      estimated_release_to_import_minutes: 0,
-      estimated_download_to_import_minutes: 0,
-    })),
-  );
+  ).then((items) => {
+    const now = new Date();
+    return items.map((item, idx) => {
+      const seasonNumber =
+        typeof item.season === "number"
+          ? item.season
+          : item.coverage && "season" in item.coverage
+            ? item.coverage.season
+            : 0;
+      const episodeNumber = typeof item.episode === "number" ? item.episode : 0;
+      const status =
+        item.status === "imported"
+          ? "imported"
+          : item.status === "grabbed"
+            ? "grabbed"
+            : "wanted";
+      const airDate = item.air_date ?? null;
+      const daysAhead = status === "wanted" ? calendarDaysFromToday(airDate, now) : 0;
+      return {
+        subscription_id: item.subscription_id,
+        wanted_id:
+          item.wanted_id ??
+          `${item.subscription_id}:${status}:${seasonNumber}:${episodeNumber}:${idx}`,
+        media_title: item.title,
+        media_kind: item.coverage?.kind === "tv" ? "tv" : "movie",
+        season_number: seasonNumber,
+        episode_number: episodeNumber,
+        status,
+        air_date: airDate,
+        expected_day: airDate ?? "",
+        days_ahead: daysAhead,
+        release_forecast: item.release_forecast ?? null,
+        next_probe_at: null,
+        info_hash: item.info_hash ?? null,
+        grabbed_at: item.grabbed_at ?? null,
+        downloaded_at: null,
+        estimated_release_to_import_minutes: 0,
+        estimated_download_to_import_minutes: 0,
+      };
+    });
+  });
 }
 
 /** 新契约 today-arrivals 的单条条目。 */
 interface TodayArrivalItem {
   subscription_id: string;
+  wanted_id?: string;
   title: string;
   coverage: SubscriptionCoverage | null;
   eta: string | null;
   status?: "grabbed" | "imported" | "wanted";
+  season?: number | null;
+  episode?: number | null;
+  air_date?: string | null;
+  release_forecast?: TodaySubscriptionArrival["release_forecast"];
   info_hash?: string | null;
   grabbed_at?: string | null;
 }

@@ -93,35 +93,26 @@ pub(crate) fn build_arrivals(
             episodes,
         } = snapshot;
         let forecast_basis = ForecastBasis::new(&pending);
-        // 在途（grabbing）：有 pending 种子的订阅，status=grabbed。
-        for _ in &pending {
-            items.push(json!({
-                "subscription_id": subscribe.id.to_string(),
-                "title": media.title,
-                "coverage": coverage_json(&subscribe.coverage),
-                "eta": null,
-                "status": "grabbed",
-                "info_hash": Value::Null,
-                "grabbed_at": Value::Null,
-            }));
-        }
-        // 当日入库：ledger 文件修改时间在 24h 内的订阅，status=imported。
-        // 修改时间按文件取，同一文件的多个 unit 在旧读模型里是重复的同一答案。
-        let imported_today = rows
-            .iter()
-            .any(|coverage| modified_within_day(&coverage.file.path, now, day_secs));
-        if imported_today && pending.is_empty() {
-            items.push(json!({
-                "subscription_id": subscribe.id.to_string(),
-                "title": media.title,
-                "coverage": coverage_json(&subscribe.coverage),
-                "eta": null,
-                "status": "imported",
-                "info_hash": Value::Null,
-                "grabbed_at": Value::Null,
-            }));
-        }
-        // 预计发布（wanted）：TV 订阅中 air_date 落在 [昨天, +7 天] 且未入库的单元。
+        let cov_json = coverage_json(&subscribe.coverage);
+        let grabbed_eps = push_grabbed_arrivals(
+            &mut items,
+            &subscribe,
+            &media.title,
+            &cov_json,
+            &pending,
+            &facts,
+        );
+        push_imported_arrivals(
+            &mut items,
+            &subscribe,
+            &media,
+            &cov_json,
+            &rows,
+            pending.is_empty(),
+            now,
+            day_secs,
+        );
+        // 预计发布（wanted）：TV 订阅中 air_date 落在 [昨天, +7 天] 且未入库/未在途的单元。
         if media.kind != domain::MediaKind::Tv {
             continue;
         }
@@ -147,8 +138,9 @@ pub(crate) fn build_arrivals(
             if facts
                 .get(Some(season), Some(episode.episode_number))
                 .is_some()
+                || grabbed_eps.contains(&(season, episode.episode_number))
             {
-                continue; // 已入库
+                continue;
             }
             let Some(air_date) = episode.air_date.as_deref() else {
                 continue;
@@ -163,7 +155,7 @@ pub(crate) fn build_arrivals(
             items.push(json!({
                 "subscription_id": subscribe.id.to_string(),
                 "title": media.title,
-                "coverage": coverage_json(&subscribe.coverage),
+                "coverage": cov_json,
                 "eta": null,
                 "status": "wanted",
                 "air_date": air_date,
@@ -176,6 +168,130 @@ pub(crate) fn build_arrivals(
         }
     }
     items
+}
+
+fn push_grabbed_arrivals(
+    items: &mut Vec<Value>,
+    subscribe: &domain::Subscribe,
+    title: &str,
+    cov_json: &Value,
+    pending: &[(i32, crate::store::PendingDownload)],
+    facts: &domain::SubscribeFacts,
+) -> std::collections::BTreeSet<(u32, u32)> {
+    let mut grabbed_eps = std::collections::BTreeSet::new();
+    let default_season = match subscribe.coverage {
+        domain::Coverage::Tv { season, .. } => Some(season),
+        _ => None,
+    };
+    for (_, pd) in pending {
+        let parsed = pd
+            .release_override
+            .clone()
+            .unwrap_or_else(|| release::parse(&pd.torrent.title));
+        let grabbed_at = pd.submitted_at.map(crate::store::rfc3339_from_secs);
+        let season = parsed.season.or(default_season);
+        if let (Some(s), Some(ep_from)) = (season, parsed.episode) {
+            let ep_to = parsed
+                .episode_to
+                .unwrap_or(ep_from)
+                .max(ep_from)
+                .min(ep_from + 60);
+            for ep in ep_from..=ep_to {
+                if facts.get(Some(s), Some(ep)).is_some() {
+                    continue;
+                }
+                grabbed_eps.insert((s, ep));
+                items.push(json!({
+                    "subscription_id": subscribe.id.to_string(),
+                    "title": title,
+                    "coverage": cov_json,
+                    "eta": null,
+                    "status": "grabbed",
+                    "season": s,
+                    "episode": ep,
+                    "info_hash": Value::Null,
+                    "grabbed_at": grabbed_at,
+                }));
+            }
+        } else {
+            items.push(json!({
+                "subscription_id": subscribe.id.to_string(),
+                "title": title,
+                "coverage": cov_json,
+                "eta": null,
+                "status": "grabbed",
+                "season": season,
+                "info_hash": Value::Null,
+                "grabbed_at": grabbed_at,
+            }));
+        }
+    }
+    grabbed_eps
+}
+
+fn push_imported_arrivals(
+    items: &mut Vec<Value>,
+    subscribe: &domain::Subscribe,
+    media: &domain::Media,
+    cov_json: &Value,
+    rows: &[domain::FileCoverage],
+    pending_empty: bool,
+    now: i64,
+    day_secs: i64,
+) {
+    let today_date = crate::store::rfc3339_from_secs(now)
+        .get(..10)
+        .unwrap_or("")
+        .to_string();
+    if media.kind == domain::MediaKind::Tv {
+        let target_season = match subscribe.coverage {
+            domain::Coverage::Tv { season, .. } => Some(season),
+            _ => None,
+        };
+        let mut imported_units = std::collections::BTreeSet::new();
+        for coverage in rows {
+            if !modified_within_day(&coverage.file.path, now, day_secs) {
+                continue;
+            }
+            for unit in &coverage.units {
+                if let Some((s, ep)) = unit.episode_coordinates()
+                    && target_season.is_none_or(|ts| ts == s)
+                {
+                    imported_units.insert((s, ep));
+                }
+            }
+        }
+        for (s, ep) in imported_units {
+            items.push(json!({
+                "subscription_id": subscribe.id.to_string(),
+                "title": media.title,
+                "coverage": cov_json,
+                "eta": null,
+                "status": "imported",
+                "air_date": today_date,
+                "season": s,
+                "episode": ep,
+                "info_hash": Value::Null,
+                "grabbed_at": Value::Null,
+            }));
+        }
+        return;
+    }
+    let imported_today = rows
+        .iter()
+        .any(|coverage| modified_within_day(&coverage.file.path, now, day_secs));
+    if imported_today && pending_empty {
+        items.push(json!({
+            "subscription_id": subscribe.id.to_string(),
+            "title": media.title,
+            "coverage": cov_json,
+            "eta": null,
+            "status": "imported",
+            "air_date": today_date,
+            "info_hash": Value::Null,
+            "grabbed_at": Value::Null,
+        }));
+    }
 }
 
 /// 部分数据源失败只影响该 (tmdb_id, season)：warn 后跳过，保留其余 items。

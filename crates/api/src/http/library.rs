@@ -395,7 +395,7 @@ pub(crate) fn tmdb_logo_url(path: &str) -> Option<String> {
         Some(trimmed.to_string())
     } else {
         Some(format!(
-            "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/{}",
+            "https://image.tmdb.org/t/p/w300/{}",
             trimmed.trim_start_matches('/')
         ))
     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod cache;
+mod logo;
 mod phase;
 mod runtime;
 pub(crate) use runtime::ImageProxy;
@@ -24,6 +25,13 @@ use url::Url;
 #[derive(Deserialize)]
 pub(crate) struct ProxyQuery {
     url: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ProxyRequestQuery {
+    url: String,
+    #[serde(default)]
+    pub(crate) variant: Option<String>,
 }
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -47,9 +55,12 @@ const ALLOWED_HOSTS: &[&str] = &[
 pub(crate) async fn proxy_image(
     State(state): State<crate::management::ApiState>,
     headers: HeaderMap,
-    query: Query<ProxyQuery>,
+    query: Query<ProxyRequestQuery>,
 ) -> Response {
-    state.image_delivery.response(query.0, headers).await
+    state
+        .image_delivery
+        .response_with_variant(query.0.url, query.0.variant, headers)
+        .await
 }
 
 pub(crate) fn new(data_dir: &Path) -> Arc<ImageProxy> {

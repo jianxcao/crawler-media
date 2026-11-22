@@ -26,21 +26,40 @@ pub(crate) async fn douban_detail(
 fn douban_detail_blocking(state: &ApiState, viewer: Option<domain::UserId>, id: &str) -> Response {
     // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
     // 有映射走完整 TMDB 详情。
-    let store = state.store.as_ref();
-    let local_media = store.get_media_by_alias("douban", id).ok().flatten();
+    let local_media =
+        crate::http::store_wait::with_store_read(state, &[store::Db::Library], |store| {
+            store.get_media_by_alias("douban", id).ok().flatten()
+        })
+        .ok()
+        .flatten();
     if let Some(media) = local_media
         && let Some(tmdb_id) = media.tmdb_id
     {
-        let kind = if media.kind == domain::MediaKind::Tv {
-            "tv"
-        } else {
-            "movie"
-        };
-        return media_detail_inner(state, viewer, kind, &tmdb_id);
+        return media_detail_with_douban(state, viewer, media.kind.as_str(), &tmdb_id, Some(id));
     }
 
     match state.catalog.douban_subject_with_credits(id) {
-        Ok(pair) => douban_subject_response(id, &pair.subject, Some(&pair.celebrities)),
+        Ok(pair) => {
+            if let Some(douban_media) =
+                crate::http::title_ref::media_from_rexxar_subject(id, &pair.subject)
+                && let crate::http::title_ref::TmdbAnchorOutcome::Unique(anchored) =
+                    crate::http::title_ref::anchor_douban_to_tmdb(
+                        state.catalog.as_ref(),
+                        &douban_media,
+                    )
+                && let Some(tmdb_id) = anchored.tmdb_id.as_deref()
+                && matches!(state.catalog.details(anchored.kind, tmdb_id), Ok(Some(_)))
+            {
+                return media_detail_with_douban(
+                    state,
+                    viewer,
+                    anchored.kind.as_str(),
+                    tmdb_id,
+                    Some(id),
+                );
+            }
+            douban_subject_response(id, &pair.subject, Some(&pair.celebrities))
+        }
         Err(media::TmdbError::NotFound(_)) => {
             err(StatusCode::NOT_FOUND, "media.missing", "条目不存在")
         }
@@ -68,8 +87,7 @@ fn douban_detail_blocking(state: &ApiState, viewer: Option<domain::UserId>, id: 
 }
 
 fn douban_subject_response(id: &str, data: &Value, douban_celebrities: Option<&Value>) -> Response {
-    let is_tv = data.get("type").and_then(|v| v.as_str()) == Some("tv")
-        || data.get("is_tv").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_tv = crate::http::title_ref::is_rexxar_tv(data);
     let kind = if is_tv { "tv" } else { "movie" };
     let title = data
         .get("title")

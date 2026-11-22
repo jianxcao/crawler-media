@@ -15,6 +15,7 @@ import {
 } from "@/components/icons";
 import { PosterImage } from "@/components/poster-image";
 import { useSubscribeEntry } from "@/components/subscribe-entry";
+import { brandLogoUrl, cachedImageUrl } from "@/lib/image-proxy";
 import { useMediaDetail } from "@/lib/media-detail";
 import type {
   MediaItem,
@@ -405,20 +406,7 @@ function PosterCardContent({
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-2 pb-2 pt-6 bg-gradient-to-t from-black/85 via-black/40 to-transparent">
             {/* 左下角：播放平台 Logo */}
             <div className="flex items-center">
-              {item.studioLogo ? (
-                <div className="flex h-4 max-w-[64px] items-center rounded bg-black/65 px-1.5 py-0.5 backdrop-blur-sm">
-                  <ArtworkImage
-                    src={item.studioLogo}
-                    alt={item.extent || "平台"}
-                    className="max-h-3 w-auto object-contain drop-shadow"
-                    loading="lazy"
-                  />
-                </div>
-              ) : item.extent ? (
-                <span className="rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold text-white/90 backdrop-blur-sm">
-                  {item.extent}
-                </span>
-              ) : null}
+              <StudioLogoBadge studioLogo={item.studioLogo} extent={item.extent} />
             </div>
 
             {/* 右下角：评分徽章 */}
@@ -514,6 +502,46 @@ function PosterCardContent({
       </div>
     </>
   );
+}
+
+function StudioLogoBadge({
+  studioLogo,
+  extent,
+}: {
+  studioLogo?: string;
+  extent?: string;
+}) {
+  const [failedLogoUrl, setFailedLogoUrl] = useState<string | null>(null);
+  const resolvedLogo = studioLogo
+    ? brandLogoUrl
+      ? brandLogoUrl(studioLogo)
+      : cachedImageUrl(studioLogo, "brand-logo")
+    : "";
+  const showLogo = Boolean(resolvedLogo) && failedLogoUrl !== studioLogo;
+
+  if (showLogo) {
+    return (
+      <div className="flex h-5 max-w-[76px] items-center justify-center rounded bg-black/70 px-1.5 py-[3px] ring-1 ring-white/[0.08] backdrop-blur-sm">
+        <ArtworkImage
+          src={resolvedLogo}
+          alt={extent || "平台"}
+          className="h-3.5 w-auto max-w-[64px] object-contain"
+          loading="lazy"
+          onError={() => setFailedLogoUrl(studioLogo ?? null)}
+        />
+      </div>
+    );
+  }
+
+  if (extent) {
+    return (
+      <span className="rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold text-white/90 backdrop-blur-sm">
+        {extent}
+      </span>
+    );
+  }
+
+  return null;
 }
 
 /**

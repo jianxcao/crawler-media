@@ -221,7 +221,7 @@ test("libraryItemToMediaItem forwards rating, studio extent, and proxied studioL
     rating: 8.7,
     studio: "CCTV-8",
     studio_logo:
-      "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
+      "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
     poster_url: "/posters/file-1",
     backdrop_url: null,
     file_count: 30,
@@ -246,7 +246,7 @@ test("libraryItemToMediaItem forwards rating, studio extent, and proxied studioL
     rating: 8.7,
     studio: "CCTV-8",
     studio_logo:
-      "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
+      "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
     poster_url: "/posters/file-1",
     backdrop_url: null,
     file_count: 30,
@@ -271,8 +271,14 @@ test("libraryItemToMediaItem forwards rating, studio extent, and proxied studioL
     );
   });
   const imgs = renderer.root.findAllByType("img");
-  const logoImg = imgs.find((img) => img.props.src === mapped.studioLogo);
-  assert.ok(logoImg, "PosterCard inside MediaRow must render the studioLogo image");
+  const expectedBrandSrc = `${mapped.studioLogo}&variant=brand-logo`;
+  const logoImg = imgs.find((img) => img.props.src === expectedBrandSrc);
+  assert.ok(
+    logoImg,
+    `PosterCard inside MediaRow must route studioLogo via variant=brand-logo without double-wrapping, got srcs: ${imgs.map((i) => i.props.src).join(", ")}`,
+  );
+  assert.match(String(logoImg.props.className ?? ""), /\bh-3\.5\b/);
+  assert.match(String(logoImg.props.className ?? ""), /\bmax-w-\[64px\]/);
   assert.ok(
     !String(logoImg.props.className ?? "").includes("brightness-0"),
     "studioLogo must not apply brightness-0 so colored logos stay colored",
@@ -282,7 +288,62 @@ test("libraryItemToMediaItem forwards rating, studio extent, and proxied studioL
     "studioLogo must not apply invert on client side",
   );
   assert.match(JSON.stringify(renderer.toJSON()), /8\.7/);
+
+  // Simulate studioLogo image error -> falls back to item.extent text pill instead of empty dark box
+  await act(async () => {
+    logoImg.props.onError();
+  });
+  assert.ok(
+    !renderer.root.findAllByType("img").some((img) => img.props.src === expectedBrandSrc),
+    "failed studioLogo image must unmount",
+  );
+  assert.match(
+    JSON.stringify(renderer.toJSON()),
+    /CCTV-8/,
+    "failed studioLogo must fall back to item.extent text pill",
+  );
   await act(async () => renderer.unmount());
+});
+
+test("brandLogoUrl normalizes raw w300 URLs, already-proxied URLs without double-wrapping, relative URLs, and empty inputs", () => {
+  const { load } = compileTsRegistry({
+    "@/lib/http": {
+      resolveRequestUrl: (p) => `/api/v1/${p.replace(/^\//, "")}`,
+    },
+  });
+  const { brandLogoUrl } = load("@/lib/image-proxy");
+  const { imageUrl: itemImageUrl } = load("@/components/library-item/item-image-url");
+
+  assert.equal(brandLogoUrl(null), "");
+  assert.equal(brandLogoUrl(undefined), "");
+  assert.equal(brandLogoUrl(""), "");
+
+  const rawW300 = "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png";
+  const expected =
+    "/api/v1/images/proxy?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw300%2F2aXk02xBwG2Nhu4lftabfqSpwY3.png&variant=brand-logo";
+  assert.equal(brandLogoUrl(rawW300), expected);
+
+  // Idempotent on already-proxied URLs (with or without existing variant)
+  const preProxied =
+    "/api/v1/images/proxy?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw300%2F2aXk02xBwG2Nhu4lftabfqSpwY3.png";
+  assert.equal(brandLogoUrl(preProxied), expected);
+  assert.equal(brandLogoUrl(`${preProxied}&variant=poster-card`), expected);
+  assert.equal(brandLogoUrl(expected), expected);
+  assert.equal(
+    brandLogoUrl("images/proxy?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw300%2F2aXk02xBwG2Nhu4lftabfqSpwY3.png"),
+    expected,
+  );
+
+  // Local relative URLs
+  assert.equal(brandLogoUrl("/posters/studio-1"), "/api/v1/posters/studio-1");
+  assert.equal(brandLogoUrl("/api/v1/posters/studio-1"), "/api/v1/posters/studio-1");
+  assert.equal(
+    brandLogoUrl("/images/assets/logo-1"),
+    "/api/v1/images/assets/logo-1?variant=brand-logo",
+  );
+
+  // item-image-url forwards optional variant
+  assert.equal(itemImageUrl(rawW300, "brand-logo"), expected);
 });
 
 test("BrandStrip caps at 4 items, falls back to text pill on null or error, and renders in MediaDetailHero", async () => {
@@ -308,8 +369,7 @@ test("BrandStrip caps at 4 items, falls back to text pill on null or error, and 
   const brands = [
     {
       name: "CCTV-8",
-      logo_url:
-        "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
+      logo_url: "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
       kind: "network",
     },
     { name: "Tencent Video", logo_url: "https://cdn.example.com/tencent.png", kind: "network" },
@@ -326,7 +386,15 @@ test("BrandStrip caps at 4 items, falls back to text pill on null or error, and 
   assert.equal(badges.length, 4, "BrandStrip must cap displayed brands at 4");
   const logoImgs = strip.root.findAllByType("img");
   assert.equal(logoImgs.length, 2);
-  assert.ok(logoImgs[0].props.src.startsWith("/api/v1/images/proxy?url="));
+  assert.equal(
+    logoImgs[0].props.src,
+    "/api/v1/images/proxy?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw300%2F2aXk02xBwG2Nhu4lftabfqSpwY3.png&variant=brand-logo",
+  );
+  assert.equal(
+    logoImgs[1].props.src,
+    "/api/v1/images/proxy?url=https%3A%2F%2Fcdn.example.com%2Ftencent.png&variant=brand-logo",
+  );
+  assert.equal(logoImgs[0].props.className, "h-4 w-auto max-w-[96px] object-contain");
   assert.ok(!JSON.stringify(strip.toJSON()).includes("Fifth Overflow Brand"));
 
   // Simulate image load error on first logo -> falls back to text pill

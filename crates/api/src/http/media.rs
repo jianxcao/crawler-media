@@ -236,6 +236,16 @@ fn media_detail_inner(
     kind: &str,
     id: &str,
 ) -> Response {
+    media_detail_with_douban(state, viewer, kind, id, None)
+}
+
+fn media_detail_with_douban(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    kind: &str,
+    id: &str,
+    douban_id: Option<&str>,
+) -> Response {
     let media_kind = match kind {
         "movie" => domain::MediaKind::Movie,
         "tv" => domain::MediaKind::Tv,
@@ -284,7 +294,7 @@ fn media_detail_inner(
     let brands = detail_brands(&meta);
 
     ok(json!({
-        "item": detail_item_json(&media, poster_url, backdrop_url),
+        "item": detail_item_json(&media, poster_url, backdrop_url, douban_id),
         "info": {
             "overview": meta.overview,
             "rating": meta.rating,
@@ -401,10 +411,14 @@ fn detail_item_json(
     media: &domain::Media,
     poster_url: Option<String>,
     backdrop_url: Option<String>,
+    douban_id: Option<&str>,
 ) -> Value {
     let mut item = item_json(media, None);
     item["poster_url"] = json!(poster_url);
     item["backdrop_url"] = json!(backdrop_url);
+    if let Some(did) = douban_id {
+        item["douban_id"] = json!(did);
+    }
     item
 }
 

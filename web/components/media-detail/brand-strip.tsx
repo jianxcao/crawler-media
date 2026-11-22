@@ -3,8 +3,7 @@
 import { useState } from "react";
 
 import { ArtworkImage } from "@/components/artwork-image";
-
-import { imageUrl } from "../library-item/item-image-url";
+import { brandLogoUrl, cachedImageUrl } from "@/lib/image-proxy";
 
 export interface BrandStripItem {
   name: string;
@@ -35,7 +34,11 @@ export function BrandStrip({ brands }: { brands?: readonly BrandStripItem[] | nu
 
 function BrandBadge({ brand }: { brand: BrandStripItem }) {
   const [failedLogoUrl, setFailedLogoUrl] = useState<string | null>(null);
-  const resolvedLogo = brand.logo_url ? imageUrl(brand.logo_url) : "";
+  const resolvedLogo = brand.logo_url
+    ? brandLogoUrl
+      ? brandLogoUrl(brand.logo_url)
+      : cachedImageUrl(brand.logo_url, "brand-logo")
+    : "";
   const showLogo = Boolean(resolvedLogo) && failedLogoUrl !== brand.logo_url;
 
   if (showLogo) {
@@ -47,7 +50,7 @@ function BrandBadge({ brand }: { brand: BrandStripItem }) {
         <ArtworkImage
           src={resolvedLogo}
           alt={brand.name}
-          className="max-h-5 max-w-[92px] object-contain"
+          className="h-4 w-auto max-w-[96px] object-contain"
           onError={() => setFailedLogoUrl(brand.logo_url)}
         />
       </span>

@@ -394,8 +394,10 @@ export interface PipelineIssue {
 export interface PipelineHealth {
   /** 整体状态：库链路 + 全局段（站点/下载器）的最坏值 */
   status: "ok" | "warn" | "error";
-  /** 链路有 error 的库数 */
+  /** 链路有 error 的总项数（含站点/下载器全局段） */
   error_count: number;
+  /** 自身入库链路存在 error 的媒体库数 */
+  library_error_count?: number;
   warn_count: number;
   /** 资源搜索段（全局，链路第一环） */
   site_check: PipelineCheck;

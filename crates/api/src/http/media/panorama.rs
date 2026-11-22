@@ -14,28 +14,28 @@ pub(super) fn season_detail_blocking(
         Ok(None) => return err(StatusCode::NOT_FOUND, "media.missing", "条目不存在"),
         Err(response) => return response,
     };
-    let meta_episodes = match catalog.cached_season_details(&tmdb_id, season) {
-        Ok(Some(rows)) => rows,
-        Ok(None) | Err(_) => Vec::new(),
-    };
-    let cached_episodes = match catalog.cached_season_episodes(&tmdb_id, season) {
-        Ok(episodes) => episodes,
+    let (episodes, meta_episodes) = match load_or_fetch_season_catalog(catalog, &tmdb_id, season) {
+        Ok(loaded) => loaded,
         Err(error) => return err(StatusCode::BAD_GATEWAY, "media.upstream", &error),
     };
     let (media_ids, panorama) = panorama_for_tmdb_tv(state, viewer, &tmdb_id);
-    if let Some(episodes) = cached_episodes {
-        let items: Vec<Value> = episodes
+    if !episodes.is_empty() || !meta_episodes.is_empty() {
+        let numbers = merged_episode_numbers(&episodes, &meta_episodes);
+        let items: Vec<Value> = numbers
             .into_iter()
-            .map(|ep| {
-                let ep_num = ep.episode_number;
+            .map(|ep_num| {
+                let ep = episodes.iter().find(|e| e.episode_number == ep_num);
                 let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
+                let air_date = ep
+                    .and_then(|e| e.air_date.clone())
+                    .or_else(|| meta.and_then(|m| m.air_date.clone()));
                 season_episode_json(
                     season,
                     ep_num,
                     meta.and_then(|m| m.name.clone()),
                     meta.and_then(|m| m.overview.clone()),
                     meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
-                    ep.air_date,
+                    air_date,
                     &panorama,
                 )
             })
@@ -65,6 +65,108 @@ pub(super) fn season_detail_blocking(
         return ok(json!({ "episodes": items })).into_response();
     }
     ok(json!({ "episodes": [] })).into_response()
+}
+
+fn load_or_fetch_season_catalog(
+    catalog: &dyn Catalog,
+    tmdb_id: &str,
+    season: u32,
+) -> Result<(Vec<media::SeasonEpisode>, Vec<media::EpisodeMeta>), String> {
+    let cached_eps = catalog.cached_season_episodes(tmdb_id, season)?;
+    let mut meta = catalog
+        .cached_season_details(tmdb_id, season)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    let episodes = match cached_eps {
+        Some(rows) => {
+            if meta.is_empty() && !rows.is_empty() {
+                meta = catalog.season_details(tmdb_id, season).unwrap_or_default();
+            }
+            rows
+        }
+        None => {
+            if meta.is_empty() {
+                meta = catalog.season_details(tmdb_id, season).unwrap_or_default();
+            }
+            match catalog.cached_season_episodes(tmdb_id, season)? {
+                Some(rows) => rows,
+                None => catalog.season_episodes(tmdb_id, season).unwrap_or_default(),
+            }
+        }
+    };
+
+    backfill_english_episode_overviews(catalog, tmdb_id, season, &mut meta);
+    Ok((episodes, meta))
+}
+
+fn backfill_english_episode_overviews(
+    catalog: &dyn Catalog,
+    tmdb_id: &str,
+    season: u32,
+    meta: &mut [media::EpisodeMeta],
+) {
+    let needs_fallback = meta.iter().any(|m| {
+        m.overview.as_deref().is_none_or(|s| s.trim().is_empty())
+            || m.name.as_deref().is_some_and(is_placeholder_episode_title)
+    });
+    if !needs_fallback {
+        return;
+    }
+    let en_rows = catalog
+        .cached_season_details_lang(tmdb_id, season, "en-US")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            catalog
+                .season_details_lang(tmdb_id, season, "en-US")
+                .unwrap_or_default()
+        });
+    for row in meta.iter_mut() {
+        let Some(en) = en_rows
+            .iter()
+            .find(|e| e.episode_number == row.episode_number)
+        else {
+            continue;
+        };
+        if row.overview.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            row.overview.clone_from(&en.overview);
+        }
+        if row.name.as_deref().is_none_or(is_placeholder_episode_title) && en.name.is_some() {
+            row.name.clone_from(&en.name);
+        }
+        if row.still_path.is_none() {
+            row.still_path.clone_from(&en.still_path);
+        }
+    }
+}
+
+fn is_placeholder_episode_title(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix('第')
+        && let Some(num) = rest.strip_suffix('集')
+    {
+        return num.trim().chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+fn merged_episode_numbers(
+    episodes: &[media::SeasonEpisode],
+    meta: &[media::EpisodeMeta],
+) -> Vec<u32> {
+    let mut set = std::collections::BTreeSet::new();
+    for ep in episodes {
+        set.insert(ep.episode_number);
+    }
+    for m in meta {
+        set.insert(m.episode_number);
+    }
+    set.into_iter().collect()
 }
 
 fn season_episode_json(

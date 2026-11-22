@@ -242,6 +242,10 @@ pub(super) fn admin_metadata_routes() -> Router<ApiState> {
         // ledger: 全局台账查看与删除是敏感文件操作，仅管理员可用
         .route("/ledger", get(library_admin::list_ledger))
         .route(
+            "/ledger/transfers",
+            get(library_admin::transfers::list_transfers),
+        )
+        .route(
             "/ledger/{id}",
             axum::routing::delete(library_admin::delete_ledger_row),
         )

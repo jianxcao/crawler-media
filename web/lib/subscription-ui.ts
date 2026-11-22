@@ -155,7 +155,7 @@ export function subscriptionCollectionMeta(
 }
 
 export interface TodayArrivalPresentation {
-  statusLabel: "预计入库" | "等待资源" | "下载中" | "整理中";
+  statusLabel: "预计入库" | "等待资源" | "下载中" | "整理中" | "已入库";
   timeLabel: string;
   estimatedAt: number | null;
 }
@@ -174,6 +174,14 @@ export interface TodayArrivalGroup {
   /** 距今天几天（0=今天）；后端已把整批候选收敛到同一天。 */
   daysAhead: number;
   presentation: TodayArrivalPresentation;
+}
+
+export interface UpcomingScheduleDay {
+  expectedDay: string;
+  dayLabel: string;
+  weekdayLabel: string;
+  daysAhead: number;
+  items: TodayArrivalGroup[];
 }
 
 function paddedUnit(value: number): string {
@@ -212,7 +220,13 @@ function groupedEpisodeLabel(rows: PresentedTodayArrival[]): string {
   }
   return [...bySeason.entries()]
     .toSorted(([left], [right]) => left - right)
-    .map(([season, episodes]) => `S${paddedUnit(season)}${episodeRanges(episodes)}`)
+    .map(([season, episodes]) => {
+      const concrete = episodes.filter((ep) => ep > 0);
+      if (concrete.length === 0) {
+        return season > 0 ? `S${paddedUnit(season)} 全季` : "剧集";
+      }
+      return `S${paddedUnit(season)}${episodeRanges(concrete)}`;
+    })
     .join(" · ");
 }
 
@@ -221,6 +235,7 @@ const arrivalStageOrder: Record<TodayArrivalPresentation["statusLabel"], number>
   等待资源: 0,
   下载中: 1,
   整理中: 2,
+  已入库: 3,
 };
 
 /**
@@ -241,17 +256,18 @@ function blockingPresentation(rows: PresentedTodayArrival[]): TodayArrivalPresen
   })[0].presentation;
 }
 
-/** 今日区域按订阅聚合，确保同一部剧无论更新多少集都只占一行。 */
+/** 今日区域按 (订阅, 距今天数) 聚合，确保同一部剧在同一天只占一行，跨天互不混淆。 */
 export function groupTodayArrivals(rows: PresentedTodayArrival[]): TodayArrivalGroup[] {
   const grouped = new Map<string, PresentedTodayArrival[]>();
   for (const row of rows) {
-    const subscriptionId = String(row.arrival.subscription_id);
-    const group = grouped.get(subscriptionId) ?? [];
+    const bucket = row.arrival.status === "imported" ? "imported" : "pending";
+    const key = `${row.arrival.subscription_id}::${row.arrival.days_ahead}::${bucket}`;
+    const group = grouped.get(key) ?? [];
     group.push(row);
-    grouped.set(subscriptionId, group);
+    grouped.set(key, group);
   }
-  return [...grouped.entries()].map(([subscriptionId, group]) => ({
-    subscriptionId,
+  return [...grouped.values()].map((group) => ({
+    subscriptionId: String(group[0].arrival.subscription_id),
     mediaTitle: group[0].arrival.media_title,
     episodeLabel: groupedEpisodeLabel(group),
     episodeCount: group.length,
@@ -259,6 +275,46 @@ export function groupTodayArrivals(rows: PresentedTodayArrival[]): TodayArrivalG
     daysAhead: group[0].arrival.days_ahead,
     presentation: blockingPresentation(group),
   }));
+}
+
+const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+function formatWeekday(day: string, daysAhead: number): string {
+  if (daysAhead === 1) return "明天";
+  if (daysAhead === 2) return "后天";
+  const parts = day.split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+    return `${daysAhead} 天后`;
+  }
+  const dt = new Date(parts[0], parts[1] - 1, parts[2]);
+  return WEEKDAY_NAMES[dt.getDay()] ?? `${daysAhead} 天后`;
+}
+
+/** 未来 7 天追剧更新排期（days_ahead > 0），按播出日期升序聚合。 */
+export function buildUpcomingScheduleDays(
+  rows: PresentedTodayArrival[],
+): UpcomingScheduleDay[] {
+  const byDay = new Map<string, PresentedTodayArrival[]>();
+  for (const row of rows) {
+    if (row.arrival.days_ahead <= 0) continue;
+    const dayKey = row.arrival.expected_day || `+${row.arrival.days_ahead}`;
+    const bucket = byDay.get(dayKey) ?? [];
+    bucket.push(row);
+    byDay.set(dayKey, bucket);
+  }
+  return [...byDay.entries()]
+    .map(([expectedDay, bucket]) => {
+      const daysAhead = bucket[0].arrival.days_ahead;
+      const cal = formatCalendarDay(expectedDay) ?? `${daysAhead} 天后`;
+      return {
+        expectedDay,
+        dayLabel: cal,
+        weekdayLabel: formatWeekday(expectedDay, daysAhead),
+        daysAhead,
+        items: groupTodayArrivals(bucket),
+      };
+    })
+    .toSorted((a, b) => a.daysAhead - b.daysAhead || a.expectedDay.localeCompare(b.expectedDay));
 }
 
 function parsedTime(value: string | null | undefined): number | null {
@@ -325,6 +381,10 @@ export function todayArrivalPresentation(
   task?: DownloadTask,
   now = new Date(),
 ): TodayArrivalPresentation {
+  if (arrival.status === "imported") {
+    return { statusLabel: "已入库", timeLabel: "今日入库", estimatedAt: now.getTime() };
+  }
+
   const taskCompleted = task?.state === "completed";
   if (arrival.status === "downloaded" || taskCompleted) {
     return { statusLabel: "整理中", timeLabel: "即将完成", estimatedAt: now.getTime() };

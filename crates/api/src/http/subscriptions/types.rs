@@ -7,6 +7,10 @@ pub(crate) struct CreateSubscriptionInput {
     /// Media 身份，`media` 字段可省略。
     #[serde(default)]
     pub(super) title_ref: Option<String>,
+    /// 原始来源引用（如从 `douban:35235320` 预检页挑选消歧后的 `tmdb:tv:203483`），
+    /// 用于把 `douban_id` 别名一并写入本地 `Media`。
+    #[serde(default)]
+    pub(super) source_title_ref: Option<String>,
     #[serde(default)]
     pub(super) media: Option<MediaInput>,
     #[serde(default)]
@@ -51,6 +55,8 @@ pub(crate) struct MediaInput {
     pub(super) year: Option<u16>,
     #[serde(default)]
     pub(super) original_title: Option<String>,
+    #[serde(default)]
+    pub(super) aliases: Vec<String>,
     #[serde(default)]
     pub(super) tmdb_id: Option<String>,
     #[serde(default)]

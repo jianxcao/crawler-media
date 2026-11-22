@@ -224,7 +224,7 @@ async fn browse_cards_and_scraped_detail_expose_negated_tmdb_logos() {
     assert_eq!(scraped_card["studio"], "CCTV-8");
     assert_eq!(
         scraped_card["studio_logo"],
-        "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png"
+        "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png"
     );
 
     let scraped_detail = get_json(
@@ -237,7 +237,7 @@ async fn browse_cards_and_scraped_detail_expose_negated_tmdb_logos() {
         json!([
             {
                 "name": "CCTV-8",
-                "logo_url": "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
+                "logo_url": "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
                 "kind": "network"
             },
             {
@@ -344,7 +344,7 @@ async fn item_detail_synthesizes_brands_for_legacy_rows_without_rescrape() {
         json!([
             {
                 "name": "HBO",
-                "logo_url": "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/hbo.png",
+                "logo_url": "https://image.tmdb.org/t/p/w300/hbo.png",
                 "kind": "network"
             },
             {
@@ -381,7 +381,7 @@ async fn unified_media_detail_and_douban_fallback_emit_info_brands() {
         json!([
             {
                 "name": "CCTV-8",
-                "logo_url": "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
+                "logo_url": "https://image.tmdb.org/t/p/w300/2aXk02xBwG2Nhu4lftabfqSpwY3.png",
                 "kind": "network"
             },
             {

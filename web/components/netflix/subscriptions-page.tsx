@@ -18,6 +18,7 @@ import { useDownloadTasks } from "@/lib/download-tasks";
 import { cachedImageUrl } from "@/lib/image-proxy";
 import { usePageChrome } from "@/lib/page-chrome";
 import { usePermissions } from "@/lib/permissions";
+import { describeSubscriptionHealthBanner } from "@/lib/subscription-form";
 import type { SubscriptionFilter } from "@/lib/subscription-overview";
 import {
   subscriptionFullyCollected,
@@ -71,7 +72,7 @@ export function NetflixSubscriptionsPage() {
   const [failed, setFailed] = useState(false);
   // 链路体检整体为 error 时顶部亮警示横幅（全景与修复入口在 设置 → 概览）。
   // 拉取失败静默——横幅只是提示层
-  const [healthIssue, setHealthIssue] = useState<{ libraryErrors: number } | null>(null);
+  const [healthBanner, setHealthBanner] = useState<string | null>(null);
   const { arrivals, failed: arrivalsFailed } = useTodaySubscriptionArrivals(subscriptions);
 
   const reload = useCallback(() => {
@@ -79,12 +80,10 @@ export function NetflixSubscriptionsPage() {
     void refresh().then((ok) => setFailed(!ok));
     if (canManageSubscriptions) {
       void checkSubscriptionAutomationReadiness()
-        .then((h) =>
-          setHealthIssue(h.status === "error" ? { libraryErrors: h.error_count } : null),
-        )
-        .catch(() => setHealthIssue(null));
+        .then((h) => setHealthBanner(describeSubscriptionHealthBanner(h)))
+        .catch(() => setHealthBanner(null));
     } else {
-      setHealthIssue(null);
+      setHealthBanner(null);
     }
   }, [canManageSubscriptions, refresh]);
 
@@ -240,15 +239,12 @@ export function NetflixSubscriptionsPage() {
       {/* 链路警示横幅：只在体检整体为 error 时出现——订阅不会丢（工单退避
           重试），但在修好之前无法自动下载入库。Netflix 弹层面板（#181818
           实底 + 方角），警示语义交给 --warn 描边与标题 */}
-      {canManageSubscriptions && healthIssue && (
+      {canManageSubscriptions && healthBanner && (
         <Link to={"/settings/overview"}
           className="mx-[4vw] mt-4 block rounded-[4px] border border-[var(--warn)]/40 bg-[#181818] px-4 py-3 text-sub leading-relaxed text-white/80 transition hover:border-[var(--warn)]/70"
         >
           <span className="font-semibold text-[var(--warn)]">订阅链路有待修复：</span>
-          {healthIssue.libraryErrors > 0
-            ? `${healthIssue.libraryErrors} 个媒体库的入库链路有问题，相关订阅暂时无法自动下载入库（已下达的任务会自动重试）`
-            : "订阅链路尚未就绪（缺少可用的资源站点或下载器），订阅暂时只能记录意愿"}
-          ——点击查看体检详情与修复入口 →
+          {healthBanner}——点击查看体检详情与修复入口 →
         </Link>
       )}
 
@@ -432,6 +428,7 @@ const comingStatusColor: Record<TodayArrivalGroup["presentation"]["statusLabel"]
   等待资源: "text-[var(--warn)]",
   下载中: "text-[var(--info)]",
   整理中: "text-[var(--ok)]",
+  已入库: "text-[var(--ok)]",
 };
 
 /**
