@@ -406,11 +406,11 @@ function PosterCardContent({
             {/* 左下角：播放平台 Logo */}
             <div className="flex items-center">
               {item.studioLogo ? (
-                <div className="flex h-4 max-w-[64px] items-center rounded bg-black/60 px-1 py-0.5 backdrop-blur-sm">
+                <div className="flex h-4 max-w-[64px] items-center rounded bg-black/65 px-1.5 py-0.5 backdrop-blur-sm">
                   <ArtworkImage
                     src={item.studioLogo}
-                    alt={item.extent ?? "平台"}
-                    className="max-h-3 w-auto object-contain brightness-0 invert drop-shadow"
+                    alt={item.extent || "平台"}
+                    className="max-h-3 w-auto object-contain drop-shadow"
                     loading="lazy"
                   />
                 </div>

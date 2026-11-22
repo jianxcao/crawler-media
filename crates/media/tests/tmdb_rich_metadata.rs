@@ -177,3 +177,87 @@ fn season_details_with_explicit_language_sends_language_once() {
         ["/tv/1396/season/1?language=zh-CN"]
     );
 }
+
+#[test]
+fn details_extract_deduplicated_multi_brands_and_prefer_network_logo() {
+    let dir = tempfile::tempdir().unwrap();
+    let tv_with_brands = r#"{
+        "id": 9001,
+        "name": "Multi Brand Drama",
+        "networks": [
+            {"name": "CCTV-8", "logo_path": null},
+            {"name": "Tencent Video", "logo_path": "/tencent.png"}
+        ],
+        "production_companies": [
+            {"name": "cctv-8", "logo_path": "/2aXk02xBwG2Nhu4lftabfqSpwY3.png"},
+            {"name": "New Classics Media", "logo_path": null},
+            {"name": "Studio 4", "logo_path": "/s4.png"},
+            {"name": "Studio 5", "logo_path": null},
+            {"name": "Studio 6", "logo_path": "/s6.png"},
+            {"name": "Studio 7", "logo_path": "/s7.png"}
+        ]
+    }"#;
+    let tv_studio_logo_fallback = r#"{
+        "id": 9002,
+        "name": "Local Broadcast Show",
+        "networks": [{"name": "Regional TV", "logo_path": null}],
+        "production_companies": [{"name": "iQIYI", "logo_path": "/iqiyi.png"}]
+    }"#;
+    let bodies = HashMap::from([
+        (
+            "/tv/9001?append_to_response=aggregate_credits,content_ratings,translations"
+                .to_string(),
+            tv_with_brands.to_string(),
+        ),
+        (
+            "/tv/9002?append_to_response=aggregate_credits,content_ratings,translations"
+                .to_string(),
+            tv_studio_logo_fallback.to_string(),
+        ),
+    ]);
+    let client = Tmdb::new(
+        FixtureTmdb {
+            bodies,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        },
+        &dir.path().join("catalog.db"),
+    )
+    .unwrap();
+
+    let meta = client.details_with_meta(MediaKind::Tv, "9001").unwrap();
+    assert_eq!(meta.brands.len(), 6, "brands must be capped at 6 entries");
+    assert_eq!(
+        meta.brands[0],
+        media::BrandMeta {
+            name: "CCTV-8".into(),
+            logo_path: Some("/2aXk02xBwG2Nhu4lftabfqSpwY3.png".into()),
+            kind: "network",
+        }
+    );
+    assert_eq!(
+        meta.brands[1],
+        media::BrandMeta {
+            name: "Tencent Video".into(),
+            logo_path: Some("/tencent.png".into()),
+            kind: "network",
+        }
+    );
+    assert_eq!(
+        meta.brands[2],
+        media::BrandMeta {
+            name: "New Classics Media".into(),
+            logo_path: None,
+            kind: "studio",
+        }
+    );
+    assert_eq!(
+        meta.studio_logo.as_deref(),
+        Some("/2aXk02xBwG2Nhu4lftabfqSpwY3.png")
+    );
+    assert!(meta.studios.contains(&"CCTV-8".to_string()));
+    assert!(meta.studios.contains(&"New Classics Media".to_string()));
+
+    let fallback = client.details_with_meta(MediaKind::Tv, "9002").unwrap();
+    assert_eq!(fallback.studio_logo.as_deref(), Some("/iqiyi.png"));
+    assert_eq!(fallback.studios, ["Regional TV", "iQIYI"]);
+}

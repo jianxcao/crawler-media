@@ -9,7 +9,7 @@ export default function SettingsSectionPage() {
   const { section = "" } = useParams();
   const [searchParams] = useSearchParams();
   // 旧「搜索」分区已并入「资源站点」，老书签/历史链接重定向过去，不要 404
-  if (section === "search") return <Navigate to="/settings/sites" replace />;
+  if (section === "search") return <Navigate to="/settings/sites?tab=search" replace />;
   // 旧「关于与更新」分区已并入「应用」（现「更新与维护」），同样重定向兜底
   if (section === "about") return <Navigate to="/settings/app" replace />;
   // 旧「应用 → 远程转码」标签已升级为「播放」分区，带 tab=remote 的老链接跟过去

@@ -60,8 +60,10 @@ export interface MediaItem {
   rating: number;
   /** 类型标签，如「科幻 / 冒险」 */
   genres: string[];
-  /** 规模：电影为时长，剧集为季数；列表数据为空，进详情后回填 */
+  /** 规模：电影为时长，剧集为季数；媒体库行用作出品/平台名 */
   extent: string;
+  /** 播出/出品平台 Logo（已解析为代理或本地 URL） */
+  studioLogo?: string;
   /** 站点资源质量徽章（清晰度 / HDR / 字幕）；预留给资源匹配，当前为空 */
   badges: string[];
   /** 一句话简介（卡片 hover 与 Hero 横幅展示） */

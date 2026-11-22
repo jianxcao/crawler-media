@@ -4,6 +4,14 @@ use super::super::{Store, StoreError};
 use super::types::EffectiveMetadata;
 use domain::{MediaId, MetadataAdoption};
 
+/// One distributor or broadcast network badge persisted in `details_json.fields.studio_logos`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredBrand {
+    pub name: String,
+    pub logo_path: Option<String>,
+    pub kind: String,
+}
+
 /// Display facts a **Scrape** observed for one **Media**; they are written with the
 /// adopted metadata so the card and the detail view read one source of truth.
 #[derive(Clone, Copy, Debug, Default)]
@@ -12,6 +20,7 @@ pub struct ScrapedDisplay<'a> {
     pub release_date: Option<&'a str>,
     pub studio: Option<&'a str>,
     pub studio_logo: Option<&'a str>,
+    pub studio_logos: &'a [StoredBrand],
 }
 
 impl Store {

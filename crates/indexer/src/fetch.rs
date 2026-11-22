@@ -70,7 +70,7 @@ pub fn search_request_page_categories(
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| id.to_string());
-                url.push_str(&format!("&{}={}", form_encode(param), form_encode(&value)));
+                url.push_str(&format!("&{}{}=1", form_encode(param), form_encode(&value)));
             }
             (FetchMethod::Get, url, None)
         }

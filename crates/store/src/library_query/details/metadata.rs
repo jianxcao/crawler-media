@@ -154,6 +154,101 @@ pub(crate) fn fill_from_adopted_parts(
     }
 }
 
+pub(crate) fn has_stored_studio_logos(details_json: &str) -> bool {
+    !parse_stored_studio_logos(details_json).is_empty()
+}
+
+fn parse_stored_studio_logos(details_json: &str) -> Vec<crate::metadata::StoredBrand> {
+    let Ok(details) = serde_json::from_str::<serde_json::Value>(details_json) else {
+        return Vec::new();
+    };
+    details
+        .pointer("/fields/studio_logos/value")
+        .or_else(|| details.pointer("/studio_logos"))
+        .and_then(|v| serde_json::from_value::<Vec<crate::metadata::StoredBrand>>(v.clone()).ok())
+        .map(|brands| {
+            brands
+                .into_iter()
+                .filter(|b| !b.name.trim().is_empty())
+                .take(6)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn extract_detail_brands(
+    kind: domain::MediaKind,
+    metadata: &MetadataFields,
+    adopted: Option<&EffectiveMetadata>,
+    source_studios: &[String],
+) -> Vec<crate::metadata::StoredBrand> {
+    if let Some(adopted) = adopted {
+        let explicit = parse_stored_studio_logos(&adopted.details_json);
+        if !explicit.is_empty() {
+            return explicit;
+        }
+    }
+    let default_kind = if kind == domain::MediaKind::Tv {
+        "network"
+    } else {
+        "studio"
+    };
+    let (studio_logo, manual_studios) = adopted
+        .map(|eff| {
+            let details = serde_json::from_str::<serde_json::Value>(&eff.details_json).ok();
+            let logo = details
+                .as_ref()
+                .and_then(|d| {
+                    d.pointer("/fields/studio_logo/value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| d.get("studio_logo").and_then(|v| v.as_str()))
+                })
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let manual = serde_json::from_str::<serde_json::Value>(&eff.field_origins_json)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/studios/source")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "manual")
+                })
+                .unwrap_or(false);
+            (logo, manual)
+        })
+        .unwrap_or((None, false));
+
+    let mut names: Vec<String> = Vec::new();
+    for name in metadata.studios.value().into_iter().flatten() {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(trimmed)) {
+            names.push(trimmed.to_string());
+        }
+    }
+    if !manual_studios {
+        for name in source_studios {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(trimmed)) {
+                names.push(trimmed.to_string());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .take(6)
+        .enumerate()
+        .map(|(index, name)| crate::metadata::StoredBrand {
+            name,
+            logo_path: if index == 0 {
+                studio_logo.clone()
+            } else {
+                None
+            },
+            kind: default_kind.to_string(),
+        })
+        .collect()
+}
+
 fn fill<T>(field: &mut FieldValue<T>, value: Option<T>) {
     if field.is_missing()
         && let Some(value) = value
@@ -224,7 +319,7 @@ fn parse_adopted_json(raw: &str, media_id: MediaId, field: &str) -> Option<serde
     }
 }
 
-fn json_names(value: &serde_json::Value) -> Vec<String> {
+pub(super) fn json_names(value: &serde_json::Value) -> Vec<String> {
     match value {
         serde_json::Value::String(text) => vec![text.clone()],
         serde_json::Value::Array(items) => items.iter().flat_map(json_names).collect(),

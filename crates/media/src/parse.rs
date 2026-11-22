@@ -4,8 +4,8 @@ use serde::Deserialize;
 use crate::client::TmdbError;
 
 pub use crate::metadata::{
-    CastRow, EpisodeMeta, ItemMeta, SeasonEpisode, TvSeason, details_meta_for, season_details,
-    season_episodes, tv_seasons,
+    BrandMeta, CastRow, EpisodeMeta, ItemMeta, SeasonEpisode, TvSeason, details_meta_for,
+    season_details, season_episodes, tv_seasons,
 };
 
 #[derive(Clone, Debug, PartialEq)]

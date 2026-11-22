@@ -5,6 +5,13 @@ login_success_css: "a[data-url*='logout.php'], a[href*='logout.php'], #logout-co
 search:
   path: /torrents.php
   query_param: search
+categories:
+  movie: ["401"]
+  tv: ["402", "403"]
+  documentary: ["404"]
+  anime: ["405"]
+  music: ["406", "408"]
+  other: ["407", "409"]
 list:
   item: "table.torrents > tbody > tr, table.torrents > tr"
 fields:

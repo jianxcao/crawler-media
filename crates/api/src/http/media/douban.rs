@@ -234,5 +234,6 @@ fn douban_info(data: &Value, douban_celebrities: Option<&Value>) -> Value {
         "language": languages,
         "released": released,
         "aliases": aliases,
+        "brands": [],
     })
 }

@@ -32,7 +32,7 @@ pub(crate) fn write_effective(
 }
 
 /// Display-only keys recorded outside any source snapshot (see `record_scraped_display`).
-const DISPLAY_ONLY_KEYS: [&str; 1] = ["studio_logo"];
+const DISPLAY_ONLY_KEYS: [&str; 2] = ["studio_logo", "studio_logos"];
 
 fn work_details_json(
     tx: &Connection,

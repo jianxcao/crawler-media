@@ -97,20 +97,31 @@ fn fill_studio(
     // Light projection: only the four studio strings leave SQLite, never the
     // multi-KB `details_json` / `normalized_json` blobs (Q3a benchmark).
     let d_studio = format!(
-        "COALESCE({}, {})",
+        "COALESCE({}, {}, {})",
+        json_first("m.details_json", "$.fields.studios.value"),
         json_text("m.details_json", "$.studio"),
         json_first("m.details_json", "$.studios")
     );
-    let d_logo = json_text("m.details_json", "$.studio_logo");
+    let d_logo = format!(
+        "COALESCE({}, {})",
+        json_text("m.details_json", "$.fields.studio_logo.value"),
+        json_text("m.details_json", "$.studio_logo")
+    );
     let n_studio = format!(
-        "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL THEN {} ELSE {} END",
+        "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL \
+         THEN COALESCE({}, {}) ELSE COALESCE({}, {}) END",
+        json_first("s.normalized_json", "$.fields.studios.value"),
         json_first("s.normalized_json", "$.fields.studios"),
+        json_first("s.normalized_json", "$.studios.value"),
         json_first("s.normalized_json", "$.studios")
     );
     let n_logo = format!(
-        "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL THEN {} ELSE {} END",
+        "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL \
+         THEN COALESCE({}, {}) ELSE COALESCE({}, {}) END",
         json_text("s.normalized_json", "$.fields.studio_logo.value"),
-        json_text("s.normalized_json", "$.studio_logo.value")
+        json_text("s.normalized_json", "$.fields.studio_logo"),
+        json_text("s.normalized_json", "$.studio_logo.value"),
+        json_text("s.normalized_json", "$.studio_logo")
     );
     let sql = format!(
         "SELECT m.media_id, m.locale, {d_studio}, {d_logo}, {n_studio}, {n_logo} \
@@ -145,12 +156,7 @@ fn fill_studio(
             Some((kept, _, _)) => exact && preferred_locale.as_deref() != Some(kept.as_str()),
         };
         if replace {
-            let (studio, logo) = if d_studio.is_some() || d_logo.is_some() {
-                (d_studio, d_logo)
-            } else {
-                (n_studio, n_logo)
-            };
-            picked.insert(media_id, (locale, studio, logo));
+            picked.insert(media_id, (locale, d_studio.or(n_studio), d_logo.or(n_logo)));
         }
     }
     for (media_id, (_, studio, logo)) in picked {
@@ -251,7 +257,9 @@ fn read_stills_batch(
 /// SQL for "the JSON text at `path`, else NULL" (non-string values read as absent).
 fn json_text(column: &str, path: &str) -> String {
     format!(
-        "CASE WHEN json_type({column}, '{path}') = 'text' THEN json_extract({column}, '{path}') END"
+        "CASE WHEN json_type({column}, '{path}') = 'text' \
+         AND json_extract({column}, '{path}') != '' \
+         THEN json_extract({column}, '{path}') END"
     )
 }
 

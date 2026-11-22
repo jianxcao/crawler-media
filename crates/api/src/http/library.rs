@@ -278,9 +278,7 @@ pub(crate) async fn list_items(
                 "year": item.year,
                 "rating": item.rating,
                 "studio": facts.studio,
-                "studio_logo": facts
-                    .studio_logo
-                    .map(|path| format!("https://image.tmdb.org/t/p/w92{path}")),
+                "studio_logo": facts.studio_logo.as_deref().and_then(tmdb_logo_url),
                 "poster_url": poster_ref.map(|file_id| artwork_url("posters", file_id)),
                 "backdrop_url": backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
                 "file_count": item.file_count,
@@ -372,14 +370,48 @@ pub(crate) async fn item_detail(
             probe_queued.contains(&file.file_id),
         ));
     }
+    ok(item_detail_json(&detail, media, files)).into_response()
+}
+
+pub(crate) fn tmdb_logo_url(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!(
+            "https://image.tmdb.org/t/p/h60_filter(negate,000,666)/{}",
+            trimmed.trim_start_matches('/')
+        ))
+    }
+}
+
+fn item_detail_json(
+    detail: &library_query::LibraryItemDetail,
+    media: Option<domain::Media>,
+    files: Vec<Value>,
+) -> Value {
     let metadata = &detail.metadata;
     let cast = detail_cast(metadata);
+    let brands: Vec<Value> = detail
+        .brands
+        .iter()
+        .map(|brand| {
+            json!({
+                "name": brand.name,
+                "logo_url": brand.logo_path.as_deref().and_then(tmdb_logo_url),
+                "kind": brand.kind,
+            })
+        })
+        .collect();
     let item = &detail.item;
     let (original_title, tmdb_id) = match media {
-        Some(media) => (media.original_title.clone(), media.tmdb_id.clone()),
+        Some(media) => (media.original_title, media.tmdb_id),
         None => (None, None),
     };
-    ok(json!({
+    json!({
         "media_item_id": item.media_id.to_string(),
         "kind": item.kind.as_str(),
         "title": item.title,
@@ -405,6 +437,7 @@ pub(crate) async fn item_detail(
             .unwrap_or_default(),
         "countries": metadata.countries.value().cloned().unwrap_or_default(),
         "studios": metadata.studios.value().cloned().unwrap_or_default(),
+        "brands": brands,
         "directors": metadata.directors.value().cloned().unwrap_or_default(),
         "creators": metadata.creators.value().cloned().unwrap_or_default(),
         "cast": cast,
@@ -413,8 +446,7 @@ pub(crate) async fn item_detail(
         "files": files,
         "next_file_cursor": detail.next_file_cursor,
         "seasons": detail.seasons,
-    }))
-    .into_response()
+    })
 }
 
 fn detail_cast(metadata: &domain::MetadataFields) -> Vec<Value> {

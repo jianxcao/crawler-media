@@ -12,6 +12,7 @@ import { invalidateLibraryDetailSnapshot } from "@/lib/library-detail-snapshot";
 import { playLinkFileId } from "@/lib/player/active-target";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 
+import { BrandStrip } from "./media-detail/brand-strip";
 import { ExpandablePlot, SourceLink } from "./media-detail/detail-metadata-widgets";
 import { MediaDetailFallback, MediaDetailScaffold } from "./media-detail/media-detail-scaffold";
 import { FileSection } from "./library-item/file-section";
@@ -196,6 +197,7 @@ export function LibraryItemDetailView({
               )}
             </div>
           )}
+          <BrandStrip brands={detail.brands} />
           <MediaTrackRows
             files={c.trackFiles}
             selectedFileId={c.selectedTrackFile?.file_id ?? null}

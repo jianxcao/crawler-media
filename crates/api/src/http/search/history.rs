@@ -315,21 +315,85 @@ pub(crate) async fn search_history(
     }
 }
 
+fn normalize_presets(
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Value, Response> {
+    let Ok(Json(body)) = body else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 请求体必须是合法 JSON",
+        ));
+    };
+    let Some(items) = body
+        .as_object()
+        .and_then(|obj| obj.get("presets"))
+        .and_then(Value::as_array)
+    else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 必须是数组",
+        ));
+    };
+    let mut seen_ids = std::collections::HashSet::with_capacity(items.len());
+    let mut normalized = Vec::with_capacity(items.len());
+    for entry in items {
+        let Some(obj) = entry.as_object() else {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "search.invalid_presets",
+                "presets 数组元素必须是对象",
+            ));
+        };
+        if let Some(id_val) = obj.get("id") {
+            let Some(id) = id_val.as_str().filter(|s| !s.trim().is_empty()) else {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "search.invalid_presets",
+                    "preset id 必须是非空字符串",
+                ));
+            };
+            if !seen_ids.insert(id.to_string()) {
+                continue;
+            }
+        }
+        normalized.push(entry.clone());
+    }
+    Ok(Value::Array(normalized))
+}
+
 pub(crate) async fn get_presets(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
     match store_read(&state, &[store::Db::App], move |store| {
-        store
-            .get_setting(&user_setting_key("search.presets", user_id))
-            .ok()
-            .flatten()
+        let is_admin = store
+            .user_role(user_id)
+            .map(|role| role == "admin")
+            .unwrap_or(false);
+        let user_key = user_setting_key("search.presets", user_id);
+        if is_admin {
+            store
+                .get_setting(crate::settings_keys::SEARCH_PRESETS)
+                .ok()
+                .flatten()
+                .or_else(|| store.get_setting(&user_key).ok().flatten())
+        } else {
+            store.get_setting(&user_key).ok().flatten().or_else(|| {
+                store
+                    .get_setting(crate::settings_keys::SEARCH_PRESETS)
+                    .ok()
+                    .flatten()
+            })
+        }
     })
     .await
     {
         Ok(raw) => {
             let presets = raw
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .filter(Value::is_array)
                 .unwrap_or_else(|| json!([]));
             ok(json!({ "presets": presets })).into_response()
         }
@@ -340,12 +404,27 @@ pub(crate) async fn get_presets(
 pub(crate) async fn put_presets(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let presets = body.get("presets").cloned().unwrap_or_else(|| json!([]));
+    let presets = match normalize_presets(body) {
+        Ok(presets) => presets,
+        Err(response) => return response,
+    };
     let key = user_setting_key("search.presets", user_id);
     let value = presets.to_string();
-    match store_write(&state, move |store| store.put_setting(&key, &value)).await {
+    match store_write(
+        &state,
+        move |store| -> Result<(), crate::store::StoreError> {
+            let is_admin = store.user_role(user_id)? == "admin";
+            store.put_setting(&key, &value)?;
+            if is_admin {
+                store.put_setting(crate::settings_keys::SEARCH_PRESETS, &value)?;
+            }
+            Ok(())
+        },
+    )
+    .await
+    {
         Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
         Ok(Err(error)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -144,6 +144,12 @@ export interface MediaCastMember {
   tmdbPersonId?: number;
 }
 
+export interface MediaBrand {
+  name: string;
+  logo_url: string | null;
+  kind?: "network" | "studio";
+}
+
 export interface MediaDetailInfo {
   directors: string[];
   directorCredits: MediaCastMember[];
@@ -152,6 +158,7 @@ export interface MediaDetailInfo {
   language: string;
   released: string;
   network?: string;
+  brands?: MediaBrand[];
   aliases: string[];
   sourceUrl?: string;
 }
@@ -564,6 +571,7 @@ interface MediaDetailEnvelope {
       language?: string;
       released?: string;
       aliases?: string[];
+      brands?: Array<{ name: string; logo_url?: string | null; kind?: string | null }>;
     };
     videos?: Array<Record<string, unknown>>;
     backdrops?: Array<{ preview_url: string; full_url: string; width: number; height: number }>;
@@ -657,6 +665,15 @@ function toMediaDetailData(
       language: data.info.language ?? "",
       released: data.info.released ?? "",
       aliases: data.info.aliases ?? [],
+      brands: (data.info.brands ?? [])
+        .map((b) => {
+          const name = (b?.name ?? "").trim();
+          if (!name) return null;
+          const logo = b.logo_url?.trim() || null;
+          const kind = b.kind === "network" || b.kind === "studio" ? b.kind : undefined;
+          return { name, logo_url: logo, ...(kind ? { kind } : {}) };
+        })
+        .filter((b): b is MediaBrand => b !== null),
     },
     videos: [],
     backdrops,

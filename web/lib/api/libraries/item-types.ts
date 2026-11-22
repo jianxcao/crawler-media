@@ -64,6 +64,12 @@ export interface LibraryItemCastMember {
   avatar_url: string | null;
 }
 
+export interface LibraryItemBrand {
+  name: string;
+  logo_url: string | null;
+  kind?: "network" | "studio";
+}
+
 export interface LibraryItemDetail {
   media_item_id: string;
   kind: LibraryKind;
@@ -78,6 +84,7 @@ export interface LibraryItemDetail {
   content_rating?: string | null;
   runtime_minutes: string | null;
   genres: string[];
+  brands?: LibraryItemBrand[];
   cast: LibraryItemCastMember[];
   /** 本地 fanart.jpg 背景图（/fanart/{ledgerId}） */
   backdrop_url: string | null;

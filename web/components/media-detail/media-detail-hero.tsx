@@ -9,6 +9,7 @@ import {
   SearchIcon,
   StarIcon,
 } from "@/components/icons";
+import { BrandStrip } from "./brand-strip";
 import type { MediaDetailInfo } from "@/lib/api/discover";
 import type { Subscription } from "@/lib/api/subscriptions";
 import type { MediaItem, MediaLibraryLink } from "@/lib/media-types";
@@ -101,6 +102,8 @@ export function MediaDetailHero({
             {isMovie ? "上映日期" : "首播日期"} · {info.released}
           </p>
         )}
+
+        <BrandStrip brands={info?.brands} />
 
         {libraryLinks.length > 0 && (
           <div className="mt-4 max-w-full max-md:mt-3">

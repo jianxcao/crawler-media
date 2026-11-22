@@ -168,6 +168,19 @@ fn fetch_tv_seasons(
     }
 }
 
+fn detail_brands(meta: &media::ItemMeta) -> Vec<Value> {
+    meta.brands
+        .iter()
+        .map(|brand| {
+            json!({
+                "name": brand.name,
+                "logo_url": brand.logo_path.as_deref().and_then(crate::http::library::tmdb_logo_url),
+                "kind": brand.kind,
+            })
+        })
+        .collect()
+}
+
 fn fetch_cast(meta: &Option<media::ItemMeta>) -> Vec<Value> {
     meta.as_ref()
         .map(|m| {
@@ -280,6 +293,7 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
     let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id);
     let meta = meta.unwrap_or_default();
+    let brands = detail_brands(&meta);
 
     ok(json!({
         "item": detail_item_json(&media, poster_url, backdrop_url),
@@ -295,6 +309,7 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
             "language": "",
             "released": released,
             "aliases": [],
+            "brands": brands,
         },
         "seasons": seasons,
         "videos": [],
@@ -333,6 +348,7 @@ fn empty_detail(kind: &str, id: &str) -> Response {
             "language": "",
             "released": "",
             "aliases": [],
+            "brands": [],
         },
         "videos": [],
         "backdrops": [],

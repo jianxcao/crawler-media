@@ -75,6 +75,7 @@ export function SiteConfigSection() {
   const [adding, setAdding] = useState(false);
   const [expandedSite, setExpandedSite] = useState<string | null>(null);
   const [createPresetNonce, setCreatePresetNonce] = useState(0);
+  const clearCreatePresetRequest = useCallback(() => setCreatePresetNonce(0), []);
 
   const catalogMap = useMemo(() => new Map(catalog.map((c) => [c.profile_id, c])), [catalog]);
   const configuredProfileIds = useMemo(
@@ -166,7 +167,7 @@ export function SiteConfigSection() {
             <PlusIcon className="size-4" />
             添加站点
           </button>
-        ) : (
+        ) : tab === "search" ? (
           <button
             type="button"
             onClick={() => setCreatePresetNonce((n) => n + 1)}
@@ -175,11 +176,14 @@ export function SiteConfigSection() {
             <PlusIcon className="size-4" />
             新建自定义分类
           </button>
-        )}
+        ) : null}
       </div>
 
       {tab === "search" ? (
-        <SearchSection createRequest={createPresetNonce} />
+        <SearchSection
+          createRequest={createPresetNonce}
+          onCreateRequestHandled={clearCreatePresetRequest}
+        />
       ) : tab === "cdp" ? (
         <CdpBrowserSection />
       ) : (

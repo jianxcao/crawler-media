@@ -25,8 +25,8 @@ pub use douban::{Douban, DoubanSubject};
 pub use parse::details;
 pub use parse::episode_stills;
 pub use parse::{
-    CastRow, CatalogHit, CountryRow, EpisodeMeta, ImageCandidate, Images, ItemMeta, LanguageRow,
-    SeasonEpisode, TvSeason,
+    BrandMeta, CastRow, CatalogHit, CountryRow, EpisodeMeta, ImageCandidate, Images, ItemMeta,
+    LanguageRow, SeasonEpisode, TvSeason,
 };
 pub use person::{PersonDetails, tmdb_person_profile_url};
 pub use tvdb::Tvdb;
