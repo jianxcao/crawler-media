@@ -34,16 +34,23 @@ impl ProbeManager {
             marker_refresh_id: None,
             job_id: None,
         };
+        let allow_when_paused = matches!(
+            origin,
+            policy::ProbeRequestOrigin::Playback
+                | policy::ProbeRequestOrigin::ManualRetry
+                | policy::ProbeRequestOrigin::ManualRefresh
+        );
         if need.metadata_valid
             && need.fingerprint_enabled
             && (need.intro_missing || need.outro_missing)
         {
             return Ok(
-                match self.try_enqueue_direct_fingerprint(
+                match self.try_enqueue_direct_fingerprint_inner(
                     unit,
                     need.media_duration_ms,
                     need.source_version,
                     need.sample_duration_secs,
+                    allow_when_paused,
                 )? {
                     Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
                     None => policy::ProbeRequestResult::AlreadyRunning,
@@ -51,10 +58,14 @@ impl ProbeManager {
             );
         }
         let ledger_id = unit.row.file.file_id.to_string();
-        if let Some(next_retry_at_ms) = self.failure_backoff_until_ms(&ledger_id, now_ms) {
+        if origin == policy::ProbeRequestOrigin::BackgroundRetry {
+            self.last_failure.lock().remove(&ledger_id);
+        } else if !allow_when_paused
+            && let Some(next_retry_at_ms) = self.failure_backoff_until_ms(&ledger_id, now_ms)
+        {
             return Ok(policy::ProbeRequestResult::Waiting { next_retry_at_ms });
         }
-        Ok(match self.try_enqueue(unit)? {
+        Ok(match self.try_enqueue_inner(unit, allow_when_paused)? {
             Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
             None => policy::ProbeRequestResult::AlreadyRunning,
         })
@@ -67,11 +78,12 @@ impl ProbeManager {
         source_version: String,
         duration_secs: u32,
     ) -> Option<String> {
-        match self.try_enqueue_direct_fingerprint(
+        match self.try_enqueue_direct_fingerprint_inner(
             unit,
             media_duration_ms,
             source_version,
             duration_secs,
+            false,
         ) {
             Ok(job) => job,
             Err(error) => {
@@ -81,12 +93,13 @@ impl ProbeManager {
         }
     }
 
-    fn try_enqueue_direct_fingerprint(
+    fn try_enqueue_direct_fingerprint_inner(
         &self,
         mut unit: ProbeUnit,
         media_duration_ms: Option<i64>,
         source_version: String,
         duration_secs: u32,
+        allow_when_paused: bool,
     ) -> Result<Option<String>, store::StoreError> {
         let ledger_id = unit.row.file.file_id.to_string();
         // Register the in-memory deduplication id, then release `seen` before the Store lock:
@@ -119,12 +132,14 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: store::ProbeDispatchStage::Fingerprint,
         };
-        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+        if (!allow_when_paused && self.background_is_paused())
+            || self.should_defer_remote_dispatch(&unit.row.file.path)
+        {
             self.seen.lock().remove(&ledger_id);
             tracing::info!(
                 job_id,
                 ledger_id,
-                "远程读取已暂停，直接声纹任务保持数据库排队"
+                "后台探测或远程读取已暂停，直接声纹任务保持数据库排队"
             );
         } else if self.fingerprint_tx.try_send((id, work)).is_err() {
             self.seen.lock().remove(&ledger_id);
@@ -139,7 +154,7 @@ impl ProbeManager {
     /// 窗口满只限制内存派发：单元已经持久化，保持数据库排队，等窗口空出后由
     /// [`Self::fill_dispatch_windows`] 重新投递。取消单元会把 durable 积压变成永久丢失。
     pub fn enqueue(&self, unit: ProbeUnit) -> bool {
-        match self.try_enqueue(unit) {
+        match self.try_enqueue_inner(unit, false) {
             Ok(job) => job.is_some(),
             Err(error) => {
                 tracing::warn!(%error, "媒体信息请求暂不可入队，保留探测义务等待重试");
@@ -148,18 +163,23 @@ impl ProbeManager {
         }
     }
 
-    fn try_enqueue(&self, mut unit: ProbeUnit) -> Result<Option<String>, store::StoreError> {
+    fn try_enqueue_inner(
+        &self,
+        mut unit: ProbeUnit,
+        allow_when_paused: bool,
+    ) -> Result<Option<String>, store::StoreError> {
         unit.reuse_fingerprint_cache = true;
         unit.reuse_media_info_cache = true;
         let ledger_id = unit.row.file.file_id.to_string();
         if self.seen.lock().contains(&ledger_id) {
             return Ok(None);
         }
-        if self
-            .last_failure
-            .lock()
-            .get(&ledger_id)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        if !allow_when_paused
+            && self
+                .last_failure
+                .lock()
+                .get(&ledger_id)
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
         {
             return Ok(None);
         }
@@ -173,11 +193,13 @@ impl ProbeManager {
             job_id,
             "【媒体信息】已进入高优先级探测队列；声纹将在媒体信息写入后另行排队"
         );
-        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+        if (!allow_when_paused && self.background_is_paused())
+            || self.should_defer_remote_dispatch(&unit.row.file.path)
+        {
             tracing::info!(
                 ledger_id,
                 job_id,
-                "远程读取已暂停，媒体信息任务保持数据库排队"
+                "后台探测或远程读取已暂停，媒体信息任务保持数据库排队"
             );
         } else {
             self.seen.lock().insert(ledger_id.clone());

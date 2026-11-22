@@ -258,6 +258,7 @@ export function EmptyView({ view }: { view: TaskCenterViewName }) {
     all: { title: "当前没有任务", note: "新的后台作业或下载任务会自动出现在这里。" },
     attention: { title: "当前无需处理", note: "异常或需要确认的任务会优先出现在这里。" },
     active: { title: "当前没有进行中的任务", note: "新任务启动后会自动进入实时过程。" },
+    scheduled: { title: "暂无定时计划", note: "系统注册的周期自动化作业会显示在这里。" },
     history: {
       title: "还没有历史记录",
       note: "完成、取消，以及被你忽略的后台作业都会保留在这里。",

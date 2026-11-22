@@ -90,10 +90,7 @@ fn read_http_request(stream: &mut TcpStream) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 1024];
     let mut header_end = None;
-    loop {
-        let Ok(n) = stream.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(n) = stream.read(&mut chunk) {
         if n == 0 {
             break;
         }

@@ -121,6 +121,8 @@ pub struct ProbeManager {
     /// that are not on the selected page.
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
+    background_paused: AtomicBool,
+    obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
     settings_publish_lock: Mutex<()>,
@@ -145,7 +147,27 @@ impl ProbeManager {
         )
     }
 
+    pub fn new_paused(store: Arc<Store>) -> Result<Self, store::StoreError> {
+        Self::with_engines_paused(
+            store,
+            Arc::new(ChromaprintEngine),
+            Arc::new(ChromaprintEngine),
+            true,
+        )
+    }
+
     pub(crate) fn new_deferred(store: Arc<Store>) -> Result<Self, store::StoreError> {
+        Self::new_deferred_with_pause(store, false)
+    }
+
+    pub(crate) fn new_deferred_paused(store: Arc<Store>) -> Result<Self, store::StoreError> {
+        Self::new_deferred_with_pause(store, true)
+    }
+
+    fn new_deferred_with_pause(
+        store: Arc<Store>,
+        initial_background_paused: bool,
+    ) -> Result<Self, store::StoreError> {
         Self::with_comparison_session_inner(
             store,
             Arc::new(marker::matcher::session::SeasonMatchSession::new(
@@ -155,6 +177,7 @@ impl ProbeManager {
             )),
             Arc::new(ChromaprintEngine),
             false,
+            initial_background_paused,
         )
     }
 
@@ -163,7 +186,16 @@ impl ProbeManager {
         fingerprint_engine: Arc<dyn FingerprintEngine>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Result<Self, store::StoreError> {
-        Self::with_comparison_session(
+        Self::with_engines_paused(store, fingerprint_engine, capture_engine, false)
+    }
+
+    pub fn with_engines_paused(
+        store: Arc<Store>,
+        fingerprint_engine: Arc<dyn FingerprintEngine>,
+        capture_engine: Arc<dyn FingerprintCaptureEngine>,
+        initial_background_paused: bool,
+    ) -> Result<Self, store::StoreError> {
+        Self::with_comparison_session_inner(
             store,
             Arc::new(marker::matcher::session::SeasonMatchSession::new(
                 fingerprint_engine,
@@ -171,6 +203,8 @@ impl ProbeManager {
                 marker::matcher::session::DEFAULT_MAX_BYTES,
             )),
             capture_engine,
+            true,
+            initial_background_paused,
         )
     }
 
@@ -189,6 +223,7 @@ impl ProbeManager {
             )),
             capture_engine,
             false,
+            false,
         )
     }
 
@@ -199,7 +234,7 @@ impl ProbeManager {
         fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Result<Self, store::StoreError> {
-        Self::with_comparison_session_inner(store, fingerprint_engine, capture_engine, true)
+        Self::with_comparison_session_inner(store, fingerprint_engine, capture_engine, true, false)
     }
 
     fn with_comparison_session_inner(
@@ -207,6 +242,7 @@ impl ProbeManager {
         fingerprint_engine: Arc<marker::matcher::session::SeasonMatchSession>,
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
         recover_now: bool,
+        initial_background_paused: bool,
     ) -> Result<Self, store::StoreError> {
         let channels = dispatch::channels();
         let settings = crate::probe_settings::ProbeSettings::load(&store)?;
@@ -247,6 +283,8 @@ impl ProbeManager {
             )),
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
+            background_paused: AtomicBool::new(initial_background_paused),
+            obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
             settings_publish_lock: Mutex::new(()),
@@ -429,6 +467,49 @@ impl ProbeManager {
     }
     pub fn wake_dispatch(&self) {
         self.wake.notify_waiters();
+    }
+
+    pub fn background_is_paused(&self) -> bool {
+        self.background_paused.load(Ordering::Acquire)
+    }
+
+    pub fn apply_startup_pause_policy(&self) {
+        self.pause_background();
+    }
+
+    pub fn pause_background(&self) {
+        self.background_paused.store(true, Ordering::Release);
+        self.drain_buffered_dispatch();
+    }
+
+    pub(crate) fn set_background_paused_flag(&self, paused: bool) {
+        self.background_paused.store(paused, Ordering::Release);
+    }
+
+    pub fn resume_background(&self) {
+        self.background_paused.store(false, Ordering::Release);
+        self.fill_dispatch_windows();
+        self.wake.notify_waiters();
+        self.obligation_wake.notify_waiters();
+    }
+
+    pub(crate) fn obligation_wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.obligation_wake)
+    }
+
+    pub(crate) fn purge_cancelled_seen(&self, file_ids: &[String], global_cancel: bool) {
+        if global_cancel {
+            self.drain_buffered_dispatch();
+        }
+        {
+            let mut seen = self.seen.lock();
+            for file_id in file_ids {
+                seen.remove(file_id);
+            }
+        }
+        if !self.background_is_paused() {
+            self.wake.notify_waiters();
+        }
     }
 }
 

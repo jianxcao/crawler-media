@@ -26,8 +26,10 @@ test("活动页默认落在观看视角", () => {
 test("带任务状态的深链进入任务视角", () => {
   assert.equal(activityScopeFromQuery("active"), "tasks");
   assert.equal(activityScopeFromQuery("attention"), "tasks");
+  assert.equal(activityScopeFromQuery("scheduled"), "tasks");
   assert.equal(activityScopeFromQuery("all"), "tasks");
   assert.equal(activityScopeFromQuery("history"), "tasks");
+  assert.equal(taskCenterViewFromQuery("scheduled"), "scheduled");
 });
 
 test("重复查询参数取第一个值，不被数组绕过", () => {

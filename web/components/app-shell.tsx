@@ -30,6 +30,7 @@ import { UiPrefsProvider, useTheme } from "@/lib/ui-prefs";
 import { useIsMobile } from "@/lib/use-media-query";
 import { settingsSectionGroupsFor, settingsSections } from "@/lib/settings-sections";
 import { usePermissions } from "@/lib/permissions";
+import { ProbeQueueProvider } from "@/lib/task-activity";
 import { publicEnv } from "@/lib/env";
 import { useSession } from "@/lib/session";
 
@@ -69,7 +70,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     {/* SubscribeEntryProvider：海报卡片「订阅影片」按钮的全站入口，
       订阅弹层只在这里挂一份（见 components/subscribe-entry.tsx）。 */}
     <SubscribeEntryProvider>
+    <ProbeQueueProvider>
     <AppShellBody>{children}</AppShellBody>
+    </ProbeQueueProvider>
     </SubscribeEntryProvider>
     </UiPrefsProvider>
     </SearchPrefsProvider>
@@ -449,9 +452,8 @@ function navIdFromPath(pathname: string): string {
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/subscriptions")) return "subscriptions";
   if (pathname.startsWith("/transfers")) return "transfers";
-  if (pathname.startsWith("/jobs")) return "jobs";
   if (pathname.startsWith("/cache")) return "cache";
-  if (pathname.startsWith("/activity")) return "tasks";
+  if (pathname.startsWith("/activity") || pathname.startsWith("/jobs")) return "tasks";
   if (pathname.startsWith("/collections")) return "collections";
   if (pathname.startsWith("/discover/movie")) return "explore-movies";
   if (pathname.startsWith("/discover/tv")) return "explore-tv";
@@ -469,8 +471,6 @@ function pathOfNavId(id: string): string {
       return "/subscriptions";
     case "transfers":
       return "/transfers";
-    case "jobs":
-      return "/jobs";
     case "cache":
       return "/cache";
     case "tasks":

@@ -17,6 +17,7 @@ mod backdrop_enrichment;
 mod catalog_refresh;
 mod check_in;
 mod completion;
+mod discover_refresh;
 mod episode_still;
 pub(crate) mod fanart_artwork;
 pub mod instance_lease;

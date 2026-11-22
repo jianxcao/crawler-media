@@ -146,7 +146,7 @@ export function ActivityView({
             <p className="text-on-image mt-1.5 max-w-2xl text-ui leading-6 text-[var(--text-muted)]">
               {scope === "media"
                 ? "谁在看什么、用哪台设备、速率如何，媒体库的实时动静都在这里。"
-                : "观察下载、入库和后台作业的完整过程，需要处理的任务会优先出现。"}
+                : "观察下载、入库、媒体探测和定时计划的完整过程，需要处理的任务会优先出现。"}
             </p>
           </div>
           {!isMobile && switcher}

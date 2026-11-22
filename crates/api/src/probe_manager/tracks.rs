@@ -18,6 +18,7 @@ pub(super) struct FfprobeTracks;
 #[derive(Debug)]
 pub(super) enum TrackProbeError {
     Failed,
+    FailedWithReason(String),
     Retry,
 }
 
@@ -122,7 +123,14 @@ pub(super) async fn probe_tracks_and_store(
     {
         return Ok(Some(cached));
     }
-    let (tracks, duration_ms) = read_tracks(mgr, unit, started_at, control).await?;
+    let (tracks, duration_ms) = match read_tracks(mgr, unit, started_at, control).await {
+        Ok(pair) => pair,
+        Err(TrackProbeError::FailedWithReason(reason)) => {
+            record_metadata_probe_failure(mgr, unit, source_version, &reason, control).await;
+            return Err(TrackProbeError::Failed);
+        }
+        Err(other) => return Err(other),
+    };
     let unit_for_write = unit.clone();
     let tracks_for_write = tracks.clone();
     let version = source_version.to_string();
@@ -140,14 +148,21 @@ pub(super) async fn probe_tracks_and_store(
             {
                 return Ok(None);
             }
-            super::probe::publish_probe_tracks(
+            let published = super::probe::publish_probe_tracks(
                 store,
                 &unit_for_write,
                 &version,
                 &tracks_for_write,
                 duration_ms,
-            )
-            .map(Some)
+            )?;
+            if published {
+                let _ = super::stages::clear_metadata_stage(
+                    store,
+                    &unit_for_write.row.file.file_id.to_string(),
+                    &version,
+                );
+            }
+            Ok(Some(published))
         });
         Ok(published)
     })
@@ -365,7 +380,40 @@ fn read_tracks_with_nfo(
                 elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
                 "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
             );
-            Ok(None)
+            if control.is_cancelled() {
+                Ok(None)
+            } else {
+                Err(TrackProbeError::FailedWithReason(error.to_string()))
+            }
         }
     }
+}
+
+async fn record_metadata_probe_failure(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    source_version: &str,
+    reason: &str,
+    control: &library::WorkControl,
+) {
+    if mgr.shutting_down.load(std::sync::atomic::Ordering::Acquire)
+        || marker::media_read::remote_reads_stopping()
+        || control.is_cancelled()
+    {
+        return;
+    }
+    let ledger_id = unit.row.file.file_id.to_string();
+    let version = source_version.to_string();
+    let job_id = unit.job_id.clone().unwrap_or_else(|| "direct".to_string());
+    let error = reason.to_string();
+    let now_ms = mgr.clock.lock().now_ms();
+    let store = mgr.store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(err) = super::stages::record_metadata_failure(
+            &store, &ledger_id, &version, &job_id, &error, now_ms,
+        ) {
+            tracing::warn!(%err, ledger_id, "记录媒体信息阶段失败退避状态失败");
+        }
+    })
+    .await;
 }

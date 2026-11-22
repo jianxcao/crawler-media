@@ -19,6 +19,8 @@ pub enum JobKind {
     BrowserReconcile,
     /// 分类历史保留：QoE、transient catalog cache、probe 终态。
     DataRetention,
+    /// 发现页榜单每日预热。
+    DiscoverRefresh,
 }
 
 impl JobKind {
@@ -50,6 +52,7 @@ impl JobKind {
             Self::PlaybackHistoryRetention => "playback_history_retention",
             Self::BrowserReconcile => "browser_reconcile",
             Self::DataRetention => "data_retention",
+            Self::DiscoverRefresh => "discover_refresh",
         }
     }
 }
@@ -71,6 +74,7 @@ impl FromStr for JobKind {
             "playback_history_retention" => Ok(Self::PlaybackHistoryRetention),
             "browser_reconcile" => Ok(Self::BrowserReconcile),
             "data_retention" => Ok(Self::DataRetention),
+            "discover_refresh" => Ok(Self::DiscoverRefresh),
             other => Err(other.to_string()),
         }
     }
@@ -103,5 +107,37 @@ impl Schedule {
             // 反复执行、永不停止（DB8 复核 I2 后果 C）。
             Self::Interval { secs } => now.saturating_add(i64::try_from(*secs).unwrap_or(i64::MAX)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::JobKind;
+
+    #[test]
+    fn discover_refresh_kind_round_trips_and_enqueues_global_def() {
+        let kind = JobKind::from_str("discover_refresh").unwrap();
+        assert_eq!(kind, JobKind::DiscoverRefresh);
+        assert_eq!(kind.as_str(), "discover_refresh");
+        assert!(!kind.is_maintenance());
+
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let queue = crate::Queue::open(dir.path().join("jobs.db")).unwrap();
+        let def = queue
+            .ensure_def(crate::NewDef {
+                kind: JobKind::DiscoverRefresh,
+                scope: crate::JobScope::Global,
+                name: "发现页榜单每日预热".into(),
+                enabled: true,
+                schedule: Some(super::Schedule::Interval { secs: 86_400 }),
+                payload: "{}".into(),
+                timeout_secs: Some(300),
+                concurrency_key: Some("discover_refresh".into()),
+            })
+            .unwrap();
+        assert_eq!(def.kind, JobKind::DiscoverRefresh);
+        assert_eq!(def.name, "发现页榜单每日预热");
     }
 }

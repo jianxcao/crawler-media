@@ -297,9 +297,48 @@ impl ProbeManager {
         }
     }
 
+    /// Drain unstarted queued items buffered in the in-memory channels without
+    /// touching SQLite or interrupting any active read.
+    pub(super) fn drain_buffered_dispatch(&self) {
+        let metadata_drained = {
+            let mut guard = self.metadata_rx.lock();
+            let mut ids = Vec::new();
+            if let Some(rx) = guard.as_mut() {
+                while let Ok(id) = rx.try_recv() {
+                    ids.push(id.ledger_id);
+                }
+            }
+            ids
+        };
+        let fingerprint_drained = {
+            let mut guard = self.fingerprint_rx.lock();
+            let mut ids = Vec::new();
+            if let Some(rx) = guard.as_mut() {
+                while let Ok((id, _)) = rx.try_recv() {
+                    ids.push(id.ledger_id);
+                }
+            }
+            ids
+        };
+        if !metadata_drained.is_empty() || !fingerprint_drained.is_empty() {
+            let mut seen = self.seen.lock();
+            for id in &metadata_drained {
+                seen.remove(id);
+            }
+            for id in &fingerprint_drained {
+                seen.remove(id);
+            }
+        }
+        for _ in &metadata_drained {
+            self.metadata_stage_finished();
+        }
+        self.metadata_overflowed.store(false, Ordering::Release);
+        self.fingerprint_overflowed.store(false, Ordering::Release);
+    }
+
     /// Fill both windows from durable pending ids. Seen stays at window + active.
     pub(super) fn fill_dispatch_windows(&self) {
-        if self.shutting_down.load(Ordering::SeqCst) {
+        if self.shutting_down.load(Ordering::SeqCst) || self.background_is_paused() {
             return;
         }
         self.fill_metadata();
@@ -308,7 +347,7 @@ impl ProbeManager {
 
     /// Top up a window once emptied or at half-drain when durable backlog overflowed.
     pub(super) fn refill_drained_windows(&self) {
-        if self.shutting_down.load(Ordering::SeqCst) {
+        if self.shutting_down.load(Ordering::SeqCst) || self.background_is_paused() {
             return;
         }
         let metadata_free = self.metadata_tx.capacity();

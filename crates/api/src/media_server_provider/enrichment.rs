@@ -105,7 +105,7 @@ impl ApiServerProvider {
 
 /// 锁外：一次 probe 入队 + 一次 catalog 合并（单条目路径与选择路径共用）。
 pub(super) fn enrich_snapshot_blocking(state: &ApiState, snapshot: &mut MediaItemSnapshot) {
-    if !snapshot.is_series {
+    if !snapshot.is_series && !state.probe.background_is_paused() {
         // 旧路径交出的就是快照自身那一行 `(file, unit)`；新载体按同一事实构造覆盖：
         // 整片快照（`unit == None`）等价于「该文件没有 unit 行」，不是 `(0, 0)`。
         let coverage = domain::FileCoverage {

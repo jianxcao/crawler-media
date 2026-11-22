@@ -12,8 +12,12 @@ use crate::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
 use super::{library_for_file, require_visible_library};
 
 /// Queue metadata extraction and enabled TV fingerprint extraction.
-fn enqueue_probe(state: &ApiState, row: &domain::FileCoverage) -> bool {
-    match state.probe.request_probe(row, ProbeRequestOrigin::Detail) {
+fn enqueue_probe_with_origin(
+    state: &ApiState,
+    row: &domain::FileCoverage,
+    origin: ProbeRequestOrigin,
+) -> bool {
+    match state.probe.request_probe(row, origin) {
         Ok(ProbeRequestResult::Queued { .. }) => true,
         Ok(_) => false,
         Err(error) => {
@@ -23,13 +27,19 @@ fn enqueue_probe(state: &ApiState, row: &domain::FileCoverage) -> bool {
     }
 }
 
+fn enqueue_probe(state: &ApiState, row: &domain::FileCoverage) -> bool {
+    enqueue_probe_with_origin(state, row, ProbeRequestOrigin::Detail)
+}
+
 /// Async callers share the existing HTTP blocking budget for probe admission.
 pub(crate) async fn ensure_probe_enqueued(state: &ApiState, row: &domain::FileCoverage) -> bool {
     let worker = state.clone();
     let row = row.clone();
     match state
         .http_work
-        .run_to_completion(move || ensure_probe_enqueued_blocking(&worker, &row))
+        .run_to_completion(move || {
+            enqueue_probe_with_origin(&worker, &row, ProbeRequestOrigin::Playback)
+        })
         .await
     {
         Ok(queued) => queued,

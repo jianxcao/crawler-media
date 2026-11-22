@@ -4,22 +4,34 @@
  * 任务活动的**唯一计数口径**。
  *
  * 侧栏「活动」角标、活动页一级切换器上的「任务」提示、任务视角内部的状态
- * 选项卡，三处说的都得是同一件事：这个系统现在有几件任务要你看。以前它们
- * 各算各的——侧栏按"下载器任务条数 + 活跃 Job 条数"数，任务页按"业务过程"
- * 数（一个下载任务和它触发的入库 Job 是同一件事，合成一条），于是同一屏上
- * 会出现侧栏 3、进行中 2 的自相矛盾。数字对不上，提醒就失去了可信度。
+ * 选项卡，三处说的都得是同一件事：这个系统现在有几件任务要你看。
  *
  * 因此把分组与归类下沉到这里：谁要计数就调 `useTaskActivity()`，谁要渲染就
- * 拿同一份分组结果去画。本模块只做归类，不碰各领域的事实源——下载状态仍来自
- * 下载器快照，Job 状态仍来自 job 表。
+ * 拿同一份分组结果去画。本模块只做归类与后台探测队列快照共享，不碰下载器或
+ * Job 表的领域状态。
  */
 
-import { useMemo } from "react";
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import type { DownloadTask } from "@/lib/api/downloaders";
 import type { JobView } from "@/lib/api/jobs";
-// 单条下载任务 / 单条 Job 的档位判定分别放在 download-attention 与
-// job-attention（无 React、可单测）；本模块只做跨领域的分组与计数。
+import {
+  cancelProbeQueue,
+  getProbeStatus,
+  pauseProbeQueue,
+  resumeProbeQueue,
+  type ProbeCancelReceipt,
+  type ProbeQueueStatus,
+} from "@/lib/api/probe";
 import {
   downloadGroupNeedsAttention,
   groupDownloadTasks,
@@ -28,12 +40,13 @@ import {
 } from "@/lib/download-attention";
 import { useDownloadTasks } from "@/lib/download-tasks";
 import {
-  ACTIVE_FEED_JOB_STATUSES,
   jobIsActive,
   jobIsHistorical,
   jobNeedsAttention,
 } from "@/lib/job-attention";
 import { useJobs } from "@/lib/jobs";
+import { useSession } from "@/lib/session";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 export {
   downloadGroupNeedsAttention,
@@ -45,6 +58,153 @@ export {
   type DownloadTaskGroup,
 } from "@/lib/download-attention";
 
+const GLOBAL_PROBE_POLL_MS = 15_000;
+const ACTIVITY_PROBE_POLL_MS = 5_000;
+
+export function probeQueueHasWork(status: ProbeQueueStatus | null | undefined): boolean {
+  if (!status) return false;
+  return (
+    status.total_pending > 0 ||
+    status.running_metadata + status.running_fingerprint > 0
+  );
+}
+
+export function probeQueueCountsAsActive(status: ProbeQueueStatus | null | undefined): boolean {
+  if (!status) return false;
+  return !status.paused && probeQueueHasWork(status);
+}
+
+export interface ProbeQueueContextValue {
+  status: ProbeQueueStatus | null;
+  busyAction: "pause" | "resume" | "cancel" | null;
+  refresh: () => void;
+  pause: () => Promise<ProbeQueueStatus>;
+  resume: () => Promise<ProbeQueueStatus>;
+  cancel: (libraryId?: string) => Promise<ProbeCancelReceipt>;
+  retainFastPolling: () => () => void;
+}
+
+const DEFAULT_PROBE_QUEUE: ProbeQueueContextValue = {
+  status: null,
+  busyAction: null,
+  refresh: () => undefined,
+  pause: async () => {
+    throw new Error("ProbeQueueProvider 未挂载");
+  },
+  resume: async () => {
+    throw new Error("ProbeQueueProvider 未挂载");
+  },
+  cancel: async () => {
+    throw new Error("ProbeQueueProvider 未挂载");
+  },
+  retainFastPolling: () => () => undefined,
+};
+
+const ProbeQueueContext = createContext<ProbeQueueContextValue>(DEFAULT_PROBE_QUEUE);
+
+export function ProbeQueueProvider({ children }: { children: ReactNode }) {
+  const { session } = useSession();
+  const enabled = session.role === "admin";
+  const [status, setStatus] = useState<ProbeQueueStatus | null>(null);
+  const [busyAction, setBusyAction] = useState<"pause" | "resume" | "cancel" | null>(null);
+  const [fastCount, setFastCount] = useState(0);
+  const inFlight = useRef(false);
+  const queued = useRef(false);
+
+  const refresh = useCallback(() => {
+    if (!enabled) {
+      setStatus(null);
+      return;
+    }
+    queued.current = true;
+    if (inFlight.current) return;
+    inFlight.current = true;
+    void (async () => {
+      try {
+        while (queued.current) {
+          queued.current = false;
+          try {
+            const next = await getProbeStatus();
+            setStatus(next);
+          } catch {
+            // 瞬时网络波动保留上一次快照，下一轮轮询恢复
+          }
+        }
+      } finally {
+        inFlight.current = false;
+      }
+    })();
+  }, [enabled]);
+
+  const intervalMs = enabled
+    ? fastCount > 0
+      ? ACTIVITY_PROBE_POLL_MS
+      : GLOBAL_PROBE_POLL_MS
+    : null;
+  useVisiblePolling(refresh, intervalMs, { leading: true });
+
+  const pause = useCallback(async () => {
+    setBusyAction("pause");
+    try {
+      const next = await pauseProbeQueue();
+      setStatus(next);
+      return next;
+    } finally {
+      setBusyAction(null);
+    }
+  }, []);
+
+  const resume = useCallback(async () => {
+    setBusyAction("resume");
+    try {
+      const next = await resumeProbeQueue();
+      setStatus(next);
+      return next;
+    } finally {
+      setBusyAction(null);
+    }
+  }, []);
+
+  const cancel = useCallback(
+    async (libraryId?: string) => {
+      setBusyAction("cancel");
+      try {
+        const receipt = await cancelProbeQueue(libraryId);
+        const next = await getProbeStatus();
+        setStatus(next);
+        return receipt;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [],
+  );
+
+  const retainFastPolling = useCallback(() => {
+    setFastCount((count) => count + 1);
+    return () => setFastCount((count) => Math.max(0, count - 1));
+  }, []);
+
+  const value = useMemo<ProbeQueueContextValue>(
+    () => ({
+      status: enabled ? status : null,
+      busyAction,
+      refresh,
+      pause,
+      resume,
+      cancel,
+      retainFastPolling,
+    }),
+    [busyAction, cancel, enabled, pause, refresh, retainFastPolling, resume, status],
+  );
+
+  return createElement(ProbeQueueContext.Provider, { value }, children);
+}
+
+export function useProbeQueue(): ProbeQueueContextValue {
+  return useContext(ProbeQueueContext);
+}
+
 export interface TaskActivity {
   /** infohash（小写）→ 关联的入库 Job：下载与入库是同一件事的两段。 */
   ingestJobsByHash: Map<string, JobView>;
@@ -55,6 +215,8 @@ export interface TaskActivity {
   standaloneAttentionJobs: JobView[];
   standaloneActiveJobs: JobView[];
   standaloneHistoricalJobs: JobView[];
+  probeStatus: ProbeQueueStatus | null;
+  probeQueue?: ProbeQueueContextValue;
   /** 需要处理的条数（下载过程按作品合并后计一条）。 */
   attentionTotal: number;
   /** 进行中的条数。 */
@@ -63,20 +225,17 @@ export interface TaskActivity {
 }
 
 /**
- * 汇总当前的任务活动。数据来自全站唯一的两个 Provider（Job / 下载快照），
- * 本 Hook 不发起任何请求，因此侧栏与活动页同时使用也不会重复读下载器。
+ * 汇总当前的任务活动。数据来自全站唯一的 Provider（Job / 下载快照 / 媒体探测状态），
+ * 本 Hook 不发起任何请求，因此侧栏与活动页同时使用也不会重复请求。
  */
 export function useTaskActivity(): TaskActivity {
   const { jobs } = useJobs();
   const { tasks: downloadTasks } = useDownloadTasks();
+  const probeQueue = useProbeQueue();
+  const probeStatus = probeQueue.status;
 
-  const ingestJobsByHash = useMemo(() => {
-    // 新契约 JobDef 不再携带 resources 字段，无法按 infohash 关联入库 Job；
-    // 下载过程与入库 Job 不再合成一条业务过程，留给各组件的卡片如实各自呈现。
-    return new Map<string, JobView>();
-  }, []);
+  const ingestJobsByHash = useMemo(() => new Map<string, JobView>(), []);
 
-  // 刷流（boost）种子常年大量在跑，计入提醒会让数字失去意义，先行分流
   const boostTasks = useMemo(
     () => downloadTasks.filter(isBoostTask),
     [downloadTasks],
@@ -95,9 +254,6 @@ export function useTaskActivity(): TaskActivity {
     [downloadGroups, ingestJobsByHash],
   );
 
-  // 已经串进下载生命周期的 ingest Job 不再作为第二件事重复出现（既不重复渲染，
-  // 也不重复计数——这正是侧栏数字曾经比页面大一号的原因）。新契约无关联字段，
-  // 该集合恒为空。
   const linkedIngestJobIds = useMemo(
     () =>
       new Set(
@@ -114,18 +270,15 @@ export function useTaskActivity(): TaskActivity {
     [jobs, linkedIngestJobIds],
   );
   const standaloneActiveJobs = useMemo(
-    () =>
-      jobs.filter(
-        (job) =>
-          jobIsActive(job) &&
-          !linkedIngestJobIds.has(job.id),
-      ),
+    () => jobs.filter((job) => jobIsActive(job) && !linkedIngestJobIds.has(job.id)),
     [jobs, linkedIngestJobIds],
   );
   const standaloneHistoricalJobs = useMemo(
     () => jobs.filter((job) => jobIsHistorical(job) && !linkedIngestJobIds.has(job.id)),
     [jobs, linkedIngestJobIds],
   );
+
+  const probeActiveCount = probeQueueCountsAsActive(probeStatus) ? 1 : 0;
 
   return {
     ingestJobsByHash,
@@ -135,29 +288,19 @@ export function useTaskActivity(): TaskActivity {
     standaloneAttentionJobs,
     standaloneActiveJobs,
     standaloneHistoricalJobs,
+    probeStatus,
+    probeQueue,
     attentionTotal: attentionDownloadGroups.length + standaloneAttentionJobs.length,
-    activeTotal: activeDownloadGroups.length + standaloneActiveJobs.length,
+    activeTotal:
+      activeDownloadGroups.length + standaloneActiveJobs.length + probeActiveCount,
     historyTotal: standaloneHistoricalJobs.length,
   };
 }
 
-/**
- * 提醒角标的展示模型：**只表达当前最该被看见的那件事**，并给出点进去
- * 直达那件事的落点。
- *
- * 有需要处理的任务时亮警示色、落在「需要处理」；否则退回进行中计数、落在
- * 「进行中」——角标数的是任务，落点就必须是任务视角对应的那一片，
- * 不能把人丢到「观看」再让他自己找为什么有提醒。什么都没有时才回到页面
- * 默认的「观看」。
- */
 export interface TaskActivityBadge {
-  /** 是否为"需要处理"的警示形态（红色）；否则是进行中（蓝色）。 */
   alert: boolean;
-  /** 要展示的数字；为 0 表示不该出现角标。 */
   count: number;
-  /** 点击落点（含视角查询参数）。 */
   href: string;
-  /** 无障碍/悬浮提示文案。 */
   hint: string;
 }
 

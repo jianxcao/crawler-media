@@ -309,12 +309,14 @@ async fn owner_round(
             }
         }
         // Review L2: 到期阶段派发要读写 probe 表，同样不在执行器上做。
-        let probe = state.probe.clone();
-        let now_ms = now.saturating_mul(1000);
-        if let Some(Err(error)) =
-            off_executor("probe_dispatch_due", move || probe.dispatch_due(now_ms, 32)).await
-        {
-            tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
+        if !state.probe.background_is_paused() {
+            let probe = state.probe.clone();
+            let now_ms = now.saturating_mul(1000);
+            if let Some(Err(error)) =
+                off_executor("probe_dispatch_due", move || probe.dispatch_due(now_ms, 32)).await
+            {
+                tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
+            }
         }
         // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
         // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作

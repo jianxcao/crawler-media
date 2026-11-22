@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 
 use super::query_phase::{QueryPhaseSnapshot, QueryPhaseTotals};
 use crate::Store;
-use crate::catalog::{Catalog, EmptyCatalog};
+use crate::catalog::Catalog;
 use crate::poster_fetch::{HttpPoster, PosterFetch};
 use crate::store::StoreError;
 use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
@@ -272,6 +272,29 @@ impl ApiState {
     where
         F: Fetcher + 'static,
     {
+        Self::new_arc_with_admin_bootstrap_inner(
+            store,
+            profiles,
+            fetcher,
+            downloader,
+            action,
+            initial_writable,
+            false,
+        )
+    }
+
+    pub(super) fn new_arc_with_admin_bootstrap_inner<F>(
+        store: Arc<Store>,
+        profiles: ProfileSet,
+        fetcher: Arc<F>,
+        downloader: Arc<dyn Downloader>,
+        action: crate::bootstrap_credentials::AdminBootstrapAction,
+        initial_writable: bool,
+        pause_background_probe: bool,
+    ) -> Result<Self, ApiStateError>
+    where
+        F: Fetcher + 'static,
+    {
         let deferred_action = if initial_writable {
             apply_admin_bootstrap(&store.as_ref(), action)?;
             None
@@ -292,7 +315,7 @@ impl ApiState {
         let writers = store.writers();
         // 有 Tokio runtime 时启动异步探测 worker；只读从属实例延迟恢复与后台启动。
         let (library_work, probe, chapter_frames, catalog, media_posters) =
-            init_probe_and_catalog(&store, initial_writable)?;
+            startup::init_probe_and_catalog(&store, initial_writable, pause_background_probe)?;
         let startup_browser = crate::runtime_browser::startup_browser(store.clone());
         let state = Self {
             store: store.clone(),
@@ -429,9 +452,14 @@ impl ApiState {
         capture: Arc<dyn marker::FingerprintCaptureEngine>,
         tracks: Arc<dyn crate::probe_manager::TracksProbe>,
     ) -> Result<Self, ApiStateError> {
-        let probe =
-            crate::probe_manager::ProbeManager::with_engines(self.store.clone(), matcher, capture)?
-                .with_tracks_probe(tracks);
+        let paused = self.probe.background_is_paused();
+        let probe = crate::probe_manager::ProbeManager::with_engines_paused(
+            self.store.clone(),
+            matcher,
+            capture,
+            paused,
+        )?
+        .with_tracks_probe(tracks);
         probe.set_library_registry(self.library_work.clone());
         probe.set_chapter_frames(self.chapter_frames.clone());
         self.probe = Arc::new(probe);
@@ -750,35 +778,4 @@ pub(super) fn seed_jobs(jobs: &jobs::Queue) -> Result<(), ApiStateError> {
     crate::maintenance::seed_maintenance_defs(jobs)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     Ok(())
-}
-
-type ProbeCatalogInit = (
-    Arc<crate::library_lifecycle::LibraryWorkRegistry>,
-    Arc<crate::probe_manager::ProbeManager>,
-    Arc<crate::chapter_frame_service::ChapterFrameService>,
-    Arc<dyn Catalog>,
-    Arc<dyn crate::media_posters::MediaPosterSource>,
-);
-
-fn init_probe_and_catalog(
-    store: &Arc<Store>,
-    initial_writable: bool,
-) -> Result<ProbeCatalogInit, ApiStateError> {
-    let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
-    let probe = Arc::new(if initial_writable {
-        crate::probe_manager::ProbeManager::new(store.clone())?
-    } else {
-        crate::probe_manager::ProbeManager::new_deferred(store.clone())?
-    });
-    probe.set_library_registry(library_work.clone());
-    let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
-        store.clone(),
-        library_work.clone(),
-    ));
-    probe.set_chapter_frames(chapter_frames.clone());
-    let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
-    let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
-        crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
-    );
-    Ok((library_work, probe, chapter_frames, catalog, media_posters))
 }

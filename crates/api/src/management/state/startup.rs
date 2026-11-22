@@ -1,10 +1,73 @@
 //! Instance startup after owned services have been constructed.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use downloader::Downloader;
+use indexer::{Fetcher, ProfileSet};
+
 use super::{ApiState, ApiStateError, apply_admin_bootstrap, seed_jobs};
+use crate::Store;
+use crate::catalog::{Catalog, EmptyCatalog};
+
+pub(super) type ProbeCatalogInit = (
+    Arc<crate::library_lifecycle::LibraryWorkRegistry>,
+    Arc<crate::probe_manager::ProbeManager>,
+    Arc<crate::chapter_frame_service::ChapterFrameService>,
+    Arc<dyn Catalog>,
+    Arc<dyn crate::media_posters::MediaPosterSource>,
+);
+
+pub(super) fn init_probe_and_catalog(
+    store: &Arc<Store>,
+    initial_writable: bool,
+    pause_background_probe: bool,
+) -> Result<ProbeCatalogInit, ApiStateError> {
+    let library_work = Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
+    let probe = Arc::new(match (initial_writable, pause_background_probe) {
+        (true, true) => crate::probe_manager::ProbeManager::new_paused(store.clone())?,
+        (true, false) => crate::probe_manager::ProbeManager::new(store.clone())?,
+        (false, true) => crate::probe_manager::ProbeManager::new_deferred_paused(store.clone())?,
+        (false, false) => crate::probe_manager::ProbeManager::new_deferred(store.clone())?,
+    });
+    probe.set_library_registry(library_work.clone());
+    let chapter_frames = Arc::new(crate::chapter_frame_service::ChapterFrameService::new(
+        store.clone(),
+        library_work.clone(),
+    ));
+    probe.set_chapter_frames(chapter_frames.clone());
+    let catalog: Arc<dyn Catalog> = Arc::new(EmptyCatalog);
+    let media_posters: Arc<dyn crate::media_posters::MediaPosterSource> = Arc::new(
+        crate::media_posters::service::MediaPosterService::new(store.clone(), catalog.clone()),
+    );
+    Ok((library_work, probe, chapter_frames, catalog, media_posters))
+}
 
 impl ApiState {
+    /// Production server constructor: background bulk media probing starts paused
+    /// so leftover queue backlogs never hammer remote mounts until resumed in UI.
+    pub fn new_production_with_admin_bootstrap_writable<F>(
+        store: Arc<Store>,
+        profiles: ProfileSet,
+        fetcher: Arc<F>,
+        downloader: Arc<dyn Downloader>,
+        action: crate::bootstrap_credentials::AdminBootstrapAction,
+        initial_writable: bool,
+    ) -> Result<Self, ApiStateError>
+    where
+        F: Fetcher + 'static,
+    {
+        Self::new_arc_with_admin_bootstrap_inner(
+            store,
+            profiles,
+            fetcher,
+            downloader,
+            action,
+            initial_writable,
+            true,
+        )
+    }
+
     pub(super) fn finish_initialization(
         self,
         browser_error: Option<String>,

@@ -106,6 +106,7 @@ fn refresh(state: &ApiState, id: &str, request: RefreshRequest) -> Result<Receip
         skipped: 0,
         next_cursor,
     };
+    state.probe.resume_background();
     for row in page {
         if row.file.publication != FilePublication::Published {
             continue;

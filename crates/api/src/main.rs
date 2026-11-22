@@ -216,7 +216,7 @@ fn create_api_state(
         data_dir,
     ));
     let browser = api::runtime_browser::production_browser(store.clone())?;
-    let mut state = ApiState::new_arc_with_admin_bootstrap_writable(
+    let mut state = ApiState::new_production_with_admin_bootstrap_writable(
         store.clone(),
         ProfileSet::load(Some(overlay_dir))?,
         Arc::new(HttpFetcher),
