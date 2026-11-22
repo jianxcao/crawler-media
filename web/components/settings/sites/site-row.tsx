@@ -13,6 +13,7 @@ import {
 import { AUTH_TYPE_LABEL, SiteForm } from "@/components/settings/sites/site-form";
 import {
   type CatalogItem,
+  checkInSite,
   deleteSite,
   reverifySite,
   setSiteEnabled,
@@ -143,6 +144,7 @@ export function SiteRow({
             site={site}
             busy={busy}
             boosting={boosting}
+            supportsCheckIn={item.supports_check_in ?? item.profile_id !== "mteam"}
             onSetEnabled={(enabled) =>
               void guard(async () => onChanged(await setSiteEnabled(site.id, enabled)))
             }
@@ -153,6 +155,9 @@ export function SiteRow({
               onOpen();
               setEditingAuth(true);
             }}
+            onCheckIn={() =>
+              void guard(async () => onChanged(await checkInSite(site.id)))
+            }
             onReverify={() =>
               void guard(async () => onChanged(await reverifySite(site.id)))
             }
@@ -355,11 +360,13 @@ interface SiteActionsMenuProps {
   site: Site;
   busy: boolean;
   boosting: boolean;
+  supportsCheckIn: boolean;
   onSetEnabled: (enabled: boolean) => void;
   onEnableBoost: () => void;
   onDisableBoost: () => void;
   onBoostSettings: () => void;
   onEditAuth: () => void;
+  onCheckIn: () => void;
   onReverify: () => void;
   onDelete: () => void;
 }
@@ -368,11 +375,13 @@ function SiteActionsMenu({
   site,
   busy,
   boosting,
+  supportsCheckIn,
   onSetEnabled,
   onEnableBoost,
   onDisableBoost,
   onBoostSettings,
   onEditAuth,
+  onCheckIn,
   onReverify,
   onDelete,
 }: SiteActionsMenuProps) {
@@ -423,6 +432,11 @@ function SiteActionsMenu({
           <DropdownMenu.Item onSelect={onEditAuth} disabled={busy} className={itemClass}>
             编辑授权
           </DropdownMenu.Item>
+          {supportsCheckIn && (
+            <DropdownMenu.Item onSelect={onCheckIn} disabled={busy} className={itemClass}>
+              立即签到
+            </DropdownMenu.Item>
+          )}
           <DropdownMenu.Item onSelect={onReverify} disabled={busy} className={itemClass}>
             重新验证
           </DropdownMenu.Item>

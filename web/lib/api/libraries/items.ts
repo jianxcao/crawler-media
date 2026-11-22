@@ -9,9 +9,11 @@ import type {
   AudioStream,
   ItemDeleteResult,
   LibraryEpisode,
+  LibraryItemBrand,
   LibraryItemDetail,
   LibraryItemFile,
   LibraryItemFilePage,
+  LibrarySeasonSummary,
   SeasonEpisodes,
   SubtitleStream,
   VideoTrackInfo,
@@ -100,6 +102,29 @@ function presenceFrom(value: unknown): "present" | "missing" | "unknown" {
   return value === "present" || value === "missing" ? value : "unknown";
 }
 
+function brandFrom(raw: unknown): LibraryItemBrand | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const name = str(r.name).trim();
+  if (!name) return null;
+  const logoRaw = r.logo_url == null ? null : str(r.logo_url).trim();
+  const kind = r.kind === "network" || r.kind === "studio" ? r.kind : undefined;
+  return {
+    name,
+    logo_url: logoRaw ? logoRaw : null,
+    ...(kind ? { kind } : {}),
+  };
+}
+
+function seasonSummaryFrom(raw: unknown): LibrarySeasonSummary {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    season_number: num(r.season_number),
+    owned_count: num(r.owned_count),
+    total_count: num(r.total_count),
+    downloading_count: num(r.downloading_count),
+  };
+}
+
 export async function getLibraryItemDetail(
   libraryId: string,
   mediaItemId: string,
@@ -126,6 +151,11 @@ export async function getLibraryItemDetail(
     content_rating: r.content_rating == null ? null : str(r.content_rating),
     runtime_minutes: r.runtime_minutes == null ? null : str(r.runtime_minutes),
     genres: Array.isArray(r.genres) ? (r.genres as unknown[]).map((g) => str(g)) : [],
+    brands: Array.isArray(r.brands)
+      ? (r.brands as unknown[])
+          .map(brandFrom)
+          .filter((brand): brand is LibraryItemBrand => brand !== null)
+      : [],
     cast: Array.isArray(r.cast)
       ? (r.cast as unknown[]).map((c) => {
           const cr = (c ?? {}) as Record<string, unknown>;
@@ -140,6 +170,9 @@ export async function getLibraryItemDetail(
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     seasons: Array.isArray(r.seasons) ? r.seasons.map(num) : [],
+    season_summaries: Array.isArray(r.season_summaries)
+      ? (r.season_summaries as unknown[]).map(seasonSummaryFrom)
+      : [],
     files,
   };
 }

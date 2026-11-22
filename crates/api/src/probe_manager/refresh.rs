@@ -64,27 +64,14 @@ impl ProbeManager {
                 reuse_media_info_cache: true,
             })
             .collect::<Vec<_>>();
-        let created = self.store.create_probe_job(
-            &job_id,
-            "marker_refresh",
-            &media_id.to_string(),
-            Some(season),
-            &scope,
-            &specs,
-        );
-        match created {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(%media_id, season, "该剧该季已有片头片尾刷新任务，拒绝重复入队");
-                return 0;
-            }
-            Err(error) => {
-                tracing::error!(%error, %media_id, season, "创建持久化片头片尾刷新任务失败");
-                return 0;
-            }
+        if !self.persist_marker_refresh_job(&job_id, media_id, season, &scope, &ledger_ids, &specs)
+        {
+            return 0;
         }
+        self.mark_job_paused_exempt(job_id.clone());
 
         let mut queued = 0;
+        let mut overflowed = false;
         for unit in &mut units {
             unit.force_fingerprint = true;
             unit.reuse_fingerprint_cache = reuse;
@@ -99,15 +86,90 @@ impl ProbeManager {
                 if self.queue_metadata(unit.clone()).is_ok() {
                     queued += 1;
                 } else {
+                    overflowed = true;
                     self.seen.lock().remove(&unit.row.file.file_id.to_string());
                     tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "刷新窗口已满，单元保持数据库排队");
                 }
             }
         }
+        if overflowed {
+            self.wake.notify_waiters();
+        }
         tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "【片头片尾】已启动强制刷新，旧标记保持可见直到整季探测完成");
         queued
+    }
+
+    fn persist_marker_refresh_job(
+        &self,
+        job_id: &str,
+        media_id: domain::MediaId,
+        season: u32,
+        scope: &str,
+        ledger_ids: &[String],
+        specs: &[crate::store::ProbeJobUnitSpec<'_>],
+    ) -> bool {
+        enum RefreshPersistErr {
+            Conflict,
+            Store(crate::store::StoreError),
+        }
+        let paused = self.background_is_paused();
+        let exempt_jobs = if paused {
+            self.paused_exempt_jobs_snapshot()
+        } else {
+            HashSet::new()
+        };
+        let outcome = self
+            .store
+            .library_write_with_error(RefreshPersistErr::Store, |store| {
+                store.with_write_tx(RefreshPersistErr::Store, |store| {
+                    let cancelled = if paused {
+                        store
+                            .cancel_dormant_queued_units_for_ledgers(
+                                ledger_ids,
+                                &exempt_jobs,
+                                "superseded_by_manual_probe",
+                            )
+                            .map_err(RefreshPersistErr::Store)?
+                    } else {
+                        Vec::new()
+                    };
+                    let created = store
+                        .create_probe_job(
+                            job_id,
+                            "marker_refresh",
+                            &media_id.to_string(),
+                            Some(season),
+                            scope,
+                            specs,
+                        )
+                        .map_err(RefreshPersistErr::Store)?;
+                    if !created {
+                        return Err(RefreshPersistErr::Conflict);
+                    }
+                    Ok(cancelled)
+                })
+            });
+        match outcome {
+            Ok(cancelled) => {
+                if !cancelled.is_empty() {
+                    let mut seen = self.seen.lock();
+                    for id in cancelled {
+                        seen.remove(&id);
+                    }
+                }
+                true
+            }
+            Err(RefreshPersistErr::Conflict) => {
+                tracing::info!(%media_id, season, "该剧该季已有片头片尾刷新任务，拒绝重复入队");
+                false
+            }
+            Err(RefreshPersistErr::Store(error)) => {
+                tracing::error!(%error, %media_id, season, "创建持久化片头片尾刷新任务失败");
+                false
+            }
+        }
     }
 
     #[cfg(test)]
@@ -153,9 +215,13 @@ impl ProbeManager {
         let is_tv = kind == MediaKind::Tv;
         let batches = build_item_refresh_batches(media_id, is_tv, units);
         self.persist_item_refresh_batches(media_id, &batches, admitted)?;
+        for batch in &batches {
+            self.mark_job_paused_exempt(batch.job_id.clone());
+        }
 
         let mut queued = 0;
         let mut total = 0;
+        let mut overflowed = false;
         let mut seasons = HashSet::new();
         for mut batch in batches {
             let refresh_id = batch
@@ -179,11 +245,15 @@ impl ProbeManager {
                     if self.queue_metadata(unit.clone()).is_ok() {
                         queued += 1;
                     } else {
+                        overflowed = true;
                         self.seen.lock().remove(&unit.row.file.file_id.to_string());
                         tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
                     }
                 }
             }
+        }
+        if overflowed {
+            self.wake.notify_waiters();
         }
         tracing::info!(
             %media_id,
@@ -201,68 +271,103 @@ impl ProbeManager {
         batches: &[ItemRefreshBatch],
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
-        self.store.library_write_with_error(
-            |error| {
-                if super::store_access::is_busy(&error) {
-                    ProbeEnqueueError::Admission(crate::http::store_wait::busy_response())
-                } else {
-                    tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                    ProbeEnqueueError::Persistence
-                }
-            },
-            |store| {
+        let paused = self.background_is_paused();
+        let exempt_jobs = if paused {
+            self.paused_exempt_jobs_snapshot()
+        } else {
+            HashSet::new()
+        };
+        let map_store_err = |error: crate::store::StoreError| {
+            if super::store_access::is_busy(&error) {
+                ProbeEnqueueError::Admission(crate::http::store_wait::busy_response())
+            } else {
+                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
+                ProbeEnqueueError::Persistence
+            }
+        };
+        let cancelled = self
+            .store
+            .library_write_with_error(map_store_err, |store| {
                 admitted()?;
-                for batch in batches {
-                    let ledger_ids = batch
-                        .units
-                        .iter()
-                        .map(|unit| unit.row.file.file_id.to_string())
-                        .collect::<Vec<_>>();
-                    let specs = batch
-                        .units
-                        .iter()
-                        .zip(&ledger_ids)
-                        .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
-                            ledger_id,
-                            kind: unit.kind.as_str(),
-                            force_fingerprint: batch.is_marker,
-                            reuse_fingerprint_cache: false,
-                            overwrite_markers: batch.is_marker,
-                            reuse_media_info_cache: false,
-                        })
-                        .collect::<Vec<_>>();
-                    match store.create_probe_job(
-                        &batch.job_id,
-                        batch.job_kind,
-                        &media_id.to_string(),
-                        batch.season,
-                        &batch.scope,
-                        &specs,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let conflict = specs.iter().any(|spec| {
-                                store
-                                    .active_probe_unit_for_ledger(spec.ledger_id)
-                                    .ok()
-                                    .flatten()
-                                    .is_some()
-                            });
-                            return Err(if conflict {
-                                ProbeEnqueueError::AlreadyRunning
-                            } else {
-                                ProbeEnqueueError::Persistence
-                            });
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
-                            return Err(ProbeEnqueueError::Persistence);
+                store.with_write_tx(map_store_err, |store| {
+                    let cancelled = if paused {
+                        let target_ids: Vec<String> = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                batch
+                                    .units
+                                    .iter()
+                                    .map(|unit| unit.row.file.file_id.to_string())
+                            })
+                            .collect();
+                        store
+                            .cancel_dormant_queued_units_for_ledgers(
+                                &target_ids,
+                                &exempt_jobs,
+                                "superseded_by_manual_probe",
+                            )
+                            .map_err(map_store_err)?
+                    } else {
+                        Vec::new()
+                    };
+                    for batch in batches {
+                        let ledger_ids = batch
+                            .units
+                            .iter()
+                            .map(|unit| unit.row.file.file_id.to_string())
+                            .collect::<Vec<_>>();
+                        let specs = batch
+                            .units
+                            .iter()
+                            .zip(&ledger_ids)
+                            .map(|(unit, ledger_id)| crate::store::ProbeJobUnitSpec {
+                                ledger_id,
+                                kind: unit.kind.as_str(),
+                                force_fingerprint: batch.is_marker,
+                                reuse_fingerprint_cache: false,
+                                overwrite_markers: batch.is_marker,
+                                reuse_media_info_cache: false,
+                            })
+                            .collect::<Vec<_>>();
+                        match store.create_probe_job(
+                            &batch.job_id,
+                            batch.job_kind,
+                            &media_id.to_string(),
+                            batch.season,
+                            &batch.scope,
+                            &specs,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let conflict = specs.iter().any(|spec| {
+                                    store
+                                        .active_probe_unit_for_ledger(spec.ledger_id)
+                                        .ok()
+                                        .flatten()
+                                        .is_some()
+                                });
+                                return Err(if conflict {
+                                    ProbeEnqueueError::AlreadyRunning
+                                } else {
+                                    ProbeEnqueueError::Persistence
+                                });
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, %media_id, "创建手动媒体探测任务失败");
+                                return Err(ProbeEnqueueError::Persistence);
+                            }
                         }
                     }
-                }
-                Ok(())
-            },
-        )
+                    Ok(cancelled)
+                })
+            })?;
+        if !cancelled.is_empty() {
+            let mut seen = self.seen.lock();
+            for id in cancelled {
+                seen.remove(&id);
+            }
+        }
+        Ok(())
     }
 }
 

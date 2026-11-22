@@ -39,12 +39,12 @@ interface SearchPrefsContextValue {
 const SearchPrefsContext = createContext<SearchPrefsContextValue | null>(null);
 
 export function SearchPrefsProvider({ children }: { children: React.ReactNode }) {
-  const { isAdmin } = usePermissions();
+  const { canSearch } = usePermissions();
   const [tabs, setTabs] = useState<SearchTab[]>(DEFAULT_SEARCH_TABS);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!isAdmin) {
+    if (!canSearch) {
       setLoading(false);
       return;
     }
@@ -63,7 +63,7 @@ export function SearchPrefsProvider({ children }: { children: React.ReactNode })
     return () => {
       cancelled = true;
     };
-  }, [isAdmin]);
+  }, [canSearch]);
 
   const saveTabs = useCallback(
     async (next: SearchTab[]) => {

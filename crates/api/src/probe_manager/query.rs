@@ -68,6 +68,9 @@ impl ProbeManager {
         writable: Arc<AtomicBool>,
         budget: Option<&QueryBudget>,
     ) {
+        if self.background_is_paused() {
+            return;
+        }
         let budget = budget.cloned().unwrap_or_else(|| QueryBudget {
             deadline: std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT,
             cancelled: self.shutting_down.clone(),
@@ -109,6 +112,9 @@ impl ProbeManager {
         writable: Arc<AtomicBool>,
     ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
         budget.check()?;
+        if self.background_is_paused() {
+            return Ok(policy::ProbeRequestResult::Disabled);
+        }
         if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
             return Ok(need.retry);
         }

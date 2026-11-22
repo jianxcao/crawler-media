@@ -197,6 +197,7 @@ impl api::catalog::Catalog for AliasYearCatalog {
             genre_ids: vec![16],
             episode_run_time: vec![25],
             cast: Vec::new(),
+            ..Default::default()
         }))
     }
     fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
@@ -689,6 +690,7 @@ impl api::catalog::Catalog for NoStillCatalog {
             genre_ids: vec![16],
             episode_run_time: vec![25],
             cast: Vec::new(),
+            ..Default::default()
         }))
     }
     fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {

@@ -564,7 +564,7 @@ function itemAspect(item: LibraryItem): number {
   return item.kind === "video" ? 16 / 9 : 2 / 3;
 }
 
-function libraryItemToMediaItem(item: LibraryItem): MediaItem {
+export function libraryItemToMediaItem(item: LibraryItem): MediaItem {
   return {
     id: libraryItemKey(item),
     source: "tmdb",
@@ -573,9 +573,10 @@ function libraryItemToMediaItem(item: LibraryItem): MediaItem {
     title: item.title,
     originalTitle: "",
     year: item.year ?? 0,
-    rating: 0,
+    rating: item.rating ?? 0,
     genres: [],
-    extent: "",
+    extent: item.studio ?? "",
+    studioLogo: item.studio_logo ? imageUrl(item.studio_logo) : undefined,
     badges: [],
     overview: "",
     // 新契约无最近入库/入库时间字段，hover 层不再给「X 入库」副文案
@@ -589,7 +590,7 @@ function libraryItemToMediaItem(item: LibraryItem): MediaItem {
 }
 
 /** 收藏卡：海报卡形态同库存条目，hover 层只说「收藏的是哪一层」（整剧与电影不解释）。 */
-function favoriteItemToMediaItem(item: FavoriteItem): MediaItem {
+export function favoriteItemToMediaItem(item: FavoriteItem): MediaItem {
   const level = favoriteLevelLabel(
     item.kind,
     item.favorite_season_number,

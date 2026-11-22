@@ -37,6 +37,7 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
 #[derive(Deserialize)]
 pub(crate) struct SiteInput {
     name: String,
+    #[serde(default)]
     url: String,
     profile_id: String,
     #[serde(default)]
@@ -160,9 +161,14 @@ pub(crate) async fn site_catalog(State(state): State<ApiState>) -> Response {
         .into_iter()
         .filter(|id| id != "demo")
         .map(|id| {
+            let (auth_types, supports_check_in) = match state.indexer.profile(&id) {
+                Some(profile) => (profile.effective_auth_types(), profile.supports_check_in()),
+                None => (vec!["cookie"], true),
+            };
             json!({
                 "profile_id": id,
-                "auth_types": if id == "mteam" { ["apikey"] } else { ["cookie"] },
+                "auth_types": auth_types,
+                "supports_check_in": supports_check_in,
             })
         })
         .collect();

@@ -13,7 +13,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 mod douban;
+mod panorama;
 pub(crate) use douban::douban_detail;
+pub(super) use panorama::{
+    append_concrete_season_stubs, enrich_library_season_summaries, render_library_episode_rows,
+};
 
 const TMDB_POSTER: &str = "https://image.tmdb.org/t/p/w342";
 const TMDB_BACKDROP_SIZE: &str = "w1280";
@@ -40,13 +44,15 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
 
 pub(crate) async fn media_detail(
     State(state): State<ApiState>,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path((kind, id)): Path<(String, String)>,
 ) -> Response {
+    let viewer = user_id.and_then(|ext| ext.0);
     let state_for_work = state.clone();
     let work = state
         .http_work
         .run(MEDIA_DEADLINE, move || {
-            media_detail_inner(&state_for_work, &kind, &id)
+            media_detail_inner(&state_for_work, viewer, &kind, &id)
         })
         .await;
     match work {
@@ -57,46 +63,15 @@ pub(crate) async fn media_detail(
 
 pub(crate) async fn season_detail(
     State(state): State<ApiState>,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path((id, season)): Path<(String, u32)>,
 ) -> Response {
+    let viewer = user_id.and_then(|ext| ext.0);
     let state_for_work = state.clone();
     let work = state
         .http_work
-        .run(MEDIA_DEADLINE, move || -> Response {
-            let catalog: &dyn Catalog = state_for_work.catalog.as_ref();
-            let tmdb_id = match tmdb_id_for(&state_for_work, catalog, domain::MediaKind::Tv, &id) {
-                Ok(Some(tid)) => tid,
-                Ok(None) => return err(StatusCode::NOT_FOUND, "media.missing", "条目不存在"),
-                Err(response) => return response,
-            };
-            let meta_episodes = match catalog.cached_season_details(&tmdb_id, season) {
-                Ok(Some(rows)) => rows,
-                Ok(None) | Err(_) => Vec::new(),
-            };
-            let episodes = match catalog.cached_season_episodes(&tmdb_id, season) {
-                Ok(Some(episodes)) => episodes,
-                Ok(None) => {
-                    return ok(json!({ "episodes": [] })).into_response();
-                }
-                Err(error) => {
-                    return err(StatusCode::BAD_GATEWAY, "media.upstream", &error);
-                }
-            };
-            let items: Vec<Value> = episodes
-                .into_iter()
-                .map(|ep| {
-                    let ep_num = ep.episode_number;
-                    let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
-                    json!({
-                        "episode_number": ep_num,
-                        "name": meta.and_then(|m| m.name.clone()),
-                        "overview": meta.and_then(|m| m.overview.clone()),
-                        "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
-                        "air_date": ep.air_date,
-                    })
-                })
-                .collect();
-            ok(json!({ "episodes": items })).into_response()
+        .run(MEDIA_DEADLINE, move || {
+            panorama::season_detail_blocking(&state_for_work, viewer, &id, season)
         })
         .await;
     match work {
@@ -105,48 +80,67 @@ pub(crate) async fn season_detail(
     }
 }
 
-fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value> {
-    let canonical_id = media
-        .tmdb_id
-        .as_deref()
-        .and_then(|id| {
-            store
-                .get_media_by_alias_kind("tmdb", id, Some(media.kind))
-                .ok()
-                .flatten()
-        })
-        .map(|m| m.id)
-        .unwrap_or(media.id);
-    let mut links = Vec::new();
-    for row in store
-        .file_coverage_for_media_batch(&[canonical_id, media.id])
-        .unwrap_or_default()
-    {
-        {
-            if let Some(owner) = store
-                .get_media(row.file.media_id)
-                .ok()
-                .flatten()
-                .and_then(|m| crate::http::library::library_for_file(store, &row.file, &m))
-                && !links
+fn find_library_links(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    media: &domain::Media,
+) -> Vec<Value> {
+    crate::http::store_wait::with_store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| -> Option<Vec<Value>> {
+            let visible = crate::visible_scope::VisibleLibraries::load(store, viewer).ok()?;
+            let canonical_id = media
+                .tmdb_id
+                .as_deref()
+                .and_then(|id| {
+                    store
+                        .get_media_by_alias_kind("tmdb", id, Some(media.kind))
+                        .ok()
+                        .flatten()
+                })
+                .map(|m| m.id)
+                .unwrap_or(media.id);
+            let mut links = Vec::new();
+            for row in store
+                .file_coverage_for_media_batch(&[canonical_id, media.id])
+                .unwrap_or_default()
+            {
+                if row.file.publication != domain::FilePublication::Published
+                    || row.file.presence == domain::FilePresence::Missing
+                {
+                    continue;
+                }
+                let Some(owner) = visible.get(&row.file.library_id) else {
+                    continue;
+                };
+                if !store.library_accepts_work(&owner.id).unwrap_or(false) {
+                    continue;
+                }
+                if !links
                     .iter()
                     .any(|link: &Value| link["library_id"] == owner.id)
-            {
-                links.push(json!({
-                    "library_id": owner.id,
-                    "library_name": owner.name,
-                    "media_item_id": row.file.media_id.to_string(),
-                }));
+                {
+                    links.push(json!({
+                        "library_id": owner.id,
+                        "library_name": owner.name,
+                        "media_item_id": row.file.media_id.to_string(),
+                    }));
+                }
             }
-        }
-    }
-    links
+            Some(links)
+        },
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 fn fetch_tv_seasons(
     catalog: &dyn Catalog,
     media_kind: domain::MediaKind,
     tmdb_id: &str,
+    panorama: Option<&store::EpisodePanorama>,
 ) -> Vec<Value> {
     if media_kind == domain::MediaKind::Tv {
         catalog
@@ -155,17 +149,35 @@ fn fetch_tv_seasons(
             .into_iter()
             .map(|s| {
                 let s_num = s.season_number;
+                let (owned_count, downloading_count) = panorama
+                    .map(|p| p.counts_for_catalog_season(s_num, s.episode_count.unwrap_or(0)))
+                    .unwrap_or((0, 0));
                 json!({
                     "season_number": s_num,
                     "name": s.name,
                     "episode_count": s.episode_count,
                     "air_date": s.air_date,
+                    "owned_episode_count": owned_count,
+                    "downloading_episode_count": downloading_count,
                 })
             })
             .collect()
     } else {
         Vec::new()
     }
+}
+
+fn detail_brands(meta: &media::ItemMeta) -> Vec<Value> {
+    meta.brands
+        .iter()
+        .map(|brand| {
+            json!({
+                "name": brand.name,
+                "logo_url": brand.logo_path.as_deref().and_then(crate::http::library::tmdb_logo_url),
+                "kind": brand.kind,
+            })
+        })
+        .collect()
 }
 
 fn fetch_cast(meta: &Option<media::ItemMeta>) -> Vec<Value> {
@@ -236,7 +248,22 @@ fn fetch_images_and_related(
     (posters, backdrops, poster_url, backdrop_url, related)
 }
 
-fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
+fn media_detail_inner(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    kind: &str,
+    id: &str,
+) -> Response {
+    media_detail_with_douban(state, viewer, kind, id, None)
+}
+
+fn media_detail_with_douban(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    kind: &str,
+    id: &str,
+    douban_id: Option<&str>,
+) -> Response {
     let media_kind = match kind {
         "movie" => domain::MediaKind::Movie,
         "tv" => domain::MediaKind::Tv,
@@ -275,14 +302,17 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
 
     let (posters, backdrops, poster_url, backdrop_url, related) =
         fetch_images_and_related(catalog, media_kind, &tmdb_id);
-    let library_links = find_library_links(&state.store.as_ref(), &media);
+    let library_links = find_library_links(state, viewer, &media);
     let cast = fetch_cast(&meta);
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
-    let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id);
+    let tv_panorama = (media_kind == domain::MediaKind::Tv)
+        .then(|| panorama::panorama_for_tmdb_tv(state, viewer, &tmdb_id).2);
+    let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id, tv_panorama.as_ref());
     let meta = meta.unwrap_or_default();
+    let brands = detail_brands(&meta);
 
     ok(json!({
-        "item": detail_item_json(&media, poster_url, backdrop_url),
+        "item": detail_item_json(&media, poster_url, backdrop_url, douban_id),
         "info": {
             "overview": meta.overview,
             "rating": meta.rating,
@@ -295,6 +325,7 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
             "language": "",
             "released": released,
             "aliases": [],
+            "brands": brands,
         },
         "seasons": seasons,
         "videos": [],
@@ -333,6 +364,7 @@ fn empty_detail(kind: &str, id: &str) -> Response {
             "language": "",
             "released": "",
             "aliases": [],
+            "brands": [],
         },
         "videos": [],
         "backdrops": [],
@@ -397,10 +429,14 @@ fn detail_item_json(
     media: &domain::Media,
     poster_url: Option<String>,
     backdrop_url: Option<String>,
+    douban_id: Option<&str>,
 ) -> Value {
     let mut item = item_json(media, None);
     item["poster_url"] = json!(poster_url);
     item["backdrop_url"] = json!(backdrop_url);
+    if let Some(did) = douban_id {
+        item["douban_id"] = json!(did);
+    }
     item
 }
 

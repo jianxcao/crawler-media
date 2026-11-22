@@ -212,6 +212,17 @@ pub(crate) fn scrape_movie_fanart(
     }
 }
 
+fn stored_brands_from_meta(meta: &media::ItemMeta) -> Vec<::store::metadata::StoredBrand> {
+    meta.brands
+        .iter()
+        .map(|brand| ::store::metadata::StoredBrand {
+            name: brand.name.clone(),
+            logo_path: brand.logo_path.clone(),
+            kind: brand.kind.to_string(),
+        })
+        .collect()
+}
+
 /// Persist the display facts a Scrape observed (rating, release date, studio, logo).
 ///
 /// They are written with the adopted metadata and the affected cards are reduced in the
@@ -226,11 +237,13 @@ pub(crate) fn record_scraped_display(
         .filter(|&count| count >= 5)
         .and_then(|_| meta.rating.as_ref().and_then(|raw| raw.parse::<f64>().ok()));
     let locale = metadata_locale(state);
+    let studio_logos = stored_brands_from_meta(meta);
     let display = ::store::metadata::ScrapedDisplay {
         rating,
         release_date: meta.release_date.as_deref(),
         studio: meta.studios.first().map(String::as_str),
         studio_logo: meta.studio_logo.as_deref(),
+        studio_logos: &studio_logos,
     };
     if let Err(error) = state
         .store
@@ -269,11 +282,13 @@ pub(crate) fn record_scraped_display_meta(
         .filter(|&count| count >= 5)
         .and_then(|_| nfo.rating.as_ref().and_then(|raw| raw.parse::<f64>().ok()));
     let locale = metadata_locale(state);
+    let studio_logos = stored_brands_from_meta(meta);
     let display = ::store::metadata::ScrapedDisplay {
         rating,
         release_date: nfo.premiered.as_deref(),
         studio: nfo.studios.first().map(String::as_str),
         studio_logo: nfo.studio_logo.as_deref(),
+        studio_logos: &studio_logos,
     };
     if let Err(error) = state
         .store

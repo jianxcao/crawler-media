@@ -87,7 +87,10 @@ async fn probe_metadata_inner(
     let media_duration_ms =
         match super::tracks::probe_tracks_and_store(mgr, unit, &source_version, control).await {
             Ok(duration_ms) => duration_ms,
-            Err(super::tracks::TrackProbeError::Failed) => return MetadataOutcome::Failed,
+            Err(
+                super::tracks::TrackProbeError::Failed
+                | super::tracks::TrackProbeError::FailedWithReason(_),
+            ) => return MetadataOutcome::Failed,
             Err(super::tracks::TrackProbeError::Retry) => return MetadataOutcome::Retry,
         };
     if unit.kind != MediaKind::Tv {

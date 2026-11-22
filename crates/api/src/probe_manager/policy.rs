@@ -121,7 +121,9 @@ pub(super) fn assess_probe_need(
         store,
         origin,
         &ledger_id,
+        &source_version,
         &expected_key,
+        metadata_valid,
         fingerprint_enabled,
         intro_missing,
         outro_missing,
@@ -141,11 +143,14 @@ pub(super) fn assess_probe_need(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn retry_gate(
     store: &Store,
     origin: ProbeRequestOrigin,
     ledger_id: &str,
+    source_version: &str,
     context_key: &str,
+    metadata_valid: bool,
     fingerprint_enabled: bool,
     intro_missing: bool,
     outro_missing: bool,
@@ -171,7 +176,24 @@ fn retry_gate(
         origin,
         ProbeRequestOrigin::ManualRetry | ProbeRequestOrigin::ManualRefresh
     );
-    if manual || !fingerprint_enabled || !outro_missing || intro_missing {
+    if manual {
+        return ProbeRequestResult::Complete;
+    }
+    if !metadata_valid {
+        let meta_key = store::ProbeStageKey {
+            ledger_id: ledger_id.to_string(),
+            context_key: source_version.to_string(),
+            stage: store::ProbeStage::Metadata,
+        };
+        if let Ok(Some(stage)) = store.get_probe_stage(&meta_key)
+            && stage.status == store::ProbeStageStatus::Failed
+            && stage.failure_count >= 5
+        {
+            return ProbeRequestResult::Exhausted;
+        }
+        return ProbeRequestResult::Complete;
+    }
+    if !fingerprint_enabled || !outro_missing || intro_missing {
         return ProbeRequestResult::Complete;
     }
     let key = store::ProbeStageKey {

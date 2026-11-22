@@ -72,6 +72,7 @@ impl Runner for StateRunner {
             JobKind::Scrape => crate::watch_scrape::run(&self.state),
             JobKind::CheckIn => crate::check_in::run(&self.state),
             JobKind::CatalogRefresh => crate::catalog_refresh::run(&self.state, &job.payload),
+            JobKind::DiscoverRefresh => crate::discover_refresh::run(&self.state),
             // 维护任务：策略解析、固定 cutoff、批间取消检查与报告都在
             // `maintenance::run` 里。它只在**不持 Queue 锁**的正式 job_loop 路径执行。
             JobKind::DatabaseMaintenance

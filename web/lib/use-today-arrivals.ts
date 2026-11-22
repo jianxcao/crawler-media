@@ -9,9 +9,11 @@ import {
   type TodaySubscriptionArrival,
 } from "@/lib/api/subscriptions";
 import {
+  buildUpcomingScheduleDays,
   groupTodayArrivals,
   todayArrivalPresentation,
   type TodayArrivalGroup,
+  type UpcomingScheduleDay,
 } from "@/lib/subscription-ui";
 import type { SubscriptionFilter } from "@/lib/subscription-overview";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -116,5 +118,36 @@ export function useTodayArrivalGroups(
     });
     const nearest = Math.min(...groups.map((group) => group.daysAhead));
     return groups.filter((group) => group.daysAhead === nearest);
+  }, [arrivals, mediaKind, now, tasks]);
+}
+
+/** 未来 7 天追剧更新排期（按播出日聚合），与今日入库动态并排互补。 */
+export function useUpcomingScheduleDays(
+  arrivals: TodaySubscriptionArrival[] | null,
+  mediaKind: SubscriptionFilter,
+  tasks: DownloadTask[],
+): UpcomingScheduleDay[] {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return useMemo(() => {
+    const taskByHash = new Map(
+      tasks.map((task) => [task.info_hash?.toLowerCase() ?? "", task]),
+    );
+    const presented = (arrivals ?? [])
+      .filter((arrival) => mediaKind === "all" || arrival.media_kind === mediaKind)
+      .map((arrival) => {
+        const task = arrival.info_hash
+          ? taskByHash.get(arrival.info_hash.toLowerCase())
+          : undefined;
+        return {
+          arrival,
+          presentation: todayArrivalPresentation(arrival, task, now),
+        };
+      });
+    return buildUpcomingScheduleDays(presented);
   }, [arrivals, mediaKind, now, tasks]);
 }

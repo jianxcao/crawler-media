@@ -155,6 +155,7 @@ export function DetailBackdropSlideshow({
         key={`b:${bottom}`}
         src={bottom}
         alt=""
+        loading="eager"
         draggable={false}
         className="absolute inset-0 size-full object-cover"
       />
@@ -163,6 +164,7 @@ export function DetailBackdropSlideshow({
           key={`t:${top}`}
           src={top}
           alt=""
+          loading="eager"
           draggable={false}
           className={`absolute inset-0 size-full object-cover ${
             topOn ? "opacity-100" : "opacity-0"

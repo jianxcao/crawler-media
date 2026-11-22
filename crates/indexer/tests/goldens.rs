@@ -399,8 +399,8 @@ fn all_builtin_profiles_load_and_have_core_fields() {
             profile.search.path.starts_with('/'),
             "profile {id} 的 search.path 应为绝对路径"
         );
-        // API 框架（mteam）用 JSON 解析，无 HTML selector；NexusPHP 必须有。
-        if id != "mteam" {
+        // API 框架用 JSON 解析，无强制 HTML selector；NexusPHP 必须有。
+        if profile.framework != indexer::Framework::Api {
             assert!(
                 profile.fields.title.is_some() && profile.fields.enclosure.is_some(),
                 "profile {id} 必须有 title + enclosure 字段"

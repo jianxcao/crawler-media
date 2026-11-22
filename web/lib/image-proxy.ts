@@ -6,7 +6,8 @@ export type ImageVariant =
   | "poster-card"
   | "wall-tile"
   | "gallery-tile"
-  | "wall-screen";
+  | "wall-screen"
+  | "brand-logo";
 
 /**
  * 海报墙格子按主图比例挑派生预设：预设是等比缩放的外接框，横版封面（其他库
@@ -19,6 +20,23 @@ export function cardVariantFor(aspect: number | undefined): ImageVariant {
 
 function appendVariant(url: string, variant: ImageVariant): string {
   return `${url}${url.includes("?") ? "&" : "?"}variant=${variant}`;
+}
+
+function setVariantParam(url: string, variant: ImageVariant): string {
+  const hashIdx = url.indexOf("#");
+  const base = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
+  const hash = hashIdx >= 0 ? url.slice(hashIdx) : "";
+  const qIdx = base.indexOf("?");
+  if (qIdx < 0) {
+    return `${base}?variant=${variant}${hash}`;
+  }
+  const pathname = base.slice(0, qIdx);
+  const query = base.slice(qIdx + 1);
+  const parts = query
+    .split("&")
+    .filter((part) => part.length > 0 && !part.startsWith("variant="));
+  parts.push(`variant=${variant}`);
+  return `${pathname}?${parts.join("&")}${hash}`;
 }
 
 /**
@@ -34,7 +52,8 @@ function appendVariant(url: string, variant: ImageVariant): string {
 export function cachedImageUrl(url: string, variant?: ImageVariant): string {
   if (!/^https?:\/\//i.test(url)) return url;
   const path = `images/proxy?url=${encodeURIComponent(url)}`;
-  return resolveRequestUrl(variant ? appendVariant(path, variant) : path);
+  const target = variant ? appendVariant(path, variant) : path;
+  return resolveRequestUrl ? (resolveRequestUrl(target) ?? "") : target;
 }
 
 /**
@@ -47,8 +66,42 @@ export function imageUrl(url: string | null, variant?: ImageVariant): string {
   if (/^https?:\/\//i.test(url)) return cachedImageUrl(url, variant);
   // 当前只有 metadata 资产路由支持本地派生；文件缩略图等其它相对接口保持原样。
   const resolved =
-    variant && /^\/?images\/assets\//.test(url) ? appendVariant(url, variant) : url;
-  return resolveRequestUrl(resolved);
+    variant && /^\/?images\/assets\//.test(url) ? setVariantParam(url, variant) : url;
+  return resolveRequestUrl ? (resolveRequestUrl(resolved) ?? "") : resolved;
+}
+
+/**
+ * 出品方 / 播出平台 Logo 专用地址解析：统一打上 `variant=brand-logo`，由后端像素归一化
+ * （剥离白底框、紧凑裁边、保留品牌原色并提亮深色字标为纯白）。
+ * 兼容已被上层 `cachedImageUrl` / `imageUrl` 预包装过的 `/api/v1/images/proxy?url=...` 地址，
+ * 幂等追加或替换 `variant=brand-logo`，避免二次嵌套代理。
+ */
+export function brandLogoUrl(url: string | null | undefined): string {
+  const trimmed = url?.trim();
+  if (!trimmed) return "";
+
+  const proxyBase = resolveRequestUrl ? resolveRequestUrl("images/proxy") : "";
+  if (proxyBase && (trimmed === proxyBase || trimmed.startsWith(`${proxyBase}?`))) {
+    return setVariantParam(trimmed, "brand-logo");
+  }
+  if (/^\/?api\/v\d+\/images\/proxy(?:\?|$)/.test(trimmed)) {
+    const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+    return setVariantParam(normalized, "brand-logo");
+  }
+  if (/^\/?images\/proxy(?:\?|$)/.test(trimmed)) {
+    const resolved = resolveRequestUrl ? resolveRequestUrl(trimmed) : trimmed;
+    return setVariantParam(resolved, "brand-logo");
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return cachedImageUrl(trimmed, "brand-logo");
+  }
+  if (/^\/?api\/v\d+\//.test(trimmed)) {
+    const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+    return /^\/api\/v\d+\/images\/assets\//.test(normalized)
+      ? setVariantParam(normalized, "brand-logo")
+      : normalized;
+  }
+  return imageUrl(trimmed, "brand-logo");
 }
 
 /**

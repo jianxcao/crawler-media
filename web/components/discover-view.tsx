@@ -180,7 +180,7 @@ export function DiscoverView({
     } else {
       fetchDiscoveryPage(mediaType, source, { signal: controller.signal })
         .then((data) => {
-          if (data.sections.every((s) => !s.error)) {
+          if (data.sections.some((s) => !s.error && s.items.length > 0)) {
             pageCache.set(cacheKey, data);
           } else {
             pageCache.delete(cacheKey);

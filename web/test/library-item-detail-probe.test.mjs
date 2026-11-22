@@ -51,7 +51,7 @@ test('item probe button submits without an episode selection after effect setup-
     '@/lib/backdrop': { useBackdrop: () => ({ setOverrideBackdrop: noop }) },
     '@/lib/ui-prefs': { useTheme: () => ({ id: 'default' }) },
     '@/lib/use-media-query': { useIsMobile: () => false },
-    '@/lib/image-proxy': { cachedImageUrl: () => '' },
+    '@/lib/image-proxy': { cachedImageUrl: () => '', imageUrl: () => '' },
   };
   const entryUrl = new URL('../components/library-item-detail-view.tsx', import.meta.url);
   const real = new Set(['@/lib/library-item-format', '@/lib/format']);

@@ -248,3 +248,74 @@ fn douban_cache_does_not_collide_with_tmdb() {
     assert_eq!(tmdb_hits.lock().unwrap().len(), 1);
     assert_eq!(douban_hits.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn suggest_entry_with_episode_count_is_classified_as_tv_not_movie() {
+    let dir = tempfile::tempdir().unwrap();
+    let query_path =
+        "/j/subject_suggest?q=%E4%B8%A4%E4%BA%AC%E5%8D%81%E4%BA%94%E6%97%A5".to_string();
+    let payload = r#"[{
+        "id": "35235320",
+        "title": "两京十五日",
+        "sub_title": "15 Days in Two Capitals",
+        "year": "2026",
+        "img": "https://img1.doubanio.com/view/photo/s_ratio_poster/public/p2910000001.jpg",
+        "type": "movie",
+        "episode": "26"
+    }]"#;
+    let douban = Douban::new(
+        FakeHttp {
+            bodies: HashMap::from([(query_path, payload.into())]),
+            hits: Arc::new(Mutex::new(Vec::new())),
+        },
+        &dir.path().join("catalog.db"),
+    )
+    .unwrap();
+
+    let tv_hits = douban.search_tv("两京十五日").unwrap();
+    assert_eq!(tv_hits.len(), 1);
+    assert_eq!(tv_hits[0].media.douban_id.as_deref(), Some("35235320"));
+    assert_eq!(tv_hits[0].media.title, "两京十五日");
+    assert_eq!(tv_hits[0].media.kind, MediaKind::Tv);
+    assert_eq!(tv_hits[0].media.year, Some(2026));
+
+    let movie_hits = douban.search_movie("两京十五日").unwrap();
+    assert!(
+        movie_hits.is_empty(),
+        "TV suggest entry with episode count must not appear in search_movie"
+    );
+}
+
+#[test]
+fn detail_fetches_rexxar_mobile_json_and_extracts_tv_kind_and_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let rexxar_path = "/rexxar/api/v2/movie/35235320?for_mobile=1".to_string();
+    let payload = r#"{
+        "id": "35235320",
+        "title": "两京十五日",
+        "original_title": "两京十五日",
+        "year": "2026",
+        "type": "movie",
+        "subtype": "tv",
+        "episodes_count": 26,
+        "aka": ["15 Days in Two Capitals", "两京"]
+    }"#;
+    let douban = Douban::new(
+        FakeHttp {
+            bodies: HashMap::from([(rexxar_path.clone(), payload.into())]),
+            hits: hits.clone(),
+        },
+        &dir.path().join("catalog.db"),
+    )
+    .unwrap();
+
+    let media = douban.detail("35235320").unwrap().expect("resolved media");
+    assert_eq!(hits.lock().unwrap().as_slice(), &[rexxar_path]);
+    assert_eq!(media.kind, MediaKind::Tv);
+    assert_eq!(media.title, "两京十五日");
+    assert_eq!(media.original_title, None);
+    assert_eq!(media.year, Some(2026));
+    assert_eq!(media.douban_id.as_deref(), Some("35235320"));
+    assert_eq!(media.aliases, vec!["15 Days in Two Capitals", "两京"]);
+}

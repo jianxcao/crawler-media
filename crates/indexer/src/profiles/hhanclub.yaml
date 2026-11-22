@@ -5,6 +5,13 @@ render: false
 search:
   path: /torrents.php
   query_param: search
+categories:
+  movie: ["401"]
+  tv: ["402", "403"]
+  documentary: ["404"]
+  anime: ["405"]
+  music: ["406", "408"]
+  other: ["407", "409"]
 list:
   item: "div.torrent-table-sub-info"
 fields:

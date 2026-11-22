@@ -228,6 +228,7 @@ impl ProbeManager {
             }
         };
         for job in jobs {
+            self.unmark_job_paused_exempt(&job.id);
             if let Err(error) = self.store.finish_probe_job(
                 &job.id,
                 job.failed == 0 && job.partial == 0,

@@ -9,7 +9,6 @@ import {
   ActivityIcon,
   BookmarkIcon,
   ChevronRightIcon,
-  ClockIcon,
   DatabaseIcon,
   FolderSyncIcon,
   GearIcon,
@@ -124,11 +123,6 @@ export function NetflixMyPage() {
                 Icon={FolderSyncIcon}
                 label="媒体整理"
                 onClick={() => navigate("/transfers")}
-              />
-              <MyRow
-                Icon={ClockIcon}
-                label="定时任务"
-                onClick={() => navigate("/jobs")}
               />
               <MyRow
                 Icon={DatabaseIcon}

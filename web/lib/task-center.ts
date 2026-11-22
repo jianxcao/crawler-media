@@ -12,8 +12,9 @@
 /** 任务视角下的状态切片；查询参数使用同一集合，保证深链不会漂移。 */
 export const TASK_CENTER_VIEWS = [
   "all",
-  "attention",
   "active",
+  "attention",
+  "scheduled",
   "history",
 ] as const;
 

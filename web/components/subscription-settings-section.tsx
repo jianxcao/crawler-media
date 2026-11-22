@@ -82,18 +82,47 @@ export function PipelineHealthPanel() {
   const [health, setHealth] = useState<PipelineHealth | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const reqIdRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const lastStartedAtRef = useRef(0);
+  const mountedRef = useRef(true);
 
-  const reload = useCallback(() => {
+  const reload = useCallback((force = false) => {
+    const forced = force === true;
+    const now = Date.now();
+    if (!forced && (inFlightRef.current || now - lastStartedAtRef.current < 1500)) {
+      return;
+    }
+    const reqId = ++reqIdRef.current;
+    inFlightRef.current = true;
+    lastStartedAtRef.current = now;
     setFailed(false);
     setBusy(true);
     checkSubscriptionAutomationReadiness()
-      .then(setHealth)
-      .catch(() => setFailed(true))
-      .finally(() => setBusy(false));
+      .then((next) => {
+        if (!mountedRef.current || reqId !== reqIdRef.current) return;
+        setHealth(next);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (!mountedRef.current || reqId !== reqIdRef.current) return;
+        setFailed(true);
+      })
+      .finally(() => {
+        if (reqId !== reqIdRef.current) return;
+        inFlightRef.current = false;
+        if (mountedRef.current) {
+          setBusy(false);
+        }
+      });
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     reload();
+    return () => {
+      mountedRef.current = false;
+    };
   }, [reload]);
 
   // 修完配置回到本页自动重检：修复 → 回来 → 变绿的反馈闭环
@@ -125,7 +154,7 @@ export function PipelineHealthPanel() {
         <h3 className="text-body font-semibold text-white/90">订阅链路体检</h3>
         <button
           type="button"
-          onClick={reload}
+          onClick={() => reload(true)}
           disabled={busy}
           className="btn-glass flex items-center gap-1.5 px-3 py-1.5 text-sub font-medium disabled:opacity-60"
         >

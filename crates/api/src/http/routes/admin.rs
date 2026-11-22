@@ -242,6 +242,10 @@ pub(super) fn admin_metadata_routes() -> Router<ApiState> {
         // ledger: 全局台账查看与删除是敏感文件操作，仅管理员可用
         .route("/ledger", get(library_admin::list_ledger))
         .route(
+            "/ledger/transfers",
+            get(library_admin::transfers::list_transfers),
+        )
+        .route(
             "/ledger/{id}",
             axum::routing::delete(library_admin::delete_ledger_row),
         )
@@ -283,6 +287,10 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
             "/settings/probe/remote-reads",
             get(probe_settings::get_remote_reads).put(probe_settings::put_remote_reads),
         )
+        .route("/probe/status", get(probe_settings::status))
+        .route("/probe/pause", post(probe_settings::pause))
+        .route("/probe/resume", post(probe_settings::resume))
+        .route("/probe/cancel", post(probe_settings::cancel))
         .route("/notify/config", put(notify::put_config))
         .route("/notify/test", post(notify::test))
         .route(

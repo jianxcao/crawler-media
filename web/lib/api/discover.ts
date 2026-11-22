@@ -23,9 +23,10 @@ import type {
 // 组件引用的导出签名与 DTO 转换函数（search.ts 复用），其余拉取函数返回空数据。
 
 interface MediaLibraryStatusDto {
-  media_item_id: string;
-  library_count: number;
-  file_count: number;
+  owned?: boolean;
+  media_item_id?: string;
+  library_count?: number;
+  file_count?: number;
 }
 
 export interface DiscoveredTitleDto {
@@ -71,6 +72,7 @@ export interface DiscoveryPageSection {
   presentation: DiscoveryPresentation;
   previewLimit: number;
   supportsFullListing: boolean;
+  items: MediaItem[];
   error?: SectionErrorInfo;
 }
 
@@ -144,6 +146,12 @@ export interface MediaCastMember {
   tmdbPersonId?: number;
 }
 
+export interface MediaBrand {
+  name: string;
+  logo_url: string | null;
+  kind?: "network" | "studio";
+}
+
 export interface MediaDetailInfo {
   directors: string[];
   directorCredits: MediaCastMember[];
@@ -152,6 +160,7 @@ export interface MediaDetailInfo {
   language: string;
   released: string;
   network?: string;
+  brands?: MediaBrand[];
   aliases: string[];
   sourceUrl?: string;
 }
@@ -173,11 +182,20 @@ export interface MediaVideo {
   watchUrl: string;
 }
 
+export type EpisodeAvailabilityStatus =
+  | "in_library"
+  | "downloading"
+  | "file_missing"
+  | "missing"
+  | "unaired";
+
 export interface MediaSeasonOverview {
   season_number: number;
   name?: string | null;
   episode_count?: number | null;
   air_date?: string | null;
+  owned_episode_count?: number;
+  downloading_episode_count?: number;
 }
 
 export interface MediaEpisodeDetail {
@@ -186,6 +204,11 @@ export interface MediaEpisodeDetail {
   overview?: string | null;
   still_url?: string | null;
   air_date?: string | null;
+  status?: EpisodeAvailabilityStatus;
+  owned?: boolean;
+  library_id?: string | null;
+  media_item_id?: string | null;
+  resolution?: string | null;
 }
 
 export interface MediaDetailData {
@@ -217,13 +240,26 @@ export interface DiscoveredPersonDetailsData {
 // DTO → 渲染模型转换（search.ts 复用，保持原样）
 // ---------------------------------------------------------------------------
 
-function toLibraryStatus(dto: MediaLibraryStatusDto | null | undefined): MediaLibraryStatus | null {
-  if (!dto) return null;
-  return {
-    mediaItemId: dto.media_item_id,
-    libraryCount: dto.library_count,
-    fileCount: dto.file_count,
-  };
+function toLibraryStatus(
+  dto: MediaLibraryStatusDto | null | undefined,
+  inLibrary?: boolean | null,
+  fallbackId = "",
+): MediaLibraryStatus | null {
+  if (dto) {
+    if (dto.owned === false) return null;
+    const libraryCount = dto.library_count ?? (dto.owned ? 1 : 0);
+    const fileCount = dto.file_count ?? (dto.owned ? 1 : 0);
+    if (libraryCount <= 0 && fileCount <= 0 && !dto.owned) return null;
+    return {
+      mediaItemId: dto.media_item_id ?? fallbackId,
+      libraryCount,
+      fileCount,
+    };
+  }
+  if (inLibrary) {
+    return { mediaItemId: fallbackId, libraryCount: 1, fileCount: 1 };
+  }
+  return null;
 }
 
 /** 片单与详情中的条目字段完整；空值兜底只覆盖上游偶发缺失，不猜来源身份。 */
@@ -277,6 +313,21 @@ export function collectionToRow(collection: DiscoveredCollectionData): MediaRowD
   };
 }
 
+interface DiscoverItemDto {
+  id: string;
+  title: string;
+  year?: number | null;
+  kind: MediaType;
+  tmdb_id?: string | null;
+  douban_id?: string | null;
+  poster_url?: string | null;
+  backdrop_url?: string | null;
+  rating?: number | null;
+  overview?: string | null;
+  in_library?: boolean | null;
+  library_status?: MediaLibraryStatusDto | null;
+}
+
 interface DiscoverEnvelope {
   ok: boolean;
   data: {
@@ -288,17 +339,7 @@ interface DiscoverEnvelope {
       presentation?: "hero" | "ranked-row" | "poster-row";
       supports_full_listing?: boolean;
       error?: { code?: string; message?: string } | null;
-      items: Array<{
-        id: string;
-        title: string;
-        year?: number | null;
-        kind: MediaType;
-        tmdb_id?: string | null;
-        poster_url?: string | null;
-        backdrop_url?: string | null;
-        rating?: number | null;
-        overview?: string | null;
-      }>;
+      items: DiscoverItemDto[];
     }>;
   };
 }
@@ -307,7 +348,7 @@ const popularCache = new Map<string, DiscoveredCollectionData>();
 
 function toMediaItem(
   mediaType: MediaType,
-  row: DiscoverEnvelope["data"]["sections"][0]["items"][0],
+  row: DiscoverItemDto,
   provider: MediaSource = "tmdb",
 ): MediaItem {
   const isDouban = provider === "douban";
@@ -331,16 +372,17 @@ function toMediaItem(
     overview: row.overview ?? "",
     posterUrl: cachedImageUrl(row.poster_url ?? ""),
     backdropUrl: row.backdrop_url ? cachedImageUrl(row.backdrop_url) : undefined,
+    libraryStatus: toLibraryStatus(row.library_status, row.in_library, row.id),
   };
 }
 
-/** 热门编排：GET /discover/{movie|tv}（可选 ?source=tmdb|douban）。 */
+/** 热门编排：GET /discover/{movie|tv}?source=tmdb|douban（始终显式单源隔离）。 */
 export async function fetchDiscoveryPage(
   mediaType: MediaType,
   provider: MediaSource = "tmdb",
   init?: RequestInit,
 ): Promise<DiscoveryPageData> {
-  const suffix = provider !== "tmdb" ? `?source=${provider}` : "";
+  const suffix = `?source=${encodeURIComponent(provider)}`;
   const envelope = await request<DiscoverEnvelope>(`/discover/${mediaType}${suffix}`, init);
   const sections = (envelope.data.sections ?? []).map((section, index) => {
     const mapped = (section.items ?? []).map((row) => toMediaItem(mediaType, row, provider));
@@ -381,6 +423,7 @@ export async function fetchDiscoveryPage(
       presentation,
       previewLimit: Math.max(mapped.length, 20),
       supportsFullListing,
+      items: mapped,
       error: sectionError,
     } satisfies DiscoveryPageSection;
   });
@@ -410,20 +453,20 @@ export async function browseDiscoveryCollection(
   // collectionRef: tmdb:movie:popular | tmdb:tv:top-rated | douban:movie:top-rated
   const [provider, mediaType, id] = collectionRef.split(":");
   const kind: MediaType = mediaType === "tv" ? "tv" : "movie";
-  const sourceSuffix = provider === "douban" ? "&source=douban" : "";
+  const resolvedSource: MediaSource = provider === "douban" ? "douban" : "tmdb";
   const envelope = await request<CollectionEnvelope>(
-    `/discover/${kind}/collection/${id}?page=${page}&page_size=20${sourceSuffix}`,
+    `/discover/${kind}/collection/${id}?page=${page}&page_size=20&source=${resolvedSource}`,
     init,
   );
   const data = envelope.data;
   return {
     collectionRef,
-    provider: provider === "douban" ? "douban" : "tmdb",
+    provider: resolvedSource,
     mediaType: kind,
     name: data.title ?? data.collection_id,
     isRanked: data.collection_id === "top-rated",
     supportsFullListing: true,
-    items: (data.items ?? []).map((row) => toMediaItem(kind, row, provider as MediaSource)),
+    items: (data.items ?? []).map((row) => toMediaItem(kind, row, resolvedSource)),
     returnedCount: (data.items ?? []).length,
     truncated: false,
     page: data.page ?? page,
@@ -439,17 +482,7 @@ interface CollectionEnvelope {
     kind: MediaType;
     collection_id: string;
     title?: string;
-    items: Array<{
-      id: string;
-      title: string;
-      year?: number | null;
-      kind: MediaType;
-      tmdb_id?: string | null;
-      poster_url?: string | null;
-      backdrop_url?: string | null;
-      rating?: number | null;
-      overview?: string | null;
-    }>;
+    items: DiscoverItemDto[];
     page: number;
     total_pages: number;
     total_results: number;
@@ -471,14 +504,16 @@ interface GenreEnvelope {
   data: { kind: MediaType; genres: DiscoveryGenre[] };
 }
 
-/** 六维筛选：GET /discover/{kind}/filtered（TMDB discover）。 */
+/** 六维筛选：GET /discover/{kind}/filtered（TMDB discover 单源隔离）。 */
 export async function fetchFilteredDiscovery(
   mediaType: MediaType,
   filters: DiscoveryFilters,
   page: number,
   init?: RequestInit,
+  provider: MediaSource = "tmdb",
 ): Promise<FilteredDiscoveryData> {
   const query = new URLSearchParams();
+  query.set("source", provider);
   if (filters.genreIds.length > 0) query.set("genres", filters.genreIds.join(","));
   if (filters.originCountry) query.set("country", filters.originCountry);
   if (filters.year) query.set("year", String(filters.year));
@@ -488,7 +523,7 @@ export async function fetchFilteredDiscovery(
   query.set("page", String(page));
   const suffix = `?${query}`;
   const envelope = await request<FilteredEnvelope>(`/discover/${mediaType}/filtered${suffix}`, init);
-  const items = (envelope.data.items ?? []).map((row) => toMediaItem(mediaType, row));
+  const items = (envelope.data.items ?? []).map((row) => toMediaItem(mediaType, row, provider));
   const totalPages = envelope.data.total_pages ?? (items.length > 0 ? 1 : 0);
   const totalResults = envelope.data.total_results ?? items.length;
   const hasMore = envelope.data.has_more ?? (page < totalPages);
@@ -510,14 +545,7 @@ interface FilteredEnvelope {
     total_pages?: number;
     total_results?: number;
     has_more?: boolean;
-    items: Array<{
-      id: string;
-      title: string;
-      year?: number | null;
-      kind: MediaType;
-      tmdb_id?: string | null;
-      poster_url?: string | null;
-    }>;
+    items: DiscoverItemDto[];
   };
 }
 
@@ -564,6 +592,7 @@ interface MediaDetailEnvelope {
       language?: string;
       released?: string;
       aliases?: string[];
+      brands?: Array<{ name: string; logo_url?: string | null; kind?: string | null }>;
     };
     videos?: Array<Record<string, unknown>>;
     backdrops?: Array<{ preview_url: string; full_url: string; width: number; height: number }>;
@@ -583,12 +612,7 @@ interface MediaDetailEnvelope {
       library_name: string;
       media_item_id: string;
     }>;
-    seasons?: Array<{
-      season_number: number;
-      name?: string | null;
-      episode_count?: number | null;
-      air_date?: string | null;
-    }>;
+    seasons?: MediaSeasonOverview[];
   };
 }
 
@@ -657,6 +681,15 @@ function toMediaDetailData(
       language: data.info.language ?? "",
       released: data.info.released ?? "",
       aliases: data.info.aliases ?? [],
+      brands: (data.info.brands ?? [])
+        .map((b) => {
+          const name = (b?.name ?? "").trim();
+          if (!name) return null;
+          const logo = b.logo_url?.trim() || null;
+          const kind = b.kind === "network" || b.kind === "studio" ? b.kind : undefined;
+          return { name, logo_url: logo, ...(kind ? { kind } : {}) };
+        })
+        .filter((b): b is MediaBrand => b !== null),
     },
     videos: [],
     backdrops,

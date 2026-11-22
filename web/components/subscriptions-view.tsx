@@ -40,7 +40,12 @@ import {
 } from "@/lib/subscription-ui";
 import { useIsMobile } from "@/lib/use-media-query";
 import { useScrollRestoration } from "@/lib/use-scroll-restoration";
-import { useTodayArrivalGroups, useTodaySubscriptionArrivals } from "@/lib/use-today-arrivals";
+import { describeSubscriptionHealthBanner } from "@/lib/subscription-form";
+import {
+  useTodayArrivalGroups,
+  useTodaySubscriptionArrivals,
+  useUpcomingScheduleDays,
+} from "@/lib/use-today-arrivals";
 import { imageUrl } from "@/lib/image-proxy";
 
 const rememberedVisibleCounts: Record<SubscriptionKind, number> = {
@@ -85,6 +90,12 @@ const todayArrivalStyle: Record<
     time: "text-[var(--ok)]",
     pulse: false,
   },
+  已入库: {
+    node: "border-[var(--ok)]/80 bg-[var(--ok)] shadow-[0_0_13px_rgba(74,222,128,0.42)]",
+    status: "border-[var(--ok)]/25 bg-[var(--ok)]/14 text-[var(--ok)]",
+    time: "text-[var(--ok)]",
+    pulse: false,
+  },
 };
 
 /**
@@ -123,19 +134,17 @@ export function SubscriptionsView() {
   const [ruleSets, setRuleSets] = useState<RuleSet[]>([]);
   // 链路体检整体为 error 时顶部亮警示横幅（提醒推到用户在的地方，
   // 全景与修复入口在 设置 → 概览）。拉取失败静默——横幅只是提示层
-  const [healthIssue, setHealthIssue] = useState<{ libraryErrors: number } | null>(null);
+  const [healthBanner, setHealthBanner] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     setFailed(false);
     void refresh().then((ok) => setFailed(!ok));
     if (canManageSubscriptions) {
       void checkSubscriptionAutomationReadiness()
-        .then((h) =>
-          setHealthIssue(h.status === "error" ? { libraryErrors: h.error_count } : null),
-        )
-        .catch(() => setHealthIssue(null));
+        .then((h) => setHealthBanner(describeSubscriptionHealthBanner(h)))
+        .catch(() => setHealthBanner(null));
     } else {
-      setHealthIssue(null);
+      setHealthBanner(null);
     }
   }, [canManageSubscriptions, refresh]);
 
@@ -228,14 +237,11 @@ export function SubscriptionsView() {
 
       {/* 链路警示横幅：只在体检整体为 error 时出现——订阅不会丢（工单退避
           重试），但在修好之前无法自动下载入库。点击进设置概览看体检全景与修复 */}
-      {canManageSubscriptions && healthIssue && (
+      {canManageSubscriptions && healthBanner && (
         <Link to={"/settings/overview"}
           className="mx-6 mt-4 block rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sub leading-relaxed text-amber-200 transition hover:bg-amber-500/15 max-md:mx-4"
         >
-          {healthIssue.libraryErrors > 0
-            ? `${healthIssue.libraryErrors} 个媒体库的入库链路有问题，相关订阅暂时无法自动下载入库（已下达的任务会自动重试）`
-            : "订阅链路尚未就绪（缺少可用的资源站点或下载器），订阅暂时只能记录意愿"}
-          ——点击查看体检详情与修复入口 →
+          {healthBanner}——点击查看体检详情与修复入口 →
         </Link>
       )}
 
@@ -446,10 +452,17 @@ function TodayArrivalsSection({
   // 分组 / 排序 / 最近一天收敛与分钟级文案刷新都在共享 hook 里
   //（见 lib/use-today-arrivals.ts，与 Netflix 布局的预告行同一份逻辑）
   const rows = useTodayArrivalGroups(arrivals, mediaType, downloadTasks);
+  const upcomingDays = useUpcomingScheduleDays(arrivals, mediaType, downloadTasks);
 
   const daysAhead = rows[0]?.daysAhead ?? 0;
   const isUpcoming = rows.length > 0 && daysAhead > 0;
-  const episodeCount = rows.reduce((total, row) => total + row.episodeCount, 0);
+  const todayRows = isUpcoming ? [] : rows;
+  const episodeCount = todayRows.reduce((total, row) => total + row.episodeCount, 0);
+  const upcomingEpisodeCount = upcomingDays.reduce(
+    (sum, d) => sum + d.items.reduce((s, item) => s + item.episodeCount, 0),
+    0,
+  );
+  const hasAnyRows = todayRows.length > 0 || upcomingDays.length > 0;
 
   return (
     <section
@@ -483,21 +496,21 @@ function TodayArrivalsSection({
             </span>
             <div className="min-w-0">
               <h3 id="today-arrivals-title" className="text-ui font-semibold text-white/92">
-                {isUpcoming ? "即将入库" : "今日可能入库"}
+                {todayRows.length > 0 ? "今日动态与追剧日历" : isUpcoming ? "追剧更新日历" : "今日可能入库"}
               </h3>
               <p className="mt-0.5 truncate text-caption text-white/38">
-                {isUpcoming
-                  ? "今天没有更新，这是最近的一次"
+                {upcomingDays.length > 0
+                  ? `实时追踪下载入库 · 未来 7 天共 ${upcomingDays.length} 个播出日 / ${upcomingEpisodeCount} 集待更新`
                   : "播出、出种与下载状态动态估算"}
               </p>
             </div>
           </div>
           {/* 空态不显示“0 部 · 0 集”——那看着像报错，而不是“今天没安排”。 */}
-          {arrivals !== null && !failed && rows.length > 0 && (
+          {arrivals !== null && !failed && hasAnyRows && (
             <span className="tnum shrink-0 rounded-full border border-white/[0.075] bg-white/[0.045] px-2.5 py-1 text-caption text-white/48 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-              {isUpcoming
-                ? `${daysAhead === 1 ? "明天" : `${daysAhead} 天后`} · ${rows.length} 部`
-                : `${rows.length} 部 · ${episodeCount} 集`}
+              {todayRows.length > 0
+                ? `今日 ${todayRows.length} 部 · ${episodeCount} 集`
+                : `近期 ${upcomingDays.length} 天 · ${upcomingEpisodeCount} 集`}
             </span>
           )}
         </header>
@@ -514,7 +527,7 @@ function TodayArrivalsSection({
         )}
         {/* 一周内确实无事可预告时，也要交代清楚系统的状态和用户的下一步，
             不能只留一句“暂无”让人怀疑追踪停了。主句说结论，次句说依据。 */}
-        {!failed && arrivals !== null && rows.length === 0 && (
+        {!failed && arrivals !== null && !hasAnyRows && (
           <div className="relative px-5 py-5 max-md:px-4">
             <p className="text-sub text-white/68">
               {trackingCount === 0
@@ -543,36 +556,32 @@ function TodayArrivalsSection({
             </p>
           </div>
         )}
-        {!failed && rows.length > 0 && (
+        {!failed && todayRows.length > 0 && (
           <div className="relative space-y-1 p-3">
-            {rows.map(({ subscriptionId, mediaTitle, episodeLabel, presentation }, index) => {
+            {todayRows.map(({ subscriptionId, mediaTitle, episodeLabel, presentation }, index) => {
             const style = todayArrivalStyle[presentation.statusLabel];
             const statusClass = `inline-flex shrink-0 items-center gap-0.5 rounded-full border px-2 py-0.5 text-caption font-medium transition-colors ${style.status}`;
             return (
               <div
-                key={subscriptionId}
+                key={`${subscriptionId}-${presentation.statusLabel}-${episodeLabel}`}
                 className="group/today grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-3 rounded-xl px-3 py-3 text-sub transition duration-200 hover:translate-x-0.5 hover:bg-white/[0.042] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] max-md:grid-cols-[1.25rem_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-2.5"
               >
                 <span className="relative flex h-full self-stretch items-start justify-center pt-1.5 max-md:row-span-2">
-                  {index < rows.length - 1 && (
+                  {index < todayRows.length - 1 && (
                     <span
                       aria-hidden="true"
                       className="absolute left-1/2 top-4 -bottom-5 w-px -translate-x-1/2 bg-gradient-to-b from-white/16 via-white/10 to-white/[0.035]"
                     />
                   )}
-                  {/* pulse 只对「下载中」为真，颜色跟着它的 --info 走 */}
                   {style.pulse && (
                     <span
                       aria-hidden="true"
                       className="absolute top-1 size-3 animate-ping rounded-full bg-[var(--info)]/25"
                     />
                   )}
-                  {/* 预告是“几天后”，节点压暗一档；发光的实心点留给马上要落地的内容。 */}
                   <span
                     aria-hidden="true"
-                    className={`relative z-10 size-2.5 rounded-full border-2 ${style.node}${
-                      isUpcoming ? " opacity-65" : ""
-                    }`}
+                    className={`relative z-10 size-2.5 rounded-full border-2 ${style.node}`}
                   />
                 </span>
                 <div className="min-w-0 self-center">
@@ -581,7 +590,7 @@ function TodayArrivalsSection({
                   >
                     {mediaTitle}
                   </Link>
-                  <span className="tnum mt-0.5 block min-w-0 truncate text-caption text-white/38">
+                  <span className="tnum mt-0.5 block min-w-0 truncate text-caption text-white/45">
                     {episodeLabel}
                   </span>
                 </div>
@@ -603,6 +612,48 @@ function TodayArrivalsSection({
               </div>
             );
             })}
+          </div>
+        )}
+        {!failed && upcomingDays.length > 0 && (
+          <div className={`${todayRows.length > 0 ? "border-t border-white/[0.065]" : ""} px-4 py-3.5 max-md:px-3.5`}>
+            <div className="mb-2.5 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-caption font-medium text-white/60">
+                <CalendarIcon className="size-3.5 text-violet-300/80" />
+                未来 7 天更新排期
+              </span>
+              <span className="tnum text-micro text-white/35">到点自动搜种下载</span>
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {upcomingDays.map((day) => (
+                <div
+                  key={day.expectedDay}
+                  className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-caption font-semibold text-white/88">
+                      {day.weekdayLabel}
+                    </span>
+                    <span className="tnum text-micro text-white/42">{day.dayLabel}</span>
+                  </div>
+                  <div className="mt-2 space-y-1.5">
+                    {day.items.map((item) => (
+                      <Link
+                        key={`${day.expectedDay}-${item.subscriptionId}`}
+                        to={`/subscriptions/${item.subscriptionId}`}
+                        className="flex items-center justify-between gap-2 rounded-lg px-1.5 py-1 transition hover:bg-white/[0.05]"
+                      >
+                        <span className="truncate text-sub font-medium text-white/82">
+                          {item.mediaTitle}
+                        </span>
+                        <span className="tnum shrink-0 rounded bg-violet-500/15 px-1.5 py-0.5 text-micro font-medium text-violet-200">
+                          {item.episodeLabel}
+                        </span>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { BrandLoader } from "@/components/brand-loader";
-import { ChevronRightIcon, GlobeIcon, RefreshIcon } from "@/components/icons";
+import { ChevronRightIcon, GlobeIcon } from "@/components/icons";
 import { PipelineHealthPanel } from "@/components/subscription-settings-section";
 import {
   diagnoseProxySettings,
@@ -36,18 +36,47 @@ export function NetworkProxyHealthPanel() {
   const [data, setData] = useState<ProxyDiagnosticResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const reqIdRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const lastStartedAtRef = useRef(0);
+  const mountedRef = useRef(true);
 
-  const reload = useCallback(() => {
+  const reload = useCallback((force = false) => {
+    const forced = force === true;
+    const now = Date.now();
+    if (!forced && (inFlightRef.current || now - lastStartedAtRef.current < 1500)) {
+      return;
+    }
+    const reqId = ++reqIdRef.current;
+    inFlightRef.current = true;
+    lastStartedAtRef.current = now;
     setFailed(false);
     setBusy(true);
     diagnoseProxySettings()
-      .then(setData)
-      .catch(() => setFailed(true))
-      .finally(() => setBusy(false));
+      .then((next) => {
+        if (!mountedRef.current || reqId !== reqIdRef.current) return;
+        setData(next);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (!mountedRef.current || reqId !== reqIdRef.current) return;
+        setFailed(true);
+      })
+      .finally(() => {
+        if (reqId !== reqIdRef.current) return;
+        inFlightRef.current = false;
+        if (mountedRef.current) {
+          setBusy(false);
+        }
+      });
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     reload();
+    return () => {
+      mountedRef.current = false;
+    };
   }, [reload]);
 
   useEffect(() => {
@@ -75,7 +104,7 @@ export function NetworkProxyHealthPanel() {
         </div>
         <button
           type="button"
-          onClick={reload}
+          onClick={() => reload(true)}
           disabled={busy}
           className="btn-glass flex items-center gap-1.5 px-3 py-1.5 text-sub font-medium disabled:opacity-60"
         >

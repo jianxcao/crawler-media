@@ -47,7 +47,10 @@ impl<H: CatalogGet + Sync> Douban<H> {
             self.cache.get_fresh(&subject_path)?,
             self.cache.get_fresh(&credits_path)?,
         ) {
-            match (decode_subject(&subject, id), decode_credits(&celebrities)) {
+            match (
+                decode_subject(&subject, id),
+                decode_credits(&celebrities, id),
+            ) {
                 (Ok(subject), Ok(celebrities)) => {
                     return Ok(DoubanSubject {
                         subject,
@@ -66,7 +69,7 @@ impl<H: CatalogGet + Sync> Douban<H> {
                 .spawn_scoped(scope, move || {
                     let _permit = permit;
                     self.cache
-                        .get_or_fetch(&self.http, &credits_path, decode_credits)
+                        .get_or_fetch(&self.http, &credits_path, |body| decode_credits(body, id))
                 })?;
             let subject = self
                 .cache
@@ -85,6 +88,12 @@ impl<H: CatalogGet + Sync> Douban<H> {
 
 fn decode_subject(body: &str, expected_id: &str) -> Result<Value, TmdbError> {
     let value = crate::contracts::json(body)?;
+    super::check_rexxar_not_found(&value, expected_id)?;
+    if !value.is_object() {
+        return Err(TmdbError::Parse(
+            "expected Douban subject JSON object".into(),
+        ));
+    }
     let matches_id = value.get("id").is_some_and(|id| {
         id.as_str().map_or_else(
             || {
@@ -110,8 +119,9 @@ fn decode_subject(body: &str, expected_id: &str) -> Result<Value, TmdbError> {
     Ok(value)
 }
 
-fn decode_credits(body: &str) -> Result<Value, TmdbError> {
+fn decode_credits(body: &str, expected_id: &str) -> Result<Value, TmdbError> {
     let value = crate::contracts::json(body)?;
+    super::check_rexxar_not_found(&value, expected_id)?;
     if !["actors", "directors"]
         .iter()
         .all(|field| value.get(*field).is_some_and(Value::is_array))

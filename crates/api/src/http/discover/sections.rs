@@ -5,7 +5,7 @@
 use crate::catalog::Catalog;
 
 #[derive(Clone, Copy)]
-pub(super) struct Section {
+pub(crate) struct Section {
     pub kind: &'static str,
     pub id: &'static str,
     pub title: &'static str,
@@ -280,7 +280,7 @@ const MOVIE_SECTIONS: &[Section] = &[
     },
 ];
 
-pub(super) fn movie_sections() -> Vec<Section> {
+pub(crate) fn movie_sections() -> Vec<Section> {
     MOVIE_SECTIONS.to_vec()
 }
 
@@ -431,7 +431,7 @@ const TV_SECTIONS: &[Section] = &[
     },
 ];
 
-pub(super) fn tv_sections() -> Vec<Section> {
+pub(crate) fn tv_sections() -> Vec<Section> {
     TV_SECTIONS.to_vec()
 }
 
@@ -621,7 +621,7 @@ const DOUBAN_MOVIE_SECTIONS: &[Section] = &[
     },
 ];
 
-pub(super) fn douban_movie_sections() -> Vec<Section> {
+pub(crate) fn douban_movie_sections() -> Vec<Section> {
     DOUBAN_MOVIE_SECTIONS.to_vec()
 }
 
@@ -706,6 +706,6 @@ const DOUBAN_TV_SECTIONS: &[Section] = &[
     },
 ];
 
-pub(super) fn douban_tv_sections() -> Vec<Section> {
+pub(crate) fn douban_tv_sections() -> Vec<Section> {
     DOUBAN_TV_SECTIONS.to_vec()
 }

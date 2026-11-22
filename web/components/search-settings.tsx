@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { LiquidGlassButton } from "@/vendor/liquid-glass";
 
@@ -95,7 +95,13 @@ interface SiteOption {
  * 拖拽用原生 Pointer Events 手写（约 60 行），不为此引入 dnd 库：
  * 场景是单列定长小列表，库的能力（多容器、虚拟滚动、传感器抽象）全用不上。
  */
-export function SearchSection({ createRequest = 0 }: { createRequest?: number }) {
+export function SearchSection({
+  createRequest = 0,
+  onCreateRequestHandled,
+}: {
+  createRequest?: number;
+  onCreateRequestHandled?: () => void;
+}) {
   const { backdrop } = useBackdrop();
   const confirm = useConfirm();
   const { tabs, loading, saveTabs } = useSearchPrefs();
@@ -103,13 +109,66 @@ export function SearchSection({ createRequest = 0 }: { createRequest?: number })
   const [busy, setBusy] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  // null = 加载中；[] = 没有任何已配置站点
+  const [siteOptions, setSiteOptions] = useState<SiteOption[] | null>(null);
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  // 父分区工具栏的「新建自定义分类」按钮：每点一次计数 +1，这里响应信号
-  // 打开空白编辑器（初始 0 不触发，避免挂载即弹编辑器）
   useEffect(() => {
-    if (createRequest > 0) openEditor(null);
-  }, [createRequest]);
+    let cancelled = false;
+    listConfiguredSites()
+      .then((configured) => {
+        if (cancelled) return;
+        setSiteOptions(
+          configured.map((s) => ({
+            siteId: s.id,
+            displayName: s.name || s.id,
+            usable: s.enabled,
+          })),
+        );
+      })
+      .catch(() => !cancelled && setSiteOptions([]));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const knownSiteIds = useMemo(
+    () => (siteOptions ? new Set(siteOptions.map((s) => s.siteId)) : null),
+    [siteOptions],
+  );
+
+  /** 打开编辑器：新建（空草稿）或载入某个预设的当前值。 */
+  const openEditor = useCallback((preset: PresetTab | null) => {
+    setError(null);
+    setEditor(
+      preset
+        ? {
+            editingId: preset.id,
+            name: preset.name,
+            categories: preset.categories,
+            siteIds: preset.site_ids,
+            posterMode: preset.poster_mode,
+            skipHistory: preset.skip_history,
+          }
+        : {
+            editingId: null,
+            name: "",
+            categories: [],
+            siteIds: [],
+            posterMode: false,
+            skipHistory: false,
+          },
+    );
+  }, []);
+
+  // 父分区工具栏的「新建自定义分类」按钮：每点一次计数 +1，这里响应信号
+  // 打开空白编辑器并立即消费信号，避免切换标签页回来时重弹空白面板
+  useEffect(() => {
+    if (createRequest > 0) {
+      openEditor(null);
+      onCreateRequestHandled?.();
+    }
+  }, [createRequest, onCreateRequestHandled, openEditor]);
 
   /** 统一的保存包装：清错误 + busy 防抖 + 中文错误回显；返回是否成功。 */
   const apply = async (next: SearchTab[]): Promise<boolean> => {
@@ -199,30 +258,6 @@ export function SearchSection({ createRequest = 0 }: { createRequest?: number })
     if (from < to && index > from && index <= to) shift = -height;
     if (to < from && index >= to && index < from) shift = height;
     return { transform: `translateY(${shift}px)`, transition: "transform 200ms ease" };
-  };
-
-  /** 打开编辑器：新建（空草稿）或载入某个预设的当前值。 */
-  const openEditor = (preset: PresetTab | null) => {
-    setError(null);
-    setEditor(
-      preset
-        ? {
-            editingId: preset.id,
-            name: preset.name,
-            categories: preset.categories,
-            siteIds: preset.site_ids,
-            posterMode: preset.poster_mode,
-            skipHistory: preset.skip_history,
-          }
-        : {
-            editingId: null,
-            name: "",
-            categories: [],
-            siteIds: [],
-            posterMode: false,
-            skipHistory: false,
-          },
-    );
   };
 
   /** 编辑器保存：新建追加到列表末尾（默认可见），编辑则原位替换（保留显隐）。 */
@@ -329,9 +364,15 @@ export function SearchSection({ createRequest = 0 }: { createRequest?: number })
                     <span className="shrink-0 rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-micro font-semibold text-[var(--accent)]">
                       自定义
                     </span>
+                    {knownSiteIds !== null &&
+                      tab.site_ids.some((id) => !knownSiteIds.has(id)) && (
+                        <span className="shrink-0 rounded-full bg-[var(--warn)]/15 px-2 py-0.5 text-micro font-semibold text-[var(--warn)]">
+                          含已删站点
+                        </span>
+                      )}
                   </div>
                   <p className="mt-0.5 truncate text-caption text-[var(--text-faint)]">
-                    {presetSummary(tab)}
+                    {presetSummary(tab, knownSiteIds)}
                   </p>
                 </div>
               )}
@@ -379,6 +420,7 @@ export function SearchSection({ createRequest = 0 }: { createRequest?: number })
         <PresetEditor
           draft={editor}
           busy={busy}
+          siteOptions={siteOptions}
           onChange={setEditor}
           onSave={() => void savePreset(editor)}
           onCancel={() => {
@@ -409,11 +451,21 @@ function tabLabel(tab: SearchTab): string {
 }
 
 /** 预设行的摘要：分类组合 × 站点组合（× 图览 × 无痕），空集显示「不限 / 全部」。 */
-function presetSummary(tab: PresetTab): string {
+export function presetSummary(
+  tab: PresetTab,
+  knownSiteIds: ReadonlySet<string> | null = null,
+): string {
   const cats = tab.categories.length
     ? tab.categories.map((c) => CATEGORY_LABEL[c]).join("、")
     : "不限分类";
-  const sites = tab.site_ids.length ? `${tab.site_ids.length} 个站点` : "全部站点";
+  const deletedCount = knownSiteIds
+    ? tab.site_ids.filter((id) => !knownSiteIds.has(id)).length
+    : 0;
+  const sites = tab.site_ids.length
+    ? deletedCount > 0
+      ? `${tab.site_ids.length} 个站点（含已删站点）`
+      : `${tab.site_ids.length} 个站点`
+    : "全部站点";
   const flags = `${tab.poster_mode ? " · 图览" : ""}${tab.skip_history ? " · 无痕" : ""}`;
   return `${cats} · ${sites}${flags}`;
 }
@@ -421,47 +473,28 @@ function presetSummary(tab: PresetTab): string {
 /**
  * 预设编辑器：名称 + 分类勾选 + 站点勾选。
  *
- * 站点选项在打开时向后端拉取（已配置站点 ∩ 站点目录，取展示名与可用状态）；
- * 分类/站点都不勾选表示「不限」，用 chips 的空选态自然表达，不设「全选」按钮。
+ * 站点选项由父组件统一拉取并传入；若预设引用了已被删除的站点，不会静默清空为「全部站点」，
+ * 而是渲染可点击移除的警告标签，由用户主动清理。
  */
 function PresetEditor({
   draft,
   busy,
+  siteOptions,
   onChange,
   onSave,
   onCancel,
 }: {
   draft: EditorState;
   busy: boolean;
+  siteOptions: SiteOption[] | null;
   onChange: (next: EditorState) => void;
   onSave: () => void;
   onCancel: () => void;
 }) {
   const { backdrop } = useBackdrop();
-  // null = 加载中；[] = 没有任何已配置站点
-  const [siteOptions, setSiteOptions] = useState<SiteOption[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    // 新契约：站点目录项没有展示名（CatalogItem 只有 profile_id），站点视图
-    // 也没有 site_id/usable 字段——展示名取配置里的 name，可用状态由 enabled
-    // 派生；目录项不再参与合并。
-    listConfiguredSites()
-      .then((configured) => {
-        if (cancelled) return;
-        setSiteOptions(
-          configured.map((s) => ({
-            siteId: s.id,
-            displayName: s.name || s.id,
-            usable: s.enabled,
-          })),
-        );
-      })
-      .catch(() => !cancelled && setSiteOptions([]));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const knownIds = new Set((siteOptions ?? []).map((s) => s.siteId));
+  const ghostSiteIds =
+    siteOptions === null ? [] : draft.siteIds.filter((id) => !knownIds.has(id));
 
   const toggleCategory = (id: TorrentCategory) =>
     onChange({
@@ -531,7 +564,7 @@ function PresetEditor({
           </p>
           {siteOptions === null ? (
             <p className="text-sub text-[var(--text-faint)]">正在加载站点列表…</p>
-          ) : siteOptions.length === 0 ? (
+          ) : siteOptions.length === 0 && ghostSiteIds.length === 0 ? (
             <p className="text-sub text-[var(--text-faint)]">
               还没有接入任何站点；先切到「站点接入」标签页添加，或直接保存（默认搜全部可用站点）。
             </p>
@@ -551,6 +584,21 @@ function PresetEditor({
                   {!site.usable && <span className="ml-1 text-micro">·不可用</span>}
                 </button>
               ))}
+              {ghostSiteIds.map((ghostId) => {
+                const shortId = ghostId.length > 12 ? `${ghostId.slice(0, 8)}…` : ghostId;
+                return (
+                  <button
+                    key={ghostId}
+                    type="button"
+                    onClick={() => toggleSite(ghostId)}
+                    title={`站点 ${ghostId} 已被删除，点击移除`}
+                    aria-label={`移除已删除站点 ${ghostId}`}
+                    className="rounded-full border border-[var(--warn)]/60 bg-[var(--warn)]/15 px-3 py-1 text-sub text-[var(--warn)] transition-colors hover:bg-[var(--warn)]/25"
+                  >
+                    已删除站点 ({shortId}) ×
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

@@ -47,12 +47,25 @@ impl crate::LibraryConnection<'_> {
         if let Some(adopted) = &adopted {
             fill_from_adopted(&mut metadata, adopted);
         }
+        let source_studios = match (&adopted, resolved.as_deref()) {
+            (Some(eff), Some(loc)) if !metadata::has_stored_studio_logos(&eff.details_json) => {
+                self.source_studios_for_locale(media_id, loc)?
+            }
+            _ => Vec::new(),
+        };
+        let brands = metadata::extract_detail_brands(
+            item.kind,
+            &metadata,
+            adopted.as_ref(),
+            &source_studios,
+        );
         let file_page = self.library_file_page(library_id, media_id, None, 50)?;
         let file_units = self.file_units(library_id, media_id, &file_page.files)?;
         let seasons = self.library_seasons(library_id, media_id)?;
         Ok(Some(LibraryItemDetail {
             item,
             metadata,
+            brands,
             files: file_page.files,
             next_file_cursor: file_page.next_cursor,
             seasons,
@@ -121,6 +134,43 @@ impl crate::LibraryConnection<'_> {
             &chain,
             LocaleFallback::UnboundInputOnly,
         ))
+    }
+
+    fn source_studios_for_locale(
+        &self,
+        media_id: MediaId,
+        locale: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT normalized_json FROM media_metadata_sources
+             WHERE media_id = ?1 AND entity_scope = 'work' AND season = -1
+               AND episode = -1 AND locale = ?2
+             ORDER BY source",
+        )?;
+        let rows = statement.query_map(params![media_id.to_string(), locale], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut names = Vec::new();
+        for row in rows {
+            let raw = row?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let studios = value
+                .pointer("/fields/studios")
+                .or_else(|| value.get("studios"));
+            if let Some(studios) = studios {
+                for name in metadata::json_names(studios) {
+                    if !names
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(&name))
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        Ok(names)
     }
 
     pub(crate) fn library_seasons(

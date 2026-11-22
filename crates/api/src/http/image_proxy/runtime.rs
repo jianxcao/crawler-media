@@ -52,12 +52,22 @@ impl ImageProxy {
         query: ProxyQuery,
         headers: HeaderMap,
     ) -> Response {
-        if !allowed_url(&query.url) {
+        self.response_with_variant(query.url, None, headers).await
+    }
+
+    pub(super) async fn response_with_variant(
+        self: &Arc<Self>,
+        url: String,
+        variant: Option<String>,
+        headers: HeaderMap,
+    ) -> Response {
+        if !allowed_url(&url) {
             return err(StatusCode::BAD_REQUEST, "image.invalid", "不允许的图床");
         }
+        let brand_logo = variant.as_deref() == Some("brand-logo");
         let deadline = Instant::now() + DELIVERY_DEADLINE;
         let mut observer = Observer::new();
-        let result = self.deliver(query.url, deadline, &mut observer).await;
+        let result = self.deliver(url, brand_logo, deadline, &mut observer).await;
         if matches!(result, Err(DeliveryError::Timeout)) {
             observer.timeout();
         }
@@ -68,6 +78,16 @@ impl ImageProxy {
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("public, max-age=86400"),
                 );
+                response.headers_mut().insert(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                );
+                response.headers_mut().insert(
+                    header::CONTENT_SECURITY_POLICY,
+                    HeaderValue::from_static(
+                        "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                    ),
+                );
                 response
             }
             Err(error) => failure(error),
@@ -77,11 +97,17 @@ impl ImageProxy {
     async fn deliver(
         self: &Arc<Self>,
         url: String,
+        brand_logo: bool,
         deadline: Instant,
         observer: &mut Observer,
     ) -> Result<Arc<Image>, DeliveryError> {
         let cache = self.cache.clone();
-        let lookup_url = url.clone();
+        let cache_key = if brand_logo {
+            format!("brand-logo\n{url}")
+        } else {
+            url.clone()
+        };
+        let lookup_key = cache_key.clone();
         let remaining = || deadline.saturating_duration_since(Instant::now());
         observer.progress.set("read_admission");
         let reservation = self
@@ -102,7 +128,7 @@ impl ImageProxy {
         let lookup = reservation
             .run(remaining().min(Duration::from_millis(750)), move || {
                 progress.set("cache_lookup");
-                cache.lookup(&lookup_url)
+                cache.lookup(&lookup_key)
             })
             .await
             .map_err(|error| {
@@ -119,7 +145,7 @@ impl ImageProxy {
         if let Some(image) = lookup {
             return Ok(Arc::new(image));
         }
-        let (fill, role) = self.start_fill(url, deadline)?;
+        let (fill, role) = self.start_fill(cache_key, url, brand_logo, deadline)?;
         observer.progress = fill.progress.clone();
         observer.fill = Some((fill.clone(), role));
         match fill.wait(deadline).await {

@@ -6,7 +6,6 @@ import type { ReactNode } from "react";
 import {
   ActivityIcon,
   BookmarkIcon,
-  ClockIcon,
   DatabaseIcon,
   FilmIcon,
   FolderSyncIcon,
@@ -63,7 +62,6 @@ export const SIDEBAR_NAV_ITEMS = [
   { id: "explore-tv", label: "发现剧集", icon: TvIcon },
   { id: "subscriptions", label: "我的订阅", icon: BookmarkIcon },
   { id: "transfers", label: "媒体整理", icon: FolderSyncIcon },
-  { id: "jobs", label: "定时任务", icon: ClockIcon },
   { id: "cache", label: "元数据缓存", icon: DatabaseIcon },
   { id: "tasks", label: "活动", icon: ActivityIcon },
 ];
@@ -83,7 +81,7 @@ export function useVisibleNavItems() {
     if (item.id === "subscriptions") return canSubscribe;
     // 活动页与任务数据都是管理员专属（JobCenter 自身也有这道判断，成员侧渲染为空），
     // 这里必须同样挡掉，否则设置页会列出一条侧栏根本没有的可排序项
-    if (item.id === "tasks" || item.id === "transfers" || item.id === "jobs" || item.id === "cache") return isAdmin;
+    if (item.id === "tasks" || item.id === "transfers" || item.id === "cache") return isAdmin;
     return true;
   });
 }

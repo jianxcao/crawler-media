@@ -233,6 +233,15 @@ pub(crate) async fn test_proxy(State(state): State<ApiState>, Json(body): Json<V
     .into_response()
 }
 
+static DIAGNOSE_GATE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+fn diagnose_gate() -> std::sync::Arc<tokio::sync::Semaphore> {
+    DIAGNOSE_GATE
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(5)))
+        .clone()
+}
+
 /// POST /settings/proxy/diagnose — Check routing and connectivity for all major metadata domains.
 pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
     let active_proxy = crate::http_agent::current_proxy();
@@ -241,7 +250,7 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
     let targets = build_diagnose_targets();
     let mut set = tokio::task::JoinSet::new();
 
-    for target in targets {
+    for (idx, target) in targets.into_iter().enumerate() {
         let proxy = if target.bypassable_for_douban && douban_bypass {
             None
         } else {
@@ -259,9 +268,9 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
         };
 
         let budget = state.http_work.clone();
-        set.spawn(
-            async move { run_single_probe(budget, target, proxy, is_proxied, route_label).await },
-        );
+        set.spawn(async move {
+            run_single_probe(idx, budget, target, proxy, is_proxied, route_label).await
+        });
     }
 
     let mut results = Vec::new();
@@ -270,11 +279,13 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
             results.push(val);
         }
     }
+    results.sort_by_key(|(idx, _)| *idx);
+    let items: Vec<Value> = results.into_iter().map(|(_, val)| val).collect();
 
     ok(json!({
         "active_proxy": active_proxy.as_deref().map(crate::http_agent::mask_proxy_url),
         "douban_bypass": douban_bypass,
-        "items": results,
+        "items": items,
     }))
     .into_response()
 }
@@ -354,51 +365,83 @@ fn build_diagnose_targets() -> Vec<TargetProbe> {
 }
 
 async fn run_single_probe(
+    idx: usize,
     budget: std::sync::Arc<crate::blocking_budget::BlockingBudget>,
     target: TargetProbe,
     proxy: Option<String>,
     is_proxied: bool,
     route_label: String,
-) -> Value {
+) -> (usize, Value) {
     let started = std::time::Instant::now();
-    let probe_url = target.probe_url.to_string();
+    let probe_url = target.probe_url.clone();
+    let method = target.method;
     let proxy_for_block = proxy;
 
-    let probe_res = budget
-        .run(super::library::BROWSE_DEADLINE, move || {
-            crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
-                let response = match target.method {
-                    ProbeMethod::Get { ua, referer } => {
-                        let mut req = agent.get(&probe_url).header("User-Agent", ua);
-                        if let Some(ref_val) = referer {
-                            req = req.header("Referer", ref_val);
-                        }
-                        req.call()
+    let gate_permit = match tokio::time::timeout(
+        super::library::BROWSE_DEADLINE,
+        diagnose_gate().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("调度异常: blocking capacity exhausted".to_string()),
+        Err(_) => Err("调度异常: operation deadline elapsed".to_string()),
+    };
+
+    let probe_res = match gate_permit {
+        Ok(gate_permit) => {
+            let res = match budget.reserve(std::time::Duration::from_millis(80)).await {
+                Ok(reservation) => {
+                    let task = tokio::task::spawn_blocking(move || {
+                        let _reservation = reservation;
+                        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
+                            let response = match method {
+                                ProbeMethod::Get { ua, referer } => {
+                                    let mut req = agent.get(&probe_url).header("User-Agent", ua);
+                                    if let Some(ref_val) = referer {
+                                        req = req.header("Referer", ref_val);
+                                    }
+                                    req.call()
+                                }
+                                ProbeMethod::PostJson { ua, body } => agent
+                                    .post(&probe_url)
+                                    .header("User-Agent", ua)
+                                    .header("Content-Type", "application/json")
+                                    .header("Accept", "application/json")
+                                    .send(body),
+                            };
+                            extract_http_status(response)
+                        })
+                    });
+                    match tokio::time::timeout(super::library::BROWSE_DEADLINE, task).await {
+                        Ok(Ok(res)) => Ok(res),
+                        Ok(Err(err)) => Err(format!("调度异常: blocking worker failed: {err}")),
+                        Err(_) => Err("调度异常: operation deadline elapsed".to_string()),
                     }
-                    ProbeMethod::PostJson { ua, body } => agent
-                        .post(&probe_url)
-                        .header("User-Agent", ua)
-                        .header("Content-Type", "application/json")
-                        .header("Accept", "application/json")
-                        .send(body),
-                };
-                extract_http_status(response)
-            })
-        })
-        .await;
+                }
+                Err(_) => Err("调度异常: blocking capacity exhausted".to_string()),
+            };
+            drop(gate_permit);
+            res
+        }
+        Err(err) => Err(err),
+    };
 
     let latency_ms = started.elapsed().as_millis() as i64;
-    let (ok, error) = evaluate_probe_result(probe_res.map_err(|e| format!("调度异常: {e}")));
+    let (ok, error) = evaluate_probe_result(probe_res);
 
-    json!({
-        "name": target.name,
-        "url": target.display_url,
-        "is_proxied": is_proxied,
-        "route_label": route_label,
-        "ok": ok,
-        "latency_ms": latency_ms,
-        "error": error,
-    })
+    (
+        idx,
+        json!({
+            "name": target.name,
+            "url": target.display_url,
+            "is_proxied": is_proxied,
+            "route_label": route_label,
+            "ok": ok,
+            "latency_ms": latency_ms,
+            "error": error,
+        }),
+    )
 }
 
 fn extract_http_status(

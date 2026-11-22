@@ -53,6 +53,15 @@ pub fn season_details(body: &str) -> Result<Vec<EpisodeMeta>, TmdbError> {
         .collect())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct BrandMeta {
+    pub name: String,
+    pub logo_path: Option<String>,
+    pub kind: &'static str,
+}
+
+const MAX_BRANDS: usize = 6;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemMeta {
     pub overview: Option<String>,
@@ -61,9 +70,10 @@ pub struct ItemMeta {
     /// Movie release date or TV first-air date, as returned by TMDB.
     pub release_date: Option<String>,
     pub last_air_date: Option<String>,
-    /// Production companies for movies, broadcast networks for TV series.
+    /// Broadcast networks (TV) and production companies (movies / TV).
     pub studios: Vec<String>,
     pub studio_logo: Option<String>,
+    pub brands: Vec<BrandMeta>,
     /// Certification selected in CN → US → first available order.
     pub content_rating: Option<String>,
     pub original_language: Option<String>,
@@ -266,26 +276,8 @@ pub fn details_meta_for(
         .filter(|credit| credit.job.as_deref() == Some("Director"))
         .filter_map(|credit| credit.name.clone().filter(|name| !name.is_empty()))
         .collect();
-    let (studios, studio_logo) = if parsed.networks.is_empty() {
-        let logo = parsed
-            .production_companies
-            .iter()
-            .find_map(|r| r.logo_path.clone());
-        let names = parsed
-            .production_companies
-            .iter()
-            .filter_map(|row| row.name.clone().filter(|name| !name.is_empty()))
-            .collect();
-        (names, logo)
-    } else {
-        let logo = parsed.networks.iter().find_map(|r| r.logo_path.clone());
-        let names = parsed
-            .networks
-            .iter()
-            .filter_map(|row| row.name.clone().filter(|name| !name.is_empty()))
-            .collect();
-        (names, logo)
-    };
+    let (studios, studio_logo, brands) =
+        extract_brands(&parsed.networks, &parsed.production_companies);
     let episode_run_time: Vec<u32> = parsed
         .episode_run_time
         .iter()
@@ -327,6 +319,7 @@ pub fn details_meta_for(
         last_air_date: parsed.last_air_date.filter(|date| !date.is_empty()),
         studios,
         studio_logo,
+        brands,
         content_rating,
         original_language: parsed
             .original_language
@@ -352,6 +345,56 @@ pub fn details_meta_for(
         origin_countries: parsed.origin_country,
         cast: parse_cast_rows(cast_rows, include_all_cast),
     })
+}
+
+fn extract_brands(
+    networks: &[NameRow],
+    companies: &[NameRow],
+) -> (Vec<String>, Option<String>, Vec<BrandMeta>) {
+    let mut all: Vec<BrandMeta> = Vec::new();
+    let sources = networks
+        .iter()
+        .map(|row| (row, "network"))
+        .chain(companies.iter().map(|row| (row, "studio")));
+    for (row, kind) in sources {
+        let Some(name) = row
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let logo_path = row
+            .logo_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string);
+        if let Some(existing) = all.iter_mut().find(|b| b.name.eq_ignore_ascii_case(name)) {
+            if existing.logo_path.is_none() && logo_path.is_some() {
+                existing.logo_path = logo_path;
+            }
+        } else {
+            all.push(BrandMeta {
+                name: name.to_string(),
+                logo_path,
+                kind,
+            });
+        }
+    }
+    let studios = all.iter().map(|b| b.name.clone()).collect();
+    let studio_logo = all.iter().find_map(|b| b.logo_path.clone()).or_else(|| {
+        networks.iter().chain(companies.iter()).find_map(|row| {
+            row.logo_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+    });
+    all.truncate(MAX_BRANDS);
+    (studios, studio_logo, all)
 }
 
 fn translated_text(
@@ -535,13 +578,10 @@ pub fn tv_seasons(body: &str) -> Result<Vec<TvSeason>, TmdbError> {
         seasons: Vec<TvSeasonRow>,
     }
     let parsed: SeasonsBody = serde_json::from_str(body)?;
-    tracing::info!(
+    tracing::debug!(
         seasons_count = parsed.seasons.len(),
         "parse::tv_seasons 正在解析"
     );
-    for s in &parsed.seasons {
-        tracing::info!(season_number = s.season_number, name = ?s.name, ep_count = ?s.episode_count, "解析单季");
-    }
     Ok(parsed
         .seasons
         .into_iter()

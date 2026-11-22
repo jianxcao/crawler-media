@@ -1,0 +1,1036 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import React, { act } from "react";
+import { create } from "react-test-renderer";
+import ts from "typescript";
+
+const require = createRequire(import.meta.url);
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const webRoot = fileURLToPath(new URL("../", import.meta.url));
+
+function createModuleLoader(overrides = {}) {
+  const resolveFile = (base) => {
+    for (const suffix of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {
+      const candidate = `${base}${suffix}`;
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
+    throw new Error(`Cannot resolve module from ${base}`);
+  };
+  const cache = new Map();
+  const load = (filename) => {
+    if (cache.has(filename)) return cache.get(filename).exports;
+    const js = ts.transpileModule(readFileSync(filename, "utf8"), {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText;
+    const mod = { exports: {} };
+    cache.set(filename, mod);
+    new Function("require", "module", "exports", js)(
+      (name) => {
+        if (name in overrides) return overrides[name];
+        if (name.startsWith("@/")) return load(resolveFile(path.join(webRoot, name.slice(2))));
+        if (name.startsWith(".")) return load(resolveFile(path.resolve(path.dirname(filename), name)));
+        return require(name);
+      },
+      mod,
+      mod.exports,
+    );
+    return mod.exports;
+  };
+  return (relPath) => load(resolveFile(path.join(webRoot, relPath)));
+}
+
+function collectText(node) {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(collectText).join("");
+  if (node.children) return node.children.map(collectText).join("");
+  return "";
+}
+
+test("computeVirtualRange renders <= 25 items for 8,230 rows at any scroll offset with exact spacer heights", () => {
+  const load = createModuleLoader();
+  const { computeVirtualRange } = load("components/transfers/transfer-helpers.tsx");
+
+  const count = 8230;
+  const defaultItemHeight = 148;
+  const gap = 12;
+  const viewportHeight = 900;
+  const overscan = 6;
+  const expectedTotal = count * defaultItemHeight + (count - 1) * gap;
+
+  const offsetsToTest = [0, 320, 4800, 65000, 640000, expectedTotal - 900, expectedTotal + 500];
+  for (const scrollTop of offsetsToTest) {
+    const range = computeVirtualRange({
+      count,
+      scrollTop,
+      viewportHeight,
+      listOffsetTop: 240,
+      overscan,
+      defaultItemHeight,
+      gap,
+    });
+
+    assert.ok(
+      range.visibleCount > 0 && range.visibleCount <= 25,
+      `scrollTop=${scrollTop}: expected 1..25 rendered items, got ${range.visibleCount}`,
+    );
+    assert.equal(range.endIndex - range.startIndex, range.visibleCount);
+    assert.equal(range.totalHeightPx, expectedTotal);
+
+    const renderedSliceHeight =
+      range.visibleCount * defaultItemHeight + (range.visibleCount - 1) * gap;
+    assert.equal(
+      range.topSpacerPx + renderedSliceHeight + range.bottomSpacerPx,
+      expectedTotal,
+      `scrollTop=${scrollTop}: top + slice + bottom must equal totalHeightPx`,
+    );
+  }
+
+  const head = computeVirtualRange({
+    count,
+    scrollTop: 0,
+    viewportHeight,
+    listOffsetTop: 0,
+    overscan,
+    defaultItemHeight,
+    gap,
+  });
+  assert.equal(head.startIndex, 0);
+  assert.equal(head.topSpacerPx, 0);
+
+  const tail = computeVirtualRange({
+    count,
+    scrollTop: expectedTotal,
+    viewportHeight,
+    listOffsetTop: 0,
+    overscan,
+    defaultItemHeight,
+    gap,
+  });
+  assert.equal(tail.endIndex, count);
+  assert.equal(tail.bottomSpacerPx, 0);
+
+  // Variable measured heights (e.g. expanded group row among collapsed group rows)
+  const measured = new Map([
+    [10, 420],
+    [11, 310],
+  ]);
+  const variableRange = computeVirtualRange({
+    count,
+    scrollTop: 950,
+    viewportHeight: 800,
+    listOffsetTop: 0,
+    overscan: 5,
+    defaultItemHeight: 88,
+    gap: 12,
+    getItemHeight: (idx) => measured.get(idx),
+  });
+  assert.ok(variableRange.visibleCount <= 25);
+  let sliceHeight = 0;
+  for (let i = variableRange.startIndex; i < variableRange.endIndex; i += 1) {
+    sliceHeight += measured.get(i) ?? 88;
+  }
+  sliceHeight += (variableRange.visibleCount - 1) * 12;
+  assert.equal(
+    variableRange.topSpacerPx + sliceHeight + variableRange.bottomSpacerPx,
+    variableRange.totalHeightPx,
+  );
+});
+
+test("listTransfers sends server-paginated query parameters while preserving legacy exports", async () => {
+  const requests = [];
+  const load = createModuleLoader({
+    "@/lib/http": {
+      request: async (url, init) => {
+        requests.push({ url, init });
+        return { ok: true, data: { items: [], groups: [] } };
+      },
+    },
+  });
+  const api = load("lib/api/transfers.ts");
+
+  assert.equal(typeof api.listLedger, "function");
+  assert.equal(typeof api.deleteLedgerRow, "function");
+  assert.equal(typeof api.retransferLedgerRow, "function");
+  assert.equal(typeof api.refreshItemMetadata, "function");
+  assert.equal(typeof api.listTransfers, "function");
+
+  const controller = new AbortController();
+  await api.listTransfers(
+    {
+      view: "files",
+      q: "  知否  ",
+      mode: "strm",
+      kind: "tv",
+      offset: 50,
+      limit: 50,
+    },
+    { signal: controller.signal },
+  );
+
+  assert.equal(requests.length, 1);
+  const parsed = new URL(requests[0].url, "http://local");
+  assert.equal(parsed.pathname, "/ledger/transfers");
+  assert.equal(parsed.searchParams.get("view"), "files");
+  assert.equal(parsed.searchParams.get("q"), "知否");
+  assert.equal(parsed.searchParams.get("mode"), "strm");
+  assert.equal(parsed.searchParams.get("kind"), "tv");
+  assert.equal(parsed.searchParams.get("offset"), "50");
+  assert.equal(parsed.searchParams.get("limit"), "50");
+  assert.equal(requests[0].init.signal, controller.signal);
+});
+
+test("STRM summary cards and file card render cloud duration & 100% zero-overhead without 128 B", async () => {
+  const iconStub = () => React.createElement("span");
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+  });
+
+  const { formatSummaryDuration, formatItemDuration } = load(
+    "components/transfers/transfer-helpers.tsx",
+  );
+  const { TransferSummaryCards } = load("components/transfers/transfer-summary-cards.tsx");
+  const { TransferFileCard } = load("components/transfers/transfer-file-card.tsx");
+
+  assert.equal(formatSummaryDuration(0), "云端按需直连");
+  assert.equal(formatSummaryDuration(38 * 60_000), "38 分钟");
+  assert.equal(formatSummaryDuration(4521 * 3_600_000), "4,521 小时");
+  assert.equal(formatItemDuration(2_760_000), "46 分钟");
+  assert.equal(formatItemDuration((60 + 52) * 60_000), "1 小时 52 分");
+
+  let summaryRenderer;
+  await act(async () => {
+    summaryRenderer = create(
+      React.createElement(TransferSummaryCards, {
+        summary: {
+          total_files: 8230,
+          media_count: 312,
+          movie_files: 120,
+          tv_files: 8110,
+          strm_count: 8230,
+          hardlink_count: 0,
+          copy_count: 0,
+          move_count: 0,
+          local_size_bytes: 0,
+          probed_duration_ms: 4521 * 3_600_000,
+          strm_probed_count: 8100,
+        },
+      }),
+    );
+  });
+
+  const summaryText = collectText(summaryRenderer.toJSON());
+  assert.match(summaryText, /8,230/);
+  assert.match(summaryText, /312/);
+  assert.match(summaryText, /100%/);
+  assert.match(summaryText, /STRM 直链\s*8,230\s*·\s*硬链接\s*0/);
+  assert.match(summaryText, /云端直链总片长/);
+  assert.match(summaryText, /本地零视频占用/);
+  assert.match(summaryText, /4,521 小时/);
+  assert.doesNotMatch(summaryText, /128 B/);
+  assert.doesNotMatch(summaryText, /\(0%\)/);
+
+  let cardRenderer;
+  await act(async () => {
+    cardRenderer = create(
+      React.createElement(TransferFileCard, {
+        item: {
+          id: "file-strm-1",
+          media_id: "media-1",
+          library_id: "lib-1",
+          media_title: "知否知否应是绿肥红瘦",
+          media_kind: "tv",
+          path: "/media/tv/知否/S01E01.strm",
+          source_path: "/cloud/115/S01E01.mkv",
+          units: [{ season: 1, episode: 1 }],
+          resolution: "2160p",
+          codec: "hevc",
+          hdr: "HDR10",
+          quality_source: "probe",
+          confidence: "high",
+          filter_score: null,
+          is_strm: true,
+          transfer_mode: "strm",
+          file_size: null,
+          duration_ms: 2_760_000,
+        },
+        isRetransferring: false,
+        isRefreshing: false,
+        deleteDisabled: false,
+        onRetransfer() {},
+        onRefreshMetadata() {},
+        onDelete() {},
+      }),
+    );
+  });
+
+  const cardText = collectText(cardRenderer.toJSON());
+  assert.match(cardText, /知否知否应是绿肥红瘦/);
+  assert.match(cardText, /S01E01/);
+  assert.match(cardText, /46 分钟/);
+  assert.match(cardText, /云端直链/);
+  assert.doesNotMatch(cardText, /128 B/);
+
+  const retransferBtn = cardRenderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("重新生成文件"));
+  assert.ok(retransferBtn);
+  assert.equal(retransferBtn.props.disabled, true);
+  assert.equal(retransferBtn.props.title, "STRM 云端直链无需重建本地硬链接");
+
+  await act(async () => {
+    summaryRenderer.unmount();
+    cardRenderer.unmount();
+  });
+});
+
+test("MediaTransferView fetches first 50 rows, toggles to grouped view, and expands work episodes lazily", async () => {
+  const iconStub = () => React.createElement("span");
+  const apiCalls = [];
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params) => {
+        apiCalls.push(params);
+        if (apiCalls.length > 10) {
+          throw new Error(`Pagination loop detected after ${apiCalls.length} calls`);
+        }
+        if (params.view === "groups") {
+          return {
+            summary: {
+              total_files: 4,
+              media_count: 2,
+              movie_files: 1,
+              tv_files: 3,
+              strm_count: 3,
+              hardlink_count: 1,
+              copy_count: 0,
+              move_count: 0,
+              local_size_bytes: 4_000_000_000,
+              probed_duration_ms: 2_760_000,
+              strm_probed_count: 1,
+            },
+            view: "groups",
+            filtered_total: 2,
+            filtered_file_total: 4,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [
+              {
+                media_id: "tv-media-1",
+                media_title: "知否知否应是绿肥红瘦",
+                media_kind: "tv",
+                library_id: "lib-tv",
+                file_count: 3,
+                strm_count: 3,
+                hardlink_count: 0,
+                local_size_bytes: 0,
+                total_duration_ms: 2_760_000,
+                primary_resolution: "2160p",
+                primary_mode: "strm",
+                sample_dir: "/media/tv/知否",
+              },
+            ],
+          };
+        }
+        return {
+          summary: {
+            total_files: 4,
+            media_count: 2,
+            movie_files: 1,
+            tv_files: 3,
+            strm_count: 3,
+            hardlink_count: 1,
+            copy_count: 0,
+            move_count: 0,
+            local_size_bytes: 4_000_000_000,
+            probed_duration_ms: 2_760_000,
+            strm_probed_count: 1,
+          },
+          view: "files",
+          filtered_total: 3,
+          filtered_file_total: 3,
+          offset: 0,
+          limit: params.limit ?? 50,
+          has_more: false,
+          items: [
+            {
+              id: "ep-1",
+              media_id: "tv-media-1",
+              library_id: "lib-tv",
+              media_title: "知否知否应是绿肥红瘦",
+              media_kind: "tv",
+              path: "/media/tv/知否/S01E01.strm",
+              source_path: null,
+              units: [{ season: 1, episode: 1 }],
+              resolution: "2160p",
+              codec: "hevc",
+              hdr: null,
+              quality_source: "probe",
+              confidence: "high",
+              filter_score: null,
+              is_strm: true,
+              transfer_mode: "strm",
+              file_size: null,
+              duration_ms: 2_760_000,
+            },
+          ],
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let viewRenderer;
+  await act(async () => {
+    viewRenderer = create(React.createElement(MediaTransferView));
+  });
+
+  assert.equal(apiCalls.length, 1);
+  assert.equal(apiCalls[0].view, "files");
+  assert.equal(apiCalls[0].limit, 50);
+
+  const initialText = collectText(viewRenderer.toJSON());
+  assert.match(initialText, /本地归档视频体积/);
+  assert.match(initialText, /另含\s*3\s*项 STRM 云端直链/);
+
+  const groupToggle = viewRenderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("按作品聚合"));
+  await act(async () => {
+    groupToggle.props.onClick();
+  });
+
+  assert.equal(apiCalls.at(-1).view, "groups");
+  assert.match(collectText(viewRenderer.toJSON()), /3\s*个文件/);
+
+  const expandBtn = viewRenderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("展开文件"));
+  await act(async () => {
+    expandBtn.props.onClick();
+  });
+
+  assert.equal(apiCalls.at(-1).view, "files");
+  assert.equal(apiCalls.at(-1).media_id, "tv-media-1");
+  assert.equal(apiCalls.at(-1).limit, 200);
+  assert.match(collectText(viewRenderer.toJSON()), /S01E01\.strm/);
+
+  const rootJson = viewRenderer.toJSON();
+  assert.equal(rootJson.props["data-scroll-root"], true);
+  assert.match(String(rootJson.props.className ?? ""), /overflow-y-auto/);
+
+  await act(async () => {
+    viewRenderer.unmount();
+  });
+});
+
+test("VirtualTransferList tracks inner [data-scroll-root] container scroll when window.scrollY stays 0", async () => {
+  const iconStub = () => React.createElement("span");
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+  });
+  const { VirtualTransferList } = load("components/transfers/virtual-transfer-list.tsx");
+
+  const scrollListeners = new Set();
+  const prevWindow = globalThis.window;
+  const mockWin = {
+    scrollY: 0,
+    innerHeight: 900,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    requestAnimationFrame(cb) {
+      cb(0);
+      return 1;
+    },
+    cancelAnimationFrame() {},
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  globalThis.window = mockWin;
+
+  const fakeScrollRoot = {
+    scrollTop: 0,
+    clientWidth: 1000,
+    clientHeight: 800,
+    ownerDocument: { defaultView: mockWin },
+    getBoundingClientRect: () => ({ top: 40, bottom: 840, left: 0, right: 1000, width: 1000, height: 800 }),
+    addEventListener(type, fn) {
+      if (type === "scroll") scrollListeners.add(fn);
+    },
+    removeEventListener(type, fn) {
+      if (type === "scroll") scrollListeners.delete(fn);
+    },
+  };
+
+  const items = Array.from({ length: 120 }, (_, i) => ({ id: `row-${i}`, label: `ROW_${i}_END` }));
+  let containerTopAtZero = 140;
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(VirtualTransferList, {
+          items,
+          getKey: (it) => it.id,
+          defaultItemHeight: 148,
+          overscan: 2,
+          gap: 12,
+          hasMore: false,
+          loadingMore: false,
+          onLoadMore() {},
+          renderItem: (it) => React.createElement("div", null, it.label),
+        }),
+        {
+          createNodeMock(element) {
+            if (element.type === "div") {
+              return {
+                offsetHeight: 148,
+                ownerDocument: { defaultView: mockWin },
+                getAttribute(attr) {
+                  const val = element.props?.[attr];
+                  return val === undefined ? null : String(val);
+                },
+                closest(sel) {
+                  return sel === "[data-scroll-root]" ? fakeScrollRoot : null;
+                },
+                getBoundingClientRect() {
+                  const top = containerTopAtZero - fakeScrollRoot.scrollTop;
+                  return { top, bottom: top + 19200, left: 0, right: 1000, width: 1000, height: 19200 };
+                },
+              };
+            }
+            return null;
+          },
+        },
+      );
+    });
+
+    assert.match(collectText(renderer.toJSON()), /ROW_0_END/);
+    assert.doesNotMatch(collectText(renderer.toJSON()), /ROW_30_END/);
+
+    // Scroll inner container to 4800px while window.scrollY remains 0!
+    await act(async () => {
+      fakeScrollRoot.scrollTop = 4800;
+      for (const fn of [...scrollListeners]) fn();
+    });
+    const textAt4800 = collectText(renderer.toJSON());
+    assert.match(
+      textAt4800,
+      /ROW_30_END/,
+      `Expected ROW_30_END when inner scrollRoot.scrollTop=4800 (got: ${textAt4800})`,
+    );
+
+    // Scroll inner container deeper to 11200px while window.scrollY remains 0!
+    await act(async () => {
+      fakeScrollRoot.scrollTop = 11200;
+      for (const fn of [...scrollListeners]) fn();
+    });
+    const textAt11200 = collectText(renderer.toJSON());
+    assert.match(
+      textAt11200,
+      /ROW_70_END/,
+      `Expected ROW_70_END when inner scrollRoot.scrollTop=11200 (got: ${textAt11200})`,
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => renderer.unmount());
+    }
+    globalThis.window = prevWindow;
+  }
+});
+
+test("VirtualTransferList & useTransferController block auto-load on error, allow manual retry, and stop on empty tail page", async () => {
+  const iconStub = () => React.createElement("span");
+  const apiCalls = [];
+  let failOffset50Once = true;
+
+  const makeFileItem = (i) => ({
+    id: `file-${i}`,
+    media_id: `media-${i}`,
+    library_id: "lib-1",
+    media_title: `作品 ${i}`,
+    media_kind: "movie",
+    path: `/media/movies/work-${i}.mkv`,
+    source_path: `/downloads/work-${i}.mkv`,
+    units: [],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: false,
+    transfer_mode: "hardlink",
+    file_size: 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  const summary = {
+    total_files: 60,
+    media_count: 60,
+    movie_files: 60,
+    tv_files: 0,
+    strm_count: 0,
+    hardlink_count: 60,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: 60_000_000,
+    probed_duration_ms: 3_600_000,
+    strm_probed_count: 0,
+  };
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params) => {
+        apiCalls.push(params);
+        if (apiCalls.length > 10) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: params.offset ?? 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [],
+          };
+        }
+        if (params.offset === 0) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: 0,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 12 }, (_, i) => makeFileItem(i)),
+            groups: [],
+          };
+        }
+        if (params.offset === 12) {
+          if (failOffset50Once) {
+            failOffset50Once = false;
+            throw new Error("模拟网络超时");
+          }
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: 12,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 5 }, (_, i) => makeFileItem(12 + i)),
+            groups: [],
+          };
+        }
+        // Empty tail page with stale has_more: true from server must force hasMore=false!
+        return {
+          summary,
+          view: "files",
+          filtered_total: 60,
+          filtered_file_total: 60,
+          offset: params.offset,
+          limit: 50,
+          has_more: true,
+          items: [],
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView));
+  });
+
+  // Initial head load (offset=0 -> 12 items, lastVirtualIndex near end) + 1 auto-load attempt (offset=12) that failed
+  assert.deepEqual(
+    apiCalls.map((c) => c.offset),
+    [0, 12],
+    "Failed auto-load must set loadMoreError and pause further automatic retries",
+  );
+
+  // Typing in search without debouncing yet (inline callback identity changes on re-render) must NOT re-trigger auto-load while loadMoreError=true!
+  const searchInput = renderer.root.findByType("input");
+  await act(async () => {
+    searchInput.props.onChange({ target: { value: " " } });
+  });
+  assert.deepEqual(apiCalls.map((c) => c.offset), [0, 12]);
+
+  // Manual "加载更多" button calls retryLoadMore -> clears error, fetches offset=12 (5 items), then auto-loads offset=17 (0 items -> forces hasMore=false and stops!)
+  const loadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.ok(loadMoreBtn, "Manual 加载更多 button must remain available after error");
+
+  await act(async () => {
+    loadMoreBtn.props.onClick();
+  });
+
+  assert.deepEqual(
+    apiCalls.map((c) => c.offset),
+    [0, 12, 12, 17],
+    "Manual retry must succeed and empty tail page at offset=17 must stop further pagination",
+  );
+  const remainingLoadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.equal(remainingLoadMoreBtn, undefined, "Empty tail page must set hasMore=false");
+
+  await act(async () => {
+    renderer.unmount();
+  });
+});
+
+test("confirmDelete preserves loaded >50 list without resetting scroll, and useGroupExpansion aborts stale filter requests & uses functional catch", async () => {
+  const iconStub = () => React.createElement("span");
+  const scrollToCalls = [];
+  let pendingGroupExpand = null;
+  let pendingGroupLoadMore = null;
+
+  const makeFileItem = (i, mediaId = `media-${i}`) => ({
+    id: `file-${i}`,
+    media_id: mediaId,
+    library_id: "lib-1",
+    media_title: `剧集 ${i}`,
+    media_kind: "tv",
+    path: `/media/tv/ep-${i}.mkv`,
+    source_path: `/downloads/ep-${i}.mkv`,
+    units: [{ season: 1, episode: i + 1 }],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: false,
+    transfer_mode: "hardlink",
+    file_size: 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  let totalFiles = 75;
+  const makeSummary = () => ({
+    total_files: totalFiles,
+    media_count: 10,
+    movie_files: 0,
+    tv_files: totalFiles,
+    strm_count: 0,
+    hardlink_count: totalFiles,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: totalFiles * 1_000_000,
+    probed_duration_ms: totalFiles * 60_000,
+    strm_probed_count: 0,
+  });
+
+  const groupSignals = [];
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params, init) => {
+        if (params.media_id) {
+          groupSignals.push({ params, signal: init?.signal });
+          if (params.offset > 0) {
+            return new Promise((resolve, reject) => {
+              pendingGroupLoadMore = { resolve, reject, signal: init?.signal };
+            });
+          }
+          return new Promise((resolve, reject) => {
+            pendingGroupExpand = { resolve, reject, signal: init?.signal };
+          });
+        }
+        if (params.view === "groups") {
+          return {
+            summary: makeSummary(),
+            view: "groups",
+            filtered_total: 1,
+            filtered_file_total: 3,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [
+              {
+                media_id: "tv-group-1",
+                media_title: "漫长的季节",
+                media_kind: "tv",
+                library_id: "lib-1",
+                file_count: 3,
+                strm_count: 0,
+                hardlink_count: 3,
+                local_size_bytes: 3_000_000,
+                total_duration_ms: 180_000,
+                primary_resolution: "1080p",
+                primary_mode: "hardlink",
+                sample_dir: "/media/tv/漫长的季节",
+              },
+            ],
+          };
+        }
+        if (params.limit === 1) {
+          return {
+            summary: makeSummary(),
+            view: "files",
+            filtered_total: totalFiles,
+            filtered_file_total: totalFiles,
+            offset: 0,
+            limit: 1,
+            has_more: totalFiles > 1,
+            items: [makeFileItem(1)],
+            groups: [],
+          };
+        }
+        if (params.offset === 0) {
+          return {
+            summary: makeSummary(),
+            view: "files",
+            filtered_total: totalFiles,
+            filtered_file_total: totalFiles,
+            offset: 0,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 50 }, (_, i) => makeFileItem(i)),
+            groups: [],
+          };
+        }
+        return {
+          summary: makeSummary(),
+          view: "files",
+          filtered_total: totalFiles,
+          filtered_file_total: totalFiles,
+          offset: 50,
+          limit: 50,
+          has_more: false,
+          items: Array.from({ length: 25 }, (_, i) => makeFileItem(50 + i)),
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => {
+        totalFiles -= 1;
+        return { deleted: true, path: "", file_deleted: false };
+      },
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView), {
+      createNodeMock(element) {
+        if (element.props?.["data-scroll-root"]) {
+          return {
+            scrollTop: 0,
+            scrollTo(opts) {
+              scrollToCalls.push(opts);
+            },
+            getBoundingClientRect: () => ({ top: 0, bottom: 800, left: 0, right: 1000, width: 1000, height: 800 }),
+            addEventListener() {},
+            removeEventListener() {},
+          };
+        }
+        return null;
+      },
+    });
+  });
+
+  // Load second page via manual button so 75 items are in memory
+  const loadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.ok(loadMoreBtn);
+  await act(async () => {
+    loadMoreBtn.props.onClick();
+  });
+
+  const scrollCallsBeforeDelete = scrollToCalls.length;
+
+  // Delete file-0 and verify 74 items remain (NOT truncated back to 50) and scroll is NOT reset!
+  const firstDeleteBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("删除管理"));
+  assert.ok(firstDeleteBtn);
+  await act(async () => {
+    firstDeleteBtn.props.onClick();
+  });
+
+  const confirmBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("确认删除"));
+  assert.ok(confirmBtn);
+  await act(async () => {
+    confirmBtn.props.onClick();
+  });
+
+  assert.equal(
+    scrollToCalls.length,
+    scrollCallsBeforeDelete,
+    "Deleting an item must not reset scroll position to top",
+  );
+  // Total height of VirtualTransferList reflects 74 items (74 * 148 + 73 * 12 = 11828px), NOT 50 items (7988px)!
+  const listTrack = renderer.root.findAllByType("div").find((d) => d.props.style?.position === "relative" && String(d.props.style?.height).endsWith("px"));
+  assert.equal(listTrack.props.style.height, `${74 * 148 + 73 * 12}px`);
+
+  // Switching viewMode DOES reset scroll to top: 0
+  const groupToggle = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("按作品聚合"));
+  await act(async () => {
+    groupToggle.props.onClick();
+  });
+  assert.ok(scrollToCalls.length > scrollCallsBeforeDelete, "Changing viewMode must reset scroll to top");
+
+  // Start expanding group -> in-flight request gets AbortSignal
+  const expandBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("展开文件"));
+  await act(async () => {
+    expandBtn.props.onClick();
+  });
+  assert.ok(pendingGroupExpand?.signal, "listTransfers in toggleGroupExpand must receive AbortSignal");
+  const firstExpandReq = pendingGroupExpand;
+
+  // Change kindFilter while expand is in-flight -> aborts in-flight controller and ignores stale resolution!
+  const tvKindBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).trim() === "剧集");
+  await act(async () => {
+    tvKindBtn.props.onClick();
+  });
+  assert.equal(firstExpandReq.signal.aborted, true, "Changing kindFilter must abort in-flight group expand");
+
+  await act(async () => {
+    firstExpandReq.resolve({
+      summary: makeSummary(),
+      view: "files",
+      filtered_total: 1,
+      filtered_file_total: 1,
+      offset: 0,
+      limit: 200,
+      has_more: false,
+      items: [makeFileItem(999, "tv-group-1")],
+      groups: [],
+    });
+  });
+  assert.doesNotMatch(collectText(renderer.toJSON()), /ep-999\.mkv/, "Stale aborted group response must be ignored");
+
+  // Now expand cleanly with 2 episodes and has_more: true, start loadMoreGroupFiles, delete ep-0 while pending, then fail loadMoreGroupFiles
+  const expandBtn2 = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("展开文件"));
+  await act(async () => {
+    expandBtn2.props.onClick();
+  });
+  await act(async () => {
+    pendingGroupExpand.resolve({
+      summary: makeSummary(),
+      view: "files",
+      filtered_total: 3,
+      filtered_file_total: 3,
+      offset: 0,
+      limit: 200,
+      has_more: true,
+      items: [makeFileItem(0, "tv-group-1"), makeFileItem(1, "tv-group-1")],
+      groups: [],
+    });
+  });
+  assert.match(collectText(renderer.toJSON()), /ep-0\.mkv/);
+
+  const loadMoreGroupBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载剩余剧集文件"));
+  await act(async () => {
+    loadMoreGroupBtn.props.onClick();
+  });
+  assert.ok(pendingGroupLoadMore?.signal, "loadMoreGroupFiles must pass AbortSignal");
+
+  // Delete ep-0 while loadMoreGroupFiles is still in flight
+  const deleteGroupFileBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => btn.props.title === "删除此文件记录");
+  await act(async () => {
+    deleteGroupFileBtn.props.onClick();
+  });
+  const confirmBtn2 = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("确认删除"));
+  await act(async () => {
+    confirmBtn2.props.onClick();
+  });
+  assert.doesNotMatch(collectText(renderer.toJSON()), /ep-0\.mkv/);
+
+  // Reject loadMoreGroupFiles -> functional catch must NOT resurrect deleted ep-0 from stale closure!
+  await act(async () => {
+    pendingGroupLoadMore.reject(new Error("分页超时"));
+  });
+  assert.doesNotMatch(
+    collectText(renderer.toJSON()),
+    /ep-0\.mkv/,
+    "loadMoreGroupFiles catch must functionally update prev state without resurrecting deleted files",
+  );
+  assert.match(collectText(renderer.toJSON()), /ep-1\.mkv/);
+
+  await act(async () => {
+    renderer.unmount();
+  });
+});

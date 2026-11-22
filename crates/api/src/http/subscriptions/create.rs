@@ -70,18 +70,26 @@ fn resolve_media_input(
     state: &ApiState,
     body: &CreateSubscriptionInput,
 ) -> Result<(MediaInput, Option<MediaKind>), Response> {
-    if let Some(raw) = &body.title_ref {
-        return media_from_title_ref(state, raw);
-    }
-    let Some(media) = body.media.clone() else {
+    let (mut media_input, kind_hint) = if let Some(raw) = &body.title_ref {
+        media_from_title_ref(state, raw)?
+    } else if let Some(media) = body.media.clone() {
+        let kind_hint = MediaKind::from_str(&media.kind).ok();
+        (media, kind_hint)
+    } else {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "subscription.invalid",
             "media 或 title_ref 必填",
         ));
     };
-    let kind_hint = MediaKind::from_str(&media.kind).ok();
-    Ok((media, kind_hint))
+    if let Some(raw_source) = &body.source_title_ref
+        && let Ok(crate::http::title_ref::TitleRef::Douban(douban_id)) =
+            crate::http::title_ref::parse_title_ref(raw_source)
+        && media_input.douban_id.is_none()
+    {
+        media_input.douban_id = Some(douban_id);
+    }
+    Ok((media_input, kind_hint))
 }
 
 fn media_from_title_ref(
@@ -283,7 +291,7 @@ fn incoming_media(media_kind: MediaKind, media_input: MediaInput) -> Media {
         title: media_input.title,
         year: media_input.year,
         original_title: media_input.original_title.filter(|t| !t.is_empty()),
-        aliases: Vec::new(),
+        aliases: media_input.aliases,
         tmdb_id: media_input.tmdb_id.filter(|id| !id.is_empty()),
         douban_id: media_input.douban_id.filter(|id| !id.is_empty()),
         tvdb_id: media_input.tvdb_id.filter(|id| !id.is_empty()),

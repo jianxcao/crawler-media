@@ -142,6 +142,7 @@ fn item_meta(overview: &str) -> media::ItemMeta {
         genre_ids: vec![18],
         episode_run_time: Vec::new(),
         cast: Vec::new(),
+        ..Default::default()
     }
 }
 

@@ -31,6 +31,49 @@ pub(super) fn log_fingerprint_publication(
     );
 }
 
+pub(super) fn record_metadata_failure(
+    store: &crate::Store,
+    ledger_id: &str,
+    source_version: &str,
+    job_id: &str,
+    error: &str,
+    now_ms: i64,
+) -> Result<(), crate::store::StoreError> {
+    let key = ProbeStageKey {
+        ledger_id: ledger_id.to_string(),
+        context_key: source_version.to_string(),
+        stage: ProbeStage::Metadata,
+    };
+    let completion = ProbeStageCompletion::Failed {
+        error_kind: classify_fingerprint_error(error).to_string(),
+        error: error.to_string(),
+    };
+    store.library_write(|db| {
+        let claim_at = db
+            .get_probe_stage(&key)?
+            .and_then(|s| s.next_retry_at_ms)
+            .map_or(now_ms, |due| now_ms.max(due));
+        if db.claim_probe_stage(&key, job_id, claim_at)? {
+            let _ = db.finish_probe_stage(&key, job_id, &completion, now_ms)?;
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn clear_metadata_stage(
+    db: &store::LibraryConnection<'_>,
+    ledger_id: &str,
+    source_version: &str,
+) -> Result<(), crate::store::StoreError> {
+    let key = ProbeStageKey {
+        ledger_id: ledger_id.to_string(),
+        context_key: source_version.to_string(),
+        stage: ProbeStage::Metadata,
+    };
+    let _ = db.retire_probe_stage(&key)?;
+    Ok(())
+}
+
 pub(super) fn record_fingerprint_stages(
     mgr: &ProbeManager,
     ledger_id: &str,

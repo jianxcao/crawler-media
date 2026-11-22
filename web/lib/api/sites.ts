@@ -47,6 +47,7 @@ export interface BoostConfig {
 export interface CatalogItem {
   profile_id: string;
   auth_types: SiteAuthType[];
+  supports_check_in?: boolean;
 }
 
 /** 创建 / 更新站点时可提交的字段（凭证字段仅写入时回显）。 */
@@ -108,7 +109,7 @@ export function configureSite(siteId: string, payload: SiteConfigPayload): Promi
         ...payload,
         profile_id: siteId,
         name: payload.name ?? siteId,
-        ...(payload.url ? { url: payload.url } : {}),
+        url: payload.url?.trim() ?? "",
       }),
     }),
   );
@@ -142,6 +143,14 @@ export async function reverifySite(siteId: string): Promise<Site> {
   if (!result.ok) {
     throw new Error(result.error ?? "站点连通性校验失败");
   }
+  return getSite(siteId);
+}
+
+/** 手动触发一次站点签到（POST /sites/{id}/check-in），返回刷新后的站点视图。 */
+export async function checkInSite(siteId: string): Promise<Site> {
+  await unwrap(
+    request<ApiEnvelope<{ ok: boolean }>>(`/sites/${siteId}/check-in`, { method: "POST" }),
+  );
   return getSite(siteId);
 }
 

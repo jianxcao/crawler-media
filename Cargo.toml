@@ -42,6 +42,7 @@ jobs = { path = "crates/jobs" }
 marker = { path = "crates/marker" }
 media-server = { path = "crates/media-server" }
 cover-generator = { path = "crates/cover-generator" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v5"] }
 thiserror = "2"

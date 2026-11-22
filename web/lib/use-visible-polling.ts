@@ -25,15 +25,16 @@ export function useVisiblePolling(
 
   useEffect(() => {
     if (!intervalMs) return;
+    const doc = typeof document !== "undefined" ? document : null;
     const tick = () => {
-      if (!document.hidden) callbackRef.current();
+      if (!doc || !doc.hidden) callbackRef.current();
     };
     if (leading) tick();
     const timer = setInterval(tick, intervalMs);
-    document.addEventListener("visibilitychange", tick);
+    doc?.addEventListener("visibilitychange", tick);
     return () => {
       clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
+      doc?.removeEventListener("visibilitychange", tick);
     };
   }, [intervalMs, leading]);
 }

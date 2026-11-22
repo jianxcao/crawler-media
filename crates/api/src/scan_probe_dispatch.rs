@@ -18,10 +18,20 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
 const PAGE_LIMIT: usize = 100;
 const MAX_PAGES_PER_TICK: usize = 10_000;
 
+pub(crate) fn dispatch_obligations_sync(
+    shared: &store::Store,
+    probe: &crate::probe_manager::ProbeManager,
+) -> Result<usize, String> {
+    dispatch_obligations(shared, probe)
+}
+
 fn dispatch_obligations(
     shared: &store::Store,
     probe: &crate::probe_manager::ProbeManager,
 ) -> Result<usize, String> {
+    if probe.background_is_paused() {
+        return Ok(0);
+    }
     let mut acked = 0usize;
     let mut after: Option<(i64, domain::LedgerId)> = None;
     for _ in 0..MAX_PAGES_PER_TICK {
@@ -128,12 +138,13 @@ pub fn start_dispatcher(state: ApiState) {
     let shared = std::sync::Arc::downgrade(&state.store);
     let probe = std::sync::Arc::downgrade(&state.probe);
     let instance = std::sync::Arc::downgrade(&state.instance_writable);
+    let wake = state.probe.obligation_wake();
     tokio::spawn(async move {
         while let Some(writable) = instance.upgrade() {
             let (Some(shared), Some(probe)) = (shared.upgrade(), probe.upgrade()) else {
                 break;
             };
-            if writable.load(std::sync::atomic::Ordering::SeqCst) {
+            if writable.load(std::sync::atomic::Ordering::SeqCst) && !probe.background_is_paused() {
                 let result =
                     tokio::task::spawn_blocking(move || dispatch_obligations(&shared, &probe))
                         .await;
@@ -147,7 +158,10 @@ pub fn start_dispatcher(state: ApiState) {
             }
             // The sleep retains Weak handles only; dropping an ApiState can stop
             // its drivers and release its per-instance blocking budgets.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = wake.notified() => {}
+            }
         }
     });
 }

@@ -1,6 +1,8 @@
 mod backend;
 mod refresh;
+mod swr;
 pub use backend::CacheBackend;
+pub use swr::{PreferStaleOutcome, with_prefer_stale};
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +15,28 @@ use std::sync::Arc;
 use crate::client::TmdbError;
 
 pub const DEFAULT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+pub const DISCOVER_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// Volatile discovery / ranking / tag-wall list keys use a 24h TTL and
+/// Stale-While-Revalidate; individual work/season/person details keep 7d TTL.
+pub fn is_discover_or_list_key(key: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "/trending/",
+        "/discover/",
+        "/now_playing",
+        "/popular",
+        "/top_rated",
+        "/upcoming",
+        "/airing_today",
+        "/on_the_air",
+        "search_subjects",
+        "movie_hot",
+        "movie_showing",
+        "tv_hot",
+        "subject_collection",
+    ];
+    PATTERNS.iter().any(|pattern| key.contains(pattern))
+}
 
 /// Real unix seconds for cache expiry. `new_at(..., 0)` stays available for
 /// tests; production `new()` must not use 0 or cache never expires.
@@ -83,9 +107,17 @@ impl CatalogCache {
         self.load(key, true)
     }
 
+    pub fn ttl_for_key(&self, key: &str) -> i64 {
+        if is_discover_or_list_key(key) {
+            DISCOVER_TTL_SECS.min(self.ttl_secs)
+        } else {
+            self.ttl_secs
+        }
+    }
+
     pub fn put(&self, key: &str, body: &str) -> Result<(), TmdbError> {
         let now = self.now_secs();
-        let expires = now + self.ttl_secs;
+        let expires = now + self.ttl_for_key(key);
         self.backend
             .put(self.source, key, body, now, Some(expires))?;
         Ok(())
@@ -115,6 +147,7 @@ impl CatalogCache {
         decode: impl Fn(&str) -> Result<T, TmdbError>,
     ) -> Result<T, TmdbError> {
         crate::catalog_request::check_current()?;
+        let mut malformed_fresh = false;
         if let Some(body) = self.get_fresh(key)? {
             match decode(&body) {
                 Ok(value) => {
@@ -123,9 +156,20 @@ impl CatalogCache {
                 }
                 Err(error @ TmdbError::NotFound(_)) => return Err(error),
                 Err(error) => {
+                    malformed_fresh = true;
                     tracing::warn!(source = %self.source, path = key, %error, "Malformed fresh Metadata cache; refetching");
                 }
             }
+        }
+        if !malformed_fresh
+            && swr::is_prefer_stale()
+            && is_discover_or_list_key(key)
+            && let Some(body) = self.get_stale(key)?
+            && let Ok(value) = decode(&body)
+        {
+            swr::record_stale_key(key);
+            tracing::debug!(source = %self.source, path = key, "Discover SWR cache hit; serving valid stale entry");
+            return Ok(value);
         }
         let refresh = self.flights.run(key, || {
             // Recheck after election: another leader may have populated the cache.

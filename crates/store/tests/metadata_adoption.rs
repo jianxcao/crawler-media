@@ -423,6 +423,7 @@ fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
                 release_date: Some("2024-01-01"),
                 studio: Some("Studio X"),
                 studio_logo: Some("https://example.com/logo.png"),
+                ..Default::default()
             },
         )
         .unwrap();

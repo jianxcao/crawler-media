@@ -1,6 +1,6 @@
 import { StrictMode, lazy } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import RootLayout from "@/app/layout";
 import AppLayout from "@/app/(app)/layout";
@@ -13,9 +13,6 @@ const HealthPage = lazy(() => import("@/app/health/page"));
 const ActivityPage = lazy(() => import("@/app/(app)/activity/page"));
 const MediaTransferView = lazy(() =>
   import("@/components/media-transfer-view").then((m) => ({ default: m.MediaTransferView })),
-);
-const ScheduledJobsView = lazy(() =>
-  import("@/components/scheduled-jobs-view").then((m) => ({ default: m.ScheduledJobsView })),
 );
 const CatalogCacheView = lazy(() =>
   import("@/components/catalog-cache-view").then((m) => ({ default: m.CatalogCacheView })),
@@ -66,7 +63,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="collections" element={<CollectionsPage />} />
             <Route path="collections/:id" element={<CollectionDetailPage />} />
             <Route path="transfers" element={<MediaTransferView />} />
-            <Route path="jobs" element={<ScheduledJobsView />} />
+            <Route path="jobs" element={<Navigate to="/activity?view=scheduled" replace />} />
             <Route path="cache" element={<CatalogCacheView />} />
             <Route path="discover/:type" element={<DiscoverPage />} />
             <Route

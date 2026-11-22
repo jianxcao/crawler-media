@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useInRouterContext } from "react-router-dom";
 import {
   getProbeSettings, getRemoteReadsSettings, saveProbeSettings, saveRemoteReadsSettings,
   type ProbeSettings,
@@ -78,6 +79,7 @@ function RemoteReadsControl() {
 }
 
 export function ProbeSettingsCard() {
+  const inRouter = useInRouterContext();
   const [saved, setSaved] = useState<ProbeSettings | null>(null);
   const [draft, setDraft] = useState<ProbeSettings | null>(null);
   const [busy, setBusy] = useState(false);
@@ -123,6 +125,18 @@ export function ProbeSettingsCard() {
       <p className="mt-2 text-caption leading-5 text-white/45">
         根据设备性能和远程媒体服务的限制调整抓取速度。保存后立即生效。
       </p>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5 text-caption text-white/65">
+        <span>后台批量探测在重启后默认挂起，可在活动中心查看队列进度并手动继续、暂停或清空。</span>
+        {inRouter ? (
+          <Link to="/activity?view=active" className="font-semibold text-sky-300 hover:underline">
+            前往活动 · 进行中任务 →
+          </Link>
+        ) : (
+          <a href="/activity?view=active" className="font-semibold text-sky-300 hover:underline">
+            前往活动 · 进行中任务 →
+          </a>
+        )}
+      </div>
       <RemoteReadsControl />
       {draft ? (
         <div className="mt-4 grid gap-4 lg:grid-cols-3">

@@ -14,6 +14,13 @@ use super::{Store, StoreError};
 mod admin_read;
 pub use admin_read::LedgerRow;
 
+#[path = "ledger/transfers_page.rs"]
+mod transfers_page;
+pub use transfers_page::{
+    TransferFileRow, TransferGroupRow, TransferKindFilter, TransferModeFilter, TransferPage,
+    TransferPageQuery, TransferSummary, TransferViewMode,
+};
+
 #[path = "ledger/coverage_page.rs"]
 mod coverage_page;
 

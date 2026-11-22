@@ -40,12 +40,20 @@ mod collections;
 pub use collections::{CollectionItemFacts, CollectionItemPage, CollectionRead, UserCollection};
 mod data_retention;
 mod downloaders;
+mod episode_panorama;
+pub use episode_panorama::{
+    EpisodeAvailability, EpisodeAvailabilityStatus, EpisodePanorama, OwnedEpisodeTarget,
+    SeasonAvailabilitySummary,
+};
 mod fingerprint_attempts;
 mod fingerprint_cache;
 mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
-pub use ledger::{FileReadScope, LedgerRow};
+pub use ledger::{
+    FileReadScope, LedgerRow, TransferFileRow, TransferGroupRow, TransferKindFilter,
+    TransferModeFilter, TransferPage, TransferPageQuery, TransferSummary, TransferViewMode,
+};
 pub use library_query::{
     ContinueEntry, ContinuePage, ContinueQuery, FavoriteOrder, HomeEntry, HomeQuery, HomeWindow,
     HydratedFile, PageSnapshot, PageValidation, PlaybackViewPage, PlaybackViewQuery,
@@ -186,7 +194,10 @@ pub use probe_state::{
     ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageState, ProbeStageStatus,
     retry_delay_ms,
 };
-pub use probe_tasks::{ProbeJob, ProbeJobUnit, ProbeJobUnitSpec};
+pub use probe_tasks::{
+    ProbeCancelSummary, ProbeJob, ProbeJobUnit, ProbeJobUnitSpec, ProbeLibraryQueueSummary,
+    ProbeQueueSummary,
+};
 pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use roots::LibraryRoot;
 pub use subscribe_wanted::WantedHistory;

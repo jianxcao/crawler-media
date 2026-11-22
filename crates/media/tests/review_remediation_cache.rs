@@ -233,7 +233,7 @@ fn douban_endpoint_cases() -> Vec<Case> {
         },
         Case {
             name: "douban detail",
-            body: r#"<h1><span property="v:itemreviewed">Movie</span> <span class="year">(1994)</span></h1>"#,
+            body: r#"{"id":"1","title":"Movie","year":"1994","type":"movie","subtype":"movie"}"#,
             run: |h, db, n| {
                 Ok(Douban::new_at(h, db, n)?
                     .detail("1")?

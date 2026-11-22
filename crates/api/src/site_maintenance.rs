@@ -87,6 +87,21 @@ pub fn perform_check_in(
     bus: &Bus,
     creds: &dyn SiteCredentials,
 ) -> Result<(), PluginError> {
+    if let Some(profile) = state.indexer.profile(&site.profile_id) {
+        if crate::check_in::uses_api_check_in(profile, site) {
+            let current = creds.load(site.id)?;
+            return crate::check_in::perform_api_check_in(&current, profile);
+        }
+        if profile.framework == indexer::Framework::Api
+            && !crate::check_in::uses_cookie_maintenance(profile, site)
+            && profile.api_check_in_path.is_some()
+        {
+            let _ = creds.load(site.id)?;
+            return Err(PluginError::Fetch(
+                "站点未配置有效的 API 密钥或 Cookie，无法执行签到".into(),
+            ));
+        }
+    }
     let policy = crate::check_in::site_policy(state, site)?;
     let http = crate::check_in::attendance_http();
     let via_http = |fallback: bool| {

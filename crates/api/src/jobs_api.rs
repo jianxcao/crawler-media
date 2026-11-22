@@ -52,6 +52,16 @@ pub fn seed_instance_defs(queue: &Queue) -> Result<(), jobs::JobError> {
         timeout_secs: Some(120),
         concurrency_key: Some("check_in".into()),
     })?;
+    queue.ensure_def(NewDef {
+        kind: JobKind::DiscoverRefresh,
+        scope: jobs::JobScope::Global,
+        name: "发现页榜单每日预热".into(),
+        enabled: true,
+        schedule: Some(Schedule::Interval { secs: 86_400 }),
+        payload: "{}".into(),
+        timeout_secs: Some(300),
+        concurrency_key: Some("discover_refresh".into()),
+    })?;
     queue.ensure_scheduled(0)?;
     Ok(())
 }

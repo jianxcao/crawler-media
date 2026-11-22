@@ -8,6 +8,7 @@ use super::{DISCOVER_DEADLINE, row, sections::Section};
 use crate::{
     blocking_budget::{BlockingBudget, BlockingError},
     catalog::Catalog,
+    discover_refresh::select_catalog,
 };
 
 const SECTION_CONCURRENCY: usize = 4;
@@ -31,7 +32,7 @@ impl Executor {
         catalog: Arc<dyn Catalog>,
         source: Option<String>,
         sections: Vec<Section>,
-    ) -> Result<Vec<Value>, BlockingError> {
+    ) -> Result<(Vec<Value>, Vec<Section>), BlockingError> {
         let _wall = self
             .walls
             .clone()
@@ -55,9 +56,9 @@ impl Executor {
         }
         let complete = async {
             while let Some(result) = tasks.join_next().await {
-                let (ordinal, value) =
+                let (ordinal, value, stale) =
                     result.map_err(|error| BlockingError::Worker(error.to_string()))??;
-                results.push((ordinal, value));
+                results.push((ordinal, value, stale));
                 if let Some((ordinal, section)) = pending.next() {
                     self.spawn(
                         &mut tasks,
@@ -75,13 +76,21 @@ impl Executor {
             .await
             .map_err(|_| BlockingError::Timeout)??;
         // Only the fixed section table is sorted, never catalog result rows.
-        results.sort_unstable_by_key(|(ordinal, _)| *ordinal);
-        Ok(results.into_iter().map(|(_, value)| value).collect())
+        results.sort_unstable_by_key(|(ordinal, _, _)| *ordinal);
+        let mut rows = Vec::with_capacity(results.len());
+        let mut stale_sections = Vec::new();
+        for (_, value, stale) in results {
+            rows.push(value);
+            if let Some(section) = stale {
+                stale_sections.push(section);
+            }
+        }
+        Ok((rows, stale_sections))
     }
 
     fn spawn(
         &self,
-        tasks: &mut JoinSet<Result<(usize, Value), BlockingError>>,
+        tasks: &mut JoinSet<Result<(usize, Value, Option<Section>), BlockingError>>,
         catalog: Arc<dyn Catalog>,
         source: Option<String>,
         section: Section,
@@ -98,19 +107,18 @@ impl Executor {
             // they really finish; no nested http_work permit is acquired.
             reservation
                 .run_to_completion(move || {
-                    let selected = match source.as_deref() {
-                        Some(source) => catalog.source(source).unwrap_or(catalog.as_ref()),
-                        None => catalog.as_ref(),
-                    };
+                    let selected = select_catalog(catalog.as_ref(), source.as_deref());
+                    let swr = media::cache::with_prefer_stale(|| (section.fetch)(selected));
+                    let stale = swr.used_stale().then_some(section);
                     let value = row(
                         selected.source_name(),
                         section.kind,
                         section.id,
                         section.title,
                         section.presentation,
-                        (section.fetch)(selected),
+                        swr.value,
                     );
-                    (ordinal, value)
+                    (ordinal, value, stale)
                 })
                 .await
         });

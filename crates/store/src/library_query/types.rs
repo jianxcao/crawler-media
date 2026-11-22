@@ -185,6 +185,8 @@ pub struct FilePage {
 pub struct LibraryItemDetail {
     pub item: LibraryItem,
     pub metadata: domain::MetadataFields,
+    #[serde(default)]
+    pub brands: Vec<crate::metadata::StoredBrand>,
     pub files: Vec<LibraryFile>,
     pub next_file_cursor: Option<String>,
     /// All seasons represented by library_units, independent of the first file page.

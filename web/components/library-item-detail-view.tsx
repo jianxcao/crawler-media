@@ -12,6 +12,7 @@ import { invalidateLibraryDetailSnapshot } from "@/lib/library-detail-snapshot";
 import { playLinkFileId } from "@/lib/player/active-target";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 
+import { BrandStrip } from "./media-detail/brand-strip";
 import { ExpandablePlot, SourceLink } from "./media-detail/detail-metadata-widgets";
 import { MediaDetailFallback, MediaDetailScaffold } from "./media-detail/media-detail-scaffold";
 import { FileSection } from "./library-item/file-section";
@@ -196,6 +197,7 @@ export function LibraryItemDetailView({
               )}
             </div>
           )}
+          <BrandStrip brands={detail.brands} />
           <MediaTrackRows
             files={c.trackFiles}
             selectedFileId={c.selectedTrackFile?.file_id ?? null}
@@ -245,9 +247,10 @@ export function LibraryItemDetailView({
         </div>
       )}
 
-      {!c.isMovie && detail.seasons.length > 0 && (
+      {!c.isMovie && ((detail.season_summaries?.length ?? 0) > 0 || detail.seasons.length > 0) && (
         <div className="mt-6 px-12 max-md:px-4">
           <SeasonEpisodesSection
+            key={`${libraryId}:${detail.media_item_id}:${initialSeason ?? ""}:${initialEpisode ?? ""}`}
             libraryId={libraryId}
             detail={detail}
             initialSeason={initialSeason}

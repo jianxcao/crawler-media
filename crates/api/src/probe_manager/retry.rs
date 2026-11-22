@@ -17,6 +17,9 @@ impl ProbeManager {
     /// ahead of a real retry cannot starve it; total work is bounded by
     /// `limit * SCAN_BUDGET_FACTOR` rows.
     pub fn dispatch_due(&self, now_ms: i64, limit: usize) -> Result<usize, store::StoreError> {
+        if self.background_is_paused() {
+            return Ok(0);
+        }
         let mut queued = 0usize;
         let mut scanned = 0usize;
         let budget = limit.saturating_mul(SCAN_BUDGET_FACTOR);
@@ -93,15 +96,26 @@ impl ProbeManager {
                 source_version,
             )
         };
-        // Without valid metadata the current context is not yet known (duration
-        // missing): never retire on that basis; the request re-probes metadata.
-        if need.metadata_valid && need.context_key != key.context_key {
-            retire("superseded_context");
-            return false;
-        }
-        if !need.fingerprint_enabled {
-            // Paused, not resolved: the lease keeps it out of the window.
-            return false;
+        if key.stage == store::ProbeStage::Metadata {
+            if need.metadata_valid {
+                retire("no_longer_needed");
+                return false;
+            }
+            if key.context_key != need.source_version {
+                retire("superseded_context");
+                return false;
+            }
+        } else {
+            // Without valid metadata the current context is not yet known (duration
+            // missing): never retire on that basis; the request re-probes metadata.
+            if need.metadata_valid && need.context_key != key.context_key {
+                retire("superseded_context");
+                return false;
+            }
+            if !need.fingerprint_enabled {
+                // Paused, not resolved: the lease keeps it out of the window.
+                return false;
+            }
         }
         if !seen_files.insert(key.ledger_id.clone()) {
             return false;

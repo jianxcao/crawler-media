@@ -1,6 +1,6 @@
 "use client";
 
-import { ArtworkImage } from "@/components/artwork-image";
+import { PosterImage } from "@/components/poster-image";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   deleteMediaCache,
@@ -233,11 +233,11 @@ export function CatalogCacheView() {
                 {/* 竖版电影海报 (2:3 黄金比例) */}
                 <div className="relative aspect-[2/3] w-full overflow-hidden bg-black/40">
                   {item.poster_url ? (
-                    <ArtworkImage
+                    <PosterImage
                       src={imageUrl(item.poster_url, "poster-card")}
                       alt={item.title}
-                      className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
-                      loading="lazy"
+                      pulseWhileLoading
+                      className="absolute inset-0 h-full w-full object-cover transition duration-300 group-hover:scale-105"
                     />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center text-xs text-white/30">

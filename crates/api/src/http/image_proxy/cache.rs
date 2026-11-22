@@ -87,6 +87,7 @@ impl ImageCache {
                 self.response_limit
             ));
         }
+        let content_type = content_type.to_ascii_lowercase();
         if !content_type.starts_with("image/")
             || content_type.contains(['\r', '\n'])
             || content_type.len() > 1024
@@ -141,10 +142,12 @@ impl ImageCache {
             && split <= 1024
             && payload.len() - split - 1 <= self.response_limit as usize
             && let Ok(kind) = std::str::from_utf8(&payload[..split])
-            && kind.starts_with("image/")
             && !kind.contains('\r')
         {
-            return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
+            let kind = kind.to_ascii_lowercase();
+            if kind.starts_with("image/") {
+                return Ok(Some((kind, payload[split + 1..].to_vec())));
+            }
         }
         tracing::warn!(path = %path.display(), "Invalid or oversized image cache entry");
         if discard_invalid {

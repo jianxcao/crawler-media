@@ -6,10 +6,10 @@ mod read;
 mod reconcile;
 pub use publication::{ProbeAnalysisCommit, ProbeAnalysisOutput};
 pub use read::{ProbeAnalysisFile, ProbeAnalysisRead};
-pub(crate) use reconcile::transfer_reconciliation;
 pub use reconcile::{
     ProbeAnalysisCursor, ProbeAnalysisFollowups, ProbeAnalysisReconcile, ProbeAnalysisRefreshState,
 };
+pub(crate) use reconcile::{transfer_reconciliation, transfer_reconciliation_for_cancel_scope};
 
 use crate::{ProbeDispatchId, ProbeDispatchStage, Store, StoreError};
 use serde::{Deserialize, Serialize};

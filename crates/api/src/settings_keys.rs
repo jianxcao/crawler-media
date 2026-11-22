@@ -53,3 +53,5 @@ pub const LIBRARY_HARDLINK_FALLBACK: &str = "library.hardlink_fallback";
 pub const INSTANCE_ALLOW_MULTI: &str = "instance.allow_multi";
 /// H3: days without download progress before a pending is marked stalled (default 7).
 pub const SUBSCRIBE_STALLED_TIMEOUT_DAYS: &str = "subscribe.stalled_timeout_days";
+/// Instance-wide default search presets configured by admins.
+pub const SEARCH_PRESETS: &str = "search.presets";

@@ -122,24 +122,28 @@ impl Fill {
 impl ImageProxy {
     pub(super) fn start_fill(
         self: &Arc<Self>,
-        url: String,
+        cache_key: String,
+        upstream_url: String,
+        brand_logo: bool,
         deadline: Instant,
     ) -> Result<(Arc<Fill>, &'static str), DeliveryError> {
         let fill = {
             let mut pending = self.pending.lock();
-            if let Some(fill) = pending.get(&url) {
+            if let Some(fill) = pending.get(&cache_key) {
                 return Ok((fill.clone(), "joined"));
             }
             if pending.len() >= ADMISSION_CAPACITY {
                 return Err(DeliveryError::Busy);
             }
             let fill = Arc::new(Fill::new());
-            pending.insert(url.clone(), fill.clone());
+            pending.insert(cache_key.clone(), fill.clone());
             fill
         };
         let mut flight = Flight {
             proxy: self.clone(),
-            url,
+            cache_key,
+            upstream_url,
+            brand_logo,
             fill: fill.clone(),
             completed: false,
         };
@@ -165,7 +169,13 @@ impl ImageProxy {
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let outcome = phase::scope(flight.fill.progress.clone(), || {
-                    fetch_cached(&proxy, &flight.url, deadline)
+                    fetch_cached(
+                        &proxy,
+                        &flight.cache_key,
+                        &flight.upstream_url,
+                        flight.brand_logo,
+                        deadline,
+                    )
                 });
                 flight.complete(outcome);
             })
@@ -177,19 +187,34 @@ impl ImageProxy {
         Ok((fill, "leader"))
     }
 }
-fn fetch_cached(proxy: &ImageProxy, url: &str, deadline: Instant) -> Outcome {
+fn fetch_cached(
+    proxy: &ImageProxy,
+    cache_key: &str,
+    upstream_url: &str,
+    brand_logo: bool,
+    deadline: Instant,
+) -> Outcome {
     let mut fetch_error = None;
-    let outcome = proxy.cache.get(url, || {
+    let outcome = proxy.cache.get(cache_key, || {
         if Instant::now() >= deadline {
             fetch_error = Some(DeliveryError::Timeout);
             return Err("image queue deadline reached".into());
         }
         // Synchronous transport retains this worker's permit until it really ends.
         phase::set("upstream_request");
-        (proxy.fetch)(url).map_err(|error| {
+        let (content_type, bytes) = (proxy.fetch)(upstream_url).map_err(|error| {
             fetch_error = Some(error.clone());
             error.to_string()
-        })
+        })?;
+        if brand_logo {
+            phase::set("normalize_logo");
+            Ok(super::super::logo::normalize_brand_logo(
+                &content_type,
+                bytes,
+            ))
+        } else {
+            Ok((content_type, bytes))
+        }
     });
     outcome
         .map(Arc::new)
@@ -197,7 +222,9 @@ fn fetch_cached(proxy: &ImageProxy, url: &str, deadline: Instant) -> Outcome {
 }
 struct Flight {
     proxy: Arc<ImageProxy>,
-    url: String,
+    cache_key: String,
+    upstream_url: String,
+    brand_logo: bool,
     fill: Arc<Fill>,
     completed: bool,
 }
@@ -220,10 +247,10 @@ impl Drop for Flight {
         }
         let mut pending = self.proxy.pending.lock();
         if pending
-            .get(&self.url)
+            .get(&self.cache_key)
             .is_some_and(|current| Arc::ptr_eq(current, &self.fill))
         {
-            pending.remove(&self.url);
+            pending.remove(&self.cache_key);
         }
     }
 }

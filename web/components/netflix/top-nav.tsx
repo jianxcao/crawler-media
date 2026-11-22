@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { AvatarBadge } from "@/components/avatar-badge";
 import { CrawlerWordmark } from "@/components/netflix/brand";
-import { ChevronDownIcon, ClockIcon, DatabaseIcon, FolderSyncIcon, LogoutIcon, UserIcon } from "@/components/icons";
+import { ChevronDownIcon, DatabaseIcon, FolderSyncIcon, LogoutIcon, UserIcon } from "@/components/icons";
 import { SearchCommand } from "@/components/search-command";
 import { logout } from "@/lib/api/auth";
 import { clearBackdropCache } from "@/lib/backdrop-cache";
@@ -330,14 +330,6 @@ function NetflixAvatarMenu({
                 onClick={() => {
                   setOpen(false);
                   navigate("/transfers");
-                }}
-              />
-              <MenuRow
-                label="定时任务"
-                icon={<ClockIcon className="size-[18px]" />}
-                onClick={() => {
-                  setOpen(false);
-                  navigate("/jobs");
                 }}
               />
               <MenuRow

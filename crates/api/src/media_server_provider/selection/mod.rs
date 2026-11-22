@@ -257,13 +257,13 @@ fn heavy_snapshot(
     }
     if !is_series {
         // 探测不能改变 person 成员或计数，只为已经选中的页安排，且不持有 Store 锁。
-        if state.instance_writable() {
+        if state.instance_writable() && !state.probe.background_is_paused() {
             state.probe.schedule_page_probe(
                 coverage.as_ref().clone(),
                 state.instance_writable.clone(),
                 probe_budget,
             );
-        } else {
+        } else if !state.instance_writable() {
             tracing::warn!(file_id = %coverage.file.file_id, "Auto-probe skipped in read-only instance");
         }
     }

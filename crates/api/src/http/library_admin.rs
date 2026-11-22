@@ -11,6 +11,9 @@ use std::time::Instant;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 
+#[path = "library_admin/transfers.rs"]
+pub(crate) mod transfers;
+
 /// GET /ledger — every ledger row (management view).
 pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
     let (mut items, pending, global_transfer_mode) =

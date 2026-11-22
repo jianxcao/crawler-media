@@ -113,6 +113,7 @@ impl ProbeManager {
         }
         self.shutdown_drain.lock().take();
         self.seen.lock().clear();
+        self.clear_paused_exempt_jobs();
         if self.metadata_pending.swap(0, Ordering::SeqCst) > 0 {
             self.metadata_idle_generation.fetch_add(1, Ordering::AcqRel);
             self.metadata_idle.notify_waiters();
@@ -169,6 +170,7 @@ impl ProbeManager {
             }
         };
 
+        let parent_exempt = self.is_job_paused_exempt(&current_job_id);
         if current_job.kind == "media_probe" {
             let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
             let store = self.store.as_ref();
@@ -185,7 +187,21 @@ impl ProbeManager {
             };
 
             if !transitioned {
+                if parent_exempt
+                    && self
+                        .store
+                        .get_probe_job(&current_job_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|job| !job.is_active())
+                {
+                    self.unmark_job_paused_exempt(&current_job_id);
+                }
                 return false;
+            }
+            if parent_exempt {
+                self.unmark_job_paused_exempt(&current_job_id);
+                self.mark_job_paused_exempt(fingerprint_job_id.clone());
             }
             work.unit.job_id = Some(fingerprint_job_id);
             work.start_job = true;
@@ -270,6 +286,20 @@ impl ProbeManager {
         Ok(())
     }
 
+    pub(super) fn dispatch_metadata_id(&self, id: ProbeDispatchId) -> Result<(), ()> {
+        if self.metadata_overflowed.load(Ordering::Acquire) {
+            return Err(());
+        }
+        match self.publish_metadata_observed(&self.metadata_tx, id, || {}) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metadata_overflowed.store(true, Ordering::Release);
+                Err(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
     fn offer(
         &self,
         tx: mpsc::Sender<ProbeDispatchId>,
@@ -297,9 +327,48 @@ impl ProbeManager {
         }
     }
 
+    /// Drain unstarted queued items buffered in the in-memory channels without
+    /// touching SQLite or interrupting any active read.
+    pub(super) fn drain_buffered_dispatch(&self) {
+        let metadata_drained = {
+            let mut guard = self.metadata_rx.lock();
+            let mut ids = Vec::new();
+            if let Some(rx) = guard.as_mut() {
+                while let Ok(id) = rx.try_recv() {
+                    ids.push(id.ledger_id);
+                }
+            }
+            ids
+        };
+        let fingerprint_drained = {
+            let mut guard = self.fingerprint_rx.lock();
+            let mut ids = Vec::new();
+            if let Some(rx) = guard.as_mut() {
+                while let Ok((id, _)) = rx.try_recv() {
+                    ids.push(id.ledger_id);
+                }
+            }
+            ids
+        };
+        if !metadata_drained.is_empty() || !fingerprint_drained.is_empty() {
+            let mut seen = self.seen.lock();
+            for id in &metadata_drained {
+                seen.remove(id);
+            }
+            for id in &fingerprint_drained {
+                seen.remove(id);
+            }
+        }
+        for _ in &metadata_drained {
+            self.metadata_stage_finished();
+        }
+        self.metadata_overflowed.store(false, Ordering::Release);
+        self.fingerprint_overflowed.store(false, Ordering::Release);
+    }
+
     /// Fill both windows from durable pending ids. Seen stays at window + active.
     pub(super) fn fill_dispatch_windows(&self) {
-        if self.shutting_down.load(Ordering::SeqCst) {
+        if self.shutting_down.load(Ordering::SeqCst) || self.background_is_paused() {
             return;
         }
         self.fill_metadata();
@@ -307,12 +376,18 @@ impl ProbeManager {
     }
 
     /// Top up a window once emptied or at half-drain when durable backlog overflowed.
+    /// While paused, only explicit exempt jobs (`paused_exempt_jobs`) are refilled.
     pub(super) fn refill_drained_windows(&self) {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
+        let paused = self.background_is_paused();
+        if paused && !self.has_paused_exempt_jobs() {
+            return;
+        }
         let metadata_free = self.metadata_tx.capacity();
         if metadata_free == METADATA_WINDOW
+            || (paused && metadata_free > 0)
             || (self.metadata_overflowed.load(Ordering::Acquire)
                 && metadata_free >= METADATA_WINDOW / 2)
         {
@@ -320,10 +395,53 @@ impl ProbeManager {
         }
         let fingerprint_free = self.fingerprint_tx.capacity();
         if fingerprint_free == FINGERPRINT_WINDOW
+            || (paused && fingerprint_free > 0)
             || (self.fingerprint_overflowed.load(Ordering::Acquire)
                 && fingerprint_free >= FINGERPRINT_WINDOW / 2)
         {
             self.fill_fingerprint();
+        }
+    }
+
+    fn pending_stage_ids(
+        &self,
+        stage: ProbeDispatchStage,
+        window: usize,
+    ) -> Option<Vec<ProbeDispatchId>> {
+        let store = self.store.as_ref();
+        let remote_paused = self.remote_reads_are_paused();
+        if self.background_is_paused() {
+            let exempt_ids = self.paused_exempt_job_ids();
+            if exempt_ids.is_empty() {
+                return None;
+            }
+            match store.pending_probe_dispatch_ids_for_jobs(
+                stage,
+                &exempt_ids,
+                remote_paused,
+                window + 1,
+            ) {
+                Ok((ids, active_jobs)) => {
+                    self.prune_inactive_exempt_jobs(&exempt_ids, &active_jobs);
+                    return Some(ids);
+                }
+                Err(error) => {
+                    tracing::error!(%error, ?stage, "读取暂停豁免派发窗口失败");
+                    return None;
+                }
+            }
+        }
+        let result = if remote_paused {
+            store.pending_local_probe_dispatch_ids(stage, window + 1)
+        } else {
+            store.pending_probe_dispatch_ids(stage, window + 1)
+        };
+        match result {
+            Ok(ids) => Some(ids),
+            Err(error) => {
+                tracing::error!(%error, ?stage, "读取派发窗口失败");
+                None
+            }
         }
     }
 
@@ -333,17 +451,9 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let store = self.store.as_ref();
-        let ids = match if self.remote_reads_are_paused() {
-            store.pending_local_metadata_dispatch_ids(METADATA_WINDOW + 1)
-        } else {
-            store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, METADATA_WINDOW + 1)
-        } {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::error!(%error, "读取媒体信息派发窗口失败");
-                return;
-            }
+        let Some(ids) = self.pending_stage_ids(ProbeDispatchStage::Metadata, METADATA_WINDOW)
+        else {
+            return;
         };
 
         let mut remaining_unseen = false;
@@ -379,21 +489,9 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let store = self.store.as_ref();
-        let ids = match if self.remote_reads_are_paused() {
-            store.pending_local_probe_dispatch_ids(
-                ProbeDispatchStage::Fingerprint,
-                FINGERPRINT_WINDOW + 1,
-            )
-        } else {
-            store
-                .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, FINGERPRINT_WINDOW + 1)
-        } {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::error!(%error, "读取声纹派发窗口失败");
-                return;
-            }
+        let Some(ids) = self.pending_stage_ids(ProbeDispatchStage::Fingerprint, FINGERPRINT_WINDOW)
+        else {
+            return;
         };
 
         let mut ready = Vec::new();
