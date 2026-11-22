@@ -115,3 +115,41 @@ pub(super) async fn get_user_for_query(
     .await
     .map_err(query_stage_error)
 }
+
+pub(super) fn entry_snapshot_query(
+    state: &ApiState,
+    user_id: UserId,
+    id: &str,
+) -> Result<Option<MediaItemSnapshot>, media_server::provider::QueryError> {
+    let entry =
+        sync_operations::read_store_query(state, &[store::Db::Library, store::Db::App], |store| {
+            items::resolve_entry_with_source_query(store, Some(user_id), id, None)
+        })?;
+    entry
+        .map(|entry| {
+            items::snapshot_from_entry_query(
+                state,
+                user_id,
+                entry.file,
+                entry.unit,
+                entry.media,
+                entry.is_series,
+            )
+        })
+        .transpose()
+}
+
+pub(super) async fn resolve_single_item_for_query(
+    provider: &ApiServerProvider,
+    user_id: UserId,
+    id: &str,
+) -> Result<Option<MediaItemSnapshot>, media_server::provider::QueryError> {
+    let id = id.to_owned();
+    let snapshot = provider
+        .run_sync_query(move |provider| entry_snapshot_query(&provider.state, user_id, &id))
+        .await??;
+    match snapshot {
+        Some(snapshot) => Ok(Some(provider.enrich_single_item(snapshot).await)),
+        None => Ok(None),
+    }
+}

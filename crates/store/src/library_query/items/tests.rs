@@ -83,17 +83,21 @@ fn browse_total_and_page_share_snapshot_during_committed_mutation() {
     let (start_tx, start_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        start_rx.recv().unwrap();
+        start_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("snapshot writer never started");
         writer.with_writer(crate::Db::Library, |conn| conn.execute("UPDATE library_files SET publication_state='pending' WHERE file_id=(SELECT file_id FROM library_files WHERE library_id=?1 LIMIT 1)",[library.to_string()]).map_err(Into::into)).unwrap();
         writer
             .begin_library_integrity(library, true, "snapshot-writer", 3000)
             .unwrap();
-        while writer
-            .advance_library_operation("snapshot-writer", 3001, 100)
-            .unwrap()
-            .state
-            == "applying"
-        {}
+        assert!(
+            (0..10_000).any(|_| writer
+                .advance_library_operation("snapshot-writer", 3001, 100)
+                .unwrap()
+                .state
+                != "applying"),
+            "snapshot-writer did not finish within 10_000 steps"
+        );
         done_tx.send(()).unwrap();
     });
     let mut triggered = false;
@@ -111,7 +115,9 @@ fn browse_total_and_page_share_snapshot_during_committed_mutation() {
                 {
                     triggered = true;
                     start_tx.send(()).unwrap();
-                    done_rx.recv().unwrap();
+                    done_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("snapshot writer did not finish");
                 }
                 Authorization::Allow
             }));

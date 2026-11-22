@@ -90,6 +90,17 @@ fn finish(store: &Store, operation: &str, now: i64) -> store::playback::Operatio
     panic!("Integrity did not finish");
 }
 
+fn seed_member(store: &Store, id: UserId) {
+    store
+        .insert_user(&domain::User {
+            id,
+            login: format!("integrity-{id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+}
+
 #[test]
 fn integrity_check_and_repair_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
@@ -97,6 +108,7 @@ fn integrity_check_and_repair_lifecycle() {
     let (lib, root_id) = create_library(&store, "Movies", MediaKind::Movie, "/movies");
     let library_id: LibraryId = lib.id.parse().unwrap();
     let user_id = UserId::new();
+    seed_member(&store, user_id);
 
     let m1_id = "00000000-0000-0000-0000-000000000001";
     let media = create_media(&store, m1_id, "Movie 1");

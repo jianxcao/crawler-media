@@ -75,13 +75,16 @@ pub fn seed_into_with_genre(
     tx.commit().unwrap();
     let op = format!("query-work-{id}-{}", uuid::Uuid::new_v4());
     store.begin_library_integrity(id, true, &op, 1000).unwrap();
-    loop {
+    let mut settled = false;
+    for _ in 0..200_000 {
         let status = store.advance_library_operation(&op, 1001, 100).unwrap();
         if status.state != "applying" {
             assert_eq!(status.state, "succeeded");
+            settled = true;
             break;
         }
     }
+    assert!(settled, "query_work seed operation did not settle");
 }
 #[allow(dead_code)]
 pub fn protocol() -> ProtocolItemQuery {

@@ -505,7 +505,7 @@ CREATE TABLE pending_file_renames (
  updated_at_ms INTEGER NOT NULL,
  CHECK((dest_device IS NULL) = (dest_inode IS NULL))
 );
-CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
+CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, created_at_ms, rename_id) WHERE phase <> 'failed';
 CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 CREATE UNIQUE INDEX pending_file_renames_active_file ON pending_file_renames(file_id) WHERE phase <> 'failed';
 CREATE UNIQUE INDEX pending_file_renames_active_to ON pending_file_renames(to_path_key) WHERE phase <> 'failed';

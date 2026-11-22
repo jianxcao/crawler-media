@@ -33,7 +33,17 @@ pub(super) fn channels() -> DispatchChannels {
     }
 }
 
+pub(super) fn is_strm_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+}
+
 impl ProbeManager {
+    pub(super) fn should_defer_remote_dispatch(&self, path: &std::path::Path) -> bool {
+        self.remote_reads_are_paused() && is_strm_path(path)
+    }
+
     /// How many ledger ids are queued or running in this process.
     pub fn queued_ledger_count(&self) -> usize {
         self.seen.lock().len()
@@ -195,6 +205,14 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: ProbeDispatchStage::Fingerprint,
         };
+        if self.should_defer_remote_dispatch(&work.unit.row.file.path) {
+            tracing::info!(
+                ledger_id,
+                "远程读取已暂停，已完成的媒体信息按顺序留在数据库排队等待声纹"
+            );
+            self.seen.lock().remove(&ledger_id);
+            return false;
+        }
         if self.fingerprint_overflowed.load(Ordering::Acquire) {
             tracing::info!(
                 ledger_id,

@@ -1,13 +1,16 @@
 #[path = "support/mod.rs"]
 mod support;
-use support::fixture_provider;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::UserId;
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, UserId,
+};
 use media_server::provider::{
-    AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
-    PlaybackEventIdentity, ServerLibrary, ServerUser,
+    AuthenticateError, EntityKind, EntityPage, ItemCounts, MediaItemMetadata, MediaItemSnapshot,
+    MediaServerProvider, PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, QueryError,
+    Season, ServerLibrary, ServerUser,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,9 +21,30 @@ struct FileAssetProvider {
     user_id: UserId,
     dummy_video_path: PathBuf,
     observed: Mutex<Vec<(&'static str, String, Option<Instant>)>>,
+    forced_error: Mutex<Option<&'static str>>,
 }
 
 impl FileAssetProvider {
+    fn new(user_id: UserId) -> Self {
+        Self {
+            user_id,
+            dummy_video_path: PathBuf::new(),
+            observed: Mutex::new(Vec::new()),
+            forced_error: Mutex::new(None),
+        }
+    }
+
+    fn marker_error(&self, marker: Option<&str>) -> QueryError {
+        let key = marker
+            .filter(|m| matches!(*m, "unavailable" | "unauthorized" | "internal"))
+            .or_else(|| *self.forced_error.lock().unwrap());
+        match key {
+            Some("unauthorized") => QueryError::Unauthorized,
+            Some("internal") => QueryError::Internal("fixture failure".into()),
+            _ => QueryError::Unavailable,
+        }
+    }
+
     fn select_segment(
         &self,
         principal: media_server::provider::QueryPrincipal,
@@ -52,22 +76,74 @@ impl FileAssetProvider {
 impl MediaServerProvider for FileAssetProvider {
     async fn resumable_items_page(
         &self,
-        user_id: domain::UserId,
+        _user_id: domain::UserId,
         parent_id: Option<&str>,
-        offset: usize,
-        limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
-        fixture_provider::resume_items(self, user_id, parent_id, offset, limit).await
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, QueryError> {
+        Err(self.marker_error(parent_id))
     }
 
     async fn next_up_items(
         &self,
-        user_id: domain::UserId,
+        _user_id: domain::UserId,
         series_id: Option<&str>,
-        offset: usize,
-        limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
-        fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, QueryError> {
+        Err(self.marker_error(series_id))
+    }
+
+    async fn query_entities(
+        &self,
+        _user: UserId,
+        _kind: EntityKind,
+        _parent: Option<&str>,
+        search: Option<&str>,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<EntityPage, QueryError> {
+        Err(self.marker_error(search))
+    }
+
+    async fn query_item_counts(&self, _user: UserId) -> Result<ItemCounts, QueryError> {
+        Err(self.marker_error(None))
+    }
+
+    async fn query_seasons(
+        &self,
+        _user: UserId,
+        media: MediaId,
+    ) -> Result<Vec<Season>, QueryError> {
+        let marker = match media.to_string().as_str() {
+            "00000000-0000-0000-0000-000000000002" => Some("unauthorized"),
+            "00000000-0000-0000-0000-000000000003" => Some("internal"),
+            _ => Some("unavailable"),
+        };
+        Err(self.marker_error(marker))
+    }
+
+    async fn search_hints_page(
+        &self,
+        _user: UserId,
+        term: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, QueryError> {
+        Err(self.marker_error(Some(term)))
+    }
+
+    async fn resolve_single_item_for_query(
+        &self,
+        _user_id: UserId,
+        id: &str,
+    ) -> Result<Option<MediaItemSnapshot>, QueryError> {
+        match id {
+            "resolve-unavailable" => Err(QueryError::Unavailable),
+            "resolve-unauthorized" => Err(QueryError::Unauthorized),
+            "resolve-internal" => Err(QueryError::Internal("fixture".into())),
+            _ => Ok(series_fixture_snapshot(id)),
+        }
     }
     async fn query_visible_items(
         &self,
@@ -250,11 +326,7 @@ impl MediaServerProvider for FileAssetProvider {
 
 #[tokio::test]
 async fn typed_query_errors_keep_http_status_on_catalog_and_episode_routes() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider);
     for (uri, status) in [
         ("/Items", StatusCode::SERVICE_UNAVAILABLE),
@@ -284,11 +356,7 @@ async fn typed_query_errors_keep_http_status_on_catalog_and_episode_routes() {
 
 #[tokio::test]
 async fn covered_routes_keep_typed_auth_binding_and_query_statuses() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider);
     for (uri, token, device, status) in [
         ("/Items", "invalid", "device-1", StatusCode::UNAUTHORIZED),
@@ -364,11 +432,7 @@ async fn covered_routes_keep_typed_auth_binding_and_query_statuses() {
 
 #[tokio::test]
 async fn latest_second_segment_and_missing_timing_reuse_one_principal() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider.clone());
     let response = app
         .clone()
@@ -399,11 +463,7 @@ async fn latest_second_segment_and_missing_timing_reuse_one_principal() {
 
 #[tokio::test]
 async fn covered_head_routes_infer_timing_and_keep_status() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider.clone());
     for uri in [
         "/Items",
@@ -436,11 +496,7 @@ async fn covered_head_routes_infer_timing_and_keep_status() {
 
 #[tokio::test]
 async fn query_unavailable_is_503_and_principal_keeps_original_credential() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider.clone());
     let started = Instant::now();
     let deadline = started + Duration::from_millis(250);
@@ -495,11 +551,7 @@ async fn query_unavailable_is_503_and_principal_keeps_original_credential() {
 
 #[tokio::test]
 async fn latest_second_segment_errors_keep_status_and_original_principal_for_get_and_head() {
-    let provider = Arc::new(FileAssetProvider {
-        user_id: UserId::new(),
-        dummy_video_path: PathBuf::new(),
-        observed: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
     let app = media_server::routes(provider.clone());
     let started = Instant::now();
     let deadline = started + Duration::from_secs(30);
@@ -541,5 +593,200 @@ async fn latest_second_segment_errors_keep_status_and_original_principal_for_get
                 );
             }
         }
+    }
+}
+
+fn series_fixture_snapshot(id: &str) -> Option<MediaItemSnapshot> {
+    let media_id = match id {
+        "w1_00000000000000000000000000000001" => "00000000-0000-0000-0000-000000000001",
+        "w1_00000000000000000000000000000002" => "00000000-0000-0000-0000-000000000002",
+        "w1_00000000000000000000000000000003" => "00000000-0000-0000-0000-000000000003",
+        _ => return None,
+    }
+    .parse()
+    .ok()?;
+    let file = LibraryFile {
+        file_id: LedgerId::new(),
+        library_id: LibraryId::new(),
+        root_id: "root".into(),
+        media_id,
+        kind: MediaKind::Tv,
+        path: PathBuf::from("/tv/show.mkv"),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(100),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    Some(MediaItemSnapshot {
+        file,
+        unit: None,
+        media: Media {
+            id: media_id,
+            kind: MediaKind::Tv,
+            title: "Show".into(),
+            year: Some(2024),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        },
+        ticks: 0,
+        play_count: 0,
+        played: false,
+        unplayed_item_count: None,
+        parent_id: "lib".into(),
+        is_series: true,
+        chapters: Vec::new(),
+        intro_start_ms: None,
+        intro_end_ms: None,
+        outro_start_ms: None,
+        outro_end_ms: None,
+        metadata: MediaItemMetadata::default(),
+    })
+}
+
+#[tokio::test]
+async fn projection_and_continuation_routes_preserve_typed_query_errors() {
+    let provider = Arc::new(FileAssetProvider::new(UserId::new()));
+    let app = media_server::routes(provider.clone());
+    let cases = [
+        (
+            "/Genres?SearchTerm=",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/emby/Genres?SearchTerm=unauthorized",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Studios?SearchTerm=internal",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+        (
+            "/emby/Studios?SearchTerm=unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Items/Counts",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Users/me/Items/Counts",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Users/me/Items/Counts",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+        (
+            "/Shows/w1_00000000000000000000000000000001/Seasons",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Shows/w1_00000000000000000000000000000002/Seasons",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Shows/w1_00000000000000000000000000000003/Seasons",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+        (
+            "/Shows/resolve-unavailable/Seasons",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Shows/resolve-unauthorized/Seasons",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Shows/resolve-internal/Seasons",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+        (
+            "/Search/Hints?SearchTerm=test",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Search/Hints?SearchTerm=unauthorized",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Search/Hints?SearchTerm=internal",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+        (
+            "/Users/Me/Items/Resume",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Users/Me/Items/Resume?ParentId=unauthorized",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "/Shows/NextUp",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            "/Shows/NextUp?SeriesId=internal",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+    for (uri, expected, marker) in cases {
+        *provider.forced_error.lock().unwrap() = Some(marker);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{uri} ({marker})");
     }
 }

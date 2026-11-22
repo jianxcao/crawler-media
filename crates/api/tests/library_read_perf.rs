@@ -69,6 +69,76 @@ fn metric_fields() -> Vec<MetricField> {
     ]
 }
 
+struct AsyncRendezvous {
+    remaining: std::sync::atomic::AtomicUsize,
+    aborted: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+struct AsyncRendezvousGuard {
+    rendezvous: Arc<AsyncRendezvous>,
+    armed: bool,
+}
+
+impl AsyncRendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AsyncRendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rendezvous
+                .aborted
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.rendezvous.notify.notify_waiters();
+        }
+    }
+}
+
+impl AsyncRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: std::sync::atomic::AtomicUsize::new(parties),
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> AsyncRendezvousGuard {
+        AsyncRendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    async fn wait(&self) {
+        use std::sync::atomic::Ordering;
+        if self.aborted.load(Ordering::Acquire) {
+            panic!("async rendezvous aborted");
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.notify.notify_waiters();
+            return;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notified = self.notify.notified();
+                if self.aborted.load(Ordering::Acquire) {
+                    panic!("async rendezvous aborted");
+                }
+                if self.remaining.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("async rendezvous timed out");
+    }
+}
+
 async fn round(
     fixture: &mut support::Fixture,
     uris: &[String; 2],
@@ -76,13 +146,15 @@ async fn round(
     batch: usize,
 ) -> ([(f64, u16, QueryMetricsSnapshot); 2], (f64, f64, f64)) {
     let app = router(fixture.state.clone());
-    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let barrier = AsyncRendezvous::new(3);
     let reader = |index: usize| {
         let barrier = barrier.clone();
         let app = app.clone();
         let uri = uris[index].clone();
         async move {
+            let mut guard = barrier.guard();
             barrier.wait().await;
+            guard.disarm();
             support::read(app, uri, diagnostic).await
         }
     };
@@ -90,7 +162,9 @@ async fn round(
     let mut files = fixture.files.clone();
     let writer_barrier = barrier.clone();
     let writer = async move {
+        let mut guard = writer_barrier.guard();
         writer_barrier.wait().await;
+        guard.disarm();
         tokio::task::spawn_blocking(move || support::write_batch(&state, &mut files, batch))
             .await
             .unwrap()

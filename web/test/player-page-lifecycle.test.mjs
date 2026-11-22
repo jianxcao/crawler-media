@@ -98,3 +98,31 @@ test("in-flight renewal promoted while cached restores with the successor identi
   assert.equal(f.reports.at(-1).saved.playSessionId, "sid-2");
   f.dispose();
 });
+
+test("persisted pageshow calls unsuspend even when restore is declined or saved is null", () => {
+  const target = new EventTarget();
+  const events = [];
+  let snapshot = {
+    unitKey: "media:1:2", playSessionId: "sid-1", phase: "playing",
+    positionMs: 10_000, wantsPlay: true, announced: true, endedByAdmin: false,
+  };
+  const dispose = bindPlaybackPageLifecycle(target, {
+    snapshot: () => snapshot,
+    suspend: () => events.push("suspend"),
+    unsuspend: () => events.push("unsuspend"),
+    restore: () => events.push("restore"),
+    stop: () => events.push("stop"),
+  });
+  // Persisted pageshow with no saved snapshot still triggers unsuspend
+  page(target, "pageshow", true);
+  assert.deepEqual(events, ["unsuspend"]);
+  // Persisted pagehide then declined restore (phase changed to error) still triggers unsuspend
+  page(target, "pagehide", true);
+  snapshot = { ...snapshot, phase: "error" };
+  page(target, "pageshow", true);
+  assert.deepEqual(events, ["unsuspend", "suspend", "unsuspend"]);
+  // Non-persisted pageshow does NOT trigger unsuspend
+  page(target, "pageshow", false);
+  assert.deepEqual(events, ["unsuspend", "suspend", "unsuspend"]);
+  dispose();
+});

@@ -50,11 +50,24 @@ fn capture(
                 )
             };
         let mut dirty = false;
-        if let Some(filter) = input
-            .filter_id
-            .and_then(|id| id.parse::<domain::FilterId>().ok())
-            && store.get_filter(filter).map_err(store_error)?.is_some()
-        {
+        if let Some(raw_filter_id) = input.filter_id {
+            let filter = raw_filter_id
+                .trim()
+                .parse::<domain::FilterId>()
+                .map_err(|_| {
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        "subscription.invalid",
+                        "filter_id 无效",
+                    )
+                })?;
+            if store.get_filter(filter).map_err(store_error)?.is_none() {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "subscription.invalid",
+                    "引用的规则组不存在",
+                ));
+            }
             subscribe.wash_cut_filter_id = Some(filter);
             dirty = true;
         }

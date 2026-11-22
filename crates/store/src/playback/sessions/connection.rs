@@ -263,6 +263,31 @@ impl crate::LibraryConnection<'_> {
         Ok(self.close_session(user_id, device_id, now)?.is_some())
     }
 
+    pub fn revoke_device_sessions(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        self.playback_write(|store| {
+            let user_str = user_id.to_string();
+            store.library.execute(
+                "UPDATE playback_sessions SET admin_ended = 1
+                 WHERE user_id = ?1 AND device_id = ?2",
+                params![user_str, device_id],
+            )?;
+            let closed_live = store
+                .close_session_inner(user_id, device_id, now)?
+                .is_some();
+            let closed_ids = store.library.execute(
+                "UPDATE playback_session_ids SET state = 'closed'
+                 WHERE user_id = ?1 AND device_id = ?2 AND state <> 'closed'",
+                params![user_str, device_id],
+            )?;
+            Ok(closed_live || closed_ids > 0)
+        })
+    }
+
     pub fn device_was_admin_ended(
         &self,
         user_id: UserId,

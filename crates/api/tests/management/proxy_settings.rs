@@ -321,3 +321,32 @@ fn proxy_diagnose_endpoint_lists_all_targets() {
             assert!(names.iter().any(|n| n.contains("豆瓣")));
         });
 }
+
+#[test]
+fn put_proxy_returns_allowed_domains_and_env_override() {
+    let _guard = PROXY_TEST_MUTEX.lock();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let app = app(&tmp);
+            let response = app
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/settings/proxy",
+                    Some("management-secret"),
+                    json!({
+                        "proxy_url": "",
+                        "allowed_domains": "example.org, tmdb.org",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let data = json_data(response).await;
+            assert_eq!(data["allowed_domains"], "example.org, tmdb.org");
+            assert!(data["env_override"].is_boolean());
+        });
+}

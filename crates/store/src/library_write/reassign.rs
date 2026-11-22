@@ -130,14 +130,15 @@ fn ensure_file_movable(
     target_kind: &str,
 ) -> Result<String, StoreError> {
     let id = file_id.to_string();
-    let row: Option<(String, String, String)> = tx
+    let row: Option<(String, String, String, String)> = tx
         .query_row(
-            "SELECT media_id, kind, library_id FROM library_files WHERE file_id = ?1",
+            "SELECT media_id, kind, library_id, publication_state
+             FROM library_files WHERE file_id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((owner, kind, library)) = row else {
+    let Some((owner, kind, library, publication_state)) = row else {
         return Err(StoreError::Missing(format!("file {id}")));
     };
     if owner != from.to_string() {
@@ -145,9 +146,19 @@ fn ensure_file_movable(
             "file {id} is owned by Media {owner}, not {from}"
         )));
     }
+    if publication_state != "published" {
+        return Err(StoreError::Conflict(format!(
+            "file {id} is not published ({publication_state})"
+        )));
+    }
     if kind != target_kind {
         return Err(StoreError::Conflict(format!(
             "file {id} has kind {kind}, which the target Media does not accept (kind {target_kind})"
+        )));
+    }
+    if super::rename_guard::has_active_file_rename(tx, &id)? {
+        return Err(StoreError::Protected(format!(
+            "file {id} has an active rename"
         )));
     }
     ensure_file_version(tx, &id, version)?;

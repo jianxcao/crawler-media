@@ -91,6 +91,14 @@ fn favorite_page_is_authorized_deduplicated_and_stable() {
     let a = library(&store, &ra, "A");
     let b = library(&store, &rb, "B");
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("pages-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let episode_fav = show(&store, "Episode Fav");
     episode(&store, episode_fav, &ra, 1);
     episode(&store, episode_fav, &ra, 2);

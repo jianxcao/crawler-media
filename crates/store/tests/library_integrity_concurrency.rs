@@ -2,13 +2,114 @@ mod query_model_support;
 
 use domain::UserId;
 use query_model_support::{run, setup};
-use std::sync::Barrier;
+use std::sync::{Arc, Condvar, Mutex};
+
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: Mutex<RendezvousState>,
+    changed: Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
 
 #[test]
 fn concurrent_integrity_advances_do_not_duplicate_reports_or_staged_counts() {
     let (tmp, store, library, media) = setup();
     let users = [UserId::new(), UserId::new(), UserId::new()];
     for user in users {
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: format!("conc-{user}"),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
         for id in &media {
             store
                 .mutate_playback(
@@ -26,10 +127,12 @@ fn concurrent_integrity_advances_do_not_duplicate_reports_or_staged_counts() {
     store
         .begin_library_integrity(library, true, "concurrent", 0)
         .unwrap();
-    let start = Barrier::new(2);
+    let start = BoundedRendezvous::new(2);
     std::thread::scope(|scope| {
         let worker = || {
+            let mut guard = start.guard();
             start.wait();
+            guard.disarm();
             for step in 1..10_000 {
                 let status = store
                     .advance_library_operation("concurrent", step, 1)

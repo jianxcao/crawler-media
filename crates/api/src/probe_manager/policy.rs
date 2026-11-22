@@ -58,11 +58,12 @@ pub(super) struct ProbeNeed {
 
 pub(super) fn assess_probe_need(
     store: &Store,
-    file: &domain::LibraryFile,
+    row: &domain::FileCoverage,
     origin: ProbeRequestOrigin,
     now_ms: i64,
     source_version: String,
 ) -> ProbeNeed {
+    let file = &row.file;
     let ledger_id = file.file_id.to_string();
     let kind = store
         .get_media(file.media_id)
@@ -71,7 +72,8 @@ pub(super) fn assess_probe_need(
         .map(|media| media.kind)
         .unwrap_or(MediaKind::Movie);
     let path = file.path.as_path();
-    let fingerprint_enabled = is_fingerprint_enabled_for_path(store, path, kind);
+    let fingerprint_enabled = is_fingerprint_enabled_for_path(store, path, kind)
+        && super::require_single_unit(row).is_ok();
     let sample_duration_secs = store
         .get_scrape_config()
         .ok()

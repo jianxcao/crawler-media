@@ -622,5 +622,7 @@ fn refused_activation_of_a_superseded_pending_session_writes_nothing() {
     );
 }
 
+#[path = "playback_event_binding/actor_barrier.rs"]
+mod actor_barrier;
 #[path = "playback_event_binding/revocation.rs"]
 mod revocation;

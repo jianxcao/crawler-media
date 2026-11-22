@@ -37,7 +37,10 @@ impl RenameCompletionPlan {
         let mut reverted_missing_targets = Vec::new();
         let mut leftovers = Vec::new();
         for side in effective_sidecars.iter_mut() {
-            if !side.action.deletes_source() || side.from == side.to {
+            if !side.action.deletes_source()
+                || side.from == side.to
+                || super::rename_disk::same_directory_entry(&side.from, &side.to).unwrap_or(true)
+            {
                 continue;
             }
             let Some(expected_source) = side.source_identity.clone() else {

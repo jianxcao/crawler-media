@@ -59,8 +59,9 @@ pub(crate) fn ensure_root_owns_path(
     let file_id = file.file_id.to_string();
     let (deleting, renaming, nested): (bool, bool, bool) = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pending_file_deletions WHERE path_key=?3),
-                EXISTS(SELECT 1 FROM pending_file_renames WHERE phase <> 'failed' AND to_path_key=?3 AND file_id<>?4)
-                    OR EXISTS(SELECT 1 FROM pending_file_renames WHERE phase <> 'failed' AND from_path_key=?3 AND file_id<>?4),
+                EXISTS(SELECT 1 FROM pending_file_renames
+                       WHERE phase <> 'failed'
+                         AND (file_id=?4 OR to_path_key=?3 OR from_path_key=?3)),
                 EXISTS(SELECT 1 FROM library_roots r JOIN libraries l USING(library_id)
                   WHERE r.enabled=1 AND l.kind=?2 AND length(r.path_key)>length(?1)
                     AND (?3=r.path_key OR substr(?3,1,length(r.path_key)+1)=r.path_key||'/'))",

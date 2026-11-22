@@ -78,6 +78,15 @@ pub(super) fn resolve_entry_with_source(
     id: &str,
     preferred: Option<&domain::PhysicalSourceId>,
 ) -> Result<Option<ResolvedEntry>, String> {
+    resolve_entry_with_source_query(store, user_id, id, preferred).map_err(|e| e.to_string())
+}
+
+pub(super) fn resolve_entry_with_source_query(
+    store: &crate::Store,
+    user_id: Option<UserId>,
+    id: &str,
+    preferred: Option<&domain::PhysicalSourceId>,
+) -> Result<Option<ResolvedEntry>, media_server::provider::QueryError> {
     let Some(item) = domain::TypedItemId::from_wire_string(id) else {
         return Ok(None);
     };
@@ -86,7 +95,7 @@ pub(super) fn resolve_entry_with_source(
         // Public artwork routes resolve an item id before any user is known.
         None => store.published_entries_for_item(&item),
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(super::sync_operations::store_query_error)?;
     let Some(source) = selected.into_iter().find(|source| {
         preferred.is_none_or(|preferred| {
             source.file.file_id == preferred.file_id
@@ -97,7 +106,7 @@ pub(super) fn resolve_entry_with_source(
     };
     let Some(media) = store
         .get_media(source.file.media_id)
-        .map_err(|error| error.to_string())?
+        .map_err(super::sync_operations::store_query_error)?
     else {
         return Ok(None);
     };
@@ -118,23 +127,7 @@ pub(super) fn entry_snapshot(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<MediaItemSnapshot>, String> {
-    let entry = super::sync_operations::read_store(
-        state,
-        &[store::Db::Library, store::Db::App],
-        |store| resolve_entry(store, Some(user_id), id),
-    )?;
-    entry
-        .map(|entry| {
-            snapshot_from_entry(
-                state,
-                user_id,
-                entry.file,
-                entry.unit,
-                entry.media,
-                entry.is_series,
-            )
-        })
-        .transpose()
+    super::query_lookups::entry_snapshot_query(state, user_id, id).map_err(|e| e.to_string())
 }
 
 pub(super) fn snapshot_from_entry(
@@ -145,6 +138,18 @@ pub(super) fn snapshot_from_entry(
     media: domain::Media,
     is_series: bool,
 ) -> Result<MediaItemSnapshot, String> {
+    snapshot_from_entry_query(state, user_id, file, unit, media, is_series)
+        .map_err(|e| e.to_string())
+}
+
+pub(super) fn snapshot_from_entry_query(
+    state: &ApiState,
+    user_id: UserId,
+    file: domain::LibraryFile,
+    unit: (i32, i32),
+    media: domain::Media,
+    is_series: bool,
+) -> Result<MediaItemSnapshot, media_server::provider::QueryError> {
     // Series rollups also consult the user's App role; leaf facts stay Library-only.
     let databases: &[store::Db] = if is_series {
         &[store::Db::Library, store::Db::App]
@@ -152,7 +157,7 @@ pub(super) fn snapshot_from_entry(
         &[store::Db::Library]
     };
     let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) =
-        super::sync_operations::read_store(state, databases, |store| {
+        super::sync_operations::read_store_query(state, databases, |store| {
             let marker = store
                 .get_file_marker(file.file_id, domain::UnitKey::new(unit.0, unit.1))
                 .ok()

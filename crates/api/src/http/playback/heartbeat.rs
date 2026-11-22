@@ -107,6 +107,16 @@ pub(crate) async fn progress(
 }
 
 fn persistence_error(error: &StoreError, user_id: domain::UserId, device_id: &str) -> Response {
+    if matches!(
+        error,
+        StoreError::WriteBusy
+            | StoreError::ReadBusy
+            | StoreError::ReadClosed
+            | StoreError::ReadDeadline
+            | StoreError::ReadCancelled
+    ) {
+        return crate::http::store_wait::busy_response();
+    }
     tracing::error!(%error, %user_id, device_id, "Playback persistence failed");
     err(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -187,18 +197,17 @@ fn classify_heartbeat(
         )?,
         _ => false,
     };
-    let archived_admin_ended = event != "start"
-        && match (session_id.as_deref(), binding.as_ref()) {
-            (Some(session_id), Some(binding)) => store.archived_play_session_was_admin_ended(
-                heartbeat.user_id,
-                device,
-                session_id,
-                binding.generation,
-                heartbeat.now,
-                10,
-            )?,
-            _ => false,
-        };
+    let archived_admin_ended = match (session_id.as_deref(), binding.as_ref()) {
+        (Some(session_id), Some(binding)) => store.archived_play_session_was_admin_ended(
+            heartbeat.user_id,
+            device,
+            session_id,
+            binding.generation,
+            heartbeat.now,
+            10,
+        )?,
+        _ => false,
+    };
     let admin_ended = live_admin_ended || archived_admin_ended;
     let identity = crate::playback_events::PlaybackEventIdentity {
         play_session_id: session_id,
@@ -255,11 +264,19 @@ fn bound_event(
         };
     let same_source = resolved.target.file.file_id == heartbeat.source.file_id
         && resolved.target.file.version.revision == heartbeat.source.revision;
-    let position_ms = heartbeat.body["position_ms"]
-        .as_i64()
-        .or_else(|| (event == "start" && same_source).then_some(resolved.start_ms))
-        .unwrap_or(0)
-        .max(0);
+    let position_ms = if event == "start" {
+        Some(
+            heartbeat.body["position_ms"]
+                .as_i64()
+                .or_else(|| same_source.then_some(resolved.start_ms))
+                .unwrap_or(0)
+                .max(0),
+        )
+    } else {
+        heartbeat.body["position_ms"]
+            .as_i64()
+            .map(|value| value.max(0))
+    };
     let event_type = match event {
         "start" => store::playback::PlaybackEventType::Playing,
         "stop" => store::playback::PlaybackEventType::Stopped,
@@ -280,7 +297,7 @@ fn bound_event(
             revision,
         },
         source_version,
-        position_ms: Some(position_ms),
+        position_ms,
         duration_ms: heartbeat
             .duration_ms
             .or(same_source.then_some(resolved.duration_ms).flatten()),
@@ -301,6 +318,46 @@ fn bound_event(
     }))
 }
 
+fn session_was_admin_ended(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    device: &str,
+    session_id: &str,
+    generation: i64,
+) -> Result<bool, StoreError> {
+    if store.is_device_revoked(heartbeat.user_id, device)? {
+        return Ok(true);
+    }
+    if store.live_play_session_was_admin_ended(heartbeat.user_id, device, session_id, generation)? {
+        return Ok(true);
+    }
+    store.archived_play_session_was_admin_ended(
+        heartbeat.user_id,
+        device,
+        session_id,
+        generation,
+        heartbeat.now,
+        10,
+    )
+}
+
+fn target_is_stale_or_version_changed(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    binding_revision: Option<i64>,
+) -> Result<bool, StoreError> {
+    if target_is_stale(store, heartbeat)? {
+        return Ok(true);
+    }
+    let Some(file) = store.visible_file(heartbeat.user_id, heartbeat.ledger_id)? else {
+        return Ok(true);
+    };
+    Ok(
+        binding_revision.is_some_and(|rev| file.version.revision != rev)
+            || file.version.revision != heartbeat.source.revision,
+    )
+}
+
 fn persist_heartbeat(
     store: &crate::Store,
     heartbeat: &Heartbeat<'_>,
@@ -313,19 +370,47 @@ fn persist_heartbeat(
     }
     let decision = classify_heartbeat(store, heartbeat, device)?;
     let Some(binding) = decision.binding else {
-        return Ok((current_unit(store, heartbeat)?, decision.admin_ended));
+        let ended = decision.admin_ended || store.is_device_revoked(heartbeat.user_id, device)?;
+        return Ok((current_unit(store, heartbeat)?, ended));
     };
-    if let Some(event) = bound_event(store, heartbeat, device, binding)? {
+    let generation = binding.generation;
+    let binding_revision = binding.file_revision;
+    let session_id = heartbeat.body["play_session_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let ended = if let Some(event) = bound_event(store, heartbeat, device, binding)? {
         match store.commit_playback_event(&event, heartbeat.now_ms)? {
             store::playback::EventOutcome::Applied => {
                 tracing::debug!(session_id = %event.session_id, "Playback heartbeat committed");
+                decision.admin_ended
+                    || session_was_admin_ended(
+                        store,
+                        heartbeat,
+                        device,
+                        &event.session_id,
+                        event.generation,
+                    )?
             }
             store::playback::EventOutcome::IgnoredStale => {
                 tracing::warn!(session_id = %event.session_id, "Stale Playback heartbeat ignored");
+                decision.admin_ended
+                    || session_was_admin_ended(
+                        store,
+                        heartbeat,
+                        device,
+                        &event.session_id,
+                        event.generation,
+                    )?
+                    || target_is_stale_or_version_changed(store, heartbeat, binding_revision)?
             }
         }
-    }
-    Ok((current_unit(store, heartbeat)?, decision.admin_ended))
+    } else {
+        decision.admin_ended
+            || session_was_admin_ended(store, heartbeat, device, &session_id, generation)?
+            || target_is_stale_or_version_changed(store, heartbeat, binding_revision)?
+    };
+    Ok((current_unit(store, heartbeat)?, ended))
 }
 
 fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str) -> Response {
@@ -433,6 +518,186 @@ mod tests {
         );
         assert!(store.get_session(user_id, "race").unwrap().is_none());
     }
+
+    fn seed_race_session(
+        store: &crate::Store,
+    ) -> (
+        domain::UserId,
+        domain::MediaId,
+        domain::PhysicalSourceId,
+        String,
+    ) {
+        let library = store
+            .list_libraries()
+            .unwrap()
+            .into_iter()
+            .find(|library| library.kind == domain::MediaKind::Movie)
+            .unwrap();
+        let media = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "race-movie".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&media).unwrap();
+        let path = library.root_paths[0].join("race.mkv");
+        std::fs::write(&path, b"video").unwrap();
+        let file = store::test_support::publish_fixture_file(
+            store,
+            &store::test_support::FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
+                media_id: media.id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let user_id = domain::UserId::new();
+        store
+            .insert_user_with_password(
+                &domain::User {
+                    id: user_id,
+                    login: "hb-admin".into(),
+                    enabled: true,
+                    role: domain::UserRole::Admin,
+                },
+                "pw",
+            )
+            .unwrap();
+        store.set_user_token(user_id, "tok").unwrap();
+        store
+            .bind_playback_credential(user_id, "dev-race", "tok")
+            .unwrap();
+        let sid = store
+            .issue_play_session(
+                user_id,
+                "dev-race",
+                file.file_id,
+                media.id,
+                domain::UnitKey::WHOLE,
+                &file.version,
+                10,
+            )
+            .unwrap();
+        let source = domain::PhysicalSourceId {
+            file_id: file.file_id,
+            revision: file.version.revision,
+        };
+        (user_id, media.id, source, sid)
+    }
+
+    #[test]
+    fn persist_heartbeat_reports_ended_by_admin_on_post_commit_revocation_and_false_on_seq_regression()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(temp.path()).unwrap();
+        let (user_id, media_id, source, sid) = seed_race_session(&store);
+        let beat = |body: &Value| {
+            persist_heartbeat(
+                &store,
+                &Heartbeat {
+                    body,
+                    user_id,
+                    media_id,
+                    ledger_id: source.file_id,
+                    season: UNIT_WHOLE,
+                    episode: UNIT_WHOLE,
+                    duration_ms: Some(10_000),
+                    now: 11,
+                    now_ms: 11_000,
+                    source: source.clone(),
+                },
+                "dev-race",
+            )
+            .unwrap()
+            .1
+        };
+        let start_body = serde_json::json!({
+            "event": "start",
+            "play_session_id": sid,
+            "event_sequence": 5,
+            "position_ms": 1_000,
+        });
+        assert!(!beat(&start_body));
+
+        let regressed = serde_json::json!({
+            "event": "progress",
+            "play_session_id": sid,
+            "event_sequence": 4,
+            "position_ms": 2_000,
+        });
+        assert!(
+            !beat(&regressed),
+            "out-of-order sequence alone is not ended_by_admin"
+        );
+
+        store.revoke_device(user_id, "dev-race").unwrap();
+        store
+            .revoke_device_sessions(user_id, "dev-race", 11)
+            .unwrap();
+        let after_revoke = serde_json::json!({
+            "event": "progress",
+            "play_session_id": sid,
+            "event_sequence": 6,
+            "position_ms": 3_000,
+        });
+        assert!(
+            beat(&after_revoke),
+            "revoked device must report ended_by_admin=true"
+        );
+    }
+
+    #[test]
+    fn persist_heartbeat_after_pre_read_revision_bump_reports_ended_by_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(temp.path()).unwrap();
+        let (user_id, media_id, mut source, sid) = seed_race_session(&store);
+        store
+            .with_writer(store::Db::Library, |conn| {
+                conn.execute(
+                    "UPDATE library_files SET file_revision = file_revision + 1 WHERE file_id = ?1",
+                    [source.file_id.to_string()],
+                )
+                .map(|_| ())
+                .map_err(Into::into)
+            })
+            .unwrap();
+        source.revision += 1;
+        let body = serde_json::json!({
+            "event": "progress",
+            "play_session_id": sid,
+            "event_sequence": 1,
+            "position_ms": 1_500,
+        });
+        let (_, ended) = persist_heartbeat(
+            &store,
+            &Heartbeat {
+                body: &body,
+                user_id,
+                media_id,
+                ledger_id: source.file_id,
+                season: UNIT_WHOLE,
+                episode: UNIT_WHOLE,
+                duration_ms: Some(10_000),
+                now: 12,
+                now_ms: 12_000,
+                source,
+            },
+            "dev-race",
+        )
+        .unwrap();
+        assert!(
+            ended,
+            "pre-read file_revision bump must still report ended_by_admin=true on IgnoredStale"
+        );
+    }
 }
 
 fn read_heartbeat_target(
@@ -486,12 +751,16 @@ fn read_heartbeat_target(
         Ok(row) => row,
         Err(error) => return Err(error.response()),
     };
-    let Some(source) = store.visible_file(user_id, file.file_id).ok().flatten() else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "playback.item_missing",
-            "条目不存在",
-        ));
+    let source = match store.visible_file(user_id, file.file_id) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "playback.item_missing",
+                "条目不存在",
+            ));
+        }
+        Err(error) => return Err(persistence_error(&error, user_id, device_id)),
     };
     let duration = match source_duration(store, &file) {
         Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),

@@ -4,7 +4,112 @@ mod body;
 mod delivery;
 
 use super::cache::ImageCache;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    timeout: Duration,
+    state: Mutex<RendezvousState>,
+    changed: Condvar,
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Self::with_timeout(parties, Duration::from_secs(5))
+    }
+
+    fn with_timeout(parties: usize, timeout: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            timeout,
+            state: Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> AbortOnDrop {
+        AbortOnDrop::new(self.clone())
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = Instant::now() + self.timeout;
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+
+    fn abort(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.aborted = true;
+        self.changed.notify_all();
+    }
+}
+
+struct AbortOnDrop {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl AbortOnDrop {
+    fn new(rendezvous: Arc<BoundedRendezvous>) -> Self {
+        Self {
+            rendezvous,
+            armed: true,
+        }
+    }
+
+    fn wait(&mut self) {
+        self.rendezvous.wait();
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rendezvous.abort();
+        }
+    }
+}
 
 fn image(bytes: usize) -> Result<(String, Vec<u8>), String> {
     Ok(("image/png".into(), vec![42; bytes]))
@@ -84,15 +189,16 @@ fn deletion_failure_rejects_new_image_without_exceeding_budget() {
 fn concurrent_writers_publish_complete_files_within_budget() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ImageCache::new(tmp.path().into(), 100, 40));
-    let barrier = Arc::new(Barrier::new(8));
+    let rendezvous = BoundedRendezvous::new(8);
+    let _abort = AbortOnDrop::new(rendezvous.clone());
     std::thread::scope(|scope| {
         for index in 0..8 {
             let cache = cache.clone();
-            let barrier = barrier.clone();
+            let mut guard = rendezvous.guard();
             scope.spawn(move || {
                 cache
                     .get(&format!("image-{index}"), || {
-                        barrier.wait();
+                        guard.wait();
                         image(30)
                     })
                     .unwrap();
@@ -114,15 +220,16 @@ fn concurrent_writers_publish_complete_files_within_budget() {
 fn concurrent_same_url_writes_never_expose_partial_images() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ImageCache::new(tmp.path().into(), 100, 40));
-    let barrier = Arc::new(Barrier::new(8));
+    let rendezvous = BoundedRendezvous::new(8);
+    let _abort = AbortOnDrop::new(rendezvous.clone());
     std::thread::scope(|scope| {
         for _ in 0..8 {
             let cache = cache.clone();
-            let barrier = barrier.clone();
+            let mut guard = rendezvous.guard();
             scope.spawn(move || {
                 let result = cache
                     .get("same", || {
-                        barrier.wait();
+                        guard.wait();
                         image(30)
                     })
                     .unwrap();
@@ -139,6 +246,71 @@ fn concurrent_same_url_writes_never_expose_partial_images() {
             .len(),
         30
     );
+}
+
+#[test]
+fn bounded_rendezvous_wakes_peers_without_aborting_when_a_thread_panics_early() {
+    let rendezvous = BoundedRendezvous::new(8);
+    let started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let mut guard = rendezvous.guard();
+                let rendezvous = rendezvous.clone();
+                scope.spawn(move || {
+                    if index == 0 {
+                        let poll_deadline = Instant::now() + Duration::from_secs(1);
+                        while rendezvous
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .arrived
+                            < 7
+                            && Instant::now() < poll_deadline
+                        {
+                            std::thread::yield_now();
+                        }
+                        panic!("early worker panic before rendezvous");
+                    }
+                    guard.wait();
+                });
+            }
+        });
+    }));
+    assert!(result.is_err(), "early panic must fail the scope");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "peers must wake promptly rather than waiting for the 5s timeout (elapsed: {:?})",
+        started.elapsed()
+    );
+    assert!(
+        rendezvous
+            .state
+            .lock()
+            .expect("mutex must not be poisoned after early panic")
+            .aborted
+    );
+}
+
+#[test]
+fn bounded_rendezvous_timeout_unwinds_cleanly_without_poisoning() {
+    let rendezvous = BoundedRendezvous::with_timeout(2, Duration::from_millis(20));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut guard = rendezvous.guard();
+        guard.wait();
+    }));
+    assert!(result.is_err(), "missing second party must time out");
+    assert!(
+        rendezvous
+            .state
+            .lock()
+            .expect("mutex must not be poisoned after wait panic")
+            .aborted
+    );
+    let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rendezvous.wait();
+    }));
+    assert!(second.is_err(), "aborted rendezvous must fail immediately");
 }
 
 #[test]

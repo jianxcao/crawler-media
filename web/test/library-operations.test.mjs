@@ -360,7 +360,7 @@ test("hidden library (admin_visible=false) works for applyRootConsolidations, up
   );
 });
 
-function loadEditDialog(apiOverrides) {
+function loadEditDialog(apiOverrides, { members = [] } = {}) {
   const opsSource = ts.transpileModule(
     readFileSync(path.join(webRoot, "lib/library-operations.ts"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
@@ -411,7 +411,7 @@ function loadEditDialog(apiOverrides) {
         return { LIBRARY_KIND_META: { movie: { label: "电影", Icon: icon }, tv: { label: "剧集", Icon: icon }, video: { label: "其他", Icon: icon } } };
       }
       if (name === "@/lib/library-operations") return opsMod.exports;
-      if (name === "@/lib/api/members") return { listMembers: async () => [] };
+      if (name === "@/lib/api/members") return { listMembers: async () => members };
       if (name === "@/lib/api/subscriptions") return { listRuleSets: async () => [] };
       if (name === "@/lib/api/libraries") return librariesStub;
       if (name.startsWith("@/")) return loadModule(resolveFile(path.join(webRoot, name.slice(2))));
@@ -421,7 +421,13 @@ function loadEditDialog(apiOverrides) {
     return mod.exports;
   };
   const formDialog = loadModule(path.join(webRoot, "components/library-form-dialog.tsx"));
-  return { LibraryFormDialog: formDialog.LibraryFormDialog, LibraryOperationError: opsMod.exports.LibraryOperationError };
+  const accessScope = loadModule(path.join(webRoot, "components/library-form/access-scope-editor.tsx"));
+  return {
+    LibraryFormDialog: formDialog.LibraryFormDialog,
+    LibraryOperationError: opsMod.exports.LibraryOperationError,
+    AccessScopeEditor: accessScope.AccessScopeEditor,
+    accessScopeSummary: accessScope.accessScopeSummary,
+  };
 }
 
 test("EditLibraryDialog preserves failed operation_id and retries via POST .../operations/{id}/retry without re-sending PATCH", async () => {
@@ -549,4 +555,107 @@ test("LibraryManageView uses manage=1 in DuplicatesPanel and reloads after root 
   );
   assert.match(duplicatesSource, /function DuplicatesPanel[\s\S]*?listLibraries\(undefined,\s*\{\s*manage:\s*true\s*\}\)/);
   assert.match(manageViewSource, /onConsolidate:[\s\S]*?consolidateLibrary\([\s\S]*?reload\(\)/);
+});
+
+test("EditLibraryDialog preserves access scope fields without expanding 可见范围 and clears member_ids for everyone", async () => {
+  const patches = [];
+  const memberId = "00000000-0000-4000-8000-000000000001";
+  const loaded = loadEditDialog({
+    updateLibraryAndWait: async (_id, payload) => {
+      patches.push(payload);
+      return {
+        ...library,
+        access_mode: payload.access_mode,
+        admin_visible: payload.admin_visible,
+        member_ids: payload.member_ids,
+      };
+    },
+  });
+
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(loaded.LibraryFormDialog, {
+        state: {
+          ...library,
+          stats: { item_count: 0, file_count: 0, total_size_bytes: 0 },
+          access_mode: "selected",
+          admin_visible: false,
+          is_default: false,
+          root_missing: false,
+          member_ids: [memberId],
+        },
+        onClose() {},
+        onSaved() {},
+      }),
+    );
+  });
+
+  try {
+    const findButton = (label) =>
+      renderer.root.findAllByType("button").find((b) => b.children.join("") === label);
+
+    await act(async () => { findButton("保存").props.onClick(); });
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].access_mode, "selected");
+    assert.equal(patches[0].admin_visible, false);
+    assert.deepEqual(patches[0].member_ids, [memberId]);
+
+    // Expand 可见范围 and switch to 所有成员 -> member_ids sent in PATCH must be []
+    const accessSectionBtn = renderer.root
+      .findByProps({ "data-section": "access" })
+      .findByType("button");
+    await act(async () => { accessSectionBtn.props.onClick(); });
+    await act(async () => { findButton("所有成员").props.onClick(); });
+    await act(async () => { findButton("保存").props.onClick(); });
+    assert.equal(patches.length, 2);
+    assert.equal(patches[1].access_mode, "everyone");
+    assert.deepEqual(patches[1].member_ids, []);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test("AccessScopeEditor excludes admin id from onMemberIds and accessScopeSummary reflects adminVisible", async () => {
+  const memberId = "00000000-0000-4000-8000-000000000001";
+  const loaded = loadEditDialog({}, { members: [{ id: memberId, login: "alice" }] });
+  const adminVisibleUpdates = [];
+  const memberIdUpdates = [];
+  const prevDocument = globalThis.document;
+  globalThis.document = new globalThis.EventTarget();
+
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(loaded.AccessScopeEditor, {
+        mode: "selected",
+        adminVisible: true,
+        memberIds: [],
+        onMode() {},
+        onAdminVisible(next) { adminVisibleUpdates.push(next); },
+        onMemberIds(next) { memberIdUpdates.push(next); },
+      }),
+    );
+  });
+
+  try {
+    const input = renderer.root.findByProps({ role: "combobox" });
+    await act(async () => { input.props.onFocus(); });
+    const aliceOption = renderer.root
+      .findAllByProps({ role: "option" })
+      .find((opt) => opt.findAllByType("span").some((s) => s.children.join("") === "alice"));
+    assert.ok(aliceOption, "must render member option");
+    await act(async () => { aliceOption.props.onClick(); });
+    assert.deepEqual(adminVisibleUpdates, [true]);
+    assert.deepEqual(memberIdUpdates, [[memberId]]);
+    assert.equal(memberIdUpdates[0].includes("admin"), false);
+
+    assert.equal(loaded.accessScopeSummary("everyone", true, 0), "所有成员");
+    assert.notEqual(loaded.accessScopeSummary("everyone", false, 0), "所有成员");
+    assert.match(loaded.accessScopeSummary("everyone", false, 0), /不可见/);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+  }
 });

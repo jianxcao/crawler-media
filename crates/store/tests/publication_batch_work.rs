@@ -96,6 +96,14 @@ fn batch(users: usize, protocol: bool) -> (u64, i64) {
     let ids: Vec<UserId> = (0..users).map(|_| UserId::new()).collect();
     for user in &ids {
         store
+            .insert_user(&domain::User {
+                id: *user,
+                login: format!("batch-{user}"),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        store
             .mutate_playback(
                 media.id,
                 &PlaybackMutation::marks(*user, 1, 0, Some(true), None),

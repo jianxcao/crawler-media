@@ -458,3 +458,140 @@ fn deleting_a_file_retires_queued_probe_work() {
         .unwrap();
     assert!(store.get_probe_job("job-delete").unwrap().is_none());
 }
+
+fn seed_active_session_for_file(
+    store: &Store,
+    user_id: UserId,
+    device_id: &str,
+    file: &LibraryFile,
+) -> String {
+    let ps = store
+        .issue_play_session(
+            user_id,
+            device_id,
+            file.file_id,
+            file.media_id,
+            UnitKey::WHOLE,
+            &file.version,
+            100,
+        )
+        .unwrap();
+    assert!(
+        store
+            .activate_play_session(user_id, device_id, &ps)
+            .unwrap()
+    );
+    let row = store::SessionRow {
+        device_id: device_id.into(),
+        user_id,
+        media_id: file.media_id,
+        season: None,
+        episode: None,
+        client: Some("web".into()),
+        device_name: Some("browser".into()),
+        client_version: Some("1.0".into()),
+        play_method: "direct".into(),
+        position_ms: 15_000,
+        start_position_ms: 0,
+        duration_ms: Some(100_000),
+        paused: false,
+        watched_ms: 15_000,
+        rate_bps: 0,
+        bytes_sent: 0,
+        connections: 1,
+        admin_ended: false,
+        started_at: 100,
+        last_report_at: 110,
+        ledger_id: Some(file.file_id.to_string()),
+        play_session_id: Some(ps.clone()),
+        last_report_at_ms: 110_000,
+        last_event_sequence: None,
+    };
+    store.upsert_session(&row).unwrap();
+    ps
+}
+
+#[test]
+fn deleting_one_file_closes_and_deletes_only_its_bound_playback_sessions() {
+    use domain::{PhysicalSourceId, TypedItemId, User, UserRole};
+    use store::PlaySessionIdState;
+    use store::playback::{BoundPlaybackEvent, EventOutcome, PlaybackEventType};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let (library, root_id) = create_library(&store, &tmp.path().join("lib"));
+    let media = create_media(&store, "Dune", MediaKind::Movie);
+    let deleted = make_file(&library, &root_id, media.id, "Dune.cut1.mkv");
+    let sibling = make_file(&library, &root_id, media.id, "Dune.cut2.mkv");
+    publish(&store, &library, &deleted);
+    publish(&store, &library, &sibling);
+
+    let (user_a, user_b) = (UserId::new(), UserId::new());
+    for (id, login) in [(user_a, "alice"), (user_b, "bob")] {
+        store
+            .insert_user(&User {
+                id,
+                login: login.into(),
+                enabled: true,
+                role: UserRole::Member,
+            })
+            .unwrap();
+    }
+    let ps_deleted = seed_active_session_for_file(&store, user_a, "dev-a", &deleted);
+    let ps_sibling = seed_active_session_for_file(&store, user_b, "dev-b", &sibling);
+
+    store
+        .delete_files(library.id.parse().unwrap(), &[deleted.file_id])
+        .unwrap();
+    assert!(store.get_session(user_a, "dev-a").unwrap().is_none());
+    assert_eq!(
+        store
+            .play_session_binding(user_a, "dev-a", &ps_deleted)
+            .unwrap()
+            .unwrap()
+            .state,
+        PlaySessionIdState::Closed
+    );
+
+    let late = store
+        .commit_playback_event(
+            &BoundPlaybackEvent {
+                user_id: user_a,
+                device_id: "dev-a".into(),
+                session_id: ps_deleted.clone(),
+                generation: 1,
+                event_sequence: Some(1),
+                item: TypedItemId::Work(media.id),
+                source_id: PhysicalSourceId {
+                    file_id: deleted.file_id,
+                    revision: deleted.version.revision,
+                },
+                source_version: deleted.version.source_version.clone(),
+                position_ms: Some(20_000),
+                duration_ms: Some(100_000),
+                audio_track: None,
+                subtitle_track: None,
+                paused: false,
+                playback_rate: 1.0,
+                rate_bps: 0,
+                client: Some("web".into()),
+                device_name: Some("browser".into()),
+                client_version: Some("1.0".into()),
+                play_method: Some("direct".into()),
+                event_type: PlaybackEventType::Progress,
+            },
+            120_000,
+        )
+        .unwrap();
+    assert!(matches!(late, EventOutcome::IgnoredStale));
+    assert!(store.get_session(user_a, "dev-a").unwrap().is_none());
+    assert!(store.get_session(user_b, "dev-b").unwrap().is_some());
+    assert_eq!(
+        store
+            .play_session_binding(user_b, "dev-b", &ps_sibling)
+            .unwrap()
+            .unwrap()
+            .state,
+        PlaySessionIdState::Active
+    );
+}

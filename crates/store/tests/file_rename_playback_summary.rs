@@ -84,6 +84,14 @@ fn fixture(keep_source_episode: bool) -> Fx {
     }
     let user = UserId::new();
     store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("rename-sum-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    store
         .mutate_playback(
             media,
             &store::playback::PlaybackMutation::marks(user, 2, 1, None, Some(true)),

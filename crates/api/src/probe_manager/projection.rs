@@ -4,7 +4,7 @@ use domain::{FileCoverage, UnitKey};
 
 pub(crate) fn require_single_unit(row: &FileCoverage) -> Result<UnitKey, crate::store::StoreError> {
     match row.units.as_slice() {
-        [unit] => Ok(*unit),
+        [unit] if !unit.is_whole() => Ok(*unit),
         _ => {
             tracing::error!(file_id = %row.file.file_id, units = row.units.len(),
                 error_kind = "unit_time_mapping_unsupported", "automatic marker detection requires unit time mapping");
@@ -16,9 +16,14 @@ pub(crate) fn require_single_unit(row: &FileCoverage) -> Result<UnitKey, crate::
 pub(crate) fn require_episode_coordinates(
     row: &FileCoverage,
 ) -> Result<(u32, u32), crate::store::StoreError> {
-    Ok(require_single_unit(row)?
+    require_single_unit(row)?
         .episode_coordinates()
-        .unwrap_or((1, 1)))
+        .ok_or_else(|| {
+            crate::store::StoreError::Invalid(
+            "unit_time_mapping_unsupported: automatic marker detection requires episode coordinates"
+                .into(),
+        )
+        })
 }
 
 pub(crate) fn single_season(row: &FileCoverage) -> Option<u32> {

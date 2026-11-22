@@ -17,5 +17,8 @@ mod pool_lifetime;
 #[path = "writer_isolation/manual.rs"]
 mod manual;
 
+#[path = "writer_isolation/manual_races.rs"]
+mod manual_races;
+
 #[path = "writer_isolation/catalog.rs"]
 mod catalog;

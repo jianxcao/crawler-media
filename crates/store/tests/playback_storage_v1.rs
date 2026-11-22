@@ -119,6 +119,17 @@ fn issue_session(
     (session_id, generation)
 }
 
+fn seed_member(store: &Store, id: UserId) {
+    store
+        .insert_user(&domain::User {
+            id,
+            login: format!("storage-{id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+}
+
 #[test]
 fn playback_resolve_and_mutation_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
@@ -158,6 +169,7 @@ fn playback_resolve_and_mutation_lifecycle() {
         .unwrap();
 
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
+    seed_member(&store, user_id);
     let item_id = TypedItemId::Unit {
         media: media_id.parse().unwrap(),
         key: UnitKey::new(1, 1),
@@ -271,6 +283,7 @@ fn playback_source_change_detection() {
         .unwrap();
 
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
+    seed_member(&store, user_id);
     let item_id = TypedItemId::Unit {
         media: media_id.parse().unwrap(),
         key: UnitKey::new(1, 1),

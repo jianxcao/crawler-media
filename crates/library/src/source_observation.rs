@@ -12,7 +12,7 @@
 //!
 //! Built from one `stat` (plus one read for `.strm`); no hashing for regular files.
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -41,13 +41,15 @@ fn modified_ns(metadata: &fs::Metadata) -> i64 {
     metadata.mtime_nsec() + metadata.mtime() * 1_000_000_000
 }
 
-fn encode(path: &Path, metadata: &fs::Metadata) -> Result<(String, Option<String>), LibraryError> {
-    if is_strm(path) {
-        let digest = format!("{:x}", Sha256::digest(fs::read(path)?));
-        let version = format!("strm:{digest}");
-        return Ok((version, Some(digest)));
-    }
-    Ok((
+fn hash_strm_reader(mut reader: impl Read) -> Result<(String, Option<String>), LibraryError> {
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut reader, &mut hasher)?;
+    let digest = format!("{:x}", hasher.finalize());
+    Ok((format!("strm:{digest}"), Some(digest)))
+}
+
+fn encode_regular(metadata: &fs::Metadata) -> (String, Option<String>) {
+    (
         format!(
             "file:{}:{}:{}:{}",
             metadata.len(),
@@ -56,7 +58,15 @@ fn encode(path: &Path, metadata: &fs::Metadata) -> Result<(String, Option<String
             metadata.ino()
         ),
         None,
-    ))
+    )
+}
+
+fn encode(path: &Path, metadata: &fs::Metadata) -> Result<(String, Option<String>), LibraryError> {
+    if is_strm(path) {
+        let file = fs::File::open(path)?;
+        return hash_strm_reader(file);
+    }
+    Ok(encode_regular(metadata))
 }
 
 /// The production content token for `path` (see module docs).
@@ -82,12 +92,10 @@ pub fn observe_open_source(
     metadata: &fs::Metadata,
 ) -> Result<SourceObservation, LibraryError> {
     let (source_version, content_digest) = if is_strm(path) {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        (format!("strm:{digest}"), Some(digest))
+        file.rewind()?;
+        hash_strm_reader(file)?
     } else {
-        encode(path, metadata)?
+        encode_regular(metadata)
     };
     Ok(build_observation(metadata, source_version, content_digest))
 }

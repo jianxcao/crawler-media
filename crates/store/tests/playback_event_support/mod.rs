@@ -25,6 +25,15 @@ pub struct Fixture {
 pub fn seed() -> (tempfile::TempDir, Fixture) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
+    let user: UserId = USER.parse().unwrap();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("fixture-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let media_id: MediaId = MEDIA.parse().unwrap();
     store
         .insert_media(&Media {

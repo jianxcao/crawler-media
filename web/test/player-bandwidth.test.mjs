@@ -307,6 +307,7 @@ import {
   directDownlinkShort,
   downlinkHintBps,
 } from "../lib/player/bandwidth.ts";
+import { mountPlayer } from "./support/player-renderer.mjs";
 
 test("缺粮 + 视频直通 + 线路装不下 → 越过逐级降档直接转码；其余情况不动", () => {
   // 直出 / remux / 音频单转的视频都是 copy，码率改不了；逐级降到 remux 照样
@@ -368,4 +369,78 @@ test("直通档线路够不够：低于源码率的 1.2 倍算不够，缺读数
   assert.equal(directDownlinkShort({ downlinkBps: null, sourceBitrateBps: 8e6 }), false);
   assert.equal(directDownlinkShort({ downlinkBps: 5e6, sourceBitrateBps: null }), false);
   assert.equal(directDownlinkShort({ downlinkBps: 5e6, sourceBitrateBps: 0 }), false);
+});
+
+test("usePlayerEngine restarts at most once across restarted transcode sessions, sends downlink_bps, and resets on retry/quality change", async () => {
+  const ui = await mountPlayer({
+    grant: (body, attempt) => {
+      const tier = body.failed_tiers?.includes(3) ? 4 : 3;
+      return {
+        play_session_id: `sid-${attempt}`,
+        session_id: `tx-${attempt}`,
+        stream_url: `/stream/sid-${attempt}.m3u8`,
+        start_ms: body.start_ms ?? 0,
+        decision: {
+          outcome: "plan",
+          tier,
+          file_id: "file-1",
+          container: "hls",
+          video: { action: "transcode" },
+          audio: { action: "copy", track_ref: null },
+          subtitles: [],
+          audio_tracks: [],
+        },
+        subtitle_urls: [],
+        watch: { position_ms: body.start_ms ?? 0, duration_ms: 1_000_000 },
+        source: null,
+      };
+    },
+    engineStats: () => ({
+      engine: "hls",
+      downlinkBps: 1_500_000,
+      bitrate: 4_000_000,
+    }),
+  });
+
+  try {
+    // 1st starved failure on transcode -> updates lastDownlinkRef and restarts once (same tier, failed_tiers: [])
+    await ui.flush(() => ui.engines[0].options.onFailed("starved #1", "starved"));
+    assert.equal(ui.calls.length, 2);
+    assert.equal(ui.calls[1].downlink_bps, 1_500_000);
+    assert.deepEqual(ui.calls[1].failed_tiers, []);
+    assert.equal(ui.clientLogs.filter((l) => l.kind === "bandwidth-restart").length, 1);
+
+    // 2nd starved failure on the restarted transcode session -> MUST NOT restart again; degrades to tier 4
+    await ui.flush(() => ui.engines[1].options.onFailed("starved #2", "starved"));
+    assert.equal(ui.calls.length, 3);
+    assert.deepEqual(ui.calls[2].failed_tiers, [3]);
+    assert.equal(ui.clientLogs.filter((l) => l.kind === "bandwidth-restart").length, 1);
+
+    // Manual quality change resets bandwidthRestartedRef so a subsequent starved can restart once again
+    await ui.flush(() => ui.renderer.root.findByType("PlayerControls").props.onSelectQuality(720));
+    assert.equal(ui.calls.length, 4);
+    assert.equal(ui.calls[3].max_height, 720);
+    await ui.flush(() => ui.engines[3].options.onFailed("starved after quality", "starved"));
+    assert.equal(ui.calls.length, 5);
+    assert.deepEqual(ui.calls[4].failed_tiers, []);
+    assert.equal(ui.clientLogs.filter((l) => l.kind === "bandwidth-restart").length, 2);
+
+    // Trigger tier-4 terminal error, then manual 重试 resets bandwidthRestartedRef too
+    await ui.flush(() => ui.engines[4].options.onFailed("starved #3", "starved"));
+    assert.equal(ui.calls.length, 6);
+    assert.deepEqual(ui.calls[5].failed_tiers, [3]);
+    await ui.flush(() => ui.engines[5].options.onFailed("starved tier 4", "starved"));
+    const retryBtn = ui.renderer.root
+      .findAllByType("button")
+      .find((node) => node.children.join("") === "重试");
+    assert.ok(retryBtn, "tier 4 failure must show 重试 button");
+    await ui.flush(() => retryBtn.props.onClick());
+    assert.equal(ui.calls.length, 7);
+    await ui.flush(() => ui.engines[6].options.onFailed("starved after retry", "starved"));
+    assert.equal(ui.calls.length, 8);
+    assert.deepEqual(ui.calls[7].failed_tiers, []);
+    assert.equal(ui.clientLogs.filter((l) => l.kind === "bandwidth-restart").length, 3);
+  } finally {
+    await ui.unmount();
+  }
 });

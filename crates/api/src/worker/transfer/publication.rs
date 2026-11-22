@@ -15,7 +15,7 @@ pub(crate) fn observe_transfer_files(
     files: &[FileCoverage],
     default_mode: &str,
 ) -> Vec<TransferFileObservation> {
-    let modes = observe_transfer_modes(files, default_mode);
+    let modes = observe_transfer_modes(files, default_mode, state.file_stats.as_ref());
     files
         .iter()
         .zip(modes)
@@ -30,30 +30,45 @@ pub(crate) fn observe_transfer_files(
 }
 
 /// The transfer mode a placed file actually ended up with: a file that shares an
-/// inode with its download source came in as a hardlink, everything else kept the
-/// configured mode. `library_files.transfer_mode` only accepts the three real
+/// inode with its download source came in as a hardlink, hardlink fallback (`nlink == 1`)
+/// and degraded move (`source_path` still present) report `"copy"`, and everything else
+/// keeps the configured mode. `library_files.transfer_mode` only accepts the three real
 /// transfer modes, so the observation never invents a fourth one.
-pub(crate) fn observe_transfer_modes(files: &[FileCoverage], default_mode: &str) -> Vec<String> {
+fn observe_transfer_modes(
+    files: &[FileCoverage],
+    default_mode: &str,
+    file_stats: &dyn crate::file_stat_read::FileStatRead,
+) -> Vec<String> {
     files
         .iter()
         .map(|coverage| {
-            let is_hardlink = std::fs::metadata(&coverage.file.path)
-                .map(|meta| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        meta.nlink() > 1
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        false
-                    }
-                })
-                .unwrap_or(false);
+            let configured = coverage
+                .file
+                .transfer_mode
+                .as_deref()
+                .unwrap_or(default_mode);
+            let meta = file_stats.metadata(&coverage.file.path).ok();
+            #[cfg(unix)]
+            let is_hardlink = meta.as_ref().is_some_and(|m| {
+                use std::os::unix::fs::MetadataExt;
+                m.nlink() > 1
+            });
+            #[cfg(not(unix))]
+            let is_hardlink = false;
             if is_hardlink {
                 "hardlink".to_string()
+            } else if meta.is_some()
+                && (configured == "hardlink"
+                    || (configured == "move"
+                        && coverage
+                            .file
+                            .source_path
+                            .as_deref()
+                            .is_some_and(|src| file_stats.symlink_metadata(src).is_ok())))
+            {
+                "copy".to_string()
             } else {
-                default_mode.to_string()
+                configured.to_string()
             }
         })
         .collect()

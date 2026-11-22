@@ -63,6 +63,12 @@ pub(in crate::probe_manager) async fn capture_target(
         Err(error) if error.contains("file_deleted") => {
             FingerprintRunOutcome::Cancelled { reason: error }
         }
+        Err(error) if error.contains("unit_time_mapping_unsupported") => {
+            FingerprintRunOutcome::Failed {
+                error_kind: "unit_time_mapping_unsupported".into(),
+                error,
+            }
+        }
         Err(error) => FingerprintRunOutcome::Partial {
             error_kind: if error.contains("budget exhausted")
                 || error.starts_with("sampling_limit:")

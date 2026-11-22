@@ -237,7 +237,7 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
     let tmp = tempfile::tempdir().unwrap();
     let state = real_state(tmp.path());
     let now = support::unix_now();
-    let user = UserId::new();
+    let user = support::seed_active_member(state.store().as_ref(), "retention-acceptance");
     let media = MediaId::new();
 
     {

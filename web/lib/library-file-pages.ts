@@ -24,6 +24,7 @@ export async function collectAllFilePages<T extends { file_id: string }>(
 ): Promise<T[]> {
   const files: T[] = [];
   const seen = new Set<string>();
+  const seenCursors = new Set<string>();
   let page = firstPage;
   while (true) {
     for (const file of page.files) {
@@ -34,7 +35,8 @@ export async function collectAllFilePages<T extends { file_id: string }>(
       files.push(file);
     }
     const cursor = page.next_cursor;
-    if (!cursor) return files;
+    if (!cursor || page.files.length === 0 || seenCursors.has(cursor)) return files;
+    seenCursors.add(cursor);
     if (!fetchAfter) {
       throw new Error("分页未结束但缺少下一页取数函数");
     }

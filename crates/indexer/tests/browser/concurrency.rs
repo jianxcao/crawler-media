@@ -3,6 +3,99 @@
 
 use crate::support::*;
 
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: std::sync::Mutex<RendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: std::sync::Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
+
 #[test]
 fn different_sites_render_concurrently_up_to_the_limit() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,12 +103,12 @@ fn different_sites_render_concurrently_up_to_the_limit() {
 
     let active = Arc::new(AtomicUsize::new(0));
     let max_concurrent = Arc::new(AtomicUsize::new(0));
-    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let barrier = BoundedRendezvous::new(4);
 
     struct ConcurrentPage {
         active: Arc<AtomicUsize>,
         max_concurrent: Arc<AtomicUsize>,
-        barrier: Arc<std::sync::Barrier>,
+        barrier: Arc<BoundedRendezvous>,
     }
     impl PageSession for ConcurrentPage {
         fn goto(&self, _: &str) -> Result<(), IndexerError> {
@@ -54,7 +147,9 @@ fn different_sites_render_concurrently_up_to_the_limit() {
     ] {
         let b = browser.clone();
         let s = site.to_string();
+        let barrier = barrier.clone();
         handles.push(std::thread::spawn(move || {
+            let mut guard = barrier.guard();
             let req = FetchRequest {
                 key: "k".into(),
                 url: s,
@@ -65,11 +160,15 @@ fn different_sites_render_concurrently_up_to_the_limit() {
                 proxy: None,
                 cdp_url: Some("http://127.0.0.1:9222".into()),
             };
-            b.render(&req)
+            let res = b.render(&req);
+            guard.disarm();
+            res
         }));
     }
 
+    let mut main_guard = barrier.guard();
     barrier.wait();
+    main_guard.disarm();
     for h in handles {
         assert!(h.join().unwrap().is_ok());
     }

@@ -114,6 +114,99 @@ fn assert_reservation(store: &Store, other: &str, target: &Path) {
     assert_eq!(store.library_lifecycle_state(other).unwrap(), "ready");
 }
 
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: std::sync::Mutex<RendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: std::sync::Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            parties,
+            state: std::sync::Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn guard(self: &std::sync::Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
+
 #[test]
 fn concurrently_prepared_root_operations_have_one_owner() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
@@ -121,7 +214,7 @@ fn concurrently_prepared_root_operations_have_one_owner() {
     let a = library(&store, &temp.path().join("a"), "A");
     let b = library(&store, &temp.path().join("b"), "B");
     let target = temp.path().join("target");
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let barrier = BoundedRendezvous::new(2);
     let threads = [a, b]
         .into_iter()
         .enumerate()
@@ -132,7 +225,9 @@ fn concurrently_prepared_root_operations_have_one_owner() {
             let barrier = barrier.clone();
             let store = store.clone();
             std::thread::spawn(move || {
+                let mut guard = barrier.guard();
                 barrier.wait();
+                guard.disarm();
                 let result = store.begin_library_reconfiguration_prepared(&prepared, 1);
                 (library.id, result)
             })

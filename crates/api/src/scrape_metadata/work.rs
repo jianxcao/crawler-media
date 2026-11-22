@@ -36,6 +36,16 @@ impl crate::poster_fetch::PosterFetch for LeasedArtworkFetch<'_> {
         }
         Ok(bytes)
     }
+    fn get_fanart(&self, url: &str) -> Result<Vec<u8>, String> {
+        if let Some(lease) = self.lease {
+            lease.control().check().map_err(|e| e.to_string())?;
+        }
+        let bytes = self.fetch.get_fanart(url)?;
+        if let Some(lease) = self.lease {
+            lease.control().check().map_err(|e| e.to_string())?;
+        }
+        Ok(bytes)
+    }
     fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         match self.lease {
             Some(lease) => lease
@@ -271,5 +281,79 @@ pub(crate) fn record_scraped_display_meta(
         .record_scraped_display(media_id, &locale, display)
     {
         tracing::error!(%error, %media_id, "记录刮削展示字段失败");
+    }
+}
+
+#[cfg(test)]
+mod fanart_tests {
+    use super::*;
+    use crate::poster_fetch::PosterFetch;
+    use media::CatalogGet;
+    use std::sync::Arc;
+
+    struct FanartOnlyFetch;
+    impl PosterFetch for FanartOnlyFetch {
+        fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+            Err(format!("disallowed poster URL: {url}"))
+        }
+        fn get_fanart(&self, url: &str) -> Result<Vec<u8>, String> {
+            if url.starts_with("https://webservice.fanart.tv/") {
+                Ok(br#"{"hdmovielogo":[{"url":"https://assets.fanart.tv/logo.png","lang":"en","likes":"5"}]}"#.to_vec())
+            } else {
+                Err(format!("unexpected fanart url: {url}"))
+            }
+        }
+    }
+
+    struct EmptyFetcher;
+    impl indexer::Fetcher for EmptyFetcher {
+        fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+            Err(indexer::IndexerError::Fetch("unused".into()))
+        }
+    }
+
+    #[test]
+    fn poster_fetch_catalog_get_and_leased_fetch_route_through_get_fanart_and_check_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("movies");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = crate::management::ApiState::new(
+            crate::Store::open(tmp.path().join("data")).unwrap(),
+            "test-token".into(),
+            indexer::ProfileSet::load(None).unwrap(),
+            Arc::new(EmptyFetcher),
+            Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+        )
+        .unwrap();
+        let _lib = state
+            .store()
+            .create_library(
+                domain::MediaKind::Movie,
+                "Movies",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let video = root.join("Movie.mkv");
+        std::fs::write(&video, b"v").unwrap();
+        let lease = state
+            .acquire_path_work(&video, domain::MediaKind::Movie)
+            .unwrap()
+            .unwrap();
+        let leased = LeasedArtworkFetch {
+            fetch: &FanartOnlyFetch,
+            lease: Some(&lease),
+        };
+        let getter = PosterFetchCatalogGet { fetch: &leased };
+        let body = getter
+            .get("https://webservice.fanart.tv/v3/movies/603?api_key=k")
+            .expect("PosterFetchCatalogGet must route through get_fanart");
+        assert!(body.contains("hdmovielogo"), "{body}");
+
+        lease.control().cancel();
+        let cancelled = leased.get_fanart("https://webservice.fanart.tv/v3/movies/603?api_key=k");
+        assert!(cancelled.is_err(), "cancelled lease must abort get_fanart");
     }
 }

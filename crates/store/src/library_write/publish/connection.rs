@@ -147,11 +147,12 @@ impl crate::LibraryConnection<'_> {
         let tx = crate::write_tx(self.library)?;
         let file_id_str = file_id.to_string();
         ensure_file_version(&tx, &file_id_str, expected)?;
-        let media: String = tx.query_row(
-            "SELECT media_id FROM library_files WHERE file_id=?1",
+        let (library_id, media): (String, String) = tx.query_row(
+            "SELECT library_id, media_id FROM library_files WHERE file_id=?1",
             [&file_id_str],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        ensure_library_writable(&tx, &library_id)?;
         ensure_media_writable(&tx, media.parse()?)?;
         upsert_file_details(&tx, &file_id_str, details)?;
         self.ensure_chapter_frames_for_updates(&[(file_id_str, Vec::new())])?;

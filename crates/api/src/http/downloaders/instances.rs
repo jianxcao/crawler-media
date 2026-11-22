@@ -196,7 +196,7 @@ pub(crate) async fn get_downloader(
         let Some(row) = store.get_downloader(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
         };
-        ok(downloader_json(&row)).into_response()
+        ok(downloader_json_with_store(&row, &store)).into_response()
     })
     .await
     .unwrap_or_else(|error| error.response())
@@ -266,6 +266,15 @@ pub(crate) async fn patch_downloader(
             );
         }
     };
+    if let Some(kind) = body.kind.as_deref().filter(|kind| !kind.is_empty())
+        && !matches!(kind, "qbittorrent" | "transmission")
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "downloader.invalid",
+            "kind 必须是 qbittorrent 或 transmission",
+        );
+    }
     crate::http::store_wait::store_write(&state, move |store| {
         let Some(mut row) = store.get_downloader(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
@@ -289,7 +298,7 @@ pub(crate) async fn patch_downloader(
                 &error.to_string(),
             );
         }
-        ok(downloader_json(&row)).into_response()
+        ok(downloader_json_with_store(&row, &store)).into_response()
     })
     .await
     .unwrap_or_else(|response| response)

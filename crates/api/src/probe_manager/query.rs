@@ -54,7 +54,7 @@ impl ProbeManager {
         self.store.with_query_budget(budget, |store| {
             Ok(policy::assess_probe_need(
                 store,
-                &row.file,
+                row,
                 policy::ProbeRequestOrigin::Detail,
                 now_ms,
                 source_version,
@@ -243,6 +243,16 @@ impl ProbeManager {
             return Err(error);
         }
         tracing::info!(job_id, "Page auto-probe durably queued");
+        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+            self.forget_seen(&ledger_id);
+            tracing::info!(
+                ledger_id,
+                job_id,
+                "Remote reads paused; page auto-probe remains queued"
+            );
+            published();
+            return Ok(policy::ProbeRequestResult::Queued { job_id });
+        }
         if self.queue_metadata(unit).is_err() {
             self.forget_seen(&ledger_id);
             tracing::info!(
@@ -318,7 +328,13 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: store::ProbeDispatchStage::Fingerprint,
         };
-        if self.fingerprint_tx.try_send((id, work)).is_err() {
+        if self.should_defer_remote_dispatch(&work.unit.row.file.path) {
+            self.forget_seen(&ledger_id);
+            tracing::info!(
+                job_id,
+                "Remote reads paused; durable fingerprint unit remains queued"
+            );
+        } else if self.fingerprint_tx.try_send((id, work)).is_err() {
             self.forget_seen(&ledger_id);
             tracing::info!(
                 job_id,

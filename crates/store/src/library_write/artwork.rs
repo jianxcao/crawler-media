@@ -56,6 +56,11 @@ pub(crate) fn record_file_artwork_in(
 ) -> Result<bool, StoreError> {
     let file_id_str = file_id.to_string();
     ensure_file_version(tx, &file_id_str, expected)?;
+    if super::rename_guard::has_active_file_rename(tx, &file_id_str)? {
+        return Err(StoreError::Protected(format!(
+            "file {file_id} has an active rename"
+        )));
+    }
     if artwork.is_empty() {
         return Ok(false);
     }
@@ -71,6 +76,7 @@ pub(crate) fn record_file_artwork_in(
     let library_id: LibraryId = library_id.parse()?;
     let media_id: MediaId = media_id.parse()?;
 
+    super::publish::ensure_library_writable(tx, &library_id.to_string())?;
     super::publish::ensure_media_writable(tx, media_id)?;
     crate::library_operations::integrity_guard::ensure_integrity_writable(tx, &[library_id])?;
     let before = read_file_summary_facts(tx, &file_id_str)?;

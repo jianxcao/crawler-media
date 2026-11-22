@@ -402,3 +402,89 @@ fn seed_movie(tmp: &tempfile::TempDir) -> (api::Store, Media, LedgerId) {
     .unwrap();
     (store, media, file_id)
 }
+
+#[tokio::test]
+async fn progress_and_stop_without_position_preserve_existing_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let (store, media, file_id) = seed_movie(&tmp);
+    let user_id = store.admin_user_id().unwrap();
+    let device_id = "dev-preserve-pos";
+    let session = super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
+
+    let first = heartbeat(
+        &app, media.id, file_id, device_id, &session, "start", 45_000,
+    )
+    .await;
+    assert_eq!(first["position_ms"], 45_000);
+
+    for event in ["progress", "stop"] {
+        let res = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/playback/progress",
+                Some("management-secret"),
+                json!({
+                    "event_sequence": next_playback_sequence(),
+                    "media_item_id": media.id.to_string(),
+                    "file_id": file_id.to_string(),
+                    "device_id": device_id,
+                    "play_session_id": session,
+                    "event": event,
+                    "duration_ms": 100_000
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let data = json_data(res).await;
+        assert_eq!(
+            data["position_ms"], 45_000,
+            "{event} without position_ms must preserve existing progress"
+        );
+    }
+    let unit = store
+        .unit_state(user_id, media.id, -1, -1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unit.position_ms, 45_000);
+}
+
+#[tokio::test]
+async fn out_of_order_sequence_does_not_report_ended_by_admin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let (_store, media, file_id) = seed_movie(&tmp);
+    let device_id = "dev-seq-order";
+    let session = super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
+
+    for (event, seq, pos) in [
+        ("start", 10, 1_000),
+        ("progress", 20, 2_000),
+        ("progress", 15, 1_500),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/playback/progress",
+                Some("management-secret"),
+                json!({
+                    "event_sequence": seq,
+                    "media_item_id": media.id.to_string(),
+                    "file_id": file_id.to_string(),
+                    "device_id": device_id,
+                    "play_session_id": session,
+                    "event": event,
+                    "position_ms": pos,
+                    "duration_ms": 100_000
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let data = json_data(res).await;
+        assert_eq!(data["ended_by_admin"], false);
+    }
+}

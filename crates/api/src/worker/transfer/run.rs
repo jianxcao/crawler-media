@@ -36,7 +36,7 @@ pub(crate) fn recorded_file_source(
 /// The Subscribe slots a published file covers, as `mark_wanted_imported`
 /// spells them: a whole-work unit is `(None, None)` (its `wanted_key` maps both
 /// to `(-1, -1)`), an episode unit is its own `(season, episode)`.
-fn wanted_slots(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
+pub(crate) fn wanted_slots(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
     units
         .iter()
         .map(|unit| {

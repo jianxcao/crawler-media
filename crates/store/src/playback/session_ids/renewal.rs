@@ -27,33 +27,49 @@ impl Store {
         resolved: &crate::ResolvedResume,
         now: i64,
     ) -> Result<String, PlaybackRenewalError> {
-        let role = self
-            .user_role(user_id)?
-            .parse()
-            .map_err(StoreError::Invalid)?;
-        self.library_write_with_error(PlaybackRenewalError::Store, |db| {
-            validate_previous(
-                db.library,
-                user_id,
-                device_id,
-                previous_session_id,
-                resolved,
-            )?;
-            let target = &resolved.target;
-            super::connection::issue_on(
-                db.library,
-                user_id,
-                device_id,
-                target.file.file_id,
-                target.media_id,
-                target.unit,
-                &target.file.version,
-                now,
-                role,
-                Some(target.config_revision),
-            )
-            .map_err(Into::into)
-        })
+        let outcome = self.with_verified_actor_library_write(user_id, Some(device_id), |db| {
+            let role = db.user_role_observation(user_id)?;
+            let aliases = crate::path_key::AliasScope::new(db.library);
+            let tx = crate::write_tx(db.library)?;
+            let inner: Result<String, PlaybackRenewalError> = (|| {
+                validate_previous(&tx, user_id, device_id, previous_session_id, resolved)?;
+                let target = &resolved.target;
+                super::connection::issue_on(
+                    &tx,
+                    user_id,
+                    device_id,
+                    target.file.file_id,
+                    target.media_id,
+                    target.unit,
+                    &target.file.version,
+                    now,
+                    role,
+                    Some(target.config_revision),
+                )
+                .map_err(Into::into)
+            })();
+            match inner {
+                Ok(id) => {
+                    tx.commit()?;
+                    aliases.publish()?;
+                    Ok(Ok(id))
+                }
+                Err(err) => Ok(Err(err)),
+            }
+        })?;
+        match outcome {
+            crate::connections::VerifiedActorOutcome::Applied(res) => res,
+            crate::connections::VerifiedActorOutcome::InactiveUser => {
+                Err(PlaybackRenewalError::Store(StoreError::Protected(format!(
+                    "user {user_id} is inactive"
+                ))))
+            }
+            crate::connections::VerifiedActorOutcome::RevokedDevice => {
+                Err(PlaybackRenewalError::Store(StoreError::Protected(format!(
+                    "device {device_id} is revoked"
+                ))))
+            }
+        }
     }
 }
 

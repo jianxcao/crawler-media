@@ -164,19 +164,12 @@ pub(crate) async fn list_rule_sets(State(state): State<ApiState>) -> Response {
             Err(StoreError::Invalid(message)) => {
                 return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
             }
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
+            Err(error) => return rule_set_read_error(error),
         };
-        let default = store
-            .get_setting(settings_keys::DEFAULT_FILTER_ID)
-            .ok()
-            .flatten()
-            .and_then(|id| FilterId::from_str(&id).ok());
+        let default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
+            Ok(raw) => raw.and_then(|id| FilterId::from_str(&id).ok()),
+            Err(error) => return rule_set_read_error(error),
+        };
         ok_list(
             filters
                 .iter()
@@ -224,11 +217,7 @@ pub(crate) async fn create_rule_set(
     };
     super::store_wait::store_write(&state, move |store| {
         if let Err(error) = store.insert_filter(&filter) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+            return rule_set_store_error(error);
         }
         (StatusCode::CREATED, ok(rule_set_json(&filter, false))).into_response()
     })
@@ -259,20 +248,13 @@ pub(crate) async fn get_rule_set(
             Err(StoreError::Invalid(message)) => {
                 return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
             }
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
+            Err(error) => return rule_set_read_error(error),
         };
-        let is_default = store
-            .get_setting(settings_keys::DEFAULT_FILTER_ID)
-            .ok()
-            .flatten()
-            .map(|raw| raw == id.to_string())
-            .unwrap_or(false);
+        let expected = id.to_string();
+        let is_default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
+            Ok(raw) => raw.as_deref() == Some(expected.as_str()),
+            Err(error) => return rule_set_read_error(error),
+        };
         ok(rule_set_json(&filter, is_default)).into_response()
     })
     .await
@@ -294,6 +276,13 @@ pub(crate) async fn patch_rule_set(
             );
         }
     };
+    if body.name.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "rule_set.invalid",
+            "规则组名称必填",
+        );
+    }
     let atoms = match body
         .atoms
         .into_iter()
@@ -314,13 +303,7 @@ pub(crate) async fn patch_rule_set(
         let existing = match store.get_filter(id) {
             Ok(Some(f)) => f,
             Ok(None) => return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &e.to_string(),
-                );
-            }
+            Err(error) => return rule_set_read_error(error),
         };
         let filter = Filter {
             id,
@@ -329,22 +312,12 @@ pub(crate) async fn patch_rule_set(
             keep_old_versions: body.keep_old_versions.unwrap_or(existing.keep_old_versions),
         };
         if let Err(error) = store.save_filter(&filter) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+            return rule_set_store_error(error);
         }
         let expected = id.to_string();
         let is_default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
             Ok(raw) => raw.as_deref() == Some(expected.as_str()),
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
+            Err(error) => return rule_set_read_error(error),
         };
         ok(rule_set_json(&filter, is_default)).into_response()
     })
@@ -367,12 +340,11 @@ pub(crate) async fn delete_rule_set(
         }
     };
     super::store_wait::store_write(&state, move |store| {
-        let is_default = store
-            .get_setting(settings_keys::DEFAULT_FILTER_ID)
-            .ok()
-            .flatten()
-            .map(|raw| raw == id.to_string())
-            .unwrap_or(false);
+        let expected = id.to_string();
+        let is_default = match store.get_setting(settings_keys::DEFAULT_FILTER_ID) {
+            Ok(raw) => raw.as_deref() == Some(expected.as_str()),
+            Err(error) => return rule_set_read_error(error),
+        };
         if is_default {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -380,13 +352,65 @@ pub(crate) async fn delete_rule_set(
                 "不能删除默认规则组",
             );
         }
+        let subscribes = match store.list_all_subscribes() {
+            Ok(rows) => rows,
+            Err(error) => return rule_set_read_error(error),
+        };
+        let libraries = match store.list_libraries() {
+            Ok(rows) => rows,
+            Err(error) => return rule_set_read_error(error),
+        };
+        let id_str = id.to_string();
+        let in_use = subscribes
+            .iter()
+            .any(|s| s.filter_id == id || s.wash_cut_filter_id == Some(id))
+            || libraries
+                .iter()
+                .any(|lib| lib.default_filter_id.as_deref() == Some(id_str.as_str()));
+        if in_use {
+            return err(
+                StatusCode::CONFLICT,
+                "rule_set.in_use",
+                "该规则组正被订阅或媒体库引用，无法删除",
+            );
+        }
         match store.delete_filter(id) {
             Ok(true) => ok(json!({ "deleted": true })).into_response(),
-            _ => err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
+            Ok(false) => err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
+            Err(error) => rule_set_store_error(error),
         }
     })
     .await
     .unwrap_or_else(|response| response)
+}
+
+fn rule_set_read_error(error: StoreError) -> Response {
+    match error {
+        StoreError::ReadBusy
+        | StoreError::ReadClosed
+        | StoreError::ReadDeadline
+        | StoreError::ReadCancelled => super::store_wait::busy_response(),
+        error => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn rule_set_store_error(error: StoreError) -> Response {
+    match error {
+        StoreError::WriteBusy
+        | StoreError::ReadBusy
+        | StoreError::ReadClosed
+        | StoreError::ReadDeadline
+        | StoreError::ReadCancelled => super::store_wait::busy_response(),
+        error => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
+    }
 }
 
 pub(crate) async fn put_default_rule_set(
@@ -405,18 +429,104 @@ pub(crate) async fn put_default_rule_set(
         }
     };
     super::store_wait::store_write(&state, move |store| {
-        if store.get_filter(id).ok().flatten().is_none() {
-            return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
+        match store.get_filter(id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在"),
+            Err(error) => return rule_set_read_error(error),
         }
         if let Err(error) = store.put_setting(settings_keys::DEFAULT_FILTER_ID, &id.to_string()) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+            return rule_set_store_error(error);
         }
         ok(json!({ "default_rule_set_id": id.to_string() })).into_response()
     })
     .await
     .unwrap_or_else(|response| response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct NoopFetcher;
+    impl indexer::Fetcher for NoopFetcher {
+        fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+            Err(indexer::IndexerError::Fetch("unused".into()))
+        }
+    }
+
+    fn rule_set_test_state(tmp: &std::path::Path) -> ApiState {
+        ApiState::new(
+            crate::Store::open(tmp.join("data")).unwrap(),
+            "test-token".into(),
+            indexer::ProfileSet::load(None).unwrap(),
+            Arc::new(NoopFetcher),
+            Arc::new(downloader::MemoryDownloader::new(tmp.join("dl"))),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rule_set_read_error_maps_read_closed_to_503() {
+        let resp = rule_set_read_error(StoreError::ReadClosed);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn rule_set_store_error_maps_write_busy_and_read_unavailable_to_503() {
+        for err in [
+            StoreError::WriteBusy,
+            StoreError::ReadBusy,
+            StoreError::ReadClosed,
+            StoreError::ReadDeadline,
+            StoreError::ReadCancelled,
+        ] {
+            let resp = rule_set_store_error(err);
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let resp = rule_set_store_error(StoreError::Protected("nope".into()));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn delete_default_rule_set_returns_503_and_preserves_filter_when_app_reader_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = rule_set_test_state(tmp.path());
+        let filter = Filter::new(FilterId::new(), "Default", vec![]);
+        state.store().insert_filter(&filter).unwrap();
+        state
+            .store()
+            .put_setting(settings_keys::DEFAULT_FILTER_ID, &filter.id.to_string())
+            .unwrap();
+
+        state.store().reader_pool(store::Db::App).close();
+        let resp = delete_rule_set(State(state), Path(filter.id.to_string())).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let conn = rusqlite::Connection::open(tmp.path().join("data/app.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM filters WHERE id = ?1",
+                [filter.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "default filter must not be deleted when Db::App reader is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_default_rule_set_returns_503_when_app_reader_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = rule_set_test_state(tmp.path());
+        let filter = Filter::new(FilterId::new(), "Candidate", vec![]);
+        state.store().insert_filter(&filter).unwrap();
+
+        state.store().reader_pool(store::Db::App).close();
+        let resp =
+            put_default_rule_set(State(state), Json(json!({ "id": filter.id.to_string() }))).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

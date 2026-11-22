@@ -77,7 +77,7 @@ async fn run_phase(
 ) {
     let (phase, scan, dispersed) = config;
     let store = env.fixture.state.store();
-    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier = BoundedRendezvous::new(2);
     let (thread_store, templates, root, scope, start) = (
         store.clone(),
         env.templates.clone(),
@@ -95,7 +95,9 @@ async fn run_phase(
             start,
         )
     });
+    let mut guard = barrier.guard();
     barrier.wait();
+    guard.disarm();
     let mut latencies = Vec::new();
     let mut waits = Vec::new();
     let mut holds = Vec::new();

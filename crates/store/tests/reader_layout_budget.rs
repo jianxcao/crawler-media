@@ -27,13 +27,11 @@ fn check_validation_recovers(store: &Store, pool: &ReaderPool, db: Db, expire: b
     let interrupted = Arc::new(AtomicBool::new(false));
     let armed = Arc::new(AtomicBool::new(false));
     let hook_armed = armed.clone();
-    let request = QueryBudget {
-        deadline: Instant::now() + Duration::from_millis(50),
-        ..budget()
-    };
-    let cancelled = request.cancelled.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let hook_cancelled = cancelled.clone();
+    let deadline_slot = Arc::new(std::sync::OnceLock::<Instant>::new());
+    let hook_deadline = deadline_slot.clone();
     let observed = interrupted.clone();
-    let deadline = request.deadline;
     lease
         .with_connection(&budget(), |conn| {
             conn.authorizer(Some(move |ctx: AuthContext<'_>| {
@@ -48,9 +46,11 @@ fn check_validation_recovers(store: &Store, pool: &ReaderPool, db: Db, expire: b
                     && !observed.swap(true, Ordering::AcqRel)
                 {
                     if expire {
-                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                        if let Some(&deadline) = hook_deadline.get() {
+                            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                        }
                     } else {
-                        cancelled.store(true, Ordering::Release);
+                        hook_cancelled.store(true, Ordering::Release);
                     }
                 }
                 Authorization::Allow
@@ -74,6 +74,16 @@ fn check_validation_recovers(store: &Store, pool: &ReaderPool, db: Db, expire: b
             Ok(())
         })
         .unwrap();
+    let request = QueryBudget {
+        deadline: Instant::now()
+            + if expire {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(5)
+            },
+        cancelled,
+    };
+    let _ = deadline_slot.set(request.deadline);
     armed.store(true, Ordering::Release);
     let result = lease.with_connection(&request, |conn| {
         Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?)

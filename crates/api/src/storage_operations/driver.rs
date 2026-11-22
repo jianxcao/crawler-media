@@ -45,6 +45,9 @@ async fn drive(state: &ApiState, operation_id: &str, library_id: &str) -> Result
             DRAIN_TIMEOUT.as_secs()
         ));
     }
+    if state.job_loop_control().is_stopping() {
+        return Ok(());
+    }
     let Some(mut current) = driver_step(state, operation_id, library_id, false).await? else {
         tracing::warn!(%operation_id, "重配置操作不存在，驱动退出");
         return Ok(());
@@ -67,6 +70,9 @@ async fn drive(state: &ApiState, operation_id: &str, library_id: &str) -> Result
     );
     let mut batch: u32 = 0;
     loop {
+        if state.job_loop_control().is_stopping() {
+            return Ok(());
+        }
         batch += 1;
         let Some(next) = driver_step(state, operation_id, library_id, true).await? else {
             return Err("Library operation disappeared during batch".into());
@@ -166,13 +172,19 @@ async fn driver_step(
         .map_err(|error| format!("{} worker: {error}", if advance { "batch" } else { "read" }))?
 }
 
+const MAX_PERSIST_FAILURE_ATTEMPTS: usize = 5;
+
 async fn persist_failure(
     state: &ApiState,
     operation_id: &str,
     library_id: &str,
     message: &str,
 ) -> bool {
+    let mut write_busy_attempts = 0usize;
     loop {
+        if state.job_loop_control().is_stopping() {
+            return false;
+        }
         let owned = state.clone();
         let operation_id = operation_id.to_string();
         let log_operation_id = operation_id.clone();
@@ -180,9 +192,8 @@ async fn persist_failure(
         let reservation = match state.fs_work.reserve_until_available().await {
             Ok(reservation) => reservation,
             Err(error) => {
-                tracing::error!(operation_id = %log_operation_id, %library_id, %error, "Library 操作失败状态落库准入失败");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
+                tracing::error!(operation_id = %log_operation_id, %library_id, %error, "Library 操作失败状态落库准入已关闭");
+                return false;
             }
         };
         let result = reservation
@@ -202,7 +213,12 @@ async fn persist_failure(
                 return true;
             }
             Ok(Err(crate::store::StoreError::WriteBusy)) => {
-                tracing::warn!(operation_id = %log_operation_id, %library_id, "Library writer 暂忙，保留 driver claim 并重试失败落库");
+                write_busy_attempts += 1;
+                if write_busy_attempts >= MAX_PERSIST_FAILURE_ATTEMPTS {
+                    tracing::error!(operation_id = %log_operation_id, %library_id, attempts = write_busy_attempts, "Library writer 持续繁忙，放弃失败状态落库并保留恢复状态");
+                    return false;
+                }
+                tracing::warn!(operation_id = %log_operation_id, %library_id, attempt = write_busy_attempts, "Library writer 暂忙，保留 driver claim 并重试失败落库");
             }
             Ok(Err(error)) => {
                 tracing::error!(operation_id = %log_operation_id, %library_id, %error, "Library 操作失败状态落库失败；保留 durable cursor 供重启恢复");
@@ -213,36 +229,131 @@ async fn persist_failure(
                 return false;
             }
         }
+        if state.job_loop_control().is_stopping() {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
+fn release_driver_claims(state: &ApiState, library_id: &str, operation_id: &str) {
+    state.library_work.release(library_id, operation_id);
+    state.library_work.release_driver(operation_id);
+    crate::root_reassign_work::notify(state);
+}
+
 async fn finalize(state: &ApiState, library_id: &str, operation_id: &str) {
-    loop {
-        let completed = state.clone();
-        let library_id = library_id.to_string();
-        let operation_id = operation_id.to_string();
-        let reservation = match state.fs_work.reserve_until_available().await {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                tracing::error!(%error, "Library 操作驱动清理准入失败");
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-        };
-        let result = reservation
-            .run_to_completion(move || {
-                completed.library_work.release(&library_id, &operation_id);
-                completed.library_work.release_driver(&operation_id);
-                crate::root_reassign_work::notify(&completed);
-            })
-            .await;
-        match result {
-            Ok(()) => return,
-            Err(error) => {
-                tracing::error!(%error, "Library 操作驱动清理失败，等待重启恢复");
-                return;
-            }
+    if state.job_loop_control().is_stopping() {
+        release_driver_claims(state, library_id, operation_id);
+        return;
+    }
+    let reservation = match state.fs_work.reserve_until_available().await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            tracing::error!(%error, %operation_id, %library_id, "Library 操作驱动清理准入已关闭，直接释放内存租约");
+            release_driver_claims(state, library_id, operation_id);
+            return;
         }
+    };
+    let completed = state.clone();
+    let library_id_owned = library_id.to_string();
+    let operation_id_owned = operation_id.to_string();
+    if let Err(error) = reservation
+        .run_to_completion(move || {
+            release_driver_claims(&completed, &library_id_owned, &operation_id_owned);
+        })
+        .await
+    {
+        tracing::error!(%error, %operation_id, %library_id, "Library 操作驱动清理失败，等待重启恢复");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use downloader::MemoryDownloader;
+    use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+    use std::sync::Arc;
+
+    struct NoFetch;
+    impl Fetcher for NoFetch {
+        fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
+            Err(IndexerError::Fetch("offline".into()))
+        }
+    }
+
+    fn test_state(dir: &std::path::Path) -> ApiState {
+        let store = crate::Store::open(dir.join("data")).unwrap();
+        ApiState::new(
+            store,
+            "secret".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(dir.join("stage"))),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn persist_failure_and_finalize_exit_on_closed_fs_work_and_write_busy_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path());
+        assert!(state.library_work.claim_driver("op-1"));
+        state.library_work.block("lib-1", "op-1");
+
+        // 1) Closing fs_work must let finalize exit promptly and release claims.
+        state.fs_work.close();
+        tokio::time::timeout(Duration::from_secs(1), finalize(&state, "lib-1", "op-1"))
+            .await
+            .expect("finalize must exit promptly when fs_work is closed");
+        assert!(state.library_work.claim_driver("op-1"));
+        assert!(!state.library_work.has_active_work());
+
+        // 2) Closed fs_work must cause persist_failure to return false promptly.
+        let persisted = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_failure(&state, "op-1", "lib-1", "boom"),
+        )
+        .await
+        .expect("persist_failure must exit promptly when fs_work is closed");
+        assert!(!persisted);
+
+        // 3) Stopping signal must cause persist_failure to return false promptly.
+        let tmp2 = tempfile::tempdir().unwrap();
+        let state2 = test_state(tmp2.path());
+        state2.job_loop_control().request_stop();
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_failure(&state2, "op-2", "lib-2", "boom"),
+        )
+        .await
+        .expect("persist_failure must exit promptly when stopping");
+        assert!(!stopped);
+
+        // 4) WriteBusy retries must be bounded when Library writer is held.
+        let tmp3 = tempfile::tempdir().unwrap();
+        let state3 = test_state(tmp3.path());
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let store_arc = state3.store();
+        let holder = std::thread::spawn(move || {
+            store_arc
+                .with_writer(store::Db::Library, |_| {
+                    held_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let busy_res = tokio::time::timeout(
+            Duration::from_secs(7),
+            persist_failure(&state3, "op-3", "lib-3", "boom"),
+        )
+        .await
+        .expect("persist_failure must cap WriteBusy retries instead of looping forever");
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        assert!(!busy_res);
     }
 }

@@ -45,6 +45,10 @@ impl BlockingBudget {
         self.permits.available_permits()
     }
 
+    pub fn close(&self) {
+        self.permits.close();
+    }
+
     /// 立即预留一个 permit（拿不到即 `Busy`）。扇出调用方在派生任务**之前**预留，
     /// 这样“窗口还能再开几个”只看真实剩余额度，不会把本请求已派生但尚未
     /// 取到 permit 的任务重复扣减（否则窗口会随调度时序缩小）。

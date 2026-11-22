@@ -17,11 +17,16 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
-        Self {
-            dir,
-            store,
-            user: UserId::new(),
-        }
+        let user = UserId::new();
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: format!("cont-{user}"),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        Self { dir, store, user }
     }
     fn library(&self, name: &str) -> LibraryId {
         let root = self.dir.path().join(name);
@@ -238,19 +243,14 @@ fn clearing_and_deleting_user_state_leave_a_correct_unstarted_baseline() {
             .favorite
     );
     let admin = UserId::new();
-    for (id, role, login) in [
-        (admin, domain::UserRole::Admin, "admin"),
-        (f.user, domain::UserRole::Member, "viewer"),
-    ] {
-        f.store
-            .insert_user(&domain::User {
-                id,
-                login: login.into(),
-                enabled: true,
-                role,
-            })
-            .unwrap();
-    }
+    f.store
+        .insert_user(&domain::User {
+            id: admin,
+            login: "admin".into(),
+            enabled: true,
+            role: domain::UserRole::Admin,
+        })
+        .unwrap();
     assert!(f.store.delete_user(f.user).unwrap());
     assert!(!f.integrity(library, false).has_issues());
     assert!(f.store.unit_state(f.user, media, 1, 1).unwrap().is_none());

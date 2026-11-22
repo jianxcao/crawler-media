@@ -429,3 +429,159 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
     assert!(store.list_unidentified(None).unwrap().is_empty());
     assert!(store.get_library(&a.id).unwrap().is_none());
 }
+
+fn assert_frozen_marker_and_scan_seen_blocked(
+    store: &Store,
+    db_path: &std::path::Path,
+    file_id: domain::LedgerId,
+    scan_op_id: &str,
+    root: &std::path::Path,
+    path: &std::path::Path,
+) {
+    use domain::UnitKey;
+    use store::StoreError;
+
+    let db = rusqlite::Connection::open(db_path).unwrap();
+    let tasks_before: i64 = db
+        .query_row("SELECT COUNT(*) FROM chapter_frame_tasks", [], |r| r.get(0))
+        .unwrap();
+    let marker_err = store
+        .delete_file_marker(file_id, UnitKey::new(1, 1))
+        .unwrap_err();
+    assert!(
+        matches!(marker_err, StoreError::Protected(_)),
+        "{marker_err:?}"
+    );
+    let tasks_after: i64 = db
+        .query_row("SELECT COUNT(*) FROM chapter_frame_tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        tasks_after, tasks_before,
+        "rejected delete_file_marker must not enqueue chapter tasks"
+    );
+
+    let seen_op_err = store
+        .record_scan_seen_stamps(
+            scan_op_id,
+            &[(
+                root.join("untracked.mkv").display().to_string(),
+                100,
+                12,
+                None,
+            )],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(seen_op_err, StoreError::Protected(_)),
+        "{seen_op_err:?}"
+    );
+
+    let seen_file_err = store
+        .record_scan_seen_stamps(
+            "synthetic-op",
+            &[(path.display().to_string(), 200, 11, None)],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(seen_file_err, StoreError::Protected(_)),
+        "{seen_file_err:?}"
+    );
+}
+
+#[test]
+fn library_removal_freeze_blocks_probe_details_artwork_marker_and_scan_seen_writes() {
+    use store::StoreError;
+    use store::files::FileDetails;
+    use store::library_write::probe::{Observed, ProbePublication};
+    use store::library_write::{FileArtwork, probe::CURRENT_TRACKS_VERSION};
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let root = temp.path().join("tv_root");
+    std::fs::create_dir_all(&root).unwrap();
+    let a = store
+        .create_library(
+            MediaKind::Tv,
+            "A",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = media();
+    store.insert_media(&media).unwrap();
+    let path = root.join("Show.S01E01.mkv");
+    let poster = root.join("poster.jpg");
+    std::fs::write(&path, b"video-bytes").unwrap();
+    std::fs::write(&poster, b"poster-bytes").unwrap();
+    let file = store::test_support::publish_fixture_file(&store, &row(media.id, &path)).unwrap();
+    let scan_op = store.enqueue_scan(&a.id, "freeze-test", &[], 100).unwrap();
+
+    // Freeze library via begin_library_removal.
+    let _removal = store.begin_library_removal(&a.id).unwrap();
+
+    let probe_err = store
+        .publish_probe_result(
+            file.file_id,
+            &ProbePublication {
+                expected: &file.version,
+                tracks_version: CURRENT_TRACKS_VERSION,
+                resolution: Some("1080p"),
+                codec: Some("h264"),
+                hdr: Observed::NotObserved,
+                duration_ms: Some(90_000),
+                details: None,
+            },
+            200,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(probe_err, StoreError::Protected(_)),
+        "{probe_err:?}"
+    );
+
+    let details = FileDetails {
+        source_revision: file.version.revision,
+        source_version: file.version.source_version.clone(),
+        tracks_version: CURRENT_TRACKS_VERSION,
+        video_json: Some("{}".into()),
+        audio_json: "[]".into(),
+        subtitle_json: "[]".into(),
+        chapters_json: None,
+        fingerprint_json: None,
+        outro_fingerprint_json: None,
+        format_duration_ms: Some(90_000),
+    };
+    let details_err = store
+        .publish_file_details(file.file_id, &file.version, &details, 200)
+        .unwrap_err();
+    assert!(
+        matches!(details_err, StoreError::Protected(_)),
+        "{details_err:?}"
+    );
+
+    let artwork_err = store
+        .record_file_artwork(
+            file.file_id,
+            &file.version,
+            &FileArtwork {
+                poster: Some(&poster),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(artwork_err, StoreError::Protected(_)),
+        "{artwork_err:?}"
+    );
+
+    assert_frozen_marker_and_scan_seen_blocked(
+        &store,
+        &temp.path().join("data/library.db"),
+        file.file_id,
+        &scan_op.id,
+        &root,
+        &path,
+    );
+}

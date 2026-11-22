@@ -211,17 +211,17 @@ pub fn should_use_proxy_for_url(url: &str) -> bool {
 }
 
 fn extract_host_from_url(url: &str) -> String {
-    let without_scheme = if let Some((_, rest)) = url.split_once("://") {
-        rest
-    } else {
-        url
-    };
-    let host_and_port = without_scheme
-        .split(&['/', '?', '#'][..])
-        .next()
-        .unwrap_or_default();
-    let host = host_and_port.split(':').next().unwrap_or_default();
-    host.to_ascii_lowercase()
+    let parsed = url::Url::parse(url).or_else(|_| {
+        if url.contains("://") {
+            Err(())
+        } else {
+            url::Url::parse(&format!("http://{url}")).map_err(|_| ())
+        }
+    });
+    parsed
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default()
 }
 
 /// Run an outbound request for a specific target URL, automatically checking the whitelist.
@@ -313,5 +313,20 @@ mod mask_tests {
     #[test]
     fn mask_proxy_url_masks_schemeless_credentials() {
         assert_eq!(mask_proxy_url("bob:pw@host:1"), "bob:***@host:1");
+    }
+
+    #[test]
+    fn extract_host_from_url_ignores_userinfo() {
+        assert_eq!(
+            super::extract_host_from_url("https://themoviedb.org:443@assets.fanart.tv/logo.png"),
+            "assets.fanart.tv"
+        );
+        assert_eq!(
+            super::extract_host_from_url("https://user:pass@api.themoviedb.org:443/3/movie/550"),
+            "api.themoviedb.org"
+        );
+        assert!(!super::should_use_proxy_for_url(
+            "https://themoviedb.org:443@assets.fanart.tv/logo.png"
+        ));
     }
 }

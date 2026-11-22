@@ -62,6 +62,17 @@ impl Store {
         self.with_library_write(|db| db.end_device_session(user_id, device_id, now))
     }
 
+    /// Mark any live session on `(user_id, device_id)` as `admin_ended`, archive it,
+    /// and close all non-closed `playback_session_ids` rows for that device.
+    pub fn revoke_device_sessions(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_library_write(|db| db.revoke_device_sessions(user_id, device_id, now))
+    }
+
     /// Check if a session was explicitly ended by admin on this device within window_secs.
     pub fn device_was_admin_ended(
         &self,

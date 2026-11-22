@@ -10,7 +10,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<(), StoreError> {
         let terminal = match error {
             StoreError::Protected(msg) => msg != "write admission refused",
-            StoreError::Missing(_) => true,
+            StoreError::Missing(_) | StoreError::Invalid(_) => true,
             _ => false,
         };
         if terminal {
@@ -93,6 +93,7 @@ impl crate::LibraryConnection<'_> {
             &to_library,
             &request.to_root_id,
             request.media_id,
+            &id,
             &from_str,
             &to_str,
             &placed,
@@ -153,7 +154,7 @@ impl crate::LibraryConnection<'_> {
     pub(super) fn file_rename_recovery_schedule(&self) -> Result<Vec<(i64, String)>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT next_retry_at, rename_id FROM pending_file_renames
-             WHERE phase IN ('planned','disk_applied','library_published','references_applied')
+             WHERE phase <> 'failed'
              ORDER BY next_retry_at, created_at_ms, rename_id",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -164,8 +165,8 @@ impl crate::LibraryConnection<'_> {
         Ok(self
             .library
             .query_row(
-                "SELECT next_retry_at FROM pending_file_renames WHERE rename_id = ?1
-                 AND phase IN ('planned','disk_applied','library_published','references_applied')",
+                "SELECT next_retry_at FROM pending_file_renames
+                 WHERE rename_id = ?1 AND phase <> 'failed'",
                 [id],
                 |row| row.get(0),
             )
@@ -179,8 +180,7 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT rename_id FROM pending_file_renames
-             WHERE phase IN ('planned','disk_applied','library_published','references_applied')
-               AND next_retry_at <= ?1
+             WHERE phase <> 'failed' AND next_retry_at <= ?1
              ORDER BY next_retry_at, created_at_ms, rename_id LIMIT ?2",
         )?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -260,12 +260,17 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<(), StoreError> {
         self.library.execute(
             "UPDATE pending_file_renames
-             SET attempts = attempts + 1,
+             SET last_completed_phase = CASE
+                     WHEN attempts + 1 >= ?4 AND phase <> 'failed' THEN phase
+                     ELSE last_completed_phase
+                 END,
+                 phase = CASE WHEN attempts + 1 >= ?4 THEN 'failed' ELSE phase END,
+                 attempts = attempts + 1,
                  next_retry_at = ?2 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
                  last_error = ?3,
                  updated_at_ms = ?2 * 1000
              WHERE rename_id = ?1 AND phase <> 'failed'",
-            params![rename_id, now, error],
+            params![rename_id, now, error, super::MAX_FILE_RENAME_ATTEMPTS],
         )?;
         Ok(())
     }

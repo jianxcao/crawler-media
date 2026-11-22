@@ -165,6 +165,7 @@ pub(crate) async fn history(
 
 fn resolve_history_media_ids(
     store: &crate::Store,
+    user_id: domain::UserId,
     scope: &str,
     query: &HashMap<String, String>,
 ) -> Result<Option<Vec<domain::MediaId>>, Response> {
@@ -195,16 +196,8 @@ fn resolve_history_media_ids(
                     "scope=library 缺少 library_id",
                 ));
             };
-            let library = store
-                .get_library(library_id)
-                .map_err(|e: store::StoreError| {
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &e.to_string(),
-                    )
-                })?
-                .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在"))?;
+            let library =
+                crate::http::library::require_visible_library(store, library_id, Some(user_id))?;
             let Ok(library_id) = library.id.parse() else {
                 return Ok(Some(Vec::new()));
             };
@@ -243,7 +236,7 @@ pub(crate) async fn clear_history(
         .unwrap_or_else(|| "all".to_string());
     let query_for_read = query;
     match store_write(&state, move |store| -> Response {
-        let media_ids = match resolve_history_media_ids(store, &scope, &query_for_read) {
+        let media_ids = match resolve_history_media_ids(store, user_id, &scope, &query_for_read) {
             Ok(ids) => ids,
             Err(resp) => return resp,
         };
@@ -254,6 +247,11 @@ pub(crate) async fn clear_history(
             Ok((states, metrics))
         }) {
             Ok(counts) => counts,
+            Err(store::StoreError::Protected(message)) => {
+                tracing::warn!(%message, %user_id, scope, "Playback history clear rejected by write barrier");
+                return err(StatusCode::CONFLICT, "playback.protected", &message);
+            }
+            Err(store::StoreError::WriteBusy) => return crate::http::store_wait::busy_response(),
             Err(error) => {
                 tracing::error!(%error, %user_id, scope, "Playback history clear failed");
                 return err(

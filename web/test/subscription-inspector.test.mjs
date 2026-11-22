@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import React, { act } from "react";
+import { create } from "react-test-renderer";
+import ts from "typescript";
 
 import {
   activityColor,
@@ -13,6 +20,10 @@ import {
   wantedPresentation,
   weekdayLabel,
 } from "../lib/subscription-inspector.ts";
+
+const require = createRequire(import.meta.url);
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const webRoot = fileURLToPath(new URL("../", import.meta.url));
 
 const makeWanted = (overrides = {}) => ({
   id: "w1",
@@ -190,4 +201,223 @@ test("wantedPresentation, milestonesOf, stuckIndex, and helper lookups cover key
   assert.equal(activityColor("import_failed"), "var(--danger)");
   assert.equal(weekdayLabel(0), "周日");
   assert.equal(weekdayLabel(6), "周六");
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeSubscriptionDetail(id, title = `Title ${id}`) {
+  return {
+    id,
+    media: { id: `media-${id}`, kind: "tv", title, poster_url: null },
+    coverage: { kind: "tv", season: 1, episode_from: 1, episode_to: 10 },
+    fetch_mode: "both",
+    filter_id: "f1",
+    wash_cut: false,
+    keep_old_versions: false,
+    full_season_pack: false,
+    tracking_state: "active",
+    follow_future: false,
+    search_interval_secs: 3600,
+    progress: { total: 10, imported: 0, missing: 10, grabbing: 0, downloaded: 0 },
+    wanted: [],
+  };
+}
+
+function mountInspectorHook(overrides = {}) {
+  const toastErrors = [];
+  const toastSuccesses = [];
+  const js = ts.transpileModule(
+    readFileSync(path.join(webRoot, "components/subscription-inspector/use-subscription-inspector.ts"), "utf8"),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+  const mod = { exports: {} };
+  const subApiStub = {
+    getSubscription: async (id) => makeSubscriptionDetail(id),
+    listSubscriptionActivities: async () => [],
+    listRuleSets: async () => [],
+    fetchReleaseForecast: async () => ({ days: [] }),
+    listActiveSubscriptionDownloads: async () => [],
+    setSubscriptionTrackingState: async () => {},
+    setSubscriptionFollowFuture: async () => {},
+    setSubscriptionKeepOldVersions: async () => {},
+    searchMissingSubscriptionResources: async () => ({ reset_count: 0 }),
+    unsubscribeFromSubscription: async () => {},
+    deleteSubscriptionPermanently: async () => {},
+    setSubscriptionFetchMode: async () => {},
+    setSubscriptionSearchInterval: async () => {},
+    updateSubscription: async () => {},
+    ...overrides,
+  };
+  new Function("require", "module", "exports", js)(
+    (name) => {
+      if (name === "react-router-dom") return { useNavigate: () => () => {} };
+      if (name === "@/components/feedback") {
+        return {
+          useConfirm: () => async () => true,
+          useToast: () => ({
+            error: (msg) => toastErrors.push(msg),
+            success: (msg) => toastSuccesses.push(msg),
+            info: () => {},
+          }),
+        };
+      }
+      if (name === "@/components/subscribe-entry") {
+        return { useSubscribeEntry: () => ({ canSubscribe: true, refresh: () => {} }) };
+      }
+      if (name === "@/lib/api/playback") {
+        return { listUpNext: async () => [], setPlaybackMarks: async () => {} };
+      }
+      if (name === "@/lib/api/subscriptions") return subApiStub;
+      if (name === "@/lib/back-navigation") return { useBackNavigation: () => () => {} };
+      if (name === "@/lib/image-proxy") return { imageUrl: (u) => u };
+      if (name === "@/lib/jobs") return { useJobs: () => ({ jobs: [] }) };
+      if (name === "@/lib/permissions") {
+        return { usePermissions: () => ({ canManageSubscriptions: true, canSearch: true, isAdmin: false }) };
+      }
+      if (name === "@/lib/subscription-ui") {
+        return {
+          subscriptionStatus: (d) => (d.tracking_state === "paused" ? "paused" : "active"),
+          subscriptionStatusMeta: { active: { label: "追踪中" }, paused: { label: "已暂停" }, completed: { label: "已收齐" } },
+        };
+      }
+      if (name === "@/lib/use-page-title") return { usePageTitle: () => {} };
+      if (name === "@/lib/use-visible-polling") return { useVisiblePolling: () => {} };
+      return require(name);
+    },
+    mod,
+    mod.exports,
+  );
+
+  let latest;
+  function Harness({ id }) {
+    latest = mod.exports.useSubscriptionInspector({ id, autoOpenUpgradeRun: false });
+    return null;
+  }
+  let renderer;
+  return {
+    toastErrors,
+    toastSuccesses,
+    latest: () => latest,
+    async mount(id) {
+      await act(async () => {
+        renderer = create(React.createElement(Harness, { id }));
+      });
+    },
+    async update(id) {
+      await act(async () => {
+        renderer.update(React.createElement(Harness, { id }));
+      });
+    },
+    async unmount() {
+      await act(async () => {
+        renderer.unmount();
+      });
+    },
+  };
+}
+
+test("useSubscriptionInspector resets state on id change and discards stale out-of-order reload responses", async () => {
+  const firstReq = deferred();
+  const secondReq = deferred();
+  const reloadTwo = deferred();
+  let calls = 0;
+  const h = mountInspectorHook({
+    getSubscription: (id) => {
+      calls += 1;
+      if (id === "sub-1") return firstReq.promise;
+      if (calls === 2) return secondReq.promise;
+      return reloadTwo.promise;
+    },
+  });
+
+  await h.mount("sub-1");
+  try {
+    // Switch to sub-2 while sub-1 is still in flight
+    await h.update("sub-2");
+    assert.equal(h.latest().detail, null);
+    assert.equal(h.latest().failed, false);
+
+    // Late rejection or resolution from sub-1 must NOT set failed/detail on sub-2
+    await act(async () => {
+      firstReq.reject(new Error("sub-1 failed"));
+    });
+    assert.equal(h.latest().failed, false, "late error from old id must be ignored");
+
+    // Resolve sub-2
+    await act(async () => {
+      secondReq.resolve(makeSubscriptionDetail("sub-2", "Current Show"));
+    });
+    assert.equal(h.latest().detail?.id, "sub-2");
+
+    // Now test same-id reload vs earlier out-of-order reload
+    const firstSameId = deferred();
+    const secondSameId = deferred();
+    let seqCalls = 0;
+    const h2 = mountInspectorHook({
+      getSubscription: () => (++seqCalls === 1 ? firstSameId.promise : secondSameId.promise),
+    });
+    await h2.mount("sub-x");
+    await act(async () => { h2.latest().reload(); });
+    await act(async () => {
+      secondSameId.resolve(makeSubscriptionDetail("sub-x", "Newer Snapshot"));
+    });
+    assert.equal(h2.latest().detail?.media.title, "Newer Snapshot");
+    await act(async () => {
+      firstSameId.resolve(makeSubscriptionDetail("sub-x", "Stale Snapshot"));
+    });
+    assert.equal(
+      h2.latest().detail?.media.title,
+      "Newer Snapshot",
+      "older out-of-order reload response must not overwrite newer state",
+    );
+    await h2.unmount();
+
+    // Switching back to a third id clears previous detail immediately
+    const thirdReq = deferred();
+    calls = 0;
+    await h.update("sub-3");
+    assert.equal(h.latest().detail, null, "switching id must clear previous detail");
+    assert.equal(h.latest().failed, false);
+    thirdReq.resolve(makeSubscriptionDetail("sub-3"));
+  } finally {
+    await h.unmount();
+  }
+});
+
+test("useSubscriptionInspector catches errors and clears busy in togglePause, remove, handleFetchModeChange, and handleSearchIntervalChange", async () => {
+  const h = mountInspectorHook({
+    setSubscriptionTrackingState: async () => { throw new Error("pause boom"); },
+    unsubscribeFromSubscription: async () => { throw new Error("remove boom"); },
+    setSubscriptionFetchMode: async () => { throw new Error("mode boom"); },
+    setSubscriptionSearchInterval: async () => { throw new Error("interval boom"); },
+  });
+
+  await h.mount("sub-1");
+  try {
+    await act(async () => { await h.latest().togglePause(); });
+    assert.equal(h.latest().busy, false);
+    await act(async () => { await h.latest().remove(); });
+    assert.equal(h.latest().busy, false);
+    await act(async () => { h.latest().handleFetchModeChange("rss"); });
+    assert.equal(h.latest().busy, false);
+    await act(async () => { h.latest().handleSearchIntervalChange(7200); });
+    assert.equal(h.latest().busy, false);
+
+    assert.deepEqual(h.toastErrors, ["pause boom", "remove boom", "mode boom", "interval boom"]);
+  } finally {
+    await h.unmount();
+  }
 });

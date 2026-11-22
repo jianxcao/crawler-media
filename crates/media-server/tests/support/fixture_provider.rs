@@ -175,7 +175,7 @@ pub async fn next_up_items(
     series_id: Option<&str>,
     offset: usize,
     limit: usize,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, media_server::provider::QueryError> {
     let requested = series_id.map(str::to_string);
     let candidates = provider
         .list_visible_items(user, requested.as_deref())
@@ -211,7 +211,7 @@ pub async fn resume_items(
     parent: Option<&str>,
     offset: usize,
     limit: usize,
-) -> Result<media_server::provider::ServerItemPage, String> {
+) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
     let rows = provider
         .list_visible_items(user, parent)
         .await?

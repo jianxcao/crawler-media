@@ -180,7 +180,26 @@ impl ScanContext<'_> {
         if files.is_empty() && changed.is_empty() {
             return Ok(ChunkTotals::default());
         }
-        let filtered: Vec<_> = self
+        let filtered = self.filter_chunk_files(files)?;
+        let scanned = filtered.len();
+        let inserted = self.register_chunk(&filtered)?;
+        // 到这里 ledger 已提交：任何后续失败都必须把这段前缀带回调用方（P3-3）。
+        let committed = ChunkTotals {
+            scanned,
+            inserted: inserted.len(),
+        };
+        let (affected, failed_invalidations) =
+            self.invalidate_chunk_changes(&filtered, changed, committed)?;
+        self.resolve_chunk_metadata(&filtered, &inserted, committed)?;
+        self.finish_chunk(filtered, stamps, &inserted, affected, failed_invalidations);
+        Ok(committed)
+    }
+
+    fn filter_chunk_files(
+        &self,
+        files: Vec<library::TransferredFile>,
+    ) -> Result<Vec<library::TransferredFile>, ChunkError> {
+        Ok(self
             .scan_scope
             .filter_transferred(files)
             .map_err(presence_failure)?
@@ -192,8 +211,13 @@ impl ScanContext<'_> {
                     .path_claimed_by_active_rename(&file.path)
                     .unwrap_or(false)
             })
-            .collect();
-        let scanned = filtered.len();
+            .collect())
+    }
+
+    fn register_chunk(
+        &self,
+        filtered: &[library::TransferredFile],
+    ) -> Result<Vec<PathBuf>, ChunkError> {
         let plan = self
             .lease
             .publish(|| {
@@ -202,12 +226,11 @@ impl ScanContext<'_> {
                 self.scan_scope
                     .validate(&store)
                     .map_err(|e| format!("{e:?}"))?;
-                self.plan_chunk(&store, &filtered)
+                self.plan_chunk(&store, filtered)
             })
             .map_err(publish_failure)?;
         let observed = plan.observe().map_err(publish_failure)?;
-        let inserted = self
-            .lease
+        self.lease
             .publish(|| {
                 let store = self.state.store.as_ref();
                 let _hold = trace_lock_section("record");
@@ -216,7 +239,15 @@ impl ScanContext<'_> {
                     .map_err(|e| format!("{e:?}"))?;
                 observed.record(&store)
             })
-            .map_err(publish_failure)?;
+            .map_err(publish_failure)
+    }
+
+    fn invalidate_chunk_changes(
+        &self,
+        filtered: &[library::TransferredFile],
+        changed: &[PathBuf],
+        committed: ChunkTotals,
+    ) -> Result<(Vec<PathBuf>, HashSet<String>), ChunkError> {
         // 版本变化的文件：派生探测事实必须失效，并按 durable obligation 合同重排探测。
         // 只处理本 Library 真正拥有的路径（过滤后仍在 `filtered` 里）。
         let changed_in_scope: Vec<PathBuf> = changed
@@ -229,30 +260,23 @@ impl ScanContext<'_> {
             })
             .cloned()
             .collect();
-        let (affected, failed_invalidations) =
-            match invalidate_changed_facts(self.state, &changed_in_scope, false) {
-                Ok(res) => res,
-                Err(e) => {
-                    let committed = ChunkTotals {
-                        scanned,
-                        inserted: inserted.len(),
-                    };
-                    return Err(ChunkError {
-                        response: err(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "library.scan_invalidation",
-                            &e,
-                        ),
-                        error: format!("library.scan_invalidation: {e}"),
-                        totals: committed,
-                    });
-                }
-            };
-        // 到这里 ledger 已提交：任何后续失败都必须把这段前缀带回调用方（P3-3）。
-        let committed = ChunkTotals {
-            scanned,
-            inserted: inserted.len(),
-        };
+        invalidate_changed_facts(self.state, &changed_in_scope, false).map_err(|e| ChunkError {
+            response: err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.scan_invalidation",
+                &e,
+            ),
+            error: format!("library.scan_invalidation: {e}"),
+            totals: committed,
+        })
+    }
+
+    fn resolve_chunk_metadata(
+        &self,
+        filtered: &[library::TransferredFile],
+        inserted: &[PathBuf],
+        committed: ChunkTotals,
+    ) -> Result<(), ChunkError> {
         // 测试屏障：注入「ledger 已提交、元数据解析失败」的故障（P3-3）。
         #[cfg(test)]
         if let Some(response) = test_metadata_hook::run(self.op_id.unwrap_or_default()) {
@@ -275,13 +299,13 @@ impl ScanContext<'_> {
                 filtered.iter().map(|file| file.path.clone()).collect();
             attach_video_artwork(self.state, &artwork_paths, self.lease.control());
         } else {
-            let scan_media = scan_media_for(self.state, &filtered);
+            let scan_media = scan_media_for(self.state, filtered);
             resolve_scan_metadata(
                 self.state,
                 self.id,
                 self.lease,
                 scan_media,
-                &inserted,
+                inserted,
                 self.scrape,
             )
             .map_err(|response| ChunkError {
@@ -290,8 +314,7 @@ impl ScanContext<'_> {
                 totals: committed,
             })?;
         }
-        self.finish_chunk(filtered, stamps, &inserted, affected, failed_invalidations);
-        Ok(committed)
+        Ok(())
     }
 
     /// 收尾一个已处理 chunk：复核版本 → 重挂窗口内变化的处理义务 → 探测入队 → 记断点。

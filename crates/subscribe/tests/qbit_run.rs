@@ -46,6 +46,7 @@ fn serve_qbit(save_path: String) -> String {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
             let request = read_request(&mut stream);
             let (body, cookie) = if request.starts_with("POST /api/v2/auth/login") {
                 ("Ok.".to_string(), "Set-Cookie: SID=test; HttpOnly\r\n")

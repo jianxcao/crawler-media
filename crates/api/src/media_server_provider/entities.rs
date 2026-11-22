@@ -1,6 +1,9 @@
 //! Protocol entities use published projections; only search result pages hydrate files.
+use super::sync_operations::store_query_error;
 use super::{ApiServerProvider, UserId};
-use media_server::provider::{Entity, EntityKind, EntityPage, ItemCounts, Season, ServerItemPage};
+use media_server::provider::{
+    Entity, EntityKind, EntityPage, ItemCounts, QueryError, Season, ServerItemPage,
+};
 
 fn kind(value: EntityKind) -> store::ProtocolEntityKind {
     match value {
@@ -17,12 +20,12 @@ pub(super) async fn entities(
     search: Option<&str>,
     offset: usize,
     limit: usize,
-) -> Result<EntityPage, String> {
+) -> Result<EntityPage, QueryError> {
     let parent = parent.map(str::to_owned);
     let search = search.map(str::to_owned);
     provider
-        .run_sync(move |provider| {
-            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+        .run_sync_query(move |provider| {
+            provider.bounded_reader_query(&[store::Db::Library, store::Db::App], |store| {
                 let library_id = parent.and_then(|id| id.parse::<domain::LibraryId>().ok());
                 let page = store
                     .protocol_entities(&store::ProtocolEntityQuery {
@@ -33,7 +36,7 @@ pub(super) async fn entities(
                         offset,
                         limit,
                     })
-                    .map_err(|error| error.to_string())?;
+                    .map_err(store_query_error)?;
                 Ok(EntityPage {
                     total: page.total,
                     items: page
@@ -53,13 +56,11 @@ pub(super) async fn entities(
 pub(super) async fn counts(
     provider: &ApiServerProvider,
     user: UserId,
-) -> Result<ItemCounts, String> {
+) -> Result<ItemCounts, QueryError> {
     provider
-        .run_sync(move |provider| {
-            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-                let value = store
-                    .protocol_counts(user)
-                    .map_err(|error| error.to_string())?;
+        .run_sync_query(move |provider| {
+            provider.bounded_reader_query(&[store::Db::Library, store::Db::App], |store| {
+                let value = store.protocol_counts(user).map_err(store_query_error)?;
                 Ok(ItemCounts {
                     movies: value.movies,
                     series: value.series,
@@ -74,13 +75,13 @@ pub(super) async fn seasons(
     provider: &ApiServerProvider,
     user: UserId,
     media: domain::MediaId,
-) -> Result<Vec<Season>, String> {
+) -> Result<Vec<Season>, QueryError> {
     provider
-        .run_sync(move |provider| {
-            provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
+        .run_sync_query(move |provider| {
+            provider.bounded_reader_query(&[store::Db::Library, store::Db::App], |store| {
                 Ok(store
                     .protocol_seasons(user, media)
-                    .map_err(|error| error.to_string())?
+                    .map_err(store_query_error)?
                     .into_iter()
                     .map(|row| Season {
                         season: row.season,
@@ -173,7 +174,7 @@ pub(super) async fn hints(
     term: &str,
     offset: usize,
     limit: usize,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     super::selection::hints(provider, user, term, offset, limit).await
 }
 

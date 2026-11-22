@@ -170,3 +170,56 @@ fn delayed_missing_source_ack_preserves_the_restored_obligation() {
     assert_eq!(remaining[0].ledger_id, file.file_id);
     assert_eq!(remaining[0].reason, "source_restored");
 }
+
+#[test]
+fn scan_probe_obligations_after_pages_with_tie_breaker_and_constant_work() {
+    let (tmp, store, first_file) = fixture();
+    let root = tmp.path().join("movies");
+    let media_id = first_file.media_id;
+    let mut files = vec![first_file];
+    for idx in 0..8 {
+        let p = root.join(format!("item_{idx}.strm"));
+        std::fs::write(&p, format!("https://example.invalid/{idx}.mkv")).unwrap();
+        files.push(
+            publish_fixture_file(
+                &store,
+                &FixtureFile {
+                    media_id,
+                    path: p.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+    }
+    for (idx, f) in files.iter().enumerate() {
+        // Group 0..=2 at t=100, 3..=5 at t=200, 6..=8 at t=300 to test identical timestamps.
+        let ts = ((idx / 3) as i64 + 1) * 100;
+        store
+            .arm_scan_probe_obligation(&f.file_id.to_string(), ts, "page")
+            .unwrap();
+    }
+
+    let mut collected = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store.scan_probe_obligations_after(cursor, 2).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        let last = page.last().unwrap();
+        cursor = Some((last.created_at_ms, last.ledger_id));
+        collected.extend(page);
+    }
+
+    assert_eq!(
+        collected.len(),
+        9,
+        "pagination must visit all 9 items without drops/dups"
+    );
+    let full = store.scan_probe_obligations(20).unwrap();
+    assert_eq!(
+        collected, full,
+        "paginated sequence must match exact index ordering"
+    );
+}

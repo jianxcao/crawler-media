@@ -2,13 +2,34 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn accept_with_deadline(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for HTTP connection"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(err) => panic!("listener accept failed: {err}"),
+        }
+    }
+}
+
 #[test]
 fn http_poster_encodes_unicode_and_spaces_in_upstream_path() {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_deadline(&listener);
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
             .unwrap();
@@ -23,8 +44,90 @@ fn http_poster_encodes_unicode_and_spaces_in_upstream_path() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nimage")
             .unwrap();
     });
-    let result = HttpPoster.get(&format!("http://{address}/火线 poster.jpg"));
+    let result =
+        HttpPoster.get_with_policy(&format!("http://{address}/火线 poster.jpg"), |_| true);
     assert_eq!(result.unwrap(), b"image");
+    server.join().unwrap();
+}
+
+#[test]
+fn http_poster_rejects_disallowed_loopback_url_without_connecting() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let err = HttpPoster
+        .get(&format!("http://{address}/poster.jpg"))
+        .unwrap_err();
+    assert!(!err.is_empty());
+    assert!(matches!(
+        listener.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn http_poster_rejects_redirect_to_disallowed_host() {
+    use std::io::{Read, Write};
+    let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let forbidden = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    forbidden.set_nonblocking(true).unwrap();
+    let forbidden_addr = forbidden.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_with_deadline(&origin);
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{forbidden_addr}/secret.jpg\r\nContent-Length: 0\r\n\r\n"
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+    });
+    let allowed_prefix = format!("http://{origin_addr}/");
+    let result = HttpPoster.get_with_policy(&format!("{allowed_prefix}start.jpg"), |u| {
+        u.starts_with(&allowed_prefix)
+    });
+    assert!(result.is_err(), "redirect to disallowed host must fail");
+    server.join().unwrap();
+    assert!(matches!(
+        forbidden.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn http_poster_rejects_response_exceeding_12_mib() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let total = 12 * 1024 * 1024 + 1;
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_with_deadline(&listener);
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {total}\r\n\r\n"
+        );
+        if stream.write_all(header.as_bytes()).is_err() {
+            return;
+        }
+        let chunk = vec![0xABu8; 64 * 1024];
+        let mut remaining = total;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            if stream.write_all(&chunk[..n]).is_err() {
+                break;
+            }
+            remaining -= n;
+        }
+    });
+    let result = HttpPoster.get_with_policy(&format!("http://{address}/huge.jpg"), |_| true);
+    assert!(result.is_err(), "response > 12 MiB must be rejected");
     server.join().unwrap();
 }
 
@@ -355,4 +458,148 @@ fn library_lease_publish_after_cancelled_control_returns_err() {
         outcome.is_err(),
         "底层租约取消后 lease.publish 必须返回 Err"
     );
+}
+
+#[test]
+fn allowed_fanart_url_accepts_fanart_and_rejects_untrusted_or_insecure_webservice() {
+    assert!(allowed_fanart_url(
+        "https://webservice.fanart.tv/v3/tv/12345?api_key=secret"
+    ));
+    assert!(allowed_fanart_url(
+        "https://assets.fanart.tv/fanart/tv/12345/hdtvlogo/logo.png"
+    ));
+    assert!(allowed_fanart_url(
+        "http://assets.fanart.tv/fanart/tv/12345/tvbanner/banner.jpg"
+    ));
+    assert!(allowed_fanart_url("https://fanart.tv/v3/movies/603"));
+
+    assert!(!allowed_fanart_url(
+        "http://webservice.fanart.tv/v3/tv/12345?api_key=secret"
+    ));
+    assert!(!allowed_fanart_url("http://127.0.0.1/logo.png"));
+    assert!(!allowed_fanart_url("https://[::1]/logo.png"));
+    assert!(!allowed_fanart_url("http://localhost/logo.png"));
+    assert!(!allowed_fanart_url("https://fanart.tv.evil.com/logo.png"));
+    assert!(!allowed_fanart_url(
+        "https://image.tmdb.org/t/p/w500/poster.jpg"
+    ));
+    assert!(!allowed_fanart_url("ftp://assets.fanart.tv/logo.png"));
+}
+
+#[test]
+fn image_proxy_and_http_poster_get_reject_fanart_and_redact_query_errors() {
+    let api_url = "https://webservice.fanart.tv/v3/tv/123?api_key=top-secret-key";
+    let asset_url = "https://assets.fanart.tv/fanart/tv/123/logo.png";
+
+    assert!(!crate::http::image_proxy::allowed_url(api_url));
+    assert!(!crate::http::image_proxy::allowed_url(asset_url));
+
+    let err_api = HttpPoster.get(api_url).unwrap_err();
+    assert!(err_api.contains("disallowed"), "{err_api}");
+    assert!(!err_api.contains("top-secret-key"), "{err_api}");
+
+    let err_asset = HttpPoster.get(asset_url).unwrap_err();
+    assert!(err_asset.contains("disallowed"), "{err_asset}");
+
+    let err_http_ws = HttpPoster
+        .get_fanart("http://webservice.fanart.tv/v3/tv/123?api_key=top-secret-key")
+        .unwrap_err();
+    assert!(err_http_ws.contains("disallowed"), "{err_http_ws}");
+    assert!(!err_http_ws.contains("top-secret-key"), "{err_http_ws}");
+}
+
+#[test]
+fn http_poster_get_fanart_rejects_loopback_without_connecting_and_redacts_query() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let err = HttpPoster
+        .get_fanart(&format!(
+            "http://{address}/logo.png?api_key=secret-loopback"
+        ))
+        .unwrap_err();
+    assert!(err.contains("disallowed"), "{err}");
+    assert!(!err.contains("secret-loopback"), "{err}");
+    assert!(matches!(
+        listener.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn http_poster_policy_redacts_query_on_redirect_rejection() {
+    use std::io::{Read, Write};
+    let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let forbidden = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    forbidden.set_nonblocking(true).unwrap();
+    let forbidden_addr = forbidden.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_with_deadline(&origin);
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{forbidden_addr}/secret?api_key=leak-me\r\nContent-Length: 0\r\n\r\n"
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+    });
+    let allowed_prefix = format!("http://{origin_addr}/");
+    let err = HttpPoster
+        .get_with_policy(
+            &format!("{allowed_prefix}start?api_key=origin-secret"),
+            |u| u.starts_with(&allowed_prefix),
+        )
+        .unwrap_err();
+    assert!(err.contains("disallowed"), "{err}");
+    assert!(!err.contains("leak-me"), "{err}");
+    assert!(!err.contains("origin-secret"), "{err}");
+    server.join().unwrap();
+}
+
+#[test]
+fn rejects_userinfo_urls_and_redacts_credentials_from_errors() {
+    assert!(!allowed_fanart_url(
+        "https://user:pass@assets.fanart.tv/logo.png"
+    ));
+    assert!(!allowed_fanart_url(
+        "https://evil@webservice.fanart.tv/v3/tv/123?api_key=SECRET"
+    ));
+    assert!(!allowed_fanart_url("https://:@assets.fanart.tv/logo.png"));
+    assert!(!crate::http::image_proxy::allowed_url(
+        "https://user:pass@image.tmdb.org/t/p/w500/a.jpg"
+    ));
+    assert!(!crate::http::image_proxy::allowed_url(
+        "https://evil@douban.com/a.jpg"
+    ));
+    assert!(!crate::http_agent::should_use_proxy_for_url(
+        "https://themoviedb.org:443@assets.fanart.tv/logo.png"
+    ));
+    assert!(crate::http_agent::should_use_proxy_for_url(
+        "https://user:pass@api.themoviedb.org/3/movie/550"
+    ));
+
+    let err_fanart = HttpPoster
+        .get_fanart("https://user:pass@assets.fanart.tv/logo.png?api_key=SECRET")
+        .unwrap_err();
+    assert!(err_fanart.contains("disallowed"), "{err_fanart}");
+    assert!(!err_fanart.contains("user:pass"), "{err_fanart}");
+    assert!(!err_fanart.contains("SECRET"), "{err_fanart}");
+
+    let err_proxy = HttpPoster
+        .get("https://user:pass@image.tmdb.org/t/p/w500/a.jpg?token=SECRET")
+        .unwrap_err();
+    assert!(err_proxy.contains("disallowed"), "{err_proxy}");
+    assert!(!err_proxy.contains("user:pass"), "{err_proxy}");
+    assert!(!err_proxy.contains("SECRET"), "{err_proxy}");
+
+    let err_policy = HttpPoster
+        .get_with_policy("http://user:pass@bad host/logo.png?api_key=SECRET", |_| {
+            true
+        })
+        .unwrap_err();
+    assert!(!err_policy.contains("user:pass"), "{err_policy}");
+    assert!(!err_policy.contains("SECRET"), "{err_policy}");
 }

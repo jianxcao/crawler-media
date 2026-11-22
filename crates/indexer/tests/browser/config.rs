@@ -41,6 +41,7 @@ fn websocket_url_on_a_different_host_or_port_is_rejected() {
             listener.set_nonblocking(true).unwrap();
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buf = [0; 1024];
                     let _ = stream.read(&mut buf);
                     let body = serde_json::json!({

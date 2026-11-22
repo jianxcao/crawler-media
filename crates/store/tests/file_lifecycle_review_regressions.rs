@@ -526,3 +526,114 @@ fn p2_10_sidecar_sharing_work_stays_bounded_at_100k_files() {
         "writer lock during begin_observed_file_rename at 100k rows must be fast: {dur_100k:?}"
     );
 }
+
+#[test]
+fn p1_2_active_rename_blocks_same_file_publish_reassign_and_artwork() {
+    let (_tmp, store, a, b, media) = open_fixture();
+    let other_media = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: other_media,
+            kind: MediaKind::Movie,
+            title: "Arrival Target".into(),
+            year: Some(2016),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+
+    let src_dir = a.join("Arrival");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let from = src_dir.join("Arrival.mkv");
+    std::fs::write(&from, b"arrival-video-bytes").unwrap();
+    let file = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: from.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let poster = src_dir.join("poster.jpg");
+    std::fs::write(&poster, b"poster-bytes").unwrap();
+
+    let to = b.join("Arrival").join("Arrival (2016).mkv");
+    let req = store
+        .begin_file_rename(file.file_id, &file.version, &from, &to, 100)
+        .unwrap();
+    let receipt = store::library_write::execute_rename_disk(&req).unwrap();
+    store.record_rename_disk(&receipt, 101).unwrap();
+    assert_eq!(
+        store.load_file_rename(&req.rename_id).unwrap().phase,
+        "disk_applied"
+    );
+
+    let config_revision = store
+        .library_config_revision(&file.library_id.to_string())
+        .unwrap();
+    let mut updated = file.clone();
+    updated.version.source_version = "scan-republish-v2".into();
+    assert!(
+        store
+            .publish_files(
+                &store::library_write::WriteScope {
+                    library_id: file.library_id,
+                    config_revision,
+                },
+                &[store::library_write::FilePublication {
+                    file: &updated,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: Some(&file.version),
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                102_000,
+            )
+            .is_err(),
+        "publish_files for same file_id under active rename must be rejected"
+    );
+
+    assert!(
+        store
+            .reassign_files(
+                &store::library_write::ReassignFiles {
+                    files: vec![(file.file_id, file.version.clone())],
+                    from: media,
+                    to: other_media,
+                    expected_media_revision: 0,
+                },
+                102_000,
+            )
+            .is_err(),
+        "reassign_files for same file_id under active rename must be rejected"
+    );
+
+    assert!(
+        store
+            .record_file_artwork(
+                file.file_id,
+                &file.version,
+                &store::library_write::FileArtwork {
+                    poster: Some(&poster),
+                    ..Default::default()
+                },
+            )
+            .is_err(),
+        "record_file_artwork for same file_id under active rename must be rejected"
+    );
+
+    let after_blocked = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(after_blocked.file.version.revision, file.version.revision);
+    assert_eq!(after_blocked.file.media_id, media);
+    assert!(after_blocked.file.poster_path.is_none());
+
+    store.resume_one_file_rename(&req.rename_id, 103).unwrap();
+    let completed = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(completed.file.path, to);
+}

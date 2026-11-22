@@ -324,3 +324,113 @@ async fn admit_without_override_keeps_parsed_release() {
     let pending = store.load_pending(id).unwrap();
     assert!(pending[0].1.release_override.is_none());
 }
+
+struct FailingAddDownloader;
+impl downloader::Downloader for FailingAddDownloader {
+    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+        Err(downloader::DownloaderError::Message(
+            "simulated add failure".into(),
+        ))
+    }
+    fn completed_files(
+        &self,
+        _: &domain::Torrent,
+    ) -> Result<Vec<std::path::PathBuf>, downloader::DownloaderError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn admit_cleans_unconfirmed_pending_row_when_downloader_add_fails_synchronously() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::from([("search", nexusphp())]),
+    });
+    let app = router(state(tmp.path(), fetcher, Arc::new(FailingAddDownloader)));
+    create_site(&app).await;
+    let subscribe = create_subscribe(&app, "search").await;
+    let resp = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/search/admit",
+            Some("management-secret"),
+            json!({
+                "subscribe_id": subscribe["id"],
+                "enclosure": "https://pt.example/download.php?id=1&passkey=abc"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let id = domain::SubscribeId::from_str(subscribe["id"].as_str().unwrap()).unwrap();
+    assert!(
+        store.load_pending(id).unwrap().is_empty(),
+        "synchronous delivery.submit error must clean up unconfirmed submitted_at=0 pending row"
+    );
+}
+
+struct ConfirmThenFailDownloader {
+    store: Arc<std::sync::OnceLock<Arc<api::Store>>>,
+    subscribe_id: domain::SubscribeId,
+}
+impl downloader::Downloader for ConfirmThenFailDownloader {
+    fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+        let store = self.store.get().unwrap();
+        store
+            .confirm_pending_submission(self.subscribe_id, &torrent.enclosure, 12345)
+            .unwrap();
+        Err(downloader::DownloaderError::Message(
+            "post-confirm error".into(),
+        ))
+    }
+    fn completed_files(
+        &self,
+        _: &domain::Torrent,
+    ) -> Result<Vec<std::path::PathBuf>, downloader::DownloaderError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn admit_keeps_confirmed_pending_row_when_confirmed_before_sync_add_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::from([("search", nexusphp())]),
+    });
+    let shared_store = Arc::new(std::sync::OnceLock::new());
+    let pre_state = state(tmp.path(), fetcher.clone(), Arc::new(FailingAddDownloader));
+    let pre_app = router(pre_state);
+    create_site(&pre_app).await;
+    let subscribe = create_subscribe(&pre_app, "search").await;
+    let sub_id = domain::SubscribeId::from_str(subscribe["id"].as_str().unwrap()).unwrap();
+
+    let api_state = state(
+        tmp.path(),
+        fetcher,
+        Arc::new(ConfirmThenFailDownloader {
+            store: shared_store.clone(),
+            subscribe_id: sub_id,
+        }),
+    );
+    shared_store.set(api_state.store()).ok().unwrap();
+    let app = router(api_state.clone());
+    let resp = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/search/admit",
+            Some("management-secret"),
+            json!({
+                "subscribe_id": subscribe["id"],
+                "enclosure": "https://pt.example/download.php?id=1&passkey=abc"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let pending = api_state.store().load_pending(sub_id).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1.submitted_at, Some(12345));
+}

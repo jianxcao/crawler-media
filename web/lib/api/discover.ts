@@ -730,3 +730,23 @@ interface PersonDetailEnvelope {
     has_more: boolean;
   };
 }
+
+interface SeasonDetailEnvelope {
+  ok: boolean;
+  data: {
+    episodes?: MediaEpisodeDetail[];
+  };
+}
+
+/** 读取剧集单季的分集详细信息（GET /media/tv/{id}/season/{season}）。 */
+export async function fetchTvSeasonEpisodes(
+  mediaId: string,
+  seasonNumber: number,
+  init?: RequestInit,
+): Promise<MediaEpisodeDetail[]> {
+  const envelope = await request<SeasonDetailEnvelope>(
+    `/media/tv/${encodeURIComponent(mediaId)}/season/${seasonNumber}`,
+    init,
+  );
+  return Array.isArray(envelope.data?.episodes) ? envelope.data.episodes : [];
+}

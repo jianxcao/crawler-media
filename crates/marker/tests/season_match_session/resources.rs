@@ -115,7 +115,100 @@ fn twenty_four_stable_episodes_require_only_1104_ordered_computations() {
     assert_eq!(analyze(&session, &samples).1.computed, 0);
 }
 
-struct ConcurrentEngine(std::sync::Barrier);
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: std::sync::Mutex<RendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: std::sync::Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
+
+struct ConcurrentEngine(Arc<BoundedRendezvous>);
 
 struct LargeCandidates;
 impl FingerprintEngine for LargeCandidates {
@@ -202,14 +295,25 @@ impl FingerprintEngine for ConcurrentEngine {
 #[test]
 fn concurrent_duplicate_misses_are_attributed_to_each_actual_invocation() {
     let (_, samples) = fixture(2);
+    let rendezvous = BoundedRendezvous::new(2);
     let session = Arc::new(SeasonMatchSession::new(
-        Arc::new(ConcurrentEngine(std::sync::Barrier::new(2))),
+        Arc::new(ConcurrentEngine(rendezvous.clone())),
         10_000,
         32 * 1024 * 1024,
     ));
     std::thread::scope(|scope| {
-        let first = scope.spawn(|| pair(&session, &samples[0], &samples[2]));
-        let second = scope.spawn(|| pair(&session, &samples[0], &samples[2]));
+        let first = scope.spawn(|| {
+            let mut guard = rendezvous.guard();
+            let result = pair(&session, &samples[0], &samples[2]);
+            guard.disarm();
+            result
+        });
+        let second = scope.spawn(|| {
+            let mut guard = rendezvous.guard();
+            let result = pair(&session, &samples[0], &samples[2]);
+            guard.disarm();
+            result
+        });
         for result in [first.join().unwrap(), second.join().unwrap()] {
             assert_eq!(result.0, PairFingerprintDecision::NoMatch);
             assert_eq!(result.1.computed, 1);

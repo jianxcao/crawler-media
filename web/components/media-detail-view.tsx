@@ -98,7 +98,7 @@ export function MediaDetailView({
     >
       {!c.isMovie && detail?.seasons && detail.seasons.length > 0 && (
         <div className="mt-9 px-12 max-md:mt-6 max-md:px-4">
-          <SeasonsSection mediaId={id} seasons={detail.seasons} />
+          <SeasonsSection mediaId={item.id} seasons={detail.seasons} />
         </div>
       )}
 

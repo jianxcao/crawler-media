@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::tasks::task_state;
 use crate::http::ok;
 use crate::management::ApiState;
-use crate::pending_reconcile::{absence_is_provable, snapshot_matches_pending};
+use crate::pending_reconcile::{absence_is_provable, snapshot_matches_pending_with_hash};
 
 fn prune_orphan_pending(
     store: &crate::Store,
@@ -223,6 +223,7 @@ fn task_row_json(
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
     media_info: Option<&(String, String, String)>,
+    stored_hash: Option<&str>,
 ) -> Value {
     let torrent = &pending.torrent;
     let key = subscribe_id.to_string();
@@ -230,7 +231,10 @@ fn task_row_json(
     let subscribed = !media_title.is_empty();
     let snapshot = snapshots_by_downloader
         .get(&pending.downloader_id)
-        .and_then(|list| list.iter().find(|s| snapshot_matches_pending(torrent, s)));
+        .and_then(|list| {
+            list.iter()
+                .find(|s| snapshot_matches_pending_with_hash(torrent, stored_hash, s))
+        });
     let state = match snapshot {
         Some(s) => task_state(&s.state, s.progress),
         None if reachable.contains(&pending.downloader_id) => "missing",
@@ -271,9 +275,16 @@ fn map_task_rows(
     reachable: &HashSet<Option<DownloaderId>>,
 ) -> Vec<Value> {
     let subscribe_media = subscribe_media_index(&store, kept);
+    let mut hashes_by_sub: HashMap<domain::SubscribeId, HashMap<String, String>> = HashMap::new();
     kept.iter()
         .map(|(subscribe_id, score, pending)| {
             let key = subscribe_id.to_string();
+            let hashes = hashes_by_sub.entry(*subscribe_id).or_insert_with(|| {
+                store
+                    .load_pending_info_hashes(*subscribe_id)
+                    .unwrap_or_default()
+            });
+            let stored_hash = hashes.get(&pending.torrent.enclosure).map(String::as_str);
             task_row_json(
                 &store,
                 *subscribe_id,
@@ -282,6 +293,7 @@ fn map_task_rows(
                 snapshots_by_downloader,
                 reachable,
                 subscribe_media.get(&key),
+                stored_hash,
             )
         })
         .collect()

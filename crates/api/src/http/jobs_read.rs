@@ -217,28 +217,41 @@ fn def_visible_to_user(
         .contains(&subscribe_id)
 }
 
+async fn run_jobs_read(
+    state: &ApiState,
+    work: impl FnOnce() -> Response + Send + 'static,
+) -> Response {
+    let started = std::time::Instant::now();
+    let reservation = match state.jobs_read_work.reserve(JOBS_READ_DEADLINE).await {
+        Ok(reservation) => reservation,
+        Err(error) => return jobs_budget_response(error),
+    };
+    let remaining = JOBS_READ_DEADLINE.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return jobs_budget_response(crate::blocking_budget::BlockingError::Timeout);
+    }
+    match reservation.run(remaining, work).await {
+        Ok(response) => response,
+        Err(error) => jobs_budget_response(error),
+    }
+}
+
 pub(crate) async fn list_jobs(
     State(state): State<ApiState>,
     Extension(user_id): Extension<UserId>,
     Query(query): Query<ListJobsQuery>,
     metrics: Option<Extension<media_server::query_metrics::QueryMetrics>>,
 ) -> Response {
-    // Review L2: Queue / Store 两把锁都是阻塞的，整个快照在 blocking 池上取。
+    // Review L2: Queue / Store 两把锁都是阻塞的，整个快照在隔离的 blocking 预算上取。
     let work_state = state.clone();
-    match state
-        .http_work
-        .run(JOBS_READ_DEADLINE, move || {
-            super::store_wait::observe_store_work(
-                &work_state.store,
-                metrics.map(|Extension(metrics)| metrics),
-                |_| list_jobs_blocking(&work_state, user_id, &query),
-            )
-        })
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => jobs_budget_response(error),
-    }
+    run_jobs_read(&state, move || {
+        super::store_wait::observe_store_work(
+            &work_state.store,
+            metrics.map(|Extension(metrics)| metrics),
+            |_| list_jobs_blocking(&work_state, user_id, &query),
+        )
+    })
+    .await
 }
 
 fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) -> Response {
@@ -364,16 +377,7 @@ pub(crate) async fn get_job(
         Err(_) => return err(StatusCode::BAD_REQUEST, "job.invalid", "任务 id 无效"),
     };
     let work_state = state.clone();
-    match state
-        .http_work
-        .run(JOBS_READ_DEADLINE, move || {
-            get_job_blocking(&work_state, user_id, id)
-        })
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => jobs_budget_response(error),
-    }
+    run_jobs_read(&state, move || get_job_blocking(&work_state, user_id, id)).await
 }
 
 fn get_job_blocking(state: &ApiState, user_id: UserId, id: JobDefId) -> Response {

@@ -10,6 +10,7 @@ fn issued_id_is_bound_to_user_device_and_ledger() {
 
     let user_a = UserId::new();
     let user_b = UserId::new();
+    support::seed_member(&store, user_a);
     let (_, ledger_id) = support::seed_published_file(&store, &tmp.path().join("library"), "bound");
 
     let id = support::issue_session(&store, user_a, "device_1", ledger_id, 1000);
@@ -47,6 +48,7 @@ fn closed_or_older_pending_cannot_reactivate() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (_, ledger_a) = support::seed_published_file(&store, &tmp.path().join("library"), "gen_a");
     let (_, ledger_b) = support::seed_published_file(&store, &tmp.path().join("library"), "gen_b");
 
@@ -84,6 +86,7 @@ fn repeated_activation_is_idempotent() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (_, ledger) = support::seed_published_file(&store, &tmp.path().join("library"), "repeat");
 
     let id = support::issue_session(&store, user, "dev1", ledger, 1000);
@@ -109,6 +112,7 @@ fn expiry_keeps_active_and_is_bounded_500() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (_, ledger) = support::seed_published_file(&store, &tmp.path().join("library"), "expiry");
 
     // Issue 501 sessions at t = 100 (older than 30 days ago from now)

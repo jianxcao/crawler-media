@@ -7,7 +7,13 @@ test("Vite forwards same-origin API requests to the configured backend", async (
   const backend = createHttpServer((request, response) => {
     response.end(request.url);
   });
-  await new Promise((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve, reject) => {
+    backend.once("error", reject);
+    backend.listen(0, "127.0.0.1", () => {
+      backend.off("error", reject);
+      resolve();
+    });
+  });
   const previousTarget = process.env.VITE_BACKEND_TARGET;
   process.env.VITE_BACKEND_TARGET = `http://127.0.0.1:${backend.address().port}`;
   let vite;

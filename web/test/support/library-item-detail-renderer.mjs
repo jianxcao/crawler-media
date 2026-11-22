@@ -45,14 +45,18 @@ export function itemDetailHarness({
   tv = false,
   sharedFile = false,
   canManageLibraries = false,
+  libraryName = "Library",
+  confirmResult = true,
   resume = () => watchState(),
   mark,
+  onClearHistory,
 } = {}) {
   const requests = [];
   const probeStatusCalls = [];
   const deletedLedgerRows = [];
   const navigation = [];
   const errors = [];
+  let episodeFetches = 0;
   const files = [file("file-a", tv ? [1] : []), file("file-b", tv ? (sharedFile ? [1, 2] : [1]) : [])];
   if (tv) files.push(file("file-c", [2]));
   const detail = {
@@ -75,6 +79,10 @@ export function itemDetailHarness({
     const body = options.body ? JSON.parse(options.body) : undefined;
     requests.push({ path: url.pathname, query, body });
     if (url.pathname === "/playback/resume") return { data: await resume(query, played) };
+    if (url.pathname === "/playback/history" && options.method === "DELETE") {
+      if (onClearHistory) await onClearHistory(query);
+      return { data: { deleted_states: 1 } };
+    }
     if (url.pathname === "/playback/marks") {
       if (options.method && options.method !== "GET" && body) {
         if (Object.keys(body).some((key) => !["media_item_id", "season_number", "episode_number", "played", "favorite"].includes(key))) {
@@ -96,6 +104,20 @@ export function itemDetailHarness({
   const mocks = {
     react: React, "react/jsx-runtime": require("react/jsx-runtime"),
     "react-router-dom": { Link: "a", useNavigate: () => (href) => navigation.push(href) },
+    "@radix-ui/react-dropdown-menu": {
+      Root: children,
+      Trigger: children,
+      Portal: children,
+      Content: children,
+      Separator: leaf,
+      Item: ({ children: content, onSelect }) =>
+        React.createElement("button", { type: "button", onClick: onSelect }, content),
+    },
+    "@/components/page-nav": {
+      PAGE_NAV_BUTTON_CLASS: "nav-btn",
+      PageNav: ({ fallback: fb, actions }) =>
+        React.createElement("nav", { "data-fallback-label": fb?.label }, actions),
+    },
     "@/lib/http": { request },
     "@/lib/library-file-pages": libraryFilePages,
     "@/lib/chapter-frame-task": chapterFrames,
@@ -105,8 +127,11 @@ export function itemDetailHarness({
     "@/lib/format": format, "@/lib/player/timeline": timeline,
     "@/lib/api/libraries": {
       getLibraryItemDetail: async (_lib, id) => ({ ...detail, media_item_id: id ?? detail.media_item_id }),
-      getLibrary: async () => ({ id: "library", name: "Library", kind: detail.kind }),
-      getItemEpisodes: async () => ({ season_number: 1, episodes }),
+      getLibrary: async () => ({ id: "library", name: libraryName, kind: detail.kind }),
+      getItemEpisodes: async () => {
+        episodeFetches += 1;
+        return { season_number: 1, episodes };
+      },
       fetchItemChapters: async () => [],
       fetchChapterFrameStatus: async () => ({ task: null, empty: true }),
       fetchItemProbeStatus: async (libraryId, mediaItemId, season) => {
@@ -124,7 +149,7 @@ export function itemDetailHarness({
       Modal: ({ open, children: content }) =>
         open ? React.createElement("div", { "data-modal": "true" }, content) : null,
     },
-    "@/components/feedback": { useConfirm: () => noop, useToast: () => feedback },
+    "@/components/feedback": { useConfirm: () => async () => confirmResult, useToast: () => feedback },
     "@/components/subscribe-entry": { useSubscribeEntry: () => ({ canSubscribe: false }) },
     "@/lib/permissions": { usePermissions: () => ({ canManageLibraries, isAdmin: canManageLibraries }) },
     "@/lib/backdrop": { useBackdrop: () => ({ setOverrideBackdrop: noop }) },
@@ -176,6 +201,8 @@ export function itemDetailHarness({
   const playButton = () => renderer.root.findAllByType("button").find((button) => /^(播放|继续观看|重新播放)/.test(button.props["aria-label"] ?? ""));
   return {
     requests, probeStatusCalls, deletedLedgerRows, navigation, errors,
+    episodeFetches: () => episodeFetches,
+    fallbackLabel: () => renderer.root.findByType("nav").props["data-fallback-label"],
     root: () => renderer.root,
     async mount(mediaItemId = "media") {
       await act(async () => {
@@ -190,6 +217,10 @@ export function itemDetailHarness({
     async unmount() { await act(async () => { renderer.unmount(); }); },
     async source(id) { await act(async () => { renderer.root.findByProps({ "aria-label": "播放版本" }).props.onChange({ target: { value: id } }); }); },
     async episode(number) { await act(async () => { renderer.root.findByProps({ "data-episode-number": number }).props.onClick(); }); },
+    async clearHistory() {
+      const btn = renderer.root.findAllByType("button").find((b) => b.children.join("") === "清除观看记录…");
+      await act(async () => { btn.props.onClick(); });
+    },
     async markFavorite() {
       const btn = renderer.root.findAllByType("button").find((b) => /^(收藏|取消收藏)$/.test(b.props["aria-label"] ?? ""));
       await act(async () => { btn.props.onClick(); });

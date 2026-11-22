@@ -4,26 +4,28 @@ use crate::library_read_work::run_store_query_stage;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use media_server::provider::QueryError;
+
 pub(in crate::media_server_provider) async fn hints(
     provider: &ApiServerProvider,
     user: UserId,
     term: &str,
     offset: usize,
     limit: usize,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     let deadline = Instant::now() + SELECTION_DEADLINE;
     for attempt in 0..2 {
         let observed_access = run_store_query_stage(&provider.state, deadline, move |store| {
             Ok(store.authorized_library_ids(user)?)
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(super::super::query_stage_error)?;
         let page = hints_attempt(provider, user, term, offset, limit, deadline).await?;
         let current_access = run_store_query_stage(&provider.state, deadline, move |store| {
             Ok(store.authorized_library_ids(user)?)
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(super::super::query_stage_error)?;
         if current_access == observed_access {
             return Ok(page);
         }
@@ -31,7 +33,7 @@ pub(in crate::media_server_provider) async fn hints(
             tracing::warn!(%user, "Jellyfin Library access changed during search hints; retrying selection");
         }
     }
-    Err("Library access changed during search hints".into())
+    Err(QueryError::Unavailable)
 }
 
 async fn hints_attempt(
@@ -41,7 +43,7 @@ async fn hints_attempt(
     offset: usize,
     limit: usize,
     deadline: Instant,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     let term = term.to_owned();
     let result = run_store_query_stage(&provider.state, deadline, move |store| {
         let page = store.protocol_search_hints(user, &term, offset, limit)?;
@@ -69,7 +71,7 @@ async fn hints_attempt(
         })
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(super::super::query_stage_error)?;
     let budget = store::QueryBudget {
         deadline,
         cancelled: Arc::new(AtomicBool::new(false)),
@@ -92,18 +94,16 @@ async fn hints_attempt(
         Ok(store.validate_page_snapshot(&snapshot)?)
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(super::super::query_stage_error)?;
     if let store::PageValidation::Stale { gone } = validation {
         let gone: HashSet<_> = gone.into_iter().collect();
         page.items.retain(|item| !gone.contains(&item.file.file_id));
     }
     Ok(page)
 }
-fn attempt_error(error: AttemptError) -> String {
+fn attempt_error(error: AttemptError) -> QueryError {
     match error {
-        AttemptError::Query(error) => error.to_string(),
-        AttemptError::Changed | AttemptError::SourcesChanged => {
-            "Library facts changed during search hints".into()
-        }
+        AttemptError::Query(error) => error,
+        AttemptError::Changed | AttemptError::SourcesChanged => QueryError::Unavailable,
     }
 }

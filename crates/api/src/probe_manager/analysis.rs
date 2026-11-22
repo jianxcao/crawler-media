@@ -71,6 +71,19 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
         .store
         .file_coverage_by_id(unit.row.file.file_id)?
         .ok_or_else(|| store::StoreError::Missing("analysis source missing".into()))?;
+    if row.file.version != unit.row.file.version
+        || row.file.path != unit.row.file.path
+        || row.file.media_id != unit.row.file.media_id
+        || row.file.library_id != unit.row.file.library_id
+        || row.file.root_id != unit.row.file.root_id
+        || row.units != unit.row.units
+        || row.file.presence != domain::FilePresence::Present
+        || row.file.publication != domain::FilePublication::Published
+    {
+        return Err(store::StoreError::Protected(
+            "analysis target changed".into(),
+        ));
+    }
     let request = store::ProbeAnalysisRequest {
         dispatch: store::ProbeDispatchId {
             job_id: job.clone(),

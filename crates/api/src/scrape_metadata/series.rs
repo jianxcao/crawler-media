@@ -306,7 +306,10 @@ pub(super) struct PosterFetchCatalogGet<'a> {
 
 impl media::CatalogGet for PosterFetchCatalogGet<'_> {
     fn get(&self, path: &str) -> Result<String, media::TmdbError> {
-        let bytes = self.fetch.get(path).map_err(media::TmdbError::Http)?;
+        let bytes = self
+            .fetch
+            .get_fanart(path)
+            .map_err(media::TmdbError::Http)?;
         String::from_utf8(bytes).map_err(|e| media::TmdbError::Parse(e.to_string()))
     }
 }

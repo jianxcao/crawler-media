@@ -252,7 +252,7 @@ pub(super) fn find_chinese_season_episode(s: &str) -> Option<SeasonEpisodeBounda
         {
             let season_str = after[..j_pos].trim();
             if let Some(s_num) = parse_cn_or_arabic_num(season_str) {
-                if pos.is_none() || p < pos.unwrap() {
+                if pos.is_none_or(|cur| p < cur) {
                     pos = Some(p);
                 }
                 season = Some(s_num);
@@ -269,7 +269,7 @@ pub(super) fn find_chinese_season_episode(s: &str) -> Option<SeasonEpisodeBounda
             let ep_str = after[..end_pos].trim();
             let (from, to) = parse_chinese_ep_range(ep_str);
             if from.is_some() {
-                if pos.is_none() || p < pos.unwrap() {
+                if pos.is_none_or(|cur| p < cur) {
                     pos = Some(p);
                 }
                 episode = from;

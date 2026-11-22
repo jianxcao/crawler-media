@@ -225,3 +225,93 @@ fn overflowed_metadata_window_preserves_fifo_order_and_blocks_live_line_jumping(
     assert_eq!(drained[0], "job-1-older");
     assert_eq!(drained[1], "job-2-newer");
 }
+
+#[test]
+fn paused_remote_reads_keep_query_and_refresh_strm_out_of_channels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(store::Store::open(tmp.path().join("data")).unwrap());
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let publish_strm = |name: &str| {
+        let path = root.join(name);
+        std::fs::write(&path, "https://fixture.invalid/video.mkv").unwrap();
+        let media = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: name.into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&media).unwrap();
+        let cov =
+            super::super::test_support::coverage(media.id, path.to_str().unwrap(), None, None);
+        super::super::test_support::publish(&store, &cov)
+    };
+    let query_row = publish_strm("query.strm");
+    let item_row = publish_strm("item.strm");
+    let info_row = publish_strm("info.strm");
+    let manager = ProbeManager::new(store.clone()).unwrap();
+    manager.apply_remote_reads_pause(true);
+
+    let budget = store::QueryBudget {
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let writable = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let query_res = manager
+        .request_probe_query(&query_row, &budget, writable)
+        .unwrap();
+    assert!(matches!(
+        query_res,
+        super::super::policy::ProbeRequestResult::Queued { .. }
+    ));
+    let item_queued = manager
+        .enqueue_forced_item_refresh(vec![ProbeUnit {
+            row: item_row.clone(),
+            kind: domain::MediaKind::Movie,
+            force_fingerprint: false,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: false,
+            reuse_media_info_cache: false,
+            marker_refresh_id: None,
+            job_id: None,
+        }])
+        .unwrap();
+    assert_eq!(item_queued, 0);
+    let info_res = manager
+        .request_media_info_refresh(&info_row, true, &uuid::Uuid::new_v4())
+        .unwrap();
+    assert!(matches!(
+        info_res,
+        super::super::policy::ProbeRequestResult::Queued { .. }
+    ));
+    assert_eq!(manager.queued_ledger_count(), 0);
+    assert!(manager.take_queued_for_test().is_none());
+    for row in [&query_row, &item_row, &info_row] {
+        assert_eq!(
+            store
+                .active_probe_unit_for_ledger(&row.file.file_id.to_string())
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+    }
+    manager.apply_remote_reads_pause(false);
+}

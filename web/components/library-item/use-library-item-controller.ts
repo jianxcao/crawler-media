@@ -111,7 +111,7 @@ export function useLibraryItemController({
     explicitTrackFileId,
     toast,
   });
-  const { resetMarking } = playback;
+  const { resetMarking, bumpEpisodesVersion } = playback;
 
   const reloadSeq = useRef(0);
   const fetchDetail = useCallback(
@@ -184,7 +184,7 @@ export function useLibraryItemController({
     ? { label: "发现详情", href: discoveryReturnPath }
     : fromRecent
       ? { label: "媒体库", href: "/library" }
-      : { label: library?.name ?? "库存", href: `/library/${libraryId}` };
+      : { label: library?.name || "库存", href: `/library/${libraryId}` };
   const back = useBackNavigation(navFallback.href);
 
   const mediaTmdbId = detail?.tmdb_id;
@@ -243,6 +243,7 @@ export function useLibraryItemController({
 
   const handleClearHistory = () => {
     if (!detail) return;
+    const expectedKey = currentPageKey.current;
     void confirm({
       title: `清除《${detail.title}》的观看记录？`,
       description: "续播进度、已看标记和播放次数都会清除，无法恢复。只影响你自己的记录。",
@@ -251,7 +252,11 @@ export function useLibraryItemController({
     }).then((ok) => {
       if (!ok) return;
       clearPlaybackHistory("item", { mediaItemId: detail.media_item_id })
-        .then((cleared) => toast.success(`已清除 ${cleared.deleted_states} 条观看记录`))
+        .then((cleared) => {
+          if (currentPageKey.current !== expectedKey) return;
+          bumpEpisodesVersion();
+          toast.success(`已清除 ${cleared.deleted_states} 条观看记录`);
+        })
         .catch((e) => toast.error((e as Error).message));
     });
   };

@@ -630,6 +630,13 @@ fn persist(
                     );
                 }
                 crate::worker::transfer::queue_transfer_removals(state, store, &removed)?;
+                for coverage in &outcome.files {
+                    let path = coverage.file.path.to_string_lossy().to_string();
+                    store.clear_ledger_missing(&path).map_err(|error| {
+                        tracing::error!(path = %path, %error, "清理 Library 缺失标记失败");
+                        error.to_string()
+                    })?;
+                }
                 Ok(published)
             },
         )
@@ -678,5 +685,10 @@ fn persist_pending(
     store.mark_pending_rejected(id, &rejected)?;
     store.mark_pending_rejected(id, &broken_enclosures)?;
     store.save_subscribe_facts_diff(id, baseline_facts, &outcome.facts)?;
+    for coverage in &outcome.files {
+        for (season, episode) in crate::worker::transfer::wanted_slots(&coverage.units) {
+            store.mark_wanted_imported(id, season, episode, now)?;
+        }
+    }
     Ok(())
 }

@@ -357,3 +357,88 @@ async fn site_write_rejects_invalid_cdp_url() {
     let body = crate::common::json_body(resp).await;
     assert_eq!(body["error"]["code"], "site.invalid_endpoint");
 }
+
+#[tokio::test]
+async fn site_write_trims_cdp_url_and_clears_whitespace_only_optional_fields() {
+    let tmp = tempdir().unwrap();
+    let app = app(&tmp);
+    let created = call(
+        &app,
+        "POST",
+        "/api/v1/sites",
+        "management-secret",
+        json!({
+            "name": "ws-site",
+            "profile_id": "demo",
+            "enabled": true,
+            "url": "https://pt.example/",
+            "cdp_url": "  http://browser.example:9222/cdp  ",
+            "cookie": "   ",
+            "api_key": "  ",
+            "rss_url": "   ",
+            "proxy": "   ",
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["cdp_url"], "http://browser.example:9222/cdp");
+    assert_eq!(created["auth_type"], "none");
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let site = store.get_site(id.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(
+        site.cdp_url.as_deref(),
+        Some("http://browser.example:9222/cdp")
+    );
+    assert!(
+        site.cookie.is_none()
+            && site.api_key.is_none()
+            && site.rss_url.is_none()
+            && site.proxy.is_none()
+    );
+
+    let uri = format!("/api/v1/sites/{id}");
+    call(
+        &app,
+        "PUT",
+        &uri,
+        "management-secret",
+        json!({
+            "name": "ws-site",
+            "profile_id": "demo",
+            "enabled": true,
+            "url": "https://pt.example/",
+            "cdp_url": "   ",
+            "cookie": "  c1  ",
+            "api_key": "  k1  ",
+            "rss_url": "   ",
+            "proxy": "   ",
+        }),
+    )
+    .await;
+    let after_put = store.get_site(id.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(after_put.cdp_url, None);
+    assert_eq!(after_put.cookie.as_deref(), Some("c1"));
+    assert_eq!(after_put.api_key.as_deref(), Some("k1"));
+    assert_eq!(after_put.rss_url, None);
+    assert_eq!(after_put.proxy, None);
+
+    call(
+        &app,
+        "PATCH",
+        &uri,
+        "management-secret",
+        json!({
+            "cookie": "   ",
+            "api_key": "  ",
+            "cdp_url": "  http://browser.example:9222/patched  ",
+        }),
+    )
+    .await;
+    let after_patch = store.get_site(id.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(after_patch.cookie, None);
+    assert_eq!(after_patch.api_key, None);
+    assert_eq!(
+        after_patch.cdp_url.as_deref(),
+        Some("http://browser.example:9222/patched")
+    );
+}

@@ -21,6 +21,14 @@ fn favorite_pages_and_positions_reject_frozen_projection_scope() {
     let (_tmp, store, library, ids) = setup();
     let user = UserId::new();
     store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("proj-a-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    store
         .mutate_playback(
             ids[0].parse().unwrap(),
             &store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(true)),
@@ -74,6 +82,14 @@ fn roster_statistics_reject_partial_integrity_repairs() {
 fn favorite_and_roster_reads_reject_a_completed_failed_integrity_check() {
     let (tmp, store, library, ids) = setup();
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("proj-b-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     store
         .mutate_playback(
             ids[0].parse().unwrap(),

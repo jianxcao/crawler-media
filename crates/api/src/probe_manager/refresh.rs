@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use domain::MediaKind;
 
-use super::{ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope, single_season};
+use super::{ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope, single_season_opt};
 
 impl ProbeManager {
     /// Force a complete season refresh while leaving its current markers and
@@ -37,7 +37,7 @@ impl ProbeManager {
         if units.iter().any(|unit| {
             unit.row.file.media_id != media_id
                 || super::require_single_unit(&unit.row).is_err()
-                || single_season(&unit.row) != Some(season)
+                || single_season_opt(&unit.row) != Some(season)
         }) {
             tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
             return 0;
@@ -92,12 +92,16 @@ impl ProbeManager {
             unit.overwrite_markers = true;
             unit.marker_refresh_id = Some(id);
             unit.job_id = Some(job_id.clone());
-            self.seen.lock().insert(unit.row.file.file_id.to_string());
-            if self.queue_metadata(unit.clone()).is_ok() {
-                queued += 1;
+            if self.should_defer_remote_dispatch(&unit.row.file.path) {
+                tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，刷新单元保持数据库排队");
             } else {
-                self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "刷新窗口已满，单元保持数据库排队");
+                self.seen.lock().insert(unit.row.file.file_id.to_string());
+                if self.queue_metadata(unit.clone()).is_ok() {
+                    queued += 1;
+                } else {
+                    self.seen.lock().remove(&unit.row.file.file_id.to_string());
+                    tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "刷新窗口已满，单元保持数据库排队");
+                }
             }
         }
         tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
@@ -159,7 +163,7 @@ impl ProbeManager {
                 .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed));
             total += batch.units.len();
             for unit in &mut batch.units {
-                if let Some(season) = single_season(&unit.row) {
+                if let Some(season) = single_season_opt(&unit.row) {
                     seasons.insert(season);
                 }
                 unit.force_fingerprint = batch.is_marker;
@@ -168,12 +172,16 @@ impl ProbeManager {
                 unit.overwrite_markers = batch.is_marker;
                 unit.marker_refresh_id = refresh_id;
                 unit.job_id = Some(batch.job_id.clone());
-                self.seen.lock().insert(unit.row.file.file_id.to_string());
-                if self.queue_metadata(unit.clone()).is_ok() {
-                    queued += 1;
+                if self.should_defer_remote_dispatch(&unit.row.file.path) {
+                    tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，整条目单元保持数据库排队");
                 } else {
-                    self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                    tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+                    self.seen.lock().insert(unit.row.file.file_id.to_string());
+                    if self.queue_metadata(unit.clone()).is_ok() {
+                        queued += 1;
+                    } else {
+                        self.seen.lock().remove(&unit.row.file.file_id.to_string());
+                        tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+                    }
                 }
             }
         }
@@ -311,7 +319,7 @@ fn make_item_refresh_batch(
 ) -> ItemRefreshBatch {
     let seasons = units
         .iter()
-        .filter_map(|unit| single_season(&unit.row))
+        .filter_map(|unit| single_season_opt(&unit.row))
         .collect::<HashSet<_>>();
     let season = (seasons.len() == 1)
         .then(|| seasons.iter().next().copied())

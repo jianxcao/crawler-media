@@ -132,19 +132,114 @@ fn merge_coalesces_catalog_definitions_and_preserves_running_receipt() {
     }
 }
 
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: std::sync::Mutex<RendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: std::sync::Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            parties,
+            state: std::sync::Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn guard(self: &std::sync::Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
+
 #[test]
 fn concurrent_ensure_uses_one_identity_and_preserves_existing_config() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("jobs.db");
     let q = Queue::open(&path).unwrap();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let barrier = BoundedRendezvous::new(8);
     let threads = (0..8)
         .map(|n| {
             let path = path.clone();
             let barrier = barrier.clone();
             std::thread::spawn(move || {
+                let mut guard = barrier.guard();
                 let queue = Queue::open(path).unwrap();
                 barrier.wait();
+                guard.disarm();
                 let mut new = def(JobKind::Transfer, JobScope::Global, "{}");
                 new.concurrency_key = Some(format!("key-{n}"));
                 queue.ensure_def(new).unwrap().id

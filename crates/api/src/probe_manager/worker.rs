@@ -239,7 +239,9 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
         if !handed_off {
             retry_dispatch(&manager, &id, owns_running).await;
         }
-        let _ = step(&manager, |manager| manager.refill_drained_windows()).await;
+        if !manager.shutting_down.load(Ordering::SeqCst) {
+            let _ = step(&manager, |manager| manager.refill_drained_windows()).await;
+        }
         drop(pending);
     }
 }
@@ -409,11 +411,11 @@ async fn retry_dispatch(
                         .as_ref()
                         .is_none_or(|unit| unit.job_id != id.job_id || unit.stage != id.stage)
                     {
-                        return Ok(());
+                        return Ok(false);
                     }
                     if active.as_ref().is_some_and(|unit| unit.status == "running") && !owns_running
                     {
-                        return Ok(());
+                        return Ok(false);
                     }
                     store
                         .retry_probe_unit(&id.job_id, &id.ledger_id)
@@ -421,20 +423,39 @@ async fn retry_dispatch(
                             tracing::error!(%error, job_id = %id.job_id, "重排探测单元失败");
                             error
                         })?;
-                    seen.remove(&id.ledger_id);
-                    Ok(())
+                    let is_paused_strm = manager.remote_reads_are_paused()
+                        && super::ledger_id(&id.ledger_id)
+                            .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
+                            .is_some_and(|row| super::dispatch::is_strm_path(&row.file.path));
+                    if is_paused_strm {
+                        seen.remove(&id.ledger_id);
+                    }
+                    Ok(!is_paused_strm)
                 })
             }
         })
         .await;
-        if matches!(result, Ok(Ok(()))) {
+        if let Ok(Ok(should_backoff)) = result {
+            if should_backoff {
+                tokio::select! {
+                    _ = wait_for_shutdown(manager) => {
+                        manager.seen.lock().remove(&id.ledger_id);
+                        return;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
+                manager.seen.lock().remove(&id.ledger_id);
+            }
             manager.wake.notify_one();
             return;
         }
         if manager.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::select! {
+            _ = wait_for_shutdown(manager) => return,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
     }
 }
 fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {

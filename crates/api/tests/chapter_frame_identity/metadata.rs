@@ -159,9 +159,13 @@ fn duration_only_metadata_publication_wakes_the_idle_frame_service() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         service.start();
         let old = super::service::wait_state(&f, store::ChapterFrameState::Completed).await;
-        while service.pending_memory() != 0 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.pending_memory() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("chapter frame pending_memory must drain");
         assert_eq!(service.dispatch_once().await.unwrap(), 0);
         // Let both workers finish their empty refill and await the next wakeup.
         tokio::time::sleep(Duration::from_millis(30)).await;

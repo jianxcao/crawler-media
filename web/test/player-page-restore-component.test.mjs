@@ -557,3 +557,92 @@ test("late renewal settling AFTER pageshow #2 cannot be claimed after deviceId c
     } finally { await ui.unmount(); }
   }
 });
+
+test("3rd BFCache round-trip restores with chained Request #2 sid-3 and attaches /stream/sid-4", async () => {
+  const server = createGenerationalServer();
+  let deliverB;
+  const pendingB = new Promise(resolve => { deliverB = resolve; });
+  let deliverC;
+  const pendingC = new Promise(resolve => { deliverC = resolve; });
+  let mintedB;
+  let mintedC;
+  const ui = await mountPlayer({
+    grant: (body, attempt) => {
+      if (attempt === 2) {
+        mintedB = server.issue(body);
+        return pendingB;
+      }
+      if (attempt === 3) {
+        mintedC = server.issue(body);
+        return pendingC;
+      }
+      return server.issue(body);
+    },
+  });
+  try {
+    await ui.seek(42_000);
+    // Round-trip #1: fires Request #1 (sid-1 -> sid-2), left in flight
+    await ui.event("pagehide"); await ui.event("pageshow");
+    assert.equal(ui.calls[1].resume_from_play_session_id, "sid-1");
+    assert.equal(mintedB.play_session_id, "sid-2");
+
+    // Round-trip #2: pageshow #2 awaits Request #1 while visible; deliver sid-2 -> chains Request #2 (sid-2 -> sid-3)
+    await ui.event("pagehide"); await ui.event("pageshow");
+    await ui.flush(() => deliverB(mintedB));
+    assert.equal(ui.calls.length, 3);
+    assert.equal(ui.calls[2].resume_from_play_session_id, "sid-2");
+    assert.equal(mintedC.play_session_id, "sid-3");
+
+    // Round-trip #3: suspend while Request #2 is in flight, then settle sid-3 while suspended
+    await ui.event("pagehide");
+    await ui.flush(() => deliverC(mintedC));
+    assert.equal(ui.engines.length, 1, "sid-3 settling in BFCache must not attach a stream while suspended");
+
+    // pageshow #3 must recognize sid-3 as chained from sid-2 and request sid-4
+    await ui.event("pageshow");
+    assert.equal(ui.calls.length, 4);
+    assert.equal(ui.calls[3].resume_from_play_session_id, "sid-3");
+    assert.equal(ui.engines.at(-1).options.streamUrl, "/stream/sid-4");
+  } finally { await ui.unmount(); }
+});
+
+test("declined BFCache restore clears pageSuspendedRef and manual 重试 starts a fresh session", async () => {
+  const ui = await mountPlayer({
+    grant: (_body, attempt) => ({
+      play_session_id: `sid-${attempt}`,
+      session_id: null,
+      stream_url: `/stream/sid-${attempt}`,
+      start_ms: 0,
+      decision: {
+        outcome: "plan",
+        tier: 4,
+        file_id: "file-1",
+        container: "mp4",
+        video: { action: "transcode" },
+        audio: { action: "copy", track_ref: null },
+        subtitles: [],
+        audio_tracks: [],
+      },
+      subtitle_urls: [],
+      watch: { position_ms: 0, duration_ms: 1000_000 },
+      source: null,
+    }),
+  });
+  try {
+    await ui.event("pagehide");
+    // While suspended in BFCache, fallback tier 4 fails -> enters terminal error phase
+    await ui.flush(() => ui.engines[0].options.onFailed("decode failed", "decode-stalled"));
+    assert.match(JSON.stringify(ui.renderer.toJSON()), /decode failed/);
+    // pageshow declines restore because phase is "error", but must unsuspend
+    await ui.event("pageshow");
+    assert.equal(ui.calls.length, 1);
+    const retryBtn = ui.renderer.root
+      .findAllByType("button")
+      .find(node => node.children.join("") === "重试");
+    assert.ok(retryBtn, "error overlay must show 重试 button");
+    await ui.flush(() => retryBtn.props.onClick());
+    assert.equal(ui.calls.length, 2, "clicking 重试 after declined restore must start a fresh session");
+    assert.equal(ui.calls[1].resume_from_play_session_id, undefined);
+    assert.equal(ui.engines.at(-1).options.streamUrl, "/stream/sid-2");
+  } finally { await ui.unmount(); }
+});

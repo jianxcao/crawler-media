@@ -24,12 +24,18 @@ fn origin(status: u16) -> (String, mpsc::Receiver<String>, std::thread::JoinHand
                 Err(error) => panic!("accept: {error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let mut bytes = Vec::new();
         let mut chunk = [0; 1024];
         while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            assert!(
+                Instant::now() < deadline,
+                "timed out reading request headers"
+            );
+            assert!(bytes.len() < 64 * 1024, "request headers exceeded cap");
             let count = stream.read(&mut chunk).unwrap();
             assert!(count > 0, "request ended before headers");
             bytes.extend_from_slice(&chunk[..count]);

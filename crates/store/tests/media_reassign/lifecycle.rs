@@ -42,6 +42,14 @@ fn captured_removal_rejects_reassignment_and_remains_cleanable() {
     let to = media(store, MediaKind::Movie, "To");
     let id = publish(store, &fx.root, from, "captured", None);
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("re-cap-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     seed_progress(store, user, from, id);
     let session = issue_session(store, user, "removal-device", id, 10);
     let before_file = file(store, id);
@@ -110,6 +118,14 @@ fn mixed_library_reassignment_rejects_entire_batch_when_one_owner_is_frozen() {
         .unwrap();
     let ready_file = publish(store, &ready_root, from, "ready", None);
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("re-mix-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     seed_progress(store, user, from, ready_file);
     let session = issue_session(store, user, "ready-device", ready_file, 10);
     let before_files = store.published_files(&[ready_file, frozen_file]).unwrap();
@@ -153,6 +169,14 @@ fn reconfiguring_library_rejects_reassignment_without_changing_file_or_playback(
     let to = media(store, MediaKind::Movie, "To");
     let id = publish(store, &fx.root, from, "reindexing", None);
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("re-cfg-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     seed_progress(store, user, from, id);
     let before_file = file(store, id);
     let before_facts = store.playback_units_for_user(user).unwrap();

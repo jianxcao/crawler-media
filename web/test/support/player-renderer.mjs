@@ -37,7 +37,7 @@ function session(sid, startMs) {
   };
 }
 
-export async function mountPlayer({ grant, progress, scope, startMsOverride } = {}) {
+export async function mountPlayer({ grant, progress, scope, startMsOverride, engineStats } = {}) {
   const target = new EventTarget();
   const timers = new Set();
   const intervals = new Set();
@@ -53,7 +53,7 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
   globalThis.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
   const storage = { getItem: () => null, setItem() {}, removeItem() {} };
   globalThis.localStorage = storage;
-  const calls = [], reports = [], metrics = [], engines = [];
+  const calls = [], reports = [], metrics = [], engines = [], clientLogs = [];
   let deviceId = "device-1";
   const video = new Video();
   const resolveFile = base => {
@@ -81,13 +81,19 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
         reportPlaybackProgressOnUnload: body => reports.push({ ...body, unload: true }),
         reportPlaybackMetric: async body => { metrics.push(body); },
         reportPlaybackMetricOnUnload: body => metrics.push(body),
-        reportPlaybackClientLog() {},
+        reportPlaybackClientLog(kind, payload) { clientLogs.push({ kind, payload }); },
       };
       if (name === "@/lib/player/device") return { getPlayerDeviceId: () => deviceId };
       if (name === "@/lib/player/capability") return { getCapabilitySnapshot: async () => ({ mse: "none", native_hls: false, is_mobile: false }) };
       if (name === "@/lib/player/engine") return {
         preloadHlsEngine() {}, createEngine(options) {
-          const engine = { options, attach: async () => {}, destroy() {}, stats: () => ({ engine: "direct", downlinkBps: null }) };
+          const index = engines.length;
+          const engine = {
+            options,
+            attach: async () => {},
+            destroy() {},
+            stats: () => (engineStats ? engineStats(options, index) : { engine: "direct", downlinkBps: null }),
+          };
           engines.push(engine); return engine;
         },
       };
@@ -103,7 +109,7 @@ export async function mountPlayer({ grant, progress, scope, startMsOverride } = 
   const props = { unit: { media_item_id: "media", file_id: "file-1" }, title: "Media", episodeLabel: null, posterUrl: null, next: null, prev: null, onPlayNext() {}, onPlayPrev() {}, onExit() {}, startMsOverride, ...(scope ? { api: scope } : {}) };
   await act(async () => { renderer = create(React.createElement(VideoPlayer, props), { createNodeMock: element => element.type === "video" ? video : null }); });
   return {
-    calls, reports, metrics, engines, video, renderer,
+    calls, reports, metrics, engines, clientLogs, video, renderer,
     session,
     setDeviceId(next) { deviceId = next; },
     async event(type, persisted = true) {

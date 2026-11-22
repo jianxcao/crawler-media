@@ -127,6 +127,14 @@ pub(super) fn users(size: usize) {
     );
     measure_user(&store, library, size, 0, "user_empty");
     let user = support::protocol().user_id;
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("perf-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     for (end, label) in [
         (size / 100, "user_sparse_1pct"),
         (size, "user_dense_100pct"),

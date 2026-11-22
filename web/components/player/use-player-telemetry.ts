@@ -357,6 +357,12 @@ export function usePlayerTelemetry({
           pageGenerationRef.current += 1;
           pageSuspendedRef.current =
             !saved.endedByAdmin && !["error", "consent", "ended", "idle"].includes(saved.phase);
+          if (pageRestoreRef.current) {
+            pageRestoreRef.current = {
+              ...pageRestoreRef.current,
+              renewedFromPlaySessionId: null,
+            };
+          }
           heartbeatStopRef.current?.();
           heartbeatStopRef.current = undefined;
           if (saved.announced && saved.playSessionId) {
@@ -376,6 +382,9 @@ export function usePlayerTelemetry({
           }
           qoe({ type: "suspend" });
           video?.pause();
+        },
+        unsuspend: () => {
+          pageSuspendedRef.current = false;
         },
         restore: (saved) => {
           const tracks = trackRefsRef.current();

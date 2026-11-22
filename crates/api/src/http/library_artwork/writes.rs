@@ -9,10 +9,13 @@ use super::artwork_key;
 use crate::http::{err, ok, store_wait};
 use crate::management::ApiState;
 
+const MAX_ARTWORK_BYTES: usize = 12 * 1024 * 1024;
+
 struct Target {
     coverage: domain::FileCoverage,
     media: domain::Media,
     path: std::path::PathBuf,
+    enabled_roots: Vec<std::path::PathBuf>,
 }
 
 fn capture(
@@ -24,13 +27,21 @@ fn capture(
     store_wait::with_foreground_store(state, |store| {
         state.require_writable()?;
         state.require_write_admitted()?;
-        let library_id = library.parse().map_err(|_| {
+        let library_id: domain::LibraryId = library.parse().map_err(|_| {
             err(
                 StatusCode::BAD_REQUEST,
                 "library.invalid",
                 "Library id 无效",
             )
         })?;
+        let library_id_str = library_id.to_string();
+        let enabled_roots = store
+            .list_library_roots()
+            .map_err(storage_error)?
+            .into_iter()
+            .filter(|root| root.enabled && root.library_id == library_id_str)
+            .map(|root| root.path)
+            .collect();
         let rows = store
             .file_coverage_in_library(library_id, Some(media), store::FileReadScope::Published)
             .map_err(storage_error)?;
@@ -57,6 +68,7 @@ fn capture(
             coverage,
             media,
             path,
+            enabled_roots,
         })
     })?
 }
@@ -198,24 +210,88 @@ fn write_artwork(
         return ok(json!({"locked":false,"automatic":true})).into_response();
     };
     let bytes = if source.starts_with("http://") || source.starts_with("https://") {
-        state
-            .poster_fetch
-            .get(source)
-            .map_err(|error| error.to_string())
+        match fetch_http_candidate(state, source) {
+            Ok(bytes) => bytes,
+            Err(response) => return response,
+        }
     } else {
-        std::fs::read(source).map_err(|error| error.to_string())
-    };
-    let bytes = match bytes {
-        Ok(bytes) if !bytes.is_empty() => bytes,
-        result => {
-            let error = result
-                .err()
-                .unwrap_or_else(|| "empty artwork candidate".to_string());
-            tracing::warn!(source, %error, "manual artwork candidate could not be read");
-            return err(StatusCode::BAD_GATEWAY, "artwork.fetch", "读取候选图片失败");
+        match read_local_candidate(source, &target.enabled_roots) {
+            Ok(bytes) => bytes,
+            Err(response) => return response,
         }
     };
     publish_bytes(state, &target, &bytes, source, &lease)
+}
+
+fn has_valid_image_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\xff\xd8\xff")
+        || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+}
+
+fn invalid_candidate(source: &str, reason: &str) -> Response {
+    tracing::warn!(source, reason, "rejected manual artwork candidate");
+    err(StatusCode::BAD_REQUEST, "artwork.invalid", "候选图片无效")
+}
+
+fn read_local_candidate(
+    source: &str,
+    enabled_roots: &[std::path::PathBuf],
+) -> Result<Vec<u8>, Response> {
+    use std::io::Read;
+    let canon_source = std::fs::canonicalize(source)
+        .map_err(|_| invalid_candidate(source, "canonicalize failed"))?;
+    let inside_enabled_root = enabled_roots.iter().any(|root| {
+        std::fs::canonicalize(root).is_ok_and(|canon_root| {
+            canon_source != canon_root && canon_source.starts_with(&canon_root)
+        })
+    });
+    if !inside_enabled_root {
+        return Err(invalid_candidate(source, "outside enabled library roots"));
+    }
+    if !std::fs::metadata(&canon_source).is_ok_and(|meta| meta.is_file()) {
+        return Err(invalid_candidate(source, "not a regular file"));
+    }
+    let file =
+        std::fs::File::open(&canon_source).map_err(|_| invalid_candidate(source, "open failed"))?;
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Err(invalid_candidate(
+            source,
+            "opened handle is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_ARTWORK_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid_candidate(source, "read failed"))?;
+    if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES || !has_valid_image_magic(&bytes) {
+        return Err(invalid_candidate(
+            source,
+            "empty, oversized, or invalid image header",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn fetch_http_candidate(state: &ApiState, source: &str) -> Result<Vec<u8>, Response> {
+    if !crate::http::image_proxy::allowed_url(source) {
+        return Err(invalid_candidate(source, "disallowed artwork URL"));
+    }
+    let bytes = state.poster_fetch.get(source).map_err(|error| {
+        if error.contains("disallowed") || error.contains("exceeds") {
+            invalid_candidate(source, &error)
+        } else {
+            tracing::warn!(source, %error, "manual artwork candidate could not be read");
+            err(StatusCode::BAD_GATEWAY, "artwork.fetch", "读取候选图片失败")
+        }
+    })?;
+    if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES || !has_valid_image_magic(&bytes) {
+        return Err(invalid_candidate(
+            source,
+            "empty, oversized, or invalid image header",
+        ));
+    }
+    Ok(bytes)
 }
 
 async fn mutation(

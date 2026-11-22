@@ -64,9 +64,9 @@ fn tmdb_detail(row: &CatalogCacheRow, val: &Value, map: &mut Entries, seen: &mut
             .unwrap_or("")
             .split('/')
             .collect();
-        if parts.len() >= 3 {
+        if parts.len() == 3 {
             let source_id = parts[2].to_string();
-            if source_id.chars().all(|c| c.is_ascii_digit()) {
+            if !source_id.is_empty() && source_id.chars().all(|c| c.is_ascii_digit()) {
                 let kind = if is_movie { "movie" } else { "tv" };
                 let entry_key = format!("tmdb:{kind}:{source_id}");
 

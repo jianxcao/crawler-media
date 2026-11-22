@@ -16,7 +16,7 @@ impl ProbeManager {
         let source_version = crate::fingerprint_job::current_source_version(&row.file.path);
         let need = {
             let store = self.store.as_ref();
-            policy::assess_probe_need(&store, &row.file, origin, now_ms, source_version)
+            policy::assess_probe_need(&store, row, origin, now_ms, source_version)
         };
         if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
             return Ok(need.retry);
@@ -119,7 +119,14 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: store::ProbeDispatchStage::Fingerprint,
         };
-        if self.fingerprint_tx.try_send((id, work)).is_err() {
+        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+            self.seen.lock().remove(&ledger_id);
+            tracing::info!(
+                job_id,
+                ledger_id,
+                "远程读取已暂停，直接声纹任务保持数据库排队"
+            );
+        } else if self.fingerprint_tx.try_send((id, work)).is_err() {
             self.seen.lock().remove(&ledger_id);
             tracing::info!(job_id, "声纹窗口已满，直接声纹任务保持数据库排队");
             self.wake.notify_waiters();
@@ -166,11 +173,19 @@ impl ProbeManager {
             job_id,
             "【媒体信息】已进入高优先级探测队列；声纹将在媒体信息写入后另行排队"
         );
-        self.seen.lock().insert(ledger_id.clone());
-        if self.queue_metadata(unit).is_err() {
-            self.seen.lock().remove(&ledger_id);
-            tracing::info!(ledger_id, job_id, "媒体信息窗口已满，单元保持数据库排队");
-            self.wake.notify_waiters();
+        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+            tracing::info!(
+                ledger_id,
+                job_id,
+                "远程读取已暂停，媒体信息任务保持数据库排队"
+            );
+        } else {
+            self.seen.lock().insert(ledger_id.clone());
+            if self.queue_metadata(unit).is_err() {
+                self.seen.lock().remove(&ledger_id);
+                tracing::info!(ledger_id, job_id, "媒体信息窗口已满，单元保持数据库排队");
+                self.wake.notify_waiters();
+            }
         }
         Ok(Some(job_id))
     }
@@ -199,7 +214,14 @@ impl ProbeManager {
             }
         };
         unit.job_id = Some(job_id.clone());
-        if self.queue_metadata(unit).is_err() {
+        if self.should_defer_remote_dispatch(&unit.row.file.path) {
+            self.seen.lock().remove(&ledger_id);
+            tracing::info!(
+                ledger_id,
+                job_id,
+                "远程读取已暂停，强制探测任务保持数据库排队"
+            );
+        } else if self.queue_metadata(unit).is_err() {
             self.seen.lock().remove(&ledger_id);
             tracing::info!(ledger_id, job_id, "强制探测窗口已满，任务保持数据库排队");
             self.wake.notify_waiters();

@@ -102,6 +102,7 @@ fn visible_coverages_for_media<'a>(
     coverages
         .iter()
         .filter(|coverage| coverage.file.media_id == media.id)
+        .filter(|coverage| coverage.file.publication == domain::FilePublication::Published)
         .filter(|coverage| {
             crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
         })

@@ -341,3 +341,117 @@ async fn pending_torrent_occupies_slot_and_prevents_duplicate_download_in_next_r
         "在途未完成的 pending 任务应占位，防多轮重复下载同集"
     );
 }
+
+#[tokio::test]
+async fn manual_run_clears_ledger_missing_and_marks_wanted_imported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::from([("search", nexusphp())]),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let source = tmp.path().join("matrix.mkv");
+    std::fs::write(&source, b"fixture").unwrap();
+    downloader.map_enclosure("https://pt.example/download.php?id=1&passkey=abc", source);
+    let api_state = state(tmp.path(), fetcher, downloader.clone());
+    let store = api_state.store();
+    let app = router(api_state);
+    create_site(&app).await;
+    let subscribe = create_subscribe(&app, "search").await;
+    let id = subscribe["id"].as_str().unwrap();
+    let sid: domain::SubscribeId = id.parse().unwrap();
+
+    // First manual run publishes the file into the default movie library.
+    let first = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/subscriptions/{id}/run"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let history = store.load_wanted_history(sid).unwrap();
+    assert!(
+        history
+            .get(&(None, None))
+            .is_some_and(|h| h.imported_at.is_some()),
+        "manual run must mark wanted_history.imported_at: {history:?}"
+    );
+
+    // Re-create a pending transfer reservation marked missing_at so a second manual run recovers it.
+    let mut cov = store
+        .list_file_coverage()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let path = cov.file.path.to_string_lossy().to_string();
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let config_revision = store
+        .library_config_revision(&cov.file.library_id.to_string())
+        .unwrap();
+    let stage_src = cov.file.source_path.clone().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    store.delete_ledger_path(&path).unwrap();
+    store
+        .delete_subscribe_facts_for_paths(sid, std::slice::from_ref(&path))
+        .unwrap();
+    cov.file.file_id = domain::LedgerId::new();
+    cov.file.version = domain::FileVersion {
+        revision: 1,
+        source_version: "v1".into(),
+    };
+    store
+        .reserve_transfer(
+            &api::store::library_write::WriteScope {
+                library_id: cov.file.library_id,
+                config_revision,
+            },
+            &cov,
+            &stage_src,
+            library::TransferMode::Hardlink,
+            100,
+        )
+        .unwrap();
+    let root = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+    store
+        .verify_library_files(&[tmp.path().join("data/library/movies"), root], 1_000)
+        .unwrap();
+    assert!(
+        store
+            .missing_at_by_path()
+            .unwrap()
+            .keys()
+            .any(|k| k.ends_with(&name)),
+        "verify_library_files must mark missing_at before re-run"
+    );
+    let second = app
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/subscriptions/{id}/run"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    let second_status = second.status();
+    let second_body = json_body(second).await;
+    assert_eq!(second_status, StatusCode::OK, "{second_body}");
+    assert_eq!(second_body["data"]["ledger_rows"], 1, "{second_body}");
+    assert!(
+        !store
+            .missing_at_by_path()
+            .unwrap()
+            .keys()
+            .any(|k| k.ends_with(&name)),
+        "manual run must clear ledger missing_at on re-publication"
+    );
+}

@@ -441,6 +441,14 @@ fn incremental_episode_add_refreshes_existing_user_summary() {
         .unwrap();
 
     let user_id = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user_id,
+            login: format!("inv-{user_id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     // Mark Episode 1 as played
     store
         .mutate_playback(
@@ -539,6 +547,14 @@ fn deleting_last_file_purges_favorites_with_orphan_media() {
         .unwrap();
 
     let user_id = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user_id,
+            login: format!("inv-{user_id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     // Mark as favorite
     store
         .mutate_playback(

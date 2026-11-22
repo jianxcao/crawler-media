@@ -392,3 +392,174 @@ fn intact_destination_after_disk_receipt_recovers_for_move_and_copy() {
         assert_eq!(std::fs::read(&to).unwrap(), b"movie bytes");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn sidecar_via_parent_symlink_alias_is_never_queued_for_deletion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real_root = tmp.path().join("real");
+    let alias_root = tmp.path().join("alias");
+    std::fs::create_dir_all(real_root.join("Show")).unwrap();
+    std::os::unix::fs::symlink(&real_root, &alias_root).unwrap();
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let _lib = store
+        .create_library(
+            MediaKind::Tv,
+            "AliasLib",
+            &[alias_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: media,
+            kind: MediaKind::Tv,
+            title: "Show".into(),
+            year: Some(2020),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+
+    let from_video = alias_root.join("Show/S01E01.mkv");
+    let to_video = real_root.join("Show/Show - S01E01.mkv");
+    let alias_poster = alias_root.join("Show/poster.jpg");
+    let real_poster = real_root.join("Show/poster.jpg");
+    let old_nfo = alias_root.join("Show/S01E01.nfo");
+    std::fs::write(&from_video, b"episode bytes").unwrap();
+    std::fs::write(&alias_poster, b"poster bytes").unwrap();
+
+    let file = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: from_video.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(
+        &old_nfo,
+        b"<episodedetails><title>Ep 1</title></episodedetails>",
+    )
+    .unwrap();
+    assert!(store.reconcile_nfo_inputs(&from_video).unwrap());
+
+    let req = store
+        .begin_file_rename(file.file_id, &file.version, &from_video, &to_video, 1)
+        .unwrap();
+    assert!(
+        req.sidecars
+            .iter()
+            .any(|s| s.from == alias_poster && s.to == real_poster),
+        "expected symlink-aliased poster.jpg to be observed as a sidecar: {:?}",
+        req.sidecars
+    );
+    let _guard = store.apply_file_rename(&req, 2).unwrap();
+
+    assert!(
+        !store
+            .file_deletion_pending(&alias_poster.to_string_lossy())
+            .unwrap(),
+        "symlink-aliased poster must never be queued for deletion"
+    );
+    assert!(
+        !store
+            .file_deletion_pending(&real_poster.to_string_lossy())
+            .unwrap(),
+        "canonical poster must never be queued for deletion"
+    );
+    assert!(store.list_due_file_deletions(100).unwrap().is_empty());
+    assert_eq!(std::fs::read(&real_poster).unwrap(), b"poster bytes");
+    assert_eq!(
+        std::fs::read(real_root.join("Show/Show - S01E01.nfo")).unwrap(),
+        b"<episodedetails><title>Ep 1</title></episodedetails>"
+    );
+}
+
+#[test]
+fn case_only_nfo_stem_rename_across_extension_change_keeps_bytes_and_migrates_inputs() {
+    let fx = fixture();
+    let probe_lower = fx.root.join("case_probe.tmp");
+    let probe_upper = fx.root.join("CASE_PROBE.TMP");
+    std::fs::write(&probe_lower, b"probe").unwrap();
+    let case_insensitive = probe_upper.exists();
+    let _ = std::fs::remove_file(&probe_lower);
+    if !case_insensitive {
+        return;
+    }
+
+    let media = fx.file.media_id;
+    let from_video = fx.root.join("arrival.mp4");
+    let to_video = fx.root.join("Arrival.mkv");
+    let from_nfo = fx.root.join("arrival.nfo");
+    let to_nfo = fx.root.join("Arrival.nfo");
+    std::fs::write(&from_video, b"arrival bytes").unwrap();
+    let file = publish_fixture_file(
+        &fx.store,
+        &FixtureFile {
+            media_id: media,
+            path: from_video.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(&from_nfo, b"<movie><title>Arrival Case</title></movie>").unwrap();
+    assert!(fx.store.reconcile_nfo_inputs(&from_video).unwrap());
+    assert_eq!(
+        fx.store
+            .library_item_detail(fx.file.library_id, media, "zh-CN")
+            .unwrap()
+            .unwrap()
+            .item
+            .title,
+        "Arrival Case"
+    );
+
+    let req = fx
+        .store
+        .begin_file_rename(file.file_id, &file.version, &from_video, &to_video, 1)
+        .unwrap();
+    let _guard = fx.store.apply_file_rename(&req, 2).unwrap();
+
+    assert!(
+        !fx.store
+            .file_deletion_pending(&from_nfo.to_string_lossy())
+            .unwrap(),
+        "case-identical NFO must never be queued for deletion"
+    );
+    assert!(
+        !fx.store
+            .file_deletion_pending(&to_nfo.to_string_lossy())
+            .unwrap()
+    );
+    assert!(fx.store.list_due_file_deletions(100).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(&to_nfo).unwrap(),
+        b"<movie><title>Arrival Case</title></movie>"
+    );
+
+    // Deleting the NFO and reconciling at the new video path must leave no ghost lowercase row.
+    std::fs::remove_file(&to_nfo).unwrap();
+    assert!(fx.store.reconcile_nfo_inputs(&to_video).unwrap());
+    assert_eq!(
+        fx.store
+            .library_item_detail(fx.file.library_id, media, "zh-CN")
+            .unwrap()
+            .unwrap()
+            .item
+            .title,
+        "M"
+    );
+}

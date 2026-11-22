@@ -201,57 +201,43 @@ async fn item_refresh_rejects_media_owned_by_another_library() {
     assert_eq!(refresh.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn p2_8_cross_library_organize_preview_includes_already_ok_files_for_target_library_and_root()
-{
-    let tmp = tempfile::tempdir().unwrap();
-    let app = app(&tmp);
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let src_root = tmp.path().join("movies-src");
-    let dst_root_1 = tmp.path().join("movies-dst-1");
-    let dst_root_2 = tmp.path().join("movies-dst-2");
-    let tv_root = tmp.path().join("tv-other");
-    for dir in [&src_root, &dst_root_1, &dst_root_2, &tv_root] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
-    let src_lib = store
-        .create_library(
-            MediaKind::Movie,
-            "Movies A",
-            &[src_root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    let dst_lib = store
-        .create_library(
-            MediaKind::Movie,
-            "Movies B",
-            &[dst_root_1.to_str().unwrap(), dst_root_2.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    let tv_lib = store
-        .create_library(
-            MediaKind::Tv,
-            "TV Other",
-            &[tv_root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
+struct CrossPreviewFixture {
+    _tmp: tempfile::TempDir,
+    app: axum::Router,
+    store: Store,
+    src_lib_id: String,
+    dst_lib_id: String,
+    tv_lib_id: String,
+    dst_root_2: std::path::PathBuf,
+    conforming: std::path::PathBuf,
+}
 
-    // Seed one movie already conforming to template under src_lib
+fn create_test_library(
+    store: &Store,
+    kind: MediaKind,
+    name: &str,
+    roots: &[&std::path::Path],
+) -> String {
+    let root_strs: Vec<&str> = roots.iter().map(|p| p.to_str().unwrap()).collect();
+    store
+        .create_library(kind, name, &root_strs, "everyone", true, &[])
+        .unwrap()
+        .id
+}
+
+fn seed_conforming_movie(
+    store: &Store,
+    root: &std::path::Path,
+    title: &str,
+    year: Option<u16>,
+    filename: &str,
+) -> std::path::PathBuf {
     use api::ScrapeStoreExt;
     let media = domain::Media {
         id: domain::MediaId::new(),
         kind: MediaKind::Movie,
-        title: "Inception".into(),
-        year: Some(2010),
+        title: title.into(),
+        year,
         original_title: None,
         aliases: vec![],
         tmdb_id: None,
@@ -263,17 +249,17 @@ async fn p2_8_cross_library_organize_preview_includes_already_ok_files_for_targe
     store.insert_media(&media).unwrap();
     let pattern = store.naming_pattern(MediaKind::Movie).unwrap();
     let conforming = library::render_path(
-        &src_root,
+        root,
         &pattern,
         &media,
-        &release::parse("Inception.2010.mkv"),
-        std::path::Path::new("Inception.2010.mkv"),
+        &release::parse(filename),
+        std::path::Path::new(filename),
     )
     .unwrap();
     std::fs::create_dir_all(conforming.parent().unwrap()).unwrap();
     std::fs::write(&conforming, b"movie-bytes").unwrap();
     store::test_support::publish_fixture_file(
-        &store,
+        store,
         &store::test_support::FixtureFile {
             media_id: media.id,
             path: conforming.display().to_string(),
@@ -281,79 +267,119 @@ async fn p2_8_cross_library_organize_preview_includes_already_ok_files_for_targe
         },
     )
     .unwrap();
+    conforming
+}
 
-    // Same-library preview sees already_ok=1, renames=[]
-    let same_res = app
+async fn setup_cross_preview_fixture() -> CrossPreviewFixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let src_root = tmp.path().join("movies-src");
+    let dst_root_1 = tmp.path().join("movies-dst-1");
+    let dst_root_2 = tmp.path().join("movies-dst-2");
+    let tv_root = tmp.path().join("tv-other");
+    for dir in [&src_root, &dst_root_1, &dst_root_2, &tv_root] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let src_lib_id = create_test_library(&store, MediaKind::Movie, "Movies A", &[&src_root]);
+    let dst_lib_id = create_test_library(
+        &store,
+        MediaKind::Movie,
+        "Movies B",
+        &[&dst_root_1, &dst_root_2],
+    );
+    let tv_lib_id = create_test_library(&store, MediaKind::Tv, "TV Other", &[&tv_root]);
+    let conforming = seed_conforming_movie(
+        &store,
+        &src_root,
+        "Inception",
+        Some(2010),
+        "Inception.2010.mkv",
+    );
+    CrossPreviewFixture {
+        _tmp: tmp,
+        app,
+        store,
+        src_lib_id,
+        dst_lib_id,
+        tv_lib_id,
+        dst_root_2,
+        conforming,
+    }
+}
+
+async fn get_status_and_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    let res = app
         .clone()
-        .oneshot(request(
-            "GET",
-            &format!("/api/v1/libraries/{}/organize-preview", src_lib.id),
-            Some("management-secret"),
-            Value::Null,
-        ))
+        .oneshot(request("GET", uri, Some("management-secret"), Value::Null))
         .await
         .unwrap();
-    assert_eq!(same_res.status(), StatusCode::OK);
-    let same_body = json_body(same_res).await;
+    let status = res.status();
+    let body = json_body(res).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn p2_8_cross_library_organize_preview_includes_already_ok_files_for_target_library_and_root()
+{
+    let fx = setup_cross_preview_fixture().await;
+
+    // Same-library preview sees already_ok=1, renames=[]
+    let (same_status, same_body) = get_status_and_json(
+        &fx.app,
+        &format!("/api/v1/libraries/{}/organize-preview", fx.src_lib_id),
+    )
+    .await;
+    assert_eq!(same_status, StatusCode::OK);
     assert_eq!(same_body["data"]["already_ok"], 1);
     assert_eq!(same_body["data"]["renames"].as_array().unwrap().len(), 0);
 
     // Cross-library preview against dst_lib + dst_root_2 includes the conforming file!
     let encoded_root2 =
-        url::form_urlencoded::byte_serialize(dst_root_2.to_str().unwrap().as_bytes())
+        url::form_urlencoded::byte_serialize(fx.dst_root_2.to_str().unwrap().as_bytes())
             .collect::<String>();
-    let cross_res = app
-        .clone()
-        .oneshot(request(
-            "GET",
-            &format!(
-                "/api/v1/libraries/{}/organize-preview?target_library_id={}&target_root={encoded_root2}",
-                src_lib.id, dst_lib.id
-            ),
-            Some("management-secret"),
-            Value::Null,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(cross_res.status(), StatusCode::OK);
-    let cross_body = json_body(cross_res).await;
+    let (cross_status, cross_body) = get_status_and_json(
+        &fx.app,
+        &format!(
+            "/api/v1/libraries/{}/organize-preview?target_library_id={}&target_root={encoded_root2}",
+            fx.src_lib_id, fx.dst_lib_id
+        ),
+    )
+    .await;
+    assert_eq!(cross_status, StatusCode::OK);
     assert_eq!(cross_body["data"]["already_ok"], 0);
     let renames = cross_body["data"]["renames"].as_array().unwrap();
     assert_eq!(renames.len(), 1);
     let dest_path = renames[0]["to"].as_str().unwrap().to_string();
     assert!(
-        dest_path.starts_with(dst_root_2.to_str().unwrap()),
+        dest_path.starts_with(fx.dst_root_2.to_str().unwrap()),
         "expected target under dst_root_2, got {dest_path}"
     );
 
-    // Mismatched kind and unknown target_root are rejected with 400
-    let bad_kind = app
-        .clone()
-        .oneshot(request(
-            "GET",
-            &format!(
-                "/api/v1/libraries/{}/organize-preview?target_library_id={}",
-                src_lib.id, tv_lib.id
-            ),
-            Some("management-secret"),
-            Value::Null,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(bad_kind.status(), StatusCode::BAD_REQUEST);
+    // Mismatched kind is rejected with 400
+    let (bad_status, _) = get_status_and_json(
+        &fx.app,
+        &format!(
+            "/api/v1/libraries/{}/organize-preview?target_library_id={}",
+            fx.src_lib_id, fx.tv_lib_id
+        ),
+    )
+    .await;
+    assert_eq!(bad_status, StatusCode::BAD_REQUEST);
 
     // Applying the previewed cross-library rename moves the file to dst_root_2 & re-parents to dst_lib
-    let apply_res = app
+    let apply_res = fx
+        .app
         .clone()
         .oneshot(request(
             "POST",
-            &format!("/api/v1/libraries/{}/organize", src_lib.id),
+            &format!("/api/v1/libraries/{}/organize", fx.src_lib_id),
             Some("management-secret"),
             json!({
                 "renames": [{
                     "from": renames[0]["from"],
                     "to": dest_path,
-                    "to_library_id": dst_lib.id,
+                    "to_library_id": fx.dst_lib_id,
                 }]
             }),
         ))
@@ -361,7 +387,7 @@ async fn p2_8_cross_library_organize_preview_includes_already_ok_files_for_targe
         .unwrap();
     assert_eq!(apply_res.status(), StatusCode::OK);
     assert!(std::path::Path::new(&dest_path).is_file());
-    assert!(!conforming.exists());
-    let moved = store.file_coverage_by_path(&dest_path).unwrap().unwrap();
-    assert_eq!(moved.file.library_id.to_string(), dst_lib.id);
+    assert!(!fx.conforming.exists());
+    let moved = fx.store.file_coverage_by_path(&dest_path).unwrap().unwrap();
+    assert_eq!(moved.file.library_id.to_string(), fx.dst_lib_id);
 }

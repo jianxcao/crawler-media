@@ -130,13 +130,21 @@ pub(super) async fn virtual_folders(
 pub(super) async fn item_counts(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    timing: Option<Extension<crate::provider::QueryTiming>>,
     Path(path): Path<UserPath>,
 ) -> Result<Json<Value>, StatusCode> {
+    let deadline = timing
+        .map(|Extension(t)| t.deadline)
+        .unwrap_or_else(|| crate::provider::QueryTiming::start().deadline);
     require_user_path(
         state.provider.as_ref(),
         user.id,
         path.user_id.as_deref(),
-        None,
+        Some(crate::provider::QueryPrincipal {
+            user_id: user.id,
+            token: user.token.clone(),
+            deadline,
+        }),
     )
     .await?;
     let counts = state
@@ -144,8 +152,8 @@ pub(super) async fn item_counts(
         .query_item_counts(user.id)
         .await
         .map_err(|error| {
-            tracing::error!(%error,user_id=%user.id,"Jellyfin item counts failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            tracing::error!(%error, user_id = %user.id, "Jellyfin item counts failed");
+            error.status_code()
         })?;
     Ok(Json(
         json!({"MovieCount":counts.movies,"SeriesCount":counts.series,"EpisodeCount":counts.episodes,"ItemCount":counts.items}),

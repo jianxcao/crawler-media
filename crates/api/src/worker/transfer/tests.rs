@@ -9,6 +9,8 @@ use super::*;
 mod deletion_pins;
 mod presence;
 mod snapshot;
+#[path = "tests/transfer_mode.rs"]
+mod transfer_mode;
 use deletion_pins::publication_observation;
 
 struct EmptyFetcher;

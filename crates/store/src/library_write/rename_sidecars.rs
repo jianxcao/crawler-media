@@ -66,6 +66,10 @@ pub enum SidecarAction {
     /// Destination already holds identical bytes and this file is the sole owner:
     /// nothing is written; the source is queued for deletion at completion.
     AlreadyIdentical,
+    /// Source and destination resolve to the exact same physical directory entry
+    /// (for example via a parent symlink alias or case-insensitive rename):
+    /// nothing is written or unlinked, and the entry is never queued for deletion.
+    SameEntry,
 }
 
 impl SidecarAction {
@@ -95,6 +99,7 @@ pub(crate) enum TargetComparison {
     /// The source is gone (already moved, or never present after a crash).
     SourceAbsent,
     DestinationAbsent,
+    SameEntry,
     Identical,
     Different,
     /// Either side could not be read: never treated as identical.
@@ -230,6 +235,23 @@ fn compare_target(from: &Path, to: &Path) -> ObservedSidecarTarget {
         }
         Ok(meta) => SidecarSourceIdentity::from_meta(&meta),
     };
+    match super::rename_disk::same_directory_entry(from, to) {
+        Ok(true) => {
+            return ObservedSidecarTarget {
+                comparison: TargetComparison::SameEntry,
+                source_identity,
+                target_identity: None,
+            };
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return ObservedSidecarTarget {
+                comparison: TargetComparison::Unknown(format!("{}: {error}", to.display())),
+                source_identity: None,
+                target_identity: None,
+            };
+        }
+    }
     let (comparison, target_identity) = match std::fs::symlink_metadata(to) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (TargetComparison::DestinationAbsent, None)
@@ -323,6 +345,7 @@ pub(crate) fn decide_for_execution(
         let shared = side.action == SidecarAction::Copy;
         side.action = match &seen.comparison {
             TargetComparison::SourceAbsent | TargetComparison::DestinationAbsent => side.action,
+            TargetComparison::SameEntry => SidecarAction::SameEntry,
             TargetComparison::Identical if shared => SidecarAction::Copy,
             TargetComparison::Identical => SidecarAction::AlreadyIdentical,
             TargetComparison::Different => {
@@ -376,8 +399,8 @@ pub(crate) fn classify_shared_sidecars(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    let siblings = sibling_files(tx, file_id, dir)?;
-    let alternate_same_stem = alternate_video_same_stem(tx, file_id, dir, from_video)?;
+    let siblings = sibling_files(tx, file_id, None, dir)?;
+    let alternate_same_stem = alternate_video_same_stem(tx, file_id, None, dir, from_video)?;
     for side in sidecars.iter_mut() {
         let own_stem = side
             .from
@@ -389,7 +412,7 @@ pub(crate) fn classify_shared_sidecars(
                         || artwork_prefix(name) == Some(stem))
             });
         if ((!own_stem || alternate_same_stem) && side.from.parent() == Some(dir) && siblings)
-            || referenced_elsewhere(tx, file_id, &side.from)?
+            || referenced_elsewhere(tx, file_id, None, &side.from)?
         {
             side.action = SidecarAction::Copy;
             tracing::info!(file_id, sidecar = %side.from.display(), "shared sidecar will be copied, source kept");
@@ -398,9 +421,32 @@ pub(crate) fn classify_shared_sidecars(
     Ok(())
 }
 
+/// Whether a same-entry NFO source in `from_library` is still needed by another
+/// file in `from_library` (e.g., `tvshow.nfo` or an alternate same-stem cut).
+pub(super) fn nfo_retained_in_library(
+    tx: &Connection,
+    from_library: &str,
+    file_id: &str,
+    from_video: &Path,
+    from_nfo: &Path,
+) -> Result<bool, StoreError> {
+    let Some(dir) = from_video.parent() else {
+        return Ok(false);
+    };
+    let own_stem = from_video
+        .file_stem()
+        .is_some_and(|stem| !stem.is_empty() && from_nfo.file_stem() == Some(stem));
+    let siblings = sibling_files(tx, file_id, Some(from_library), dir)?;
+    let same_stem = alternate_video_same_stem(tx, file_id, Some(from_library), dir, from_video)?;
+    Ok((!own_stem && siblings)
+        || (own_stem && same_stem)
+        || referenced_elsewhere(tx, file_id, Some(from_library), from_nfo)?)
+}
+
 fn alternate_video_same_stem(
     tx: &Connection,
     file_id: &str,
+    library_id: Option<&str>,
     dir: &Path,
     from_video: &Path,
 ) -> Result<bool, StoreError> {
@@ -415,9 +461,10 @@ fn alternate_video_same_stem(
     let upper = format!("{base}/{current_stem}/");
     let mut stmt = tx.prepare(
         "SELECT path_key FROM library_files
-         WHERE parent_dir_key = ?2 AND path_key >= ?3 AND path_key < ?4 AND file_id <> ?1",
+         WHERE parent_dir_key = ?2 AND path_key >= ?3 AND path_key < ?4 AND file_id <> ?1
+           AND (?5 IS NULL OR library_id = ?5)",
     )?;
-    let mut rows = stmt.query(params![file_id, dir_key, lower, upper])?;
+    let mut rows = stmt.query(params![file_id, dir_key, lower, upper, library_id])?;
     while let Some(row) = rows.next()? {
         let path: String = row.get(0)?;
         let candidate = Path::new(&path);
@@ -430,24 +477,37 @@ fn alternate_video_same_stem(
     Ok(false)
 }
 
-fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, StoreError> {
+fn sibling_files(
+    tx: &Connection,
+    file_id: &str,
+    library_id: Option<&str>,
+    dir: &Path,
+) -> Result<bool, StoreError> {
     let dir_key = crate::path_key::canonical_recorded_key(tx, &dir.to_string_lossy());
     let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files WHERE parent_dir_key = ?2 AND file_id <> ?1)",
-        params![file_id, dir_key],
+        "SELECT EXISTS(SELECT 1 FROM library_files
+                       WHERE parent_dir_key = ?2 AND file_id <> ?1
+                         AND (?3 IS NULL OR library_id = ?3))",
+        params![file_id, dir_key, library_id],
         |r| r.get(0),
     )?;
     Ok(exists)
 }
 
-fn referenced_elsewhere(tx: &Connection, file_id: &str, path: &Path) -> Result<bool, StoreError> {
+fn referenced_elsewhere(
+    tx: &Connection,
+    file_id: &str,
+    library_id: Option<&str>,
+    path: &Path,
+) -> Result<bool, StoreError> {
     let path = crate::path_key::canonical_recorded_key(tx, &path.to_string_lossy());
     let used: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files WHERE poster_path_key = ?2 AND file_id <> ?1)
-             OR EXISTS(SELECT 1 FROM library_files WHERE backdrop_path_key = ?2 AND file_id <> ?1)
-             OR EXISTS(SELECT 1 FROM library_files WHERE still_path_key = ?2 AND file_id <> ?1)
-             OR EXISTS(SELECT 1 FROM scrape_sidecars WHERE path_key = ?2 AND file_id <> ?1)",
-        params![file_id, path],
+        "SELECT EXISTS(SELECT 1 FROM library_files WHERE poster_path_key = ?2 AND file_id <> ?1 AND (?3 IS NULL OR library_id = ?3))
+             OR EXISTS(SELECT 1 FROM library_files WHERE backdrop_path_key = ?2 AND file_id <> ?1 AND (?3 IS NULL OR library_id = ?3))
+             OR EXISTS(SELECT 1 FROM library_files WHERE still_path_key = ?2 AND file_id <> ?1 AND (?3 IS NULL OR library_id = ?3))
+             OR EXISTS(SELECT 1 FROM scrape_sidecars s WHERE s.path_key = ?2 AND s.file_id <> ?1
+                         AND (?3 IS NULL OR EXISTS(SELECT 1 FROM library_files lf WHERE lf.file_id = s.file_id AND lf.library_id = ?3)))",
+        params![file_id, path, library_id],
         |r| r.get(0),
     )?;
     Ok(used)
@@ -466,9 +526,15 @@ pub(crate) fn apply_sidecar_with_mode(
 ) -> Result<bool, StoreError> {
     if matches!(
         side.action,
-        SidecarAction::KeepSource | SidecarAction::AlreadyIdentical
+        SidecarAction::KeepSource | SidecarAction::AlreadyIdentical | SidecarAction::SameEntry
     ) || !side.from.is_file()
     {
+        return Ok(false);
+    }
+    if super::rename_disk::same_directory_entry(&side.from, &side.to)? {
+        side.action = SidecarAction::SameEntry;
+        side.source_identity = None;
+        side.target_identity = None;
         return Ok(false);
     }
     if let Some(parent) = side.to.parent() {

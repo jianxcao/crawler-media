@@ -64,7 +64,10 @@ export class FavoriteWindow<T> {
     let page = start === 0 ? head : await this.page(start, limit, scope);
     this.check(generation);
     const items = [...page.items];
+    const seenCursors = new Set<string>();
     while (page.next_cursor && items.length < Math.max(count, limit)) {
+      if (page.items.length === 0 || seenCursors.has(page.next_cursor)) break;
+      seenCursors.add(page.next_cursor);
       page = await this.page(start + items.length, limit, scope);
       this.check(generation);
       items.push(...page.items);

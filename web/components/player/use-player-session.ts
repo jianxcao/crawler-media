@@ -72,6 +72,7 @@ export function usePlayerSession({
   inFlightRenewalRef,
   endedByAdminRef,
   onEndedByAdmin,
+  bandwidthRestartedRef,
 }: {
   unitRef: MutableRefObject<PlaybackUnit>;
   unitKey: string;
@@ -102,6 +103,7 @@ export function usePlayerSession({
   inFlightRenewalRef: MutableRefObject<InFlightRenewalState | null>;
   endedByAdminRef: MutableRefObject<boolean>;
   onEndedByAdmin: () => void;
+  bandwidthRestartedRef?: MutableRefObject<boolean>;
 }) {
   const initialUnitStartRef = useRef<ReturnType<typeof createInitialUnitStart> | null>(null);
   if (initialUnitStartRef.current === null) {
@@ -320,6 +322,12 @@ export function usePlayerSession({
             if (obsolete()) return;
             if (priorSession.play_session_id && getPlayerDeviceId() === requestDeviceId) {
               promotePredecessor(predecessorSid, priorSession.play_session_id);
+              if (pageRestoreRef.current) {
+                pageRestoreRef.current = {
+                  ...pageRestoreRef.current,
+                  renewedFromPlaySessionId: null,
+                };
+              }
               predecessorSid = priorSession.play_session_id;
             }
           } catch (priorError) {
@@ -551,9 +559,10 @@ export function usePlayerSession({
       video?.pause();
       wantsPlayRef.current = true;
       pendingFileMsRef.current = positionRef.current;
+      if (bandwidthRestartedRef) bandwidthRestartedRef.current = false;
       dispatch({ type: "request", startMs: positionRef.current });
     },
-    [dispatch, freezeFrame, pendingFileMsRef, positionRef, quality, state.session, video, wantsPlayRef],
+    [bandwidthRestartedRef, dispatch, freezeFrame, pendingFileMsRef, positionRef, quality, state.session, video, wantsPlayRef],
   );
 
   return {

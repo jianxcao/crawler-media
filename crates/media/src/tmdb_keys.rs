@@ -1,5 +1,15 @@
 //! Exact request shapes shared by TMDB producers and local cache consumers.
 
+/// Complete movie details shapes, in preference order: identity/translations,
+/// rich metadata, and the basic details fallback.
+pub fn movie_details_paths(id: &str) -> [String; 3] {
+    [
+        format!("/movie/{id}?append_to_response=translations,alternative_titles"),
+        format!("/movie/{id}?append_to_response=credits,release_dates,translations"),
+        format!("/movie/{id}"),
+    ]
+}
+
 /// Complete TV details shapes, in preference order: identity/translations,
 /// rich metadata, and the basic details fallback. Season/similar endpoints differ.
 pub fn tv_details_paths(id: &str) -> [String; 3] {

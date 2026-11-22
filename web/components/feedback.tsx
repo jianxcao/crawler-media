@@ -89,10 +89,11 @@ const TONE_DOT: Record<ToastTone, string> = {
 // 确认 / 输入弹窗
 // ---------------------------------------------------------------------------
 
-/** 按 options 是否带 checkbox 决定 confirm 的返回类型 */
-type ConfirmReturn<O extends ConfirmOptions> = O extends { checkbox: ConfirmCheckbox }
-  ? ConfirmResult
-  : boolean;
+/** 按 options 是否带 checkbox 决定 confirm 的返回类型（用显式重载保留字面量多余字段检查） */
+export interface ConfirmFn {
+  (options: ConfirmOptions & { checkbox: ConfirmCheckbox }): Promise<ConfirmResult>;
+  (options: ConfirmOptions): Promise<boolean>;
+}
 
 type DialogRequest =
   | { kind: "confirm"; options: ConfirmOptions; resolve: (result: ConfirmResult) => void }
@@ -100,7 +101,7 @@ type DialogRequest =
 
 interface FeedbackApi {
   toast: ToastApi;
-  confirm: <O extends ConfirmOptions>(options: O) => Promise<ConfirmReturn<O>>;
+  confirm: ConfirmFn;
   prompt: (options: PromptOptions) => Promise<string | null>;
 }
 
@@ -178,22 +179,25 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     setDialog(next);
   }, []);
 
-  const api = useMemo<FeedbackApi>(
-    () => ({
+  const api = useMemo<FeedbackApi>(() => {
+    function confirm(options: ConfirmOptions & { checkbox: ConfirmCheckbox }): Promise<ConfirmResult>;
+    function confirm(options: ConfirmOptions): Promise<boolean>;
+    function confirm(options: ConfirmOptions): Promise<boolean | ConfirmResult> {
+      return new Promise<ConfirmResult>((resolve) =>
+        openDialog({ kind: "confirm", options, resolve }),
+      ).then((result) => (options.checkbox ? result : result.ok));
+    }
+    return {
       toast: {
         success: (message, options) => push("success", message, options),
         error: (message, options) => push("error", message, options),
         info: (message, options) => push("info", message, options),
       },
-      confirm: <O extends ConfirmOptions>(options: O) =>
-        new Promise<ConfirmResult>((resolve) =>
-          openDialog({ kind: "confirm", options, resolve }),
-        ).then((result) => (options.checkbox ? result : result.ok) as ConfirmReturn<O>),
+      confirm,
       prompt: (options) =>
         new Promise<string | null>((resolve) => openDialog({ kind: "prompt", options, resolve })),
-    }),
-    [push, openDialog],
-  );
+    };
+  }, [push, openDialog]);
 
   // 关闭弹窗并回传结果
   const settle = (result: ConfirmResult | string | null) => {

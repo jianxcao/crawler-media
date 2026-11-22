@@ -17,6 +17,26 @@ fn completed_result_retries_sql_busy_without_releasing_attempt_fence() {
     assert_completed_result_retries(true);
 }
 
+struct SignalOnDrop(parking_lot::Mutex<Option<std::sync::mpsc::SyncSender<()>>>);
+
+impl SignalOnDrop {
+    fn new(tx: std::sync::mpsc::SyncSender<()>) -> Self {
+        Self(parking_lot::Mutex::new(Some(tx)))
+    }
+
+    fn signal(&self) {
+        if let Some(tx) = self.0.lock().take() {
+            let _ = tx.try_send(());
+        }
+    }
+}
+
+impl Drop for SignalOnDrop {
+    fn drop(&mut self) {
+        self.signal();
+    }
+}
+
 fn assert_completed_result_retries(sql_busy: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = ApiState::new(
@@ -46,34 +66,38 @@ fn assert_completed_result_retries(sql_busy: bool) {
             )
             .unwrap()
     };
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel(1);
     let held_rx = std::sync::Mutex::new(held_rx);
     let jobs = Arc::clone(&state.jobs);
-    let (start_tx, start_rx) = std::sync::mpsc::channel();
     let database = tmp.path().join("data/jobs.db");
-    let holder = std::thread::spawn(move || {
-        start_rx.recv().unwrap();
-        if sql_busy {
-            let database = rusqlite::Connection::open(database).unwrap();
-            database.execute_batch("BEGIN IMMEDIATE").unwrap();
-            held_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            database.execute_batch("ROLLBACK").unwrap();
-        } else {
-            let _queue = jobs.acquire().unwrap();
-            held_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        }
-    });
+    let wait = Duration::from_secs(5);
     std::thread::scope(|scope| {
+        let holder = scope.spawn(move || {
+            let held_guard = SignalOnDrop::new(held_tx);
+            start_rx.recv_timeout(wait).unwrap();
+            if sql_busy {
+                let database = rusqlite::Connection::open(database).unwrap();
+                database.execute_batch("BEGIN IMMEDIATE").unwrap();
+                held_guard.signal();
+                release_rx.recv_timeout(wait).unwrap();
+                database.execute_batch("ROLLBACK").unwrap();
+            } else {
+                let _queue = jobs.acquire().unwrap();
+                held_guard.signal();
+                release_rx.recv_timeout(wait).unwrap();
+            }
+        });
+        let release_guard = SignalOnDrop::new(release_tx);
         let run = scope.spawn(|| {
+            let start_guard = SignalOnDrop::new(start_tx);
             run_pending_jobs_with_clock(
                 &state,
                 1,
                 || {
-                    start_tx.send(()).unwrap();
-                    held_rx.lock().unwrap().recv().unwrap();
+                    start_guard.signal();
+                    held_rx.lock().unwrap().recv_timeout(wait).unwrap();
                     2
                 },
                 TickSource::DevHttp,
@@ -84,7 +108,7 @@ fn assert_completed_result_retries(sql_busy: bool) {
             state.active_job_attempts.lock().contains_key(&job.id),
             "executed result must retain its recovery fence while Jobs is busy"
         );
-        release_tx.send(()).unwrap();
+        release_guard.signal();
         holder.join().unwrap();
         let finished = run.join().unwrap().unwrap();
         assert_eq!(finished.finished.len(), 1);

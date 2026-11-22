@@ -1,7 +1,100 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: Mutex<RendezvousState>,
+    changed: Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
 
 use jobs::{JobIdentity, JobKind, Queue};
 use media::response_cache::{self, CacheSource};
@@ -98,13 +191,15 @@ fn sqlite_first_open_child() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let barrier = Arc::new(Barrier::new(WORKERS));
+    let barrier = BoundedRendezvous::new(WORKERS);
     std::thread::scope(|scope| {
         for worker in 0..WORKERS {
             let barrier = Arc::clone(&barrier);
             let path = dir.join(worker.to_string());
             scope.spawn(move || {
+                let mut guard = barrier.guard();
                 barrier.wait();
+                guard.disarm();
                 match worker % 4 {
                     0 => check_store(&path, worker),
                     1 => check_queue(&path, worker),

@@ -2,6 +2,11 @@
 
 use super::*;
 
+fn normalize_optional(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteInput>) -> Response {
     if state.indexer.profile(&body.profile_id).is_none() {
         return err(
@@ -28,6 +33,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
     let downloader_id = body
         .downloader_id
         .as_deref()
+        .map(str::trim)
         .filter(|id| !id.is_empty())
         .and_then(|id| domain::DownloaderId::from_str(id).ok());
     let maintenance_via = match body.maintenance_via.as_deref() {
@@ -43,17 +49,17 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         },
         None => domain::MaintenanceVia::Http,
     };
-    if maintenance_via == domain::MaintenanceVia::Browser
-        && body.proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
-    {
+    let proxy = body.proxy.and_then(normalize_optional);
+    if maintenance_via == domain::MaintenanceVia::Browser && proxy.is_some() {
         return err(
             StatusCode::BAD_REQUEST,
             "site.browser_proxy_unsupported",
             "浏览器维护方式不支持配置代理",
         );
     }
-    if let Some(cdp_url) = body.cdp_url.as_deref().filter(|u| !u.trim().is_empty())
-        && let Err(e) = indexer::BrowserConfig::validate_endpoint(cdp_url.trim())
+    let cdp_url = body.cdp_url.and_then(normalize_optional);
+    if let Some(ref endpoint) = cdp_url
+        && let Err(e) = indexer::BrowserConfig::validate_endpoint(endpoint)
     {
         return err(
             StatusCode::BAD_REQUEST,
@@ -66,12 +72,12 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         name: body.name,
         url,
         profile_id: body.profile_id,
-        cookie: body.cookie,
-        api_key: body.api_key,
-        rss_url: body.rss_url,
-        proxy: body.proxy,
+        cookie: body.cookie.and_then(normalize_optional),
+        api_key: body.api_key.and_then(normalize_optional),
+        rss_url: body.rss_url.and_then(normalize_optional),
+        proxy,
         rate_limit_per_minute: body.rate_limit_per_minute,
-        cdp_url: body.cdp_url,
+        cdp_url,
         downloader_id,
         enabled: body.enabled,
         maintenance_via,
@@ -120,6 +126,7 @@ async fn put_site_inner(
     let downloader_id = match body
         .downloader_id
         .as_deref()
+        .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(domain::DownloaderId::from_str)
         .transpose()
@@ -177,8 +184,8 @@ fn replacement_site(
         ));
     }
     let cdp_url = replacement_credential(body.cdp_url, current.cdp_url);
-    if let Some(endpoint) = cdp_url.as_deref().filter(|u| !u.trim().is_empty())
-        && let Err(_) = indexer::BrowserConfig::validate_endpoint(endpoint.trim())
+    if let Some(ref endpoint) = cdp_url
+        && indexer::BrowserConfig::validate_endpoint(endpoint).is_err()
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -205,7 +212,7 @@ fn replacement_site(
 
 fn replacement_credential(input: Option<String>, current: Option<String>) -> Option<String> {
     match input {
-        Some(value) => (!value.is_empty()).then_some(value),
+        Some(value) => normalize_optional(value),
         None => current,
     }
 }
@@ -250,24 +257,24 @@ async fn patch_site_inner(
             site.url = url;
         }
         if let Some(cookie) = body.cookie {
-            site.cookie = (!cookie.is_empty()).then_some(cookie);
+            site.cookie = normalize_optional(cookie);
         }
         if let Some(api_key) = body.api_key {
-            site.api_key = (!api_key.is_empty()).then_some(api_key);
+            site.api_key = normalize_optional(api_key);
         }
         if let Some(rss_url) = body.rss_url {
-            site.rss_url = (!rss_url.is_empty()).then_some(rss_url);
+            site.rss_url = normalize_optional(rss_url);
         }
         if let Some(proxy) = body.proxy {
-            site.proxy = (!proxy.is_empty()).then_some(proxy);
+            site.proxy = normalize_optional(proxy);
         }
         if let Some(rate) = body.rate_limit_per_minute {
             site.rate_limit_per_minute = (rate > 0).then_some(rate);
         }
         if let Some(cdp_url) = body.cdp_url {
-            let trimmed = cdp_url.trim();
-            if !trimmed.is_empty()
-                && let Err(_) = indexer::BrowserConfig::validate_endpoint(trimmed)
+            let normalized = normalize_optional(cdp_url);
+            if let Some(ref endpoint) = normalized
+                && indexer::BrowserConfig::validate_endpoint(endpoint).is_err()
             {
                 return err(
                     StatusCode::BAD_REQUEST,
@@ -275,12 +282,11 @@ async fn patch_site_inner(
                     "无效的 CDP discovery 端点",
                 );
             }
-            site.cdp_url = (!cdp_url.is_empty()).then_some(cdp_url);
+            site.cdp_url = normalized;
         }
         if let Some(downloader_id) = body.downloader_id {
-            site.downloader_id = (!downloader_id.is_empty())
-                .then(|| domain::DownloaderId::from_str(&downloader_id).ok())
-                .flatten();
+            site.downloader_id = normalize_optional(downloader_id)
+                .and_then(|trimmed| domain::DownloaderId::from_str(&trimmed).ok());
         }
         if let Some(mv_str) = body.maintenance_via {
             match mv_str.parse::<domain::MaintenanceVia>() {

@@ -1,5 +1,14 @@
-import { request, resolveRequestUrl, getAuthToken } from "@/lib/http";
+import { request, resolveRequestUrl, getAuthToken, redirectToLoginOn401 } from "@/lib/http";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
+
+class FatalLogStreamError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`system/logs/stream ${status}`);
+    this.name = "FatalLogStreamError";
+    this.status = status;
+  }
+}
 
 export interface SystemLogEntry {
   id: number;
@@ -51,10 +60,12 @@ export function subscribeSystemLogs(options: {
   signal?: AbortSignal;
 }): () => void {
   const ctrl = new AbortController();
-  const signal = options.signal || ctrl.signal;
+  const signal = options.signal ? AbortSignal.any([options.signal, ctrl.signal]) : ctrl.signal;
   const token = getAuthToken();
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+  };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -63,6 +74,17 @@ export function subscribeSystemLogs(options: {
     method: "GET",
     headers,
     signal,
+    async onopen(response) {
+      if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+        return;
+      }
+      if (response.status === 401 || response.status === 403) {
+        redirectToLoginOn401(response.status);
+        ctrl.abort();
+        throw new FatalLogStreamError(response.status);
+      }
+      throw new Error(`system/logs/stream ${response.status}`);
+    },
     onmessage(msg) {
       if (msg.event === "log" && msg.data) {
         try {
@@ -75,8 +97,11 @@ export function subscribeSystemLogs(options: {
     },
     onerror(err) {
       options.onError?.(err);
+      if (signal.aborted || err instanceof FatalLogStreamError) {
+        throw err;
+      }
     },
-  });
+  }).catch(() => undefined);
 
   return () => {
     ctrl.abort();

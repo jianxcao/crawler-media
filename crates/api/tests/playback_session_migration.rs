@@ -21,6 +21,14 @@ fn current_sessions_use_user_scoped_device_key() {
     {
         let store = Store::open(dir.path()).unwrap();
         store
+            .insert_user(&domain::User {
+                id: user,
+                login: "session-migration".into(),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        store
             .insert_media(&Media {
                 id: media,
                 kind: MediaKind::Movie,

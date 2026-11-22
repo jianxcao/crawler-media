@@ -18,29 +18,40 @@ pub(crate) async fn removal_preview(
                 .iter()
                 .map(|coverage| coverage.file.size_bytes.unwrap_or(0))
                 .sum();
-            let titles: Vec<_> = store
-                .load_pending(subscribe.id)
-                .map_err(store_error)?
-                .into_iter()
-                .map(|(_, pending)| pending.torrent.title)
-                .collect();
-            Ok((media, files.len(), bytes, titles))
+            let titles: Vec<_> =
+                crate::http::subscriptions::deletion::persisted_pending(store, subscribe.id)
+                    .map_err(store_error)?
+                    .into_iter()
+                    .map(|(_, pending)| pending.torrent.title)
+                    .collect();
+            Ok((media, files.len(), bytes, titles, subscribe.downloader_id))
         },
     )
     .await;
-    let (media, file_count, bytes, mut titles) = match captured {
+    let (media, file_count, bytes, mut titles, downloader_id) = match captured {
         Ok(Ok(captured)) => captured,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
     };
     let inferred = titles.is_empty();
     if inferred {
-        let downloader = state.downloader.clone();
+        let worker_state = state.clone();
         titles = match state
             .http_work
-            .run(
-                crate::http::library::BROWSE_DEADLINE,
-                move || match downloader.task_snapshots() {
+            .run(crate::http::library::BROWSE_DEADLINE, move || {
+                let downloader = match crate::delivery::client_for_id(&worker_state, downloader_id)
+                {
+                    Ok(client) => client,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            ?downloader_id,
+                            "Subscribe preview Downloader unavailable"
+                        );
+                        return Vec::new();
+                    }
+                };
+                match downloader.task_snapshots() {
                     Ok(snapshots) => snapshots
                         .into_iter()
                         .filter(|snapshot| {
@@ -56,8 +67,8 @@ pub(crate) async fn removal_preview(
                         tracing::error!(%error, "Subscribe preview Downloader snapshot failed");
                         Vec::new()
                     }
-                },
-            )
+                }
+            })
             .await
         {
             Ok(titles) => titles,

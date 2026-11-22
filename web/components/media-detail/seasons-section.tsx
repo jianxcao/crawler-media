@@ -4,8 +4,11 @@ import { useEffect, useState } from "react";
 
 import { ArtworkImage } from "@/components/artwork-image";
 import { BrandLoader } from "@/components/brand-loader";
-import type { MediaEpisodeDetail, MediaSeasonOverview } from "@/lib/api/discover";
-import { request } from "@/lib/http";
+import {
+  fetchTvSeasonEpisodes,
+  type MediaEpisodeDetail,
+  type MediaSeasonOverview,
+} from "@/lib/api/discover";
 import { imageUrl } from "@/lib/image-proxy";
 
 /** 在线剧集详情的季与分集预览区。 */
@@ -23,24 +26,20 @@ export function SeasonsSection({
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    let alive = true;
+    const controller = new AbortController();
     setLoading(true);
-    request<{ ok: boolean; data: { episodes: MediaEpisodeDetail[] } }>(
-      `/media/tv/${mediaId}/season/${activeSeason}`,
-    )
-      .then((res) => {
-        if (alive && res?.ok && Array.isArray(res?.data?.episodes)) {
-          setEpisodes(res.data.episodes);
-        }
+    fetchTvSeasonEpisodes(mediaId, activeSeason, { signal: controller.signal })
+      .then((loaded) => {
+        if (!controller.signal.aborted) setEpisodes(loaded);
       })
       .catch(() => {
-        if (alive) setEpisodes([]);
+        if (!controller.signal.aborted) setEpisodes([]);
       })
       .finally(() => {
-        if (alive) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
     return () => {
-      alive = false;
+      controller.abort();
     };
   }, [mediaId, activeSeason]);
 

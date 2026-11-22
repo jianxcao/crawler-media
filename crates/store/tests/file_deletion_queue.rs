@@ -164,10 +164,20 @@ fn library_removal_cancels_deletion_before_retiring_root_alias() {
         .unwrap();
     let entry = store.list_due_file_deletions(0).unwrap().pop().unwrap();
     let operation = store.begin_library_removal(&library.id).unwrap();
-    while !store
-        .capture_library_removal_batch(&operation.operation_id)
-        .unwrap()
-    {}
+    let mut captured = false;
+    for _ in 0..1_000 {
+        if store
+            .capture_library_removal_batch(&operation.operation_id)
+            .unwrap()
+        {
+            captured = true;
+            break;
+        }
+    }
+    assert!(
+        captured,
+        "capture_library_removal_batch did not finish within 1,000 steps"
+    );
     store
         .set_removal_state(&operation.operation_id, "cleaning", None)
         .unwrap();

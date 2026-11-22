@@ -51,9 +51,12 @@ impl FingerprintEngine for Invalidate {
                 .unwrap();
             }
             let mut released = self.released.lock();
-            while !*released {
-                self.resume.wait(&mut released);
-            }
+            self.resume.wait_while_for(
+                &mut released,
+                |done| !*done,
+                std::time::Duration::from_secs(10),
+            );
+            assert!(*released, "marker guard resume timed out");
         }
         KindEngine::default().find_common_segment(a, b, min, max)
     }

@@ -126,34 +126,59 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         if !source_ready(manager, &unit) {
             return;
         }
-        match outcome {
-            stages::FingerprintRunOutcome::Retry => {}
-            stages::FingerprintRunOutcome::Uncertain { reason } => {
-                manager.finish_with_status(
-                    &unit,
-                    "succeeded",
-                    Some("verification_uncertain"),
-                    Some(&reason),
-                );
-            }
-            stages::FingerprintRunOutcome::Complete => {
-                if let Err(error) = crate::probe_manager::analysis::handoff(manager, &unit) {
-                    tracing::error!(%error,job_id=?unit.job_id,"持久分析交接失败，保留采集单元");
-                }
-            }
-            stages::FingerprintRunOutcome::Partial { error_kind, error } => {
-                manager.finish_with_status(&unit, "partial", Some(&error_kind), Some(&error));
-            }
-            stages::FingerprintRunOutcome::Failed { error_kind, error } => {
-                manager.finish_with_status(&unit, "failed", Some(&error_kind), Some(&error));
-            }
-            stages::FingerprintRunOutcome::Cancelled { reason } => {
-                manager.cancel_unit(&unit, &reason);
-            }
-        }
+        finish_fingerprint_outcome(manager, &unit, outcome);
     })
     .await;
     owns_running
+}
+
+fn finish_fingerprint_outcome(
+    manager: &ProbeManager,
+    unit: &crate::probe_manager::ProbeUnit,
+    outcome: stages::FingerprintRunOutcome,
+) {
+    match outcome {
+        stages::FingerprintRunOutcome::Retry => {}
+        stages::FingerprintRunOutcome::Uncertain { reason } => {
+            manager.finish_with_status(
+                unit,
+                "succeeded",
+                Some("verification_uncertain"),
+                Some(&reason),
+            );
+        }
+        stages::FingerprintRunOutcome::Complete => {
+            if let Err(error) = crate::probe_manager::analysis::handoff(manager, unit) {
+                if crate::probe_manager::store_access::is_busy(&error) {
+                    tracing::warn!(%error, job_id = ?unit.job_id, "持久分析交接繁忙，保留采集单元等待重试");
+                } else if matches!(error, store::StoreError::Missing(_)) {
+                    tracing::warn!(%error, job_id = ?unit.job_id, "持久分析交接源已缺失，取消单元");
+                    manager.cancel_unit(unit, &error.to_string());
+                } else {
+                    let error_kind = match error {
+                        store::StoreError::Invalid(_) => "analysis_handoff_invalid",
+                        _ => "analysis_handoff_rejected",
+                    };
+                    tracing::error!(%error, job_id = ?unit.job_id, error_kind, "持久分析交接永久失败，终止单元");
+                    manager.finish_with_status(
+                        unit,
+                        "failed",
+                        Some(error_kind),
+                        Some(&error.to_string()),
+                    );
+                }
+            }
+        }
+        stages::FingerprintRunOutcome::Partial { error_kind, error } => {
+            manager.finish_with_status(unit, "partial", Some(&error_kind), Some(&error));
+        }
+        stages::FingerprintRunOutcome::Failed { error_kind, error } => {
+            manager.finish_with_status(unit, "failed", Some(&error_kind), Some(&error));
+        }
+        stages::FingerprintRunOutcome::Cancelled { reason } => {
+            manager.cancel_unit(unit, &reason);
+        }
+    }
 }
 
 #[cfg(test)]

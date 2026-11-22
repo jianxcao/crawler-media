@@ -220,7 +220,9 @@ impl<H: CatalogGet> Tmdb<H> {
         tmdb_id: &str,
     ) -> Result<Option<String>, TmdbError> {
         let path = match kind {
-            MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
+            MediaKind::Movie | MediaKind::Video => {
+                crate::tmdb_keys::movie_details_paths(tmdb_id)[2].clone()
+            }
             MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
         };
         self.fetch(&path, |body| {
@@ -235,25 +237,45 @@ impl<H: CatalogGet> Tmdb<H> {
         kind: MediaKind,
         tmdb_id: &str,
     ) -> Result<Option<String>, TmdbError> {
-        let path = match kind {
-            MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
-            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[2].clone(),
+        let paths = match kind {
+            MediaKind::Movie | MediaKind::Video => crate::tmdb_keys::movie_details_paths(tmdb_id),
+            MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id),
         };
-        self.cached_fetch(&path, &self.language, |body| {
-            crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
-            parse::details_poster_path(body)
-        })
-        .map(Option::flatten)
+        let mut saw_valid = false;
+        let mut last_error: Option<TmdbError> = None;
+        for path in &paths {
+            match self.cached_fetch(path, &self.language, |body| {
+                crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
+                parse::details_poster_path(body)
+            }) {
+                Ok(Some(Some(poster))) => return Ok(Some(poster)),
+                Ok(Some(None)) => saw_valid = true,
+                Ok(None) => {}
+                Err(
+                    err @ (TmdbError::Sqlite(_)
+                    | TmdbError::CacheDb(_)
+                    | TmdbError::CacheBackend(_)),
+                ) => return Err(err),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        if saw_valid {
+            Ok(None)
+        } else if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn movie_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
-        let path = format!("/movie/{tmdb_id}?append_to_response=translations,alternative_titles");
-        match self.cached_details(MediaKind::Movie, &path) {
+        let paths = crate::tmdb_keys::movie_details_paths(tmdb_id);
+        match self.cached_details(MediaKind::Movie, &paths[0]) {
             Ok(media) => Ok(media),
             Err(err @ (TmdbError::OriginTimeout | TmdbError::Deadline | TmdbError::Cancelled)) => {
                 Err(err)
             }
-            Err(_) => self.cached_details(MediaKind::Movie, &format!("/movie/{tmdb_id}")),
+            Err(_) => self.cached_details(MediaKind::Movie, &paths[2]),
         }
     }
 
@@ -372,7 +394,7 @@ impl<H: CatalogGet> Tmdb<H> {
             .unwrap_or(self.language.as_str());
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => {
-                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+                crate::tmdb_keys::movie_details_paths(tmdb_id)[1].clone()
             }
             // `credits` on TV details only returns the principal cast. The
             // aggregate endpoint includes cast credited across the series. Ratings and
@@ -411,7 +433,7 @@ impl<H: CatalogGet> Tmdb<H> {
             .unwrap_or(&self.language);
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => {
-                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+                crate::tmdb_keys::movie_details_paths(tmdb_id)[1].clone()
             }
             MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };
@@ -438,7 +460,7 @@ impl<H: CatalogGet> Tmdb<H> {
             .unwrap_or(self.language.as_str());
         let path = match kind {
             MediaKind::Movie | MediaKind::Video => {
-                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+                crate::tmdb_keys::movie_details_paths(tmdb_id)[1].clone()
             }
             MediaKind::Tv => crate::tmdb_keys::tv_details_paths(tmdb_id)[1].clone(),
         };

@@ -117,3 +117,38 @@ async fn an_in_flight_lease_is_cancelled_and_drained_before_the_first_batch() {
         "the drained Library is idle again"
     );
 }
+
+#[tokio::test]
+async fn driver_releases_claims_when_fs_work_closes() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = stage(&temp);
+    let seeded = seed_library(&state, &temp);
+    let target = new_root(&temp);
+
+    let lease = state.acquire_library_work(&seeded.library_id).unwrap();
+    let started = api::storage_operations::begin_library_reconfiguration(
+        &state,
+        &seeded.library_id,
+        api::storage_operations::ReconfigurationRequest {
+            root_paths: Some(vec![target.to_string_lossy().into_owned()]),
+            display_locale: None,
+        },
+    )
+    .unwrap();
+    let operation_id = started["operation_id"].as_str().unwrap().to_string();
+    drop(lease);
+
+    let app = router(state.clone());
+    let done = poll_operation(&app, &seeded.library_id, &operation_id).await;
+    assert_eq!(done["data"]["state"], "succeeded");
+    state.fs_work.close();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.library_work().has_active_work() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("driver must exit and release library_work even if fs_work is closed");
+    assert!(!state.library_work().has_active_work());
+}

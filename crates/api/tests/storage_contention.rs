@@ -331,9 +331,13 @@ async fn completed_scanner_does_not_contribute_concurrent_heartbeat_samples() {
         errors: vec![],
         samples: vec![],
     });
-    while !scanner.is_finished() {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !scanner.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed scanner thread must finish");
     let active = std::sync::atomic::AtomicBool::new(false);
     let (latencies, _, snapshots, _) = hammer_while_scanning(
         &fixture.app,

@@ -231,3 +231,44 @@ async fn run_upgrade_applies_new_ruleset_and_activates_wash_cut() {
     assert_eq!(updated["data"]["wash_cut"], true);
     assert_eq!(updated["data"]["wash_cut_filter_id"], rule_id);
 }
+
+#[tokio::test]
+async fn run_upgrade_rejects_invalid_or_unknown_filter_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = authed_app(&tmp);
+    let created = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                json!({
+                    "media": { "kind": "tv", "title": "The Long Watch", "tmdb_id": "100" },
+                    "coverage": { "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 1 },
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = created["data"]["id"].as_str().unwrap();
+
+    for bad_filter in ["not-a-uuid", "", &uuid::Uuid::new_v4().to_string()] {
+        let resp = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/subscriptions/{id}/upgrade-runs"),
+                Some("management-secret"),
+                json!({ "filter_id": bad_filter }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "filter_id={bad_filter}"
+        );
+        assert_eq!(json_error(resp).await["code"], "subscription.invalid");
+    }
+}

@@ -338,6 +338,100 @@ mod tests {
 mod attribution_tests {
     use super::*;
 
+    struct RendezvousState {
+        arrived: usize,
+        aborted: bool,
+    }
+
+    struct BoundedRendezvous {
+        parties: usize,
+        state: std::sync::Mutex<RendezvousState>,
+        changed: std::sync::Condvar,
+    }
+
+    struct RendezvousGuard {
+        rendezvous: std::sync::Arc<BoundedRendezvous>,
+        armed: bool,
+    }
+
+    impl RendezvousGuard {
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for RendezvousGuard {
+        fn drop(&mut self) {
+            if self.armed {
+                let mut guard = self
+                    .rendezvous
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.aborted = true;
+                self.rendezvous.changed.notify_all();
+            }
+        }
+    }
+
+    impl BoundedRendezvous {
+        fn new(parties: usize) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                parties,
+                state: std::sync::Mutex::new(RendezvousState {
+                    arrived: 0,
+                    aborted: false,
+                }),
+                changed: std::sync::Condvar::new(),
+            })
+        }
+
+        fn guard(self: &std::sync::Arc<Self>) -> RendezvousGuard {
+            RendezvousGuard {
+                rendezvous: self.clone(),
+                armed: true,
+            }
+        }
+
+        fn wait(&self) {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.aborted {
+                drop(guard);
+                panic!("rendezvous aborted");
+            }
+            guard.arrived += 1;
+            if guard.arrived >= self.parties {
+                self.changed.notify_all();
+                return;
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while guard.arrived < self.parties && !guard.aborted {
+                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+                else {
+                    guard.aborted = true;
+                    self.changed.notify_all();
+                    drop(guard);
+                    panic!("rendezvous timed out");
+                };
+                let (next, timeout) = self
+                    .changed
+                    .wait_timeout(guard, remaining)
+                    .unwrap_or_else(|e| e.into_inner());
+                guard = next;
+                if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                    guard.aborted = true;
+                    self.changed.notify_all();
+                    drop(guard);
+                    panic!("rendezvous timed out");
+                }
+            }
+            if guard.aborted {
+                drop(guard);
+                panic!("rendezvous aborted");
+            }
+        }
+    }
+
     #[test]
     fn distinct_scopes_on_interleaved_connections_attribute_only_their_sql() {
         let first = Connection::open_in_memory().unwrap();
@@ -355,14 +449,18 @@ mod attribution_tests {
     fn concurrent_connections_match_their_isolated_work_after_error_and_unwind() {
         fn sample(
             rows: usize,
-            barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+            barrier: Option<std::sync::Arc<BoundedRendezvous>>,
         ) -> QueryWorkStats {
             let conn = Connection::open_in_memory().unwrap();
             let mut stats = QueryWorkStats::default();
             let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut guard = barrier.as_ref().map(|b| b.guard());
                 let _capture = QueryWorkCapture::new(&conn, &mut stats);
                 if let Some(barrier) = barrier {
                     barrier.wait();
+                }
+                if let Some(ref mut guard) = guard {
+                    guard.disarm();
                 }
                 conn.query_row("WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM n WHERE v < ?1) SELECT sum(v) FROM n", [rows], |_| Ok(())).unwrap();
                 assert!(conn.execute_batch("SELECT missing FROM missing").is_err());
@@ -383,7 +481,7 @@ mod attribution_tests {
         }
         let baseline_small = sample(10, None);
         let baseline_large = sample(10000, None);
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier = BoundedRendezvous::new(2);
         let peer = barrier.clone();
         let small = std::thread::spawn(move || sample(10, Some(peer)));
         let large = std::thread::spawn(move || sample(10000, Some(barrier)));

@@ -154,6 +154,7 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "cursor");
     let (hidden, hidden_file) =
@@ -210,6 +211,7 @@ fn hidden_count_counts_rows_not_distinct_media() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "hidden");
     let (hidden, hidden_file) =
@@ -236,6 +238,7 @@ fn empty_visible_scope_returns_empty_page() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "empty");
     let (second, second_file) =
         support::seed_published_file(&store, &tmp.path().join("library-other"), "empty-other");
@@ -256,6 +259,7 @@ fn none_visible_scope_is_unrestricted() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (first, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted");
     let (second, second_file) = support::seed_published_file(
@@ -280,6 +284,7 @@ fn since_filters_both_page_and_hidden_count() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "since");
     let (hidden, hidden_file) =
@@ -320,6 +325,7 @@ fn limit_bounds_and_ambiguous_cursor_are_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "limit");
     log_fixture(&store, user, visible, file, "v", 1_700_000_000, 10);
@@ -347,6 +353,7 @@ fn scope_does_not_leak_between_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (first, file) = support::seed_published_file(&store, &tmp.path().join("library"), "leak");
     let (second, second_file) =
         support::seed_published_file(&store, &tmp.path().join("library-other"), "leak-other");
@@ -392,6 +399,8 @@ fn user_scope_filters_page_and_hidden() {
     let store = Store::open(tmp.path()).unwrap();
     let alice = UserId::new();
     let bob = UserId::new();
+    support::seed_member(&store, alice);
+    support::seed_member(&store, bob);
     let (visible, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "users");
     let (hidden, hidden_file) =

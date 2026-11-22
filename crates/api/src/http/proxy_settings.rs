@@ -157,6 +157,14 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
             .flatten()
             .and_then(|v| crate::config::parse_bool(&v))
             .unwrap_or(true);
+        let allowed_domains = store
+            .get_setting(settings_keys::PROXY_ALLOWED_DOMAINS)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let env_override = crate::config::proxy_env(&crate::config::ProcessEnv)
+            .url
+            .is_some();
 
         let active_masked = crate::http_agent::current_proxy().map(|p| mask_proxy_url(&p));
 
@@ -165,6 +173,8 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
             "username": username,
             "has_password": has_password,
             "douban_bypass": douban_bypass,
+            "allowed_domains": allowed_domains,
+            "env_override": env_override,
             "active_proxy": active_masked,
         }))
         .into_response()
@@ -174,10 +184,7 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
 }
 
 /// POST /settings/proxy/test — Probe connection through specified proxy.
-pub(crate) async fn test_proxy(
-    State(_state): State<ApiState>,
-    Json(body): Json<Value>,
-) -> Response {
+pub(crate) async fn test_proxy(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
     let proxy_url = body["proxy_url"]
         .as_str()
         .map(str::trim)
@@ -201,21 +208,22 @@ pub(crate) async fn test_proxy(
     let proxy_for_block = formatted_proxy;
     let target_for_block = target.to_string();
 
-    let probe_res = tokio::task::spawn_blocking(move || {
-        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
-            extract_http_status(
-                agent
-                    .get(&target_for_block)
-                    .header("User-Agent", "crawler-media-probe/1.0")
-                    .call(),
-            )
+    let probe_res = state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
+                extract_http_status(
+                    agent
+                        .get(&target_for_block)
+                        .header("User-Agent", "crawler-media-probe/1.0")
+                        .call(),
+                )
+            })
         })
-    })
-    .await;
+        .await;
 
     let elapsed_ms = started.elapsed().as_millis() as i64;
-    let (probe_ok, error) =
-        evaluate_probe_result(probe_res.map_err(|join_err| format!("探测异常: {join_err}")));
+    let (probe_ok, error) = evaluate_probe_result(probe_res.map_err(|e| format!("调度异常: {e}")));
 
     ok(json!({
         "ok": probe_ok,

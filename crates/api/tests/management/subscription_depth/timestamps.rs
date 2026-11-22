@@ -373,3 +373,142 @@ async fn removal_preview_marks_matching_downloader_counts_as_inferred() {
         })
     );
 }
+
+#[tokio::test]
+async fn removal_preview_counts_imported_pending() {
+    let tmp = tempfile::tempdir().unwrap();
+    let empty_default = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        empty_default,
+    ));
+
+    let sub_a = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                json!({
+                    "media": { "kind": "movie", "title": "The Matrix" },
+                    "coverage": { "kind": "movie" },
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id_a = sub_a["data"]["id"].as_str().unwrap();
+    seed_pending_torrent(
+        &tmp,
+        id_a,
+        "The.Matrix.1999.2160p",
+        "https://pt.example/imported",
+    );
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store
+        .mark_pending_imported(
+            id_a.parse().unwrap(),
+            &["https://pt.example/imported".into()],
+        )
+        .unwrap();
+    let preview_a = json_body(
+        app.oneshot(request(
+            "GET",
+            &format!("/api/v1/subscriptions/{id_a}/removal-preview"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(preview_a["data"]["torrent_count"], 1);
+    assert_eq!(preview_a["data"]["torrent_count_inferred"], false);
+    assert_eq!(
+        preview_a["data"]["torrent_titles"],
+        json!(["The.Matrix.1999.2160p"])
+    );
+}
+
+#[tokio::test]
+async fn removal_preview_uses_subscribe_downloader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let empty_default = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        empty_default,
+    ));
+    let tr_server = super::super::lifecycle::FakeServer::start(|request, stream| {
+        let body = if request.raw.contains("torrent-get") {
+            r#"{"result":"success","arguments":{"torrents":[{"id":1,"name":"The.Matrix.1999.1080p","hashString":"0123456789abcdef0123456789abcdef01234567","sizeWhenDone":100,"labels":["crawler-media"]}]}}"#
+        } else {
+            r#"{"result":"success","arguments":{"rpc-version":16}}"#
+        };
+        super::super::lifecycle::respond(
+            stream,
+            "200 OK",
+            "X-Transmission-Session-Id: test\r\n",
+            body.as_bytes(),
+        );
+    });
+    let tr_dl = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/downloaders",
+                Some("management-secret"),
+                json!({
+                    "name": "tr-secondary",
+                    "kind": "transmission",
+                    "url": format!("{}/transmission/rpc", tr_server.url()),
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let dl_id = tr_dl["id"].as_str().unwrap();
+    let sub_b = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                json!({
+                    "media": { "kind": "movie", "title": "The Matrix" },
+                    "coverage": { "kind": "movie" },
+                    "downloader_id": dl_id,
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id_b = sub_b["data"]["id"].as_str().unwrap();
+    let preview_b = json_body(
+        app.oneshot(request(
+            "GET",
+            &format!("/api/v1/subscriptions/{id_b}/removal-preview"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(preview_b["data"]["torrent_count"], 1);
+    assert_eq!(preview_b["data"]["torrent_count_inferred"], true);
+    assert_eq!(
+        preview_b["data"]["torrent_titles"],
+        json!(["The.Matrix.1999.1080p"])
+    );
+}

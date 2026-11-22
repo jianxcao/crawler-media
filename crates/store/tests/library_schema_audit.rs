@@ -317,3 +317,73 @@ fn facet_dimension_cases() -> Vec<(&'static str, BrowseFilter)> {
         ),
     ]
 }
+
+#[test]
+fn pending_file_renames_due_and_probe_queries_avoid_scans_and_sorts() {
+    let (_tmp, conn) = open_library_db();
+
+    let due_plan = plan_text(
+        &conn,
+        "SELECT rename_id FROM pending_file_renames
+         WHERE phase <> 'failed' AND next_retry_at <= ?1
+         ORDER BY next_retry_at, created_at_ms, rename_id LIMIT ?2",
+    );
+    assert!(
+        due_plan.contains("pending_file_renames_due"),
+        "due renames query must use partial index pending_file_renames_due: {due_plan}"
+    );
+    assert!(
+        !due_plan.contains("TEMP B-TREE") && !due_plan.contains("SCAN "),
+        "due renames query must not scan or sort: {due_plan}"
+    );
+
+    let sched_plan = plan_text(
+        &conn,
+        "SELECT next_retry_at, rename_id FROM pending_file_renames
+         WHERE phase <> 'failed'
+         ORDER BY next_retry_at, created_at_ms, rename_id",
+    );
+    assert!(
+        sched_plan.contains("pending_file_renames_due"),
+        "recovery schedule must use pending_file_renames_due: {sched_plan}"
+    );
+    assert!(
+        !sched_plan.contains("TEMP B-TREE"),
+        "recovery schedule must not sort: {sched_plan}"
+    );
+
+    let missing_plan = plan_text(
+        &conn,
+        "SELECT u.job_id, u.file_id
+         FROM probe_job_units u
+         JOIN probe_jobs j ON j.id = u.job_id
+         JOIN library_files f ON f.file_id = u.file_id
+         WHERE u.status IN ('queued', 'running')
+           AND j.status IN ('queued', 'running')
+           AND f.missing_at IS NOT NULL
+         ORDER BY u.file_id LIMIT ?1",
+    );
+    assert!(
+        missing_plan.contains("SCAN u USING INDEX probe_unit_active"),
+        "missing-source units must drive from partial index probe_unit_active: {missing_plan}"
+    );
+    assert!(
+        !missing_plan.contains("TEMP B-TREE"),
+        "missing-source units must avoid temp sorts: {missing_plan}"
+    );
+
+    let cursor_plan = plan_text(
+        &conn,
+        "SELECT file_id, created_at_ms, reason FROM file_probe_obligations
+         WHERE (created_at_ms, file_id) > (?1, ?2)
+         ORDER BY created_at_ms ASC, file_id ASC LIMIT ?3",
+    );
+    assert!(
+        cursor_plan.contains("probe_obligation_dispatch"),
+        "cursor probe obligation query must use probe_obligation_dispatch: {cursor_plan}"
+    );
+    assert!(
+        !cursor_plan.contains("SCAN ") && !cursor_plan.contains("TEMP B-TREE"),
+        "cursor probe obligation query must not scan or sort: {cursor_plan}"
+    );
+}

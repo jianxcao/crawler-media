@@ -258,15 +258,15 @@ export function UnidentifiedGroupRow({
           movie={movie}
           fileCount={group.file_count}
           busy={busy}
-          onConfirm={() =>
+          onConfirm={({ title, year }) =>
             act(async () => {
               // 未识别文件按路径认领为新识别作品，逐个提交；任一失败即报错。
               for (const f of group.files) {
                 await claimUnidentifiedFile({
                   path: f.file_path,
-                  title: panel.seed.title,
+                  title,
                   kind: movie ? "movie" : "tv",
-                  year: panel.seed.year ?? null,
+                  year,
                   tmdb_id: String(panel.seed.tmdbId),
                 });
               }

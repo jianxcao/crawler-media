@@ -46,4 +46,12 @@ fn test_proxy_whitelist_domains() {
     assert!(!should_use_proxy_for_url(
         "https://alipan.com/drive/video.mp4"
     ));
+
+    // Userinfo host-confusion bypass attempts must resolve the true host after `@`.
+    assert!(!should_use_proxy_for_url(
+        "https://themoviedb.org:443@assets.fanart.tv/logo.png"
+    ));
+    assert!(should_use_proxy_for_url(
+        "https://user:pass@api.themoviedb.org/3/movie/550"
+    ));
 }

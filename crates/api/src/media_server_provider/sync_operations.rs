@@ -1,16 +1,12 @@
 //! Synchronous protocol stages run in the bounded HTTP blocking budget.
 use super::*;
 impl ApiServerProvider {
-    pub(super) fn bounded_store<T>(
+    pub(super) fn bounded_write_store<T>(
         &self,
         work: impl FnOnce(&crate::Store) -> Result<T, String>,
     ) -> Result<T, String> {
-        crate::http::store_wait::with_foreground_store(&self.state, |store| {
-            store
-                .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || work(store))
-                .map_err(|error| error.to_string())?
-        })
-        .map_err(admission_error)?
+        crate::http::store_wait::with_foreground_store(&self.state, work)
+            .map_err(admission_error)?
     }
     pub(super) fn bounded_reader<T>(
         &self,
@@ -18,6 +14,13 @@ impl ApiServerProvider {
         work: impl FnOnce(&crate::Store) -> Result<T, String>,
     ) -> Result<T, String> {
         read_store(&self.state, databases, work)
+    }
+    pub(super) fn bounded_reader_query<T>(
+        &self,
+        databases: &[store::Db],
+        work: impl FnOnce(&crate::Store) -> Result<T, media_server::provider::QueryError>,
+    ) -> Result<T, media_server::provider::QueryError> {
+        read_store_query(&self.state, databases, work)
     }
     pub(super) async fn run_sync<T: Send + 'static>(
         &self,
@@ -33,16 +36,45 @@ impl ApiServerProvider {
                 error.to_string()
             })
     }
+    pub(super) async fn run_sync_query<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(ApiServerProvider) -> T + Send + 'static,
+    ) -> Result<T, media_server::provider::QueryError> {
+        let provider = Self::new(self.state.clone());
+        self.state
+            .http_work
+            .run_to_completion(move || work(provider))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Jellyfin blocking stage failed");
+                match error {
+                    crate::blocking_budget::BlockingError::Busy
+                    | crate::blocking_budget::BlockingError::Timeout => {
+                        media_server::provider::QueryError::Unavailable
+                    }
+                    crate::blocking_budget::BlockingError::Worker(msg) => {
+                        media_server::provider::QueryError::Internal(msg)
+                    }
+                }
+            })
+    }
     pub(super) fn get_user_sync(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
         self.bounded_reader(&[store::Db::App], |store| {
             let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {
                 return Ok(None);
             };
-            let role = store.user_role(user.id).unwrap_or_else(|_| "member".into());
+            if !user.enabled
+                || store
+                    .get_setting(&format!("user_removal.{user_id}"))
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+            {
+                return Ok(None);
+            }
             Ok(Some(ServerUser {
                 id: user.id,
                 login: user.login,
-                is_admin: role == "admin",
+                is_admin: user.role == domain::UserRole::Admin,
             }))
         })
     }
@@ -227,42 +259,42 @@ impl ApiServerProvider {
         favorite: Option<bool>,
     ) -> Result<bool, UserMarksError> {
         if !self.state.instance_writable() {
-            return Err(UserMarksError::Internal(
+            return Err(UserMarksError::Conflict(
                 "instance is read-only or under maintenance".into(),
             ));
         }
 
-        crate::http::store_wait::with_foreground_store(&self.state, |store| {
-            store
-                .with_read_scope(crate::http::store_wait::STORE_READ_WAIT, || {
-                    let Some((media_id, season, episode)) =
-                        resolve_mark_unit(store, user_id, id).map_err(UserMarksError::Internal)?
-                    else {
-                        return Ok(false);
-                    };
-                    let change = crate::store::playback::PlaybackMutation::marks(
-                        user_id, season, episode, played, favorite,
-                    );
-                    store
-                        .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
-                        .map_err(|error| user_marks::mark_error(error, user_id, media_id))?;
-                    Ok(true)
-                })
-                .map_err(|error| match error {
-                    store::StoreError::ReadBusy
-                    | store::StoreError::ReadClosed
-                    | store::StoreError::ReadDeadline
-                    | store::StoreError::ReadCancelled => UserMarksError::Unavailable,
-                    error => UserMarksError::Internal(error.to_string()),
-                })?
+        let Some((media_id, season, episode)) = self
+            .state
+            .store
+            .with_read_snapshot(
+                &[store::Db::Library, store::Db::App],
+                crate::http::store_wait::STORE_READ_WAIT,
+                || resolve_mark_unit(&self.state.store, user_id, id),
+            )
+            .map_err(user_marks::snapshot_error)?
+            .map_err(user_marks::snapshot_error)?
+        else {
+            return Ok(false);
+        };
+
+        let change = crate::store::playback::PlaybackMutation::marks(
+            user_id, season, episode, played, favorite,
+        );
+        let outcome = crate::http::store_wait::with_foreground_store(&self.state, |store| {
+            store.mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
         })
-        .map_err(|response| {
-            if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
-                UserMarksError::Unavailable
-            } else {
-                UserMarksError::Internal(admission_error(response))
+        .map_err(|response| match response.status() {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE => UserMarksError::Unavailable,
+            axum::http::StatusCode::CONFLICT => {
+                UserMarksError::Conflict("instance is read-only or under maintenance".into())
             }
-        })?
+            _ => UserMarksError::Internal(admission_error(response)),
+        })?;
+        match outcome {
+            Ok(()) => Ok(true),
+            Err(error) => user_marks::mark_error(error, user_id, media_id),
+        }
     }
     pub(super) fn issue_play_session_sync(
         &self,
@@ -276,7 +308,7 @@ impl ApiServerProvider {
 
         // 播放域时间走注入时钟；`issue_play_session` 的 `issued_at` 是**秒**。
         let now = self.state.playback_clock.now_ms() / 1000;
-        self.bounded_store(|store| {
+        self.bounded_write_store(|store| {
             store
                 .issue_play_session(
                     user_id,
@@ -317,6 +349,27 @@ impl ApiServerProvider {
     }
 }
 
+pub(super) fn store_query_error(error: store::StoreError) -> media_server::provider::QueryError {
+    if crate::library_read_work::store_error_is_unavailable(&error) {
+        media_server::provider::QueryError::Unavailable
+    } else {
+        media_server::provider::QueryError::Internal(error.to_string())
+    }
+}
+
+pub(super) fn read_store_query<T>(
+    state: &ApiState,
+    databases: &[store::Db],
+    work: impl FnOnce(&crate::Store) -> Result<T, media_server::provider::QueryError>,
+) -> Result<T, media_server::provider::QueryError> {
+    state
+        .store
+        .with_read_snapshot(databases, crate::http::store_wait::STORE_READ_WAIT, || {
+            work(&state.store)
+        })
+        .map_err(store_query_error)?
+}
+
 pub(super) fn read_store<T>(
     state: &ApiState,
     databases: &[store::Db],
@@ -347,5 +400,43 @@ pub(super) fn item_databases(user: Option<UserId>) -> &'static [store::Db] {
         &[store::Db::Library, store::Db::App]
     } else {
         &[store::Db::Library]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::store_query_error;
+    use media_server::provider::QueryError;
+    use store::StoreError;
+
+    #[test]
+    fn store_query_error_maps_unavailable_variants_to_unavailable() {
+        for err in [
+            StoreError::QueryUnavailable {
+                library_id: domain::LibraryId::new(),
+            },
+            StoreError::ReadBusy,
+            StoreError::ReadClosed,
+            StoreError::ReadDeadline,
+            StoreError::ReadCancelled,
+            StoreError::WriteBusy,
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            )),
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+                None,
+            )),
+        ] {
+            assert!(
+                matches!(store_query_error(err), QueryError::Unavailable),
+                "expected QueryError::Unavailable"
+            );
+        }
+        assert!(matches!(
+            store_query_error(StoreError::Invalid("bad input".into())),
+            QueryError::Internal(_)
+        ));
     }
 }

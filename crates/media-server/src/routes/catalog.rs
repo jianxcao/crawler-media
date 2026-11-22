@@ -113,14 +113,22 @@ pub(super) async fn items(
 pub(super) async fn resume_items(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    timing: Option<Extension<QueryTiming>>,
     Path(path): Path<UserPath>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
+    let deadline = timing
+        .map(|Extension(t)| t.deadline)
+        .unwrap_or_else(|| QueryTiming::start().deadline);
     require_user_path(
         state.provider.as_ref(),
         user.id,
         path.user_id.as_deref(),
-        None,
+        Some(QueryPrincipal {
+            user_id: user.id,
+            token: user.token.clone(),
+            deadline,
+        }),
     )
     .await?;
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
@@ -131,7 +139,7 @@ pub(super) async fn resume_items(
         .await
         .map_err(|error| {
             tracing::error!(%error, user_id = %user.id, "Jellyfin 续播选页失败");
-            StatusCode::INTERNAL_SERVER_ERROR
+            error.status_code()
         })?;
     let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
     Ok(Json(
@@ -185,21 +193,37 @@ pub(super) async fn latest_items(
 pub(super) async fn genres(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    timing: Option<Extension<QueryTiming>>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    entity_page(state, user.id, query, crate::provider::EntityKind::Genre).await
+    entity_page(
+        state,
+        user,
+        timing,
+        query,
+        crate::provider::EntityKind::Genre,
+    )
+    .await
 }
 async fn entity_page(
     state: AppState,
-    user: domain::UserId,
+    user: AuthUser,
+    timing: Option<Extension<QueryTiming>>,
     query: ItemsQuery,
     kind: crate::provider::EntityKind,
 ) -> Result<Json<Value>, StatusCode> {
+    let deadline = timing
+        .map(|Extension(t)| t.deadline)
+        .unwrap_or_else(|| QueryTiming::start().deadline);
     let libraries = state
         .provider
-        .list_visible_libraries(user)
+        .list_visible_libraries_for_query(QueryPrincipal {
+            user_id: user.id,
+            token: user.token.clone(),
+            deadline,
+        })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.status_code())?;
     let parent = query::library_parent(query.parent_id.as_deref(), &libraries);
     if query.parent_id.is_some() && parent.is_none() {
         return Ok(Json(json!({"Items": [], "TotalRecordCount": 0})));
@@ -207,7 +231,7 @@ async fn entity_page(
     let page = state
         .provider
         .query_entities(
-            user,
+            user.id,
             kind,
             parent,
             query.search_term.as_deref(),
@@ -216,8 +240,8 @@ async fn entity_page(
         )
         .await
         .map_err(|error| {
-            tracing::error!(%error,user_id=%user,"Jellyfin entity projection read failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            tracing::error!(%error, user_id = %user.id, "Jellyfin entity projection read failed");
+            error.status_code()
         })?;
     let (item_type, tag) = match kind {
         crate::provider::EntityKind::Genre => ("Genre", "genre"),
@@ -248,9 +272,17 @@ pub(super) async fn genre_by_name(
 pub(super) async fn studios(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    timing: Option<Extension<QueryTiming>>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    entity_page(state, user.id, query, crate::provider::EntityKind::Studio).await
+    entity_page(
+        state,
+        user,
+        timing,
+        query,
+        crate::provider::EntityKind::Studio,
+    )
+    .await
 }
 pub(super) async fn studio_by_name(
     State(state): State<AppState>,
@@ -298,8 +330,8 @@ pub(super) async fn search_hints(
         )
         .await
         .map_err(|error| {
-            tracing::error!(%error,user_id=%user.id,"Jellyfin search hints failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            tracing::error!(%error, user_id = %user.id, "Jellyfin search hints failed");
+            error.status_code()
         })?;
     let hints:Vec<_>=page.items.into_iter().map(|item| {
         let id=item.protocol_id();

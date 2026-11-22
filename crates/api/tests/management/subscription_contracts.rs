@@ -124,3 +124,52 @@ async fn patch_subscription_filter_id_updates_store_and_rejects_invalid() {
         .unwrap();
     assert_eq!(unknown_field_patch.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn patch_subscription_rejects_invalid_tracking_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let api_state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    );
+    let app = router(api_state);
+    let created = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                super::common::subscribe_payload("search"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let sub_id = created["id"].as_str().unwrap();
+
+    for invalid in ["bogus", "completed", ""] {
+        let resp = app
+            .clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/subscriptions/{sub_id}"),
+                Some("management-secret"),
+                json!({ "tracking_state": invalid }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tracking_state={invalid}"
+        );
+        assert_eq!(
+            super::common::json_error(resp).await["code"],
+            "subscription.invalid"
+        );
+    }
+}

@@ -2016,7 +2016,7 @@ CREATE TABLE pending_file_renames (
 **显式命名索引**
 
 ```sql
-CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
+CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, created_at_ms, rename_id) WHERE phase <> 'failed';
 CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 ```
 

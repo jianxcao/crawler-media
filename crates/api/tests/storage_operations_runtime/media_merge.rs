@@ -282,6 +282,17 @@ async fn media_merge_converges_queued_job_references_once() {
     );
 }
 
+fn advance_merge_to_succeeded(store: &store::Store, request_id: &str, now_ms: i64) {
+    for _ in 0..1_000 {
+        let status = store.advance_media_merge(request_id, now_ms).unwrap();
+        if status.state == "succeeded" {
+            return;
+        }
+        assert_ne!(status.state, "failed");
+    }
+    panic!("media merge {request_id} did not converge within 1000 steps");
+}
+
 #[tokio::test]
 async fn media_merge_busy_convergence_retries_without_another_merge_or_restart() {
     let temp = tempfile::tempdir().unwrap();
@@ -296,16 +307,7 @@ async fn media_merge_busy_convergence_retries_without_another_merge_or_restart()
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    loop {
-        let status = state
-            .store()
-            .advance_media_merge(MERGE_REQUEST_ID, 10)
-            .unwrap();
-        if status.state == "succeeded" {
-            break;
-        }
-        assert_ne!(status.state, "failed");
-    }
+    advance_merge_to_succeeded(state.store().as_ref(), MERGE_REQUEST_ID, 10);
     let jobs = state.jobs();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -354,13 +356,7 @@ async fn overlapping_convergence_success_cannot_clear_newer_failed_retry() {
             .0,
         StatusCode::ACCEPTED
     );
-    while state
-        .store()
-        .advance_media_merge(MERGE_REQUEST_ID, 10)
-        .unwrap()
-        .state
-        != "succeeded"
-    {}
+    advance_merge_to_succeeded(state.store().as_ref(), MERGE_REQUEST_ID, 10);
     let db = rusqlite::Connection::open(temp.path().join("data/jobs.db")).unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     let first_state = state.clone();
@@ -388,13 +384,7 @@ async fn overlapping_convergence_success_cannot_clear_newer_failed_retry() {
         .0,
         StatusCode::ACCEPTED
     );
-    while state
-        .store()
-        .advance_media_merge(second_request, 11)
-        .unwrap()
-        .state
-        != "succeeded"
-    {}
+    advance_merge_to_succeeded(state.store().as_ref(), second_request, 11);
     assert_eq!(
         api::storage_operations::converge_retired_media_refs(&state),
         0

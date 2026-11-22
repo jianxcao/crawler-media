@@ -264,3 +264,50 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
     );
     assert_eq!(member_read["data"]["effective"]["fanart_configured"], true);
 }
+
+#[tokio::test]
+async fn scrape_settings_reports_effective_fingerprint_sampling_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+
+    let initial = get_json(&app, "/api/v1/settings/scrape").await;
+    assert_eq!(
+        initial["data"]["effective"]["fingerprint_sampling_mode"],
+        "full_window"
+    );
+
+    let adaptive = put_json(
+        &app,
+        "/api/v1/settings/scrape",
+        json!({ "setting": { "fingerprint_sampling_mode": "adaptive" } }),
+    )
+    .await;
+    assert_eq!(
+        adaptive["data"]["effective"]["fingerprint_sampling_mode"],
+        "adaptive"
+    );
+    let persisted = get_json(&app, "/api/v1/settings/scrape").await;
+    assert_eq!(
+        persisted["data"]["effective"]["fingerprint_sampling_mode"],
+        "adaptive"
+    );
+
+    let reset = put_json(
+        &app,
+        "/api/v1/settings/scrape",
+        json!({ "setting": { "fingerprint_sampling_mode": "" } }),
+    )
+    .await;
+    assert_eq!(
+        reset["data"]["effective"]["fingerprint_sampling_mode"],
+        "full_window"
+    );
+
+    let rejected = put_json(
+        &app,
+        "/api/v1/settings/scrape",
+        json!({ "setting": { "fingerprint_sampling_mode": "bogus" } }),
+    )
+    .await;
+    assert_eq!(rejected["error"]["code"], "scrape.invalid");
+}

@@ -64,6 +64,14 @@ fn clean_start_end_to_end_storage_lifecycle() {
 
     // 6. Playback Resume and Tracking
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
+    store
+        .insert_user(&domain::User {
+            id: user_id,
+            login: format!("bounds-{user_id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let item_id = TypedItemId::Work(media_id);
     // A playback event is only accepted for a session issued for this target and source.
     let (session_id, generation) = issue_progress_session(&store, user_id, &file, media_id);

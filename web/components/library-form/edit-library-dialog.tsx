@@ -91,8 +91,6 @@ export function EditLibraryDialog({
   onClose: () => void;
   onSaved: (saved: MediaLibrary) => void;
 }) {
-  // 新契约的 MediaLibrary 不再带能力位 / 收藏范围 / 扫描开关 / 访问控制字段
-  // （对应端点已删），编辑表单按类型形态给安全默认值
   const scraped = library.kind === "movie" || library.kind === "tv";
   // 图片库：条目只看不播，缩略图从原图缩放而来（不是抓帧），开关文案随之换
   const playable = true;
@@ -106,9 +104,9 @@ export function EditLibraryDialog({
     library.exclude_from_home ?? kindExcludedFromHome(),
   );
   const [autoSeriesCollections, setAutoSeriesCollections] = useState(library.auto_series_collections ?? true);
-  const [accessMode, setAccessMode] = useState<LibraryAccessMode>("everyone");
-  const [adminVisible, setAdminVisible] = useState(true);
-  const [memberIds, setMemberIds] = useState<string[]>([]);
+  const [accessMode, setAccessMode] = useState<LibraryAccessMode>(library.access_mode ?? "everyone");
+  const [adminVisible, setAdminVisible] = useState(library.admin_visible ?? true);
+  const [memberIds, setMemberIds] = useState<string[]>(library.member_ids ?? []);
   const [detectIntros, setDetectIntros] = useState(library.detect_intros ?? false);
   const [enableFingerprint, setEnableFingerprint] = useState(library.enable_fingerprint ?? false);
   const [defaultFilterId, setDefaultFilterId] = useState<string>(library.default_filter_id ?? "");
@@ -224,7 +222,7 @@ export function EditLibraryDialog({
       auto_series_collections: autoSeriesCollections,
       access_mode: accessMode,
       admin_visible: adminVisible,
-      member_ids: memberIds,
+      member_ids: accessMode === "selected" ? memberIds : [],
       detect_intros: detectIntros,
       enable_fingerprint: enableFingerprint,
     };
@@ -380,7 +378,7 @@ export function EditLibraryDialog({
     id: "access",
     title: "可见范围",
     summary: (
-      <span className={accessMode === "everyone" ? "text-[var(--text)]" : "text-[var(--warn)]"}>
+      <span className={accessMode === "everyone" && adminVisible ? "text-[var(--text)]" : "text-[var(--warn)]"}>
         {accessScopeSummary(accessMode, adminVisible, memberIds.length)}
       </span>
     ),

@@ -73,21 +73,18 @@ impl Store {
         now_ms: i64,
         before_writer: impl FnOnce(),
     ) -> Result<EventOutcome, StoreError> {
-        let role: domain::UserRole = self
-            .user_role(event.user_id)?
-            .parse()
-            .map_err(StoreError::Invalid)?;
-        before_writer();
-        self.with_library_write(|db| {
-            let scope = crate::LibraryConnection {
-                library: db.library,
-                data_dir: db.data_dir,
-                root_ledger_scans: db.root_ledger_scans,
-                media_ledger_reads: db.media_ledger_reads,
-                authorization: Some((event.user_id, role)),
-            };
-            scope.commit_playback_event(event, now_ms)
-        })
+        match self.with_verified_actor_library_write_observed(
+            event.user_id,
+            Some(&event.device_id),
+            before_writer,
+            |db| db.commit_playback_event(event, now_ms),
+        )? {
+            crate::connections::VerifiedActorOutcome::Applied(outcome) => Ok(outcome),
+            crate::connections::VerifiedActorOutcome::InactiveUser
+            | crate::connections::VerifiedActorOutcome::RevokedDevice => {
+                Ok(EventOutcome::IgnoredStale)
+            }
+        }
     }
 }
 

@@ -10,13 +10,15 @@ enum Kind {
     Resume,
 }
 
+use media_server::provider::QueryError;
+
 pub(in crate::media_server_provider) async fn next_up_items(
     provider: &ApiServerProvider,
     user: UserId,
     series: Option<&str>,
     offset: usize,
     limit: usize,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     continuation(
         &provider.state,
         user,
@@ -38,7 +40,7 @@ pub(in crate::media_server_provider) async fn resumable_items(
     parent: Option<&str>,
     offset: usize,
     limit: usize,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     continuation(
         &provider.state,
         user,
@@ -59,7 +61,7 @@ async fn continuation(
     user: UserId,
     query: ServerItemQuery,
     kind: Kind,
-) -> Result<ServerItemPage, String> {
+) -> Result<ServerItemPage, QueryError> {
     let deadline = Instant::now() + SELECTION_DEADLINE;
     let mut admission = Admission {
         budget: store::QueryBudget {
@@ -74,7 +76,7 @@ async fn continuation(
             capture(store, user, &request, kind)
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(super::super::query_stage_error)?;
         let (mut page, references, snapshot) = match finish_protocol(
             state,
             deadline,
@@ -92,12 +94,12 @@ async fn continuation(
         state
             .library_reads
             .check_open()
-            .map_err(|error| error.to_string())?;
+            .map_err(super::super::query_stage_error)?;
         let validation = run_store_query_stage_named(state, deadline, "validate", move |store| {
             validate(store, user, &references, &snapshot)
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(super::super::query_stage_error)?;
         if let store::PageValidation::Stale { gone } = validation {
             if attempt == 0 {
                 continue;
@@ -112,7 +114,17 @@ async fn continuation(
         );
         return Ok(page);
     }
-    Err("Library continuation changed during selection".into())
+    Err(QueryError::Unavailable)
+}
+
+fn query_to_read_error(error: QueryError) -> store::LibraryReadError {
+    match error {
+        QueryError::Unavailable => store::LibraryReadError::Busy,
+        QueryError::Unauthorized => store::LibraryReadError::Unauthorized,
+        QueryError::Internal(msg) => {
+            store::LibraryReadError::Store(store::StoreError::Invalid(msg))
+        }
+    }
 }
 
 fn capture(
@@ -130,7 +142,7 @@ fn capture(
         scoped_query.season_id = Some(parent.to_owned());
     }
     let resolved = super::request::resolve_page_request(store, user, &scoped_query)
-        .map_err(|error| store::StoreError::Invalid(error.to_string()))?;
+        .map_err(query_to_read_error)?;
     let selected = if let Some(resolved) = resolved {
         let libraries = store
             .authorized_library_ids(user)?
@@ -215,12 +227,10 @@ fn validate(
     }
 }
 
-fn attempt_error(error: AttemptError) -> String {
+fn attempt_error(error: AttemptError) -> QueryError {
     match error {
-        AttemptError::Query(error) => error.to_string(),
-        AttemptError::Changed | AttemptError::SourcesChanged => {
-            "Library continuation changed during hydration".into()
-        }
+        AttemptError::Query(error) => error,
+        AttemptError::Changed | AttemptError::SourcesChanged => QueryError::Unavailable,
     }
 }
 struct Admission {

@@ -148,6 +148,11 @@ export function useItemPlaybackMarks({
     setMarking(false);
   }, []);
 
+  const bumpEpisodesVersion = useCallback(() => {
+    setWatched(null);
+    setEpisodesVersion((v) => v + 1);
+  }, []);
+
   return {
     watched,
     favorite,
@@ -156,5 +161,6 @@ export function useItemPlaybackMarks({
     toggleFavorite,
     togglePlayed,
     resetMarking,
+    bumpEpisodesVersion,
   };
 }

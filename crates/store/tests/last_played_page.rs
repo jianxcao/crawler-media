@@ -55,6 +55,17 @@ fn episode(store: &Store, media: MediaId, root: &std::path::Path, ep: u32) {
     .unwrap();
 }
 
+fn seed_member(store: &Store, id: UserId) {
+    store
+        .insert_user(&domain::User {
+            id,
+            login: format!("lp-{id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+}
+
 fn favorite(store: &Store, user: UserId, media: MediaId, s: i32, e: i32, at: i64) {
     store
         .mutate_playback(
@@ -74,6 +85,7 @@ fn last_played_pages_cross_from_played_to_unplayed() {
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     let mut expected = Vec::new();
     for index in 0..19 {
         let media = show(&store, &format!("Item {index}"));
@@ -129,6 +141,7 @@ fn last_played_sort_has_no_temp_btree() {
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     for index in 0..80 {
         let media = show(&store, &format!("Item {index}"));
         episode(&store, media, &root, 1);
@@ -192,6 +205,7 @@ fn last_played_tiers_keep_segment_tie_directions_and_watch_filters() {
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     let expected = tier_fixtures(&store, user, &root);
     for descending in [false, true] {
         for unwatched_first in [false, true] {
@@ -317,6 +331,7 @@ fn last_played_titles_and_bucket_cursors_match_pages_with_and_without_user() {
     let root = tmp.path().join("a");
     let lib = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     let mut expected = Vec::new();
     for n in 0..12 {
         let title = format!("{} item", char::from(b'A' + n));

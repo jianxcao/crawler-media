@@ -267,7 +267,15 @@ impl Store {
         change: &PlaybackMutation,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        self.with_library_write(|db| db.mutate_playback(media, change, now_ms))
+        match self.with_verified_actor_library_write(change.user_id, None, |db| {
+            db.mutate_playback(media, change, now_ms)
+        })? {
+            crate::connections::VerifiedActorOutcome::Applied(()) => Ok(()),
+            crate::connections::VerifiedActorOutcome::InactiveUser
+            | crate::connections::VerifiedActorOutcome::RevokedDevice => Err(
+                StoreError::Protected(format!("user {} is inactive", change.user_id)),
+            ),
+        }
     }
 
     /// Accept or replay a merge request. The canonical operation id, the pinned

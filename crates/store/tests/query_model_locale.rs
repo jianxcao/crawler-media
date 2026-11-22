@@ -118,12 +118,14 @@ fn conflict_is_zero_write_and_integrity_ownership_is_bidirectional() {
         Err(store::StoreError::Protected(_))
     ));
     assert_eq!(store.metadata_language().unwrap().revision, 0);
-    while store
-        .advance_library_operation("integrity", 2, 100)
-        .unwrap()
-        .state
-        != "succeeded"
-    {}
+    assert!(
+        (0..10_000).any(|_| store
+            .advance_library_operation("integrity", 2, 100)
+            .unwrap()
+            .state
+            == "succeeded"),
+        "integrity operation did not succeed within 10_000 steps"
+    );
     let changed = store
         .change_metadata_language(0, "ja", "change", 3)
         .unwrap();
@@ -137,12 +139,14 @@ fn conflict_is_zero_write_and_integrity_ownership_is_bidirectional() {
         Err(store::StoreError::QueryUnavailable { .. })
     ));
     for op in changed.operations {
-        while store
-            .advance_library_operation(&op.operation_id, 5, 100)
-            .unwrap()
-            .state
-            != "succeeded"
-        {}
+        assert!(
+            (0..10_000).any(|_| store
+                .advance_library_operation(&op.operation_id, 5, 100)
+                .unwrap()
+                .state
+                == "succeeded"),
+            "locale operation did not succeed within 10_000 steps"
+        );
     }
     let cleared = store.change_metadata_language(1, "  ", "clear", 6).unwrap();
     assert_eq!(cleared.language, "");

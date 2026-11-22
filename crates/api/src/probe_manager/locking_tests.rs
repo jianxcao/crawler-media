@@ -42,18 +42,117 @@ fn missing_metadata_job_stops_fingerprint_enqueue_without_deadlock() {
     ));
 }
 
+struct RendezvousState {
+    arrived: usize,
+    generation: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: std::sync::Mutex<RendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: std::sync::Mutex::new(RendezvousState {
+                arrived: 0,
+                generation: 0,
+                aborted: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        let epoch = guard.generation;
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            guard.arrived = 0;
+            guard.generation += 1;
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while guard.generation == epoch && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.generation == epoch && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
+
 #[test]
 fn deleted_probe_cancellation_and_detail_enqueue_remain_responsive() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(tmp.path()).unwrap());
     let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
-    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier = BoundedRendezvous::new(2);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     for cancel in [false, true] {
         let manager = manager.clone();
         let barrier = barrier.clone();
         let done = done_tx.clone();
         std::thread::spawn(move || {
+            let mut guard = barrier.guard();
             for _ in 0..1000 {
                 let request = unit();
                 assert!(manager.enqueue(request));
@@ -69,6 +168,7 @@ fn deleted_probe_cancellation_and_detail_enqueue_remain_responsive() {
                 }
                 barrier.wait();
             }
+            guard.disarm();
             done.send(()).unwrap();
         });
     }

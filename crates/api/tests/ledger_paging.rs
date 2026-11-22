@@ -265,3 +265,114 @@ fn ledger_http_reader_checkouts_stay_bounded_after_file_growth() {
         "one Library snapshot and one App settings snapshot suffice: {large}"
     );
 }
+
+#[tokio::test]
+async fn ledger_reports_copy_when_hardlink_fell_back_or_move_left_source_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let root = dir.path().join("movies");
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Owner",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let hl_fallback = root.join("hl-fallback.mkv");
+    let hl_real = root.join("hl-real.mkv");
+    let move_degraded = root.join("move-degraded.mkv");
+    let move_ok = root.join("move-ok.mkv");
+    let offline = root.join("offline-move.mkv");
+    let intact_src = downloads.join("intact-src.mkv");
+    for p in [
+        &hl_fallback,
+        &hl_real,
+        &move_degraded,
+        &move_ok,
+        &intact_src,
+    ] {
+        std::fs::write(p, b"video").unwrap();
+    }
+    std::fs::hard_link(&hl_real, root.join("hl-alias.mkv")).unwrap();
+
+    let insert = |path: &Path, title: &str, mode: &str, src: Option<String>| {
+        let media = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: title.into(),
+            year: Some(2024),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&media).unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id: media.id,
+                path: path.to_string_lossy().into_owned(),
+                source_path: src,
+                transfer_mode: Some(mode.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    insert(&hl_fallback, "HlFallback", "hardlink", None);
+    insert(&hl_real, "HlReal", "hardlink", None);
+    insert(
+        &move_degraded,
+        "MoveDegraded",
+        "move",
+        Some(intact_src.to_string_lossy().into_owned()),
+    );
+    insert(
+        &move_ok,
+        "MoveOk",
+        "move",
+        Some(
+            downloads
+                .join("gone-src.mkv")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    insert(
+        &offline,
+        "OfflineMove",
+        "move",
+        Some(intact_src.to_string_lossy().into_owned()),
+    );
+
+    let state = ApiState::new(
+        store,
+        "ledger-test".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap();
+    let rows = ledger(state).await;
+    let mode_of = |title: &str| {
+        rows.iter().find(|r| r["media_title"] == title).unwrap()["transfer_mode"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(mode_of("HlFallback"), "copy");
+    assert_eq!(mode_of("HlReal"), "hardlink");
+    assert_eq!(mode_of("MoveDegraded"), "copy");
+    assert_eq!(mode_of("MoveOk"), "move");
+    assert_eq!(mode_of("OfflineMove"), "move");
+}

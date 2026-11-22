@@ -14,6 +14,7 @@ export interface PlaybackPageSnapshot {
 export interface PlaybackPageHandlers {
   snapshot(): PlaybackPageSnapshot;
   suspend(snapshot: PlaybackPageSnapshot): void;
+  unsuspend?(): void;
   restore(snapshot: PlaybackPageSnapshot): void;
   stop(snapshot: PlaybackPageSnapshot): void;
 }
@@ -39,7 +40,9 @@ export function bindPlaybackPageLifecycle(
     }
   };
   const show = (event: Event) => {
-    if (!(event as PageTransitionEvent).persisted || !saved) return;
+    if (!(event as PageTransitionEvent).persisted) return;
+    handlers.unsuspend?.();
+    if (!saved) return;
     const snapshot = saved;
     saved = null;
     const current = handlers.snapshot();

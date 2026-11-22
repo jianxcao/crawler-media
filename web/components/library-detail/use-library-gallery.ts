@@ -179,12 +179,23 @@ export function useLibraryGallery({
         let groups = first.groups;
         let next = first.next_cursor;
         const chain: (string | null)[] = [cursor];
+        const seenCursors = new Set<string>();
+        if (cursor !== null) seenCursors.add(cursor);
+        if (first.groups.length === 0 || (next !== null && seenCursors.has(next))) {
+          next = null;
+        }
         while (next !== null && target - bucketStart >= groups.length) {
           if (gen !== galleryGeneration.current) return;
+          seenCursors.add(next);
           chain.push(next);
           const page = await fetchAt(next);
           groups = [...groups, ...page.groups];
-          next = page.next_cursor;
+          const nextCursor = page.next_cursor;
+          if (page.groups.length === 0 || (nextCursor !== null && seenCursors.has(nextCursor))) {
+            next = null;
+            break;
+          }
+          next = nextCursor;
         }
         chain.push(next);
         if (gen !== galleryGeneration.current) return;

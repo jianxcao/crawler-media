@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use domain::{
     Coverage, FetchMode, Filter, FilterId, Media, MediaId, MediaKind, QualityFact, Subscribe,
@@ -139,19 +140,30 @@ fn rename_fact_path_update_preserves_concurrent_transfer_upgrade_and_third_path(
     let receipt = store::library_write::execute_rename_disk(&req).unwrap();
     fx.store.record_rename_disk(&receipt, 2).unwrap();
 
+    struct SignalOnDrop(Option<mpsc::SyncSender<()>>);
+    impl Drop for SignalOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.try_send(());
+            }
+        }
+    }
+
     let e02_upgraded = fx.root.join("S01E02.4K.mkv");
-    let writer_held = Arc::new(Barrier::new(2));
+    let (held_tx, held_rx) = mpsc::sync_channel::<()>(1);
     std::thread::scope(|scope| {
         let store_r = Arc::clone(&fx.store);
-        let held = Arc::clone(&writer_held);
         let rename_id = req.rename_id.clone();
+        let held_guard = SignalOnDrop(Some(held_tx.clone()));
         let rename_handle = scope.spawn(move || {
-            held.wait();
+            held_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("subscribe writer lock notification timed out");
             store_r.complete_file_rename(&rename_id, 3).unwrap();
         });
         fx.store
             .with_writer(store::Db::Subscribe, |conn| {
-                writer_held.wait();
+                let _ = held_tx.try_send(());
                 // Allow a non-atomic read+write path to load the stale E02 snapshot first.
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 conn.execute(
@@ -162,6 +174,7 @@ fn rename_fact_path_update_preserves_concurrent_transfer_upgrade_and_third_path(
                 Ok(())
             })
             .unwrap();
+        drop(held_guard);
         rename_handle.join().unwrap();
     });
 

@@ -387,18 +387,24 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         _search: Option<&str>,
         _offset: usize,
         _limit: usize,
-    ) -> Result<EntityPage, String> {
-        Err("entity projection queries unsupported".into())
+    ) -> Result<EntityPage, QueryError> {
+        Err(QueryError::Internal(
+            "entity projection queries unsupported".into(),
+        ))
     }
-    async fn query_item_counts(&self, _user: UserId) -> Result<ItemCounts, String> {
-        Err("protocol count queries unsupported".into())
+    async fn query_item_counts(&self, _user: UserId) -> Result<ItemCounts, QueryError> {
+        Err(QueryError::Internal(
+            "protocol count queries unsupported".into(),
+        ))
     }
     async fn query_seasons(
         &self,
         _user: UserId,
         _media: domain::MediaId,
-    ) -> Result<Vec<Season>, String> {
-        Err("season projection queries unsupported".into())
+    ) -> Result<Vec<Season>, QueryError> {
+        Err(QueryError::Internal(
+            "season projection queries unsupported".into(),
+        ))
     }
     async fn search_hints_page(
         &self,
@@ -406,8 +412,10 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         _term: &str,
         _offset: usize,
         _limit: usize,
-    ) -> Result<ServerItemPage, String> {
-        Err("bounded search hints unsupported".into())
+    ) -> Result<ServerItemPage, QueryError> {
+        Err(QueryError::Internal(
+            "bounded search hints unsupported".into(),
+        ))
     }
     async fn resolve_entity_image(
         &self,
@@ -460,7 +468,7 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         series_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String>;
+    ) -> Result<ServerItemPage, QueryError>;
 
     /// Select partial unplayed units within the parent scope before deduplication and paging.
     async fn resumable_items_page(
@@ -469,12 +477,22 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         parent_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String>;
+    ) -> Result<ServerItemPage, QueryError>;
     async fn resolve_single_item(
         &self,
         user_id: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String>;
+
+    async fn resolve_single_item_for_query(
+        &self,
+        user_id: UserId,
+        id: &str,
+    ) -> Result<Option<MediaItemSnapshot>, QueryError> {
+        self.resolve_single_item(user_id, id)
+            .await
+            .map_err(QueryError::Internal)
+    }
 
     async fn resolve_user_item_data(
         &self,

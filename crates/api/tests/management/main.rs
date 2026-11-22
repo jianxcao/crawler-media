@@ -34,6 +34,7 @@ mod search_policy_race;
 mod subscription_depth;
 mod subscription_depth_activity;
 mod subscription_depth_cleanup;
+mod subscription_depth_shared_cleanup;
 mod subscription_policy;
 mod transfer_deletion_race;
 mod transfer_isolation;

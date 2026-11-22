@@ -270,6 +270,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let user = UserId::new();
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: format!("assertions-{user}"),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
         let media = MediaId::new();
         store
             .insert_media(&domain::Media {
@@ -286,6 +294,36 @@ mod tests {
                 anilist_id: None,
             })
             .unwrap();
+        let root = dir.path().join("tv");
+        std::fs::create_dir_all(&root).unwrap();
+        store
+            .create_library(
+                domain::MediaKind::Tv,
+                "TV",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        crate::test_support::publish_fixture_file(
+            &store,
+            &crate::test_support::FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
+                media_id: media,
+                path: root.join("S01E01.mkv").display().to_string(),
+                season: Some(1),
+                episode: Some(1),
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: domain::QualitySource::Release,
+                confidence: domain::Confidence::High,
+                filter_score: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         (dir, store, user, media)
     }
 

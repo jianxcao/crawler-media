@@ -99,11 +99,22 @@ fn cache_key(url: &str) -> String {
 
 /// 白名单校验：解析 URL，取**主机名**（不是子串）做精确/子域匹配；
 /// 拒绝 IP 字面量与 localhost（SSRF 到内网地址的通道）。
-fn allowed_url(url: &str) -> bool {
+pub(crate) fn allowed_url(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
     };
     if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || url.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '\\', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .contains('@')
+        })
+    {
         return false;
     }
     let Some(host) = parsed.host_str() else {
@@ -287,6 +298,11 @@ mod tests {
         assert!(!allowed_url("https://evilbgm.tv/x"));
         assert!(!allowed_url("https://notthetvdb.com/x"));
         assert!(!allowed_url("https://image.tmdb.org.evil.net/x"));
+        // 夹带 userinfo 的 URL → 拒绝。
+        assert!(!allowed_url(
+            "https://user:pass@image.tmdb.org/t/p/w500/a.jpg"
+        ));
+        assert!(!allowed_url("https://evil@douban.com/a.jpg"));
         // 非 http(s) 协议。
         assert!(!allowed_url("ftp://image.tmdb.org/x"));
         // 无主机。

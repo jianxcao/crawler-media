@@ -1,10 +1,23 @@
 //! Batch read facts: `Store::media_batch` and
 //! `Store::playback_units_for_user` (full `UnitState`, not a reduced row).
 
-use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, User, UserId, UserRole,
+};
 use std::path::Path;
 use store::Store;
 use store::test_support::FixtureFile;
+
+fn seed_user(store: &Store, id: UserId) {
+    store
+        .insert_user(&User {
+            id,
+            login: format!("u-{id}"),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
+}
 
 fn media(kind: MediaKind, title: &str, tmdb_id: Option<&str>) -> Media {
     Media {
@@ -208,8 +221,10 @@ fn favorite_only_update_preserves_played_activity_timestamp() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let user = UserId::new();
+    seed_user(&store, user);
     let media = media(MediaKind::Tv, "Favorite timestamp", None);
     store.insert_media(&media).unwrap();
+    publish_unit(&store, tmp.path(), media.id, 1, 1);
     store
         .upsert_unit(
             user,
@@ -244,8 +259,10 @@ fn whole_unit_unfavorite_preserves_other_units_activity_timestamps() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let user = UserId::new();
+    seed_user(&store, user);
     let media = media(MediaKind::Tv, "Cascade favorite timestamp", None);
     store.insert_media(&media).unwrap();
+    publish_unit(&store, tmp.path(), media.id, 1, 1);
     store
         .upsert_unit(
             user,
@@ -341,10 +358,12 @@ fn favorite_activity_orders_independently_of_played_activity() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let user = UserId::new();
+    seed_user(&store, user);
     let older = media(MediaKind::Movie, "Older favorite", None);
     let newer = media(MediaKind::Movie, "Newer favorite", None);
     store.insert_media(&older).unwrap();
     store.insert_media(&newer).unwrap();
+    publish_whole(&store, tmp.path(), newer.id);
     store
         .upsert_unit(
             user,
@@ -413,8 +432,10 @@ fn favorite_only_insert_does_not_materialize_inherited_played() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let user = UserId::new();
+    seed_user(&store, user);
     let show = media(MediaKind::Tv, "Inherited played", None);
     store.insert_media(&show).unwrap();
+    publish_unit(&store, tmp.path(), show.id, 1, 1);
     store
         .upsert_unit(
             user,

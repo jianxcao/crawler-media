@@ -5,13 +5,6 @@ use super::StoreError;
 use crate::users::SETTING_CLI_TOKEN;
 
 impl crate::writers::App<'_> {
-    fn revoked_list(&self) -> Result<Vec<String>, StoreError> {
-        Ok(self
-            .get_setting("playback.revoked_devices")?
-            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-            .unwrap_or_default())
-    }
-
     fn revoked_device_key(user_id: UserId, device_id: &str) -> String {
         format!("{user_id}:{device_id}")
     }
@@ -25,8 +18,7 @@ fn valid_device_identity(device_id: &str) -> bool {
 
 impl crate::writers::App<'_> {
     pub fn is_device_revoked(&self, user_id: UserId, device_id: &str) -> Result<bool, StoreError> {
-        let key = Self::revoked_device_key(user_id, device_id);
-        Ok(self.revoked_list()?.iter().any(|id| id == &key))
+        crate::app_auth::is_device_revoked_on(self.app, user_id, device_id)
     }
 
     /// Whether this authenticated device has a new ordinary credential to record.

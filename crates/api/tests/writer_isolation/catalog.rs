@@ -55,12 +55,12 @@ fn assert_shared_cache(fanart: bool) {
     http_calls
         .recv_timeout(Duration::from_secs(1))
         .expect("cache miss must fetch outside Cache writer");
-    let early_write = refresh_result.recv_timeout(SLO);
+    let early_write = refresh_result.recv_timeout(NEGATIVE_SLO);
 
     let (hit_done, hit_result) = mpsc::channel();
     let hit = fetch.clone();
     let reading = std::thread::spawn(move || hit_done.send(hit("cached")).unwrap());
-    let cached = hit_result.recv_timeout(SLO);
+    let cached = hit_result.recv_timeout(POSITIVE_SLO);
     gate.release();
     writer.join().unwrap().unwrap();
     refreshing.join().unwrap();

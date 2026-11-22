@@ -471,7 +471,7 @@ function GroupRow({
           movie={movie}
           fileCount={group.file_count}
           busy={busy}
-          onConfirm={() =>
+          onConfirm={({ title }) =>
             act(
               () =>
                 assignLibraryFilesToTitle({
@@ -480,7 +480,7 @@ function GroupRow({
                   title_ref: `tmdb:${movie ? "movie" : "tv"}:${panel.seed.tmdbId}`,
                   files: group.files,
                 }),
-              `${group.file_count} 个文件已改挂为《${panel.seed.title}》`,
+              `${group.file_count} 个文件已改挂为《${title}》`,
             )
           }
           onCancel={() => setPanel(null)}

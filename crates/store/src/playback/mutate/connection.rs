@@ -64,11 +64,31 @@ impl crate::LibraryConnection<'_> {
         change: &PlaybackMutation,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        let role = self.user_role_observation(change.user_id)?;
+        let tx = crate::write_tx(self.library)?;
+        crate::library_write::publish::ensure_media_writable(&tx, media)?;
+        let visible = crate::library_read::authorized_ids_on(&tx, change.user_id, role)?;
+        let has_visible_published = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT library_id FROM library_files
+                 WHERE media_id = ?1 AND publication_state = 'published'",
+            )?;
+            let rows = stmt.query_map(params![media.to_string()], |row| row.get::<_, String>(0))?;
+            let mut found = false;
+            for row in rows {
+                if visible.contains(&row?) {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_visible_published {
+            return Err(StoreError::Missing(format!("visible media {media}")));
+        }
         if change.played.is_none() && change.favorite.is_none() {
             return Ok(());
         }
-        let tx = crate::write_tx(self.library)?;
-        crate::library_write::publish::ensure_media_writable(&tx, media)?;
         let (season, episode) = match change.scope {
             UnitScope::Whole => (-1, -1),
             UnitScope::Season(s) => (s as i32, -1),

@@ -526,13 +526,15 @@ fn recovery_keeps_intent_retryable_while_library_is_reindexing() {
     );
 
     // Finish reconfiguration (`ready` + bumped `config_revision`), then resume succeeds!
-    while fx
-        .store
-        .advance_library_operation(&op.operation_id, 2_000, 50)
-        .unwrap()
-        .state
-        != "succeeded"
-    {}
+    assert!(
+        (0..10_000).any(|_| fx
+            .store
+            .advance_library_operation(&op.operation_id, 2_000, 50)
+            .unwrap()
+            .state
+            == "succeeded"),
+        "library reconfiguration did not succeed within 10_000 steps"
+    );
     assert_eq!(fx.store.resume_pending_file_renames(70).unwrap(), 1);
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, to);
     assert!(
@@ -674,6 +676,83 @@ fn rename_migrates_nfo_input_key_so_removing_renamed_nfo_clears_ghost_metadata()
     assert_eq!(
         detail_after.item.title, "M",
         "deleting the renamed NFO must clear the migrated metadata input without leaving a ghost old-key row"
+    );
+}
+
+#[test]
+fn rename_failures_cap_at_twenty_attempts_and_invalid_refusal_is_terminal() {
+    let fx = fixture();
+    let to_retry = fx.a.join("RetryCap.mkv");
+    let req = begin(&fx, &to_retry);
+
+    for attempt in 1..store::library_write::MAX_FILE_RENAME_ATTEMPTS {
+        let now = attempt * 100_000;
+        fx.store
+            .record_file_rename_failure(&req.rename_id, now, &format!("err-{attempt}"))
+            .unwrap();
+        let persisted = fx.store.load_file_rename(&req.rename_id).unwrap();
+        assert_eq!(persisted.phase, "planned");
+        assert!(
+            fx.store
+                .list_due_file_rename_ids(now + 100_000)
+                .unwrap()
+                .contains(&req.rename_id),
+            "attempt {attempt} must remain retryable"
+        );
+    }
+
+    // The 20th failure trips the retry cap to terminal `failed`.
+    fx.store
+        .record_file_rename_failure(&req.rename_id, 9_999_999, "err-20")
+        .unwrap();
+    let capped = fx.store.load_file_rename(&req.rename_id).unwrap();
+    assert_eq!(capped.phase, "failed");
+    assert!(
+        !fx.store
+            .list_due_file_rename_ids(99_999_999)
+            .unwrap()
+            .contains(&req.rename_id)
+    );
+    assert!(
+        !fx.store
+            .file_rename_recovery_schedule()
+            .unwrap()
+            .iter()
+            .any(|(_, id)| id == &req.rename_id)
+    );
+
+    // Invalid refusal immediately terminalizes an active rename intent.
+    let path2 = fx.a.join("Second.mkv");
+    std::fs::write(&path2, b"second").unwrap();
+    let file2 = publish_fixture_file(
+        &fx.store,
+        &FixtureFile {
+            media_id: fx._media,
+            path: path2.to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let req2 = fx
+        .store
+        .begin_file_rename(
+            file2.file_id,
+            &file2.version,
+            &path2,
+            &fx.a.join("Bad.mkv"),
+            1,
+        )
+        .unwrap();
+    fx.store
+        .record_rename_refusal(
+            &req2.rename_id,
+            2,
+            &store::StoreError::Invalid("bad path".into()),
+        )
+        .unwrap();
+    assert_eq!(
+        fx.store.load_file_rename(&req2.rename_id).unwrap().phase,
+        "failed"
     );
 }
 

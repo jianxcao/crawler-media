@@ -90,7 +90,7 @@ pub(crate) async fn put_metadata(
         }
         let (tmdb, tvdb) = {
             if let Some(key) = body["tmdb_api_key"].as_str()
-                && let Err(error) = store.put_setting(settings_keys::TMDB_API_KEY, key)
+                && let Err(error) = store.put_setting(settings_keys::TMDB_API_KEY, key.trim())
             {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -99,7 +99,7 @@ pub(crate) async fn put_metadata(
                 );
             }
             if let Some(key) = body["tvdb_api_key"].as_str()
-                && let Err(error) = store.put_setting(settings_keys::TVDB_API_KEY, key)
+                && let Err(error) = store.put_setting(settings_keys::TVDB_API_KEY, key.trim())
             {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,

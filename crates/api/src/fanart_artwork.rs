@@ -186,7 +186,7 @@ fn write_destination_if_missing(
     }
 
     if cached_bytes.is_none() {
-        match fetch.get(url) {
+        match fetch.get_fanart(url) {
             Ok(bytes) if !bytes.is_empty() => {
                 *cached_bytes = Some(bytes);
             }
@@ -460,6 +460,57 @@ mod tests {
             std::fs::read(show.join("fanart.jpg")).unwrap(),
             b"tmdb-backdrop"
         );
+    }
+
+    struct FanartOnlyFetch {
+        bodies: HashMap<String, Vec<u8>>,
+    }
+
+    impl crate::poster_fetch::PosterFetch for FanartOnlyFetch {
+        fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+            Err(format!("disallowed poster URL: {url}"))
+        }
+
+        fn get_fanart(&self, url: &str) -> Result<Vec<u8>, String> {
+            self.bodies
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("missing {url}"))
+        }
+    }
+
+    #[test]
+    fn save_fanart_files_routes_through_get_fanart_when_get_rejects_fanart_hosts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let show = tmp.path().join("show");
+        let season = show.join("Season 1");
+        std::fs::create_dir_all(&season).unwrap();
+        let video = season.join("S01E01.strm");
+        std::fs::write(&video, b"https://cdn.example/a.mkv").unwrap();
+        let row = ledger_row(video.to_str().unwrap(), 1);
+        let set = FanartSet {
+            logo: Some(image("https://assets.fanart.tv/logo.png")),
+            banner: Some(image("https://assets.fanart.tv/banner.jpg")),
+            thumb: None,
+            season_posters: vec![season_image("https://assets.fanart.tv/s1.jpg", 1)],
+            season_thumbs: Vec::new(),
+            season_banners: Vec::new(),
+        };
+        let fetch = FanartOnlyFetch {
+            bodies: [
+                ("https://assets.fanart.tv/logo.png".into(), b"logo".to_vec()),
+                (
+                    "https://assets.fanart.tv/banner.jpg".into(),
+                    b"banner".to_vec(),
+                ),
+                ("https://assets.fanart.tv/s1.jpg".into(), b"season".to_vec()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let written = save_fanart_files(&fetch, &show, &[row], &set);
+        assert!(written >= 4, "{written}");
+        assert_eq!(std::fs::read(show.join("logo.png")).unwrap(), b"logo");
     }
 }
 

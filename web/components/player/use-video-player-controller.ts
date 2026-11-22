@@ -108,6 +108,7 @@ export function useVideoPlayerController(props: VideoPlayerProps) {
   const autoplayLastRef = useRef<AutoplayOutcome | null>(null);
   const lastDownlinkRef = useRef<number | null>(null);
   const sourceBitrateRef = useRef<number | null>(null);
+  const bandwidthRestartedRef = useRef(false);
   const trickplayRef = useRef<TrickplayIndex | null>(null);
   const qoeRef = useRef(initialQoe());
   const qoe = useCallback((event: QoeEvent) => {
@@ -164,6 +165,7 @@ export function useVideoPlayerController(props: VideoPlayerProps) {
     inFlightRenewalRef,
     endedByAdminRef,
     onEndedByAdmin,
+    bandwidthRestartedRef,
   });
 
   startMsRef.current = session.mode?.originMs ?? 0;
@@ -186,6 +188,7 @@ export function useVideoPlayerController(props: VideoPlayerProps) {
     pageSuspendedRef,
     lastDownlinkRef,
     sourceBitrateRef,
+    bandwidthRestartedRef,
     pendingCommitRef,
     tryAutoplay: session.tryAutoplay,
     freezeFrame: freeze.freezeFrame,
@@ -363,6 +366,8 @@ export function useVideoPlayerController(props: VideoPlayerProps) {
   const retryFromCurrent = useCallback(() => {
     endedByAdminRef.current = false;
     wantsPlayRef.current = true;
+    pageSuspendedRef.current = false;
+    bandwidthRestartedRef.current = false;
     pageRestoreRef.current = null;
     inFlightRenewalRef.current = null;
     dispatch({ type: "request", startMs: positionRef.current });

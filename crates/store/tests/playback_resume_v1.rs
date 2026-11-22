@@ -29,6 +29,15 @@ struct Fixture {
 fn fixture() -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
+    let user: UserId = USER.parse().unwrap();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("resume-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let lib = store
         .create_library(MediaKind::Tv, "TV", &["/tv"], "everyone", true, &[])
         .unwrap();

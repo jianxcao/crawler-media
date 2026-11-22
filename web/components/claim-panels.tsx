@@ -49,7 +49,7 @@ export function ClaimConfirmPanel({
   movie: boolean;
   fileCount: number;
   busy: boolean;
-  onConfirm: () => void;
+  onConfirm: (resolved: { title: string; year: number | null }) => void;
   onCancel: () => void;
 }) {
   const [detail, setDetail] = useState<MediaDetailData | null>(null);
@@ -75,7 +75,8 @@ export function ClaimConfirmPanel({
   const item = detail?.item;
   const posterUrl = item?.posterUrl || seed.posterUrl;
   const title = item?.title ?? seed.title;
-  const year = item?.year ?? seed.year;
+  const year = item?.year ?? seed.year ?? null;
+  const waitingForSeedDetail = seed.title.startsWith("TMDB #") && !detail && !failed;
   const credits = detail
     ? [
         detail.info.directors.length > 0 ? `导演 ${detail.info.directors.slice(0, 2).join(" / ")}` : "",
@@ -162,8 +163,8 @@ export function ClaimConfirmPanel({
         </button>
         <button
           type="button"
-          disabled={busy}
-          onClick={onConfirm}
+          disabled={busy || waitingForSeedDetail}
+          onClick={() => onConfirm({ title, year: year || null })}
           className="btn-accent rounded-full px-3.5 py-1.5 text-sub font-semibold disabled:opacity-40"
         >
           认领{fileCount > 1 ? `全部 ${fileCount} 个文件` : ""}

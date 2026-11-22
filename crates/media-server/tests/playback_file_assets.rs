@@ -26,7 +26,7 @@ impl MediaServerProvider for FileAssetProvider {
         parent_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
         fixture_provider::resume_items(self, user_id, parent_id, offset, limit).await
     }
 
@@ -36,7 +36,7 @@ impl MediaServerProvider for FileAssetProvider {
         series_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
         fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
     }
     async fn query_latest_items(
@@ -263,4 +263,43 @@ async fn present_file_assets_stream_real_bytes_with_content_type() {
     )
     .unwrap();
     assert_eq!(body["fonts"][0], "font1.ttf");
+}
+
+#[tokio::test]
+async fn non_dir_font_dir_returns_404_and_trickplay_falls_back_to_webp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dummy_video_path = tmp.path().join("dummy.mkv");
+    std::fs::write(&dummy_video_path, b"video content").unwrap();
+    std::fs::write(tmp.path().join("dummy.fonts"), b"not-a-directory").unwrap();
+    std::fs::write(
+        tmp.path().join("dummy.trickplay.webp"),
+        b"RIFF\x00\x00\x00\x00WEBP",
+    )
+    .unwrap();
+
+    let provider = Arc::new(FileAssetProvider {
+        user_id: UserId::new(),
+        dummy_video_path,
+    });
+    let app = media_server::media_routes(provider);
+
+    let req_fonts = Request::get("/playback/files/present-file/fonts?token=valid-token")
+        .body(Body::empty())
+        .unwrap();
+    let res_fonts = app.clone().oneshot(req_fonts).await.unwrap();
+    assert_eq!(res_fonts.status(), StatusCode::NOT_FOUND);
+
+    let req_trickplay = Request::get("/playback/files/present-file/trickplay?token=valid-token")
+        .body(Body::empty())
+        .unwrap();
+    let res_trickplay = app.oneshot(req_trickplay).await.unwrap();
+    assert_eq!(res_trickplay.status(), StatusCode::OK);
+    assert_eq!(
+        res_trickplay.headers().get("content-type").unwrap(),
+        "image/webp"
+    );
+    let bytes = axum::body::to_bytes(res_trickplay.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"RIFF\x00\x00\x00\x00WEBP");
 }

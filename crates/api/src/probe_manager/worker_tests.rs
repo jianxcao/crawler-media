@@ -266,3 +266,169 @@ async fn metadata_idle_waits_for_overflow_window_refill_before_notifying() {
     );
     let _ = manager.shutdown_workers().await;
 }
+
+struct AlwaysRetryTracks {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl super::super::TracksProbe for AlwaysRetryTracks {
+    fn probe(
+        &self,
+        _: &std::path::Path,
+        _: &library::WorkControl,
+    ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(library::LibraryError::ReadWaitStopped)
+    }
+}
+
+struct AlwaysRetryCapture {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl marker::FingerprintEngine for AlwaysRetryCapture {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
+        Ok(vec![1, 2, 3])
+    }
+    fn find_common_segment(
+        &self,
+        _: &[u32],
+        _: &[u32],
+        _: f32,
+        _: f32,
+    ) -> Option<marker::CommonSegment> {
+        None
+    }
+}
+
+impl marker::FingerprintCaptureEngine for AlwaysRetryCapture {
+    fn capture_window(
+        &self,
+        _: &marker::CaptureRequest,
+    ) -> Result<marker::CapturedFingerprint, marker::CaptureFailure> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(marker::CaptureFailure {
+            kind: marker::CaptureFailureKind::Cancelled,
+            message: marker::media_read::READ_WAIT_STOPPED.into(),
+            metrics: marker::CaptureMetrics::default(),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_dispatch_sleeps_100ms_and_aborts_promptly_on_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("shows");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(store::Store::open(tmp.path().join("data")).unwrap());
+    let lib = store
+        .create_library(
+            domain::MediaKind::Tv,
+            "Shows",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .set_library_intro_settings(&lib.id, true, true)
+        .unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "Retry Show".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let meta_path = root.join("Show.S01E01.mkv");
+    let fp_path = root.join("Show.S01E02.mkv");
+    std::fs::write(&meta_path, b"meta").unwrap();
+    std::fs::write(&fp_path, b"fp").unwrap();
+    let meta_row = super::super::test_support::publish(
+        &store,
+        &super::super::test_support::coverage(
+            media.id,
+            meta_path.to_str().unwrap(),
+            Some(1),
+            Some(1),
+        ),
+    );
+    let fp_row = super::super::test_support::publish(
+        &store,
+        &super::super::test_support::coverage(
+            media.id,
+            fp_path.to_str().unwrap(),
+            Some(1),
+            Some(2),
+        ),
+    );
+    let tracks = Arc::new(AlwaysRetryTracks {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let capture = Arc::new(AlwaysRetryCapture {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let manager = Arc::new(
+        ProbeManager::with_engines(store.clone(), capture.clone(), capture.clone())
+            .unwrap()
+            .with_tracks_probe(tracks.clone()),
+    );
+    assert!(manager.try_start_workers());
+    assert!(manager.enqueue(ProbeUnit {
+        row: meta_row,
+        kind: domain::MediaKind::Tv,
+        force_fingerprint: false,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: false,
+        reuse_media_info_cache: false,
+        marker_refresh_id: None,
+        job_id: None,
+    }));
+    manager.enqueue_direct_fingerprint(
+        ProbeUnit {
+            row: fp_row.clone(),
+            kind: domain::MediaKind::Tv,
+            force_fingerprint: true,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: false,
+            reuse_media_info_cache: false,
+            marker_refresh_id: None,
+            job_id: None,
+        },
+        Some(120_000),
+        fp_row.file.version.source_version.clone(),
+        180,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    let meta_calls = tracks.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let fp_calls = capture.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        (1..=4).contains(&meta_calls),
+        "metadata retry must pace at ~100ms, got {meta_calls} calls in 260ms"
+    );
+    assert!(
+        (1..=4).contains(&fp_calls),
+        "fingerprint retry must pace at ~100ms, got {fp_calls} calls in 260ms"
+    );
+    let shutdown_started = std::time::Instant::now();
+    manager.shutdown_workers().await.unwrap();
+    assert!(
+        shutdown_started.elapsed() < std::time::Duration::from_millis(90),
+        "shutdown while retry_dispatch is sleeping must abort promptly, took {:?}",
+        shutdown_started.elapsed()
+    );
+}

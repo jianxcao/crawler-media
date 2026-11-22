@@ -58,63 +58,7 @@ pub(crate) async fn artwork_candidates(
     let result = state
         .http_work
         .run(std::time::Duration::from_secs(10), move || {
-            let store = state_for_blocking.store.clone();
-            let library = match require_visible_library(&store, &id, user_id) {
-                Ok(library) => library,
-                Err(response) => return Err(response),
-            };
-            let Some(media) = store.get_media(media_id).ok().flatten() else {
-                return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
-            };
-            let rows: Vec<domain::FileCoverage> = store.file_coverage_for_media(media_id).unwrap_or_default().into_iter()
-                .filter(|coverage| coverage.file.library_id.to_string() == library.id)
-                .collect();
-            if rows.is_empty() {
-                return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
-            }
-            let selected = preferred_coverage(&rows).cloned();
-            let locked = poster_locked(&store, media_id);
-            // 及时释放 Store 锁，再做后续文件/网络检查
-            drop(store);
-
-            let current = selected
-                .as_ref()
-                .and_then(|coverage| poster_path(&coverage.file))
-                .map(|p| p.display().to_string());
-
-            let mut posters: Vec<Value> = Vec::new();
-            if let (Some(path), Some(coverage)) = (&current, &selected) {
-                posters.push(json!({
-                    "file_path": path,
-                    "preview_url": crate::http::library::artwork_url("posters", coverage.file.file_id),
-                    "width": 342,
-                    "height": 513,
-                    "language": null,
-                    "vote_average": null,
-                    "vote_count": null,
-                }));
-            }
-            // Remote metadata candidate
-            if let Some(tmdb_id) = media.tmdb_id.clone()
-                && let Ok(Some(url)) = state_for_blocking.catalog.cached_poster_url(media.kind, &tmdb_id) {
-                    posters.push(json!({
-                        "file_path": url,
-                        "preview_url": url,
-                        "width": null,
-                        "height": null,
-                        "language": null,
-                        "vote_average": null,
-                        "vote_count": null,
-                    }));
-                }
-            Ok(json!({
-                "posters": posters,
-                "backdrops": [],
-                "current_poster": current,
-                "current_backdrop": null,
-                "poster_locked": locked,
-                "backdrop_locked": false,
-            }))
+            load_artwork_candidates(&state_for_blocking, &id, media_id, user_id)
         })
         .await;
 
@@ -137,6 +81,94 @@ pub(crate) async fn artwork_candidates(
             &msg,
         ),
     }
+}
+
+fn load_artwork_candidates(
+    state: &ApiState,
+    id: &str,
+    media_id: MediaId,
+    user_id: Option<domain::UserId>,
+) -> Result<Value, Response> {
+    let (media, selected, locked, is_admin) =
+        store_wait::with_store_read(state, &[store::Db::Library, store::Db::App], |store| {
+            let library = require_visible_library(store, id, user_id)?;
+            let lib_id: domain::LibraryId = library
+                .id
+                .parse()
+                .map_err(|_| err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在"))?;
+            let Some(media) = store
+                .get_media(media_id)
+                .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取失败"))?
+            else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let rows = store
+                .file_coverage_in_library(lib_id, Some(media_id), store::FileReadScope::Published)
+                .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取失败"))?;
+            if rows.is_empty() {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
+            let selected = preferred_coverage(&rows).cloned();
+            let locked = poster_locked(store, media_id);
+            let is_admin = match user_id {
+                Some(uid) => {
+                    store.user_role(uid).map_err(|_| {
+                        err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取失败")
+                    })? == "admin"
+                }
+                None => false,
+            };
+            Ok((media, selected, locked, is_admin))
+        })??;
+
+    let current = selected
+        .as_ref()
+        .and_then(|coverage| poster_path(&coverage.file))
+        .map(|p| p.display().to_string());
+
+    let mut posters: Vec<Value> = Vec::new();
+    if let (Some(path), Some(coverage)) = (&current, &selected) {
+        let preview_url = crate::http::library::artwork_url("posters", coverage.file.file_id);
+        let file_path = if is_admin { path } else { &preview_url };
+        posters.push(json!({
+            "file_path": file_path,
+            "preview_url": preview_url,
+            "width": 342,
+            "height": 513,
+            "language": null,
+            "vote_average": null,
+            "vote_count": null,
+        }));
+    }
+    if let Some(tmdb_id) = media.tmdb_id.clone()
+        && let Ok(Some(url)) = state.catalog.cached_poster_url(media.kind, &tmdb_id)
+    {
+        posters.push(json!({
+            "file_path": url,
+            "preview_url": url,
+            "width": null,
+            "height": null,
+            "language": null,
+            "vote_average": null,
+            "vote_count": null,
+        }));
+    }
+    Ok(json!({
+        "posters": posters,
+        "backdrops": [],
+        "current_poster": if is_admin { current } else { None },
+        "current_backdrop": null,
+        "poster_locked": locked,
+        "backdrop_locked": false,
+    }))
 }
 
 pub(crate) fn image_content_type(bytes: &[u8]) -> &'static str {

@@ -71,6 +71,19 @@ pub fn unix_now() -> i64 {
     api::store::unix_now()
 }
 
+pub fn seed_active_member(store: &Store, login: &str) -> domain::UserId {
+    let user = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: login.into(),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    user
+}
+
 /// 为一个已登记的 Media 发布真实文件，返回可用于签发会话的 file id。
 ///
 /// 维护测试原本用合成 `LedgerId` 签发会话；现在签发要求文件真实存在且已发布。

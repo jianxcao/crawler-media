@@ -63,7 +63,10 @@ impl RedirectCache {
         }
         match self.fetch_location(url) {
             Some(ResolvedTarget { target, ttl }) => {
-                if let Some(ttl) = ttl.filter(|d| !d.is_zero()) {
+                let mut cached = false;
+                if let Some(ttl) = ttl.filter(|d| !d.is_zero())
+                    && let Some(expires) = Instant::now().checked_add(ttl)
+                {
                     let mut entries = self.lock();
                     if entries.len() >= MAX_ENTRIES {
                         let now = Instant::now();
@@ -72,12 +75,13 @@ impl RedirectCache {
                             entries.clear();
                         }
                     }
-                    entries.insert(url.to_string(), (target.clone(), Instant::now() + ttl));
+                    entries.insert(url.to_string(), (target.clone(), expires));
+                    cached = true;
                 }
                 tracing::debug!(
                     cache_hit = false,
                     redirected = target != url,
-                    cached = ttl.is_some_and(|d| !d.is_zero()),
+                    cached,
                     elapsed_ms = started.elapsed().as_millis(),
                     "STRM target resolution completed"
                 );
@@ -298,8 +302,7 @@ fn signed_url_ttl(url: &str, now: SystemTime) -> Option<Option<Duration>> {
     let mut found = false;
     if let Some(secs) = unix_expiry {
         found = true;
-        let exp = UNIX_EPOCH + Duration::from_secs(secs);
-        let Some(rem) = exp.duration_since(now).ok() else {
+        let Some(rem) = remaining_until_expiry(UNIX_EPOCH, secs, now) else {
             return Some(None);
         };
         let safe = rem.saturating_sub(SIGNED_URL_SAFETY_MARGIN);
@@ -311,13 +314,10 @@ fn signed_url_ttl(url: &str, now: SystemTime) -> Option<Option<Duration>> {
     if let Some(exp_secs) = amz_expires {
         found = true;
         let rem = match amz_date.and_then(parse_amz_date) {
-            Some(issued) => {
-                let exp = issued + Duration::from_secs(exp_secs);
-                match exp.duration_since(now).ok() {
-                    Some(rem) => rem,
-                    None => return Some(None),
-                }
-            }
+            Some(issued) => match remaining_until_expiry(issued, exp_secs, now) {
+                Some(rem) => rem,
+                None => return Some(None),
+            },
             None => Duration::from_secs(exp_secs),
         };
         let safe = rem.saturating_sub(SIGNED_URL_SAFETY_MARGIN);
@@ -327,6 +327,13 @@ fn signed_url_ttl(url: &str, now: SystemTime) -> Option<Option<Duration>> {
         limit = Some(limit.map_or(safe, |prev| prev.min(safe)));
     }
     found.then_some(limit)
+}
+
+fn remaining_until_expiry(base: SystemTime, add_secs: u64, now: SystemTime) -> Option<Duration> {
+    let Some(exp) = base.checked_add(Duration::from_secs(add_secs)) else {
+        return Some(Duration::MAX);
+    };
+    exp.duration_since(now).ok()
 }
 
 /// Parse AWS SigV4 `YYYYMMDDTHHMMSSZ` UTC timestamp into `SystemTime`.
@@ -356,7 +363,7 @@ fn parse_amz_date(raw: &str) -> Option<SystemTime> {
         return None;
     }
     let total_secs = (days as u64) * 86_400 + hour * 3600 + min * 60 + sec;
-    Some(UNIX_EPOCH + Duration::from_secs(total_secs))
+    UNIX_EPOCH.checked_add(Duration::from_secs(total_secs))
 }
 
 /// Process-wide resolution used for every remote ffprobe/ffmpeg input.

@@ -45,6 +45,14 @@ pub(super) fn fixture(episodes: usize) -> Fixture {
     };
     store.insert_media(&media).unwrap();
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("int-sup-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let mut db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     db.pragma_update(None, "foreign_keys", true).unwrap();
     let tx = db.transaction().unwrap();

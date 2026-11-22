@@ -174,6 +174,14 @@ fn reassignment_moves_only_listed_files_and_preserves_source_facts() {
     let keep = publish(store, &fx.root, a, "keep", None);
     let moved = publish(store, &fx.root, a, "move", None);
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("reassign-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
 
     // A's watch history and resume binding live on the *unlisted* sibling file.
     store
@@ -317,6 +325,14 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
     let b = media(store, MediaKind::Movie, "B");
     let moved = publish(store, &fx.root, a, "move", None);
     let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("reassign-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     store
         .upsert_unit_for_source(
             user,

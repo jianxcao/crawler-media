@@ -25,7 +25,7 @@ pub(super) async fn shows_next_up(
         .await
         .map_err(|error| {
             tracing::error!(%error, user_id = %user.id, "Jellyfin NextUp 聚合失败");
-            StatusCode::INTERNAL_SERVER_ERROR
+            error.status_code()
         })?;
     let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
     Ok(Json(
@@ -39,15 +39,20 @@ pub(super) async fn show_seasons(
 ) -> Result<Json<Value>, StatusCode> {
     let item = state
         .provider
-        .resolve_single_item(user.id, &id)
+        .resolve_single_item_for_query(user.id, &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| error.status_code())?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let series_id = domain::TypedItemId::Work(item.media.id).to_wire_string();
-    let mut seasons = state.provider.query_seasons(user.id,item.media.id).await.map_err(|error|{
-        tracing::error!(%error,user_id=%user.id,media_id=%item.media.id,"Jellyfin season projection read failed");StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let mut seasons = state
+        .provider
+        .query_seasons(user.id, item.media.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, media_id = %item.media.id, "Jellyfin season projection read failed");
+            error.status_code()
+        })?;
     if seasons.is_empty() {
         seasons.push(crate::provider::Season {
             season: item.unit.map(|unit| unit.season as u32).unwrap_or(1),

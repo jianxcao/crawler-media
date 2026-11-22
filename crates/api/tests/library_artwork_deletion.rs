@@ -24,7 +24,7 @@ impl PosterFetch for FreezeOnFetch {
         if let Some((state, id)) = self.0.lock().unwrap().take() {
             api::library_lifecycle::start_library_removal(&state, &id).unwrap();
         }
-        Ok(b"replacement".to_vec())
+        Ok(b"\xff\xd8\xff\xe0replacement".to_vec())
     }
 }
 fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
@@ -115,7 +115,10 @@ async fn frozen_artwork_mutations_preserve_sidecar_and_manual_lock() {
     state.store().begin_library_removal(&id).unwrap();
     let app = router(state.clone());
     for (action, body) in [
-        ("select", json!({"file_path":"https://offline/image"})),
+        (
+            "select",
+            json!({"file_path":"https://image.tmdb.org/t/p/w780/offline.jpg"}),
+        ),
         ("select", json!({"file_path":null})),
         ("upload", json!({"data_url":"data:image/jpeg;base64,bmV3"})),
     ] {
@@ -145,7 +148,7 @@ async fn selection_frozen_during_fetch_does_not_publish_bytes_or_lock() {
             &id,
             media,
             "select",
-            json!({"file_path":"https://offline/image"}),
+            json!({"file_path":"https://image.tmdb.org/t/p/w780/offline.jpg"}),
         ))
         .await
         .unwrap();
@@ -176,8 +179,8 @@ async fn active_artwork_upload_and_selection_keep_manual_lock_contract() {
         ),
         (
             "select",
-            json!({"file_path":"https://offline/image"}),
-            b"replacement".as_slice(),
+            json!({"file_path":"https://image.tmdb.org/t/p/w780/offline.jpg"}),
+            b"\xff\xd8\xff\xe0replacement".as_slice(),
         ),
     ] {
         let response = app

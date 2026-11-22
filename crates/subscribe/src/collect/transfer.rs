@@ -15,10 +15,12 @@ use crate::SubscribeError;
 use crate::add::Added;
 use domain::QualityFact;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
     added: &Added<'_, D>,
     scored: &ScoredTorrent,
     release: &Release,
+    slots: &[(Option<u32>, Option<u32>)],
     src: &Path,
     dest: &Path,
     pending: bool,
@@ -39,18 +41,7 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
         .ok_or(SubscribeError::MissingPublicationTarget("root_id"))?;
     let mode = resolve_mode(src, added.input.library_root, added.input.transfer_mode);
     let file_id = LedgerId::new();
-    let units: Vec<UnitKey> = if added.input.media.kind == domain::MediaKind::Movie {
-        vec![UnitKey::WHOLE]
-    } else {
-        let span = release.episode_span();
-        match (release.season, span) {
-            (Some(s), Some((from, to))) => (from..=to)
-                .map(|e| UnitKey::new(s as i32, e as i32))
-                .collect(),
-            (Some(s), None) => vec![UnitKey::new(s as i32, release.episode.unwrap_or(1) as i32)],
-            _ => vec![UnitKey::WHOLE],
-        }
-    };
+    let units = covered_units(added.input.media.kind, release, slots);
     let file = domain::LibraryFile {
         file_id,
         library_id,
@@ -100,6 +91,37 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
         recorder.published(&candidate)?;
     }
     Ok(candidate)
+}
+
+fn covered_units(
+    kind: domain::MediaKind,
+    release: &Release,
+    slots: &[(Option<u32>, Option<u32>)],
+) -> Vec<UnitKey> {
+    if kind == domain::MediaKind::Movie {
+        return vec![UnitKey::WHOLE];
+    }
+    match (release.season, release.episode_span()) {
+        (Some(s), Some((from, to))) => (from..=to)
+            .map(|e| UnitKey::new(s as i32, e as i32))
+            .collect(),
+        (Some(s), None) => {
+            let mut units: Vec<UnitKey> = slots
+                .iter()
+                .filter_map(|(slot_s, slot_e)| {
+                    Some(UnitKey::new((*slot_s)? as i32, (*slot_e)? as i32))
+                })
+                .collect();
+            units.sort_by_key(|u| (u.season, u.episode));
+            units.dedup();
+            if units.is_empty() {
+                vec![UnitKey::new(s as i32, release.episode.unwrap_or(1) as i32)]
+            } else {
+                units
+            }
+        }
+        _ => vec![UnitKey::WHOLE],
+    }
 }
 
 fn publish_video<D: Downloader + ?Sized>(

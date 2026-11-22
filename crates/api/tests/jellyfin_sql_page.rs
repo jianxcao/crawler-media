@@ -405,13 +405,29 @@ fn create_library_tv(store: &Store, name: &str, root: &Path) -> LibraryId {
         .unwrap()
 }
 
+fn insert_test_user(store: &Store, login: &str) -> UserId {
+    let user = UserId::new();
+    store
+        .insert_user_with_password(
+            &domain::User {
+                id: user,
+                login: login.into(),
+                enabled: true,
+                role: domain::UserRole::Member,
+            },
+            "pw",
+        )
+        .unwrap();
+    user
+}
+
 /// played/favorite 过滤在 SQL 内生效（`filters` 与 `is_played`/`is_favorite` 一致）。
 #[test]
 fn mark_filters_are_applied_before_paging() {
     let fx = Fx::new();
     let first = fx.add_movie("Aaa");
     fx.add_movie("Bbb");
-    let user = UserId::new();
+    let user = insert_test_user(&fx.store, "page-mark-filter");
     fx.store
         .mutate_playback(
             first,
@@ -521,7 +537,7 @@ fn played_filter_follows_the_newest_assertion() {
     std::fs::create_dir_all(&dir).unwrap();
     let library = create_library_tv(&fx.store, "Played", &dir);
     let show = fx.add_show(&dir, &[(1, 1)]);
-    let user = UserId::new();
+    let user = insert_test_user(&fx.store, "page-played-time");
     let mark = |scope: domain::UnitScope, played: bool, now: i64| {
         fx.store
             .mutate_playback(
@@ -680,7 +696,7 @@ fn series_played_filter_reduces_per_episode() {
     std::fs::create_dir_all(&dir).unwrap();
     let library = create_library_tv(&fx.store, "Series Played", &dir);
     let show = fx.add_show(&dir, &[(1, 1), (1, 2)]);
-    let user = UserId::new();
+    let user = insert_test_user(&fx.store, "page-series-played");
     let mark = |scope: domain::UnitScope, played: bool, now: i64| {
         fx.store
             .mutate_playback(

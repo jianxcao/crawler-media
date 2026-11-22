@@ -37,16 +37,19 @@ fn unchanged_members_and_playback_do_not_rewrite_static_counts() {
     store
         .set_metadata_overrides(media, domain::EntityScope::Work, "en-US", &fields, revision)
         .unwrap();
+    let user = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("mut-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     store
         .mutate_playback(
             media,
-            &store::playback::PlaybackMutation::marks(
-                domain::UserId::new(),
-                -1,
-                -1,
-                Some(true),
-                Some(true),
-            ),
+            &store::playback::PlaybackMutation::marks(user, -1, -1, Some(true), Some(true)),
             10,
         )
         .unwrap();

@@ -255,12 +255,14 @@ fn integrity_owner_defers_compensation_without_releasing_its_retention() {
         store.get_media(expected.id).unwrap(),
         Some(expected.clone())
     );
-    while peer
-        .advance_library_operation("compensation-owner", 2, 100)
-        .unwrap()
-        .state
-        == "applying"
-    {}
+    assert!(
+        (0..10_000).any(|_| peer
+            .advance_library_operation("compensation-owner", 2, 100)
+            .unwrap()
+            .state
+            != "applying"),
+        "compensation-owner operation did not finish within 10_000 steps"
+    );
     assert!(
         !store
             .undo_ensured_media_if_unreferenced(expected.id, &expected)
@@ -510,12 +512,14 @@ fn integrity_repair_of_orphan_projection_blocks_actual_identity_restore() {
         store.get_media(expected.id).unwrap(),
         Some(expected.clone())
     );
-    while peer
-        .advance_library_operation("orphan-projection-owner", 2, 100)
-        .unwrap()
-        .state
-        == "applying"
-    {}
+    assert!(
+        (0..10_000).any(|_| peer
+            .advance_library_operation("orphan-projection-owner", 2, 100)
+            .unwrap()
+            .state
+            != "applying"),
+        "orphan-projection-owner operation did not finish within 10_000 steps"
+    );
     assert!(
         !store
             .undo_ensured_media_if_unreferenced(expected.id, &expected)

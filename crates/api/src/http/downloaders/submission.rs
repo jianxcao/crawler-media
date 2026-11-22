@@ -485,11 +485,6 @@ struct SubmissionDelivery {
 
 impl SubmissionDelivery {
     fn run(self) -> Result<(), SubmitFailure> {
-        let guard = self
-            .subscribe
-            .as_ref()
-            .map(|sub| self.state.subscribe_guard(sub.id));
-        let _held = guard.as_ref().map(|guard| guard.lock());
         let mut snapshot = None;
         let score = match &self.subscribe {
             Some(sub) => {
@@ -511,25 +506,12 @@ impl SubmissionDelivery {
             }
             None => 0,
         };
-        if let Some(snapshot) = snapshot {
-            let store = self.state.store.as_ref();
-            let current = store
-                .subscribe_snapshot_is_current(&snapshot, &Default::default())
-                .map_err(|error| {
-                    SubmitFailure::Response(err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "subscribe.observation_failed",
-                        &error.to_string(),
-                    ))
-                })?;
-            if !current {
-                return Err(SubmitFailure::Conflict);
-            }
-        }
-        self.state
-            .require_writable()
-            .and_then(|_| self.state.require_write_admitted())
-            .map_err(SubmitFailure::Response)?;
+        revalidate_before_submit(
+            &self.state,
+            self.subscribe.as_ref(),
+            snapshot.as_ref(),
+            &self.parsed,
+        )?;
         crate::delivery::submit_torrent_with_options(
             &self.state,
             &self.torrent,
@@ -537,23 +519,190 @@ impl SubmissionDelivery {
             self.save_path.as_deref(),
         )
         .map_err(SubmitFailure::Downloader)?;
-        if let Some(sub) = &self.subscribe
-            && let Err(response) = record_submitted_pending(
+        if let Some(sub) = &self.subscribe {
+            persist_submitted_under_guard(
                 &self.state,
                 sub,
                 &self.torrent,
                 self.downloader_id,
                 &self.parsed,
                 score,
-            )
-        {
-            if let Ok(client) = crate::delivery::client_for_id(&self.state, self.downloader_id)
-                && let Err(error) = client.remove_owned(&self.torrent, false)
-            {
-                tracing::error!(%error, torrent=%self.torrent.title, "Failed to roll back untracked manual delivery");
-            }
-            return Err(SubmitFailure::Response(response));
+            )?;
         }
         Ok(())
+    }
+}
+
+fn revalidate_before_submit(
+    state: &ApiState,
+    subscribe: Option<&domain::Subscribe>,
+    snapshot: Option<&store::SubscribeLibrarySnapshot>,
+    parsed: &Release,
+) -> Result<(), SubmitFailure> {
+    let Some(sub) = subscribe else {
+        return state
+            .require_writable()
+            .and_then(|_| state.require_write_admitted())
+            .map_err(SubmitFailure::Response);
+    };
+    let guard = state.subscribe_guard(sub.id);
+    let _held = guard.lock();
+    if state.subscribe_is_deleting(sub.id) {
+        return Err(SubmitFailure::Response(err(
+            StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除",
+        )));
+    }
+    let store = state.store.as_ref();
+    let current = store
+        .get_subscribe(sub.id)
+        .map_err(|error| {
+            SubmitFailure::Response(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ))
+        })?
+        .ok_or_else(|| {
+            SubmitFailure::Response(err(
+                StatusCode::NOT_FOUND,
+                "subscribe.missing",
+                "订阅不存在",
+            ))
+        })?;
+    if current.media_id != sub.media_id
+        || current.filter_id != sub.filter_id
+        || current.coverage != sub.coverage
+        || current.downloader_id != sub.downloader_id
+    {
+        return Err(SubmitFailure::Response(err(
+            StatusCode::CONFLICT,
+            "subscription.changed",
+            "订阅配置已变更，请刷新后重试",
+        )));
+    }
+    if let Some(snapshot) = snapshot {
+        let current_snap = store
+            .subscribe_snapshot_is_current(snapshot, &Default::default())
+            .map_err(|error| {
+                SubmitFailure::Response(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subscribe.observation_failed",
+                    &error.to_string(),
+                ))
+            })?;
+        if !current_snap || pending_slot_taken(store, &current, parsed)? {
+            return Err(SubmitFailure::Conflict);
+        }
+    }
+    state
+        .require_writable()
+        .and_then(|_| state.require_write_admitted())
+        .map_err(SubmitFailure::Response)
+}
+
+fn pending_slot_taken(
+    store: &crate::Store,
+    subscribe: &domain::Subscribe,
+    parsed: &Release,
+) -> Result<bool, SubmitFailure> {
+    let media = store
+        .get_media(subscribe.media_id)
+        .map_err(|error| {
+            SubmitFailure::Response(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "subscribe.observation_failed",
+                &error.to_string(),
+            ))
+        })?
+        .ok_or_else(|| {
+            SubmitFailure::Response(err(StatusCode::NOT_FOUND, "media.missing", "媒体不存在"))
+        })?;
+    let pending = store.load_pending(subscribe.id).map_err(|error| {
+        SubmitFailure::Response(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "subscribe.observation_failed",
+            &error.to_string(),
+        ))
+    })?;
+    let releases = crate::worker::finish_search::pending_releases(&pending);
+    let facts = subscribe::facts_with_pending(
+        domain::SubscribeFacts::default(),
+        &releases,
+        subscribe,
+        &media,
+    );
+    Ok(subscribe::pending_slots(subscribe, parsed)
+        .iter()
+        .any(|(s, e)| facts.get(*s, *e).is_some()))
+}
+
+fn persist_submitted_under_guard(
+    state: &ApiState,
+    sub: &domain::Subscribe,
+    torrent: &Torrent,
+    downloader_id: Option<DownloaderId>,
+    parsed: &Release,
+    score: i32,
+) -> Result<(), SubmitFailure> {
+    let guard = state.subscribe_guard(sub.id);
+    let held = guard.lock();
+    let current = if state.subscribe_is_deleting(sub.id) {
+        None
+    } else {
+        match state.store.as_ref().get_subscribe(sub.id) {
+            Ok(found) => found,
+            Err(error) => {
+                drop(held);
+                rollback_untracked_delivery(state, downloader_id, torrent);
+                return Err(SubmitFailure::Response(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                )));
+            }
+        }
+    };
+    let Some(current) = current else {
+        drop(held);
+        rollback_untracked_delivery(state, downloader_id, torrent);
+        return Err(SubmitFailure::Response(err(
+            StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除",
+        )));
+    };
+    if current.media_id != sub.media_id
+        || current.filter_id != sub.filter_id
+        || current.downloader_id != sub.downloader_id
+        || current.coverage != sub.coverage
+    {
+        drop(held);
+        rollback_untracked_delivery(state, downloader_id, torrent);
+        return Err(SubmitFailure::Response(err(
+            StatusCode::CONFLICT,
+            "subscription.changed",
+            "订阅配置已变更，请刷新后重试",
+        )));
+    }
+    let result = record_submitted_pending(state, sub, torrent, downloader_id, parsed, score);
+    drop(held);
+    if let Err(response) = result {
+        rollback_untracked_delivery(state, downloader_id, torrent);
+        return Err(SubmitFailure::Response(response));
+    }
+    Ok(())
+}
+
+fn rollback_untracked_delivery(
+    state: &ApiState,
+    downloader_id: Option<DownloaderId>,
+    torrent: &Torrent,
+) {
+    if let Ok(client) = crate::delivery::client_for_id(state, downloader_id)
+        && let Err(error) = client.remove_owned(torrent, false)
+    {
+        tracing::error!(%error, torrent=%torrent.title, "Failed to roll back untracked manual delivery");
     }
 }

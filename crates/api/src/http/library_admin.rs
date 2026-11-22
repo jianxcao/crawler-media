@@ -24,18 +24,21 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
         let rows = items.len();
         let observe_started = Instant::now();
         // Disk observation (hardlink count, unknown sizes) runs after the store lock is released.
-        for (item, (path, is_strm, saved_mode, size_bytes)) in items.iter_mut().zip(pending) {
-            let meta = (!is_strm || size_bytes.is_none())
-                .then(|| files.metadata(&path).ok())
+        for (item, obs) in items.iter_mut().zip(pending) {
+            let meta = (!obs.is_strm || obs.size_bytes.is_none())
+                .then(|| files.metadata(&obs.path).ok())
                 .flatten();
-            let file_size = size_bytes
+            let file_size = obs
+                .size_bytes
                 .or_else(|| meta.as_ref().map(|m| m.len()))
                 .unwrap_or(0);
             item["transfer_mode"] = json!(transfer_mode_label(
-                is_strm,
+                obs.is_strm,
                 meta.as_ref(),
-                saved_mode,
-                &global_transfer_mode
+                obs.source_path.as_deref(),
+                obs.saved_mode,
+                &global_transfer_mode,
+                files.as_ref(),
             ));
             item["file_size"] = json!(file_size);
         }
@@ -60,7 +63,13 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
     }
 }
 
-type LedgerFileObservation = (std::path::PathBuf, bool, Option<String>, Option<u64>);
+struct LedgerFileObservation {
+    path: std::path::PathBuf,
+    source_path: Option<std::path::PathBuf>,
+    is_strm: bool,
+    saved_mode: Option<String>,
+    size_bytes: Option<u64>,
+}
 
 fn capture_ledger(
     store: &crate::Store,
@@ -108,12 +117,13 @@ fn capture_ledger(
             .source_path
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
-        pending.push((
-            file.path.clone(),
+        pending.push(LedgerFileObservation {
+            path: file.path.clone(),
+            source_path: file.source_path.clone(),
             is_strm,
-            file.transfer_mode.clone(),
-            file.size_bytes,
-        ));
+            saved_mode: file.transfer_mode.clone(),
+            size_bytes: file.size_bytes,
+        });
         items.push(json!({
             "id": file.file_id.to_string(),
             "media_id": file.media_id.to_string(),
@@ -139,8 +149,10 @@ fn capture_ledger(
 fn transfer_mode_label(
     is_strm: bool,
     meta: Option<&std::fs::Metadata>,
+    source_path: Option<&std::path::Path>,
     saved_mode: Option<String>,
     global_transfer_mode: &str,
+    files: &dyn crate::file_stat_read::FileStatRead,
 ) -> String {
     #[cfg(unix)]
     let is_hardlink = {
@@ -153,12 +165,23 @@ fn transfer_mode_label(
         saved_mode.as_deref() == Some("hardlink") || global_transfer_mode == "hardlink"
     };
     if is_strm {
-        "strm".to_string()
-    } else if is_hardlink {
-        "hardlink".to_string()
-    } else {
-        saved_mode.unwrap_or_else(|| global_transfer_mode.to_string())
+        return "strm".to_string();
     }
+    if is_hardlink {
+        return "hardlink".to_string();
+    }
+    let configured = saved_mode.unwrap_or_else(|| global_transfer_mode.to_string());
+    #[cfg(unix)]
+    if meta.is_some() && configured == "hardlink" {
+        return "copy".to_string();
+    }
+    if meta.is_some()
+        && configured == "move"
+        && source_path.is_some_and(|src| files.symlink_metadata(src).is_ok())
+    {
+        return "copy".to_string();
+    }
+    configured
 }
 
 #[derive(serde::Deserialize)]

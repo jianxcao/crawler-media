@@ -4,12 +4,17 @@ use std::sync::Arc;
 use crate::catalog::ArtworkCandidate;
 use domain::Media;
 
-use crate::http_agent;
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 
+mod policy;
+pub(crate) use policy::allowed_fanart_url;
+
 pub trait PosterFetch: Send + Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>, String>;
+    fn get_fanart(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.get(url)
+    }
     fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::write(path, bytes)
     }
@@ -17,14 +22,24 @@ pub trait PosterFetch: Send + Sync {
 
 pub struct HttpPoster;
 
+impl HttpPoster {
+    #[cfg(test)]
+    pub(crate) fn get_with_policy(
+        &self,
+        url: &str,
+        allowed: impl Fn(&str) -> bool,
+    ) -> Result<Vec<u8>, String> {
+        policy::fetch_with_policy(url, allowed)
+    }
+}
+
 impl PosterFetch for HttpPoster {
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
-        let url = url::Url::parse(url).map_err(|error| error.to_string())?;
-        http_agent::call_url(url.as_str(), |agent| agent.get(url.as_str()).call())
-            .map_err(|err| err.to_string())?
-            .into_body()
-            .read_to_vec()
-            .map_err(|err| err.to_string())
+        policy::fetch_with_policy(url, crate::http::image_proxy::allowed_url)
+    }
+
+    fn get_fanart(&self, url: &str) -> Result<Vec<u8>, String> {
+        policy::fetch_with_policy(url, allowed_fanart_url)
     }
 }
 

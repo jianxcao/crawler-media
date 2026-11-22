@@ -44,12 +44,19 @@ pub(super) fn resolve_target(
                 file_id: entry.file.file_id,
                 revision: entry.file.version.revision,
             };
-            let resolved =
-                provider.bounded_reader(&[store::Db::Library, store::Db::App], |store| {
-                    store
-                        .resolve_playback(user_id, &item, Some(&source), None)
-                        .map_err(|error| error.to_string())
-                })?;
+            let resolved = provider.bounded_reader(
+                &[store::Db::Library, store::Db::App],
+                |store| match store.resolve_playback(user_id, &item, Some(&source), None) {
+                    Ok(resolved) => Ok(Some(resolved)),
+                    Err(store::StoreError::Missing(_) | store::StoreError::Protected(_)) => {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error.to_string()),
+                },
+            )?;
+            let Some(resolved) = resolved else {
+                return Ok(None);
+            };
             (resolved.target.file.file_id == source.file_id
                 && resolved.target.file.version.revision == source.revision)
                 .then_some(resolved.duration_ms)
@@ -92,20 +99,16 @@ pub(super) fn report_event(
     };
     let source = identity.media_source_id.as_ref().or(bound_source.as_ref());
     let Some(target) = resolve_target(provider, user_id, id, source)? else {
-        if source.is_some() {
-            return Ok(());
-        }
-        return Err(format!(
-            "Jellyfin playback item {id} is missing or not visible"
-        ));
+        return Ok(());
     };
     let now_ms = provider.state.playback_clock.now_ms();
-    provider.bounded_store(|store| {
+    provider.bounded_write_store(|store| {
     if store
         .is_device_revoked(user_id, &client.device_id)
         .map_err(|error| error.to_string())?
     {
-        return Err("device revoked".into());
+        tracing::warn!(%user_id, device_id = %client.device_id, "Revoked device Jellyfin playback event ignored");
+        return Ok(());
     }
     let request = ProtocolEvent {
         user_id,
@@ -127,6 +130,9 @@ pub(super) fn report_event(
         }
         Ok(store::playback::EventOutcome::IgnoredStale) => {
             tracing::warn!(session_id=%bound.session_id,"Stale Jellyfin Playback event ignored");
+        }
+        Err(store::StoreError::Protected(error) | store::StoreError::Missing(error)) => {
+            tracing::warn!(session_id=%bound.session_id, %error, "Jellyfin Playback event ignored due to protected/missing target");
         }
         Err(error) => {
             tracing::error!(session_id=%bound.session_id,%error,"Jellyfin Playback event failed");
@@ -197,17 +203,22 @@ impl ProtocolEvent<'_> {
         } else if let Some(id) = self.reusable_session(store, prior.as_ref())? {
             id
         } else if self.event == PlaybackEvent::Playing {
-            store
-                .issue_play_session(
-                    self.user_id,
-                    &self.client.device_id,
-                    self.target.file.file_id,
-                    self.target.media.id,
-                    domain::UnitKey::new(self.target.season, self.target.episode),
-                    &self.target.file.version,
-                    self.now,
-                )
-                .map_err(|error| error.to_string())?
+            match store.issue_play_session(
+                self.user_id,
+                &self.client.device_id,
+                self.target.file.file_id,
+                self.target.media.id,
+                domain::UnitKey::new(self.target.season, self.target.episode),
+                &self.target.file.version,
+                self.now,
+            ) {
+                Ok(id) => id,
+                Err(store::StoreError::Protected(error) | store::StoreError::Missing(error)) => {
+                    tracing::warn!(%error, user_id = %self.user_id, device_id = %self.client.device_id, "Jellyfin playback session issuance ignored");
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         } else {
             return Ok(None);
         };

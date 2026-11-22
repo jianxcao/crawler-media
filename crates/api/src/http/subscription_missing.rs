@@ -28,7 +28,37 @@ fn missing_search_blocking(state: ApiState, user_id: domain::UserId, id: String)
         Err(response) => return response,
     };
     let guard = state.subscribe_guard(initial.id);
+    let (subscribe, media) = {
+        let _guard = guard.lock();
+        if state.subscribe_is_deleting(initial.id) {
+            return err(
+                StatusCode::CONFLICT,
+                "subscription.deleting",
+                "订阅正在删除，无法搜索缺失资源",
+            );
+        }
+        let pair = match super::subscriptions::resolve_subscribe(&state, &id, user_id) {
+            Ok(pair) => pair,
+            Err(response) => return response,
+        };
+        if pair.0.tracking_state == "paused" {
+            return err(
+                StatusCode::CONFLICT,
+                "subscription.paused",
+                "订阅已暂停，无法搜索缺失资源",
+            );
+        }
+        pair
+    };
+    let cap = crate::air_gate::aired_cap(&state, &subscribe, &media);
     let _guard = guard.lock();
+    if state.subscribe_is_deleting(subscribe.id) {
+        return err(
+            StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除，无法搜索缺失资源",
+        );
+    }
     let (subscribe, media) = match super::subscriptions::resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,
@@ -40,15 +70,16 @@ fn missing_search_blocking(state: ApiState, user_id: domain::UserId, id: String)
             "订阅已暂停，无法搜索缺失资源",
         );
     }
-    queue_missing_search(&state, &subscribe, &media)
+    queue_missing_search(&state, &subscribe, &media, cap)
 }
 
 fn queue_missing_search(
     state: &ApiState,
     subscribe: &domain::Subscribe,
     media: &domain::Media,
+    cap: Option<u32>,
 ) -> Response {
-    let missing = match missing_units(state, subscribe, media) {
+    let missing = match missing_units(state, subscribe, media, cap) {
         Ok(units) => units,
         Err(error) => {
             return err(
@@ -106,8 +137,8 @@ fn missing_units(
     state: &ApiState,
     subscribe: &domain::Subscribe,
     media: &domain::Media,
+    cap: Option<u32>,
 ) -> Result<Vec<Unit>, crate::store::StoreError> {
-    let cap = crate::air_gate::aired_cap(state, subscribe, media);
     let store = state.store.as_ref();
     let facts = store.load_subscribe_facts(subscribe.id)?;
     let pending = store.load_pending(subscribe.id)?;

@@ -26,6 +26,15 @@ struct Fixture {
 fn seed(episodes: &[(i32, i32)]) -> (tempfile::TempDir, Fixture) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
+    let user: UserId = USER.parse().unwrap();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("assertions-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let media_id: MediaId = MEDIA.parse().unwrap();
     store
         .insert_media(&Media {

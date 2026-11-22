@@ -344,12 +344,14 @@ fn all_file_cleanup_seams_preserve_retained_media_then_final_release_purges() {
                 store
                     .set_removal_state(&removal.operation_id, "cleaning", None)
                     .unwrap();
-                while store
-                    .clean_library_removal(&removal.operation_id)
-                    .unwrap()
-                    .state
-                    != "succeeded"
-                {}
+                assert!(
+                    (0..10_000).any(|_| store
+                        .clean_library_removal(&removal.operation_id)
+                        .unwrap()
+                        .state
+                        == "succeeded"),
+                    "library removal did not succeed within 10_000 steps"
+                );
             }
         }
         assert!(

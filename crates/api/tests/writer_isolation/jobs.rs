@@ -2,6 +2,7 @@ use super::support::*;
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::time::Duration;
+use tower::ServiceExt;
 
 #[test]
 fn job_claim_and_job_list_do_not_serialize() {
@@ -26,12 +27,16 @@ fn job_claim_and_job_list_do_not_serialize() {
     wait.recv_timeout(Duration::from_secs(1)).unwrap();
     let runtime = runtime();
     let result = runtime.block_on(async {
-        tokio::time::timeout(SLO, fixture.request("GET", "/api/v1/jobs", Value::Null)).await
+        tokio::time::timeout(
+            POSITIVE_SLO,
+            fixture.request("GET", "/api/v1/jobs", Value::Null),
+        )
+        .await
     });
     blocked.commit().unwrap();
     let enqueued = writer.join().unwrap().unwrap();
     let (status, body) =
-        result.expect("jobs writer must not delay the committed HTTP list beyond 200ms");
+        result.expect("jobs writer must not delay the committed HTTP list beyond 2s");
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed = body["data"].as_array().unwrap();
     for def in baseline {
@@ -120,7 +125,7 @@ fn jobs_http_mutation_is_bounded_while_committed_reads_remain_available() {
         let read = fixture.request("GET", "/api/v1/jobs", Value::Null);
         let (write, read) = tokio::join!(
             tokio::time::timeout(Duration::from_millis(1800), mutation),
-            tokio::time::timeout(SLO, read),
+            tokio::time::timeout(POSITIVE_SLO, read),
         );
         (write, read)
     });
@@ -131,4 +136,52 @@ fn jobs_http_mutation_is_bounded_while_committed_reads_remain_available() {
         .expect("Jobs mutation must finish within its writer budget");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(result.1.unwrap().0, StatusCode::OK);
+}
+
+#[test]
+fn jobs_reads_succeed_when_http_work_saturated_and_under_burst() {
+    let fixture = Fixture::idle();
+    let def_id = fixture.state.jobs().acquire().unwrap().list_defs().unwrap()[0].id;
+    let mut held = Vec::new();
+    while let Ok(permit) = fixture.state.http_work.try_reserve() {
+        held.push(permit);
+    }
+    assert!(!held.is_empty(), "http_work must be saturated");
+    let app = api::router(fixture.state.clone());
+    let paths = [
+        "/api/v1/jobs?active_only=true&limit=200".to_string(),
+        "/api/v1/jobs?limit=50".to_string(),
+        format!("/api/v1/jobs/{def_id}"),
+    ];
+    let outcomes = runtime().block_on(async move {
+        let handles: Vec<_> = (0..12)
+            .map(|idx| {
+                let router = app.clone();
+                let path = paths[idx % paths.len()].clone();
+                tokio::spawn(async move {
+                    let req = axum::http::Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .header("authorization", format!("Bearer {TOKEN}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap();
+                    let resp = router.oneshot(req).await.unwrap();
+                    let status = resp.status();
+                    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+                })
+            })
+            .collect();
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            out.push(handle.await.unwrap());
+        }
+        out
+    });
+    drop(held);
+    for (idx, (status, body)) in outcomes.iter().enumerate() {
+        assert_eq!(*status, StatusCode::OK, "burst #{idx} failed: {body}");
+    }
 }

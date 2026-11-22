@@ -502,6 +502,57 @@ impl Store {
         }
         Ok(facts)
     }
+
+    /// Remove persisted `subscribe_facts` slots in `seasons` for `subscribe_id`.
+    /// Whole-work (`season = -1`) slots are never matched by `u32` seasons.
+    pub fn delete_subscribe_facts_for_seasons(
+        &self,
+        subscribe_id: SubscribeId,
+        seasons: &[u32],
+    ) -> Result<usize, StoreError> {
+        if seasons.is_empty() {
+            return Ok(0);
+        }
+        let unique: std::collections::BTreeSet<u32> = seasons.iter().copied().collect();
+        self.with_writer(crate::Db::Subscribe, |subscribe| {
+            let tx = crate::write_tx(subscribe)?;
+            let id = subscribe_id.to_string();
+            let mut stmt =
+                tx.prepare("DELETE FROM subscribe_facts WHERE subscribe_id = ?1 AND season = ?2")?;
+            let mut deleted = 0usize;
+            for season in unique {
+                deleted += stmt.execute(params![&id, i64::from(season)])?;
+            }
+            drop(stmt);
+            tx.commit()?;
+            Ok(deleted)
+        })
+    }
+
+    /// Remove persisted `subscribe_facts` slots pointing at any path in `paths`.
+    pub fn delete_subscribe_facts_for_paths(
+        &self,
+        subscribe_id: SubscribeId,
+        paths: &[String],
+    ) -> Result<usize, StoreError> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let unique: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
+        self.with_writer(crate::Db::Subscribe, |subscribe| {
+            let tx = crate::write_tx(subscribe)?;
+            let id = subscribe_id.to_string();
+            let mut stmt =
+                tx.prepare("DELETE FROM subscribe_facts WHERE subscribe_id = ?1 AND path = ?2")?;
+            let mut deleted = 0usize;
+            for path in unique {
+                deleted += stmt.execute(params![&id, path])?;
+            }
+            drop(stmt);
+            tx.commit()?;
+            Ok(deleted)
+        })
+    }
 }
 
 impl Store {

@@ -185,3 +185,80 @@ async fn invalid_scope_or_id_rejected_without_writes() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn clear_history_hides_inaccessible_library_and_returns_conflict_on_merging_media() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let (_member_id, member_token) = create_member(&app, "hist-member").await;
+    let hidden_dir = tmp.path().join("hidden-lib");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let hidden_lib = store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Hidden",
+            &[hidden_dir.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let hidden_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!(
+                "/api/v1/playback/history?scope=library&library_id={}",
+                hidden_lib.id
+            ),
+            Some(&member_token),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hidden_res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_error(hidden_res).await["code"], "library.missing");
+
+    let merge_dir_a = tmp.path().join("merge-a");
+    let merge_dir_b = tmp.path().join("merge-b");
+    let _ = seed_test_library(&app, "Merge Lib A", &merge_dir_a).await;
+    let _ = seed_test_library(&app, "Merge Lib B", &merge_dir_b).await;
+    let survivor = seed_test_ledger(&tmp, &merge_dir_a);
+    let loser = seed_test_ledger(&tmp, &merge_dir_b);
+    let admin_id = store.admin_user_id().unwrap();
+    store
+        .mutate_playback(
+            loser,
+            &store::playback::PlaybackMutation::marks(admin_id, -1, -1, Some(true), None),
+            500,
+        )
+        .unwrap();
+    store
+        .begin_media_merge(
+            &store::playback::MediaMergeRequest {
+                request_id: "00000000-0000-0000-0001-0000000000c1".into(),
+                survivor,
+                loser,
+                survivor_revision: 0,
+                loser_revision: 0,
+                refresh_targets: Default::default(),
+            },
+            1_000,
+        )
+        .unwrap();
+
+    let merge_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/playback/history?scope=item&media_item_id={loser}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(merge_res.status(), StatusCode::CONFLICT);
+    assert_eq!(json_error(merge_res).await["code"], "playback.protected");
+}

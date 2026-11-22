@@ -55,6 +55,17 @@ fn episode(store: &Store, media: MediaId, root: &std::path::Path, ep: u32) {
     .unwrap();
 }
 
+fn seed_member(store: &Store, id: UserId) {
+    store
+        .insert_user(&domain::User {
+            id,
+            login: format!("fav-{id}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+}
+
 fn favorite(store: &Store, user: UserId, media: MediaId, s: i32, e: i32, at: i64) {
     store
         .mutate_playback(
@@ -94,6 +105,7 @@ fn favorites_keep_global_unit_semantics_when_only_other_episode_is_visible() {
     episode(&store, media, &ra, 1);
     episode(&store, media, &rb, 2);
     let user = UserId::new();
+    seed_member(&store, user);
     favorite(&store, user, media, 1, 2, 10_000);
     let page = store
         .playback_favorite_page(&query(user, vec![a], 10, None))
@@ -125,6 +137,7 @@ fn favorites_keyset_pages_are_disjoint_and_complete() {
     let root = tmp.path().join("a");
     let a = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     let mut ids = Vec::new();
     for index in 0..25 {
         let media = show(&store, &format!("Favorite {index}"));
@@ -158,6 +171,7 @@ fn favorites_page_plan_has_no_scan() {
     let root = tmp.path().join("a");
     let a = library(&store, &root, "A");
     let user = UserId::new();
+    seed_member(&store, user);
     let target = show(&store, "Target");
     episode(&store, target, &root, 1);
     favorite(&store, user, target, 1, 1, 10_000);
@@ -205,6 +219,7 @@ fn favorite_global_unit_winner_lifecycle_and_unknown_timestamp() {
     let root = tmp.path().join("visible");
     let a = library(&store, &root, "Visible");
     let user = UserId::new();
+    seed_member(&store, user);
     let target = show(&store, "Logical global favorite");
     episode(&store, target, &root, 1);
     favorite(&store, user, target, 1, 1, 10_000);
@@ -276,6 +291,7 @@ fn favorite_unwatched_tiers_aggregate_visible_libraries_before_paging() {
     let a = library(&store, &root_a, "A");
     let b = library(&store, &root_b, "B");
     let user = UserId::new();
+    seed_member(&store, user);
     let unseen = show(&store, "Unseen oldest favorite");
     let partial = show(&store, "Watching middle favorite");
     let played = show(&store, "Played newest favorite");
@@ -347,6 +363,7 @@ fn favorite_position_seek_and_cursor_scope_preserve_real_window_navigation() {
     let root = tmp.path().join("visible");
     let a = library(&store, &root, "Visible");
     let user = UserId::new();
+    seed_member(&store, user);
     let mut ids = Vec::new();
     for index in 0..25 {
         let id = show(&store, &format!("Item {index}"));
@@ -407,6 +424,7 @@ fn favorite_cursor_orders_preserve_ascending_ties_and_null_years() {
     let root = tmp.path().join("visible");
     let library = library(&store, &root, "Visible");
     let user = UserId::new();
+    seed_member(&store, user);
     let mut expected = Vec::new();
     for (title, year, at) in [
         ("Bravo", None, 0),
@@ -479,6 +497,7 @@ fn favorite_continuation_skips_the_exact_total_statement() {
     let root = tmp.path().join("visible");
     let library = library(&store, &root, "Visible");
     let user = UserId::new();
+    seed_member(&store, user);
     for index in 0..5 {
         let id = show(&store, &format!("Item {index}"));
         episode(&store, id, &root, 1);

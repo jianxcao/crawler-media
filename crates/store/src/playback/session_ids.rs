@@ -63,15 +63,20 @@ impl Store {
         version: &domain::FileVersion,
         now: i64,
     ) -> Result<String, StoreError> {
-        let role = self
-            .user_role(user_id)?
-            .parse()
-            .map_err(StoreError::Invalid)?;
-        self.with_library_write(|db| {
+        match self.with_verified_actor_library_write(user_id, Some(device_id), |db| {
+            let role = db.user_role_observation(user_id)?;
             db.issue_play_session(
                 user_id, device_id, ledger_id, media_id, unit, version, now, role,
             )
-        })
+        })? {
+            crate::connections::VerifiedActorOutcome::Applied(id) => Ok(id),
+            crate::connections::VerifiedActorOutcome::InactiveUser => {
+                Err(StoreError::Protected(format!("user {user_id} is inactive")))
+            }
+            crate::connections::VerifiedActorOutcome::RevokedDevice => Err(StoreError::Protected(
+                format!("device {device_id} is revoked"),
+            )),
+        }
     }
 
     /// Retrieve binding info for a session ID given user and device.

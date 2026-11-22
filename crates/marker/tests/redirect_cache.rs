@@ -15,6 +15,7 @@ fn server(status: &'static str, location: Option<&'static str>) -> (String, Arc<
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             counter.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
@@ -77,6 +78,7 @@ fn direct_sources_reuse_the_observed_target_until_invalidation() {
     std::thread::spawn(move || {
         for (index, stream) in listener.incoming().enumerate() {
             let mut stream = stream.unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
@@ -110,6 +112,7 @@ fn rotating_targets_honor_no_store_and_short_max_age_and_invalidation() {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let n = counter.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut first_line = String::new();
@@ -143,4 +146,23 @@ fn rotating_targets_honor_no_store_and_short_max_age_and_invalidation() {
     std::thread::sleep(Duration::from_millis(1100));
     let short_b = cache.resolve(&short_url);
     assert_ne!(short_a, short_b, "must re-resolve once max-age=1 expires");
+}
+
+#[test]
+fn signed_expiry_overflow_values_do_not_panic() {
+    let amz_target = "http://cdn.invalid/video.mkv?X-Amz-Date=20261121T000000Z&X-Amz-Expires=18446744073709551615";
+    let (amz_url, amz_hits) = server("302 Found", Some(amz_target));
+    let cache = RedirectCache::new(Duration::from_secs(60));
+    assert_eq!(cache.resolve(&amz_url), amz_target);
+    assert_eq!(cache.resolve(&amz_url), amz_target);
+    assert_eq!(amz_hits.load(Ordering::SeqCst), 1);
+
+    let unix_target = "http://cdn.invalid/video.mkv?Expires=18446744073709551615";
+    let (unix_url, unix_hits) = server("302 Found", Some(unix_target));
+    assert_eq!(cache.resolve(&unix_url), unix_target);
+    assert_eq!(cache.resolve(&unix_url), unix_target);
+    assert_eq!(unix_hits.load(Ordering::SeqCst), 1);
+
+    let max_cache = RedirectCache::new(Duration::MAX);
+    assert_eq!(max_cache.resolve(&unix_url), unix_target);
 }

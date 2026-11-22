@@ -99,7 +99,7 @@ fn assert_pause_preserved(after_completed: bool) {
         let transfer = tokio::task::spawn_blocking(move || api::worker::transfer_one(&state, id));
         gate.entered().await;
         let mutation = tokio::time::timeout(
-            SLO,
+            POSITIVE_SLO,
             fixture.request(
                 "PATCH",
                 &format!("/api/v1/subscriptions/{id}"),

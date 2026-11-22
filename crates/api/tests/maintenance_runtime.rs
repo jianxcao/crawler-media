@@ -330,11 +330,11 @@ fn cancelled_retention_does_not_start_another_batch() {
 
 #[test]
 fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
-    use domain::{MediaId, UserId};
+    use domain::MediaId;
     use store::SessionRow;
 
     let (tmp, state) = temp_state(Arc::new(SqliteExecutor));
-    let user = UserId::new();
+    let user = support::seed_active_member(state.store().as_ref(), "retention-runtime");
     let media = MediaId::new();
     let now = unix_now();
     let cutoff = now - DAY;

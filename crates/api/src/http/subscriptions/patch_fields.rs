@@ -182,11 +182,14 @@ fn update_tracking_fields(
     subscribe: &mut Subscribe,
     body: &PatchSubscriptionInput,
 ) -> Result<(), Response> {
-    if let Some(state) = body
-        .tracking_state
-        .as_deref()
-        .filter(|state| *state == "active" || *state == "paused")
-    {
+    if let Some(state) = body.tracking_state.as_deref() {
+        if state != "active" && state != "paused" {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "subscription.invalid",
+                "tracking_state 必须是 active 或 paused",
+            ));
+        }
         subscribe.tracking_state = state.to_string();
     }
     if let Some(follow) = body.follow_future {

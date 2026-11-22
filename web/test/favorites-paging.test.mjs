@@ -180,3 +180,33 @@ test("favorite gallery failure stays retryable after a concurrent wall succeeds"
   state = favoriteFailures(state, { channel: "gallery", failed: false });
   assert.deepEqual(state, { wall: false, gallery: false });
 });
+
+test("favorite window refresh terminates on empty page or repeated cursor", async () => {
+  let emptyPageCalls = 0;
+  const emptyWin = await windowModel(
+    async (options) => {
+      if (!options.after) return page(["0", "1"], 10, "c2");
+      emptyPageCalls += 1;
+      assert.ok(emptyPageCalls <= 3, "must not loop on empty page with non-null next_cursor");
+      return { items: [], total: null, next_cursor: `c-${emptyPageCalls + 2}` };
+    },
+    async (options) => ({ start: options.start, after: "c1" }),
+  );
+  const emptyResult = await emptyWin.refresh(2, 10, 2, scope);
+  assert.deepEqual(emptyResult.items, []);
+  assert.equal(emptyPageCalls, 1);
+
+  let repeatCalls = 0;
+  const repeatWin = await windowModel(
+    async (options) => {
+      if (!options.after) return page(["0", "1"], 10, "c2");
+      repeatCalls += 1;
+      assert.ok(repeatCalls <= 3, "must not loop on repeated cursor");
+      return { items: [{ media_item_id: `x-${repeatCalls}` }], total: null, next_cursor: "c2" };
+    },
+    async (options) => ({ start: options.start, after: "c2" }),
+  );
+  const repeatResult = await repeatWin.refresh(2, 10, 2, scope);
+  assert.equal(repeatResult.items.length, 2);
+  assert.equal(repeatCalls, 2);
+});

@@ -87,7 +87,7 @@ impl ProbeManager {
             let store = self.store.as_ref();
             super::policy::assess_probe_need(
                 &store,
-                &row.file,
+                &row,
                 ProbeRequestOrigin::BackgroundRetry,
                 now_ms,
                 source_version,

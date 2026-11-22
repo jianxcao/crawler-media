@@ -30,6 +30,8 @@ export interface ScrapeSetting {
   fanart_language?: string[];
   /** 声纹识别单集采样时长（秒），空 = 跟随默认 180（3 分钟）。 */
   fingerprint_duration_secs?: number | null;
+  /** 声纹采样模式："full_window" | "adaptive"，空 = 跟随默认 "full_window"。 */
+  fingerprint_sampling_mode?: "full_window" | "adaptive" | "" | null;
 }
 
 export interface EffectiveScrapeConfig {
@@ -54,6 +56,7 @@ export interface EffectiveScrapeConfig {
   theintrodb_api_key: string | null;
   fanart_configured: boolean;
   fingerprint_duration_secs: number;
+  fingerprint_sampling_mode: "full_window" | "adaptive" | string;
 }
 
 export interface ScrapeConfig {
@@ -90,6 +93,7 @@ export const SCRAPE_DEFAULTS: ScrapeSetting = {
   fanart_api_key: null,
   fanart_language: [],
   fingerprint_duration_secs: null,
+  fingerprint_sampling_mode: null,
 };
 
 export async function getScrapeConfig(): Promise<ScrapeConfig> {

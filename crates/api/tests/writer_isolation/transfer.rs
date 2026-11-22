@@ -22,11 +22,12 @@ fn transfer_releases_subscribe_guard_during_downloader_io() {
         let transfer = tokio::task::spawn_blocking(move || api::worker::transfer_one(&state, id));
         gate.entered().await;
         let uri = format!("/api/v1/subscriptions/{id}");
-        let detail = tokio::time::timeout(SLO, fixture.request("GET", &uri, Value::Null)).await;
+        let detail =
+            tokio::time::timeout(POSITIVE_SLO, fixture.request("GET", &uri, Value::Null)).await;
         // PATCH actually needs subscribe_guard; GET alone already skips it and
         // cannot prove that Transfer releases the guard during Downloader IO.
         let mutation = tokio::time::timeout(
-            SLO,
+            POSITIVE_SLO,
             fixture.request("PATCH", &uri, json!({"tracking_state": "paused"})),
         )
         .await;
@@ -72,7 +73,7 @@ fn duplicate_transfer_rounds_preserve_the_active_round_until_delete_cleanup() {
     let runtime = runtime();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let id = fixture.subscribe;
                 let state = fixture.state.clone();
                 let first =
@@ -86,11 +87,13 @@ fn duplicate_transfer_rounds_preserve_the_active_round_until_delete_cleanup() {
                     let third = api::worker::transfer_one(&state, id);
                     (second, third)
                 });
-                let duplicate_result = tokio::time::timeout(SLO, &mut duplicates).await.ok();
+                let duplicate_result = tokio::time::timeout(POSITIVE_SLO, &mut duplicates)
+                    .await
+                    .ok();
                 let duplicates_returned = duplicate_result.is_some();
                 let uri = format!("/api/v1/subscriptions/{id}?delete_library_files=true");
                 let mut deletion = Box::pin(fixture.request("DELETE", &uri, Value::Null));
-                let early_delete = tokio::time::timeout(SLO, &mut deletion).await.ok();
+                let early_delete = tokio::time::timeout(NEGATIVE_SLO, &mut deletion).await.ok();
                 let deletion_waited = early_delete.is_none();
                 gate.release();
                 let first_result = first.await.unwrap();

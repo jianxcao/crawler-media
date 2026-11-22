@@ -189,12 +189,23 @@ export function useWallWindow({
         let itemsInWindow = first.items;
         let next = first.next_cursor;
         const chain: (string | null)[] = [cursor];
+        const seenCursors = new Set<string>();
+        if (cursor !== null) seenCursors.add(cursor);
+        if (first.items.length === 0 || (next !== null && seenCursors.has(next))) {
+          next = null;
+        }
         while (next !== null && target - bucketStart >= itemsInWindow.length) {
           if (seq !== reloadSeq.current) return;
+          seenCursors.add(next);
           chain.push(next);
           const page = await fetchAt(next);
           itemsInWindow = [...itemsInWindow, ...page.items];
-          next = page.next_cursor;
+          const nextCursor = page.next_cursor;
+          if (page.items.length === 0 || (nextCursor !== null && seenCursors.has(nextCursor))) {
+            next = null;
+            break;
+          }
+          next = nextCursor;
         }
         chain.push(next);
         if (seq !== reloadSeq.current) return;

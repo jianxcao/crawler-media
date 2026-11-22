@@ -62,6 +62,12 @@ impl Delivery {
             .add_with_options(torrent, url, None)
             .map_err(|e| error(e).into_response())
     }
+
+    pub fn rollback(&self, torrent: &Torrent) {
+        if let Err(error) = self.client.remove_owned(torrent, false) {
+            tracing::error!(%error, torrent = %torrent.title, "Failed to roll back manual admit delivery");
+        }
+    }
 }
 
 fn error(error: impl ToString) -> ApiError {

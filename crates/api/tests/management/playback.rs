@@ -182,6 +182,42 @@ pub(super) async fn get_data(app: &axum::Router, uri: &str) -> Value {
     body["data"].clone()
 }
 
+fn seed_tv_episode_for_marks(tmp: &tempfile::TempDir, title: &str) -> String {
+    let tv_id = domain::MediaId::new();
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    store
+        .insert_media(&domain::Media {
+            id: tv_id,
+            kind: domain::MediaKind::Tv,
+            title: title.into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let tv_dir = tmp.path().join("data/library/tv");
+    std::fs::create_dir_all(&tv_dir).unwrap();
+    let ep_path = tv_dir.join("Cascade.Show.S01E01.mkv");
+    std::fs::write(&ep_path, b"cascade").unwrap();
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: tv_id,
+            path: ep_path.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tv_id.to_string()
+}
+
 #[tokio::test]
 async fn marks_cascade_and_favorites_list() {
     let tmp = tempfile::tempdir().unwrap();
@@ -237,25 +273,8 @@ async fn marks_cascade_and_favorites_list() {
     assert_eq!(marks["data"]["is_favorite"], true);
 
     // If an episode is favorited, query for whole show must also reflect is_favorite = true
-    let tv_id = uuid::Uuid::new_v4().to_string();
-    // 新模型的 unit 写入有真实 media 外键：先登记一个 TV 媒体身份。
-    api::Store::open(tmp.path().join("data"))
-        .unwrap()
-        .insert_media(&domain::Media {
-            id: tv_id.parse().unwrap(),
-            kind: domain::MediaKind::Tv,
-            title: "Cascade Show".into(),
-            year: None,
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: None,
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        })
-        .unwrap();
-    let _ = post_async(
+    let tv_id = seed_tv_episode_for_marks(&tmp, "Cascade Show");
+    let tv_marked = post_async(
         &app,
         "/api/v1/playback/marks",
         json!({
@@ -266,6 +285,7 @@ async fn marks_cascade_and_favorites_list() {
         }),
     )
     .await;
+    assert_eq!(tv_marked.status(), StatusCode::OK);
 
     let tv_whole_marks = json_body(
         app.clone()
@@ -281,20 +301,16 @@ async fn marks_cascade_and_favorites_list() {
     .await;
     assert_eq!(tv_whole_marks["data"]["is_favorite"], true);
 
-    let favorites = json_body(
-        app.clone()
-            .oneshot(request(
-                "GET",
-                "/api/v1/playback/favorites",
-                Some("management-secret"),
-                Value::Null,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(favorites["data"]["total"], 1);
-    assert_eq!(favorites["data"]["items"][0]["title"], "The Matrix");
+    let favorites = get_data(&app, "/api/v1/playback/favorites").await;
+    assert_eq!(favorites["total"], 2);
+    let titles: Vec<&str> = favorites["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["title"].as_str())
+        .collect();
+    assert!(titles.contains(&"The Matrix"), "{titles:?}");
+    assert!(titles.contains(&"Cascade Show"), "{titles:?}");
 }
 
 #[tokio::test]

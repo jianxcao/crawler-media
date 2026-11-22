@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import dayjs from "dayjs";
 
@@ -41,24 +41,26 @@ export function SystemLogsSection() {
 
   const parentRef = useRef<HTMLDivElement>(null);
   const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const confirm = useConfirm();
 
   // Load initial logs
-  const loadLogs = async () => {
+  const loadLogs = useCallback(async () => {
     try {
       setLoading(true);
       const res = await listSystemLogs({ limit: 3000 });
       setLogs(res.entries || []);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "加载系统日志失败");
+      toastRef.current.error(err instanceof Error ? err.message : "加载系统日志失败");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadLogs();
-  }, []);
+    void loadLogs();
+  }, [loadLogs]);
 
   // SSE real-time log subscription
   useEffect(() => {
@@ -113,8 +115,8 @@ export function SystemLogsSection() {
   const handleClear = async () => {
     const ok = await confirm({
       title: "清空日志",
-      content: "确定要清空当前的内存运行日志吗？这不会删除历史磁盘日志文件。",
-      confirmText: "清空",
+      description: "确定要清空当前的内存运行日志吗？这不会删除历史磁盘日志文件。",
+      confirmLabel: "清空",
       tone: "danger",
     });
     if (!ok) return;

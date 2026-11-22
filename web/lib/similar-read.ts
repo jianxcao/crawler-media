@@ -32,6 +32,7 @@ export async function waitForSimilar(
     options.signal?.throwIfAborted();
     if (result.state === "ready") return result.items;
     options.onPending?.();
-    await (options.pause ?? pause)(Math.min(5000, Math.max(100, result.retry_after_ms)), options.signal);
+    const retryAfterMs = Number.isFinite(result.retry_after_ms) ? result.retry_after_ms : 1000;
+    await (options.pause ?? pause)(Math.min(5000, Math.max(100, retryAfterMs)), options.signal);
   }
 }

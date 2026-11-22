@@ -120,24 +120,46 @@ fn load_episode_snapshot(
     let mut coverage = Vec::new();
     let mut has_file = false;
     for library in visible.ids() {
-        has_file |= store
-            .has_file_in_library(library, media.id)
-            .map_err(episode_store_error)?;
-        let rows = match season {
-            Some(season) => store.file_coverage_in_library_season(
-                library,
-                media.id,
-                season,
-                store::FileReadScope::Playable,
-            ),
-            None => store.file_coverage_in_library(
-                library,
-                Some(media.id),
-                store::FileReadScope::Playable,
-            ),
+        match season {
+            Some(season) => {
+                let has_published = !store
+                    .file_coverage_in_library(
+                        library,
+                        Some(media.id),
+                        store::FileReadScope::Published,
+                    )
+                    .map_err(episode_store_error)?
+                    .is_empty();
+                has_file |= has_published;
+                if has_published {
+                    coverage.extend(
+                        store
+                            .file_coverage_in_library_season(
+                                library,
+                                media.id,
+                                season,
+                                store::FileReadScope::Playable,
+                            )
+                            .map_err(episode_store_error)?,
+                    );
+                }
+            }
+            None => {
+                let published = store
+                    .file_coverage_in_library(
+                        library,
+                        Some(media.id),
+                        store::FileReadScope::Published,
+                    )
+                    .map_err(episode_store_error)?;
+                has_file |= !published.is_empty();
+                coverage.extend(
+                    published
+                        .into_iter()
+                        .filter(|row| row.file.presence == domain::FilePresence::Present),
+                );
+            }
         }
-        .map_err(episode_store_error)?;
-        coverage.extend(rows);
     }
     if !has_file {
         return Err(missing());

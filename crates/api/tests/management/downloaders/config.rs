@@ -167,3 +167,50 @@ async fn downloader_enabled_flag_round_trips_through_patch() {
     assert_eq!(response.status(), StatusCode::OK, "{response:?}");
     assert_eq!(json_data(response).await["enabled"], false);
 }
+
+#[tokio::test]
+async fn patch_downloader_rejects_invalid_kind_without_saving() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_dl(
+        &app,
+        json!({
+            "name": "qb-a",
+            "kind": "qbittorrent",
+            "url": "http://qb-a:8080",
+            "username": "admin",
+            "password": "secret-a",
+            "is_default": true
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    for bad_kind in ["aria2", "   "] {
+        let resp = app
+            .clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/downloaders/{id}"),
+                Some("management-secret"),
+                json!({ "kind": bad_kind }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "kind={bad_kind}");
+        assert_eq!(json_error(resp).await["code"], "downloader.invalid");
+    }
+
+    let detail = json_data(
+        app.oneshot(request(
+            "GET",
+            &format!("/api/v1/downloaders/{id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["kind"], "qbittorrent");
+}

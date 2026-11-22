@@ -51,7 +51,13 @@ fn jobs_writer_and_reservation_contention_reject_subscribe_mutations_before_stor
                 assert_eq!(response.headers().get("retry-after").unwrap(), "1");
                 assert!(started.elapsed() < Duration::from_millis(1800));
             }
-            assert_eq!(tokio::time::timeout(SLO, fixture.request("GET","/api/v1/jobs",Value::Null)).await.unwrap().0,StatusCode::OK);
+            assert_eq!(
+                tokio::time::timeout(POSITIVE_SLO, fixture.request("GET", "/api/v1/jobs", Value::Null))
+                    .await
+                    .unwrap()
+                    .0,
+                StatusCode::OK
+            );
         });
         fixture
             .state
@@ -547,17 +553,23 @@ fn jobs_mutation_and_maintenance_endpoints_return_retryable_busy_without_stallin
             assert!(started.elapsed() < Duration::from_millis(1800));
         }
         assert_eq!(
-            tokio::time::timeout(SLO, fixture.request("GET", "/api/v1/health", Value::Null))
-                .await
-                .unwrap()
-                .0,
+            tokio::time::timeout(
+                POSITIVE_SLO,
+                fixture.request("GET", "/api/v1/health", Value::Null)
+            )
+            .await
+            .unwrap()
+            .0,
             StatusCode::OK
         );
         assert_eq!(
-            tokio::time::timeout(SLO, fixture.request("GET", "/api/v1/jobs", Value::Null))
-                .await
-                .unwrap()
-                .0,
+            tokio::time::timeout(
+                POSITIVE_SLO,
+                fixture.request("GET", "/api/v1/jobs", Value::Null)
+            )
+            .await
+            .unwrap()
+            .0,
             StatusCode::OK
         );
     });

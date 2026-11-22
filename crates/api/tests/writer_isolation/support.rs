@@ -15,7 +15,8 @@ use std::time::Duration;
 use tower::ServiceExt;
 
 pub const TOKEN: &str = "writer-isolation-fixture";
-pub const SLO: Duration = Duration::from_millis(200);
+pub const POSITIVE_SLO: Duration = Duration::from_secs(2);
+pub const NEGATIVE_SLO: Duration = Duration::from_millis(200);
 pub struct Offline;
 impl Fetcher for Offline {
     fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
@@ -105,6 +106,7 @@ impl Downloader for GatedDownloader {
 pub struct Fixture {
     pub temp: tempfile::TempDir,
     pub state: ApiState,
+    router: std::sync::OnceLock<axum::Router>,
     pub media: MediaId,
     pub subscribe: SubscribeId,
     pub user: domain::UserId,
@@ -204,11 +206,17 @@ impl Fixture {
         Self {
             temp,
             state,
+            router: std::sync::OnceLock::new(),
             media: media.id,
             subscribe: subscribe.id,
             user,
             root,
         }
+    }
+    pub fn router(&self) -> axum::Router {
+        self.router
+            .get_or_init(|| api::router(self.state.clone()))
+            .clone()
     }
     pub fn idle() -> Self {
         Self::new(Arc::new(IdleDownloader))
@@ -246,7 +254,8 @@ impl Fixture {
             .unwrap();
     }
     pub async fn request(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = api::router(self.state.clone())
+        let response = self
+            .router()
             .oneshot(
                 Request::builder()
                     .method(method)

@@ -77,6 +77,7 @@ fn failed_movie_mark_preserves_whole_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    support::seed_member(&store, user);
     let media = MediaId::new();
     store
         .insert_media(&domain::Media {
@@ -211,6 +212,7 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let media = MediaId::new();
     insert_movie(&store, media);
     support::publish_file(&store, &tmp.path().join("library"), media, "cascade");
@@ -404,6 +406,7 @@ fn only_admin_end_records_admin_ended_in_playback_log() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
+    support::seed_member(&store, user);
     let (media, file) =
         support::seed_published_file(&store, &tmp.path().join("library"), "admin-end");
 

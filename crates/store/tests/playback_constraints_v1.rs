@@ -1,5 +1,8 @@
-use domain::{Media, MediaId, MediaKind, UserId};
+use domain::{
+    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, User, UserId, UserRole,
+};
 use store::Store;
+use store::test_support::FixtureFile;
 
 #[test]
 fn upsert_unit_and_set_unit_marks_satisfies_schema_check_constraints() {
@@ -7,6 +10,14 @@ fn upsert_unit_and_set_unit_marks_satisfies_schema_check_constraints() {
     let store = Store::open(tmp.path()).unwrap();
 
     let user_id = UserId::new();
+    store
+        .insert_user(&User {
+            id: user_id,
+            login: format!("c-{user_id}"),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
     let media_id = MediaId::new();
 
     let m = Media {
@@ -23,6 +34,36 @@ fn upsert_unit_and_set_unit_marks_satisfies_schema_check_constraints() {
         aliases: vec![],
     };
     store.insert_media(&m).unwrap();
+    let root = tmp.path().join("tv");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "TV",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store::test_support::publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id,
+            path: root.join("S01E01.mkv").display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 1. Favorite only episode (no played assertion, position 0) -> R01-A trigger
     store

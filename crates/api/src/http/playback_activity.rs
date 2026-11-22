@@ -288,6 +288,77 @@ pub(crate) async fn devices(
     }
 }
 
+fn ensure_device_revoked_in_app(
+    store: &crate::Store,
+    target_user: domain::UserId,
+    device_id: &str,
+) -> Result<(), Response> {
+    let already_revoked = match store.is_device_revoked(target_user, device_id) {
+        Ok(revoked) => revoked,
+        Err(
+            store::StoreError::WriteBusy
+            | store::StoreError::ReadBusy
+            | store::StoreError::ReadClosed
+            | store::StoreError::ReadDeadline
+            | store::StoreError::ReadCancelled,
+        ) => return Err(crate::http::store_wait::busy_response()),
+        Err(error) => {
+            tracing::error!(%error, %target_user, device_id, "Playback device revocation lookup failed");
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "查询设备状态失败",
+            ));
+        }
+    };
+    if already_revoked {
+        return Ok(());
+    }
+    match store.device_is_revocable(target_user, device_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(%target_user, device_id, "Playback device credential revocation unsupported");
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "playback.unsupported",
+                "该设备仅使用系统 CLI 凭据或尚无已绑定的会话凭据，不能安全注销，仅可结束当前播放",
+            ));
+        }
+        Err(
+            store::StoreError::WriteBusy
+            | store::StoreError::ReadBusy
+            | store::StoreError::ReadClosed
+            | store::StoreError::ReadDeadline
+            | store::StoreError::ReadCancelled,
+        ) => return Err(crate::http::store_wait::busy_response()),
+        Err(error) => {
+            tracing::error!(%error, %target_user, device_id, "Playback device identity lookup failed");
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "查询设备状态失败",
+            ));
+        }
+    }
+    store
+        .revoke_device(target_user, device_id)
+        .map_err(|error| match error {
+            store::StoreError::Protected(message) => {
+                tracing::warn!(%message, %target_user, device_id, "撤销设备凭据不受支持");
+                err(StatusCode::BAD_REQUEST, "playback.unsupported", &message)
+            }
+            store::StoreError::WriteBusy => crate::http::store_wait::busy_response(),
+            other => {
+                tracing::error!(error = %other, %target_user, device_id, "撤销设备凭据失败");
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    "注销设备失败，请稍后重试",
+                )
+            }
+        })
+}
+
 /// DELETE /playback/devices/{device_id}?user_id=... — revoke one user's device:
 /// end its session and block protocol events/streams. Web supports ending only.
 pub(crate) async fn revoke_device(
@@ -302,40 +373,25 @@ pub(crate) async fn revoke_device(
             Ok(target_user) => target_user,
             Err(response) => return response,
         };
-        match store.device_is_revocable(target_user, &device_id) {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::error!(%target_user, device_id, "Playback device credential revocation unsupported");
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "playback.unsupported",
-                    "该设备仅使用系统 CLI 凭据或尚无已绑定的会话凭据，不能安全注销，仅可结束当前播放",
-                );
-            }
-            Err(error) => {
-                tracing::error!(%error, %target_user, device_id, "Playback device identity lookup failed");
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    "查询设备状态失败",
-                );
-            }
+        if let Err(response) = ensure_device_revoked_in_app(store, target_user, &device_id) {
+            return response;
         }
-        if let Err(error) = store.end_device_session(target_user, &device_id, now) {
-            tracing::error!(%error, %target_user, device_id, "注销设备前结束会话失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                "注销设备失败，请稍后重试",
-            );
-        }
-        if let Err(error) = store.revoke_device(target_user, &device_id) {
-            tracing::error!(%error, %target_user, device_id, "撤销设备凭据失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                "注销设备失败，请稍后重试",
-            );
+        if let Err(error) = store.revoke_device_sessions(target_user, &device_id, now) {
+            return match error {
+                store::StoreError::Protected(message) => {
+                    tracing::warn!(%message, %target_user, device_id, "注销设备关闭播放会话被写入屏障拒绝");
+                    err(StatusCode::CONFLICT, "playback.protected", &message)
+                }
+                store::StoreError::WriteBusy => crate::http::store_wait::busy_response(),
+                other => {
+                    tracing::error!(error = %other, %target_user, device_id, "注销设备关闭会话失败");
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        "注销设备失败，请稍后重试",
+                    )
+                }
+            };
         }
         ok(json!({ "revoked": true })).into_response()
     })

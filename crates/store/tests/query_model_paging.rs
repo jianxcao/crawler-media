@@ -243,12 +243,14 @@ fn complete_name_and_date_orders_keep_original_title_after_explicit_keys() {
     store
         .begin_library_integrity(library, true, &operation, 2000)
         .unwrap();
-    while store
-        .advance_library_operation(&operation, 2001, 100)
-        .unwrap()
-        .state
-        == "applying"
-    {}
+    assert!(
+        (0..10_000).any(|_| store
+            .advance_library_operation(&operation, 2001, 100)
+            .unwrap()
+            .state
+            != "applying"),
+        "paging integrity operation did not finish within 10_000 steps"
+    );
     for (id, added) in ids.iter().zip([100_i64, 200, 400, 300]) {
         db.execute(
             "UPDATE library_items SET added_at_sort=?2 WHERE media_id=?1",

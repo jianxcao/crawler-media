@@ -404,3 +404,58 @@ async fn web_movie_playback_omits_coords_and_explicit_zero_is_rejected() {
     let res_zeros = app.clone().oneshot(req_zeros).await.unwrap();
     assert_eq!(res_zeros.status(), axum::http::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn session_stream_redirects_strm_to_target_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let app = router(state.clone());
+    let store = state.store();
+    let lib_root = seed_library(store.as_ref(), tmp.path(), "strm-stream");
+    let (member, token) = seed_member(store.as_ref(), "strm-user");
+    let media = seed_media(store.as_ref(), "Strm Movie", Some(2025));
+    let strm_path = lib_root.join("movie.strm");
+    std::fs::write(&strm_path, b"https://cdn.example/video.mp4\n").unwrap();
+    let file = store::test_support::publish_fixture_file(
+        store.as_ref(),
+        &store::test_support::FixtureFile {
+            media_id: media,
+            path: strm_path.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sid = store
+        .issue_play_session(
+            member,
+            "strm-dev",
+            file.file_id,
+            media,
+            domain::UnitKey::WHOLE,
+            &file.version,
+            now_secs(),
+        )
+        .unwrap();
+    let stream_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/v1/playback/sessions/{sid}/stream?device_id=strm-dev"
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_res.status(), axum::http::StatusCode::FOUND);
+    assert_eq!(
+        stream_res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap(),
+        "https://cdn.example/video.mp4"
+    );
+}

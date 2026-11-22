@@ -11,6 +11,19 @@ fn open() -> (tempfile::TempDir, Store) {
     (temp, store)
 }
 
+fn seed_member(store: &Store) -> UserId {
+    let user = UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("summary-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    user
+}
+
 fn tv_library(store: &Store, temp: &tempfile::TempDir, name: &str) -> (String, std::path::PathBuf) {
     let root = temp.path().join(name);
     std::fs::create_dir_all(&root).unwrap();
@@ -105,7 +118,7 @@ fn favouriting_one_episode_marks_the_media_favourite_in_its_library() {
     let media = seed_tv(&store, "Show");
     seed_episode(&store, &root, media, 1, 1);
     seed_episode(&store, &root, media, 1, 2);
-    let user = UserId::new();
+    let user = seed_member(&store);
 
     store
         .mutate_playback(
@@ -131,7 +144,7 @@ fn season_mark_completes_the_owned_season_and_advances_next_up() {
     seed_episode(&store, &root, media, 1, 1);
     seed_episode(&store, &root, media, 1, 2);
     seed_episode(&store, &root, media, 2, 1);
-    let user = UserId::new();
+    let user = seed_member(&store);
 
     store
         .mutate_playback(
@@ -162,7 +175,7 @@ fn season_mark_preserves_other_season_display_while_advancing_global_continuatio
     let media = seed_tv(&store, "Show");
     seed_episode(&store, &season_one_root, media, 1, 1);
     seed_episode(&store, &season_two_root, media, 2, 1);
-    let user = UserId::new();
+    let user = seed_member(&store);
     let one_id = season_one.parse().unwrap();
     let two_id = season_two.parse().unwrap();
     store
@@ -263,7 +276,7 @@ fn replaying_the_same_write_is_a_no_op() {
     let (library_id, root) = tv_library(&store, &temp, "tv");
     let media = seed_tv(&store, "Show");
     seed_episode(&store, &root, media, 1, 1);
-    let user = UserId::new();
+    let user = seed_member(&store);
 
     store
         .mutate_playback(
@@ -334,7 +347,7 @@ fn a_library_that_does_not_own_the_media_gets_no_summary() {
     let (other, _) = tv_library(&store, &temp, "other");
     let media = seed_tv(&store, "Show");
     seed_episode(&store, &root, media, 1, 1);
-    let user = UserId::new();
+    let user = seed_member(&store);
 
     store
         .mutate_playback(

@@ -107,3 +107,17 @@ test("similar client rejects old arrays, unknown states, and malformed pending i
     await assert.rejects(api.fetchItemSimilar("library", "media"), /响应格式错误/);
   }
 });
+
+test("waitForSimilar defaults non-finite retry_after_ms to 1000ms instead of NaN", async () => {
+  const { waitForSimilar } = await loadTs("../lib/similar-read.ts");
+  for (const badDelay of [NaN, undefined, Infinity]) {
+    let calls = 0;
+    const delays = [];
+    const items = await waitForSimilar(
+      async () => (++calls === 1 ? { state: "pending", retry_after_ms: badDelay } : ready),
+      { pause: async (ms) => { delays.push(ms); } },
+    );
+    assert.deepEqual(items, ready.items);
+    assert.deepEqual(delays, [1000]);
+  }
+});

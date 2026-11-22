@@ -74,10 +74,13 @@ export function PlayerPage({
   const [target, setTarget] = useState<ActiveTarget>(() =>
     initialTarget({ season, episode, fileId }),
   );
-  const current =
-    target.season !== undefined && target.episode !== undefined
-      ? { season: target.season, episode: target.episode }
-      : null;
+  const current = useMemo(
+    () =>
+      target.season !== undefined && target.episode !== undefined
+        ? { season: target.season, episode: target.episode }
+        : null,
+    [target.season, target.episode],
+  );
   const [failed, setFailed] = useState<string | null>(null);
 
   useEffect(() => {

@@ -27,7 +27,8 @@ impl crate::LibraryConnection<'_> {
         if current_version_tx(&tx, &id)? != Some(p.expected.clone()) {
             return Ok(false);
         }
-        crate::library_operations::integrity_guard::ensure_media_integrity_writable(&tx, media_id)?;
+        crate::library_write::ensure_library_writable(&tx, &library_id.to_string())?;
+        crate::library_write::ensure_media_writable(&tx, media_id)?;
         let before = read_file_summary_facts(&tx, &id)?;
         let previous_duration: Option<i64> = tx.query_row(
             "SELECT duration_ms FROM library_files WHERE file_id=?1",

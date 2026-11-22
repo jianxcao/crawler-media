@@ -311,3 +311,149 @@ fn rejected_pending_is_only_revived_by_manual_submission() {
     );
     assert!(store.load_rejected_enclosures(id).unwrap().is_empty());
 }
+
+fn create_tv_sub(store: &Store, filter_id: FilterId) -> SubscribeId {
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: format!("Show-{}", MediaId::new()),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+        tvdb_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let subscribe = Subscribe {
+        id: SubscribeId::new(),
+        user_id: UserId::new(),
+        media_id: media.id,
+        coverage: Coverage::Tv {
+            season: 1,
+            episode_from: 1,
+            episode_to: None,
+        },
+        fetch_mode: FetchMode::Search,
+        filter_id,
+        wash_cut: false,
+        wash_cut_filter_id: None,
+        full_season_pack: false,
+        downloader_id: None,
+        library_id: None,
+        tracking_state: "active".into(),
+        follow_future: false,
+        search_interval_secs: 1800,
+        keep_old_versions: false,
+    };
+    store.insert_subscribe(&subscribe).unwrap();
+    subscribe.id
+}
+
+fn seed_facts_fixture() -> (tempfile::TempDir, Store, SubscribeId, SubscribeId, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let filter = Filter {
+        id: FilterId::new(),
+        name: "f-facts".into(),
+        atoms: vec![FilterAtom {
+            priority: 10,
+            rule: domain::AtomRule::Resolution("1080p".into()),
+            exclude: false,
+        }],
+        keep_old_versions: false,
+    };
+    store.insert_filter(&filter).unwrap();
+    let sub_a = create_tv_sub(&store, filter.id);
+    let sub_b = create_tv_sub(&store, filter.id);
+    let shared_path = "/tv/Show/S01E02-S02E02.mkv".to_string();
+    let mut facts_a = domain::SubscribeFacts::default();
+    for (s, e, score, path) in [
+        (None, None, 5, "/tv/Show/movie.mkv"),
+        (Some(1), Some(1), 10, "/tv/Show/S01E01.mkv"),
+        (Some(1), Some(2), 12, shared_path.as_str()),
+        (Some(2), Some(2), 12, shared_path.as_str()),
+        (Some(3), Some(1), 15, "/tv/Show/S03E01.mkv"),
+    ] {
+        facts_a.upsert(
+            s,
+            e,
+            domain::QualityFact {
+                score,
+                path: Some(path.into()),
+            },
+        );
+    }
+    store.save_subscribe_facts(sub_a, &facts_a).unwrap();
+
+    let mut facts_b = domain::SubscribeFacts::default();
+    facts_b.upsert(
+        Some(2),
+        Some(1),
+        domain::QualityFact {
+            score: 20,
+            path: Some(shared_path.clone()),
+        },
+    );
+    store.save_subscribe_facts(sub_b, &facts_b).unwrap();
+    (tmp, store, sub_a, sub_b, shared_path)
+}
+
+#[test]
+fn delete_subscribe_facts_for_paths_clears_shared_file_slots() {
+    let (_tmp, store, sub_a, sub_b, shared_path) = seed_facts_fixture();
+    assert_eq!(
+        store.delete_subscribe_facts_for_paths(sub_a, &[]).unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .delete_subscribe_facts_for_paths(sub_a, &[shared_path.clone(), shared_path])
+            .unwrap(),
+        2
+    );
+    let loaded_a = store.load_subscribe_facts(sub_a).unwrap();
+    assert!(loaded_a.get(Some(1), Some(2)).is_none());
+    assert!(loaded_a.get(Some(2), Some(2)).is_none());
+    assert!(loaded_a.get(Some(1), Some(1)).is_some());
+    assert!(loaded_a.movie().is_some());
+    assert!(
+        store
+            .load_subscribe_facts(sub_b)
+            .unwrap()
+            .get(Some(2), Some(1))
+            .is_some()
+    );
+}
+
+#[test]
+fn delete_subscribe_facts_for_seasons_clears_matching_seasons_only() {
+    let (_tmp, store, sub_a, sub_b, _) = seed_facts_fixture();
+    assert_eq!(
+        store
+            .delete_subscribe_facts_for_seasons(sub_a, &[])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .delete_subscribe_facts_for_seasons(sub_a, &[2, 3, 3])
+            .unwrap(),
+        2
+    );
+    let loaded_a = store.load_subscribe_facts(sub_a).unwrap();
+    assert!(loaded_a.get(Some(2), Some(2)).is_none());
+    assert!(loaded_a.get(Some(3), Some(1)).is_none());
+    assert!(loaded_a.get(Some(1), Some(1)).is_some());
+    assert!(loaded_a.get(Some(1), Some(2)).is_some());
+    assert!(loaded_a.movie().is_some());
+    assert!(
+        store
+            .load_subscribe_facts(sub_b)
+            .unwrap()
+            .get(Some(2), Some(1))
+            .is_some()
+    );
+}

@@ -271,3 +271,54 @@ test("gallery passes gallery=true to item-index and aborts multi-page jump on so
     await view.unmount();
   }
 });
+
+for (const gallery of [false, true]) {
+  const mode = gallery ? "gallery" : "poster wall";
+  test(`${mode} jump terminates when page is empty or cursor repeats`, async () => {
+    let jumpEmptyCalls = 0;
+    const emptyView = libraryDetailHarness({
+      gallery,
+      recallOffset: 600,
+      load: async (_mode, { cursor }) => {
+        if (cursor?.startsWith("title-M")) {
+          jumpEmptyCalls += 1;
+          assert.ok(jumpEmptyCalls <= 3, `${mode} jump must stop on empty page`);
+          if (jumpEmptyCalls === 1) return page("M-1", "title-M-2");
+          return { items: [], groups: [], next_cursor: `title-M-${jumpEmptyCalls + 1}`, total: 1000 };
+        }
+        return page("A movie");
+      },
+    });
+    await emptyView.mount();
+    try {
+      await emptyView.click("recall");
+      assert.equal(jumpEmptyCalls, 2);
+      assert.equal(emptyView.rows(), "M-1");
+      assert.equal(emptyView.hasMore(), false);
+    } finally {
+      await emptyView.unmount();
+    }
+
+    let jumpRepeatCalls = 0;
+    const repeatView = libraryDetailHarness({
+      gallery,
+      recallOffset: 600,
+      load: async (_mode, { cursor }) => {
+        if (cursor === "title-M") {
+          jumpRepeatCalls += 1;
+          assert.ok(jumpRepeatCalls <= 3, `${mode} jump must stop on repeated cursor`);
+          return page("M-1", "title-M");
+        }
+        return page("A movie");
+      },
+    });
+    await repeatView.mount();
+    try {
+      await repeatView.click("recall");
+      assert.equal(jumpRepeatCalls, 1);
+      assert.equal(repeatView.hasMore(), false);
+    } finally {
+      await repeatView.unmount();
+    }
+  });
+}

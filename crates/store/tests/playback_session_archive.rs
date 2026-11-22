@@ -379,7 +379,14 @@ fn library_removal_and_session_sweep_succeed_after_media_merge() {
             1_000,
         )
         .unwrap();
-    while f.store.advance_media_merge(&op_id, 1_000).unwrap().state != "succeeded" {}
+    let mut merged = false;
+    for _ in 0..1_000 {
+        if f.store.advance_media_merge(&op_id, 1_000).unwrap().state == "succeeded" {
+            merged = true;
+            break;
+        }
+    }
+    assert!(merged, "media merge did not succeed within 1,000 steps");
 
     // Sweep stale sessions (closes dev_stale) and Library removal (closes dev_active) must both succeed cleanly!
     assert_eq!(f.store.sweep_stale_sessions(100_000, 30).unwrap(), 1);

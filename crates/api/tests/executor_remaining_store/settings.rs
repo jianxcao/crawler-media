@@ -170,3 +170,67 @@ fn metadata_key_hint_handles_unicode_without_panicking() {
     let body = runtime().block_on(json_response(response));
     assert_eq!(body["data"]["tmdb"]["api_key_hint"], "已配置");
 }
+
+#[test]
+fn proxy_test_obeys_http_work_capacity_without_network() {
+    let f = Fixture::new();
+    let budget = Arc::new(api::blocking_budget::BlockingBudget::new(1));
+    let reservation = budget.try_reserve().unwrap();
+    let state = f.state.clone().with_http_work(budget);
+    let response = runtime()
+        .block_on(router(state).oneshot(request(
+            "POST",
+            "/api/v1/settings/proxy/test",
+            &f.token,
+            json!({ "target": "http://127.0.0.1:9" }),
+        )))
+        .unwrap();
+    drop(reservation);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = runtime().block_on(json_response(response));
+    assert_eq!(body["data"]["ok"], false);
+    assert!(
+        body["data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("capacity exhausted"),
+        "{body}"
+    );
+}
+
+#[test]
+fn put_metadata_trims_api_keys_and_clears_whitespace_only_keys() {
+    let f = Fixture::new();
+    let app = router(f.state.clone());
+    let resp = runtime()
+        .block_on(app.clone().oneshot(request(
+            "PUT",
+            "/api/v1/settings/metadata",
+            &f.token,
+            json!({
+                "tmdb_api_key": "  my-tmdb-key  ",
+                "tvdb_api_key": "   ",
+            }),
+        )))
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = runtime().block_on(json_response(resp));
+    assert_eq!(body["data"]["tmdb"]["configured"], true);
+    assert_eq!(body["data"]["tvdb"]["configured"], false);
+    assert_eq!(
+        f.state
+            .store()
+            .get_setting(api::settings_keys::TMDB_API_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("my-tmdb-key")
+    );
+    assert_eq!(
+        f.state
+            .store()
+            .get_setting(api::settings_keys::TVDB_API_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+}

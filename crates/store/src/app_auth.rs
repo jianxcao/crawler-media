@@ -54,3 +54,46 @@ pub(crate) fn get_user_on(conn: &Connection, id: UserId) -> Result<Option<User>,
     .optional()
     .map_err(Into::into)
 }
+
+/// Active user's role (`None` when missing, disabled, or pending removal).
+pub(crate) fn active_user_role_on(
+    conn: &Connection,
+    id: UserId,
+) -> Result<Option<UserRole>, StoreError> {
+    let user_id = id.to_string();
+    let removal_key = format!("user_removal.{user_id}");
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(u.role, 'member')
+             FROM users u
+             WHERE u.id = ?1
+               AND u.enabled != 0
+               AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key = ?2)",
+            params![user_id, removal_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|role| role.parse().map_err(StoreError::Invalid))
+        .transpose()
+}
+
+/// Whether `(user_id, device_id)` appears in `settings['playback.revoked_devices']`.
+pub(crate) fn is_device_revoked_on(
+    conn: &Connection,
+    user_id: UserId,
+    device_id: &str,
+) -> Result<bool, StoreError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'playback.revoked_devices'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(false);
+    };
+    let list: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+    let key = format!("{user_id}:{device_id}");
+    Ok(list.iter().any(|entry| entry == &key))
+}

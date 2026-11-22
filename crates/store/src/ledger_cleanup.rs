@@ -54,6 +54,16 @@ pub(crate) fn delete_file_in_tx(conn: &Connection, file_id: &str) -> Result<bool
     )?;
 
     conn.execute(
+        "UPDATE playback_session_ids SET state = 'closed'
+         WHERE file_id = ?1 AND state <> 'closed'",
+        [file_id],
+    )?;
+    conn.execute(
+        "DELETE FROM playback_sessions WHERE file_id = ?1",
+        [file_id],
+    )?;
+
+    conn.execute(
         "DELETE FROM pending_file_renames WHERE file_id = ?1 AND phase = 'failed'",
         [file_id],
     )?;

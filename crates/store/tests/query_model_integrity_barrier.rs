@@ -18,8 +18,16 @@ fn integrity_blocks_metadata_and_playback_until_completion() {
         ),
         Err(store::StoreError::Protected(_))
     ));
-    let mutation =
-        store::playback::PlaybackMutation::marks(domain::UserId::new(), -1, -1, None, Some(true));
+    let user = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("barrier-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    let mutation = store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(true));
     assert!(matches!(
         store.mutate_playback(media, &mutation, 2),
         Err(store::StoreError::Protected(_))
@@ -81,12 +89,14 @@ fn integrity_blocks_changes_to_already_staged_media() {
     );
     drop(store);
     let store = store::Store::open(tmp.path()).unwrap();
-    while store
-        .advance_library_operation("staged", 2, 100)
-        .unwrap()
-        .state
-        == "applying"
-    {}
+    assert!(
+        (0..10_000).any(|_| store
+            .advance_library_operation("staged", 2, 100)
+            .unwrap()
+            .state
+            != "applying"),
+        "staged integrity operation did not finish within 10_000 steps"
+    );
     run(&store, lib, false, "oracle");
     assert!(
         !store

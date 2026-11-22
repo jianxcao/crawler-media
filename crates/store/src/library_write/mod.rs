@@ -38,7 +38,8 @@ pub use reassign::*;
 pub(crate) use reduce::*;
 pub use rename_completion::{ObservedRenameCompletion, RenameCompletionPlan};
 pub use rename_durable::{
-    FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction, SidecarSourceIdentity,
+    FileRenameRequest, MAX_FILE_RENAME_ATTEMPTS, RenameSidecar, RenameSourceEvidence,
+    SidecarAction, SidecarSourceIdentity,
 };
 pub use rename_intent::{ObservedRenameIntent, RenameIntentPlan};
 pub use rename_phases::{

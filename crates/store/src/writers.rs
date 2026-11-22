@@ -1,6 +1,14 @@
 //! Each database has one writer connection. Cross-database acquisition order is
 //! app → subscribe → library → cache → jobs.
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -41,7 +49,31 @@ pub struct Writers {
     subscribe: Mutex<Connection>,
     library: Mutex<Connection>,
     cache: Mutex<Connection>,
+    app_seq: AtomicU64,
     pub(crate) rename_publications: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+struct AppSeqGuard<'a>(&'a AtomicU64);
+
+impl<'a> AppSeqGuard<'a> {
+    fn enter(seq: &'a AtomicU64) -> Self {
+        let prev = seq.fetch_add(1, Ordering::SeqCst);
+        debug_assert!(
+            prev.is_multiple_of(2),
+            "app_seq must be even on Db::App entry"
+        );
+        Self(seq)
+    }
+}
+
+impl Drop for AppSeqGuard<'_> {
+    fn drop(&mut self) {
+        let prev = self.0.fetch_add(1, Ordering::SeqCst);
+        debug_assert!(
+            !prev.is_multiple_of(2),
+            "app_seq must be odd on Db::App exit"
+        );
+    }
 }
 
 struct Admission {
@@ -71,7 +103,31 @@ impl Writers {
             subscribe: Mutex::new(subscribe),
             library: Mutex::new(library),
             cache: Mutex::new(cache),
+            app_seq: AtomicU64::new(0),
             rename_publications: Mutex::default(),
+        }
+    }
+
+    pub(crate) fn app_seq(&self) -> u64 {
+        self.app_seq.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn wait_for_even_app_seq(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<u64, StoreError> {
+        let mut backoff = Duration::from_micros(50);
+        loop {
+            let seq = self.app_seq();
+            if seq.is_multiple_of(2) {
+                return Ok(seq);
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(StoreError::WriteBusy);
+            }
+            std::thread::sleep(backoff.min(deadline.saturating_duration_since(now)));
+            backoff = (backoff * 2).min(Duration::from_millis(2));
         }
     }
 
@@ -147,6 +203,27 @@ impl Writers {
         db: Db,
         work: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
+        self.with_writer_inner(wait, db, true, work)
+    }
+
+    /// Borrow a database's single writer strictly for storage/schema maintenance
+    /// (`PRAGMA optimize`, `incremental_vacuum`, `VACUUM`) that never mutates logical
+    /// or actor/auth rows (`users`, `settings`, `device_credentials`, `library_members`).
+    pub fn with_maintenance_writer<T>(
+        &self,
+        db: Db,
+        work: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.with_writer_inner(Duration::from_secs(1), db, false, work)
+    }
+
+    fn with_writer_inner<T>(
+        &self,
+        wait: Duration,
+        db: Db,
+        track_app_seq: bool,
+        work: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let admission = ADMISSION.with(|scope| {
             scope
                 .borrow()
@@ -199,6 +276,8 @@ impl Writers {
                 *failure.borrow_mut() = Some(AdmissionFailure::Refused);
                 return Err(error);
             }
+            let _app_seq =
+                (track_app_seq && db == Db::App).then(|| AppSeqGuard::enter(&self.app_seq));
             let mut scope = WriterScope::new(&conn, budget.as_ref(), cleanup_errors.clone())?;
             let _capture = crate::stats::LeaseStats::new(db, &conn);
             let result = work(&conn);

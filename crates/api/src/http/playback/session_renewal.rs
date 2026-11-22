@@ -39,6 +39,18 @@ pub(super) fn renewal_error(error: PlaybackRenewalError) -> Response {
             "管理员已结束本次播放",
         ),
         PlaybackRenewalError::Store(
+            store::StoreError::WriteBusy
+            | store::StoreError::ReadBusy
+            | store::StoreError::ReadClosed
+            | store::StoreError::ReadDeadline
+            | store::StoreError::ReadCancelled,
+        ) => crate::http::store_wait::busy_response(),
+        PlaybackRenewalError::Store(store::StoreError::Protected(ref message))
+            if message.contains("revoked") =>
+        {
+            err(StatusCode::FORBIDDEN, "playback.revoked", "该设备已被注销")
+        }
+        PlaybackRenewalError::Store(
             store::StoreError::Missing(_) | store::StoreError::Protected(_),
         ) => SelectionError::Unavailable.response(),
         PlaybackRenewalError::Store(error) => {

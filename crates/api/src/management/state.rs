@@ -43,6 +43,8 @@ pub struct ApiState {
     pub fs_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// Cached native artwork reads cannot queue behind maintenance filesystem IO.
     pub(crate) artwork_reads: Arc<crate::blocking_budget::BlockingBudget>,
+    /// Bounded queue-isolated budget for local SQLite Jobs snapshot reads.
+    pub(crate) jobs_read_work: Arc<crate::blocking_budget::BlockingBudget>,
     /// Instance-owned coalesced Browser reconciliation; no global registry.
     pub(crate) browser_reconcile: Arc<crate::http::browser_settings::ReconcileCoordinator>,
     /// 后台背景图独立准入，按最终目标路径单飞；不占用交互式请求预算。
@@ -100,6 +102,8 @@ pub struct ApiState {
     /// Deletion reservations prevent workers and manual triggers from starting
     /// new work while asynchronous cleanup runs without holding a sync guard.
     deleting_subscribes: Arc<Mutex<HashSet<SubscribeId>>>,
+    /// In-flight manual admit operations keyed by `(subscribe_id, enclosure)`.
+    pub(crate) manual_admit_inflight: Arc<Mutex<HashSet<(SubscribeId, String)>>>,
     pub(crate) jellyfin_server_id: Arc<String>,
     pub(crate) indexer: Arc<Indexer>,
     pub(crate) downloader: Arc<dyn Downloader>,
@@ -305,6 +309,7 @@ impl ApiState {
             season_enrichment_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
             artwork_reads: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
+            jobs_read_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
             browser_reconcile: Default::default(),
             backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
             notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),
@@ -342,6 +347,7 @@ impl ApiState {
             active_transfers: Arc::new(Mutex::new(std::collections::HashSet::new())),
             subscribe_round_finished: Arc::new(tokio::sync::Notify::new()),
             deleting_subscribes: Arc::new(Mutex::new(HashSet::new())),
+            manual_admit_inflight: Arc::new(Mutex::new(HashSet::new())),
             jellyfin_server_id: Arc::new(jellyfin_server_id),
             indexer: Arc::new(Indexer::new(profiles, fetcher)),
             downloader,

@@ -105,3 +105,63 @@ async fn verify_downloader_fails_on_unreachable_endpoint() {
     assert_eq!(found2["status"], "failed");
     assert!(found2["last_error"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn get_downloader_includes_persisted_verification_status_and_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    ));
+    let create_resp = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/downloaders",
+            Some("management-secret"),
+            json!({
+                "name": "unreachable-qb",
+                "kind": "qbittorrent",
+                "url": "http://127.0.0.1:49999",
+                "username": "admin",
+                "password": "wrong-password"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dl_id = json_data(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let verify_resp = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/downloaders/{dl_id}/verify"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+
+    let get_resp = app
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/downloaders/{dl_id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let detail = json_data(get_resp).await;
+    assert_eq!(detail["status"], "failed");
+    assert!(detail["last_error"].as_str().is_some());
+}

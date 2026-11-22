@@ -2,9 +2,102 @@
 use domain::MediaKind;
 use media::{CatalogGet, Tmdb, TmdbError};
 use std::sync::{
-    Arc, Barrier,
+    Arc, Condvar, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+
+struct RendezvousState {
+    arrived: usize,
+    aborted: bool,
+}
+
+struct BoundedRendezvous {
+    parties: usize,
+    state: Mutex<RendezvousState>,
+    changed: Condvar,
+}
+
+struct RendezvousGuard {
+    rendezvous: Arc<BoundedRendezvous>,
+    armed: bool,
+}
+
+impl RendezvousGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut guard = self
+                .rendezvous
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.aborted = true;
+            self.rendezvous.changed.notify_all();
+        }
+    }
+}
+
+impl BoundedRendezvous {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            state: Mutex::new(RendezvousState {
+                arrived: 0,
+                aborted: false,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn guard(self: &Arc<Self>) -> RendezvousGuard {
+        RendezvousGuard {
+            rendezvous: self.clone(),
+            armed: true,
+        }
+    }
+
+    fn wait(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+        guard.arrived += 1;
+        if guard.arrived >= self.parties {
+            self.changed.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while guard.arrived < self.parties && !guard.aborted {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.arrived < self.parties && !guard.aborted {
+                guard.aborted = true;
+                self.changed.notify_all();
+                drop(guard);
+                panic!("rendezvous timed out");
+            }
+        }
+        if guard.aborted {
+            drop(guard);
+            panic!("rendezvous aborted");
+        }
+    }
+}
 
 struct FiniteFailure {
     state: AtomicUsize,
@@ -51,13 +144,15 @@ fn shared_failures_retain_not_found_or_transport_category_and_allow_recovery() {
             )
             .unwrap(),
         );
-        let ready = Arc::new(Barrier::new(8));
+        let ready = BoundedRendezvous::new(8);
         let workers: Vec<_> = (0..8)
             .map(|_| {
                 let tmdb = tmdb.clone();
                 let ready = ready.clone();
                 std::thread::spawn(move || {
+                    let mut guard = ready.guard();
                     ready.wait();
+                    guard.disarm();
                     tmdb.details_with_meta(MediaKind::Movie, "603")
                 })
             })

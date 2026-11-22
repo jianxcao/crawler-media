@@ -65,23 +65,33 @@ export function useSubscriptionInspector({
   const [upNext, setUpNext] = useState<UpNextItem | null>(null);
   const detailId = detail?.id;
   const mediaId = detail?.media.id;
+  const activeIdRef = useRef(String(id));
+  activeIdRef.current = String(id);
+  const reloadSeqRef = useRef(0);
+
+  useEffect(() => {
+    setDetail(null);
+    setActivities([]);
+    setFailed(false);
+  }, [id]);
 
   const reload = useCallback(() => {
     const subscriptionId = String(id);
+    const seq = ++reloadSeqRef.current;
     Promise.all([
       getSubscription(subscriptionId),
       listSubscriptionActivities(subscriptionId),
       canManageSubscriptions ? listRuleSets() : Promise.resolve([]),
     ])
       .then(([d, acts, rules]) => {
-        if (String(id) !== subscriptionId) return;
+        if (activeIdRef.current !== subscriptionId || seq !== reloadSeqRef.current) return;
         setDetail(d);
         setActivities(acts);
         setRuleSets(rules);
         setFailed(false);
       })
       .catch(() => {
-        if (String(id) !== subscriptionId) return;
+        if (activeIdRef.current !== subscriptionId || seq !== reloadSeqRef.current) return;
         setDetail((prev) => {
           if (!prev) setFailed(true);
           return prev;
@@ -206,6 +216,8 @@ export function useSubscriptionInspector({
       toast.success(resuming ? "已恢复订阅追踪" : "已暂停订阅追踪");
       reload();
       refreshSubscriptions();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "操作失败，请稍后重试");
     } finally {
       setBusy(false);
     }
@@ -303,6 +315,8 @@ export function useSubscriptionInspector({
     try {
       await unsubscribeFromSubscription(detail.id);
       afterRemoved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "取消订阅失败，请稍后重试");
     } finally {
       setBusy(false);
     }
@@ -331,6 +345,7 @@ export function useSubscriptionInspector({
         toast.success("已更新搜种模式");
         reload();
       })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "更新搜种模式失败，请稍后重试"))
       .finally(() => setBusy(false));
   };
 
@@ -342,6 +357,7 @@ export function useSubscriptionInspector({
         toast.success("已更新搜索间隔");
         reload();
       })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "更新搜索间隔失败，请稍后重试"))
       .finally(() => setBusy(false));
   };
 

@@ -229,6 +229,7 @@ fn scrape_json(config: &crate::scrape_config::ScrapeConfig) -> Value {
             "theintrodb_enabled": e.theintrodb_enabled,
             "fanart_configured": e.fanart_api_key.is_some(),
             "fingerprint_duration_secs": e.fingerprint_duration_secs,
+            "fingerprint_sampling_mode": e.fingerprint_sampling_mode,
         },
     })
 }

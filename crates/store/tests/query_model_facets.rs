@@ -64,6 +64,14 @@ fn watch_only_filters_static_buckets() {
         .unwrap();
     let user = domain::UserId::new();
     store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("facets-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
+    store
         .mutate_playback(
             ids[0].parse().unwrap(),
             &store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(true)),
@@ -490,6 +498,14 @@ fn seed_oracle_facts() -> (tempfile::TempDir, Store, domain::LibraryId, domain::
     tx.commit().unwrap();
     query_model_support::run(&store, library, true, "facets-12-repair");
     let user = domain::UserId::new();
+    store
+        .insert_user(&domain::User {
+            id: user,
+            login: format!("facets-oracle-{user}"),
+            enabled: true,
+            role: domain::UserRole::Member,
+        })
+        .unwrap();
     let db = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     for (n, f) in FACTS.iter().enumerate() {
         if f.played || f.favorite {

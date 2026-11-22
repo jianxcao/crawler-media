@@ -130,16 +130,43 @@ impl crate::LibraryConnection<'_> {
         limit: usize,
     ) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
         let limit = limit.clamp(1, 100);
-        let mut stmt = self.library.prepare("SELECT file_id, created_at_ms, reason FROM file_probe_obligations ORDER BY created_at_ms ASC, file_id ASC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit], |row| {
-            let id: String = row.get(0)?;
-            Ok(ScanProbeObligation {
-                ledger_id: LedgerId::from_str(&id)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?,
-                created_at_ms: row.get(1)?,
-                reason: row.get(2)?,
-            })
-        })?;
+        let mut stmt = self.library.prepare(
+            "SELECT file_id, created_at_ms, reason FROM file_probe_obligations
+             ORDER BY created_at_ms ASC, file_id ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], map_obligation)?;
+        let obligations = rows.collect::<Result<Vec<_>, _>>()?;
+        let vm_steps = i64::from(stmt.get_status(rusqlite::StatementStatus::VmStep));
+        Ok((obligations, vm_steps))
+    }
+
+    pub fn scan_probe_obligations_after(
+        &self,
+        after: Option<(i64, LedgerId)>,
+        limit: usize,
+    ) -> Result<Vec<ScanProbeObligation>, StoreError> {
+        self.scan_probe_obligations_after_with_vm_steps(after, limit)
+            .map(|(obligations, _)| obligations)
+    }
+
+    pub fn scan_probe_obligations_after_with_vm_steps(
+        &self,
+        after: Option<(i64, LedgerId)>,
+        limit: usize,
+    ) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
+        let Some((after_ms, after_id)) = after else {
+            return self.scan_probe_obligations_with_vm_steps(limit);
+        };
+        let limit = limit.clamp(1, 100);
+        let mut stmt = self.library.prepare(
+            "SELECT file_id, created_at_ms, reason FROM file_probe_obligations
+             WHERE (created_at_ms, file_id) > (?1, ?2)
+             ORDER BY created_at_ms ASC, file_id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![after_ms, after_id.to_string(), limit],
+            map_obligation,
+        )?;
         let obligations = rows.collect::<Result<Vec<_>, _>>()?;
         let vm_steps = i64::from(stmt.get_status(rusqlite::StatementStatus::VmStep));
         Ok((obligations, vm_steps))
@@ -226,9 +253,19 @@ impl crate::LibraryConnection<'_> {
              WHERE u.status IN ('queued', 'running')
                AND j.status IN ('queued', 'running')
                AND f.missing_at IS NOT NULL
-             ORDER BY u.rowid LIMIT ?1",
+             ORDER BY u.file_id LIMIT ?1",
         )?;
         let rows = statement.query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+}
+
+fn map_obligation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanProbeObligation> {
+    let id: String = row.get(0)?;
+    Ok(ScanProbeObligation {
+        ledger_id: LedgerId::from_str(&id)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?,
+        created_at_ms: row.get(1)?,
+        reason: row.get(2)?,
+    })
 }

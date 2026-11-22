@@ -185,6 +185,43 @@ fn session_source_json(file: &domain::LibraryFile, size_bytes: Option<i64>) -> V
     })
 }
 
+fn issue_session_error(
+    error: store::StoreError,
+    user: domain::UserId,
+    device: &str,
+    file_id: domain::LedgerId,
+) -> Response {
+    match error {
+        store::StoreError::WriteBusy
+        | store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled => crate::http::store_wait::busy_response(),
+        store::StoreError::Missing(_) => super::request::SelectionError::Unavailable.response(),
+        store::StoreError::Protected(message) => {
+            if message.contains("revoked") {
+                err(StatusCode::FORBIDDEN, "playback.revoked", "该设备已被注销")
+            } else if message.contains("is not visible")
+                || message.contains("is not ready")
+                || message.contains("source changed")
+            {
+                super::request::SelectionError::Unavailable.response()
+            } else {
+                tracing::warn!(%message, %user, device, %file_id, "Playback session issuance blocked");
+                err(StatusCode::CONFLICT, "playback.protected", &message)
+            }
+        }
+        other => {
+            tracing::error!(error = %other, %user, device, %file_id, "Playback session issuance failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "无法签发播放会话",
+            )
+        }
+    }
+}
+
 async fn issue_binding(
     state: &ApiState,
     user: domain::UserId,
@@ -200,27 +237,13 @@ async fn issue_binding(
     let device = device.to_string();
     let issued = store_write(state, move |store| {
         if let Some(previous) = previous_session_id {
-            return store.renew_play_session(user, &device, &previous, &resolved, now)
+            return store
+                .renew_play_session(user, &device, &previous, &resolved, now)
                 .map_err(super::session_renewal::renewal_error);
         }
-            store
-                .issue_play_session(
-                    user,
-                    &device,
-                    file.file_id,
-                    media_id,
-                    unit,
-                    &version,
-                    now,
-                )
-                .map_err(|error| {
-                    tracing::error!(%error,%user,device,file_id=%file.file_id,"Playback session issuance failed");
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        "无法签发播放会话",
-                    )
-                })
+        store
+            .issue_play_session(user, &device, file.file_id, media_id, unit, &version, now)
+            .map_err(|error| issue_session_error(error, user, &device, file.file_id))
     })
     .await;
     issued?
@@ -383,6 +406,12 @@ fn session_source_path(
     Ok((path, is_strm))
 }
 
+async fn strm_redirect_url(path: std::path::PathBuf) -> Result<Option<String>, StatusCode> {
+    tokio::task::spawn_blocking(move || library::read_strm_url(&path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub(crate) async fn session_stream(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
@@ -408,7 +437,7 @@ pub(crate) async fn session_stream(
     };
 
     if is_strm {
-        if let Some(direct_url) = library::read_strm_url(&path) {
+        if let Some(direct_url) = strm_redirect_url(path).await? {
             return Ok((
                 StatusCode::FOUND,
                 [(axum::http::header::LOCATION, direct_url)],

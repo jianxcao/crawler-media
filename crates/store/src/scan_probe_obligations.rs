@@ -100,6 +100,24 @@ impl Store {
         self.with_library_read(|db| db.scan_probe_obligations_with_vm_steps(limit))
     }
 
+    /// Retrieve up to `limit` (clamped 1..=100) pending probe obligations strictly
+    /// after `(created_at_ms, ledger_id)` in deterministic `(created_at_ms, file_id)` order.
+    pub fn scan_probe_obligations_after(
+        &self,
+        after: Option<(i64, LedgerId)>,
+        limit: usize,
+    ) -> Result<Vec<ScanProbeObligation>, StoreError> {
+        self.with_library_read(|db| db.scan_probe_obligations_after(after, limit))
+    }
+
+    pub fn scan_probe_obligations_after_with_vm_steps(
+        &self,
+        after: Option<(i64, LedgerId)>,
+        limit: usize,
+    ) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
+        self.with_library_read(|db| db.scan_probe_obligations_after_with_vm_steps(after, limit))
+    }
+
     /// Discard the assessed obligation only while its source is still missing or deleted.
     pub fn discard_scan_probe_obligation_if_source_unavailable(
         &self,

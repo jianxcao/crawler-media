@@ -5,9 +5,21 @@
 
 #![allow(dead_code, unused_imports)]
 
-use domain::{Confidence, LedgerId, MediaId, QualitySource, UnitKey, UserId};
+use domain::{Confidence, LedgerId, MediaId, QualitySource, UnitKey, User, UserId, UserRole};
 use store::Store;
 use store::test_support::FixtureFile;
+
+/// Insert an enabled Member user with a unique login for test fixtures.
+pub fn seed_member(store: &Store, id: UserId) {
+    store
+        .insert_user(&User {
+            id,
+            login: format!("member-{id}"),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .expect("insert fixture user");
+}
 
 /// Seed one published whole-unit file under `root` and return its Media and file id.
 ///
@@ -97,6 +109,9 @@ pub fn issue_session(
     file_id: LedgerId,
     now: i64,
 ) -> String {
+    if store.get_user(user).expect("read fixture user").is_none() {
+        seed_member(store, user);
+    }
     let file = store
         .published_files(&[file_id])
         .expect("read published file")

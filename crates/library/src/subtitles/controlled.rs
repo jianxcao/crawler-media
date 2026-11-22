@@ -166,6 +166,7 @@ pub(super) fn extract_embedded_controlled(
         }
     };
     if !output.status.success() {
+        target.invalidate_redirect();
         remove_staging(&staged);
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail: String = detail.chars().take(500).collect();

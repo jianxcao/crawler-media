@@ -374,11 +374,12 @@ fn collect_one<D: Downloader + ?Sized>(
         has_existing,
         pre_probed,
     } = admitted;
-    let (dest, mut candidate) =
-        match reserve_destination(added, scored, &release, &src, pending, control, recorder)? {
-            Some(found) => found,
-            None => return Ok(None),
-        };
+    let (dest, mut candidate) = match reserve_destination(
+        added, scored, &release, &slots, &src, pending, control, recorder,
+    )? {
+        Some(found) => found,
+        None => return Ok(None),
+    };
     let verdict = match confirm_replacement(
         added,
         probe,
@@ -559,10 +560,12 @@ fn admit_arrival<D: Downloader + ?Sized>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reserve_destination<D: Downloader + ?Sized>(
     added: &Added<'_, D>,
     scored: &ScoredTorrent,
     release: &Release,
+    slots: &[(Option<u32>, Option<u32>)],
     src: &Path,
     pending: Option<&crate::collection_destinations::DestinationMapping>,
     control: &library::WorkControl,
@@ -579,6 +582,7 @@ fn reserve_destination<D: Downloader + ?Sized>(
                 added,
                 scored,
                 release,
+                slots,
                 src,
                 &dest,
                 true,
@@ -607,6 +611,7 @@ fn reserve_destination<D: Downloader + ?Sized>(
                     added,
                     scored,
                     release,
+                    slots,
                     src,
                     &dest,
                     false,

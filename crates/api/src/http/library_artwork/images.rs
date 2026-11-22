@@ -107,7 +107,13 @@ async fn artwork_bytes(
         move |store| {
             let user = user_id(store, user, &copied_headers);
             let file = raw_file.parse::<domain::LedgerId>().ok()?;
-            let coverage = store.file_coverage_by_id(file).ok().flatten()?;
+            let coverage = store
+                .file_coverage_by_id(file)
+                .ok()
+                .flatten()
+                .filter(|coverage| {
+                    coverage.file.publication == domain::FilePublication::Published
+                })?;
             let media = store.get_media(coverage.file.media_id).ok().flatten()?;
             super::super::library::file_visible_to_user(store, &coverage.file, &media, user)
                 .then_some(coverage)

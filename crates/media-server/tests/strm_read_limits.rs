@@ -27,7 +27,7 @@ impl MediaServerProvider for TestStrmProvider {
         parent_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
         fixture_provider::resume_items(self, user_id, parent_id, offset, limit).await
     }
 
@@ -37,7 +37,7 @@ impl MediaServerProvider for TestStrmProvider {
         series_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<media_server::provider::ServerItemPage, String> {
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
         fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
     }
     async fn query_latest_items(

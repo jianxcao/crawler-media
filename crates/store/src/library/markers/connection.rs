@@ -8,11 +8,23 @@ impl crate::LibraryConnection<'_> {
         unit: domain::UnitKey,
     ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
-        self.library.execute(
-            "DELETE FROM file_markers WHERE file_id=?1 AND season=?2 AND episode=?3",
-            params![file_id.to_string(), unit.season, unit.episode],
-        )?;
-        self.ensure_chapter_frames_for_updates(&[(file_id.to_string(), Vec::new())])?;
+        let id = file_id.to_string();
+        let owner: Option<(String, String)> = tx
+            .query_row(
+                "SELECT library_id, media_id FROM library_files WHERE file_id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((library_id, media_id)) = owner {
+            crate::library_write::ensure_library_writable(&tx, &library_id)?;
+            crate::library_write::ensure_media_writable(&tx, media_id.parse()?)?;
+            tx.execute(
+                "DELETE FROM file_markers WHERE file_id=?1 AND season=?2 AND episode=?3",
+                params![id, unit.season, unit.episode],
+            )?;
+            self.ensure_chapter_frames_for_updates(&[(id, Vec::new())])?;
+        }
         tx.commit()?;
         Ok(())
     }

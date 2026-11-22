@@ -167,7 +167,7 @@ fn torrents_to_delete(
         .collect()
 }
 
-fn persisted_pending(
+pub(crate) fn persisted_pending(
     store: &crate::Store,
     id: SubscribeId,
 ) -> Result<Vec<(i32, crate::store::PendingDownload)>, crate::store::StoreError> {
@@ -276,6 +276,24 @@ fn begin_subscription_deletion(
     }))
 }
 
+pub(crate) fn other_media_subscribes(
+    store: &crate::Store,
+    subscribe: &Subscribe,
+) -> Result<Vec<Subscribe>, Response> {
+    Ok(store
+        .list_all_subscribes()
+        .map_err(|error| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            )
+        })?
+        .into_iter()
+        .filter(|other| other.id != subscribe.id && other.media_id == subscribe.media_id)
+        .collect())
+}
+
 fn deletable_library_rows(
     store: &crate::Store,
     subscribe: &Subscribe,
@@ -291,18 +309,7 @@ fn deletable_library_rows(
                 "订阅对应的媒体不存在",
             )
         })?;
-    let others = store
-        .list_all_subscribes()
-        .map_err(|error| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            )
-        })?
-        .into_iter()
-        .filter(|other| other.id != subscribe.id && other.media_id == subscribe.media_id)
-        .collect::<Vec<_>>();
+    let others = other_media_subscribes(store, subscribe)?;
     Ok(store
         .file_coverage_for_media(subscribe.media_id)
         .unwrap_or_default()
@@ -311,9 +318,9 @@ fn deletable_library_rows(
         .collect())
 }
 
-/// 旧语义是逐 `(file × unit)` 行判定的：只要这个文件有**某个 unit** 属于本订阅、且没有
-/// 别的订阅认领**同一个 unit**，该行（也就是这个文件）就要删。文件级的库归属检查对同一
-/// 文件的所有 unit 是同一个布尔值，所以提到 unit 判定之外只做一次。
+/// 只有当文件存在匹配 unit、且文件上没有任何 unit 被其他订阅认领时，
+/// 才允许物理删除该文件。文件级的库归属检查对同一文件的所有 unit 是同一个布尔值，
+/// 所以提到 unit 判定之外只做一次。
 fn coverage_owned_by_subscribe(
     store: &crate::Store,
     subscribe: &Subscribe,
@@ -321,12 +328,28 @@ fn coverage_owned_by_subscribe(
     coverage: &domain::FileCoverage,
     others: &[Subscribe],
 ) -> bool {
-    let owned = coverage.units.iter().any(|unit| {
+    coverage_owned_by_subscribe_matching(store, subscribe, media, coverage, others, |unit| {
         unit_owned_by(&subscribe.coverage, unit)
-            && !others
-                .iter()
-                .any(|other| unit_owned_by(&other.coverage, unit))
+    })
+}
+
+pub(crate) fn coverage_owned_by_subscribe_matching(
+    store: &crate::Store,
+    subscribe: &Subscribe,
+    media: &domain::Media,
+    coverage: &domain::FileCoverage,
+    others: &[Subscribe],
+    unit_matches: impl Fn(&domain::UnitKey) -> bool,
+) -> bool {
+    let claimed_by_other = coverage.units.iter().any(|unit| {
+        others
+            .iter()
+            .any(|other| unit_owned_by(&other.coverage, unit))
     });
+    if claimed_by_other {
+        return false;
+    }
+    let owned = coverage.units.iter().any(unit_matches);
     if !owned {
         return false;
     }

@@ -184,3 +184,100 @@ impl marker::FingerprintCaptureEngine for ContendedPublication {
         })
     }
 }
+
+struct HandoffMismatchCapture {
+    db_path: std::path::PathBuf,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl marker::FingerprintEngine for HandoffMismatchCapture {
+    fn extract_at(
+        &self,
+        _: &std::path::Path,
+        _: u32,
+        _: u32,
+        _: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
+        Ok(vec![1, 2, 3])
+    }
+    fn find_common_segment(
+        &self,
+        _: &[u32],
+        _: &[u32],
+        _: f32,
+        _: f32,
+    ) -> Option<marker::CommonSegment> {
+        None
+    }
+}
+
+impl marker::FingerprintCaptureEngine for HandoffMismatchCapture {
+    fn capture_window(
+        &self,
+        request: &marker::CaptureRequest,
+    ) -> Result<marker::CapturedFingerprint, marker::CaptureFailure> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let conn = rusqlite::Connection::open(&self.db_path).unwrap();
+        conn.execute("UPDATE probe_job_units SET sampling_plan_json = NULL", [])
+            .unwrap();
+        Ok(marker::CapturedFingerprint {
+            window: request.window.clone(),
+            words: vec![1, 2, 3],
+            pcm_duration_ms: Some(request.window.duration_ms()),
+            metrics: marker::CaptureMetrics::default(),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn analysis_handoff_permanent_mismatch_terminates_unit_without_requeue() {
+    let (directory, store, unit) = fixture();
+    store
+        .as_ref()
+        .put_file_meta_versioned(
+            &unit.row.file.file_id.to_string(),
+            &library::Tracks {
+                video: Some(Default::default()),
+                ..Default::default()
+            },
+            Some(&unit.row.file.version.source_version),
+            Some(120_000),
+        )
+        .unwrap();
+    let engine = Arc::new(HandoffMismatchCapture {
+        db_path: directory.path().join("data/library.db"),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let manager = Arc::new(
+        ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone()).unwrap(),
+    );
+    assert!(manager.try_start_workers());
+    let job_id = manager
+        .enqueue_direct_fingerprint(
+            unit.clone(),
+            Some(120_000),
+            unit.row.file.version.source_version.clone(),
+            180,
+        )
+        .expect("direct fingerprint job");
+
+    let job = tokio::time::timeout(Duration::from_millis(700), async {
+        loop {
+            let job = store.as_ref().get_probe_job(&job_id).unwrap().unwrap();
+            if !job.is_active() {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("permanent analysis handoff mismatch must terminate instead of infinite retry");
+
+    assert_eq!(job.status, "failed");
+    assert_eq!(
+        engine.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "permanent handoff mismatch must not re-capture"
+    );
+    manager.shutdown_workers().await.unwrap();
+}

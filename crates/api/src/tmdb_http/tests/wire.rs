@@ -57,6 +57,7 @@ impl Server {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         accepted += 1;
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut request = [0; 4096];
                         let _ = stream.read(&mut request);
@@ -93,7 +94,11 @@ impl Drop for Server {
         let _ = self.release.send(());
         let _ = self.stop.send(());
         if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
+            if !thread::panicking() {
+                worker.join().unwrap();
+            } else {
+                let _ = worker.join();
+            }
         }
     }
 }

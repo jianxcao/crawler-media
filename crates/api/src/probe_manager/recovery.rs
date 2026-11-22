@@ -132,6 +132,7 @@ impl ProbeManager {
         self.fill_dispatch_windows();
     }
     fn retire_missing_source_work(&self) {
+        let mut previous_batch = std::collections::HashSet::new();
         loop {
             let refs = match self.store.missing_source_probe_unit_refs(64) {
                 Ok(refs) => refs,
@@ -144,6 +145,12 @@ impl ProbeManager {
             if refs.is_empty() {
                 return;
             }
+            if refs.iter().any(|pair| previous_batch.contains(pair)) {
+                tracing::error!("缺失源探测单元取消后仍反复出现，停止重试以防死循环");
+                self.recovery_deferred.store(true, Ordering::SeqCst);
+                return;
+            }
+            previous_batch.clear();
             for (job, file) in refs {
                 if let Err(error) = self.store.cancel_probe_unit(&job, &file, "file_missing") {
                     tracing::error!(%error,job,file,"取消缺失源单元失败");
@@ -151,6 +158,7 @@ impl ProbeManager {
                     return;
                 }
                 self.seen.lock().remove(&file);
+                previous_batch.insert((job, file));
             }
         }
     }

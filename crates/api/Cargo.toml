@@ -31,7 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 subscribe.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "fs", "io-util", "time", "sync", "signal"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "fs", "io-util", "time", "sync", "signal"] }
 futures-core = "0.3"
 flate2.workspace = true
 tar.workspace = true
@@ -42,7 +42,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 tower = { version = "0.5", features = ["util"] }
 ureq = { version = "3", features = ["socks-proxy"] }
-url = "2"
+url.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -53,7 +53,7 @@ libc.workspace = true
 [dev-dependencies]
 store = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-tokio = { version = "1", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "crawler-media"

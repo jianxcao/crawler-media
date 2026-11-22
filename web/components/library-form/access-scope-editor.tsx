@@ -79,7 +79,7 @@ export function AccessScopeEditor({
   ];
   const setSelected = (next: ViewerOptionId[]) => {
     onAdminVisible(next.includes(ADMIN_OPTION_ID));
-    onMemberIds(next.filter((v): v is string => typeof v === "string"));
+    onMemberIds(next.filter((v) => v !== ADMIN_OPTION_ID));
   };
   return (
     <div>
@@ -261,7 +261,9 @@ export function accessScopeSummary(
   adminVisible: boolean,
   memberCount: number,
 ): string {
-  if (mode === "everyone") return "所有成员";
+  if (mode === "everyone") {
+    return adminVisible ? "所有成员" : "所有成员（我自己不可见）";
+  }
   const parts = [adminVisible ? "我自己" : null, memberCount > 0 ? `${memberCount} 位成员` : null].filter(
     (v): v is string => v !== null,
   );

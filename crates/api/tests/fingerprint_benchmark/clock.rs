@@ -85,7 +85,8 @@ impl AnalysisClock {
         let worker = std::thread::spawn(move || {
             let mut now = 0;
             let mut first_batch_released = wait_for_all.is_none();
-            while !done.load(Ordering::SeqCst) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
                 if !first_batch_released && let Some(files) = wait_for_all.as_ref() {
                     let all_in_analysis = !files.is_empty()
                         && files.iter().all(|file_id| {
@@ -102,10 +103,10 @@ impl AnalysisClock {
                     }
                 }
                 if first_batch_released
-                    && !store
-                        .pending_probe_analysis_keys(None, 1)
-                        .unwrap()
-                        .is_empty()
+                    && matches!(
+                        store.pending_probe_analysis_keys(None, 1),
+                        Ok(keys) if !keys.is_empty()
+                    )
                 {
                     now += 2_000;
                     clock.set(now);
@@ -124,6 +125,11 @@ impl AnalysisClock {
 impl Drop for AnalysisClock {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.worker.take().unwrap().join().unwrap();
+        if let Some(worker) = self.worker.take() {
+            let res = worker.join();
+            if !std::thread::panicking() {
+                res.expect("analysis clock worker panicked");
+            }
+        }
     }
 }

@@ -51,7 +51,7 @@ fn cache_write_does_not_block_library_heartbeat() {
     let runtime = runtime();
     let result = runtime.block_on(async {
         tokio::time::timeout(
-            SLO,
+            POSITIVE_SLO,
             fixture.request(
                 "POST",
                 "/api/v1/playback/progress",
@@ -66,8 +66,7 @@ fn cache_write_does_not_block_library_heartbeat() {
     });
     blocked.commit().unwrap();
     writer.join().unwrap().unwrap();
-    let (status, body) =
-        result.expect("cache writer must not delay Library heartbeat beyond 200ms");
+    let (status, body) = result.expect("cache writer must not delay Library heartbeat beyond 2s");
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         fixture

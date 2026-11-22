@@ -34,6 +34,7 @@ export function usePlayerEngine({
   pageSuspendedRef,
   lastDownlinkRef,
   sourceBitrateRef,
+  bandwidthRestartedRef,
   pendingCommitRef,
   tryAutoplay,
   freezeFrame,
@@ -59,6 +60,7 @@ export function usePlayerEngine({
   pageSuspendedRef: MutableRefObject<boolean>;
   lastDownlinkRef: MutableRefObject<number | null>;
   sourceBitrateRef: MutableRefObject<number | null>;
+  bandwidthRestartedRef?: MutableRefObject<boolean>;
   pendingCommitRef: MutableRefObject<number | null>;
   tryAutoplay: () => Promise<void>;
   freezeFrame: (targetFileMs?: number) => void;
@@ -70,20 +72,21 @@ export function usePlayerEngine({
 }) {
   const [bufferedEndMs, setBufferedEndMs] = useState<number | null>(null);
   const [videoDurationMs, setVideoDurationMs] = useState<number | null>(null);
-  const bandwidthRestartedRef = useRef(false);
+  const localBandwidthRestartedRef = useRef(false);
+  const activeBandwidthRestartedRef = bandwidthRestartedRef ?? localBandwidthRestartedRef;
   const directShortRef = useRef(0);
   const directHintShownRef = useRef(false);
 
   useEffect(() => {
     setBufferedEndMs(null);
     setVideoDurationMs(null);
-  }, [unitKey, startMsOverride]);
+    activeBandwidthRestartedRef.current = false;
+  }, [activeBandwidthRestartedRef, unitKey, startMsOverride]);
 
   useEffect(() => {
     if (!session?.stream_url || !video || !mode) return;
 
     let disposed = false;
-    bandwidthRestartedRef.current = false;
     directShortRef.current = 0;
     directHintShownRef.current = false;
     sourceBitrateRef.current = session.source?.bit_rate ?? null;
@@ -106,10 +109,11 @@ export function usePlayerEngine({
             videoAction: session.decision.video?.action,
             downlinkBps: stats.downlinkBps,
             bitrateBps: stats.bitrate,
-            alreadyRestarted: bandwidthRestartedRef.current,
+            alreadyRestarted: activeBandwidthRestartedRef.current,
           })
         ) {
-          bandwidthRestartedRef.current = true;
+          activeBandwidthRestartedRef.current = true;
+          lastDownlinkRef.current = stats.downlinkBps;
           reportPlaybackClientLog(
             "bandwidth-restart",
             {
@@ -198,6 +202,7 @@ export function usePlayerEngine({
       engineRef.current = null;
     };
   }, [
+    activeBandwidthRestartedRef,
     apiRef,
     capabilityRef,
     dispatch,

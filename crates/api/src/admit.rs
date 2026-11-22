@@ -105,20 +105,7 @@ fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Respo
     let subscribe_id = body.subscribe_id.parse::<SubscribeId>().map_err(|_| {
         ApiError::invalid("subscribe.invalid", "invalid Subscribe id".into()).into_response()
     })?;
-    let guard = state.subscribe_guard(subscribe_id);
-    let Some(_lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
-        return Err(crate::http::store_wait::busy_response());
-    };
-    if state.subscribe_is_deleting(subscribe_id) {
-        return Err(ApiError::with(
-            axum::http::StatusCode::CONFLICT,
-            "subscription.deleting",
-            "订阅正在删除".into(),
-        )
-        .into_response());
-    }
-    let (subscribe, media, filter, sites) =
-        admitted_store(&state, |store| load_admit_context(store, subscribe_id))?;
+    let (subscribe, media, filter, sites) = lock_and_load_admit_context(&state, subscribe_id)?;
     let keyword = media
         .original_title
         .as_deref()
@@ -147,6 +134,7 @@ fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Respo
     };
     let delivery = delivery::prepare(&state, &subscribe, &scored.torrent)?;
     let url = delivery.resolve_url(&state, &scored.torrent)?;
+    let _inflight = ManualAdmitGuard::acquire(&state, subscribe.id, &scored.torrent.enclosure)?;
     let pending = crate::store::PendingDownload {
         // Existing pending representation: zero means the remote outcome is unconfirmed.
         submitted_at: Some(0),
@@ -154,22 +142,12 @@ fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Respo
         release_override: override_for_pending,
         downloader_id: delivery.id,
     };
-    admitted_store(&state, |store| {
-        store
-            .record_manual_pending_submissions(subscribe.id, &[(scored.score, pending)])
-            .map_err(ApiError::from)
-    })?;
-    delivery.submit(&scored.torrent, &url)?;
-    // This closes an already admitted side effect. A new maintenance/readonly gate
-    // must not discard its result; the persisted intent survives any confirmation failure.
-    if let Err(error) = state.store.confirm_pending_submission(
-        subscribe.id,
-        &scored.torrent.enclosure,
-        crate::job_loop::unix_now(),
-    ) {
-        tracing::error!(%error, subscribe_id=%subscribe.id, "Submitted manual Torrent retains unconfirmed pending intent");
-        return Err(ApiError::from(error).into_response());
+    record_manual_admit_pending(&state, &subscribe, scored.score, pending)?;
+    if let Err(response) = delivery.submit(&scored.torrent, &url) {
+        cleanup_failed_manual_admit_pending(&state, subscribe.id, &scored.torrent.enclosure);
+        return Err(response);
     }
+    confirm_admitted_submission(&state, subscribe.id, &delivery, &scored.torrent)?;
     tracing::info!(subscribe_id=%subscribe.id, title=%scored.torrent.title, score=scored.score, "Manual Torrent admitted and submitted");
     Ok(Json(json!({
         "subscribe_id": subscribe.id.to_string(),
@@ -177,6 +155,185 @@ fn admit_blocking(state: ApiState, body: AdmitBody) -> Result<Json<Value>, Respo
         "enclosure": scored.torrent.enclosure,
         "score": scored.score,
     })))
+}
+
+fn lock_and_load_admit_context(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+) -> Result<
+    (
+        domain::Subscribe,
+        domain::Media,
+        domain::Filter,
+        Vec<domain::Site>,
+    ),
+    Response,
+> {
+    let guard = state.subscribe_guard(subscribe_id);
+    let Some(_lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        return Err(crate::http::store_wait::busy_response());
+    };
+    if state.subscribe_is_deleting(subscribe_id) {
+        return Err(ApiError::with(
+            axum::http::StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除".into(),
+        )
+        .into_response());
+    }
+    admitted_store(state, |store| load_admit_context(store, subscribe_id))
+}
+
+fn record_manual_admit_pending(
+    state: &ApiState,
+    expected: &domain::Subscribe,
+    score: i32,
+    pending: crate::store::PendingDownload,
+) -> Result<(), Response> {
+    let guard = state.subscribe_guard(expected.id);
+    let Some(_lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        return Err(crate::http::store_wait::busy_response());
+    };
+    if state.subscribe_is_deleting(expected.id) {
+        return Err(ApiError::with(
+            axum::http::StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除".into(),
+        )
+        .into_response());
+    }
+    admitted_store(state, |store| {
+        let current = store
+            .get_subscribe(expected.id)?
+            .ok_or_else(|| ApiError::missing("subscribe.missing", "Subscribe not found".into()))?;
+        if current.media_id != expected.media_id
+            || current.filter_id != expected.filter_id
+            || current.downloader_id != expected.downloader_id
+            || current.coverage != expected.coverage
+        {
+            return Err(ApiError::with(
+                axum::http::StatusCode::CONFLICT,
+                "subscription.changed",
+                "订阅配置已变更，请刷新后重试".into(),
+            ));
+        }
+        if store
+            .load_pending(expected.id)?
+            .into_iter()
+            .any(|(_, item)| {
+                item.torrent.enclosure == pending.torrent.enclosure && item.submitted_at.is_some()
+            })
+        {
+            return Err(ApiError::with(
+                axum::http::StatusCode::CONFLICT,
+                "subscription.already_pending",
+                "该资源已在下载队列中".into(),
+            ));
+        }
+        store
+            .record_manual_pending_submissions(expected.id, &[(score, pending)])
+            .map_err(ApiError::from)
+    })
+}
+
+struct ManualAdmitGuard {
+    inflight: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(SubscribeId, String)>>>,
+    key: (SubscribeId, String),
+}
+
+impl ManualAdmitGuard {
+    fn acquire(
+        state: &ApiState,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+    ) -> Result<Self, Response> {
+        let key = (subscribe_id, enclosure.to_string());
+        let inserted = state.manual_admit_inflight.lock().insert(key.clone());
+        if !inserted {
+            return Err(ApiError::with(
+                axum::http::StatusCode::CONFLICT,
+                "subscription.admitting",
+                "正在提交该资源，请稍后重试".into(),
+            )
+            .into_response());
+        }
+        Ok(Self {
+            inflight: state.manual_admit_inflight.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for ManualAdmitGuard {
+    fn drop(&mut self) {
+        self.inflight.lock().remove(&self.key);
+    }
+}
+
+fn cleanup_failed_manual_admit_pending(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+    enclosure: &str,
+) {
+    let guard = state.subscribe_guard(subscribe_id);
+    let Some(_lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        tracing::warn!(%subscribe_id, "Timed out acquiring guard to clean failed manual admit pending row");
+        return;
+    };
+    if state.subscribe_is_deleting(subscribe_id) {
+        return;
+    }
+    let Ok(pending) = state.store.load_pending(subscribe_id) else {
+        return;
+    };
+    let is_unconfirmed = pending
+        .iter()
+        .any(|(_, item)| item.torrent.enclosure == enclosure && item.submitted_at.is_none());
+    if is_unconfirmed && let Err(error) = state.store.delete_pending(subscribe_id, enclosure) {
+        tracing::warn!(%error, %subscribe_id, "Failed to delete unconfirmed manual admit pending row");
+    }
+}
+
+fn confirm_admitted_submission(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+    delivery: &delivery::Delivery,
+    torrent: &domain::Torrent,
+) -> Result<(), Response> {
+    let guard = state.subscribe_guard(subscribe_id);
+    let Some(lease) = guard.try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT) else {
+        return Err(crate::http::store_wait::busy_response());
+    };
+    let deleting = if state.subscribe_is_deleting(subscribe_id) {
+        true
+    } else {
+        state
+            .store
+            .get_subscribe(subscribe_id)
+            .map_err(|error| ApiError::from(error).into_response())?
+            .is_none()
+    };
+    if deleting {
+        drop(lease);
+        delivery.rollback(torrent);
+        return Err(ApiError::with(
+            axum::http::StatusCode::CONFLICT,
+            "subscription.deleting",
+            "订阅正在删除".into(),
+        )
+        .into_response());
+    }
+    // This closes an already admitted side effect. A new maintenance/readonly gate
+    // must not discard its result; the persisted intent survives any confirmation failure.
+    if let Err(error) = state.store.confirm_pending_submission(
+        subscribe_id,
+        &torrent.enclosure,
+        crate::job_loop::unix_now(),
+    ) {
+        tracing::error!(%error, %subscribe_id, "Submitted manual Torrent retains unconfirmed pending intent");
+        return Err(ApiError::from(error).into_response());
+    }
+    Ok(())
 }
 
 pub async fn admit_torrent_v1(

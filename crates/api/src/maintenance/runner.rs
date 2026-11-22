@@ -353,7 +353,10 @@ fn execute_database_target(
             };
         }
     };
-    match state.store.with_writer(db, |conn| Ok(execute(conn))) {
+    match state
+        .store
+        .with_maintenance_writer(db, |conn| Ok(execute(conn)))
+    {
         Ok(result) => result,
         Err(store::StoreError::WriteBusy) => Ok(DatabaseReport::skipped(
             target.name.as_str(),

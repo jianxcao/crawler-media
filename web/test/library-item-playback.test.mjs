@@ -106,3 +106,35 @@ test("a late watched-mark resume cannot replace a newly selected episode's previ
     assert.match(view.label(), /看到 2:00/);
   } finally { await view.unmount(); }
 });
+
+test("clearing playback history resets watched state and triggers episode & resume reload", async () => {
+  let cleared = false;
+  const view = itemDetailHarness({
+    tv: true,
+    libraryName: "",
+    resume: () => (cleared
+      ? watchState({ position_ms: 0, start_ms: 0, played: false, resume_status: "no_progress" })
+      : watchState({ position_ms: 120_000, start_ms: 120_000, played: false })),
+    onClearHistory: () => { cleared = true; },
+  });
+  await view.mount();
+  try {
+    assert.equal(view.fallbackLabel(), "库存", "empty library name must fall back to 库存");
+    assert.match(view.label(), /看到 2:00/);
+    const fetchesBefore = view.episodeFetches();
+    const resumeCallsBefore = view.requests.filter((r) => r.path === "/playback/resume").length;
+
+    await view.clearHistory();
+
+    assert.equal(view.requests.some((r) => r.path === "/playback/history"), true);
+    assert.equal(view.episodeFetches(), fetchesBefore + 1, "clear history must refresh season episodes");
+    assert.equal(
+      view.requests.filter((r) => r.path === "/playback/resume").length,
+      resumeCallsBefore + 1,
+      "clear history must re-fetch resume state",
+    );
+    assert.equal(view.label(), "播放", "watched progress label must clear after history deletion");
+  } finally {
+    await view.unmount();
+  }
+});

@@ -4,7 +4,7 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use store::test_support::FixtureFile;
 use store::{ScanOperationStatus, Store};
 
-fn publish_fixture_row(store: &Store, path: &std::path::Path) {
+fn publish_fixture_row(store: &Store, path: &std::path::Path) -> String {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -20,12 +20,14 @@ fn publish_fixture_row(store: &Store, path: &std::path::Path) {
     };
     store.insert_media(&media).unwrap();
     let root = path.parent().unwrap();
-    if !store
+    let library_id = if let Some(existing) = store
         .list_library_roots()
         .unwrap()
-        .iter()
-        .any(|candidate| candidate.path == root)
+        .into_iter()
+        .find(|candidate| candidate.path == root)
     {
+        existing.library_id
+    } else {
         store
             .create_library(
                 MediaKind::Movie,
@@ -35,8 +37,9 @@ fn publish_fixture_row(store: &Store, path: &std::path::Path) {
                 true,
                 &[],
             )
-            .unwrap();
-    }
+            .unwrap()
+            .id
+    };
     let row = FixtureFile {
         file_id: Some(LedgerId::new()),
         media_id: media.id,
@@ -52,6 +55,7 @@ fn publish_fixture_row(store: &Store, path: &std::path::Path) {
         ..Default::default()
     };
     store::test_support::publish_fixture_file(store, &row).unwrap();
+    library_id
 }
 
 #[test]
@@ -215,7 +219,7 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     let path = file.display().to_string();
     // A scan has a configured root before it records checkpoints, even while a
     // particular file has no ledger row yet.
-    store
+    let library = store
         .create_library(
             MediaKind::Movie,
             "Scan root",
@@ -226,7 +230,7 @@ fn scan_seen_requires_current_ledger_and_file_version() {
         )
         .unwrap();
 
-    let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
+    let op = store.enqueue_scan(&library.id, "sig1", &[], 1000).unwrap();
     assert!(
         !store.scan_seen_is_current(&op.id, &path).unwrap(),
         "未记录断点"
@@ -279,8 +283,8 @@ fn strm_url_change_with_same_size_and_mtime_is_not_current() {
     std::fs::write(&file, "https://a/video").unwrap();
     let path = file.display().to_string();
 
-    let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    publish_fixture_row(&store, &file);
+    let library_id = publish_fixture_row(&store, &file);
+    let op = store.enqueue_scan(&library_id, "sig1", &[], 1000).unwrap();
     store
         .record_scan_seen(&op.id, std::slice::from_ref(&file))
         .unwrap();
@@ -313,9 +317,9 @@ fn unknown_zero_version_checkpoint_is_not_current() {
     let missing_file = root.join("Gone (2024).mkv");
     let path = missing_file.display().to_string();
 
-    let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     // 台账行存在，但文件读不到 metadata → 断点版本 0/0（等价于老断点行）。
-    publish_fixture_row(&store, &missing_file);
+    let library_id = publish_fixture_row(&store, &missing_file);
+    let op = store.enqueue_scan(&library_id, "sig1", &[], 1000).unwrap();
     store
         .record_scan_seen(&op.id, std::slice::from_ref(&missing_file))
         .unwrap();
@@ -330,9 +334,12 @@ fn unknown_zero_version_checkpoint_is_not_current() {
 fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "TV", &["/media/tv"], "everyone", true, &[])
+        .unwrap();
     let show_a = PathBuf::from("/media/tv/Show A");
     let op = store
-        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1000)
+        .enqueue_scan(&library.id, "sig1", std::slice::from_ref(&show_a), 1000)
         .unwrap();
     let claimed = store.claim_next_queued_scan(&[]).unwrap().unwrap();
     assert_eq!(claimed.id, op.id);
@@ -340,7 +347,7 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
 
     // worker 判定之后、写终态之前，另一请求并入同一 operation。
     let merged = store
-        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1001)
+        .enqueue_scan(&library.id, "sig1", std::slice::from_ref(&show_a), 1001)
         .unwrap();
     assert_eq!(merged.id, op.id);
     assert_eq!(merged.dirty_rev, 1);
@@ -459,10 +466,10 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
     let file = root.join("Movie (2024).strm");
     std::fs::write(&file, "https://a/video").unwrap();
     let path = file.display().to_string();
-    publish_fixture_row(&store, &file);
+    let library_id = publish_fixture_row(&store, &file);
 
     // 首次处理：断点与 durable 版本一起写下。
-    let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
+    let op1 = store.enqueue_scan(&library_id, "sig1", &[], 1000).unwrap();
     store
         .record_scan_seen(&op1.id, std::slice::from_ref(&file))
         .unwrap();
@@ -519,7 +526,7 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
         "同 size/同 mtime 的 URL 变化必须被 durable 版本识别"
     );
 
-    let op2 = store.enqueue_scan("lib1", "sig1", &[], 2000).unwrap();
+    let op2 = store.enqueue_scan(&library_id, "sig1", &[], 2000).unwrap();
     assert_ne!(op1.id, op2.id, "上一个 operation 已终态");
     store
         .record_scan_seen(&op2.id, std::slice::from_ref(&file))

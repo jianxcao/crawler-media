@@ -18,5 +18,5 @@ pub(crate) use publication::TransferFileObservation;
 pub(crate) use publication::{observe_transfer_files, publish_transfer_file};
 pub(crate) use recorder::{PlannedPublicationRecorder, PublicationRecorder};
 pub(crate) use removals::{observe_transfer_removals, queue_transfer_removals};
-pub(crate) use run::recorded_file_source;
 pub use run::transfer_one;
+pub(crate) use run::{recorded_file_source, wanted_slots};

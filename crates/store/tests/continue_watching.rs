@@ -48,11 +48,16 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
-        Self {
-            dir,
-            store,
-            user: UserId::new(),
-        }
+        let user = UserId::new();
+        store
+            .insert_user(&domain::User {
+                id: user,
+                login: format!("cw-{user}"),
+                enabled: true,
+                role: domain::UserRole::Member,
+            })
+            .unwrap();
+        Self { dir, store, user }
     }
     fn library(&self, name: &str) -> LibraryId {
         self.library_kind(name, MediaKind::Tv)

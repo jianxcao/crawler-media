@@ -62,7 +62,7 @@ async fn file_fonts(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    if !path.exists() {
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -73,7 +73,10 @@ async fn file_fonts(
         .unwrap_or_default();
     let parent = path.parent().unwrap_or(FsPath::new(""));
     let font_dir = parent.join(format!("{stem}.fonts"));
-    if font_dir.is_dir() {
+    if tokio::fs::metadata(&font_dir)
+        .await
+        .is_ok_and(|meta| meta.is_dir())
+    {
         let mut fonts = Vec::new();
         if let Ok(mut dir) = tokio::fs::read_dir(&font_dir).await {
             while let Ok(Some(entry)) = dir.next_entry().await {
@@ -117,7 +120,7 @@ async fn file_trickplay(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    if !path.exists() {
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -133,7 +136,7 @@ async fn file_trickplay(
         parent.join(format!("{stem}-trickplay.jpg")),
     ];
     for cand in candidates {
-        if cand.exists() {
+        if tokio::fs::try_exists(&cand).await.unwrap_or(false) {
             let content_type = match cand.extension().and_then(|e| e.to_str()) {
                 Some("webp") => "image/webp",
                 _ => "image/jpeg",
@@ -335,18 +338,34 @@ async fn stream(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if is_strm {
-        // Enforce 64KiB limit on STRM files (65536 bytes)
-        if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() > 65_536
-        {
-            tracing::warn!(path = %path.display(), len = meta.len(), "STRM file exceeds 64KiB limit");
-            return Err(StatusCode::BAD_GATEWAY);
+        enum StrmOutcome {
+            TooLarge(u64),
+            Ready(Option<String>),
         }
-        return match library::read_strm_url(&path) {
-            Some(direct_url) => {
+        let strm_path = path.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            // Enforce 64KiB limit on STRM files (65536 bytes)
+            if let Ok(meta) = std::fs::metadata(&strm_path)
+                && meta.len() > 65_536
+            {
+                return StrmOutcome::TooLarge(meta.len());
+            }
+            StrmOutcome::Ready(library::read_strm_url(&strm_path))
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, item_id = %id, "Jellyfin STRM read task failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        return match outcome {
+            StrmOutcome::TooLarge(len) => {
+                tracing::warn!(path = %path.display(), len, "STRM file exceeds 64KiB limit");
+                Err(StatusCode::BAD_GATEWAY)
+            }
+            StrmOutcome::Ready(Some(direct_url)) => {
                 Ok((StatusCode::FOUND, [(header::LOCATION, direct_url)]).into_response())
             }
-            None => {
+            StrmOutcome::Ready(None) => {
                 tracing::warn!(user_id = %user.id, item_id = %id, "Jellyfin STRM file has no usable URL");
                 Err(StatusCode::NOT_FOUND)
             }
@@ -448,7 +467,15 @@ pub async fn playback_info(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let source = super::source::media_source(&snapshot, &id).await?;
+    let source_item_id = match snapshot.unit {
+        Some(key) => domain::TypedItemId::Unit {
+            media: snapshot.media.id,
+            key,
+        }
+        .to_wire_string(),
+        None => snapshot.protocol_id(),
+    };
+    let source = super::source::media_source(&snapshot, &source_item_id).await?;
     let client = user.playback_client(&headers);
     let play_session_id = state
         .provider

@@ -115,3 +115,65 @@ async fn catalog_cache_rejects_ambiguous_source_id_deletion() {
         "ambiguous source ids cannot remove other cache rows"
     );
 }
+
+#[tokio::test]
+async fn catalog_cache_aggregate_ignores_tmdb_subresource_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store
+        .put_catalog_cache(
+            "tmdb",
+            "/tv/123",
+            r#"{"name":"Real Show","first_air_date":"2020-01-01"}"#,
+            100,
+            None,
+        )
+        .unwrap();
+    store
+        .put_catalog_cache(
+            "tmdb",
+            "/tv/123/season/1",
+            r#"{"name":"Season 1","air_date":"2020-01-01","poster_path":"/s1.jpg"}"#,
+            200,
+            None,
+        )
+        .unwrap();
+    store
+        .put_catalog_cache(
+            "tmdb",
+            "/tv/999/season/1",
+            r#"{"name":"Season 1","air_date":"2021-01-01"}"#,
+            300,
+            None,
+        )
+        .unwrap();
+    drop(store);
+
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    ));
+    let resp = app
+        .oneshot(request(
+            "GET",
+            "/api/v1/catalog/cache?view=aggregate",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let data = json_data(resp).await;
+    let entries = data.as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "subresource keys must not aggregate as works: {entries:?}"
+    );
+    assert_eq!(entries[0]["id"], "tmdb_tv_123");
+    assert_eq!(entries[0]["title"], "Real Show");
+}

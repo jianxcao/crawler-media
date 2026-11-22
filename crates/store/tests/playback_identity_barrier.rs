@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
-use domain::{MediaId, MediaKind, UserId};
+use domain::{MediaId, MediaKind, UnitKey, User, UserId, UserRole};
 use rusqlite::Connection;
 use store::Store;
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{MediaMergeRequest, PlaybackMutation};
 
 mod merge_support;
@@ -29,14 +30,51 @@ fn begin(store: &Store, survivor: MediaId, loser: MediaId) -> String {
 }
 
 fn seed(store: &Store) -> (MediaId, MediaId, UserId) {
-    for (id, title) in [(SURVIVOR, "Survivor"), (LOSER, "Loser")] {
+    let user: UserId = USER.parse().unwrap();
+    store
+        .insert_user(&User {
+            id: user,
+            login: format!("barrier-{user}"),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
+    let (lib, root_id) =
+        merge_support::create_library(store, "Movies", MediaKind::Movie, "/movies");
+    let scope = WriteScope {
+        library_id: lib.id.parse().unwrap(),
+        config_revision: 0,
+    };
+    for (idx, (id, title)) in [(SURVIVOR, "Survivor"), (LOSER, "Loser")]
+        .into_iter()
+        .enumerate()
+    {
         merge_support::create_media(store, id, title, MediaKind::Movie);
+        let fid = format!("00000000-0000-0000-0001-00000000010{idx}");
+        let file = merge_support::make_file(
+            &fid,
+            &lib.id,
+            &root_id,
+            id,
+            &format!("{title}.mkv"),
+            MediaKind::Movie,
+            1_000_000,
+        );
+        store
+            .publish_files(
+                &scope,
+                &[StorePublication {
+                    file: &file,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1_000,
+            )
+            .unwrap();
     }
-    (
-        SURVIVOR.parse().unwrap(),
-        LOSER.parse().unwrap(),
-        USER.parse().unwrap(),
-    )
+    (SURVIVOR.parse().unwrap(), LOSER.parse().unwrap(), user)
 }
 
 #[test]
@@ -45,6 +83,14 @@ fn frozen_and_retired_marks_are_rejected_without_changing_other_users_or_survivo
     let store = Store::open(tmp.path()).unwrap();
     let (survivor, loser, user) = seed(&store);
     let other = UserId::new();
+    store
+        .insert_user(&User {
+            id: other,
+            login: format!("other-{other}"),
+            enabled: true,
+            role: UserRole::Member,
+        })
+        .unwrap();
     let marks = PlaybackMutation::marks(user, -1, -1, Some(true), Some(true));
     store.mutate_playback(survivor, &marks, 500).unwrap();
     store.mutate_playback(loser, &marks, 600).unwrap();

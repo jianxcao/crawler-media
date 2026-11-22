@@ -1,4 +1,8 @@
 //! SQL on one explicitly borrowed database connection.
+use std::collections::HashSet;
+
+use rusqlite::OptionalExtension;
+
 use super::*;
 
 impl crate::LibraryConnection<'_> {
@@ -11,11 +15,35 @@ impl crate::LibraryConnection<'_> {
             return Ok(());
         }
         let tx = crate::write_tx(self.library)?;
+        let mut checked_libraries = HashSet::new();
+        if let Some(library_id) = tx
+            .query_row(
+                "SELECT library_id FROM scan_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            && checked_libraries.insert(library_id.clone())
+        {
+            crate::library_write::ensure_library_writable(&tx, &library_id)?;
+        }
         let aliases = crate::path_key::alias_snapshot(self.library);
         let keys: Vec<String> = stamps
             .iter()
             .map(|(path, _, _, _)| crate::path_key::canonical_key(path, &aliases))
             .collect();
+        let mut owner_stmt =
+            tx.prepare("SELECT library_id FROM library_files WHERE path_key = ?1")?;
+        for path_key in &keys {
+            if let Some(library_id) = owner_stmt
+                .query_row([path_key], |row| row.get::<_, String>(0))
+                .optional()?
+                && checked_libraries.insert(library_id.clone())
+            {
+                crate::library_write::ensure_library_writable(&tx, &library_id)?;
+            }
+        }
+        drop(owner_stmt);
         for ((path, mtime_ms, file_size, content_digest), path_key) in
             stamps.iter().zip(keys.iter())
         {

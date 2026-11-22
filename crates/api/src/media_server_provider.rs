@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use media_server::provider::{
     AuthenticateError, MediaItemSnapshot, MediaPerson, MediaServerProvider, PlaybackClientInfo,
-    PlaybackEvent, ServerItemPage, ServerItemQuery, ServerLibrary, ServerUser,
+    PlaybackEvent, QueryError, ServerItemPage, ServerItemQuery, ServerLibrary, ServerUser,
     SubtitleDeliveryError, UserMarksError,
 };
 
@@ -363,20 +363,20 @@ impl MediaServerProvider for ApiServerProvider {
         search: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<media_server::provider::EntityPage, String> {
+    ) -> Result<media_server::provider::EntityPage, QueryError> {
         entities::entities(self, user, kind, parent, search, offset, limit).await
     }
     async fn query_item_counts(
         &self,
         user: UserId,
-    ) -> Result<media_server::provider::ItemCounts, String> {
+    ) -> Result<media_server::provider::ItemCounts, QueryError> {
         entities::counts(self, user).await
     }
     async fn query_seasons(
         &self,
         user: UserId,
         media: domain::MediaId,
-    ) -> Result<Vec<media_server::provider::Season>, String> {
+    ) -> Result<Vec<media_server::provider::Season>, QueryError> {
         entities::seasons(self, user, media).await
     }
     async fn search_hints_page(
@@ -385,7 +385,7 @@ impl MediaServerProvider for ApiServerProvider {
         term: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String> {
+    ) -> Result<ServerItemPage, QueryError> {
         entities::hints(self, user, term, offset, limit).await
     }
     async fn resolve_entity_image(
@@ -437,7 +437,7 @@ impl MediaServerProvider for ApiServerProvider {
         series_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String> {
+    ) -> Result<ServerItemPage, QueryError> {
         selection::next_up_items(self, user_id, series_id, offset, limit).await
     }
 
@@ -448,7 +448,7 @@ impl MediaServerProvider for ApiServerProvider {
         parent_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String> {
+    ) -> Result<ServerItemPage, QueryError> {
         selection::resumable_items(self, user_id, parent_id, offset, limit).await
     }
     async fn resolve_single_item(
@@ -466,6 +466,14 @@ impl MediaServerProvider for ApiServerProvider {
         }
     }
 
+    async fn resolve_single_item_for_query(
+        &self,
+        user_id: UserId,
+        id: &str,
+    ) -> Result<Option<MediaItemSnapshot>, QueryError> {
+        query_lookups::resolve_single_item_for_query(self, user_id, id).await
+    }
+
     async fn resolve_user_item_data(
         &self,
         user_id: UserId,
@@ -475,8 +483,7 @@ impl MediaServerProvider for ApiServerProvider {
             return Ok(None);
         };
         if let domain::TypedItemId::Season { media, season } = item {
-            return self
-                .season_user_item_data(user_id, media, season)
+            return user_marks::season_user_item_data(self, user_id, media, season)
                 .await
                 .map(Some);
         }
@@ -732,46 +739,6 @@ impl MediaServerProvider for ApiServerProvider {
             )
         })
         .await?
-    }
-}
-
-impl ApiServerProvider {
-    /// Season-level marks rolled up over the season's visible episodes.
-    async fn season_user_item_data(
-        &self,
-        user_id: UserId,
-        media: domain::MediaId,
-        season: u32,
-    ) -> Result<media_server::provider::UserItemData, String> {
-        let summary = entities::seasons(self, user_id, media)
-            .await?
-            .into_iter()
-            .find(|row| row.season == season);
-        let (total, played) = summary
-            .map(|row| (row.total as usize, row.played as usize))
-            .unwrap_or_default();
-        let favorite = self
-            .run_sync(move |provider| {
-                provider.bounded_reader(&[store::Db::Library], |store| {
-                    store
-                        .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
-                        .map(|state| state.is_some_and(|state| state.favorite))
-                        .map_err(|error| error.to_string())
-                })
-            })
-            .await??;
-        let unplayed_item_count = total.saturating_sub(played);
-        let item_id = domain::TypedItemId::Season { media, season }.to_wire_string();
-        Ok(media_server::provider::UserItemData {
-            key: item_id.clone(),
-            item_id,
-            playback_position_ticks: 0,
-            play_count: 0,
-            played: total == 0 || unplayed_item_count == 0,
-            is_favorite: favorite,
-            unplayed_item_count: Some(unplayed_item_count),
-            played_percentage: (total > 0).then(|| played as f64 / total as f64 * 100.0),
-        })
     }
 }
 

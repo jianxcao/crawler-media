@@ -167,3 +167,29 @@ test("真实 adapter 对缺状态字段的文件不 fail-open", async () => {
   const detail = await api.getLibraryItemDetail("lib", "m");
   assert.equal(isPlayableFile(detail.files[0]), false);
 });
+
+test("collectAllFilePages stops when a page returns empty files or repeats a cursor", async () => {
+  let emptyCalls = 0;
+  const fromEmpty = await collectAllFilePages(
+    { files: [dto("f1")], next_cursor: "c1" },
+    async () => {
+      emptyCalls += 1;
+      assert.ok(emptyCalls <= 3, "must terminate instead of looping on empty files page");
+      return { files: [], next_cursor: "c2" };
+    },
+  );
+  assert.deepEqual(fromEmpty.map((f) => f.file_id), ["f1"]);
+  assert.equal(emptyCalls, 1);
+
+  let repeatCalls = 0;
+  const fromRepeat = await collectAllFilePages(
+    { files: [dto("f1")], next_cursor: "c1" },
+    async () => {
+      repeatCalls += 1;
+      assert.ok(repeatCalls <= 3, "must terminate instead of looping on repeated cursor");
+      return { files: [dto("f2")], next_cursor: "c1" };
+    },
+  );
+  assert.deepEqual(fromRepeat.map((f) => f.file_id), ["f1", "f2"]);
+  assert.equal(repeatCalls, 1);
+});

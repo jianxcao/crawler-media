@@ -89,3 +89,60 @@ fn cached_artwork_and_episode_facts_preserve_successful_fields_when_offline() {
         Some(metadata)
     );
 }
+
+#[test]
+fn cached_details_poster_reads_append_to_response_cache_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let movie_rich_db = dir.path().join("movie-rich.db");
+    let source = Source(Arc::new(Mutex::new(Some(
+        r#"{"id":603,"title":"The Matrix","poster_path":"/movie-rich.jpg","release_date":"1999-03-30"}"#,
+    ))));
+    let tmdb = Tmdb::new_at(source.clone(), &movie_rich_db, NOW).unwrap();
+    tmdb.details_with_meta_for(MediaKind::Movie, "603", &["zh-CN"], &["CN"])
+        .unwrap();
+    *source.0.lock().unwrap() = None;
+    assert_eq!(
+        tmdb.cached_details_poster(MediaKind::Movie, "603").unwrap(),
+        Some("/movie-rich.jpg".to_string())
+    );
+
+    let movie_trans_db = dir.path().join("movie-trans.db");
+    *source.0.lock().unwrap() = Some(
+        r#"{"id":603,"title":"The Matrix","poster_path":"/movie-trans.jpg","release_date":"1999-03-30"}"#,
+    );
+    let tmdb = Tmdb::new_at(source.clone(), &movie_trans_db, NOW).unwrap();
+    tmdb.movie_details("603").unwrap();
+    *source.0.lock().unwrap() = None;
+    assert_eq!(
+        tmdb.cached_details_poster(MediaKind::Movie, "603").unwrap(),
+        Some("/movie-trans.jpg".to_string())
+    );
+
+    let tv_trans_db = dir.path().join("tv-trans.db");
+    *source.0.lock().unwrap() = Some(
+        r#"{"id":1396,"name":"Breaking Bad","poster_path":"/tv-trans.jpg","first_air_date":"2008-01-20"}"#,
+    );
+    let tmdb = Tmdb::new_at(source.clone(), &tv_trans_db, NOW).unwrap();
+    tmdb.tv_details("1396").unwrap();
+    *source.0.lock().unwrap() = None;
+    assert_eq!(
+        tmdb.cached_details_poster(MediaKind::Tv, "1396").unwrap(),
+        Some("/tv-trans.jpg".to_string())
+    );
+
+    let tv_rich_db = dir.path().join("tv-rich.db");
+    let cache = media::cache::CatalogCache::open(&tv_rich_db, NOW).unwrap();
+    let key =
+        media::tmdb_keys::request_key(&media::tmdb_keys::tv_details_paths("1396")[1], "zh-CN");
+    cache
+        .put(
+            &key,
+            r#"{"id":1396,"name":"Breaking Bad","poster_path":"/tv-rich.jpg"}"#,
+        )
+        .unwrap();
+    let tmdb = Tmdb::with_cache(source, cache);
+    assert_eq!(
+        tmdb.cached_details_poster(MediaKind::Tv, "1396").unwrap(),
+        Some("/tv-rich.jpg".to_string())
+    );
+}

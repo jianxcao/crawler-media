@@ -216,3 +216,189 @@ async fn durable_overflow_can_ack_without_an_in_memory_dispatch_id() {
         65
     );
 }
+
+fn insert_tv_with_failed_outro(
+    fix: &PresenceFixture,
+    tv_root: &std::path::Path,
+    index: usize,
+    failures: i64,
+) {
+    let store = fix.state.store();
+    let path = tv_root.join(format!("Show.S01E{index:02}.mkv"));
+    std::fs::write(&path, b"tv-bytes").unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: format!("Waiting Show {index}"),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let file_id = LedgerId::new();
+    let source_version = api::fingerprint_job::current_source_version(&path);
+    store.insert_media(&media).unwrap();
+    store
+        .insert_scanned_files(
+            &[ScannedLedger {
+                file_id,
+                media_id: media.id,
+                path: path.display().to_string(),
+                units: vec![UnitKey::new(1, index as i32 + 1)],
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+                source_version: source_version.clone(),
+                source_digest: None,
+                size_bytes: None,
+                created_ns: None,
+                modified_ns: None,
+                artwork: Default::default(),
+                observations: Vec::new(),
+            }],
+            index as i64,
+        )
+        .unwrap();
+    let row = store.file_coverage_by_id(file_id).unwrap().unwrap();
+    let lid = file_id.to_string();
+    let tracks = library::Tracks {
+        video: Some(Default::default()),
+        ..Default::default()
+    };
+    store
+        .put_file_meta_versioned(&lid, &tracks, Some(&source_version), Some(600_000))
+        .unwrap();
+    let source = api::fingerprint_job::capture_source(&tracks, None).ok();
+    let profile = api::fingerprint_job::profile_for_source(source.as_ref());
+    let context_key = api::fingerprint_job::fingerprint_cache_key_with_profile(
+        &row.file.version.source_version,
+        180,
+        Some(600_000),
+        &profile,
+    );
+    store
+        .put_fingerprint_cache(
+            &lid,
+            &store::FingerprintCacheEntry {
+                cache_key: context_key.clone(),
+                algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
+                sample_duration_secs: 180,
+                media_duration_ms: Some(600_000),
+                intro: marker::CapturedFingerprint {
+                    window: marker::SampleWindow::new(0, 180_000),
+                    words: vec![1, 2, 3],
+                    pcm_duration_ms: Some(180_000),
+                    metrics: Default::default(),
+                },
+                outro: None,
+            },
+        )
+        .unwrap();
+    let outro_key = store::ProbeStageKey {
+        ledger_id: lid,
+        context_key,
+        stage: store::ProbeStage::Outro,
+    };
+    let now_ms = store::unix_now() * 1000;
+    let base_ms = now_ms - 10 * 86_400_000;
+    for attempt in 0..failures {
+        let job = format!("job-{index}-{attempt}");
+        let ts = if attempt == failures - 1 && failures < 5 {
+            now_ms
+        } else {
+            base_ms + attempt * 86_400_000
+        };
+        assert!(store.claim_probe_stage(&outro_key, &job, ts).unwrap());
+        assert!(
+            store
+                .finish_probe_stage(
+                    &outro_key,
+                    &job,
+                    &store::ProbeStageCompletion::Failed {
+                        error_kind: "network".into(),
+                        error: "boom".into(),
+                    },
+                    ts,
+                )
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn waiting_head_obligations_do_not_starve_later_obligations() {
+    let fix = fixture_without_workers();
+    let store = fix.state.store();
+    let tv_root = fix.dir.path().join("shows");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let tv_lib = store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[tv_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .set_library_intro_settings(&tv_lib.id, true, true)
+        .unwrap();
+    for index in 0..100 {
+        insert_tv_with_failed_outro(&fix, &tv_root, index, 1);
+    }
+    let tail = insert_scanned(&fix, 100);
+    let tail_id = tail.file.file_id.to_string();
+    assert_eq!(
+        api::scan_probe_dispatch::dispatch_once(fix.state.clone())
+            .await
+            .unwrap(),
+        1,
+        "cursor pagination must reach obligations behind 100 Waiting rows"
+    );
+    assert!(
+        store
+            .active_probe_unit_for_ledger(&tail_id)
+            .unwrap()
+            .is_some(),
+        "row #101 behind 100 Waiting rows must get durable probe work"
+    );
+    assert_eq!(store.scan_probe_obligations(105).unwrap().len(), 100);
+}
+
+#[tokio::test]
+async fn exhausted_obligation_is_acknowledged_and_cleared() {
+    let fix = fixture_without_workers();
+    let store = fix.state.store();
+    let tv_root = fix.dir.path().join("shows");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let tv_lib = store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[tv_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .set_library_intro_settings(&tv_lib.id, true, true)
+        .unwrap();
+    insert_tv_with_failed_outro(&fix, &tv_root, 1, 5);
+    assert_eq!(
+        api::scan_probe_dispatch::dispatch_once(fix.state.clone())
+            .await
+            .unwrap(),
+        1,
+        "Exhausted obligation must be acknowledged"
+    );
+    assert!(store.scan_probe_obligations(10).unwrap().is_empty());
+}
