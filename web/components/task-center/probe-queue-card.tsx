@@ -71,7 +71,7 @@ export function ProbeQueueCard({
               {status.libraries.map((lib) => (
                 <span
                   key={lib.library_id}
-                  className="tnum inline-flex items-center gap-1 rounded-lg border border-white/10 bg-black/25 px-2.5 py-1 text-caption text-white/80"
+                  className="code-well tnum inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-caption text-white/80"
                 >
                   <span>
                     {lib.library_name}：{formatCount(lib.total_pending)} 项

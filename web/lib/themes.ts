@@ -33,15 +33,25 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "silver",
     label: "银玻璃",
-    description: "液态玻璃 · 冷银高光的控制台质感（默认）",
+    description: "冷银磨砂 · 沉稳克制的暗色控制台质感（默认）",
     preview: { bg: "#10131c", accent: "#cdd6e6" },
+    structural: false,
+  },
+  {
+    id: "liquid",
+    label: "液态玻璃",
+    description: "曲面光学折射 · 棱镜流光边缘与深海通透玻璃质感",
+    preview: {
+      bg: "linear-gradient(135deg, #06101f 0%, #0d2a4c 55%, #1d4d73 100%)",
+      accent: "linear-gradient(135deg, #f0f9ff 0%, #7dd3fc 52%, #c4b5fd 100%)",
+    },
     structural: false,
   },
   {
     id: "paper",
     label: "纸感玻璃",
-    description: "浅色磨砂玻璃 · 纸白画布与冷银边缘",
-    preview: { bg: "#eef1f6", accent: "#596a82" },
+    description: "日光白瓷磨砂 · 清爽通透的纸白画布与宝石蓝点缀",
+    preview: { bg: "#eef1f6", accent: "#2b5ba3" },
     structural: false,
   },
   {

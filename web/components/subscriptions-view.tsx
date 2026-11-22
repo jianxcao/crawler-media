@@ -377,16 +377,16 @@ function SubscriptionSection({
     >
       {title && (
         <header className="sticky top-2 z-20 mb-4 px-6 max-md:px-4">
-          <div className="flex items-center justify-between rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(18,21,30,0.88),rgba(10,12,18,0.82))] px-4 py-2.5 shadow-[0_10px_28px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-xl">
+          <div className="section-sticky-bar flex items-center justify-between rounded-2xl px-4 py-2.5">
             {/* 只留标题：分组名已经说清是剧集还是电影，再加一个彩色圆点既没有
                 信息量，还会和海报上表示“追更中 / 在库”的绿点撞语义。 */}
             <h3
               id={`${kind}-subscriptions-title`}
-              className="text-ui font-semibold tracking-[-0.01em] text-white/90"
+              className="text-ui font-semibold tracking-[-0.01em] text-[var(--text)]"
             >
               {title}
             </h3>
-            <span className="tnum rounded-full border border-white/[0.07] bg-white/[0.04] px-2.5 py-0.5 text-caption text-[var(--text-muted)]">
+            <span className="tnum rounded-full border border-[var(--line)] bg-[var(--glass-fill)] px-2.5 py-0.5 text-caption text-[var(--text-muted)]">
               {subscriptions.length} 部
             </span>
           </div>
@@ -467,9 +467,9 @@ function TodayArrivalsSection({
   return (
     <section
       aria-labelledby="today-arrivals-title"
-      className="relative mx-6 mt-5 rounded-[22px] shadow-[0_18px_55px_rgba(0,0,0,0.2)] max-md:mx-4 max-md:mt-4"
+      className="relative mx-6 mt-5 rounded-[22px] max-md:mx-4 max-md:mt-4"
     >
-      <div className="relative isolate overflow-hidden rounded-[22px] border border-white/[0.1] bg-[linear-gradient(145deg,rgba(16,19,29,0.82),rgba(8,10,16,0.68))] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl">
+      <div className="arrival-calendar-surface relative isolate overflow-hidden rounded-[22px]">
         <span
           aria-hidden="true"
           className="pointer-events-none absolute -right-16 -top-24 size-56 rounded-full bg-violet-500/[0.09] blur-3xl"
@@ -679,7 +679,7 @@ export function MediaTypeSwitcher({
   };
   return (
     <div
-      className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl"
+      className="segmented-glass inline-flex shrink-0 rounded-full p-1"
       aria-label="订阅类型"
     >
       {(["all", "tv", "movie"] as const).map((type) => (
@@ -688,11 +688,7 @@ export function MediaTypeSwitcher({
           type="button"
           aria-pressed={value === type}
           onClick={() => onChange(type)}
-          className={`rounded-full py-1.5 text-sub font-semibold transition ${compact ? "px-2.5" : "px-4"} ${
-            value === type
-              ? "bg-white/15 text-white shadow-sm"
-              : "text-[var(--text-muted)] hover:text-white"
-          }`}
+          className={`segmented-glass__item rounded-full py-1.5 text-sub font-semibold transition ${compact ? "px-2.5" : "px-4"}`}
         >
           {labels[type]}
         </button>

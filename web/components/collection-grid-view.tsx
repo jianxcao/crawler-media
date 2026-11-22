@@ -365,7 +365,7 @@ export function CollectionGridView({
                 : "正在读取完整榜单…"}
             </p>
           </div>
-          <label className="flex h-10 w-full items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 text-[var(--text-muted)] backdrop-blur-sm sm:w-72">
+          <label className="flex h-10 w-full items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-inset)] px-4 text-[var(--text-muted)] backdrop-blur-sm sm:w-72">
             <SearchIcon className="size-4 shrink-0" />
             <input
               value={query}
@@ -423,7 +423,7 @@ export function CollectionGridView({
       </header>
 
       {error && !items && (
-        <div className="mx-auto mt-16 max-w-md rounded-2xl border border-white/10 bg-black/25 p-8 text-center text-body text-[var(--text-muted)]">
+        <div className="css-glass mx-auto mt-16 max-w-md rounded-2xl p-8 text-center text-body text-[var(--text-muted)]">
           <p className="mb-4">{error}</p>
           <button
             type="button"

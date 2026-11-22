@@ -80,7 +80,7 @@ function HeroSlide({
           open(item);
         }
       }}
-      className={`absolute inset-0 transition-opacity duration-700 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)] ${
+      className={`dark-media-surface absolute inset-0 transition-opacity duration-700 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)] ${
         active ? "z-[1] cursor-pointer opacity-100" : "pointer-events-none z-0 opacity-0"
       }`}
     >

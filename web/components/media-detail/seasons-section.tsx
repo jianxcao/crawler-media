@@ -237,7 +237,7 @@ function DiscoverEpisodeCard({ season, ep }: { season: number; ep: MediaEpisodeD
 
   const content = (
     <>
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.04]">
+      <div className="dark-media-surface relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.04]">
         {ep.still_url ? (
           <ArtworkImage
             src={imageUrl(ep.still_url)}

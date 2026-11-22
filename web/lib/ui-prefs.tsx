@@ -58,6 +58,7 @@ const UiPrefsContext = createContext<UiPrefsContextValue | null>(null);
  */
 const THEME_BROWSER_CHROME: Record<string, string> = {
   netflix: "#000000",
+  liquid: "#06101f",
   paper: "#eef1f6",
   [DEFAULT_THEME_ID]: "#0a0b10",
 };
@@ -178,7 +179,10 @@ export function useUiPrefs(): UiPrefsContextValue {
  */
 export function useTheme(): ThemeMeta {
   const ctx = useContext(UiPrefsContext);
-  return themeMeta(ctx ? ctx.prefs.theme : DEFAULT_THEME_ID);
+  if (ctx) return themeMeta(ctx.prefs.theme);
+  const docTheme =
+    typeof document !== "undefined" ? document.documentElement.getAttribute("data-theme") : null;
+  return themeMeta(normalizeThemeId(docTheme));
 }
 
 /**

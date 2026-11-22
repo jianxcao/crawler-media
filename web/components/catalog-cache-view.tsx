@@ -231,7 +231,7 @@ export function CatalogCacheView() {
                 className="group relative flex flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] transition hover:border-white/20 hover:bg-white/[0.04]"
               >
                 {/* 竖版电影海报 (2:3 黄金比例) */}
-                <div className="relative aspect-[2/3] w-full overflow-hidden bg-black/40">
+                <div className="dark-media-surface relative aspect-[2/3] w-full overflow-hidden bg-[var(--poster-placeholder,#141824)]">
                   {item.poster_url ? (
                     <PosterImage
                       src={imageUrl(item.poster_url, "poster-card")}

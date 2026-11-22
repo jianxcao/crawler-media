@@ -42,7 +42,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
   // 与工作台侧栏共用同一份用户偏好（透明度/明暗）；外观分区拖动滑杆时，
   // 这块面板就是实时预览的对象。
   const { prefs } = useUiPrefs();
-  const glass = sidebarGlass(prefs.sidebar);
+  const glass = sidebarGlass(prefs.sidebar, prefs.theme);
   // 有可用更新时给「更新与维护」分区行点一颗小蓝点：从别的入口进了设置，
   // 也能一眼看出更新在哪一栏（与侧栏更新入口同一份快照数据）
   return (
@@ -217,7 +217,7 @@ function AppearanceSection() {
         <p className="mb-3 text-sub leading-6 text-[var(--text-muted)]">
           主题会保存到你的账号，并在此设备和其他设备间同步。
         </p>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {THEMES.map((theme) => {
             const selected = prefs.theme === theme.id;
             return (

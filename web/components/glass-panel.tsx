@@ -113,10 +113,10 @@ export function GlassPanel({
   }, []);
 
   // 渲染器只随背景图重建（要换折射纹理）；参数变化走下面的轻量热更新。
-  // 主题参与依赖：netflix 主题不创建渲染器，从银玻璃切过来时也会把旧渲染器
-  // 一并 dispose（live 切换主题不能泄漏 WebGL 上下文）。
+  // 主题参与依赖：netflix 与 paper 主题不创建深色 WebGL 渲染器（paper 若采样深黑默认底图会
+  // 把浅色侧栏染成铅灰色），从暗色玻璃切过来时也会把旧渲染器一并 dispose。
   useEffect(() => {
-    if (theme.id === "netflix") return;
+    if (theme.id === "netflix" || theme.id === "paper") return;
     const root = rootRef.current;
     const canvas = canvasRef.current;
     if (!root || !canvas) return;
@@ -167,6 +167,24 @@ export function GlassPanel({
         // Netflix 全站圆角压到 2/4/8 档（globals.css 的 --radius-* 覆盖只作用于
         // 工具类，radius 是内联样式够不到），16px 的银玻璃默认值在此钳到 8px 档
         style={{ borderRadius: Math.min(radius, 8) }}
+      >
+        <div className={`glass-panel__content ${contentClassName}`}>{children}</div>
+      </div>
+    );
+  }
+
+  // —— paper 分支（纸感玻璃浅色主题）：日光白瓷磨砂面板，避免 WebGL 采样暗色底图变灰 ——
+  if (theme.id === "paper") {
+    return (
+      <div
+        className={`glass-panel glass-panel--paper ${className}`}
+        style={
+          {
+            borderRadius: radius,
+            ...(hairlineAlpha !== undefined && { "--glass-hairline": hairlineAlpha }),
+            ...(fallbackAlpha !== undefined && { "--glass-fallback": fallbackAlpha }),
+          } as React.CSSProperties
+        }
       >
         <div className={`glass-panel__content ${contentClassName}`}>{children}</div>
       </div>

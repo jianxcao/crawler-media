@@ -22,6 +22,8 @@ const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const prefs = await readFile(new URL("../lib/ui-prefs.tsx", import.meta.url), "utf8");
 const themes = await readFile(new URL("../lib/themes.ts", import.meta.url), "utf8");
 const emptyState = await readFile(new URL("../components/content-empty-state.tsx", import.meta.url), "utf8");
+const glassPanel = await readFile(new URL("../components/glass-panel.tsx", import.meta.url), "utf8");
+const subscriptionsView = await readFile(new URL("../components/subscriptions-view.tsx", import.meta.url), "utf8");
 const settingsSectionsSource = await readFile(new URL("../lib/settings-sections.ts", import.meta.url), "utf8");
 const settingsView = await readFile(new URL("../components/settings-view.tsx", import.meta.url), "utf8");
 
@@ -34,7 +36,7 @@ function themeBlock(id) {
   return css.slice(start, end + 2);
 }
 
-test("paper glass maps the shared semantic palette to light surfaces", () => {
+test("paper glass maps the shared semantic palette to crisp light surfaces and readable status tokens", () => {
   const paper = themeBlock("paper");
   for (const token of [
     "color-scheme: light",
@@ -49,9 +51,45 @@ test("paper glass maps the shared semantic palette to light surfaces", () => {
     "--info:",
     "--warn:",
     "--danger:",
+    "--color-sky-300:",
+    "--color-emerald-300:",
+    "--color-amber-200:",
+    "--color-violet-200:",
+    "--color-purple-300:",
+    "--color-red-400:",
   ]) {
     assert.ok(paper.includes(token), `paper theme missing ${token}`);
   }
+  // Paper sidebar bypasses dark-wallpaper WebGL sampling and uses daylight frosted glass
+  assert.match(glassPanel, /glass-panel--paper/);
+  assert.match(css, /\.glass-panel--paper\s*\{/);
+  // Paper detail pages transition to daylight canvas instead of pitch black #000
+  assert.match(css, /html\[data-theme="paper"\]\s+\.detail-ambient\s*\{[\s\S]*?#eef1f6/);
+  // SubscriptionsView no longer hardcodes dark charcoal linear-gradient slabs
+  assert.doesNotMatch(subscriptionsView, /rgba\(16,19,29,0\.82\)/);
+  assert.doesNotMatch(subscriptionsView, /rgba\(18,21,30,0\.88\)/);
+});
+
+test("liquid glass defines optical dark surfaces, specular highlights, and matching pre-paint chrome", () => {
+  const liquid = themeBlock("liquid");
+  for (const token of [
+    "color-scheme: dark",
+    "--bg: #06101f",
+    "--surface-sidebar:",
+    "--surface-main:",
+    "--surface-raised:",
+    "--text:",
+    "--line:",
+    "--accent:",
+    "--ok:",
+    "--info:",
+    "--warn:",
+    "--danger:",
+  ]) {
+    assert.ok(liquid.includes(token), `liquid theme missing ${token}`);
+  }
+  assert.match(prefs, /liquid: "#06101f"/);
+  assert.match(html, /liquid/);
 });
 
 test("silver remains the default and Netflix keeps its own theme block", () => {
@@ -60,10 +98,11 @@ test("silver remains the default and Netflix keeps its own theme block", () => {
   assert.match(themes, /DEFAULT_THEME_ID = "silver"/);
 });
 
-test("paper is applied before the first paint and uses a matching browser chrome color", () => {
-  assert.match(html, /t==="paper"\|\|t==="netflix"/);
+test("paper and liquid are applied before the first paint and use matching browser chrome colors", () => {
+  assert.match(html, /t==="paper"\|\|t==="netflix"\|\|t==="liquid"/);
   assert.match(html, /setAttribute\("data-theme",t\)/);
   assert.match(prefs, /paper: "#eef1f6"/);
+  assert.match(prefs, /liquid: "#06101f"/);
 });
 
 test("empty and disabled states stay neutral", () => {
@@ -80,6 +119,10 @@ test("disabled buttons neutralize bright fills and avoid double-fading text-fain
   assert.match(
     css,
     /html\[data-theme="paper"\]\s+\.btn-accent:disabled[\s\S]*?\{[^}]*background:\s*rgba\(32,\s*42,\s*58,\s*0\.0[5-8]\)[^}]*color:\s*var\(--text-faint\)[^}]*opacity:\s*1/
+  );
+  assert.match(
+    css,
+    /html\[data-theme="liquid"\]\s+\.btn-accent:disabled[\s\S]*?\{[^}]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.0[6-9]\)[^}]*color:\s*var\(--text-faint\)[^}]*opacity:\s*1/
   );
   assert.match(
     css,

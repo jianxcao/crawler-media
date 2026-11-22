@@ -183,18 +183,14 @@ function ScopeSwitcher({
   onChange: (scope: ActivityScope) => void;
 }) {
   return (
-    <div className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl">
+    <div className="segmented-glass flex shrink-0 rounded-full p-1">
       {(["media", "tasks"] as const).map((scope) => (
         <button
           key={scope}
           type="button"
           aria-pressed={value === scope}
           onClick={() => onChange(scope)}
-          className={`flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-sub font-semibold transition max-md:px-3.5 ${
-            value === scope
-              ? "bg-white/15 text-white shadow-sm"
-              : "text-[var(--text-muted)] hover:text-white"
-          }`}
+          className="segmented-glass__item flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-sub font-semibold transition max-md:px-3.5"
         >
           {scope === "media" ? "观看" : "任务"}
           {scope === "media" && liveCount > 0 && (

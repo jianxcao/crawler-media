@@ -155,7 +155,7 @@ export function MediaDetailScaffold({
             className="size-full object-cover object-center"
           />
           <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
-          <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
+          <div className="detail-mobile-hero-fade absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
         </div>
       )}
 

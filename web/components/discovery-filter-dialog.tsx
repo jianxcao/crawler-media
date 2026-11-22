@@ -15,7 +15,7 @@ import type { MediaType } from "@/lib/media-types";
 
 const genreCache = new Map<MediaType, DiscoveryGenre[]>();
 const selectClass =
-  "h-10 w-full rounded-xl border border-white/10 bg-black/30 px-3 text-body text-[var(--text)] outline-none focus:border-white/25";
+  "h-10 w-full rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] px-3 text-body text-[var(--text)] outline-none focus:border-[var(--line-strong)]";
 
 export function DiscoveryFilterControl({
   mediaType,
@@ -81,7 +81,7 @@ export function DiscoveryFilterControl({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="relative flex size-11 shrink-0 items-center justify-center rounded-full border border-white/10 bg-black/35 text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:border-white/20 hover:text-white"
+          className="btn-glass relative flex size-11 shrink-0 items-center justify-center rounded-full text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:text-[var(--text)]"
           aria-label={activeCount > 0 ? `筛选，已启用 ${activeCount} 项` : "筛选影片"}
         >
           <FilterIcon className="size-[18px]" />
@@ -95,7 +95,7 @@ export function DiscoveryFilterControl({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="relative flex h-9 shrink-0 items-center rounded-full border border-white/10 bg-black/35 px-4 text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:border-white/20 hover:text-white"
+          className="btn-glass relative flex h-9 shrink-0 items-center rounded-full px-4 text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:text-[var(--text)]"
           aria-label={activeCount > 0 ? `筛选，已启用 ${activeCount} 项` : "筛选影片"}
         >
           筛选

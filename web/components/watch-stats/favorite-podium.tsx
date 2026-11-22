@@ -121,7 +121,9 @@ export function FavoritePodium({
   return (
     <section
       aria-label={drilled ? "本期看得最多" : "本期最受欢迎"}
-      className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02]"
+      className={`relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02] ${
+        ambient ? "dark-media-surface" : ""
+      }`}
     >
       {ambient && (
         <div aria-hidden="true" className="pointer-events-none absolute inset-0">

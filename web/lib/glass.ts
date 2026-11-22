@@ -31,34 +31,53 @@ export const SIDEBAR_GLASS = {
   bevel: 0,
 } as const;
 
-/** 侧栏玻璃的变体：与 LiquidGlassCard 的默认值一致（frosted 磨砂）。 */
+/** 液态玻璃主题侧栏：启用曲面透镜（bevel=1）+ 更高光学折射率、色散与高光反射。 */
+export const LIQUID_SIDEBAR_GLASS = {
+  blur: 0.16,
+  refraction: 0.86,
+  chromaticAberration: 0.11,
+  distortion: 0.024,
+  edgeHighlight: 0.22,
+  specular: 0.26,
+  fresnel: 1.18,
+  darkTint: 0.06,
+  tintStrength: 0.16,
+  tintColor: [0.82, 0.95, 1.08] as [number, number, number],
+  shadow: 0.2,
+  bevel: 1,
+  liquidMotion: 0.18,
+} as const;
+
+/** 侧栏玻璃的变体：银玻璃用 frosted 磨砂，液态玻璃用 dome 曲面透镜。 */
 export const SIDEBAR_GLASS_VARIANT = "frosted" as const;
+export const LIQUID_SIDEBAR_GLASS_VARIANT = "dome" as const;
 
 /**
- * 由用户偏好推导侧栏 GlassPanel 的入参（见 lib/api/ui.ts 的 SidebarUiPrefs）。
- * 基底是 Card 同款材质（SIDEBAR_GLASS + frosted 变体 + 始终采样背景），
- * 三根滑杆在其上微调：
- *   - transparency（透明度 0~1）→ opacity = 0.96 × (1 - transparency)：
- *     Card 的材质羽化（shader 的 u_opacity 压整块玻璃的 alpha）。0 = Card
- *     出厂的 0.96（默认），1 = 玻璃完全隐去、原样透出面板之下的真实页面；
- *   - brightness（明暗 -1~1）→ tint：负值向黑压暗、正值向白提亮，
- *     默认 0（Card 出厂值，不加暗不提亮）；
- *   - depth（厚度 10~90，px）→ shader 的 u_zRadius（边缘曲率带宽度）：越大越像
- *     厚玻璃、边缘折射带越宽，默认 32（Card 出厂值）。
- *
- * CSS 侧配套：
- *   - hairlineAlpha 恒为 0：Card 没有任何 CSS 边框，轮廓全靠 shader 的
- *     edgeHighlight / fresnel 边缘光表达，发丝白线会破坏还原度；
- *   - fallbackAlpha：玻璃周边 CSS 装饰（.panel--sidebar 的 WebGL 兜底底色 +
- *     .glass-panel 的外投影）的强度系数，随透明度淡出——玻璃隐去后兜底色
- *     会顶上来挡住页面、外投影会留下面板形状的暗晕。
- * 工作台与设置页两处侧栏共用此推导，保证观感一致。
+ * 由用户偏好与当前主题推导侧栏 GlassPanel 的入参（见 lib/api/ui.ts 的 SidebarUiPrefs）。
+ * 银玻璃基底是 Card 同款磨砂材质；液态玻璃升级为曲面光学折射（dome + bevel=1 + 色散高光）。
  */
-export function sidebarGlass(prefs: {
-  transparency: number;
-  brightness: number;
-  depth: number;
-}) {
+export function sidebarGlass(
+  prefs: {
+    transparency: number;
+    brightness: number;
+    depth: number;
+  },
+  themeId?: string,
+) {
+  if (themeId === "liquid") {
+    return {
+      variant: LIQUID_SIDEBAR_GLASS_VARIANT,
+      sampleBackground: 1,
+      settings: {
+        ...LIQUID_SIDEBAR_GLASS,
+        tint: prefs.brightness,
+        depth: Math.max(44, prefs.depth),
+        opacity: 0.94 * (1 - prefs.transparency),
+      },
+      hairlineAlpha: 0.18 * (1 - prefs.transparency),
+      fallbackAlpha: 1 - prefs.transparency,
+    };
+  }
   return {
     variant: SIDEBAR_GLASS_VARIANT,
     sampleBackground: 1,
