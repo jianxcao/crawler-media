@@ -311,7 +311,7 @@ pub(crate) async fn item_detail(
     };
     let loaded = super::store_wait::store_read(
         &state,
-        &[store::Db::Library, store::Db::App],
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
         move |store| {
             require_visible_library(&store, &id, user_id)?;
             let detail = match store.library_item_detail(lib_id, media_id, "") {
@@ -325,29 +325,42 @@ pub(crate) async fn item_detail(
                 }
                 Err(error) => return Err(browse_store_error(error)),
             };
-            let media = match store.get_media(media_id) {
-                Ok(media) => media,
-                Err(error) => return Err(browse_store_error(error)),
-            };
+            let media = store.get_media(media_id).map_err(browse_store_error)?;
             let file_ids: Vec<domain::LedgerId> =
                 detail.files.iter().map(|file| file.file_id).collect();
-            let details = match store.file_details_batch(&file_ids) {
-                Ok(details) => details,
-                Err(error) => return Err(browse_store_error(error)),
-            };
-            let probe_queued = match store.probe_queued_among(&file_ids) {
-                Ok(probe_queued) => probe_queued,
-                Err(error) => return Err(browse_store_error(error)),
-            };
-            Ok((detail, media, details, probe_queued))
+            let details = store
+                .file_details_batch(&file_ids)
+                .map_err(browse_store_error)?;
+            let probe_queued = store
+                .probe_queued_among(&file_ids)
+                .map_err(browse_store_error)?;
+            let panorama = (detail.item.kind == MediaKind::Tv)
+                .then(|| {
+                    store.episode_panorama(&[media_id], &[lib_id], Some(lib_id), "", release::parse)
+                })
+                .transpose()
+                .map_err(browse_store_error)?;
+            Ok((detail, media, details, probe_queued, panorama))
         },
     )
     .await;
-    let (detail, media, details, probe_queued) = match loaded {
+    let (detail, media, details, probe_queued, panorama) = match loaded {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
     };
+    let season_summaries = super::media::enrich_library_season_summaries(
+        &state,
+        panorama,
+        media.as_ref().and_then(|m| m.tmdb_id.as_deref()),
+        detail
+            .metadata
+            .number_of_seasons
+            .value()
+            .copied()
+            .unwrap_or(0),
+    )
+    .await;
     let mut files = Vec::with_capacity(detail.files.len());
     for file in &detail.files {
         let units = detail
@@ -370,7 +383,7 @@ pub(crate) async fn item_detail(
             probe_queued.contains(&file.file_id),
         ));
     }
-    ok(item_detail_json(&detail, media, files)).into_response()
+    ok(item_detail_json(&detail, media, files, &season_summaries)).into_response()
 }
 
 pub(crate) fn tmdb_logo_url(path: &str) -> Option<String> {
@@ -392,6 +405,7 @@ fn item_detail_json(
     detail: &library_query::LibraryItemDetail,
     media: Option<domain::Media>,
     files: Vec<Value>,
+    season_summaries: &[store::SeasonAvailabilitySummary],
 ) -> Value {
     let metadata = &detail.metadata;
     let cast = detail_cast(metadata);
@@ -446,6 +460,7 @@ fn item_detail_json(
         "files": files,
         "next_file_cursor": detail.next_file_cursor,
         "seasons": detail.seasons,
+        "season_summaries": season_summaries,
     })
 }
 
@@ -663,95 +678,71 @@ pub(crate) async fn item_episodes(
     let read_id = id.clone();
     let read = super::store_wait::store_read(
         &state,
-        &[store::Db::Library, store::Db::App],
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
         move |store| {
             let is_admin = match user_id {
                 Some(user) => store.user_role(user).map_err(browse_store_error)? == "admin",
                 None => false,
             };
-            store
-                .library_read_snapshot(|store| {
-                    require_visible_library_on(store, &read_id, user_id, is_admin)?;
-                    match store.get_library_item(lib_id, media_id) {
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
-                            return Err(err(
-                                StatusCode::NOT_FOUND,
-                                "library.item_missing",
-                                "条目不存在",
-                            ));
-                        }
-                        Err(error) => return Err(browse_store_error(error)),
+            let (mut episodes, media) = store
+                .library_read_snapshot(|lib_db| {
+                    require_visible_library_on(lib_db, &read_id, user_id, is_admin)?;
+                    if lib_db
+                        .get_library_item(lib_id, media_id)
+                        .map_err(browse_store_error)?
+                        .is_none()
+                    {
+                        return Err(err(
+                            StatusCode::NOT_FOUND,
+                            "library.item_missing",
+                            "条目不存在",
+                        ));
                     }
-                    let episodes = store
+                    let episodes = lib_db
                         .library_episodes(lib_id, media_id, season, "")
                         .map_err(browse_store_error)?;
-                    let mut states = HashMap::new();
-                    let is_tv = store
-                        .get_media(media_id)
-                        .map_err(browse_store_error)?
-                        .is_none_or(|media| media.kind == domain::MediaKind::Tv);
-                    if let Some(user_id) = user_id.filter(|_| is_tv) {
-                        let units: Vec<_> = episodes
-                            .iter()
-                            .map(|episode| {
-                                domain::UnitKey::new(episode.season as i32, episode.episode as i32)
-                            })
-                            .collect();
-                        let resolved = store
-                            .effective_unit_states(user_id, media_id, &units)
-                            .map_err(browse_store_error)?;
-                        for (episode, state) in episodes.iter().zip(resolved) {
-                            states.insert((episode.season, episode.episode), state);
-                        }
-                    }
-                    Ok((episodes, states))
+                    let media = lib_db.get_media(media_id).map_err(browse_store_error)?;
+                    Ok((episodes, media))
                 })
-                .map_err(browse_store_error)?
+                .map_err(browse_store_error)??;
+            let panorama = store
+                .episode_panorama(&[media_id], &[lib_id], Some(lib_id), "", release::parse)
+                .map_err(browse_store_error)?;
+            super::media::append_concrete_season_stubs(season, &panorama, &mut episodes);
+            let mut states = HashMap::new();
+            let is_tv = media
+                .as_ref()
+                .is_none_or(|m| m.kind == domain::MediaKind::Tv);
+            if let Some(uid) = user_id.filter(|_| is_tv) {
+                let units: Vec<_> = episodes
+                    .iter()
+                    .map(|ep| domain::UnitKey::new(ep.season as i32, ep.episode as i32))
+                    .collect();
+                let resolved = store
+                    .effective_unit_states(uid, media_id, &units)
+                    .map_err(browse_store_error)?;
+                for (ep, st) in episodes.iter().zip(resolved) {
+                    states.insert((ep.season, ep.episode), st);
+                }
+            }
+            Ok((episodes, states, panorama, media.and_then(|m| m.tmdb_id)))
         },
     )
     .await;
-    let (episodes, effective_states) = match read {
+    let (episodes, effective_states, panorama, tmdb_id) = match read {
         Ok(Ok(value)) => value,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
     };
-    let rows: Vec<Value> = episodes
-        .iter()
-        .map(|episode| {
-            let unit_state = effective_states
-                .get(&(episode.season, episode.episode))
-                .and_then(Option::as_ref);
-            let (position_ms, played, progress_percent) = match unit_state {
-                Some(state) => {
-                    let percent = (!state.played)
-                        .then(|| state.duration_ms.filter(|duration| *duration > 0))
-                        .flatten()
-                        .map(|duration| ((state.position_ms * 100) / duration).clamp(0, 100));
-                    (state.position_ms, state.played, percent)
-                }
-                None => (0, false, None),
-            };
-            json!({
-                "episode_number": episode.episode,
-                "name": episode
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| format!("第 {} 集", episode.episode)),
-                "overview": episode.overview,
-                "air_date": episode.air_date,
-                "still_url": episode.still_url.as_deref().map(super::media::episode_still_url),
-                "owned": episode.owned,
-                "file_ids": episode.file_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-                "position_ms": position_ms,
-                "played": played,
-                "progress_percent": progress_percent,
-                "media_item_id": item_id,
-                "season_number": episode.season,
-                "runtime_minutes": episode.runtime_minutes,
-                "rating": episode.rating,
-            })
-        })
-        .collect();
+    let rows = super::media::render_library_episode_rows(
+        &state,
+        episodes,
+        season,
+        tmdb_id,
+        &item_id,
+        &effective_states,
+        &panorama,
+    )
+    .await;
     ok_list(rows).into_response()
 }

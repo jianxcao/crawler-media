@@ -115,6 +115,52 @@ impl crate::LibraryConnection<'_> {
         })
     }
 
+    pub(crate) fn resolved_episode_locale(
+        &self,
+        library_id: Option<LibraryId>,
+        media_id: MediaId,
+        requested: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if let Some(lib_id) = library_id
+            && let Some(resolved) = self.resolved_metadata_locale(lib_id, media_id, requested)?
+        {
+            let exists: bool = self.library.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_episodes WHERE media_id = ?1 AND locale = ?2)",
+                params![media_id.to_string(), &resolved],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(Some(resolved));
+            }
+        }
+        let mut statement = self.library.prepare_cached(
+            "SELECT DISTINCT locale FROM media_episodes WHERE media_id = ?1 ORDER BY locale",
+        )?;
+        let locales = statement
+            .query_map([media_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if locales.is_empty() {
+            return Ok(None);
+        }
+        let library_locale = library_id
+            .map(|id| crate::library_query::library_display_locale_on(self.library, id))
+            .transpose()?
+            .flatten();
+        let chain = [
+            Some(requested.to_string()),
+            library_locale,
+            crate::library_query::instance_default_locale_on(self.library)?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        Ok(crate::metadata::locale::select_locale(
+            &locales,
+            &chain,
+            crate::metadata::locale::LocaleFallback::AdoptedFirst,
+        ))
+    }
+
     pub fn library_episodes(
         &self,
         library_id: LibraryId,
@@ -122,7 +168,7 @@ impl crate::LibraryConnection<'_> {
         season: Option<u32>,
         locale: &str,
     ) -> Result<Vec<LibraryEpisode>, StoreError> {
-        let resolved = self.resolved_metadata_locale(library_id, media_id, locale)?;
+        let resolved = self.resolved_episode_locale(Some(library_id), media_id, locale)?;
         let mut episodes: BTreeMap<(u32, u32), LibraryEpisode> = BTreeMap::new();
         if let Some(resolved) = resolved {
             for row in self.episode_metadata(media_id, &resolved, season)? {

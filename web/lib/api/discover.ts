@@ -180,11 +180,20 @@ export interface MediaVideo {
   watchUrl: string;
 }
 
+export type EpisodeAvailabilityStatus =
+  | "in_library"
+  | "downloading"
+  | "file_missing"
+  | "missing"
+  | "unaired";
+
 export interface MediaSeasonOverview {
   season_number: number;
   name?: string | null;
   episode_count?: number | null;
   air_date?: string | null;
+  owned_episode_count?: number;
+  downloading_episode_count?: number;
 }
 
 export interface MediaEpisodeDetail {
@@ -193,6 +202,11 @@ export interface MediaEpisodeDetail {
   overview?: string | null;
   still_url?: string | null;
   air_date?: string | null;
+  status?: EpisodeAvailabilityStatus;
+  owned?: boolean;
+  library_id?: string | null;
+  media_item_id?: string | null;
+  resolution?: string | null;
 }
 
 export interface MediaDetailData {
@@ -591,12 +605,7 @@ interface MediaDetailEnvelope {
       library_name: string;
       media_item_id: string;
     }>;
-    seasons?: Array<{
-      season_number: number;
-      name?: string | null;
-      episode_count?: number | null;
-      air_date?: string | null;
-    }>;
+    seasons?: MediaSeasonOverview[];
   };
 }
 

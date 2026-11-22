@@ -13,7 +13,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 mod douban;
+mod panorama;
 pub(crate) use douban::douban_detail;
+pub(super) use panorama::{
+    append_concrete_season_stubs, enrich_library_season_summaries, render_library_episode_rows,
+};
 
 const TMDB_POSTER: &str = "https://image.tmdb.org/t/p/w342";
 const TMDB_BACKDROP_SIZE: &str = "w1280";
@@ -40,13 +44,15 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
 
 pub(crate) async fn media_detail(
     State(state): State<ApiState>,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path((kind, id)): Path<(String, String)>,
 ) -> Response {
+    let viewer = user_id.and_then(|ext| ext.0);
     let state_for_work = state.clone();
     let work = state
         .http_work
         .run(MEDIA_DEADLINE, move || {
-            media_detail_inner(&state_for_work, &kind, &id)
+            media_detail_inner(&state_for_work, viewer, &kind, &id)
         })
         .await;
     match work {
@@ -57,46 +63,15 @@ pub(crate) async fn media_detail(
 
 pub(crate) async fn season_detail(
     State(state): State<ApiState>,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path((id, season)): Path<(String, u32)>,
 ) -> Response {
+    let viewer = user_id.and_then(|ext| ext.0);
     let state_for_work = state.clone();
     let work = state
         .http_work
-        .run(MEDIA_DEADLINE, move || -> Response {
-            let catalog: &dyn Catalog = state_for_work.catalog.as_ref();
-            let tmdb_id = match tmdb_id_for(&state_for_work, catalog, domain::MediaKind::Tv, &id) {
-                Ok(Some(tid)) => tid,
-                Ok(None) => return err(StatusCode::NOT_FOUND, "media.missing", "条目不存在"),
-                Err(response) => return response,
-            };
-            let meta_episodes = match catalog.cached_season_details(&tmdb_id, season) {
-                Ok(Some(rows)) => rows,
-                Ok(None) | Err(_) => Vec::new(),
-            };
-            let episodes = match catalog.cached_season_episodes(&tmdb_id, season) {
-                Ok(Some(episodes)) => episodes,
-                Ok(None) => {
-                    return ok(json!({ "episodes": [] })).into_response();
-                }
-                Err(error) => {
-                    return err(StatusCode::BAD_GATEWAY, "media.upstream", &error);
-                }
-            };
-            let items: Vec<Value> = episodes
-                .into_iter()
-                .map(|ep| {
-                    let ep_num = ep.episode_number;
-                    let meta = meta_episodes.iter().find(|m| m.episode_number == ep_num);
-                    json!({
-                        "episode_number": ep_num,
-                        "name": meta.and_then(|m| m.name.clone()),
-                        "overview": meta.and_then(|m| m.overview.clone()),
-                        "still_url": meta.and_then(|m| m.still_path.as_deref().map(episode_still_url)),
-                        "air_date": ep.air_date,
-                    })
-                })
-                .collect();
-            ok(json!({ "episodes": items })).into_response()
+        .run(MEDIA_DEADLINE, move || {
+            panorama::season_detail_blocking(&state_for_work, viewer, &id, season)
         })
         .await;
     match work {
@@ -147,6 +122,7 @@ fn fetch_tv_seasons(
     catalog: &dyn Catalog,
     media_kind: domain::MediaKind,
     tmdb_id: &str,
+    panorama: Option<&store::EpisodePanorama>,
 ) -> Vec<Value> {
     if media_kind == domain::MediaKind::Tv {
         catalog
@@ -155,11 +131,16 @@ fn fetch_tv_seasons(
             .into_iter()
             .map(|s| {
                 let s_num = s.season_number;
+                let (owned_count, downloading_count) = panorama
+                    .map(|p| p.counts_for_catalog_season(s_num, s.episode_count.unwrap_or(0)))
+                    .unwrap_or((0, 0));
                 json!({
                     "season_number": s_num,
                     "name": s.name,
                     "episode_count": s.episode_count,
                     "air_date": s.air_date,
+                    "owned_episode_count": owned_count,
+                    "downloading_episode_count": downloading_count,
                 })
             })
             .collect()
@@ -249,7 +230,12 @@ fn fetch_images_and_related(
     (posters, backdrops, poster_url, backdrop_url, related)
 }
 
-fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
+fn media_detail_inner(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    kind: &str,
+    id: &str,
+) -> Response {
     let media_kind = match kind {
         "movie" => domain::MediaKind::Movie,
         "tv" => domain::MediaKind::Tv,
@@ -291,7 +277,9 @@ fn media_detail_inner(state: &ApiState, kind: &str, id: &str) -> Response {
     let library_links = find_library_links(&state.store.as_ref(), &media);
     let cast = fetch_cast(&meta);
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
-    let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id);
+    let tv_panorama = (media_kind == domain::MediaKind::Tv)
+        .then(|| panorama::panorama_for_tmdb_tv(state, viewer, &tmdb_id).1);
+    let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id, tv_panorama.as_ref());
     let meta = meta.unwrap_or_default();
     let brands = detail_brands(&meta);
 

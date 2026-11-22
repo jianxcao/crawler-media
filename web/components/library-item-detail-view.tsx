@@ -247,7 +247,7 @@ export function LibraryItemDetailView({
         </div>
       )}
 
-      {!c.isMovie && detail.seasons.length > 0 && (
+      {!c.isMovie && ((detail.season_summaries?.length ?? 0) > 0 || detail.seasons.length > 0) && (
         <div className="mt-6 px-12 max-md:px-4">
           <SeasonEpisodesSection
             libraryId={libraryId}

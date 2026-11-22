@@ -8,10 +8,11 @@ use parking_lot::Mutex;
 
 use crate::IndexerError;
 use crate::fetch::{
-    FetchRequest, Fetcher, download_token_request, mteam_download_request, rss_request,
+    FetchRequest, Fetcher, download_token_request, effective_base_url, mteam_download_request,
+    rss_request, uses_html_cookie_fallback,
 };
 use crate::parse;
-use crate::profile::{Framework, Profile, ProfileSet};
+use crate::profile::{ApiDialect, Framework, Profile, ProfileSet};
 
 #[derive(Debug)]
 pub struct SiteFailure {
@@ -99,15 +100,29 @@ impl Indexer {
             .profiles
             .get(&site.profile_id)
             .ok_or_else(|| IndexerError::UnknownProfile(site.profile_id.clone()))?;
-        if profile.framework != Framework::Api {
+        if profile.framework != Framework::Api || uses_html_cookie_fallback(site, profile) {
+            return Ok(None);
+        }
+        if profile.api_dialect == ApiDialect::HdareaV1 && profile.download.is_none() {
             return Ok(None);
         }
         let id = torrent
             .id
             .as_deref()
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| IndexerError::Parse("API Torrent 缺少 ID，无法获取下载令牌".into()))?;
-        self.resolve_download(site, profile, id).map(Some)
+            .map(str::to_string)
+            .or_else(|| parse::extract_id(&torrent.enclosure));
+        let Some(id) = id else {
+            if profile.api_dialect == ApiDialect::HdareaV1
+                && torrent.enclosure.contains("dl_token=")
+            {
+                return Ok(Some(torrent.enclosure.clone()));
+            }
+            return Err(IndexerError::Parse(
+                "API Torrent 缺少 ID，无法获取下载令牌".into(),
+            ));
+        };
+        self.resolve_download(site, profile, &id).map(Some)
     }
 
     fn run(&self, sites: &[Site], mode: Mode<'_>) -> SearchOutcome {
@@ -160,22 +175,30 @@ impl Indexer {
             e
         })?;
         let results = match mode {
+            Mode::Search { .. } if uses_html_cookie_fallback(site, profile) => {
+                parse::parse_html(site, profile, &body)
+            }
             Mode::Search { .. } if profile.framework == Framework::Api => {
-                let items = parse::parse_mteam_items(&body)?;
-                // 不在搜索阶段逐个触发 genDlToken（搜索可能返回上百个种子，连续调 100 次
-                // 会直接触发馒头的风控「請求過於頻繁」并耗尽 API 配额，且耗时高达几十秒）。
-                // 这里用占位或种子详情/ID 链接作为 enclosure，在真正投递或下载时按需调用，
-                // 或者在没有报错时保留已有的成功项。
-                let mut torrents = Vec::new();
-                for item in items {
-                    let id_str = item.id.clone().unwrap_or_default();
-                    let enclosure = format!(
-                        "{}/api/torrent/download?id={id_str}",
-                        site.url.trim_end_matches('/')
-                    );
-                    torrents.push(item.into_torrent(site.id, enclosure));
+                match profile.api_dialect {
+                    ApiDialect::Mteam => {
+                        let items = parse::parse_mteam_items(&body)?;
+                        // 不在搜索阶段逐个触发 genDlToken（搜索可能返回上百个种子，连续调 100 次
+                        // 会直接触发馒头的风控「請求過於頻繁」并耗尽 API 配额，且耗时高达几十秒）。
+                        // 这里用占位或种子详情/ID 链接作为 enclosure，在真正投递或下载时按需调用，
+                        // 或者在没有报错时保留已有的成功项。
+                        let mut torrents = Vec::new();
+                        for item in items {
+                            let id_str = item.id.clone().unwrap_or_default();
+                            let enclosure = format!(
+                                "{}/api/torrent/download?id={id_str}",
+                                site.url.trim_end_matches('/')
+                            );
+                            torrents.push(item.into_torrent(site.id, enclosure));
+                        }
+                        Ok(torrents)
+                    }
+                    ApiDialect::HdareaV1 => parse::parse_hdarea_torrents(site, profile, &body),
                 }
-                Ok(torrents)
             }
             Mode::Search { .. } => parse::search(site, profile, &body),
             Mode::Rss => parse::rss(site, profile, &body),
@@ -197,10 +220,22 @@ impl Indexer {
         profile: &Profile,
         id: &str,
     ) -> Result<String, IndexerError> {
-        let request = download_token_request(site, profile, id)
-            .unwrap_or_else(|| mteam_download_request(site, id));
-        let body = self.fetch(site, &request)?;
-        parse::parse_mteam_download(&body)
+        match profile.api_dialect {
+            ApiDialect::Mteam => {
+                let request = download_token_request(site, profile, id)
+                    .unwrap_or_else(|| mteam_download_request(site, id));
+                let body = self.fetch(site, &request)?;
+                parse::parse_mteam_download(&body)
+            }
+            ApiDialect::HdareaV1 => {
+                let request = download_token_request(site, profile, id).ok_or_else(|| {
+                    IndexerError::Parse("HDArea profile 未配置下载令牌端点".into())
+                })?;
+                let body = self.fetch(site, &request)?;
+                let base = effective_base_url(site, profile);
+                parse::parse_hdarea_download(&base, &body)
+            }
+        }
     }
 
     fn fetch(&self, site: &Site, request: &FetchRequest) -> Result<String, IndexerError> {

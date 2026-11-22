@@ -40,6 +40,11 @@ mod collections;
 pub use collections::{CollectionItemFacts, CollectionItemPage, CollectionRead, UserCollection};
 mod data_retention;
 mod downloaders;
+mod episode_panorama;
+pub use episode_panorama::{
+    EpisodeAvailability, EpisodeAvailabilityStatus, EpisodePanorama, OwnedEpisodeTarget,
+    SeasonAvailabilitySummary,
+};
 mod fingerprint_attempts;
 mod fingerprint_cache;
 mod fingerprint_models;

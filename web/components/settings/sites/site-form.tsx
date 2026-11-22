@@ -157,9 +157,11 @@ export function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
     auth_type: authType,
     required_fields: AUTH_TYPE_FIELDS[authType],
   }));
-  const [authType, setAuthType] = useState<SiteAuthType>(
-    site?.auth_type ?? options[0]?.auth_type ?? "cookie",
-  );
+  const initialAuthType: SiteAuthType =
+    site && options.some((o) => o.auth_type === site.auth_type)
+      ? site.auth_type
+      : (options[0]?.auth_type ?? site?.auth_type ?? "cookie");
+  const [authType, setAuthType] = useState<SiteAuthType>(initialAuthType);
   const [siteUrl, setSiteUrl] = useState(site?.url ?? "");
   const [maintenanceVia, setMaintenanceVia] = useState<"http" | "browser">(
     site?.maintenance_via ?? "http",
@@ -168,51 +170,76 @@ export function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
 
   const current = options.find((o) => o.auth_type === authType) ?? options[0];
   const fields = current?.required_fields ?? [];
-  const canSubmit = fields.length > 0 && fields.every((f) => values[f]?.trim());
+  const hasSavedActiveCredential = Boolean(
+    site && site.auth_type !== "none" && site.auth_type === authType,
+  );
+  const canSubmit =
+    hasSavedActiveCredential ||
+    fields.length === 0 ||
+    fields.every((f) => Boolean(values[f]?.trim()));
 
   function submit() {
     const payload: SiteConfigPayload = {
       auth_type: authType,
       enabled: site?.enabled ?? true,
-      maintenance_via: maintenanceVia,
+      maintenance_via: authType === "apikey" ? "http" : maintenanceVia,
       ...(siteUrl.trim() ? { url: siteUrl.trim() } : {}),
     };
+    if (authType === "apikey") {
+      payload.cookie = "";
+    } else if (authType === "cookie") {
+      payload.api_key = "";
+    } else if (authType === "none") {
+      payload.cookie = "";
+      payload.api_key = "";
+    }
     for (const f of fields) {
-      (payload as unknown as Record<string, unknown>)[f] = values[f]?.trim() ?? "";
+      const trimmed = values[f]?.trim() ?? "";
+      if (trimmed.length > 0 || !hasSavedActiveCredential) {
+        (payload as unknown as Record<string, unknown>)[f] = trimmed;
+      }
     }
     onSubmit(payload);
   }
 
+  const credentialPlaceholder = hasSavedActiveCredential
+    ? "留空则保留现有凭证；填写则替换"
+    : site
+      ? "出于安全，请填写新的授权凭证"
+      : "";
+
   return (
     <div className="space-y-4">
-      <div>
-        <label className="mb-1.5 block text-sub font-medium text-[var(--text-muted)]">
-          登录与签到维护方式
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setMaintenanceVia("http")}
-            data-active={maintenanceVia === "http"}
-            className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
-          >
-            标准 HTTP (支持代理)
-          </button>
-          <button
-            type="button"
-            onClick={() => setMaintenanceVia("browser")}
-            data-active={maintenanceVia === "browser"}
-            className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
-          >
-            无头浏览器 (CDP / Obscura)
-          </button>
+      {authType !== "apikey" && (
+        <div>
+          <label className="mb-1.5 block text-sub font-medium text-[var(--text-muted)]">
+            登录与签到维护方式
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setMaintenanceVia("http")}
+              data-active={maintenanceVia === "http"}
+              className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
+            >
+              标准 HTTP (支持代理)
+            </button>
+            <button
+              type="button"
+              onClick={() => setMaintenanceVia("browser")}
+              data-active={maintenanceVia === "browser"}
+              className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
+            >
+              无头浏览器 (CDP / Obscura)
+            </button>
+          </div>
+          {maintenanceVia === "browser" && (
+            <p className="mt-1 text-caption text-[var(--text-faint)]">
+              浏览器维护方式不支持配置代理。若浏览器执行异常，系统将自动回退到 HTTP 流程。
+            </p>
+          )}
         </div>
-        {maintenanceVia === "browser" && (
-          <p className="mt-1 text-caption text-[var(--text-faint)]">
-            浏览器维护方式不支持配置代理。若浏览器执行异常，系统将自动回退到 HTTP 流程。
-          </p>
-        )}
-      </div>
+      )}
 
       {options.length > 1 && (
         <div>
@@ -266,7 +293,7 @@ export function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
                 onChange={(e) => setValues((v) => ({ ...v, [field]: e.target.value }))}
                 rows={3}
                 autoComplete="off"
-                placeholder={site ? "出于安全，请重新填写" : ""}
+                placeholder={credentialPlaceholder}
                 className="scroll-thin w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-ui text-[var(--text)] outline-none focus:border-[var(--accent)]/60"
               />
             ) : (
@@ -274,7 +301,7 @@ export function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
                 type={fm.kind}
                 value={values[field] ?? ""}
                 onChange={(e) => setValues((v) => ({ ...v, [field]: e.target.value }))}
-                placeholder={site ? "出于安全，请重新填写" : ""}
+                placeholder={credentialPlaceholder}
                 autoComplete={fm.kind === "password" ? "new-password" : "off"}
                 className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-ui text-[var(--text)] outline-none focus:border-[var(--accent)]/60"
               />

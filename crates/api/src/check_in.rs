@@ -19,9 +19,12 @@ pub fn run(state: &ApiState) -> Result<(), String> {
     let _http = AttendanceHttp;
     let mut failures = Vec::new();
     for site in sites {
-        // 判断站点类型：纯 API 架构站点（如新版 M-Team）无 attendance.php，无需也不支持传统打卡保活
+        // 判断站点类型：纯 API 架构站点（如新版 M-Team）无签到端点，无需也不支持打卡保活；
+        // 但具备 api_check_in_path（如 HDArea /api/v1/user/signin）或使用 Cookie 模式的混合站点正常执行签到。
         if let Some(profile) = state.indexer.profile(&site.profile_id)
             && profile.framework == indexer::Framework::Api
+            && !uses_api_check_in(profile, &site)
+            && !uses_cookie_maintenance(profile, &site)
         {
             tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】API 令牌架构站点，跳过页面打卡签到");
             continue;
@@ -114,13 +117,32 @@ impl HttpPost for AttendanceHttp {
     }
 }
 
+pub(crate) fn uses_api_check_in(profile: &indexer::Profile, site: &Site) -> bool {
+    profile.api_check_in_path.is_some()
+        && site
+            .api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty())
+}
+
+pub(crate) fn uses_cookie_maintenance(profile: &indexer::Profile, site: &Site) -> bool {
+    match profile.framework {
+        indexer::Framework::Nexusphp => true,
+        indexer::Framework::Api => {
+            site.api_key.as_deref().is_none_or(|k| k.trim().is_empty())
+                && site.cookie.as_deref().is_some_and(|c| !c.trim().is_empty())
+                && profile.effective_auth_types().contains(&"cookie")
+        }
+    }
+}
+
 pub(crate) fn site_policy(state: &ApiState, site: &Site) -> Result<NexusPhpPolicy, PluginError> {
     let profile = state.indexer.profile(&site.profile_id)
         .ok_or_else(|| {
             tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site maintenance profile unavailable");
             PluginError::Fetch("Site profile 不可用；请选择支持认证验证的模板".into())
         })?;
-    if profile.framework != indexer::Framework::Nexusphp {
+    if !uses_cookie_maintenance(profile, site) {
         tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site page maintenance unsupported for API profile");
         return Err(PluginError::Fetch(
             "API Site 不支持页面 Login/Check-in；请配置有效 API key".into(),
@@ -129,12 +151,84 @@ pub(crate) fn site_policy(state: &ApiState, site: &Site) -> Result<NexusPhpPolic
     Ok(NexusPhpPolicy::new(profile.login_success_css.clone()))
 }
 
-fn attendance_request(
-    url: &str,
-    body: Option<&str>,
-    cookie: Option<&str>,
-    proxy: Option<&str>,
-) -> Result<String, PluginError> {
+pub(crate) fn ensure_check_in_supported(state: &ApiState, site: &Site) -> Result<(), PluginError> {
+    let profile = state.indexer.profile(&site.profile_id).ok_or_else(|| {
+        tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site maintenance profile unavailable");
+        PluginError::Fetch("Site profile 不可用；请选择支持认证验证的模板".into())
+    })?;
+    if uses_cookie_maintenance(profile, site) || profile.api_check_in_path.is_some() {
+        return Ok(());
+    }
+    tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site check-in unsupported for API profile");
+    Err(PluginError::Fetch(
+        "API Site 不支持页面 Login/Check-in；请配置有效 API key".into(),
+    ))
+}
+
+pub(crate) fn perform_api_check_in(
+    site: &Site,
+    profile: &indexer::Profile,
+) -> Result<(), PluginError> {
+    let api_key = site
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| PluginError::Fetch("站点未配置有效的 API 密钥，无法执行 API 签到".into()))?;
+    let raw_path = profile
+        .api_check_in_path
+        .as_deref()
+        .ok_or_else(|| PluginError::Fetch("该站点模板不支持 API 签到".into()))?;
+    let path = if raw_path.starts_with('/') {
+        raw_path.to_string()
+    } else {
+        format!("/{raw_path}")
+    };
+    let base = profile.effective_site_base_url(&site.url);
+    let url = format!("{base}{path}");
+    let host = validate_non_placeholder_url(&url)?;
+    let mut config = ureq::config::Config::builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(10)));
+    if let Some(proxy) = site.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        let proxy = ureq::Proxy::new(proxy)
+            .map_err(|error| PluginError::Fetch(format!("invalid Site proxy: {error}")))?;
+        config = config.proxy(Some(proxy));
+    }
+    let request = ureq::http::Request::builder()
+        .method("POST")
+        .uri(&url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        .header("X-API-Key", api_key)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .map_err(|error| PluginError::Fetch(error.to_string()))?;
+    let started = std::time::Instant::now();
+    let response = ureq::Agent::new_with_config(config.build())
+        .run(request)
+        .map_err(|error| {
+            tracing::error!(site_host = %host, %error, "Site API check-in HTTP request failed");
+            PluginError::Fetch(error.to_string())
+        })?;
+    let status = response.status();
+    let text = response.into_body().read_to_string().map_err(|error| {
+        tracing::error!(site_host = %host, %error, "Site API check-in response read failed");
+        PluginError::Fetch(error.to_string())
+    })?;
+    tracing::debug!(
+        site_host = %host,
+        elapsed_ms = started.elapsed().as_millis(),
+        status = status.as_u16(),
+        "Site API check-in response received"
+    );
+    validate_api_check_in_response(status.as_u16(), status.is_success(), &text)
+}
+
+fn validate_non_placeholder_url(url: &str) -> Result<String, PluginError> {
     let parsed = url::Url::parse(url).map_err(|error| PluginError::Fetch(error.to_string()))?;
     let host = parsed.host_str().unwrap_or_default();
     if host.ends_with(".example")
@@ -147,9 +241,83 @@ fn attendance_request(
             "Site maintenance rejected placeholder URL"
         );
         return Err(PluginError::Fetch(
-            "Site URL 是占位地址；请配置实际站点地址与有效 Cookie".into(),
+            "Site URL 是占位地址；请配置实际站点地址与有效 Cookie 或 API 密钥".into(),
         ));
     }
+    Ok(host.to_string())
+}
+
+fn validate_api_check_in_response(
+    status_code: u16,
+    is_2xx: bool,
+    text: &str,
+) -> Result<(), PluginError> {
+    let parsed: Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(error) if is_2xx => {
+            return Err(PluginError::Fetch(format!(
+                "API 签到响应非合法 JSON（HTTP {status_code}）：{error}"
+            )));
+        }
+        Err(_) => {
+            let preview: String = text.trim().chars().take(160).collect();
+            return Err(PluginError::Fetch(format!(
+                "API 签到失败（HTTP {status_code}）：{preview}"
+            )));
+        }
+    };
+    let message = parsed
+        .get("message")
+        .or_else(|| parsed.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if is_2xx {
+        let explicit_fail = parsed.get("success").and_then(Value::as_bool) == Some(false);
+        let code_ok = !explicit_fail
+            && match parsed.get("code") {
+                Some(Value::Number(n)) => n.as_i64() == Some(0),
+                Some(Value::String(s)) => s.trim() == "0",
+                _ => false,
+            };
+        let code_nonzero = match parsed.get("code") {
+            Some(Value::Number(n)) => n.as_i64() != Some(0),
+            Some(Value::String(s)) => s.trim() != "0",
+            _ => false,
+        };
+        let success_ok =
+            !code_nonzero && parsed.get("success").and_then(Value::as_bool) == Some(true);
+        if code_ok || success_ok || indicates_already_signed_in(message) {
+            return Ok(());
+        }
+    }
+    let detail = if message.is_empty() {
+        text.trim().chars().take(160).collect::<String>()
+    } else {
+        message.to_string()
+    };
+    Err(PluginError::Fetch(format!(
+        "API 签到失败（HTTP {status_code}）：{detail}"
+    )))
+}
+
+fn indicates_already_signed_in(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    message.contains("已签到")
+        || message.contains("已经签到")
+        || message.contains("重复签到")
+        || lower.contains("already signed")
+        || lower.contains("already checked")
+        || (lower.contains("already") && lower.contains("sign"))
+}
+
+fn attendance_request(
+    url: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
+    proxy: Option<&str>,
+) -> Result<String, PluginError> {
+    let host = validate_non_placeholder_url(url)?;
     let mut config =
         ureq::config::Config::builder().timeout_global(Some(std::time::Duration::from_secs(10)));
     if let Some(proxy) = proxy.filter(|proxy| !proxy.trim().is_empty()) {
@@ -171,11 +339,11 @@ fn attendance_request(
         .map_err(|error| PluginError::Fetch(error.to_string()))?;
     let started = std::time::Instant::now();
     let response = ureq::Agent::new_with_config(config.build()).run(request).map_err(|error| {
-        tracing::error!(site_host = host, method, %error, "Site maintenance HTTP request failed");
+        tracing::error!(site_host = %host, method, %error, "Site maintenance HTTP request failed");
         PluginError::Fetch(error.to_string())
     })?;
     tracing::debug!(
-        site_host = host,
+        site_host = %host,
         method,
         elapsed_ms = started.elapsed().as_millis(),
         status = response.status().as_u16(),
@@ -189,7 +357,7 @@ fn attendance_request(
         .map(|value| format!("Set-Cookie: {value}\n"))
         .collect();
     let text = response.into_body().read_to_string().map_err(|error| {
-        tracing::error!(site_host = host, method, %error, "Site maintenance response read failed");
+        tracing::error!(site_host = %host, method, %error, "Site maintenance response read failed");
         PluginError::Fetch(error.to_string())
     })?;
     Ok(format!("{}{text}", cookies.concat()))

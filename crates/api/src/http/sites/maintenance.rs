@@ -95,13 +95,29 @@ async fn maintain_site(state: ApiState, id: String, action: Action) -> Response 
                     .flatten()
                     .ok_or_else(|| err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"))
             }?;
-            let _policy = crate::check_in::site_policy(&worker, &site).map_err(|error| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    "site.maintenance_unsupported",
-                    &error.to_string(),
-                )
-            })?;
+            match action {
+                Action::Login => {
+                    let _policy =
+                        crate::check_in::site_policy(&worker, &site).map_err(|error| {
+                            err(
+                                StatusCode::BAD_REQUEST,
+                                "site.maintenance_unsupported",
+                                &error.to_string(),
+                            )
+                        })?;
+                }
+                Action::CheckIn => {
+                    crate::check_in::ensure_check_in_supported(&worker, &site).map_err(
+                        |error| {
+                            err(
+                                StatusCode::BAD_REQUEST,
+                                "site.maintenance_unsupported",
+                                &error.to_string(),
+                            )
+                        },
+                    )?;
+                }
+            }
             let bus = hooks::Bus::new();
             let creds = AdmittedCredentials::new(&worker, site.clone());
             let result = match action {

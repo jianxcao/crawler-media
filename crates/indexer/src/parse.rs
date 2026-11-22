@@ -30,7 +30,17 @@ pub(crate) fn rss(
     parse_rss(site, rss, body)
 }
 
-fn parse_html(site: &Site, profile: &Profile, body: &str) -> Result<Vec<Torrent>, IndexerError> {
+pub(crate) fn parse_html(
+    site: &Site,
+    profile: &Profile,
+    body: &str,
+) -> Result<Vec<Torrent>, IndexerError> {
+    let base = profile.effective_site_base_url(&site.url);
+    let join_base = if base.is_empty() {
+        site.url.as_str()
+    } else {
+        base.as_str()
+    };
     let document = Html::parse_document(body);
 
     // 登录态探测：如果配置了 login_success_css（例如 a[href*='logout.php']），页面缺失该元素时
@@ -83,8 +93,8 @@ fn parse_html(site: &Site, profile: &Profile, body: &str) -> Result<Vec<Torrent>
             .detail
             .as_ref()
             .and_then(|f| optional_text(item, Some(f)))
-            .map(|d| join_url(&site.url, &d));
-        let enclosure_url = join_url(&site.url, &enclosure);
+            .map(|d| join_url(join_base, &d));
+        let enclosure_url = join_url(join_base, &enclosure);
         torrents.push(Torrent {
             site_id: site.id,
             title,
@@ -151,7 +161,7 @@ impl MTeamItem {
             .map(|raw| format!("https://www.m-team.cc/torrent/{}", raw));
         Torrent {
             site_id,
-            title: self.name.unwrap_or_default(),
+            title: combine_title_and_subtitle(self.name, self.small_descr),
             enclosure,
             size_bytes: self.size.as_deref().and_then(parse_size),
             seeders: status.seeders.as_deref().and_then(|s| s.parse().ok()),
@@ -166,6 +176,92 @@ impl MTeamItem {
             category: None,
             poster_url: self.image_list.into_iter().next(),
         }
+    }
+}
+
+pub(crate) fn parse_hdarea_torrents(
+    site: &Site,
+    profile: &Profile,
+    body: &str,
+) -> Result<Vec<Torrent>, IndexerError> {
+    let parsed: HdareaSearchResponse =
+        serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
+    check_hdarea_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.http_code,
+        parsed.message.as_deref(),
+    )?;
+    let base = profile.effective_site_base_url(&site.url);
+    let items = parsed.data.map(HdareaData::into_items).unwrap_or_default();
+    Ok(items
+        .into_iter()
+        .map(|item| item.into_torrent(site.id, &base))
+        .collect())
+}
+
+pub(crate) fn parse_hdarea_download(base: &str, body: &str) -> Result<String, IndexerError> {
+    let parsed: HdareaDownloadResponse =
+        serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
+    check_hdarea_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.http_code,
+        parsed.message.as_deref(),
+    )?;
+    let extracted = match parsed.data {
+        Some(serde_json::Value::String(url)) if !url.trim().is_empty() => {
+            Some(join_url(base, url.trim()))
+        }
+        Some(serde_json::Value::Object(map)) => ["download_url", "url", "dl_url", "link"]
+            .into_iter()
+            .find_map(|key| map.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(|url| join_url(base, url)),
+        _ => None,
+    };
+    extracted.ok_or_else(|| {
+        IndexerError::Parse(format!(
+            "HDArea 未返回下载链接（{}）",
+            parsed.message.unwrap_or_else(|| "无描述".into())
+        ))
+    })
+}
+
+fn check_hdarea_envelope(
+    success: Option<bool>,
+    code: Option<&str>,
+    http_code: Option<u16>,
+    message: Option<&str>,
+) -> Result<(), IndexerError> {
+    let code_failed = code.is_some_and(|c| c != "0");
+    if !code_failed && success != Some(false) {
+        return Ok(());
+    }
+    let msg = message.unwrap_or("无描述");
+    if matches!(http_code, Some(401 | 403)) || matches!(code, Some("401" | "403")) {
+        let status = http_code.unwrap_or(401);
+        return Err(IndexerError::Fetch(format!(
+            "HDArea API 认证失败（HTTP {status}）：{msg}"
+        )));
+    }
+    let label = code.unwrap_or("error");
+    Err(IndexerError::Parse(format!(
+        "HDArea API 返回错误 {label}：{msg}"
+    )))
+}
+
+fn combine_title_and_subtitle(name: Option<String>, small_descr: Option<String>) -> String {
+    let main = name.unwrap_or_default();
+    let main = main.trim();
+    let sub = small_descr.unwrap_or_default();
+    let sub = sub.trim();
+    match (main.is_empty(), sub.is_empty()) {
+        (false, false) => format!("{main} [{sub}]"),
+        (false, true) => main.to_string(),
+        (true, false) => sub.to_string(),
+        (true, true) => String::new(),
     }
 }
 
@@ -235,7 +331,7 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
 }
 
 /// 从下载/详情链接提取站点内种子 id（`download.php?id=123` / `torrent/123`）。
-fn extract_id(url: &str) -> Option<String> {
+pub(crate) fn extract_id(url: &str) -> Option<String> {
     let query = url.split_once('?').map(|(_, q)| q).unwrap_or(url);
     query
         .split('&')
@@ -382,6 +478,13 @@ pub(crate) struct MTeamItem {
     pub(crate) id: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     name: Option<String>,
+    #[serde(
+        default,
+        rename = "smallDescr",
+        alias = "small_descr",
+        deserialize_with = "de_opt_string"
+    )]
+    small_descr: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     size: Option<String>,
     #[serde(default, alias = "createdDate", deserialize_with = "de_opt_string")]
@@ -412,4 +515,178 @@ struct MTeamDownloadResponse {
     message: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     data: Option<String>,
+}
+
+fn de_opt_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(de_opt_string(deserializer)?.and_then(|s| s.trim().parse().ok()))
+}
+
+fn de_opt_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(de_opt_string(deserializer)?.and_then(|s| s.trim().parse().ok()))
+}
+
+fn de_opt_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(de_opt_string(deserializer)?.and_then(|s| s.trim().parse().ok()))
+}
+
+fn de_opt_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Bool(flag)) => Some(flag),
+        Some(serde_json::Value::Number(num)) => num.as_i64().map(|n| n != 0),
+        Some(serde_json::Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[derive(Deserialize)]
+struct HdareaSearchResponse {
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u16")]
+    http_code: Option<u16>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    message: Option<String>,
+    #[serde(default)]
+    data: Option<HdareaData>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HdareaData {
+    Envelope {
+        #[serde(default)]
+        items: Vec<HdareaItem>,
+    },
+    Items(Vec<HdareaItem>),
+}
+
+impl HdareaData {
+    fn into_items(self) -> Vec<HdareaItem> {
+        match self {
+            Self::Envelope { items } => items,
+            Self::Items(items) => items,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HdareaItem {
+    #[serde(default, deserialize_with = "de_opt_string")]
+    id: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    small_descr: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    category_id: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    category_name: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    size: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u32")]
+    seeders: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32")]
+    leechers: Option<u32>,
+    #[serde(default, alias = "snatched", deserialize_with = "de_opt_u32")]
+    times_completed: Option<u32>,
+    #[serde(default, alias = "upload_time", deserialize_with = "de_opt_string")]
+    added: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u32")]
+    sp_state: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
+    download_volume_factor: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    is_free: Option<bool>,
+    #[serde(default, alias = "hit_and_run", deserialize_with = "de_opt_bool")]
+    hr: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    imdb_id: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    poster_url: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    detail_url: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    download_url: Option<String>,
+}
+
+impl HdareaItem {
+    fn into_torrent(self, site_id: domain::SiteId, base: &str) -> Torrent {
+        let free = self.is_free == Some(true)
+            || self.download_volume_factor.is_some_and(|v| v == 0.0)
+            || matches!(self.sp_state, Some(2 | 4));
+        let id = self.id.filter(|s| !s.trim().is_empty());
+        let enclosure = self
+            .download_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(|u| join_url(base, u))
+            .unwrap_or_else(|| {
+                let id_str = id.as_deref().unwrap_or_default();
+                format!("{base}/download.php?id={id_str}")
+            });
+        let detail_url = self
+            .detail_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(|u| join_url(base, u))
+            .or_else(|| {
+                id.as_deref()
+                    .map(|raw| format!("{base}/details.php?id={raw}"))
+            });
+        Torrent {
+            site_id,
+            title: combine_title_and_subtitle(self.name, self.small_descr),
+            enclosure,
+            size_bytes: self.size.as_deref().and_then(parse_size),
+            seeders: self.seeders,
+            free,
+            hr: self.hr,
+            imdb_id: self.imdb_id.filter(|s| !s.trim().is_empty()),
+            id,
+            leechers: self.leechers,
+            snatched: self.times_completed,
+            upload_time: self.added.filter(|s| !s.trim().is_empty()),
+            detail_url,
+            category: self
+                .category_name
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| self.category_id.filter(|s| !s.trim().is_empty())),
+            poster_url: self.poster_url.filter(|s| !s.trim().is_empty()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HdareaDownloadResponse {
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u16")]
+    http_code: Option<u16>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    message: Option<String>,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
 }

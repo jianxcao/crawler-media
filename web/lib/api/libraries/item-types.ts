@@ -70,6 +70,20 @@ export interface LibraryItemBrand {
   kind?: "network" | "studio";
 }
 
+export type EpisodeAvailabilityStatus =
+  | "in_library"
+  | "downloading"
+  | "file_missing"
+  | "missing"
+  | "unaired";
+
+export interface LibrarySeasonSummary {
+  season_number: number;
+  owned_count: number;
+  total_count: number;
+  downloading_count: number;
+}
+
 export interface LibraryItemDetail {
   media_item_id: string;
   kind: LibraryKind;
@@ -90,6 +104,7 @@ export interface LibraryItemDetail {
   backdrop_url: string | null;
   files: LibraryItemFile[];
   seasons: number[];
+  season_summaries?: LibrarySeasonSummary[];
 }
 
 /** 剧集分集区的一集。 */
@@ -101,6 +116,10 @@ export interface LibraryEpisode {
   still_url: string | null;
   /** 该集有在位文件；false=缺集或文件缺失（置灰展示） */
   owned: boolean;
+  /** 5 态可用性全景（in_library / downloading / file_missing / missing / unaired） */
+  status?: EpisodeAvailabilityStatus;
+  /** 首选在位文件的清晰度（如 2160p / 1080p） */
+  resolution?: string | null;
   /** 该集的台账文件 id */
   file_ids: string[];
   /** 当前观看者上次看到的位置（毫秒）；0=没看过或已重置 */

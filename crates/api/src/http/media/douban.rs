@@ -5,14 +5,16 @@ use super::*;
 /// via the catalog, since douban ids don't encode movie/tv).
 pub(crate) async fn douban_detail(
     State(state): State<ApiState>,
+    user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path(id): Path<String>,
 ) -> Response {
+    let viewer = user_id.and_then(|ext| ext.0);
     let state_clone = state.clone();
     let id_clone = id.clone();
     let res = state
         .http_work
         .run(MEDIA_DEADLINE, move || {
-            douban_detail_blocking(&state_clone, &id_clone)
+            douban_detail_blocking(&state_clone, viewer, &id_clone)
         })
         .await;
     match res {
@@ -21,7 +23,7 @@ pub(crate) async fn douban_detail(
     }
 }
 
-fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
+fn douban_detail_blocking(state: &ApiState, viewer: Option<domain::UserId>, id: &str) -> Response {
     // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
     // 有映射走完整 TMDB 详情。
     let store = state.store.as_ref();
@@ -34,7 +36,7 @@ fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
         } else {
             "movie"
         };
-        return media_detail_inner(state, kind, &tmdb_id);
+        return media_detail_inner(state, viewer, kind, &tmdb_id);
     }
 
     match state.catalog.douban_subject_with_credits(id) {

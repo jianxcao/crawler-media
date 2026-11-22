@@ -12,6 +12,14 @@ pub enum Framework {
     Api,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiDialect {
+    #[default]
+    Mteam,
+    HdareaV1,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct SearchConfig {
     pub path: String,
@@ -131,6 +139,12 @@ pub struct Profile {
     pub id: String,
     pub framework: Framework,
     #[serde(default)]
+    pub api_dialect: ApiDialect,
+    #[serde(default)]
+    pub auth_types: Vec<String>,
+    #[serde(default)]
+    pub api_check_in_path: Option<String>,
+    #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
     pub web_base_url: Option<String>,
@@ -148,6 +162,60 @@ pub struct Profile {
     #[serde(default)]
     pub fields: Fields,
     pub rss: Option<RssConfig>,
+}
+
+impl Profile {
+    pub fn effective_auth_types(&self) -> Vec<&str> {
+        if !self.auth_types.is_empty() {
+            self.auth_types.iter().map(String::as_str).collect()
+        } else if self.framework == Framework::Api {
+            vec!["apikey"]
+        } else {
+            vec!["cookie"]
+        }
+    }
+
+    pub fn supports_check_in(&self) -> bool {
+        self.framework == Framework::Nexusphp || self.api_check_in_path.is_some()
+    }
+
+    /// Resolve the base URL for HTTP requests against a configured `Site`.
+    pub fn effective_site_base_url(&self, site_url: &str) -> String {
+        let trimmed = site_url.trim().trim_end_matches('/');
+        if is_loopback_url(trimmed) {
+            return trimmed.to_string();
+        }
+        if let Some(base) = &self.base_url {
+            let base_trimmed = base.trim().trim_end_matches('/');
+            let web_trimmed = self
+                .web_base_url
+                .as_deref()
+                .map(|u| u.trim().trim_end_matches('/'));
+            if trimmed.is_empty() || web_trimmed != Some(base_trimmed) {
+                return base_trimmed.to_string();
+            }
+        }
+        trimmed.to_string()
+    }
+}
+
+fn is_loopback_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    for prefix in [
+        "http://127.0.0.1",
+        "https://127.0.0.1",
+        "http://localhost",
+        "https://localhost",
+        "http://[::1]",
+        "https://[::1]",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && (rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Clone, Default)]

@@ -13,6 +13,7 @@ import type {
   LibraryItemDetail,
   LibraryItemFile,
   LibraryItemFilePage,
+  LibrarySeasonSummary,
   SeasonEpisodes,
   SubtitleStream,
   VideoTrackInfo,
@@ -114,6 +115,16 @@ function brandFrom(raw: unknown): LibraryItemBrand | null {
   };
 }
 
+function seasonSummaryFrom(raw: unknown): LibrarySeasonSummary {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    season_number: num(r.season_number),
+    owned_count: num(r.owned_count),
+    total_count: num(r.total_count),
+    downloading_count: num(r.downloading_count),
+  };
+}
+
 export async function getLibraryItemDetail(
   libraryId: string,
   mediaItemId: string,
@@ -159,6 +170,9 @@ export async function getLibraryItemDetail(
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     seasons: Array.isArray(r.seasons) ? r.seasons.map(num) : [],
+    season_summaries: Array.isArray(r.season_summaries)
+      ? (r.season_summaries as unknown[]).map(seasonSummaryFrom)
+      : [],
     files,
   };
 }
