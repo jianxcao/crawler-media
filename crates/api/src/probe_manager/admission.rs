@@ -18,6 +18,18 @@ impl ProbeManager {
             let store = self.store.as_ref();
             policy::assess_probe_need(&store, row, origin, now_ms, source_version)
         };
+        let allow_when_paused = matches!(
+            origin,
+            policy::ProbeRequestOrigin::Playback
+                | policy::ProbeRequestOrigin::ManualRetry
+                | policy::ProbeRequestOrigin::ManualRefresh
+        );
+        if allow_when_paused
+            && matches!(need.retry, policy::ProbeRequestResult::AlreadyRunning)
+            && self.background_is_paused()
+        {
+            return self.promote_paused_queued_unit(row);
+        }
         if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
             return Ok(need.retry);
         }
@@ -34,12 +46,6 @@ impl ProbeManager {
             marker_refresh_id: None,
             job_id: None,
         };
-        let allow_when_paused = matches!(
-            origin,
-            policy::ProbeRequestOrigin::Playback
-                | policy::ProbeRequestOrigin::ManualRetry
-                | policy::ProbeRequestOrigin::ManualRefresh
-        );
         if need.metadata_valid
             && need.fingerprint_enabled
             && (need.intro_missing || need.outro_missing)
@@ -108,7 +114,7 @@ impl ProbeManager {
         if !self.seen.lock().insert(ledger_id.clone()) {
             return Ok(None);
         }
-        let job_id = match self.persist_single_unit(&unit, "fingerprint_probe") {
+        let job_id = match self.persist_single_unit(&unit, "fingerprint_probe", false) {
             Ok(Some(job_id)) => job_id,
             Ok(None) => {
                 self.seen.lock().remove(&ledger_id);
@@ -119,6 +125,9 @@ impl ProbeManager {
                 return Err(error);
             }
         };
+        if allow_when_paused {
+            self.mark_job_paused_exempt(job_id.clone());
+        }
         unit.job_id = Some(job_id.clone());
         let work = probe::FingerprintWork {
             unit: unit.clone(),
@@ -184,9 +193,12 @@ impl ProbeManager {
             return Ok(None);
         }
         self.last_failure.lock().remove(&ledger_id);
-        let Some(job_id) = self.persist_single_unit(&unit, "media_probe")? else {
+        let Some(job_id) = self.persist_single_unit(&unit, "media_probe", false)? else {
             return Ok(None);
         };
+        if allow_when_paused {
+            self.mark_job_paused_exempt(job_id.clone());
+        }
         unit.job_id = Some(job_id.clone());
         tracing::info!(
             path = %unit.row.file.path.display(),
@@ -223,7 +235,7 @@ impl ProbeManager {
             tracing::info!(ledger_id, "已有媒体探测任务，跳过重复强制探测");
             return false;
         }
-        let job_id = match self.persist_single_unit(&unit, "media_probe") {
+        let job_id = match self.persist_single_unit(&unit, "media_probe", true) {
             Ok(Some(job_id)) => job_id,
             Ok(None) => {
                 self.seen.lock().remove(&ledger_id);
@@ -235,6 +247,7 @@ impl ProbeManager {
                 return false;
             }
         };
+        self.mark_job_paused_exempt(job_id.clone());
         unit.job_id = Some(job_id.clone());
         if self.should_defer_remote_dispatch(&unit.row.file.path) {
             self.seen.lock().remove(&ledger_id);
@@ -251,10 +264,77 @@ impl ProbeManager {
         true
     }
 
+    fn promote_paused_queued_unit(
+        &self,
+        row: &domain::FileCoverage,
+    ) -> Result<policy::ProbeRequestResult, store::StoreError> {
+        let ledger_id = row.file.file_id.to_string();
+        let Some(active) = self.store.active_probe_unit_for_ledger(&ledger_id)? else {
+            return Ok(policy::ProbeRequestResult::AlreadyRunning);
+        };
+        if active.status != "queued" {
+            return Ok(policy::ProbeRequestResult::AlreadyRunning);
+        }
+        let newly_exempt = self.mark_job_paused_exempt(active.job_id.clone());
+        if !self.should_defer_remote_dispatch(&row.file.path) {
+            self.dispatch_promoted_unit(&active.job_id, &ledger_id, active.stage);
+        }
+        if newly_exempt {
+            Ok(policy::ProbeRequestResult::Queued {
+                job_id: active.job_id,
+            })
+        } else {
+            Ok(policy::ProbeRequestResult::AlreadyRunning)
+        }
+    }
+
+    fn dispatch_promoted_unit(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        stage: store::ProbeDispatchStage,
+    ) {
+        match stage {
+            store::ProbeDispatchStage::Metadata => {
+                if self.seen.lock().insert(ledger_id.to_string()) {
+                    let id = store::ProbeDispatchId {
+                        job_id: job_id.to_string(),
+                        ledger_id: ledger_id.to_string(),
+                        stage: store::ProbeDispatchStage::Metadata,
+                    };
+                    if self.dispatch_metadata_id(id).is_err() {
+                        self.seen.lock().remove(ledger_id);
+                        self.wake.notify_waiters();
+                    }
+                }
+            }
+            store::ProbeDispatchStage::Fingerprint => {
+                if !self.seen.lock().contains(ledger_id) {
+                    let id = store::ProbeDispatchId {
+                        job_id: job_id.to_string(),
+                        ledger_id: ledger_id.to_string(),
+                        stage: store::ProbeDispatchStage::Fingerprint,
+                    };
+                    if let Some((_, work)) = self.load_dispatch_unit(&id) {
+                        let inserted = self.seen.lock().insert(ledger_id.to_string());
+                        if inserted && self.fingerprint_tx.try_send((id, work)).is_err() {
+                            self.seen.lock().remove(ledger_id);
+                            self.wake.notify_waiters();
+                        }
+                    }
+                }
+            }
+            store::ProbeDispatchStage::Analysis => {
+                self.wake.notify_waiters();
+            }
+        }
+    }
+
     fn persist_single_unit(
         &self,
         unit: &ProbeUnit,
         kind: &str,
+        supersede_when_paused: bool,
     ) -> Result<Option<String>, store::StoreError> {
         let job_id = uuid::Uuid::new_v4().to_string();
         let ledger_id = unit.row.file.file_id.to_string();
@@ -267,6 +347,12 @@ impl ProbeManager {
             overwrite_markers: unit.overwrite_markers,
             reuse_media_info_cache: unit.reuse_media_info_cache,
         };
+        let paused = supersede_when_paused && self.background_is_paused();
+        let exempt_jobs = if paused {
+            self.paused_exempt_jobs_snapshot()
+        } else {
+            std::collections::HashSet::new()
+        };
         // Presence may have changed after policy assessment. Keep this final check and
         // persistence under the same Store lock that presence writes take: a source
         // recorded missing must never gain probe work, whichever admission path asked.
@@ -275,16 +361,49 @@ impl ProbeManager {
                 tracing::info!(ledger_id, "源文件已标记缺失，拒绝创建探测任务");
                 return Ok(None);
             }
-            store
-                .create_probe_job(
-                    &job_id,
-                    kind,
-                    &unit.row.file.media_id.to_string(),
-                    single_season_opt(&unit.row),
-                    &scope,
-                    &[spec],
-                )
-                .map(|created| created.then_some(job_id))
+            if !paused {
+                return store
+                    .create_probe_job(
+                        &job_id,
+                        kind,
+                        &unit.row.file.media_id.to_string(),
+                        single_season_opt(&unit.row),
+                        &scope,
+                        &[spec],
+                    )
+                    .map(|created| created.then_some(job_id));
+            }
+            enum SingleTxErr {
+                Conflict,
+                Store(store::StoreError),
+            }
+            match store.with_write_tx(SingleTxErr::Store, |store| {
+                store
+                    .cancel_dormant_queued_units_for_ledgers(
+                        std::slice::from_ref(&ledger_id),
+                        &exempt_jobs,
+                        "superseded_by_manual_probe",
+                    )
+                    .map_err(SingleTxErr::Store)?;
+                let created = store
+                    .create_probe_job(
+                        &job_id,
+                        kind,
+                        &unit.row.file.media_id.to_string(),
+                        single_season_opt(&unit.row),
+                        &scope,
+                        &[spec],
+                    )
+                    .map_err(SingleTxErr::Store)?;
+                if !created {
+                    return Err(SingleTxErr::Conflict);
+                }
+                Ok(())
+            }) {
+                Ok(()) => Ok(Some(job_id)),
+                Err(SingleTxErr::Conflict) => Ok(None),
+                Err(SingleTxErr::Store(err)) => Err(err),
+            }
         })
     }
 }

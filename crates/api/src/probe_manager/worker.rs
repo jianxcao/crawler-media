@@ -524,7 +524,7 @@ async fn run_window_dispatcher(manager: Arc<ProbeManager>) {
             if recover_completed {
                 manager.recover_completed_jobs();
             }
-            if !manager.background_is_paused() {
+            if !manager.background_is_paused() || manager.has_paused_exempt_jobs() {
                 manager.refill_drained_windows();
             }
         })

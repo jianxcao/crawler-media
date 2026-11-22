@@ -18,7 +18,7 @@ pub(super) fn season_detail_blocking(
         Ok(loaded) => loaded,
         Err(error) => return err(StatusCode::BAD_GATEWAY, "media.upstream", &error),
     };
-    let (media_ids, panorama) = panorama_for_tmdb_tv(state, viewer, &tmdb_id);
+    let (media_ids, has_visible_item, panorama) = panorama_for_tmdb_tv(state, viewer, &tmdb_id);
     if !episodes.is_empty() || !meta_episodes.is_empty() {
         let numbers = merged_episode_numbers(&episodes, &meta_episodes);
         let items: Vec<Value> = numbers
@@ -42,10 +42,12 @@ pub(super) fn season_detail_blocking(
             .collect();
         return ok(json!({ "episodes": items })).into_response();
     }
-    if let Some(&media_id) = media_ids.first()
-        && let Ok(local_eps) = state
-            .store
-            .adopted_episode_metadata(media_id, season, None, "")
+    if has_visible_item
+        && let Some(&media_id) = media_ids.first()
+        && let Ok(Ok(local_eps)) =
+            crate::http::store_wait::with_store_read(state, &[store::Db::Library], |store| {
+                store.adopted_episode_metadata(media_id, season, None, "")
+            })
         && !local_eps.is_empty()
     {
         let items: Vec<Value> = local_eps
@@ -199,7 +201,7 @@ pub(super) fn panorama_for_tmdb_tv(
     state: &ApiState,
     user_id: Option<domain::UserId>,
     tmdb_id: &str,
-) -> (Vec<domain::MediaId>, store::EpisodePanorama) {
+) -> (Vec<domain::MediaId>, bool, store::EpisodePanorama) {
     let result = state.store.with_read_snapshot(
         &[store::Db::Library, store::Db::App, store::Db::Subscribe],
         crate::http::store_wait::STORE_READ_WAIT,
@@ -223,21 +225,32 @@ pub(super) fn panorama_for_tmdb_tv(
                 .get_media_by_alias_kind("tmdb", tmdb_id, Some(domain::MediaKind::Tv))?
                 .map(|m| vec![m.id])
                 .unwrap_or_default();
-            let panorama = store.episode_panorama(
+            let has_visible_item = media_ids.iter().any(|&media_id| {
+                visible_libs.iter().any(|&lib_id| {
+                    store
+                        .get_library_item(lib_id, media_id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                })
+            });
+            let subscriber_filter = if is_admin { None } else { Some(user_id) };
+            let panorama = store.episode_panorama_scoped(
                 &media_ids,
                 &visible_libs,
                 visible_libs.first().copied(),
                 "",
+                subscriber_filter,
                 release::parse,
             )?;
-            Ok::<_, store::StoreError>((media_ids, panorama))
+            Ok::<_, store::StoreError>((media_ids, has_visible_item, panorama))
         },
     );
     match result {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(error)) | Err(error) => {
             tracing::warn!(%error, tmdb_id, "failed to load TV episode panorama");
-            (Vec::new(), store::EpisodePanorama::empty())
+            (Vec::new(), false, store::EpisodePanorama::empty())
         }
     }
 }

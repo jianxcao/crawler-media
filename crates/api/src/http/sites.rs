@@ -37,6 +37,7 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
 #[derive(Deserialize)]
 pub(crate) struct SiteInput {
     name: String,
+    #[serde(default)]
     url: String,
     profile_id: String,
     #[serde(default)]

@@ -235,7 +235,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), runtime::DeliveryError> {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("image/jpeg")
-            .to_string();
+            .to_ascii_lowercase();
         if !content_type.starts_with("image/") {
             return Err(format!("上游不是图片: {content_type}").into());
         }

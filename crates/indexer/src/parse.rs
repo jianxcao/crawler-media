@@ -372,6 +372,9 @@ fn present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> bool {
 
 fn hr_present(root: scraper::ElementRef<'_>, field: Option<&Field>) -> Option<bool> {
     let field = field?;
+    if field.selector.trim().is_empty() {
+        return None;
+    }
     let selector = match Selector::parse(&field.selector) {
         Ok(selector) => selector,
         Err(error) => {

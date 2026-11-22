@@ -43,6 +43,16 @@ async fn send_json(
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    send_json_as(app, TOKEN, method, uri, body).await
+}
+
+async fn send_json_as(
+    app: &axum::Router,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let req_body = if body.is_null() {
         Body::empty()
     } else {
@@ -54,7 +64,7 @@ async fn send_json(
             Request::builder()
                 .method(method)
                 .uri(uri)
-                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(req_body)
                 .unwrap(),
@@ -64,6 +74,19 @@ async fn send_json(
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+async fn proxy_get(app: &axum::Router, uri: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 fn build_logo_fixture_png() -> Vec<u8> {
@@ -98,17 +121,11 @@ async fn brand_logo_proxy_strips_white_border_crops_padding_preserves_color_and_
     }));
     let app = router(state);
 
-    let normalized = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/test.png&variant=brand-logo")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let normalized = proxy_get(
+        &app,
+        "/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/test.png&variant=brand-logo",
+    )
+    .await;
     assert_eq!(normalized.status(), StatusCode::OK);
     assert_eq!(normalized.headers()["content-type"], "image/png");
     let norm_bytes = to_bytes(normalized.into_body(), usize::MAX).await.unwrap();
@@ -122,16 +139,11 @@ async fn brand_logo_proxy_strips_white_border_crops_padding_preserves_color_and_
     assert!(wordmark[0] >= 225 && wordmark[1] >= 225 && wordmark[2] >= 225);
     assert_eq!(wordmark[3], 255);
 
-    let raw = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/test.png")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let raw = proxy_get(
+        &app,
+        "/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/test.png",
+    )
+    .await;
     assert_eq!(raw.status(), StatusCode::OK);
     let raw_bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
     let raw_decoded = image::load_from_memory(&raw_bytes).unwrap().to_rgba8();
@@ -167,6 +179,14 @@ impl CatalogGet for FakeMetadataHttp {
         }
         if path == "/rexxar/api/v2/movie/35235320/celebrities?for_mobile=1" {
             return Ok(json!({ "actors": [], "directors": [] }).to_string());
+        }
+        if path.starts_with("/rexxar/api/v2/movie/99999999") {
+            return Ok(json!({
+                "code": 5000,
+                "msg": "subject_not_found",
+                "request": "GET /v2/movie/99999999"
+            })
+            .to_string());
         }
         if path.starts_with("/search/tv?") {
             return Ok(search_tv_fixture(self.tmdb_mode));
@@ -204,53 +224,8 @@ impl CatalogGet for FakeMetadataHttp {
             })
             .to_string());
         }
-        if path.starts_with("/tv/66732/season/2") && path.contains("language=en-US") {
-            return Ok(json!({
-                "id": 92002,
-                "name": "Season 2",
-                "season_number": 2,
-                "episodes": [
-                    {
-                        "episode_number": 1,
-                        "name": "Chapter One: MADMAX",
-                        "overview": "Will sees visions of the Upside Down.",
-                        "still_path": "/s2e1.jpg",
-                        "air_date": "2017-10-27"
-                    },
-                    {
-                        "episode_number": 2,
-                        "name": "Chapter Two: Trick or Treat, Freak",
-                        "overview": "Eleven recalls her escape from the woods.",
-                        "still_path": "/s2e2.jpg",
-                        "air_date": "2017-10-27"
-                    }
-                ]
-            })
-            .to_string());
-        }
         if path.starts_with("/tv/66732/season/2") {
-            return Ok(json!({
-                "id": 92002,
-                "name": "第 2 季",
-                "season_number": 2,
-                "episodes": [
-                    {
-                        "episode_number": 1,
-                        "name": "第一章：疯狂麦克斯",
-                        "overview": "威尔再次看到颠倒世界的幻象。",
-                        "still_path": "/s2e1.jpg",
-                        "air_date": "2017-10-27"
-                    },
-                    {
-                        "episode_number": 2,
-                        "name": "第 2 集",
-                        "overview": "",
-                        "still_path": "/s2e2.jpg",
-                        "air_date": "2017-10-27"
-                    }
-                ]
-            })
-            .to_string());
+            return Ok(season_66732_fixture(path.contains("language=en-US")));
         }
         if path.starts_with("/tv/203483") {
             return Ok(json!({
@@ -271,6 +246,56 @@ impl CatalogGet for FakeMetadataHttp {
             .to_string());
         }
         Err(TmdbError::NotFound(path.to_string()))
+    }
+}
+
+fn season_66732_fixture(en: bool) -> String {
+    if en {
+        json!({
+            "id": 92002,
+            "name": "Season 2",
+            "season_number": 2,
+            "episodes": [
+                {
+                    "episode_number": 1,
+                    "name": "Chapter One: MADMAX",
+                    "overview": "Will sees visions of the Upside Down.",
+                    "still_path": "/s2e1.jpg",
+                    "air_date": "2017-10-27"
+                },
+                {
+                    "episode_number": 2,
+                    "name": "Chapter Two: Trick or Treat, Freak",
+                    "overview": "Eleven recalls her escape from the woods.",
+                    "still_path": "/s2e2.jpg",
+                    "air_date": "2017-10-27"
+                }
+            ]
+        })
+        .to_string()
+    } else {
+        json!({
+            "id": 92002,
+            "name": "第 2 季",
+            "season_number": 2,
+            "episodes": [
+                {
+                    "episode_number": 1,
+                    "name": "第一章：疯狂麦克斯",
+                    "overview": "威尔再次看到颠倒世界的幻象。",
+                    "still_path": "/s2e1.jpg",
+                    "air_date": "2017-10-27"
+                },
+                {
+                    "episode_number": 2,
+                    "name": "第 2 集",
+                    "overview": "",
+                    "still_path": "/s2e2.jpg",
+                    "air_date": "2017-10-27"
+                }
+            ]
+        })
+        .to_string()
     }
 }
 
@@ -320,14 +345,18 @@ fn search_tv_fixture(mode: TmdbMode) -> String {
     }
 }
 
-fn app_with_mode(root: &Path, mode: TmdbMode) -> axum::Router {
+fn state_with_mode(root: &Path, mode: TmdbMode) -> ApiState {
     let catalog_db = root.join("catalog.db");
     let tmdb =
         TmdbCatalog::new(Tmdb::new(FakeMetadataHttp { tmdb_mode: mode }, &catalog_db).unwrap());
     let douban =
         DoubanCatalog::new(Douban::new(FakeMetadataHttp { tmdb_mode: mode }, &catalog_db).unwrap());
     let sources: Vec<Arc<dyn Catalog>> = vec![tmdb, douban];
-    router(base_state(root).with_catalog(FanoutCatalog::new(sources)))
+    base_state(root).with_catalog(FanoutCatalog::new(sources))
+}
+
+fn app_with_mode(root: &Path, mode: TmdbMode) -> axum::Router {
+    router(state_with_mode(root, mode))
 }
 
 #[tokio::test]
@@ -542,19 +571,198 @@ async fn brand_logo_proxy_strips_silver_gray_box_background() {
         Ok(("image/png".to_string(), png_bytes.clone()))
     }));
     let app = router(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/silver.png&variant=brand-logo")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = proxy_get(
+        &app,
+        "/api/v1/images/proxy?url=https://image.tmdb.org/t/p/w300/silver.png&variant=brand-logo",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let norm_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let decoded = image::load_from_memory(&norm_bytes).unwrap().to_rgba8();
     assert_eq!(decoded.dimensions(), (30, 16));
     assert_eq!(decoded.get_pixel(0, 0).0, [220, 40, 50, 255]);
+}
+
+fn publish_ep(store: &Store, media_id: domain::MediaId, path: &Path, episode: u32, res: &str) {
+    std::fs::write(path, b"video").unwrap();
+    store::test_support::publish_fixture_file(
+        store,
+        &store::test_support::FixtureFile {
+            media_id,
+            path: path.display().to_string(),
+            season: Some(1),
+            episode: Some(episode),
+            resolution: Some(res.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+fn seed_private_and_public_tv(
+    store: &Store,
+    priv_root: &Path,
+    pub_root: &Path,
+    member_token: &str,
+) -> (domain::MediaId, String, String) {
+    let member_id = domain::UserId::new();
+    let user = domain::User {
+        id: member_id,
+        login: "member".into(),
+        enabled: true,
+        role: domain::UserRole::Member,
+    };
+    store
+        .insert_user_with_password(&user, "member-secret")
+        .unwrap();
+    store.set_user_token(member_id, member_token).unwrap();
+    let priv_s = priv_root.to_str().unwrap();
+    let pub_s = pub_root.to_str().unwrap();
+    let priv_lib = store
+        .create_library(
+            domain::MediaKind::Tv,
+            "私密剧库",
+            &[priv_s],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+    let pub_lib = store
+        .create_library(
+            domain::MediaKind::Tv,
+            "公共剧库",
+            &[pub_s],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media_id = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Tv,
+            title: "两京十五日".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: Some("203483".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    (media_id, priv_lib.id, pub_lib.id)
+}
+
+#[tokio::test]
+async fn member_tv_detail_and_title_preview_hide_private_library_and_dedup_multi_version_episodes()
+{
+    let tmp = tempfile::tempdir().unwrap();
+    let state = state_with_mode(tmp.path(), TmdbMode::Matched);
+    let tok = "polish-member-token";
+    let priv_d = tmp.path().join("priv_tv");
+    let pub_d = tmp.path().join("pub_tv");
+    std::fs::create_dir_all(&priv_d).unwrap();
+    std::fs::create_dir_all(&pub_d).unwrap();
+
+    let (media_id, priv_lib_id, pub_lib_id) = {
+        let store = state.store();
+        let guard = store.as_ref();
+        let seeded = seed_private_and_public_tv(guard, &priv_d, &pub_d, tok);
+        publish_ep(guard, seeded.0, &priv_d.join("1.mkv"), 1, "1080p");
+        publish_ep(guard, seeded.0, &priv_d.join("2.mkv"), 2, "1080p");
+        seeded
+    };
+    let app = router(state.clone());
+    let pv_url = "/api/v1/subscriptions/title-preview";
+    let pv_req = json!({ "title_ref": "tmdb:tv:203483" });
+
+    let (m_status, m_detail) =
+        send_json_as(&app, tok, "GET", "/api/v1/media/tv/203483", Value::Null).await;
+    assert_eq!(m_status, StatusCode::OK, "{m_detail}");
+    assert_eq!(m_detail["data"]["library_links"], json!([]));
+    assert_eq!(m_detail["data"]["seasons"][0]["owned_episode_count"], 0);
+
+    let (mp_status, m_preview) = send_json_as(&app, tok, "POST", pv_url, pv_req.clone()).await;
+    assert_eq!(mp_status, StatusCode::OK, "{m_preview}");
+    assert_eq!(m_preview["data"]["seasons"][0]["owned_count"], 0);
+
+    let (_, a_preview) = send_json(&app, "POST", pv_url, pv_req.clone()).await;
+    assert_eq!(a_preview["data"]["seasons"][0]["owned_count"], 2);
+
+    {
+        let store = state.store();
+        publish_ep(store.as_ref(), media_id, &pub_d.join("1a.mkv"), 1, "1080p");
+        publish_ep(store.as_ref(), media_id, &pub_d.join("1b.mkv"), 1, "2160p");
+    }
+
+    let (_, m_detail2) =
+        send_json_as(&app, tok, "GET", "/api/v1/media/tv/203483", Value::Null).await;
+    let links = m_detail2["data"]["library_links"].as_array().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["library_id"], pub_lib_id);
+    assert_ne!(links[0]["library_id"], priv_lib_id);
+    assert_eq!(m_detail2["data"]["seasons"][0]["owned_episode_count"], 1);
+
+    let (_, m_preview2) = send_json_as(&app, tok, "POST", pv_url, pv_req).await;
+    assert_eq!(m_preview2["data"]["seasons"][0]["owned_count"], 1);
+}
+
+#[tokio::test]
+async fn image_proxy_sets_csp_nosniff_and_rejects_oversized_bomb_png_gracefully() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut oversized = RgbaImage::from_pixel(2049, 16, Rgba([255, 255, 255, 255]));
+    for y in 4..12 {
+        for x in 100..120 {
+            oversized.put_pixel(x, y, Rgba([220, 40, 50, 255]));
+        }
+    }
+    let mut bomb_png = Vec::new();
+    oversized
+        .write_to(&mut Cursor::new(&mut bomb_png), ImageFormat::Png)
+        .unwrap();
+    let expected_bomb = bomb_png.clone();
+
+    let state = base_state(tmp.path()).with_image_fetch(Arc::new(move |url: &str| {
+        if url.ends_with("bomb.png") {
+            Ok(("image/png".to_string(), bomb_png.clone()))
+        } else {
+            Ok(("Image/SVG+XML".to_string(), b"<svg></svg>".to_vec()))
+        }
+    }));
+    let app = router(state);
+    let expected_csp = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
+    let bomb_resp = proxy_get(
+        &app,
+        "/api/v1/images/proxy?url=https://image.tmdb.org/t/p/original/bomb.png&variant=brand-logo",
+    )
+    .await;
+    assert_eq!(bomb_resp.status(), StatusCode::OK);
+    assert_eq!(bomb_resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(bomb_resp.headers()["content-security-policy"], expected_csp);
+    let bomb_bytes = to_bytes(bomb_resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(bomb_bytes.as_ref(), expected_bomb.as_slice());
+
+    let svg_resp = proxy_get(
+        &app,
+        "/api/v1/images/proxy?url=https://image.tmdb.org/t/p/original/logo.svg",
+    )
+    .await;
+    assert_eq!(svg_resp.status(), StatusCode::OK);
+    assert_eq!(svg_resp.headers()["content-type"], "image/svg+xml");
+    assert_eq!(svg_resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(svg_resp.headers()["content-security-policy"], expected_csp);
+}
+
+#[tokio::test]
+async fn douban_rexxar_code_5000_returns_404_not_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app_with_mode(tmp.path(), TmdbMode::Missing);
+    let (status, body) = send_json(&app, "GET", "/api/v1/media/douban/99999999", Value::Null).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "media.missing");
 }

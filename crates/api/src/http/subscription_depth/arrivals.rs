@@ -38,9 +38,16 @@ pub(crate) fn load_arrivals(
     } else {
         store.list_subscribes_for_user(user_id)?
     };
+    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))?;
     let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
     let media_ids: Vec<domain::MediaId> = subscribes.iter().map(|s| s.media_id).collect();
     for coverage in store.file_coverage_for_media_batch(&media_ids)? {
+        if coverage.file.publication != domain::FilePublication::Published
+            || coverage.file.presence == domain::FilePresence::Missing
+            || visible.get(&coverage.file.library_id).is_none()
+        {
+            continue;
+        }
         rows_by_media
             .entry(coverage.file.media_id)
             .or_default()
@@ -57,10 +64,13 @@ pub(crate) fn load_arrivals(
         } else {
             domain::SubscribeFacts::default()
         };
-        let rows = rows_by_media
+        let mut rows = rows_by_media
             .get(&subscribe.media_id)
             .cloned()
             .unwrap_or_default();
+        if let Some(target_lib) = subscribe.library_id {
+            rows.retain(|coverage| coverage.file.library_id == target_lib);
+        }
         let episodes = super::catalog_facts::adopted_episodes(store, &subscribe, &rows)?;
         snapshots.push(ArrivalSnapshot {
             episodes,
@@ -102,7 +112,7 @@ pub(crate) fn build_arrivals(
             &pending,
             &facts,
         );
-        push_imported_arrivals(
+        let imported_units = push_imported_arrivals(
             &mut items,
             &subscribe,
             &media,
@@ -139,6 +149,7 @@ pub(crate) fn build_arrivals(
                 .get(Some(season), Some(episode.episode_number))
                 .is_some()
                 || grabbed_eps.contains(&(season, episode.episode_number))
+                || imported_units.contains(&(season, episode.episode_number))
             {
                 continue;
             }
@@ -238,7 +249,7 @@ fn push_imported_arrivals(
     pending_empty: bool,
     now: i64,
     day_secs: i64,
-) {
+) -> std::collections::BTreeSet<(u32, u32)> {
     let today_date = crate::store::rfc3339_from_secs(now)
         .get(..10)
         .unwrap_or("")
@@ -248,16 +259,18 @@ fn push_imported_arrivals(
             domain::Coverage::Tv { season, .. } => Some(season),
             _ => None,
         };
+        let mut owned_units = std::collections::BTreeSet::new();
         let mut imported_units = std::collections::BTreeSet::new();
         for coverage in rows {
-            if !modified_within_day(&coverage.file.path, now, day_secs) {
-                continue;
-            }
+            let recent = modified_within_day(&coverage.file.path, now, day_secs);
             for unit in &coverage.units {
                 if let Some((s, ep)) = unit.episode_coordinates()
                     && target_season.is_none_or(|ts| ts == s)
                 {
-                    imported_units.insert((s, ep));
+                    owned_units.insert((s, ep));
+                    if recent {
+                        imported_units.insert((s, ep));
+                    }
                 }
             }
         }
@@ -275,7 +288,7 @@ fn push_imported_arrivals(
                 "grabbed_at": Value::Null,
             }));
         }
-        return;
+        return owned_units;
     }
     let imported_today = rows
         .iter()
@@ -292,6 +305,7 @@ fn push_imported_arrivals(
             "grabbed_at": Value::Null,
         }));
     }
+    std::collections::BTreeSet::new()
 }
 
 /// 部分数据源失败只影响该 (tmdb_id, season)：warn 后跳过，保留其余 items。

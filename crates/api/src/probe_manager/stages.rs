@@ -49,7 +49,11 @@ pub(super) fn record_metadata_failure(
         error: error.to_string(),
     };
     store.library_write(|db| {
-        if db.claim_probe_stage(&key, job_id, now_ms)? {
+        let claim_at = db
+            .get_probe_stage(&key)?
+            .and_then(|s| s.next_retry_at_ms)
+            .map_or(now_ms, |due| now_ms.max(due));
+        if db.claim_probe_stage(&key, job_id, claim_at)? {
             let _ = db.finish_probe_stage(&key, job_id, &completion, now_ms)?;
         }
         Ok(())

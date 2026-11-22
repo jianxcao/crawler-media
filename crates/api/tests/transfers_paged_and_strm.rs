@@ -311,3 +311,98 @@ async fn transfers_groups_aggregates_works_and_legacy_ledger_stays_unpaged() {
             .all(|row| row.as_object().unwrap().len() == 16)
     );
 }
+
+#[tokio::test]
+async fn transfers_unicode_casefold_search_and_removing_library_exclusion() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let active_root = dir.path().join("active-tv");
+    let removing_root = dir.path().join("removing-tv");
+    std::fs::create_dir_all(&active_root).unwrap();
+    std::fs::create_dir_all(&removing_root).unwrap();
+
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Active TV",
+            &[active_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let removing_lib = store
+        .create_library(
+            MediaKind::Tv,
+            "Removing TV",
+            &[removing_root.to_str().unwrap()],
+            "everyone",
+            false,
+            &[],
+        )
+        .unwrap();
+
+    let elite = insert_media(&store, MediaKind::Tv, "Élite");
+    let elite_ep = active_root.join("Elite.S01E01.2160p.mkv");
+    std::fs::write(&elite_ep, b"elite-bytes").unwrap();
+    publish_item(&store, elite, &elite_ep, Some("hardlink"), Some((1, 1)));
+
+    let hidden = insert_media(&store, MediaKind::Tv, "Élite Hidden Copy");
+    let hidden_ep = removing_root.join("Hidden.S01E01.2160p.mkv");
+    std::fs::write(&hidden_ep, b"hidden-bytes").unwrap();
+    publish_item(&store, hidden, &hidden_ep, Some("copy"), Some((1, 1)));
+
+    store
+        .record_scan_seen_stamps(
+            "unicode-removal-seed",
+            &[
+                (
+                    elite_ep.to_string_lossy().into_owned(),
+                    100,
+                    1_200_000_000,
+                    None,
+                ),
+                (
+                    hidden_ep.to_string_lossy().into_owned(),
+                    200,
+                    8_800_000_000,
+                    None,
+                ),
+            ],
+        )
+        .unwrap();
+    store.begin_library_removal(&removing_lib.id).unwrap();
+
+    let state = ApiState::new(
+        store,
+        "transfers-test".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap();
+
+    // Non-ASCII uppercase `"ÉLITE"` (`%C3%89LITE`) matches `"Élite"` via `casefold(...)`,
+    // while `removing_lib` is excluded from both summary totals and filtered rows.
+    let files_page = get_json(
+        state.clone(),
+        "/api/v1/ledger/transfers?view=files&q=%C3%89LITE",
+    )
+    .await;
+    assert_eq!(files_page["filtered_total"], 1);
+    assert_eq!(files_page["filtered_file_total"], 1);
+    assert_eq!(files_page["filtered_group_total"], 1);
+    assert_eq!(files_page["items"][0]["media_title"], "Élite");
+    assert_eq!(files_page["summary"]["total_files"], 1);
+    assert_eq!(files_page["summary"]["media_count"], 1);
+    assert_eq!(files_page["summary"]["tv_files"], 1);
+    assert_eq!(files_page["summary"]["hardlink_count"], 1);
+    assert_eq!(files_page["summary"]["copy_count"], 0);
+    assert_eq!(files_page["summary"]["local_size_bytes"], 1_200_000_000_u64);
+
+    let groups_page = get_json(state, "/api/v1/ledger/transfers?view=groups").await;
+    assert_eq!(groups_page["filtered_total"], 1);
+    let groups = groups_page["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["media_title"], "Élite");
+}

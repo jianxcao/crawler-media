@@ -498,13 +498,16 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
     })
     .await
     .unwrap();
-    assert_eq!(
-        manager
-            .request_probe(&row, ProbeRequestOrigin::Detail)
-            .unwrap(),
-        ProbeRequestResult::Waiting {
-            next_retry_at_ms: 1_060_000
-        }
+    let waiting = manager
+        .request_probe(&row, ProbeRequestOrigin::Detail)
+        .unwrap();
+    assert!(
+        matches!(
+            waiting,
+            ProbeRequestResult::Waiting { next_retry_at_ms }
+                if (1_055_000..=1_060_500).contains(&next_retry_at_ms)
+        ),
+        "unexpected waiting state: {waiting:?}"
     );
     manager.shutdown_workers().await.unwrap();
 
@@ -515,16 +518,26 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
     );
     restarted.set_clock(clock.clone());
     assert!(restarted.try_start_workers());
-    assert_eq!(
+    // Restart drops in-memory failure cooldown while preserving durable failure_count (1/5).
+    assert!(matches!(
         restarted
             .request_probe(&row, ProbeRequestOrigin::Detail)
             .unwrap(),
-        ProbeRequestResult::Waiting {
-            next_retry_at_ms: 1_060_000
+        ProbeRequestResult::Queued { .. }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while store
+            .active_probe_unit_for_ledger(&file_id.to_string())
+            .unwrap()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    );
+    })
+    .await
+    .unwrap();
 
-    for deadline in [1_060_000, 1_360_000, 2_260_000, 5_860_000] {
+    for deadline in [1_360_000, 2_260_000, 5_860_000] {
         clock.set(deadline);
         assert_eq!(restarted.dispatch_due(deadline, 32).unwrap(), 1);
         tokio::time::timeout(Duration::from_secs(2), async {

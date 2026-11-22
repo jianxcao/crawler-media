@@ -109,7 +109,7 @@ export function configureSite(siteId: string, payload: SiteConfigPayload): Promi
         ...payload,
         profile_id: siteId,
         name: payload.name ?? siteId,
-        ...(payload.url ? { url: payload.url } : {}),
+        url: payload.url?.trim() ?? "",
       }),
     }),
   );

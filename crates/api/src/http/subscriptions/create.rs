@@ -215,18 +215,6 @@ fn persist_subscription(
     if auto_next_season {
         crate::completion::set_auto_next_season(&state, subscribe.id, true);
     }
-    if media.kind == MediaKind::Tv
-        && let (Some(tmdb_id), Coverage::Tv { season, .. }) =
-            (media.tmdb_id.as_deref(), &subscribe.coverage)
-        && state
-            .catalog
-            .cached_season_episodes(tmdb_id, *season)
-            .ok()
-            .flatten()
-            .is_none()
-    {
-        let _ = state.catalog.season_episodes(tmdb_id, *season);
-    }
     let snapshot = {
         let store = state.store.as_ref();
         let facts = store.load_subscribe_facts(subscribe.id).unwrap_or_default();

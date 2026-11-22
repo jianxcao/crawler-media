@@ -15,6 +15,7 @@ import {
   type JobView,
 } from "@/lib/api/jobs";
 import { maintenanceReportSummary } from "@/lib/maintenance-preview";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 function formatInterval(secs: number): string {
   if (secs < 60) return `每 ${secs} 秒`;
@@ -51,27 +52,29 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
     return () => clearInterval(timer);
   }, []);
 
-  const loadJobs = useCallback(async () => {
+  const loadJobs = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const data = await listJobs({ scope: "system" });
       const scheduled = data.filter((j) => j.schedule != null);
       setJobs(scheduled);
       setError(null);
     } catch (e) {
-      setError((e as Error).message || "加载定时任务失败");
+      if (!silent) {
+        setError((e as Error).message || "加载定时任务失败");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void loadJobs();
-    const interval = setInterval(() => {
-      void loadJobs();
-    }, 10000);
-    return () => clearInterval(interval);
   }, [loadJobs]);
+
+  useVisiblePolling(() => {
+    void loadJobs({ silent: true });
+  }, 10_000);
 
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
@@ -91,7 +94,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
         await updateJobSchedule(jobId, secs);
       }
       setEditingScheduleId(null);
-      await loadJobs();
+      await loadJobs({ silent: true });
       toast.success("执行周期已更新");
     } catch (e) {
       toast.error(`修改调度周期失败: ${(e as Error).message}`);
@@ -104,7 +107,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
     try {
       setTogglingId(job.id);
       await toggleJob(job.id, !job.enabled);
-      await loadJobs();
+      await loadJobs({ silent: true });
       toast.success(job.enabled ? "已暂停该定时计划" : "已启用该定时计划");
     } catch (e) {
       toast.error(`切换状态失败: ${(e as Error).message}`);
@@ -120,7 +123,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
     try {
       setRunningJobId(job.id);
       await runJob(job.id);
-      await loadJobs();
+      await loadJobs({ silent: true });
       toast.success("已触发立即执行");
     } catch (e) {
       toast.error(`触发失败: ${(e as Error).message}`);
@@ -338,7 +341,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                       intervalSecs={job.schedule?.interval_secs}
                       onSaved={async () => {
                         setMaintenanceError(null);
-                        await loadJobs();
+                        await loadJobs({ silent: true });
                       }}
                       onError={setMaintenanceError}
                     />

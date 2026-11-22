@@ -110,6 +110,7 @@ export function ProbeQueueProvider({ children }: { children: ReactNode }) {
   const [fastCount, setFastCount] = useState(0);
   const inFlight = useRef(false);
   const queued = useRef(false);
+  const mutationSeqRef = useRef(0);
 
   const refresh = useCallback(() => {
     if (!enabled) {
@@ -123,8 +124,13 @@ export function ProbeQueueProvider({ children }: { children: ReactNode }) {
       try {
         while (queued.current) {
           queued.current = false;
+          const seqAtStart = mutationSeqRef.current;
           try {
             const next = await getProbeStatus();
+            if (mutationSeqRef.current !== seqAtStart) {
+              queued.current = true;
+              continue;
+            }
             setStatus(next);
           } catch {
             // 瞬时网络波动保留上一次快照，下一轮轮询恢复
@@ -144,9 +150,11 @@ export function ProbeQueueProvider({ children }: { children: ReactNode }) {
   useVisiblePolling(refresh, intervalMs, { leading: true });
 
   const pause = useCallback(async () => {
+    mutationSeqRef.current += 1;
     setBusyAction("pause");
     try {
       const next = await pauseProbeQueue();
+      mutationSeqRef.current += 1;
       setStatus(next);
       return next;
     } finally {
@@ -155,9 +163,11 @@ export function ProbeQueueProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resume = useCallback(async () => {
+    mutationSeqRef.current += 1;
     setBusyAction("resume");
     try {
       const next = await resumeProbeQueue();
+      mutationSeqRef.current += 1;
       setStatus(next);
       return next;
     } finally {
@@ -167,11 +177,16 @@ export function ProbeQueueProvider({ children }: { children: ReactNode }) {
 
   const cancel = useCallback(
     async (libraryId?: string) => {
+      mutationSeqRef.current += 1;
       setBusyAction("cancel");
       try {
         const receipt = await cancelProbeQueue(libraryId);
+        mutationSeqRef.current += 1;
+        const seqAfterCancel = mutationSeqRef.current;
         const next = await getProbeStatus();
-        setStatus(next);
+        if (mutationSeqRef.current === seqAfterCancel) {
+          setStatus(next);
+        }
         return receipt;
       } finally {
         setBusyAction(null);

@@ -312,6 +312,9 @@ test("MediaTransferView fetches first 50 rows, toggles to grouped view, and expa
     "@/lib/api/transfers": {
       listTransfers: async (params) => {
         apiCalls.push(params);
+        if (apiCalls.length > 10) {
+          throw new Error(`Pagination loop detected after ${apiCalls.length} calls`);
+        }
         if (params.view === "groups") {
           return {
             summary: {
@@ -562,4 +565,472 @@ test("VirtualTransferList tracks inner [data-scroll-root] container scroll when 
     }
     globalThis.window = prevWindow;
   }
+});
+
+test("VirtualTransferList & useTransferController block auto-load on error, allow manual retry, and stop on empty tail page", async () => {
+  const iconStub = () => React.createElement("span");
+  const apiCalls = [];
+  let failOffset50Once = true;
+
+  const makeFileItem = (i) => ({
+    id: `file-${i}`,
+    media_id: `media-${i}`,
+    library_id: "lib-1",
+    media_title: `作品 ${i}`,
+    media_kind: "movie",
+    path: `/media/movies/work-${i}.mkv`,
+    source_path: `/downloads/work-${i}.mkv`,
+    units: [],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: false,
+    transfer_mode: "hardlink",
+    file_size: 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  const summary = {
+    total_files: 60,
+    media_count: 60,
+    movie_files: 60,
+    tv_files: 0,
+    strm_count: 0,
+    hardlink_count: 60,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: 60_000_000,
+    probed_duration_ms: 3_600_000,
+    strm_probed_count: 0,
+  };
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params) => {
+        apiCalls.push(params);
+        if (apiCalls.length > 10) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: params.offset ?? 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [],
+          };
+        }
+        if (params.offset === 0) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: 0,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 12 }, (_, i) => makeFileItem(i)),
+            groups: [],
+          };
+        }
+        if (params.offset === 12) {
+          if (failOffset50Once) {
+            failOffset50Once = false;
+            throw new Error("模拟网络超时");
+          }
+          return {
+            summary,
+            view: "files",
+            filtered_total: 60,
+            filtered_file_total: 60,
+            offset: 12,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 5 }, (_, i) => makeFileItem(12 + i)),
+            groups: [],
+          };
+        }
+        // Empty tail page with stale has_more: true from server must force hasMore=false!
+        return {
+          summary,
+          view: "files",
+          filtered_total: 60,
+          filtered_file_total: 60,
+          offset: params.offset,
+          limit: 50,
+          has_more: true,
+          items: [],
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView));
+  });
+
+  // Initial head load (offset=0 -> 12 items, lastVirtualIndex near end) + 1 auto-load attempt (offset=12) that failed
+  assert.deepEqual(
+    apiCalls.map((c) => c.offset),
+    [0, 12],
+    "Failed auto-load must set loadMoreError and pause further automatic retries",
+  );
+
+  // Typing in search without debouncing yet (inline callback identity changes on re-render) must NOT re-trigger auto-load while loadMoreError=true!
+  const searchInput = renderer.root.findByType("input");
+  await act(async () => {
+    searchInput.props.onChange({ target: { value: " " } });
+  });
+  assert.deepEqual(apiCalls.map((c) => c.offset), [0, 12]);
+
+  // Manual "加载更多" button calls retryLoadMore -> clears error, fetches offset=12 (5 items), then auto-loads offset=17 (0 items -> forces hasMore=false and stops!)
+  const loadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.ok(loadMoreBtn, "Manual 加载更多 button must remain available after error");
+
+  await act(async () => {
+    loadMoreBtn.props.onClick();
+  });
+
+  assert.deepEqual(
+    apiCalls.map((c) => c.offset),
+    [0, 12, 12, 17],
+    "Manual retry must succeed and empty tail page at offset=17 must stop further pagination",
+  );
+  const remainingLoadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.equal(remainingLoadMoreBtn, undefined, "Empty tail page must set hasMore=false");
+
+  await act(async () => {
+    renderer.unmount();
+  });
+});
+
+test("confirmDelete preserves loaded >50 list without resetting scroll, and useGroupExpansion aborts stale filter requests & uses functional catch", async () => {
+  const iconStub = () => React.createElement("span");
+  const scrollToCalls = [];
+  let pendingGroupExpand = null;
+  let pendingGroupLoadMore = null;
+
+  const makeFileItem = (i, mediaId = `media-${i}`) => ({
+    id: `file-${i}`,
+    media_id: mediaId,
+    library_id: "lib-1",
+    media_title: `剧集 ${i}`,
+    media_kind: "tv",
+    path: `/media/tv/ep-${i}.mkv`,
+    source_path: `/downloads/ep-${i}.mkv`,
+    units: [{ season: 1, episode: i + 1 }],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: false,
+    transfer_mode: "hardlink",
+    file_size: 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  let totalFiles = 75;
+  const makeSummary = () => ({
+    total_files: totalFiles,
+    media_count: 10,
+    movie_files: 0,
+    tv_files: totalFiles,
+    strm_count: 0,
+    hardlink_count: totalFiles,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: totalFiles * 1_000_000,
+    probed_duration_ms: totalFiles * 60_000,
+    strm_probed_count: 0,
+  });
+
+  const groupSignals = [];
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params, init) => {
+        if (params.media_id) {
+          groupSignals.push({ params, signal: init?.signal });
+          if (params.offset > 0) {
+            return new Promise((resolve, reject) => {
+              pendingGroupLoadMore = { resolve, reject, signal: init?.signal };
+            });
+          }
+          return new Promise((resolve, reject) => {
+            pendingGroupExpand = { resolve, reject, signal: init?.signal };
+          });
+        }
+        if (params.view === "groups") {
+          return {
+            summary: makeSummary(),
+            view: "groups",
+            filtered_total: 1,
+            filtered_file_total: 3,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [
+              {
+                media_id: "tv-group-1",
+                media_title: "漫长的季节",
+                media_kind: "tv",
+                library_id: "lib-1",
+                file_count: 3,
+                strm_count: 0,
+                hardlink_count: 3,
+                local_size_bytes: 3_000_000,
+                total_duration_ms: 180_000,
+                primary_resolution: "1080p",
+                primary_mode: "hardlink",
+                sample_dir: "/media/tv/漫长的季节",
+              },
+            ],
+          };
+        }
+        if (params.limit === 1) {
+          return {
+            summary: makeSummary(),
+            view: "files",
+            filtered_total: totalFiles,
+            filtered_file_total: totalFiles,
+            offset: 0,
+            limit: 1,
+            has_more: totalFiles > 1,
+            items: [makeFileItem(1)],
+            groups: [],
+          };
+        }
+        if (params.offset === 0) {
+          return {
+            summary: makeSummary(),
+            view: "files",
+            filtered_total: totalFiles,
+            filtered_file_total: totalFiles,
+            offset: 0,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 50 }, (_, i) => makeFileItem(i)),
+            groups: [],
+          };
+        }
+        return {
+          summary: makeSummary(),
+          view: "files",
+          filtered_total: totalFiles,
+          filtered_file_total: totalFiles,
+          offset: 50,
+          limit: 50,
+          has_more: false,
+          items: Array.from({ length: 25 }, (_, i) => makeFileItem(50 + i)),
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => {
+        totalFiles -= 1;
+        return { deleted: true, path: "", file_deleted: false };
+      },
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView), {
+      createNodeMock(element) {
+        if (element.props?.["data-scroll-root"]) {
+          return {
+            scrollTop: 0,
+            scrollTo(opts) {
+              scrollToCalls.push(opts);
+            },
+            getBoundingClientRect: () => ({ top: 0, bottom: 800, left: 0, right: 1000, width: 1000, height: 800 }),
+            addEventListener() {},
+            removeEventListener() {},
+          };
+        }
+        return null;
+      },
+    });
+  });
+
+  // Load second page via manual button so 75 items are in memory
+  const loadMoreBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载更多"));
+  assert.ok(loadMoreBtn);
+  await act(async () => {
+    loadMoreBtn.props.onClick();
+  });
+
+  const scrollCallsBeforeDelete = scrollToCalls.length;
+
+  // Delete file-0 and verify 74 items remain (NOT truncated back to 50) and scroll is NOT reset!
+  const firstDeleteBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("删除管理"));
+  assert.ok(firstDeleteBtn);
+  await act(async () => {
+    firstDeleteBtn.props.onClick();
+  });
+
+  const confirmBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("确认删除"));
+  assert.ok(confirmBtn);
+  await act(async () => {
+    confirmBtn.props.onClick();
+  });
+
+  assert.equal(
+    scrollToCalls.length,
+    scrollCallsBeforeDelete,
+    "Deleting an item must not reset scroll position to top",
+  );
+  // Total height of VirtualTransferList reflects 74 items (74 * 148 + 73 * 12 = 11828px), NOT 50 items (7988px)!
+  const listTrack = renderer.root.findAllByType("div").find((d) => d.props.style?.position === "relative" && String(d.props.style?.height).endsWith("px"));
+  assert.equal(listTrack.props.style.height, `${74 * 148 + 73 * 12}px`);
+
+  // Switching viewMode DOES reset scroll to top: 0
+  const groupToggle = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("按作品聚合"));
+  await act(async () => {
+    groupToggle.props.onClick();
+  });
+  assert.ok(scrollToCalls.length > scrollCallsBeforeDelete, "Changing viewMode must reset scroll to top");
+
+  // Start expanding group -> in-flight request gets AbortSignal
+  const expandBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("展开文件"));
+  await act(async () => {
+    expandBtn.props.onClick();
+  });
+  assert.ok(pendingGroupExpand?.signal, "listTransfers in toggleGroupExpand must receive AbortSignal");
+  const firstExpandReq = pendingGroupExpand;
+
+  // Change kindFilter while expand is in-flight -> aborts in-flight controller and ignores stale resolution!
+  const tvKindBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).trim() === "剧集");
+  await act(async () => {
+    tvKindBtn.props.onClick();
+  });
+  assert.equal(firstExpandReq.signal.aborted, true, "Changing kindFilter must abort in-flight group expand");
+
+  await act(async () => {
+    firstExpandReq.resolve({
+      summary: makeSummary(),
+      view: "files",
+      filtered_total: 1,
+      filtered_file_total: 1,
+      offset: 0,
+      limit: 200,
+      has_more: false,
+      items: [makeFileItem(999, "tv-group-1")],
+      groups: [],
+    });
+  });
+  assert.doesNotMatch(collectText(renderer.toJSON()), /ep-999\.mkv/, "Stale aborted group response must be ignored");
+
+  // Now expand cleanly with 2 episodes and has_more: true, start loadMoreGroupFiles, delete ep-0 while pending, then fail loadMoreGroupFiles
+  const expandBtn2 = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("展开文件"));
+  await act(async () => {
+    expandBtn2.props.onClick();
+  });
+  await act(async () => {
+    pendingGroupExpand.resolve({
+      summary: makeSummary(),
+      view: "files",
+      filtered_total: 3,
+      filtered_file_total: 3,
+      offset: 0,
+      limit: 200,
+      has_more: true,
+      items: [makeFileItem(0, "tv-group-1"), makeFileItem(1, "tv-group-1")],
+      groups: [],
+    });
+  });
+  assert.match(collectText(renderer.toJSON()), /ep-0\.mkv/);
+
+  const loadMoreGroupBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("加载剩余剧集文件"));
+  await act(async () => {
+    loadMoreGroupBtn.props.onClick();
+  });
+  assert.ok(pendingGroupLoadMore?.signal, "loadMoreGroupFiles must pass AbortSignal");
+
+  // Delete ep-0 while loadMoreGroupFiles is still in flight
+  const deleteGroupFileBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => btn.props.title === "删除此文件记录");
+  await act(async () => {
+    deleteGroupFileBtn.props.onClick();
+  });
+  const confirmBtn2 = renderer.root
+    .findAllByType("button")
+    .find((btn) => collectText(btn).includes("确认删除"));
+  await act(async () => {
+    confirmBtn2.props.onClick();
+  });
+  assert.doesNotMatch(collectText(renderer.toJSON()), /ep-0\.mkv/);
+
+  // Reject loadMoreGroupFiles -> functional catch must NOT resurrect deleted ep-0 from stale closure!
+  await act(async () => {
+    pendingGroupLoadMore.reject(new Error("分页超时"));
+  });
+  assert.doesNotMatch(
+    collectText(renderer.toJSON()),
+    /ep-0\.mkv/,
+    "loadMoreGroupFiles catch must functionally update prev state without resurrecting deleted files",
+  );
+  assert.match(collectText(renderer.toJSON()), /ep-1\.mkv/);
+
+  await act(async () => {
+    renderer.unmount();
+  });
 });

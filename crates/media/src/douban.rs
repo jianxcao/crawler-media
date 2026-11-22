@@ -168,12 +168,12 @@ impl<H: CatalogGet> Douban<H> {
     }
 
     /// 豆瓣 subject 详情：抓移动端 Rexxar JSON `/rexxar/api/v2/movie/{id}?for_mobile=1`
-    /// 解析标题/原名/年份/别名/类型（兼容旧 HTML 测试桩回退）。
+    /// 解析标题/原名/年份/别名/类型。
     pub fn detail(&self, id: &str) -> Result<Option<Media>, TmdbError> {
         let path = format!("/rexxar/api/v2/movie/{id}?for_mobile=1");
         match self
             .cache
-            .get_or_fetch(&self.http, &path, |body| parse_subject_detail(id, body))
+            .get_or_fetch(&self.http, &path, |body| parse_rexxar_detail(id, body))
         {
             Ok(media) => Ok(Some(media)),
             Err(TmdbError::NotFound(_)) => Ok(None),
@@ -473,43 +473,27 @@ fn encode(value: &str) -> String {
     encoded
 }
 
-fn parse_subject_detail(id: &str, body: &str) -> Result<Media, TmdbError> {
-    if body.trim_start().starts_with('<') {
-        let (title, year, is_tv) = parse_detail(body).ok_or_else(|| {
-            TmdbError::Parse(
-                "missing Douban subject details; response may require authentication".into(),
-            )
-        })?;
-        return Ok(Media {
-            id: MediaId::new(),
-            kind: if is_tv {
-                MediaKind::Tv
-            } else {
-                MediaKind::Movie
-            },
-            title,
-            year,
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: None,
-            douban_id: Some(id.to_string()),
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        });
+pub(super) fn check_rexxar_not_found(v: &serde_json::Value, id: &str) -> Result<(), TmdbError> {
+    if v.get("code").and_then(|c| c.as_i64()) == Some(5000)
+        || ["msg", "localized_message"].iter().any(|field| {
+            v.get(*field).and_then(|m| m.as_str()).is_some_and(|m| {
+                let lower = m.to_ascii_lowercase();
+                lower.contains("not_found") || lower.contains("not found") || m.contains("不存在")
+            })
+        })
+    {
+        return Err(TmdbError::NotFound(id.to_string()));
     }
-    parse_rexxar_detail(id, body)
+    Ok(())
 }
 
 fn parse_rexxar_detail(id: &str, body: &str) -> Result<Media, TmdbError> {
     let v = crate::contracts::json(body)?;
-    if v.get("code").and_then(|c| c.as_i64()) == Some(5000)
-        || v.get("msg").and_then(|m| m.as_str()).is_some_and(|m| {
-            let lower = m.to_ascii_lowercase();
-            lower.contains("not_found") || lower.contains("not found") || m.contains("不存在")
-        })
-    {
-        return Err(TmdbError::NotFound(id.to_string()));
+    check_rexxar_not_found(&v, id)?;
+    if !v.is_object() {
+        return Err(TmdbError::Parse(
+            "expected Douban subject JSON object".into(),
+        ));
     }
     if let Some(actual_id) = v.get("id") {
         let matches = actual_id.as_str().map_or_else(
@@ -587,64 +571,36 @@ fn rexxar_is_tv(v: &serde_json::Value) -> bool {
             .is_some_and(|n| n > 0)
 }
 
-/// 从豆瓣详情页 HTML 提取 (title, year, is_tv)。
-/// 结构：`<h1><span property="v:itemreviewed">片名</span> <span class="year">(1994)</span></h1>`
-/// 剧集页面含「集数:」字段。
-fn parse_detail(body: &str) -> Option<(String, Option<u16>, bool)> {
-    let title = body
-        .split(r#"property="v:itemreviewed">"#)
-        .nth(1)?
-        .split('<')
-        .next()?
-        .trim()
-        .to_string();
-    if title.is_empty() {
-        return None;
-    }
-    let year = body
-        .split(r#"class="year">"#)
-        .nth(1)?
-        .split('<')
-        .next()?
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .parse::<u16>()
-        .ok();
-    let is_tv = body.contains("集数:");
-    Some((title, year, is_tv))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parse_detail;
+    use super::parse_rexxar_detail;
+    use crate::client::TmdbError;
+    use domain::MediaKind;
 
     #[test]
-    fn parses_movie_detail_page() {
-        let html = r#"<html><body>
-            <h1><span property="v:itemreviewed">肖申克的救赎</span> <span class="year">(1994)</span></h1>
-            <div id="info"><span class="pl">类型:</span> 剧情 / 犯罪</div>
-        </body></html>"#;
-        let (title, year, is_tv) = parse_detail(html).unwrap();
-        assert_eq!(title, "肖申克的救赎");
-        assert_eq!(year, Some(1994));
-        assert!(!is_tv);
+    fn parses_rexxar_movie_detail() {
+        let json = r#"{"id":"1292052","title":"肖申克的救赎","year":"1994","type":"movie","subtype":"movie"}"#;
+        let media = parse_rexxar_detail("1292052", json).unwrap();
+        assert_eq!(media.title, "肖申克的救赎");
+        assert_eq!(media.year, Some(1994));
+        assert_eq!(media.kind, MediaKind::Movie);
     }
 
     #[test]
-    fn parses_tv_detail_page() {
-        let html = r#"<html><body>
-            <h1><span property="v:itemreviewed">权力的游戏</span> <span class="year">(2011)</span></h1>
-            <div id="info"><span class="pl">集数:</span> 73</div>
-        </body></html>"#;
-        let (title, year, is_tv) = parse_detail(html).unwrap();
-        assert_eq!(title, "权力的游戏");
-        assert_eq!(year, Some(2011));
-        assert!(is_tv);
+    fn parses_rexxar_tv_detail() {
+        let json = r#"{"id":"3016187","title":"权力的游戏","year":"2011","type":"movie","subtype":"tv","episodes_count":73}"#;
+        let media = parse_rexxar_detail("3016187", json).unwrap();
+        assert_eq!(media.title, "权力的游戏");
+        assert_eq!(media.year, Some(2011));
+        assert_eq!(media.kind, MediaKind::Tv);
     }
 
     #[test]
-    fn missing_title_is_none() {
-        assert!(parse_detail("<html><body>no subject here</body></html>").is_none());
+    fn rexxar_code_5000_is_not_found() {
+        let json = r#"{"code":5000,"msg":"subject_not_found"}"#;
+        assert!(matches!(
+            parse_rexxar_detail("99999999", json),
+            Err(TmdbError::NotFound(_))
+        ));
     }
 }

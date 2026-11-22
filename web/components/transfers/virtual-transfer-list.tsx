@@ -11,7 +11,9 @@ interface VirtualTransferListProps<T> {
   gap?: number;
   hasMore: boolean;
   loadingMore: boolean;
+  autoLoadBlocked?: boolean;
   onLoadMore: () => void;
+  onRetryLoadMore?: () => void;
   renderItem: (item: T, index: number) => ReactNode;
 }
 
@@ -27,10 +29,14 @@ export function VirtualTransferList<T>({
   gap = 12,
   hasMore,
   loadingMore,
+  autoLoadBlocked = false,
   onLoadMore,
+  onRetryLoadMore,
   renderItem,
 }: VirtualTransferListProps<T>) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
   const [fallbackScrollEl, setFallbackScrollEl] = useState<HTMLElement | null>(null);
   const [scrollMargin, setScrollMargin] = useState(0);
 
@@ -90,11 +96,11 @@ export function VirtualTransferList<T>({
   const lastVirtualIndex = virtualItems.length > 0 ? virtualItems[virtualItems.length - 1].index : -1;
 
   useEffect(() => {
-    if (!hasMore || loadingMore || items.length === 0) return;
+    if (!hasMore || loadingMore || autoLoadBlocked || items.length === 0) return;
     if (lastVirtualIndex >= items.length - 10) {
-      onLoadMore();
+      onLoadMoreRef.current();
     }
-  }, [hasMore, loadingMore, items.length, lastVirtualIndex, onLoadMore]);
+  }, [hasMore, loadingMore, autoLoadBlocked, items.length, lastVirtualIndex]);
 
   const totalSize = rowVirtualizer.getTotalSize();
 
@@ -146,7 +152,7 @@ export function VirtualTransferList<T>({
         <div className="flex justify-center py-4">
           <button
             type="button"
-            onClick={onLoadMore}
+            onClick={onRetryLoadMore ?? onLoadMore}
             className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2 text-xs font-medium text-white/75 transition hover:border-white/[0.16] hover:bg-white/[0.08] hover:text-white"
           >
             加载更多

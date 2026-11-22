@@ -422,3 +422,167 @@ test("ProbeSettingsCard surfaces a shortcut link to /activity?view=active", asyn
     renderer.unmount();
   });
 });
+
+test("ProbeQueueProvider ignores stale in-flight refresh started before pause and queues fresh status read", async () => {
+  let resolveFirstStatus;
+  let statusCalls = 0;
+  const { ProbeQueueProvider, useProbeQueue } = loadTsModule("../lib/task-activity.ts", {
+    "@/lib/api/probe": {
+      getProbeStatus: () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return new Promise((resolve) => {
+            resolveFirstStatus = resolve;
+          });
+        }
+        return Promise.resolve(PAUSED_STATUS);
+      },
+      pauseProbeQueue: async () => PAUSED_STATUS,
+      resumeProbeQueue: async () => RUNNING_STATUS,
+      cancelProbeQueue: async () => ({ cancelled_units: 0, cleared_obligations: 0 }),
+    },
+    "@/lib/session": { useSession: () => ({ session: { role: "admin" } }) },
+    "@/lib/use-visible-polling": {
+      useVisiblePolling: (cb, _ms, opts) => {
+        React.useEffect(() => {
+          if (opts?.leading) cb();
+        }, [cb, opts?.leading]);
+      },
+    },
+    "@/lib/jobs": { useJobs: () => ({ jobs: [] }) },
+    "@/lib/download-tasks": { useDownloadTasks: () => ({ tasks: [] }) },
+  });
+
+  let latestQueue = null;
+  function Inspector() {
+    latestQueue = useProbeQueue();
+    return null;
+  }
+
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(ProbeQueueProvider, null, React.createElement(Inspector)),
+    );
+  });
+
+  assert.equal(statusCalls, 1, "Initial leading refresh is in-flight");
+
+  // User pauses queue BEFORE the initial refresh resolves
+  await act(async () => {
+    await latestQueue.pause();
+  });
+  assert.equal(latestQueue.status?.paused, true);
+
+  // Now the stale pre-pause refresh resolves with RUNNING_STATUS (paused: false)!
+  await act(async () => {
+    resolveFirstStatus(RUNNING_STATUS);
+  });
+
+  assert.equal(
+    latestQueue.status?.paused,
+    true,
+    "Stale refresh started before pause() must NOT overwrite post-pause state with paused=false",
+  );
+  assert.equal(
+    statusCalls,
+    2,
+    "Stale refresh must queue a fresh post-mutation getProbeStatus() read",
+  );
+
+  await act(async () => {
+    renderer.unmount();
+  });
+});
+
+test("ScheduledJobsView uses useVisiblePolling and silent refresh without flashing '正在刷新…'", async () => {
+  let pollCallback = null;
+  let pollInterval = null;
+  let resolveSecondFetch = null;
+  let fetchCount = 0;
+
+  const { ScheduledJobsView } = loadTsModule("../components/scheduled-jobs-view.tsx", {
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/maintenance-job-settings": { MaintenanceJobSettings: () => null },
+    "@/lib/use-visible-polling": {
+      useVisiblePolling: (cb, ms) => {
+        pollCallback = cb;
+        pollInterval = ms;
+      },
+    },
+    "@/lib/api/jobs": {
+      isMaintenanceJob: () => false,
+      parseMaintenanceReport: () => null,
+      listJobs: () => {
+        fetchCount += 1;
+        const job = {
+          id: "job-rss",
+          kind: "subscribe_rss",
+          name: "RSS 轮询",
+          friendly_name: fetchCount === 1 ? "RSS 巡检 v1" : "RSS 巡检 v2",
+          enabled: true,
+          schedule: { interval_secs: 300 },
+          next_run_after: Math.floor(Date.now() / 1000) + 120,
+          last_status: "succeeded",
+          last_finished_at: null,
+          last_error: null,
+          last_report: null,
+          payload: null,
+        };
+        if (fetchCount === 2) {
+          return new Promise((resolve) => {
+            resolveSecondFetch = () => resolve([job]);
+          });
+        }
+        return Promise.resolve([job]);
+      },
+      runJob: async () => ({}),
+      toggleJob: async () => ({}),
+      updateJobSchedule: async () => ({}),
+      updateMaintenanceConfig: async () => ({}),
+    },
+  });
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(ScheduledJobsView, { embedded: true }));
+  });
+  try {
+    assert.equal(pollInterval, 10_000, "ScheduledJobsView must poll via useVisiblePolling(10_000)");
+    assert.equal(typeof pollCallback, "function");
+    assert.match(collectText(renderer.toJSON()), /RSS 巡检 v1/);
+
+    // Trigger background 10s poll and hold response in-flight: button must NOT flash "正在刷新…" or disable!
+    await act(async () => {
+      pollCallback();
+    });
+    assert.equal(fetchCount, 2);
+    const refreshBtnDuringSilentPoll = renderer.root
+      .findAllByType("button")
+      .find((node) => collectText(node).includes("刷新"));
+    assert.equal(collectText(refreshBtnDuringSilentPoll), "刷新");
+    assert.equal(refreshBtnDuringSilentPoll.props.disabled, false);
+
+    await act(async () => {
+      resolveSecondFetch();
+    });
+    assert.match(collectText(renderer.toJSON()), /RSS 巡检 v2/);
+  } finally {
+    await act(async () => {
+      renderer.unmount();
+    });
+  }
+});
+
+test("NetflixSubscriptionsPage ComingSoonCard key includes statusLabel and episodeLabel to avoid duplicate keys", () => {
+  const source = readFileSync(
+    new URL("../components/netflix/subscriptions-page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /key=\{`\$\{group\.subscriptionId\}-\$\{group\.presentation\.statusLabel\}-\$\{group\.episodeLabel\}`\}/,
+  );
+});

@@ -14,10 +14,13 @@ impl ProbeManager {
         for ledger_id in ledger_ids {
             let unit = self.store.active_probe_unit_for_ledger(ledger_id)?;
             if let Some(unit) = unit {
-                self.store.library_write(|store| {
-                    store.cancel_probe_unit(&unit.job_id, ledger_id, reason)?;
-                    Ok(())
+                let job = self.store.library_write(|store| {
+                    let (job, _, _) = store.cancel_probe_unit(&unit.job_id, ledger_id, reason)?;
+                    Ok(job)
                 })?;
+                if !job.is_active() {
+                    self.unmark_job_paused_exempt(&job.id);
+                }
                 self.seen.lock().remove(ledger_id);
             }
         }
@@ -121,6 +124,9 @@ impl ProbeManager {
             .and_then(|id| self.store.get_probe_job(id).ok().flatten())
             .is_some_and(|job| job.status == "cancelled");
         if cancelled {
+            if let Some(id) = unit.job_id.as_deref() {
+                self.unmark_job_paused_exempt(id);
+            }
             self.seen.lock().remove(&ledger_id);
             return;
         }
@@ -150,6 +156,7 @@ impl ProbeManager {
         match result {
             Ok(Some(job)) => {
                 if !job.is_active() {
+                    self.unmark_job_paused_exempt(job_id);
                     // Enqueue holds seen before Store. Never retain the Store
                     // temporary guard while acquiring seen (including in if let).
                     let units = self.store.probe_job_units(job_id);
@@ -229,10 +236,12 @@ impl ProbeManager {
             return true;
         }
         if job.status == "cancelled" {
+            self.unmark_job_paused_exempt(&job.id);
             timings::log_terminal_job(&self.store_access(), &self.timings, &job);
             return true;
         }
         if job.failed > 0 {
+            self.unmark_job_paused_exempt(&job.id);
             if let Err(error) = self.store.library_write(|store| {
                 store.finish_probe_job(
                     &job.id,
@@ -254,6 +263,7 @@ impl ProbeManager {
         } else if job.kind == "marker_refresh" {
             self.wake.notify_waiters();
         } else {
+            self.unmark_job_paused_exempt(&job.id);
             let final_succeeded = job.status == "succeeded";
             let job_final_status = job.status.clone();
             match self.store.library_write(|store| {

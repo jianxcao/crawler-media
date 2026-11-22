@@ -18,6 +18,9 @@ export function manageArtworkImage(
   let visible = true;
   let disposed = false;
   let loaded = false;
+  let active = false;
+  let settledSync = false;
+  let requestSeq = 0;
   let priority = initialPriority;
   let lease: ReturnType<typeof artworkQueue.enqueue> | undefined;
   let retry = artworkRetry(image, (src) => request({ ...source, src }));
@@ -28,25 +31,40 @@ export function manageArtworkImage(
     if (!disposed) onBitmapState?.(false);
   }
   function release() {
+    active = false;
+    settledSync = true;
+    requestSeq += 1;
     const previous = lease;
     lease = undefined;
     previous?.finish();
   }
   function request(next: ArtworkSource) {
     if (disposed || !visible || (!next.src && !next.srcSet)) return;
-    lease = artworkQueue.enqueue(() => {
+    release();
+    const token = ++requestSeq;
+    active = true;
+    settledSync = false;
+    const created = artworkQueue.enqueue(() => {
+      if (requestSeq !== token || disposed || !visible) return;
+      active = true;
+      settledSync = false;
       image.removeAttribute("srcset");
       if (next.sizes) image.setAttribute("sizes", next.sizes);
       else image.removeAttribute("sizes");
       if (next.srcSet) image.setAttribute("srcset", next.srcSet);
       if (next.src) image.src = next.src;
-      if (!disposed && image.complete && image.naturalWidth > 0) {
+      if (requestSeq === token && !disposed && image.complete && image.naturalWidth > 0) {
         onBitmapState?.(true);
       }
     }, priority);
+    if (requestSeq !== token || settledSync || !active) {
+      created.finish();
+    } else {
+      lease = created;
+    }
   }
   const onLoad = (event: Event) => {
-    if (!lease || disposed || !visible) { event.stopImmediatePropagation(); return; }
+    if (!active || disposed || !visible) { event.stopImmediatePropagation(); return; }
     loaded = true;
     retry.onLoad();
     release();
@@ -54,7 +72,7 @@ export function manageArtworkImage(
     onSettled?.();
   };
   const onError = (event: Event) => {
-    if (!lease || disposed || !visible) { event.stopImmediatePropagation(); return; }
+    if (!active || disposed || !visible) { event.stopImmediatePropagation(); return; }
     loaded = false;
     onBitmapState?.(false);
     release();
@@ -65,6 +83,14 @@ export function manageArtworkImage(
 
   return {
     load(next: ArtworkSource) {
+      if (
+        (loaded || active) &&
+        (next.src ?? "") === (source.src ?? "") &&
+        (next.srcSet ?? "") === (source.srcSet ?? "") &&
+        (next.sizes ?? "") === (source.sizes ?? "")
+      ) {
+        return;
+      }
       retry.dispose();
       // Keep a decoded bitmap only while waiting for a real replacement.
       if (!loaded || (!next.src && !next.srcSet)) clearSource();

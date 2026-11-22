@@ -187,15 +187,9 @@ fn retry_gate(
         };
         if let Ok(Some(stage)) = store.get_probe_stage(&meta_key)
             && stage.status == store::ProbeStageStatus::Failed
+            && stage.failure_count >= 5
         {
-            if stage.failure_count >= 5 {
-                return ProbeRequestResult::Exhausted;
-            }
-            if let Some(next_retry_at_ms) = stage.next_retry_at_ms
-                && next_retry_at_ms > now_ms
-            {
-                return ProbeRequestResult::Waiting { next_retry_at_ms };
-            }
+            return ProbeRequestResult::Exhausted;
         }
         return ProbeRequestResult::Complete;
     }

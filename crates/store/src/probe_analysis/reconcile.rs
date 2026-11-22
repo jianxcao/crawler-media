@@ -8,6 +8,31 @@ pub(crate) fn transfer_reconciliation(
     job: &str,
     file: &str,
 ) -> Result<(), StoreError> {
+    transfer_reconciliation_inner(tx, job, file, true, None)
+}
+
+pub(crate) fn transfer_reconciliation_for_cancel_scope(
+    tx: &rusqlite::Connection,
+    job: &str,
+    file: &str,
+    cancelled_library_id: Option<&str>,
+) -> Result<(), StoreError> {
+    transfer_reconciliation_inner(
+        tx,
+        job,
+        file,
+        cancelled_library_id.is_some(),
+        cancelled_library_id,
+    )
+}
+
+fn transfer_reconciliation_inner(
+    tx: &rusqlite::Connection,
+    job: &str,
+    file: &str,
+    allow_successor: bool,
+    excluded_library_id: Option<&str>,
+) -> Result<(), StoreError> {
     let receiver: Option<(String, String, String)> = tx.query_row(
         "SELECT live.job_id,live.file_id,old.analysis_refresh_json
          FROM probe_job_units old JOIN probe_job_units live
@@ -31,7 +56,10 @@ pub(crate) fn transfer_reconciliation(
     ).optional()?;
     let receiver = match receiver {
         Some(receiver) => Some(receiver),
-        None => create_reconciliation_successor(tx, job, file)?,
+        None if allow_successor => {
+            create_reconciliation_successor(tx, job, file, excluded_library_id)?
+        }
+        None => None,
     };
     if let Some((receiver_job, receiver_file, state)) = receiver {
         merge_reconciliation(tx, &receiver_job, &receiver_file, &state)?;
@@ -69,6 +97,7 @@ fn create_reconciliation_successor(
     tx: &rusqlite::Connection,
     job: &str,
     file: &str,
+    excluded_library_id: Option<&str>,
 ) -> Result<Option<(String, String, String)>, StoreError> {
     let candidate: Option<(String,String,String,String)> = tx.query_row(
         "SELECT prior.job_id,prior.file_id,old.analysis_refresh_json,lower(hex(randomblob(16)))
@@ -82,6 +111,7 @@ fn create_reconciliation_successor(
          WHERE old.job_id=?1 AND old.file_id=?2 AND old.stage='analysis'
            AND json_extract(old.analysis_refresh_json,'$.reconcile_done')=0
            AND f.file_id<>?2 AND f.presence_state='present' AND f.publication_state='published'
+           AND (?3 IS NULL OR f.library_id<>?3)
            AND l.lifecycle_state='ready' AND l.detect_intros=1 AND l.enable_fingerprint=1
            AND NOT EXISTS(SELECT 1 FROM library_removals r WHERE r.library_id=f.library_id)
            AND NOT EXISTS(SELECT 1 FROM probe_job_units active WHERE active.file_id=f.file_id AND active.status IN ('queued','running'))
@@ -92,7 +122,7 @@ fn create_reconciliation_successor(
            AND json_extract(prior.analysis_context_json,'$.sampling_mode')=json_extract(old.analysis_context_json,'$.sampling_mode')
            AND (EXISTS(SELECT 1 FROM fingerprint_cache c WHERE c.file_id=f.file_id)
              OR EXISTS(SELECT 1 FROM fingerprint_samples s WHERE s.file_id=f.file_id AND s.source_version=f.source_version))
-         LIMIT 1",params![job,file],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+         LIMIT 1",params![job,file,excluded_library_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).optional()?;
     let Some((previous, file, state, new_job)) = candidate else {
         return Ok(None);

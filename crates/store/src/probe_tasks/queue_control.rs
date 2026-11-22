@@ -1,5 +1,5 @@
 //! Read-only queue summary and bulk cancellation of queued probe work.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -102,7 +102,9 @@ impl crate::LibraryConnection<'_> {
         let tx = crate::write_tx(self.library)?;
         let targets = select_queued_units(&tx, library_id)?;
         let mut cancelled_file_ids = Vec::with_capacity(targets.len());
+        let mut cancelled_seen = BTreeSet::new();
         let mut affected_jobs = BTreeSet::new();
+        let mut analysis_targets = Vec::new();
         {
             let mut update = tx.prepare(
                 "UPDATE probe_job_units SET status = 'cancelled', error = ?3
@@ -111,10 +113,32 @@ impl crate::LibraryConnection<'_> {
             for (job_id, file_id, stage) in targets {
                 if update.execute(params![job_id, file_id, reason])? > 0 {
                     if stage == "analysis" {
-                        crate::probe_analysis::transfer_reconciliation(&tx, &job_id, &file_id)?;
+                        analysis_targets.push((job_id.clone(), file_id.clone()));
                     }
                     affected_jobs.insert(job_id);
-                    cancelled_file_ids.push(file_id);
+                    if cancelled_seen.insert(file_id.clone()) {
+                        cancelled_file_ids.push(file_id);
+                    }
+                }
+            }
+        }
+        for (job_id, file_id) in analysis_targets {
+            crate::probe_analysis::transfer_reconciliation_for_cancel_scope(
+                &tx, &job_id, &file_id, library_id,
+            )?;
+        }
+        let residual = select_queued_units(&tx, library_id)?;
+        if !residual.is_empty() {
+            let mut update = tx.prepare(
+                "UPDATE probe_job_units SET status = 'cancelled', error = ?3
+                 WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'",
+            )?;
+            for (job_id, file_id, _) in residual {
+                if update.execute(params![job_id, file_id, reason])? > 0 {
+                    affected_jobs.insert(job_id);
+                    if cancelled_seen.insert(file_id.clone()) {
+                        cancelled_file_ids.push(file_id);
+                    }
                 }
             }
         }
@@ -140,6 +164,72 @@ impl crate::LibraryConnection<'_> {
             cancelled_file_ids,
         })
     }
+
+    pub fn with_write_tx<T, E>(
+        &self,
+        map_err: impl Fn(StoreError) -> E,
+        work: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let tx = crate::write_tx(self.library).map_err(|err| map_err(err.into()))?;
+        let outcome = work(self)?;
+        tx.commit().map_err(|err| map_err(err.into()))?;
+        Ok(outcome)
+    }
+
+    /// Cancel unstarted `status = 'queued'` units on `ledger_ids` whose `job_id`
+    /// is not in `exempt_job_ids`, allowing an explicit refresh while paused to
+    /// supersede dormant background work without touching running or exempt jobs.
+    pub fn cancel_dormant_queued_units_for_ledgers(
+        &self,
+        ledger_ids: &[String],
+        exempt_job_ids: &HashSet<String>,
+        reason: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        if ledger_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = crate::write_tx(self.library)?;
+        let ledger_json = serde_json::to_string(ledger_ids)?;
+        let targets = select_non_exempt_queued_for_ledgers(&tx, &ledger_json, exempt_job_ids)?;
+        if targets.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        let mut cancelled_files = Vec::with_capacity(targets.len());
+        let mut seen_files = BTreeSet::new();
+        let mut affected_jobs = BTreeSet::new();
+        let mut analysis_targets = Vec::new();
+        cancel_selected_targets(
+            &tx,
+            targets,
+            reason,
+            &mut affected_jobs,
+            &mut seen_files,
+            &mut cancelled_files,
+            Some(&mut analysis_targets),
+        )?;
+        for (job_id, file_id) in analysis_targets {
+            crate::probe_analysis::transfer_reconciliation(&tx, &job_id, &file_id)?;
+        }
+        let residual = select_non_exempt_queued_for_ledgers(&tx, &ledger_json, exempt_job_ids)?;
+        if !residual.is_empty() {
+            cancel_selected_targets(
+                &tx,
+                residual,
+                reason,
+                &mut affected_jobs,
+                &mut seen_files,
+                &mut cancelled_files,
+                None,
+            )?;
+        }
+        let now = now_ms();
+        for job_id in affected_jobs {
+            reconcile_cancelled_job(&tx, &job_id, reason, now)?;
+        }
+        tx.commit()?;
+        Ok(cancelled_files)
+    }
 }
 
 fn accumulate_active_units(
@@ -157,6 +247,7 @@ fn accumulate_active_units(
            AND j.status IN ('queued', 'running')
            AND f.missing_at IS NULL
            AND l.lifecycle_state = 'ready'
+           AND NOT EXISTS (SELECT 1 FROM library_removals r WHERE r.library_id = l.library_id)
          GROUP BY l.library_id, l.name, l.sort_order, u.stage, u.status",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -209,6 +300,7 @@ fn accumulate_pending_obligations(
          JOIN libraries l ON l.library_id = f.library_id
          WHERE f.missing_at IS NULL
            AND l.lifecycle_state = 'ready'
+           AND NOT EXISTS (SELECT 1 FROM library_removals r WHERE r.library_id = l.library_id)
            AND NOT EXISTS (
                SELECT 1 FROM probe_job_units u
                JOIN probe_jobs j ON j.id = u.job_id
@@ -318,5 +410,62 @@ fn reconcile_cancelled_job(
          WHERE id = ?1 AND status IN ('queued', 'running')",
         params![job_id, terminal, now, reason],
     )?;
+    Ok(())
+}
+
+fn select_non_exempt_queued_for_ledgers(
+    tx: &rusqlite::Connection,
+    ledger_json: &str,
+    exempt_job_ids: &HashSet<String>,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT u.job_id, u.file_id, u.stage
+         FROM probe_job_units u
+         WHERE u.file_id IN (SELECT value FROM json_each(?1))
+           AND u.status = 'queued'",
+    )?;
+    let rows = stmt.query_map([ledger_json], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (job_id, file_id, stage) = row?;
+        if !exempt_job_ids.contains(&job_id) {
+            out.push((job_id, file_id, stage));
+        }
+    }
+    Ok(out)
+}
+
+fn cancel_selected_targets(
+    tx: &rusqlite::Connection,
+    targets: Vec<(String, String, String)>,
+    reason: &str,
+    affected_jobs: &mut BTreeSet<String>,
+    seen_files: &mut BTreeSet<String>,
+    cancelled_files: &mut Vec<String>,
+    mut analysis_targets: Option<&mut Vec<(String, String)>>,
+) -> Result<(), StoreError> {
+    let mut update = tx.prepare(
+        "UPDATE probe_job_units SET status = 'cancelled', error = ?3
+         WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'",
+    )?;
+    for (job_id, file_id, stage) in targets {
+        if update.execute(params![job_id, file_id, reason])? > 0 {
+            if stage == "analysis"
+                && let Some(list) = analysis_targets.as_deref_mut()
+            {
+                list.push((job_id.clone(), file_id.clone()));
+            }
+            affected_jobs.insert(job_id);
+            if seen_files.insert(file_id.clone()) {
+                cancelled_files.push(file_id);
+            }
+        }
+    }
     Ok(())
 }

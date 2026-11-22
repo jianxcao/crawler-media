@@ -250,6 +250,7 @@ export function LibraryItemDetailView({
       {!c.isMovie && ((detail.season_summaries?.length ?? 0) > 0 || detail.seasons.length > 0) && (
         <div className="mt-6 px-12 max-md:px-4">
           <SeasonEpisodesSection
+            key={`${libraryId}:${detail.media_item_id}:${initialSeason ?? ""}:${initialEpisode ?? ""}`}
             libraryId={libraryId}
             detail={detail}
             initialSeason={initialSeason}

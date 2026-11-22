@@ -310,3 +310,57 @@ test("checkInSite posts to /sites/{id}/check-in and reloads site snapshot", asyn
     { url: "/sites/site-hda-1", method: "GET" },
   ]);
 });
+
+test("configureSite serializes url: '' when SiteForm leaves URL blank so backend profile default URL applies", async () => {
+  const { SiteForm } = loadSiteForm();
+  const submitted = [];
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(SiteForm, {
+        item: HDAREA_CATALOG,
+        site: null,
+        busy: false,
+        onSubmit: (payload) => submitted.push(payload),
+      }),
+    );
+  });
+
+  const pwInput = renderer.root
+    .findAllByType("input")
+    .find((inp) => inp.props.type === "password");
+  await act(async () => {
+    pwInput.props.onChange({ target: { value: "0123456789abcdef0123456789abcdef" } });
+  });
+
+  const submitBtn = renderer.root
+    .findAllByType("button")
+    .find((btn) => textOf(btn).includes("保存并验证"));
+  await act(async () => {
+    submitBtn.props.onClick();
+  });
+  await act(async () => {
+    renderer.unmount();
+  });
+
+  assert.equal(submitted.length, 1);
+  assert.equal("url" in submitted[0], false, "SiteForm omits blank url in payload");
+
+  const postedBodies = [];
+  const createdSite = makeSite({ auth_type: "apikey" });
+  const sitesApi = loadSitesApi(async (url, init) => {
+    assert.equal(url, "/sites");
+    assert.equal(init?.method, "POST");
+    postedBodies.push(JSON.parse(init.body));
+    return { ok: true, data: createdSite };
+  });
+
+  await sitesApi.configureSite("hdarea", submitted[0]);
+  assert.equal(postedBodies.length, 1);
+  assert.equal("url" in postedBodies[0], true, "POST /sites body must always include url");
+  assert.equal(postedBodies[0].url, "");
+  assert.equal(postedBodies[0].profile_id, "hdarea");
+
+  await sitesApi.configureSite("hdarea", { ...submitted[0], url: "  https://custom.hdarea.co  " });
+  assert.equal(postedBodies[1].url, "https://custom.hdarea.co");
+});

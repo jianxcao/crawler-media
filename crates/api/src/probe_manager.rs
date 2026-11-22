@@ -122,6 +122,7 @@ pub struct ProbeManager {
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
     background_paused: AtomicBool,
+    paused_exempt_jobs: std::sync::Mutex<HashSet<String>>,
     obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
@@ -284,6 +285,7 @@ impl ProbeManager {
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
             background_paused: AtomicBool::new(initial_background_paused),
+            paused_exempt_jobs: std::sync::Mutex::new(HashSet::new()),
             obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
@@ -479,6 +481,7 @@ impl ProbeManager {
 
     pub fn pause_background(&self) {
         self.background_paused.store(true, Ordering::Release);
+        self.clear_paused_exempt_jobs();
         self.drain_buffered_dispatch();
     }
 
@@ -491,6 +494,71 @@ impl ProbeManager {
         self.fill_dispatch_windows();
         self.wake.notify_waiters();
         self.obligation_wake.notify_waiters();
+    }
+
+    pub(super) fn mark_job_paused_exempt(&self, job_id: String) -> bool {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(job_id)
+    }
+
+    pub(super) fn unmark_job_paused_exempt(&self, job_id: &str) {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(job_id);
+    }
+
+    pub(super) fn is_job_paused_exempt(&self, job_id: &str) -> bool {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(job_id)
+    }
+
+    pub(super) fn has_paused_exempt_jobs(&self) -> bool {
+        !self
+            .paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    pub(super) fn paused_exempt_job_ids(&self) -> Vec<String> {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn paused_exempt_jobs_snapshot(&self) -> HashSet<String> {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn prune_inactive_exempt_jobs(&self, checked: &[String], active: &[String]) {
+        let active_set: HashSet<&str> = active.iter().map(String::as_str).collect();
+        let mut guard = self
+            .paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for job_id in checked {
+            if !active_set.contains(job_id.as_str()) {
+                guard.remove(job_id);
+            }
+        }
+    }
+
+    pub(super) fn clear_paused_exempt_jobs(&self) {
+        self.paused_exempt_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     pub(crate) fn obligation_wake(&self) -> Arc<Notify> {
@@ -507,7 +575,7 @@ impl ProbeManager {
                 seen.remove(file_id);
             }
         }
-        if !self.background_is_paused() {
+        if !self.background_is_paused() || self.has_paused_exempt_jobs() {
             self.wake.notify_waiters();
         }
     }

@@ -132,6 +132,20 @@ impl Store {
         self.with_library_read(|db| db.pending_local_probe_dispatch_ids(stage, limit))
     }
 
+    /// Pending dispatch IDs restricted to explicit exempt jobs while background
+    /// probe execution is paused, plus the subset of `job_ids` that are still active.
+    pub fn pending_probe_dispatch_ids_for_jobs(
+        &self,
+        stage: ProbeDispatchStage,
+        job_ids: &[String],
+        local_only: bool,
+        limit: usize,
+    ) -> Result<(Vec<ProbeDispatchId>, Vec<String>), StoreError> {
+        self.with_library_read(|db| {
+            db.pending_probe_dispatch_ids_for_jobs(stage, job_ids, local_only, limit)
+        })
+    }
+
     /// Same read as [`Self::pending_probe_dispatch_ids`], additionally reporting the SQLite
     /// VM steps it consumed, so tests can assert the refill cost as a counter.
     #[doc(hidden)]

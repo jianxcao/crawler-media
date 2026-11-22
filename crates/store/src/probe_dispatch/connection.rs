@@ -37,6 +37,63 @@ impl crate::LibraryConnection<'_> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn pending_probe_dispatch_ids_for_jobs(
+        &self,
+        stage: ProbeDispatchStage,
+        job_ids: &[String],
+        local_only: bool,
+        limit: usize,
+    ) -> Result<(Vec<ProbeDispatchId>, Vec<String>), StoreError> {
+        if job_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let jobs_json = serde_json::to_string(job_ids)?;
+        let mut active_stmt = self.library.prepare(
+            "SELECT id FROM probe_jobs
+             WHERE id IN (SELECT value FROM json_each(?1))
+               AND status IN ('queued', 'running')",
+        )?;
+        let active_jobs: Vec<String> = active_stmt
+            .query_map([&jobs_json], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if active_jobs.is_empty() || limit == 0 {
+            return Ok((Vec::new(), active_jobs));
+        }
+        let active_json = serde_json::to_string(&active_jobs)?;
+        let sql = if local_only {
+            "SELECT u.job_id, u.file_id
+             FROM probe_job_units u
+             JOIN probe_jobs j ON j.id = u.job_id
+             JOIN library_files f ON f.file_id = u.file_id
+             WHERE u.stage = ?1 AND u.status = 'queued'
+               AND u.job_id IN (SELECT value FROM json_each(?2))
+               AND j.status IN ('queued', 'running')
+               AND lower(f.display_path) NOT LIKE '%.strm'
+             ORDER BY u.job_id, u.file_id
+             LIMIT ?3"
+        } else {
+            "SELECT u.job_id, u.file_id
+             FROM probe_job_units u
+             JOIN probe_jobs j ON j.id = u.job_id
+             WHERE u.stage = ?1 AND u.status = 'queued'
+               AND u.job_id IN (SELECT value FROM json_each(?2))
+               AND j.status IN ('queued', 'running')
+             ORDER BY u.job_id, u.file_id
+             LIMIT ?3"
+        };
+        let mut stmt = self.library.prepare(sql)?;
+        let ids = stmt
+            .query_map(params![stage.as_str(), active_json, limit as i64], |row| {
+                Ok(ProbeDispatchId {
+                    job_id: row.get(0)?,
+                    ledger_id: row.get(1)?,
+                    stage,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((ids, active_jobs))
+    }
+
     pub fn pending_probe_dispatch_ids(
         &self,
         stage: ProbeDispatchStage,

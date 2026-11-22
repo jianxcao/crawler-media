@@ -136,6 +136,7 @@ fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError
         .store
         .fail_probe_analysis_refresh_if_capture_failed(job_id)?
     {
+        manager.unmark_job_paused_exempt(&job.id);
         super::super::timings::finalize_terminal_job(
             &manager.store_access(),
             &manager.timings,
@@ -213,6 +214,7 @@ fn publish(manager: &ProbeManager, commit: &ProbeAnalysisCommit) -> Result<(), s
                     frames.notify_pending();
                 }
                 for job in jobs {
+                    manager.unmark_job_paused_exempt(&job.id);
                     super::super::timings::finalize_terminal_job(
                         &manager.store_access(),
                         &manager.timings,

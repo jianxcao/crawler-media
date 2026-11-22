@@ -52,7 +52,8 @@ function setVariantParam(url: string, variant: ImageVariant): string {
 export function cachedImageUrl(url: string, variant?: ImageVariant): string {
   if (!/^https?:\/\//i.test(url)) return url;
   const path = `images/proxy?url=${encodeURIComponent(url)}`;
-  return resolveRequestUrl(variant ? appendVariant(path, variant) : path);
+  const target = variant ? appendVariant(path, variant) : path;
+  return resolveRequestUrl ? (resolveRequestUrl(target) ?? "") : target;
 }
 
 /**
@@ -66,7 +67,7 @@ export function imageUrl(url: string | null, variant?: ImageVariant): string {
   // 当前只有 metadata 资产路由支持本地派生；文件缩略图等其它相对接口保持原样。
   const resolved =
     variant && /^\/?images\/assets\//.test(url) ? setVariantParam(url, variant) : url;
-  return resolveRequestUrl(resolved);
+  return resolveRequestUrl ? (resolveRequestUrl(resolved) ?? "") : resolved;
 }
 
 /**

@@ -131,6 +131,47 @@ pub(super) async fn probe_tracks_and_store(
         }
         Err(other) => return Err(other),
     };
+    publish_probed_tracks(
+        mgr,
+        unit,
+        &tracks,
+        duration_ms,
+        &ledger_id,
+        source_version,
+        started_at,
+    )
+    .await?;
+    tracing::info!(
+        media_id = %unit.row.file.media_id,
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
+        ledger_id,
+        path = %path.display(),
+        video = tracks.video.is_some(),
+        audio_tracks = tracks.audio.len(),
+        subtitle_tracks = tracks.subtitles.len(),
+        source_version,
+        format_duration_ms = ?duration_ms,
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        "【媒体信息】流信息探测与缓存完成"
+    );
+    mgr.timings.record_media_info(
+        unit.job_id.as_deref(),
+        started_at.elapsed().as_millis() as u64,
+        false,
+    );
+    Ok(duration_ms)
+}
+
+async fn publish_probed_tracks(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    tracks: &library::Tracks,
+    duration_ms: Option<i64>,
+    ledger_id: &str,
+    source_version: &str,
+    started_at: Instant,
+) -> Result<(), TrackProbeError> {
     let unit_for_write = unit.clone();
     let tracks_for_write = tracks.clone();
     let version = source_version.to_string();
@@ -186,6 +227,7 @@ pub(super) async fn probe_tracks_and_store(
             if let Some(service) = mgr.chapter_frames() {
                 service.notify_pending();
             }
+            Ok(())
         }
         Ok(false) => {
             tracing::warn!(
@@ -196,7 +238,7 @@ pub(super) async fn probe_tracks_and_store(
                 source_version,
                 "【媒体信息】探测结果属于已被替换的文件版本，丢弃不发布"
             );
-            return Err(TrackProbeError::Failed);
+            Err(TrackProbeError::Failed)
         }
         Err(error) => {
             tracing::error!(
@@ -208,29 +250,9 @@ pub(super) async fn probe_tracks_and_store(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "【媒体信息】流信息缓存写入失败"
             );
-            return Err(TrackProbeError::Retry);
+            Err(TrackProbeError::Retry)
         }
     }
-    tracing::info!(
-        media_id = %unit.row.file.media_id,
-        season = ?single_season(&unit.row),
-        episode = ?single_episode(&unit.row),
-        ledger_id,
-        path = %path.display(),
-        video = tracks.video.is_some(),
-        audio_tracks = tracks.audio.len(),
-        subtitle_tracks = tracks.subtitles.len(),
-        source_version,
-        format_duration_ms = ?duration_ms,
-        elapsed_ms = started_at.elapsed().as_millis() as u64,
-        "【媒体信息】流信息探测与缓存完成"
-    );
-    mgr.timings.record_media_info(
-        unit.job_id.as_deref(),
-        started_at.elapsed().as_millis() as u64,
-        false,
-    );
-    Ok(duration_ms)
 }
 
 async fn read_tracks(

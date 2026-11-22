@@ -220,7 +220,10 @@ fn read_summary(conn: &Connection, global_mode: &str) -> Result<TransferSummary,
                                 AND COALESCE(f.duration_ms, d.format_duration_ms, 0) > 0 THEN 1 ELSE 0 END), 0)
          FROM library_files f
          JOIN media m ON m.media_id = f.media_id
-         LEFT JOIN file_details d ON d.file_id = f.file_id"
+         LEFT JOIN file_details d ON d.file_id = f.file_id
+         WHERE NOT EXISTS (
+             SELECT 1 FROM library_removals r WHERE r.library_id = f.library_id
+         )"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     Ok(stmt.query_row([global_mode], |row| {
@@ -245,7 +248,9 @@ fn append_filter_clauses(
     global_mode: &str,
     params: &mut Vec<SqlValue>,
 ) -> String {
-    let mut clauses: Vec<String> = Vec::new();
+    let mut clauses: Vec<String> = vec![
+        "NOT EXISTS (SELECT 1 FROM library_removals r WHERE r.library_id = f.library_id)".into(),
+    ];
     let mut push = |val: SqlValue| -> usize {
         params.push(val);
         params.len()
@@ -297,11 +302,11 @@ fn append_filter_clauses(
     {
         let idx = push(SqlValue::Text(needle));
         clauses.push(format!(
-            "(INSTR(LOWER(m.title), ?{idx}) > 0 \
-              OR INSTR(LOWER(f.display_path), ?{idx}) > 0 \
-              OR INSTR(LOWER(COALESCE(f.source_path, '')), ?{idx}) > 0 \
-              OR INSTR(LOWER(COALESCE(f.resolution, '')), ?{idx}) > 0 \
-              OR INSTR(LOWER(COALESCE(f.codec, '')), ?{idx}) > 0)"
+            "(INSTR(casefold(m.title), ?{idx}) > 0 \
+              OR INSTR(casefold(f.display_path), ?{idx}) > 0 \
+              OR INSTR(casefold(COALESCE(f.source_path, '')), ?{idx}) > 0 \
+              OR INSTR(casefold(COALESCE(f.resolution, '')), ?{idx}) > 0 \
+              OR INSTR(casefold(COALESCE(f.codec, '')), ?{idx}) > 0)"
         ));
     }
 
@@ -354,7 +359,11 @@ fn read_files_page(
 
     let sql = format!(
         "WITH page AS MATERIALIZED (
-             SELECT f.file_id, m.title AS media_title, m.kind AS media_kind
+             SELECT
+                 f.file_id,
+                 m.title AS media_title,
+                 m.kind AS media_kind,
+                 ROW_NUMBER() OVER (ORDER BY {order_sql}) AS page_ord
              FROM library_files f
              JOIN media m ON m.media_id = f.media_id
              {where_sql}
@@ -371,7 +380,8 @@ fn read_files_page(
          FROM page p
          CROSS JOIN library_files f ON f.file_id = p.file_id
          LEFT JOIN file_details d ON d.file_id = p.file_id
-         LEFT JOIN library_file_units u ON u.file_id = p.file_id"
+         LEFT JOIN library_file_units u ON u.file_id = p.file_id
+         ORDER BY p.page_ord ASC, u.season ASC, u.episode ASC"
     );
 
     let mut stmt = conn.prepare(&sql)?;

@@ -280,3 +280,115 @@ test("ArtworkImage hides native broken-icon/alt flash while queued or loading an
     await act(async () => { renderer.unmount(); });
   }
 });
+
+test("synchronous load fired inside set src during enqueue neither swallows load nor leaks a queue slot", (t) => {
+  const { load, requests } = setup(t);
+
+  class SyncCachedImageFixture extends ImageFixture {
+    set src(value) {
+      super.src = value;
+      if (value) {
+        this.finish("load");
+      }
+    }
+    get src() {
+      return super.src;
+    }
+  }
+
+  const syncImg = new SyncCachedImageFixture();
+  let settledCount = 0;
+  const bitmapStates = [];
+  const managed = manageArtworkImage(
+    syncImg,
+    0,
+    () => {
+      settledCount += 1;
+    },
+    (hasBitmap) => {
+      bitmapStates.push(hasBitmap);
+    },
+  );
+  t.after(() => managed.dispose());
+
+  managed.load({ src: "https://app.invalid/posters/sync-cached.jpg" });
+  assert.equal(settledCount, 1, "synchronous load inside enqueue must not be swallowed");
+  assert.equal(bitmapStates.at(-1), true, "synchronous load must mark bitmap ready");
+
+  // All 4 shared queue slots must remain available (0 slots leaked)!
+  for (let i = 0; i < 4; i += 1) load(`after-sync-${i}`);
+  assert.deepEqual(
+    requests.map(({ image }) => image.src),
+    [
+      "https://app.invalid/posters/after-sync-0",
+      "https://app.invalid/posters/after-sync-1",
+      "https://app.invalid/posters/after-sync-2",
+      "https://app.invalid/posters/after-sync-3",
+    ],
+    "synchronously settled artwork must release its queue slot immediately",
+  );
+});
+
+test("calling load with an unchanged source while active or after completion is a no-op that consumes 0 queue slots", (t) => {
+  const { load, requests } = setup(t);
+
+  class CountingImageFixture extends ImageFixture {
+    srcAssignments = 0;
+    set src(value) {
+      this.srcAssignments += 1;
+      super.src = value;
+    }
+    get src() {
+      return super.src;
+    }
+  }
+
+  const image = new CountingImageFixture();
+  const managed = manageArtworkImage(image, 0);
+  t.after(() => managed.dispose());
+
+  const targetSource = {
+    src: "https://app.invalid/posters/unchanged.jpg",
+    srcSet: "https://app.invalid/posters/unchanged-2x.jpg 2x",
+    sizes: "200px",
+  };
+
+  managed.load(targetSource);
+  assert.equal(image.srcAssignments, 1);
+
+  // Calling load again with identical source while still in-flight must be a no-op
+  managed.load({ ...targetSource });
+  assert.equal(image.srcAssignments, 1, "re-render while active must not re-assign src");
+
+  image.finish("load");
+
+  // Fill all 4 queue slots with other preloads
+  for (let i = 0; i < 4; i += 1) load(`busy-${i}`);
+  assert.equal(requests.filter(({ image: img }) => img.src).length, 4);
+
+  // Calling load again with identical source after completion must neither clear/reassign src nor enqueue
+  managed.load({ ...targetSource });
+  assert.equal(image.src, "https://app.invalid/posters/unchanged.jpg");
+  assert.equal(image.srcAssignments, 1, "completed artwork must not re-assign unchanged src");
+
+  // Verify 0 queue slots were queued behind the 4 busy slots
+  load("fifth");
+  requests[0].image.finish("load");
+  assert.equal(
+    requests[4].image.src,
+    "https://app.invalid/posters/fifth",
+    "unchanged load() must consume 0 queue slots",
+  );
+});
+
+test("DetailBackdropSlideshow passes loading='eager' to its ArtworkImage layers", () => {
+  const slideshowSource = readFileSync(
+    new URL("../components/detail-backdrop-slideshow.tsx", import.meta.url),
+    "utf8",
+  );
+  const matches = [...slideshowSource.matchAll(/<ArtworkImage\b[\s\S]*?\/>/g)];
+  assert.equal(matches.length, 2, "DetailBackdropSlideshow should render bottom and top ArtworkImage");
+  for (const [snippet] of matches) {
+    assert.match(snippet, /loading="eager"/, `Expected loading="eager" on ArtworkImage:\n${snippet}`);
+  }
+});

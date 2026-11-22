@@ -578,13 +578,10 @@ pub fn tv_seasons(body: &str) -> Result<Vec<TvSeason>, TmdbError> {
         seasons: Vec<TvSeasonRow>,
     }
     let parsed: SeasonsBody = serde_json::from_str(body)?;
-    tracing::info!(
+    tracing::debug!(
         seasons_count = parsed.seasons.len(),
         "parse::tv_seasons 正在解析"
     );
-    for s in &parsed.seasons {
-        tracing::info!(season_number = s.season_number, name = ?s.name, ep_count = ?s.episode_count, "解析单季");
-    }
     Ok(parsed
         .seasons
         .into_iter()

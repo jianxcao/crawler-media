@@ -78,6 +78,16 @@ impl ImageProxy {
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("public, max-age=86400"),
                 );
+                response.headers_mut().insert(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                );
+                response.headers_mut().insert(
+                    header::CONTENT_SECURITY_POLICY,
+                    HeaderValue::from_static(
+                        "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                    ),
+                );
                 response
             }
             Err(error) => failure(error),

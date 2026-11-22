@@ -492,8 +492,10 @@ fn preview_facts(
 ) -> Option<PreviewFacts> {
     super::store_wait::with_store_read(
         state,
-        &[store::Db::Library, store::Db::Subscribe],
-        |store| {
+        &[store::Db::Library, store::Db::App, store::Db::Subscribe],
+        |store| -> Option<PreviewFacts> {
+            let visible =
+                crate::visible_scope::VisibleLibraries::load(store, current_user_id).ok()?;
             let media = resolved
                 .tmdb_id
                 .as_deref()
@@ -536,13 +538,23 @@ fn preview_facts(
                 })
                 .map(|s| s.id.to_string());
 
-            let ledger = store.file_coverage_for_media(media_id).unwrap_or_default();
+            let ledger: Vec<domain::FileCoverage> = store
+                .file_coverage_for_media(media_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|row| {
+                    row.file.publication == domain::FilePublication::Published
+                        && row.file.presence != domain::FilePresence::Missing
+                        && visible.get(&row.file.library_id).is_some()
+                })
+                .collect();
             let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
             let movie_owned = media.kind == MediaKind::Movie && has_owned;
-            (media, existing, owned_seasons, movie_owned)
+            Some((media, existing, owned_seasons, movie_owned))
         },
     )
     .ok()
+    .flatten()
 }
 
 fn preview_seasons(
@@ -555,7 +567,11 @@ fn preview_seasons(
     }
     if let Some(tmdb_id) = media.tmdb_id.as_deref() {
         let rows = state.catalog.tv_seasons(tmdb_id).unwrap_or_default();
-        tracing::info!(tmdb_id = %tmdb_id, rows_count = rows.len(), "title-preview 正在拉取 TV seasons");
+        tracing::debug!(
+            tmdb_id = %tmdb_id,
+            rows_count = rows.len(),
+            "title-preview 正在拉取 TV seasons"
+        );
         let today = today_rfc3339();
         let current_year = today.get(..4).unwrap_or("9999");
         return rows
@@ -653,16 +669,20 @@ fn owned_episode_counts(
     coverage: &[domain::FileCoverage],
     media_id: domain::MediaId,
 ) -> (HashMap<u32, usize>, bool) {
-    let mut owned_seasons: HashMap<u32, usize> = HashMap::new();
+    let mut distinct_episodes: HashMap<u32, HashSet<u32>> = HashMap::new();
     let mut has_owned = false;
     for row in coverage.iter().filter(|row| row.file.media_id == media_id) {
         has_owned = true;
         for unit in &row.units {
-            if let Some((season, _)) = unit.episode_coordinates() {
-                *owned_seasons.entry(season).or_default() += 1;
+            if let Some((season, episode)) = unit.episode_coordinates() {
+                distinct_episodes.entry(season).or_default().insert(episode);
             }
         }
     }
+    let owned_seasons = distinct_episodes
+        .into_iter()
+        .map(|(season, episodes)| (season, episodes.len()))
+        .collect();
     (owned_seasons, has_owned)
 }
 

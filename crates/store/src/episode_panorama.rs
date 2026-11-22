@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use domain::{Confidence, LibraryId, MediaId, Release};
-use rusqlite::{Connection, params};
+use domain::{Confidence, LibraryId, MediaId, Release, UserId};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{Db, LibraryConnection, Store, StoreError};
@@ -241,9 +241,10 @@ impl EpisodePanorama {
         preferred_library: Option<LibraryId>,
         locale: &str,
     ) -> Result<(), StoreError> {
-        if !media_ids.is_empty() && !library_ids.is_empty() {
-            self.load_library_units(db.library, media_ids, library_ids)?;
+        if media_ids.is_empty() || library_ids.is_empty() {
+            return Ok(());
         }
+        self.load_library_units(db.library, media_ids, library_ids)?;
         let mut seen = HashSet::new();
         for &media_id in media_ids {
             if !seen.insert(media_id) {
@@ -304,7 +305,11 @@ impl EpisodePanorama {
              LEFT JOIN library_files f ON f.file_id = u.preferred_file_id
              WHERE u.media_id IN (SELECT value FROM json_each(?1))
                AND u.library_id IN (SELECT value FROM json_each(?2))
-               AND u.season >= 0 AND u.episode >= 0",
+               AND u.season >= 0 AND u.episode >= 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM library_removals r
+                   WHERE r.library_id = u.library_id
+               )",
         )?;
         let rows = stmt.query_map(params![media_json, lib_json], |row| {
             Ok((
@@ -351,16 +356,30 @@ impl EpisodePanorama {
         &mut self,
         conn: &Connection,
         media_ids: &[MediaId],
+        library_ids: &[LibraryId],
+        include_null_lib: bool,
+        subscriber_filter: Option<Option<UserId>>,
         parse_release: &F,
     ) -> Result<(), StoreError>
     where
         F: Fn(&str) -> Release,
     {
-        if media_ids.is_empty() {
+        if media_ids.is_empty() || library_ids.is_empty() {
             return Ok(());
         }
+        let filter_uid = match subscriber_filter {
+            None => None,
+            Some(Some(uid)) => Some(uid.to_string()),
+            Some(None) => return Ok(()),
+        };
         let media_json = serde_json::to_string(
             &media_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )?;
+        let lib_json = serde_json::to_string(
+            &library_ids
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
@@ -368,19 +387,30 @@ impl EpisodePanorama {
         let mut sub_stmt = conn.prepare(
             "SELECT id, coverage_kind, season, episode_from, episode_to
              FROM subscribes
-             WHERE media_id IN (SELECT value FROM json_each(?1))",
+             WHERE media_id IN (SELECT value FROM json_each(?1))
+               AND (library_id IN (SELECT value FROM json_each(?2))
+                    OR (library_id IS NULL AND ?3 != 0))
+               AND (?4 IS NULL OR user_id = ?4)",
         )?;
         let mut sub_ids = Vec::new();
         let mut sub_cov: HashMap<String, Option<(u32, u32, Option<u32>)>> = HashMap::new();
-        let sub_rows = sub_stmt.query_map([media_json], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-            ))
-        })?;
+        let sub_rows = sub_stmt.query_map(
+            params![
+                media_json,
+                lib_json,
+                i64::from(include_null_lib),
+                filter_uid
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )?;
         for row in sub_rows {
             let (id, kind, season, ep_from, ep_to) = row?;
             let cov = match (kind.as_str(), season, ep_from) {
@@ -531,26 +561,89 @@ impl Store {
     where
         F: Fn(&str) -> Release,
     {
+        self.episode_panorama_scoped(
+            media_ids,
+            library_ids,
+            preferred_library,
+            locale,
+            None,
+            parse_release,
+        )
+    }
+
+    /// Scoped snapshot read across `library.db` -> `subscribe.db` without acquiring any writer lock.
+    pub fn episode_panorama_scoped<F>(
+        &self,
+        media_ids: &[MediaId],
+        library_ids: &[LibraryId],
+        preferred_library: Option<LibraryId>,
+        locale: &str,
+        subscriber_filter: Option<Option<UserId>>,
+        parse_release: F,
+    ) -> Result<EpisodePanorama, StoreError>
+    where
+        F: Fn(&str) -> Release,
+    {
         let mut panorama = EpisodePanorama::new(current_utc_date());
-        if media_ids.is_empty() {
+        if media_ids.is_empty() || library_ids.is_empty() {
             return Ok(panorama);
         }
-        self.with_read_snapshot(&[Db::Library, Db::Subscribe], PANORAMA_READ_WAIT, || {
-            self.with_read(Db::Library, |conn| {
+        let read_subscribe = !matches!(subscriber_filter, Some(None));
+        let dbs: &[Db] = if read_subscribe {
+            &[Db::Library, Db::Subscribe]
+        } else {
+            &[Db::Library]
+        };
+        self.with_read_snapshot(dbs, PANORAMA_READ_WAIT, || {
+            let include_null_lib = self.with_read(Db::Library, |conn| {
                 panorama.load_library_facts(
                     &self.library_connection(conn),
                     media_ids,
                     library_ids,
                     preferred_library,
                     locale,
-                )
+                )?;
+                default_tv_library_included(conn, library_ids)
             })?;
-            self.with_read(Db::Subscribe, |conn| {
-                panorama.load_subscribe_facts(conn, media_ids, &parse_release)
-            })?;
+            if read_subscribe {
+                self.with_read(Db::Subscribe, |conn| {
+                    panorama.load_subscribe_facts(
+                        conn,
+                        media_ids,
+                        library_ids,
+                        include_null_lib,
+                        subscriber_filter,
+                        &parse_release,
+                    )
+                })?;
+            }
             Ok(panorama)
         })?
     }
+}
+
+fn default_tv_library_included(
+    conn: &Connection,
+    library_ids: &[LibraryId],
+) -> Result<bool, StoreError> {
+    let default_raw: Option<String> = conn
+        .query_row(
+            "SELECT library_id FROM libraries
+             WHERE kind = 'tv'
+               AND is_default = 1
+               AND lifecycle_state = 'ready'
+               AND NOT EXISTS (
+                   SELECT 1 FROM library_removals r
+                   WHERE r.library_id = libraries.library_id
+               )
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(default_raw
+        .and_then(|raw| raw.parse::<LibraryId>().ok())
+        .is_some_and(|default_id| library_ids.contains(&default_id)))
 }
 
 fn current_utc_date() -> String {

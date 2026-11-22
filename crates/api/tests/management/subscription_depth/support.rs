@@ -232,18 +232,30 @@ pub(crate) fn seed_pending_torrent(
 pub(crate) struct FakeDoubanHttp;
 
 impl media::CatalogGet for FakeDoubanHttp {
-    fn get(&self, _path: &str) -> Result<String, media::TmdbError> {
-        Ok(douban_html::movie().to_string())
+    fn get(&self, path: &str) -> Result<String, media::TmdbError> {
+        if path.contains("/celebrities") {
+            return Ok(json!({ "actors": [], "directors": [] }).to_string());
+        }
+        let id = path
+            .split("/movie/")
+            .nth(1)
+            .and_then(|tail| tail.split(['/', '?']).next())
+            .unwrap_or("1292052");
+        Ok(douban_rexxar_movie(id))
     }
 }
 
-pub(crate) mod douban_html {
-    pub fn movie() -> &'static str {
-        r#"<html><body>
-            <h1><span property="v:itemreviewed">肖申克的救赎</span> <span class="year">(1994)</span></h1>
-            <div id="info"><span class="pl">类型:</span> 剧情 / 犯罪</div>
-        </body></html>"#
-    }
+fn douban_rexxar_movie(id: &str) -> String {
+    json!({
+        "id": id,
+        "title": "肖申克的救赎",
+        "original_title": "The Shawshank Redemption",
+        "year": "1994",
+        "type": "movie",
+        "subtype": "movie",
+        "genres": ["剧情", "犯罪"]
+    })
+    .to_string()
 }
 
 pub(crate) fn douban_app(tmp: &tempfile::TempDir) -> axum::Router {

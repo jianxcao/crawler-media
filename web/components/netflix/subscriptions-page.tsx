@@ -402,7 +402,7 @@ function ComingSoonSection({
       <HScroller className={`gap-2 pb-1 pt-1 ${inset}`}>
         {groups.map((group) => (
           <ComingSoonCard
-            key={group.subscriptionId}
+            key={`${group.subscriptionId}-${group.presentation.statusLabel}-${group.episodeLabel}`}
             group={group}
             posterUrl={posterBySubscription.get(String(group.subscriptionId))}
             progress={progressBySubscription.get(String(group.subscriptionId))}

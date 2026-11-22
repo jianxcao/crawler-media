@@ -1,11 +1,12 @@
 //! Daily scheduled Discover wall prewarm job (`discover_refresh`) and
 //! singleflight background Stale-While-Revalidate (SWR) helpers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 
 use crate::catalog::Catalog;
 use crate::http::discover::{
@@ -14,29 +15,64 @@ use crate::http::discover::{
 use crate::management::ApiState;
 
 const REFRESH_CONCURRENCY: usize = 2;
+const MAX_IN_FLIGHT_SWR: usize = 16;
 
-static IN_FLIGHT_SWR: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-fn swr_flights() -> &'static Mutex<HashSet<String>> {
-    IN_FLIGHT_SWR.get_or_init(|| Mutex::new(HashSet::new()))
+struct SwrInstanceFlights {
+    keys: HashSet<String>,
+    semaphore: Arc<Semaphore>,
 }
 
-struct SwrFlightGuard(String);
+static IN_FLIGHT_SWR: OnceLock<Mutex<HashMap<usize, SwrInstanceFlights>>> = OnceLock::new();
+
+fn swr_flights() -> &'static Mutex<HashMap<usize, SwrInstanceFlights>> {
+    IN_FLIGHT_SWR.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct SwrFlightGuard {
+    instance_id: usize,
+    flight_key: String,
+    semaphore: Arc<Semaphore>,
+    // Keep the per-instance allocation alive until after `instance_id` leaves `IN_FLIGHT_SWR`.
+    _anchor: Arc<crate::write_gate::WriteGate>,
+}
 
 impl SwrFlightGuard {
-    fn try_enter(key: String) -> Option<Self> {
-        let mut set = swr_flights().lock();
-        if set.contains(&key) {
+    fn try_enter(state: &ApiState, flight_key: String) -> Option<Self> {
+        let anchor = state.write_gate();
+        let instance_id = Arc::as_ptr(&anchor) as usize;
+        let mut map = swr_flights().lock();
+        let entry = map
+            .entry(instance_id)
+            .or_insert_with(|| SwrInstanceFlights {
+                keys: HashSet::new(),
+                semaphore: Arc::new(Semaphore::new(REFRESH_CONCURRENCY)),
+            });
+        if entry.keys.contains(&flight_key) || entry.keys.len() >= MAX_IN_FLIGHT_SWR {
+            if entry.keys.is_empty() {
+                map.remove(&instance_id);
+            }
             return None;
         }
-        set.insert(key.clone());
-        Some(Self(key))
+        entry.keys.insert(flight_key.clone());
+        let semaphore = entry.semaphore.clone();
+        Some(Self {
+            instance_id,
+            flight_key,
+            semaphore,
+            _anchor: anchor,
+        })
     }
 }
 
 impl Drop for SwrFlightGuard {
     fn drop(&mut self) {
-        swr_flights().lock().remove(&self.0);
+        let mut map = swr_flights().lock();
+        if let Some(entry) = map.get_mut(&self.instance_id) {
+            entry.keys.remove(&self.flight_key);
+            if entry.keys.is_empty() {
+                map.remove(&self.instance_id);
+            }
+        }
     }
 }
 
@@ -98,46 +134,65 @@ pub(crate) fn spawn_swr_sections_refresh(
     source: Option<String>,
     sections: Vec<Section>,
 ) {
+    if !state.instance_writable() || state.write_gate().admit().is_err() {
+        return;
+    }
     if sections.is_empty() || state.job_loop_control().is_stopping() {
         return;
     }
-    let Some(guard) = SwrFlightGuard::try_enter(flight_key) else {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    let Some(guard) = SwrFlightGuard::try_enter(state, flight_key) else {
         return;
     };
     let catalog: Arc<dyn Catalog> = state.catalog.clone();
     let control = state.job_loop_control();
-    handle.spawn_blocking(move || {
+    let writable = state.instance_writable.clone();
+    let write_gate = state.write_gate();
+    let semaphore = guard.semaphore.clone();
+    handle.spawn(async move {
         let _guard = guard;
-        let selected = select_catalog(catalog.as_ref(), source.as_deref());
-        let cursor = AtomicUsize::new(0);
-        let workers = sections.len().clamp(1, REFRESH_CONCURRENCY);
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        if control.is_stopping() {
-                            break;
+        let Ok(_permit) = semaphore.acquire_owned().await else {
+            return;
+        };
+        if control.is_stopping() || !writable.load(Ordering::SeqCst) || write_gate.admit().is_err()
+        {
+            return;
+        }
+        let _ = tokio::task::spawn_blocking(move || {
+            let selected = select_catalog(catalog.as_ref(), source.as_deref());
+            let cursor = AtomicUsize::new(0);
+            let workers = sections.len().clamp(1, REFRESH_CONCURRENCY);
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(|| {
+                        loop {
+                            if control.is_stopping()
+                                || !writable.load(Ordering::SeqCst)
+                                || write_gate.admit().is_err()
+                            {
+                                break;
+                            }
+                            let idx = cursor.fetch_add(1, Ordering::Relaxed);
+                            let Some(section) = sections.get(idx) else {
+                                break;
+                            };
+                            if let Err(error) = (section.fetch)(selected) {
+                                tracing::warn!(
+                                    source = selected.source_name(),
+                                    kind = section.kind,
+                                    section = section.id,
+                                    %error,
+                                    "发现页 SWR 后台刷新单分区失败"
+                                );
+                            }
                         }
-                        let idx = cursor.fetch_add(1, Ordering::Relaxed);
-                        let Some(section) = sections.get(idx) else {
-                            break;
-                        };
-                        if let Err(error) = (section.fetch)(selected) {
-                            tracing::warn!(
-                                source = selected.source_name(),
-                                kind = section.kind,
-                                section = section.id,
-                                %error,
-                                "发现页 SWR 后台刷新单分区失败"
-                            );
-                        }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        })
+        .await;
     });
 }
 
@@ -146,19 +201,36 @@ pub(crate) fn spawn_swr_closure_refresh(
     flight_key: String,
     work: impl FnOnce(&dyn Catalog) + Send + 'static,
 ) {
+    if !state.instance_writable() || state.write_gate().admit().is_err() {
+        return;
+    }
     if state.job_loop_control().is_stopping() {
         return;
     }
-    let Some(guard) = SwrFlightGuard::try_enter(flight_key) else {
-        return;
-    };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
+    let Some(guard) = SwrFlightGuard::try_enter(state, flight_key) else {
+        return;
+    };
     let catalog: Arc<dyn Catalog> = state.catalog.clone();
-    handle.spawn_blocking(move || {
+    let control = state.job_loop_control();
+    let writable = state.instance_writable.clone();
+    let write_gate = state.write_gate();
+    let semaphore = guard.semaphore.clone();
+    handle.spawn(async move {
         let _guard = guard;
-        work(catalog.as_ref());
+        let Ok(_permit) = semaphore.acquire_owned().await else {
+            return;
+        };
+        if control.is_stopping() || !writable.load(Ordering::SeqCst) || write_gate.admit().is_err()
+        {
+            return;
+        }
+        let _ = tokio::task::spawn_blocking(move || {
+            work(catalog.as_ref());
+        })
+        .await;
     });
 }
 

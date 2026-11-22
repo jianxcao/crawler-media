@@ -7,13 +7,21 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
 
-use image::{ImageFormat, RgbaImage, imageops};
+use image::{ImageFormat, ImageReader, Limits, RgbaImage, imageops};
 
 pub(crate) fn normalize_brand_logo(content_type: &str, bytes: Vec<u8>) -> (String, Vec<u8>) {
     if content_type.to_ascii_lowercase().contains("svg") {
         return (content_type.to_string(), bytes);
     }
-    let Ok(decoded) = image::load_from_memory(&bytes) else {
+    let Ok(mut reader) = ImageReader::new(Cursor::new(&bytes)).with_guessed_format() else {
+        return (content_type.to_string(), bytes);
+    };
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let Ok(decoded) = reader.decode() else {
         return (content_type.to_string(), bytes);
     };
     let mut img = decoded.to_rgba8();
@@ -77,7 +85,7 @@ fn strip_light_box_background(img: &mut RgbaImage) {
 
     while let Some((x, y)) = queue.pop_front() {
         img.get_pixel_mut(x, y).0[3] = 0;
-        for (nx, ny) in neighbors4(x, y, w, h) {
+        for (nx, ny) in neighbors4(x, y, w, h).into_iter().flatten() {
             let nidx = idx_of(nx, ny);
             if !visited[nidx] && is_light_bg(img.get_pixel(nx, ny).0) {
                 visited[nidx] = true;
@@ -115,6 +123,7 @@ fn feather_background_edges(img: &mut RgbaImage, visited: &[bool]) {
             }
             let touches_bg = neighbors4(x, y, w, h)
                 .into_iter()
+                .flatten()
                 .any(|(nx, ny)| visited[idx_of(nx, ny)]);
             if !touches_bg {
                 continue;
@@ -131,21 +140,13 @@ fn feather_background_edges(img: &mut RgbaImage, visited: &[bool]) {
     }
 }
 
-fn neighbors4(x: u32, y: u32, w: u32, h: u32) -> Vec<(u32, u32)> {
-    let mut out = Vec::with_capacity(4);
-    if x > 0 {
-        out.push((x - 1, y));
-    }
-    if x + 1 < w {
-        out.push((x + 1, y));
-    }
-    if y > 0 {
-        out.push((x, y - 1));
-    }
-    if y + 1 < h {
-        out.push((x, y + 1));
-    }
-    out
+fn neighbors4(x: u32, y: u32, w: u32, h: u32) -> [Option<(u32, u32)>; 4] {
+    [
+        x.checked_sub(1).map(|nx| (nx, y)),
+        x.checked_add(1).filter(|&nx| nx < w).map(|nx| (nx, y)),
+        y.checked_sub(1).map(|ny| (x, ny)),
+        y.checked_add(1).filter(|&ny| ny < h).map(|ny| (x, ny)),
+    ]
 }
 
 fn crop_alpha_bounds(img: RgbaImage) -> RgbaImage {

@@ -26,6 +26,7 @@ function isAbortError(error: unknown): boolean {
 
 function useTransferActions(
   onItemDeleted: (target: TransferFileItem) => void,
+  onItemRetransferred: (target: TransferFileItem, destination?: string) => void,
   onAfterMutate: () => Promise<void>,
 ) {
   const [retransferringId, setRetransferringId] = useState<string | null>(null);
@@ -44,7 +45,8 @@ function useTransferActions(
       }
       try {
         setRetransferringId(item.id);
-        await retransferLedgerRow(item.id);
+        const res = await retransferLedgerRow(item.id);
+        onItemRetransferred(item, res?.destination);
         await onAfterMutate();
         toast.success(`《${item.media_title || "媒体文件"}》硬链接已重新生成成功`);
       } catch (e) {
@@ -53,7 +55,7 @@ function useTransferActions(
         setRetransferringId(null);
       }
     },
-    [onAfterMutate, toast],
+    [onItemRetransferred, onAfterMutate, toast],
   );
 
   const triggerMetadataRefresh = useCallback(
@@ -133,12 +135,19 @@ export function useTransferController() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const loadMoreErrorRef = useRef(false);
+  const fileItemsRef = useRef<TransferFileItem[]>([]);
+  fileItemsRef.current = fileItems;
+  const groupItemsRef = useRef<TransferGroupItem[]>([]);
+  groupItemsRef.current = groupItems;
   const headAbortRef = useRef<AbortController | null>(null);
   const appendAbortRef = useRef<AbortController | null>(null);
+  const summaryAbortRef = useRef<AbortController | null>(null);
   const toast = useToast();
-  const expansion = useGroupExpansion(modeFilter, debouncedQuery);
+  const expansion = useGroupExpansion(modeFilter, kindFilter, debouncedQuery);
 
   useEffect(() => {
     const trimmed = searchTerm.trim();
@@ -154,8 +163,11 @@ export function useTransferController() {
     async (options: { silent?: boolean } = {}) => {
       headAbortRef.current?.abort();
       appendAbortRef.current?.abort();
+      summaryAbortRef.current?.abort();
       const controller = new AbortController();
       headAbortRef.current = controller;
+      loadMoreErrorRef.current = false;
+      setLoadMoreError(false);
 
       try {
         if (!options.silent) setLoading(true);
@@ -166,10 +178,11 @@ export function useTransferController() {
         );
         if (controller.signal.aborted) return;
 
+        const returnedCount = viewMode === "files" ? page.items.length : page.groups.length;
         setSummary(page.summary);
         setFilteredTotal(page.filtered_total);
         setFilteredFileTotal(page.filtered_file_total);
-        setHasMore(page.has_more);
+        setHasMore(returnedCount > 0 && page.has_more);
         if (viewMode === "files") {
           setFileItems(page.items);
           setNextOffset(page.items.length);
@@ -194,68 +207,142 @@ export function useTransferController() {
     return () => {
       headAbortRef.current?.abort();
       appendAbortRef.current?.abort();
+      summaryAbortRef.current?.abort();
     };
   }, [fetchHeadPage]);
 
-  const loadMore = useCallback(async () => {
-    if (loading || loadingMore || !hasMore) return;
-    appendAbortRef.current?.abort();
-    const controller = new AbortController();
-    appendAbortRef.current = controller;
-    setLoadingMore(true);
+  const loadMoreInternal = useCallback(
+    async (force = false) => {
+      if (loading || loadingMore || !hasMore || (!force && loadMoreErrorRef.current)) return;
+      appendAbortRef.current?.abort();
+      const controller = new AbortController();
+      appendAbortRef.current = controller;
+      setLoadingMore(true);
 
-    try {
-      const page = await listTransfers(
-        { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: nextOffset, limit: PAGE_SIZE },
-        { signal: controller.signal },
-      );
-      if (controller.signal.aborted) return;
+      try {
+        const page = await listTransfers(
+          { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: nextOffset, limit: PAGE_SIZE },
+          { signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
 
-      setSummary(page.summary);
-      setFilteredTotal(page.filtered_total);
-      setFilteredFileTotal(page.filtered_file_total);
-      setHasMore(page.has_more);
-      if (viewMode === "files") {
-        setFileItems((prev) => {
-          const seen = new Set(prev.map((item) => item.id));
-          return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
-        });
-        setNextOffset(page.offset + page.items.length);
-      } else {
-        setGroupItems((prev) => {
-          const seen = new Set(prev.map((item) => item.media_id));
-          return [...prev, ...page.groups.filter((item) => !seen.has(item.media_id))];
-        });
-        setNextOffset(page.offset + page.groups.length);
+        loadMoreErrorRef.current = false;
+        setLoadMoreError(false);
+        setSummary(page.summary);
+        setFilteredTotal(page.filtered_total);
+        setFilteredFileTotal(page.filtered_file_total);
+        const returnedCount = viewMode === "files" ? page.items.length : page.groups.length;
+        setHasMore(returnedCount > 0 && page.has_more);
+        if (viewMode === "files") {
+          if (page.items.length > 0) {
+            setFileItems((prev) => {
+              const seen = new Set(prev.map((item) => item.id));
+              return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
+            });
+            setNextOffset(page.offset + page.items.length);
+          }
+        } else if (page.groups.length > 0) {
+          setGroupItems((prev) => {
+            const seen = new Set(prev.map((item) => item.media_id));
+            return [...prev, ...page.groups.filter((item) => !seen.has(item.media_id))];
+          });
+          setNextOffset(page.offset + page.groups.length);
+        }
+      } catch (e) {
+        if (!isAbortError(e) && !controller.signal.aborted) {
+          loadMoreErrorRef.current = true;
+          setLoadMoreError(true);
+          toast.error("加载下一页失败: " + (e as Error).message);
+        }
+      } finally {
+        if (appendAbortRef.current === controller) setLoadingMore(false);
       }
-    } catch (e) {
-      if (!isAbortError(e) && !controller.signal.aborted) {
-        toast.error("加载下一页失败: " + (e as Error).message);
-      }
-    } finally {
-      if (appendAbortRef.current === controller) setLoadingMore(false);
-    }
-  }, [loading, loadingMore, hasMore, viewMode, debouncedQuery, modeFilter, kindFilter, nextOffset, toast]);
+    },
+    [loading, loadingMore, hasMore, viewMode, debouncedQuery, modeFilter, kindFilter, nextOffset, toast],
+  );
+
+  const loadMore = useCallback(() => loadMoreInternal(false), [loadMoreInternal]);
+
+  const retryLoadMore = useCallback(() => {
+    loadMoreErrorRef.current = false;
+    setLoadMoreError(false);
+    return loadMoreInternal(true);
+  }, [loadMoreInternal]);
 
   const handleItemDeleted = useCallback(
     (target: TransferFileItem) => {
+      const hadFile = fileItemsRef.current.some((item) => item.id === target.id);
       setFileItems((prev) => prev.filter((item) => item.id !== target.id));
       expansion.removeExpandedFile(target.media_id, target.id);
+      const isStrm = target.is_strm || target.transfer_mode === "strm";
+      const targetGroup = groupItemsRef.current.find((g) => g.media_id === target.media_id);
+      const groupWillRemove = Boolean(targetGroup && targetGroup.file_count <= 1);
       setGroupItems((prev) =>
         prev
-          .map((g) => (g.media_id === target.media_id ? { ...g, file_count: Math.max(0, g.file_count - 1) } : g))
+          .map((g) =>
+            g.media_id === target.media_id
+              ? {
+                  ...g,
+                  file_count: Math.max(0, g.file_count - 1),
+                  strm_count: isStrm ? Math.max(0, g.strm_count - 1) : g.strm_count,
+                  hardlink_count:
+                    target.transfer_mode === "hardlink" ? Math.max(0, g.hardlink_count - 1) : g.hardlink_count,
+                  local_size_bytes: !isStrm
+                    ? Math.max(0, g.local_size_bytes - (target.file_size ?? 0))
+                    : g.local_size_bytes,
+                  total_duration_ms: Math.max(0, g.total_duration_ms - (target.duration_ms ?? 0)),
+                }
+              : g,
+          )
           .filter((g) => g.file_count > 0),
       );
+      if (viewMode === "files" && hadFile) {
+        setNextOffset((prev) => Math.max(0, prev - 1));
+      } else if (viewMode === "groups" && groupWillRemove) {
+        setNextOffset((prev) => Math.max(0, prev - 1));
+      }
+      setFilteredFileTotal((prev) => Math.max(0, prev - 1));
+      if (viewMode === "files" || groupWillRemove) {
+        setFilteredTotal((prev) => Math.max(0, prev - 1));
+      }
     },
-    [expansion],
+    [expansion, viewMode],
   );
 
-  const silentRefresh = useCallback(() => fetchHeadPage({ silent: true }), [fetchHeadPage]);
-  const actions = useTransferActions(handleItemDeleted, silentRefresh);
+  const handleItemRetransferred = useCallback((target: TransferFileItem, destination?: string) => {
+    if (!destination || destination === target.path) return;
+    setFileItems((prev) =>
+      prev.map((item) => (item.id === target.id ? { ...item, path: destination } : item)),
+    );
+  }, []);
+
+  const refreshSummaryOnly = useCallback(async () => {
+    summaryAbortRef.current?.abort();
+    const controller = new AbortController();
+    summaryAbortRef.current = controller;
+    try {
+      const page = await listTransfers(
+        { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: 0, limit: 1 },
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted) return;
+      setSummary(page.summary);
+      setFilteredTotal(page.filtered_total);
+      setFilteredFileTotal(page.filtered_file_total);
+      const loadedCount =
+        viewMode === "files" ? fileItemsRef.current.length : groupItemsRef.current.length;
+      setHasMore((prev) => prev && loadedCount < page.filtered_total);
+    } catch {
+      // 摘要后台刷新失败时保留本地乐观状态
+    }
+  }, [viewMode, debouncedQuery, modeFilter, kindFilter]);
+
+  const actions = useTransferActions(handleItemDeleted, handleItemRetransferred, refreshSummaryOnly);
 
   return {
     viewMode,
     searchTerm,
+    debouncedQuery,
     modeFilter,
     kindFilter,
     summary,
@@ -266,6 +353,7 @@ export function useTransferController() {
     hasMore,
     loading,
     loadingMore,
+    loadMoreError,
     error,
     expandedGroups: expansion.expandedGroups,
     ...actions,
@@ -295,6 +383,7 @@ export function useTransferController() {
     },
     refresh: () => fetchHeadPage(),
     loadMore,
+    retryLoadMore,
     toggleGroupExpand: expansion.toggleGroupExpand,
     loadMoreGroupFiles: expansion.loadMoreGroupFiles,
   };

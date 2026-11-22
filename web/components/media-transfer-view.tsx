@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ContentEmptyState } from "@/components/content-empty-state";
 import { FolderSyncIcon, RefreshIcon } from "@/components/icons";
 import { TransferSummaryCards } from "@/components/transfers/transfer-summary-cards";
@@ -14,16 +14,26 @@ import { useTransferController } from "@/components/transfers/use-transfer-contr
 export function MediaTransferView() {
   const ctl = useTransferController();
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
+  const scrollElementRef = useRef<HTMLDivElement | null>(null);
+  const hasMountedRef = useRef(false);
+  const attachScrollElement = useCallback((node: HTMLDivElement | null) => {
+    scrollElementRef.current = node;
+    setScrollElement(node);
+  }, []);
   const activeListCount =
     ctl.viewMode === "files" ? ctl.fileItems.length : ctl.groupItems.length;
 
   useEffect(() => {
-    scrollElement?.scrollTo?.({ top: 0 });
-  }, [scrollElement, ctl.viewMode, ctl.modeFilter, ctl.kindFilter]);
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+    scrollElementRef.current?.scrollTo?.({ top: 0 });
+  }, [ctl.viewMode, ctl.modeFilter, ctl.kindFilter, ctl.debouncedQuery]);
 
   return (
     <div
-      ref={setScrollElement}
+      ref={attachScrollElement}
       data-scroll-root
       className="scroll-thin scroll-safe h-full flex-1 overflow-y-auto pb-10"
     >
@@ -100,7 +110,9 @@ export function MediaTransferView() {
           overscan={8}
           hasMore={ctl.hasMore}
           loadingMore={ctl.loadingMore}
+          autoLoadBlocked={ctl.loadMoreError}
           onLoadMore={() => void ctl.loadMore()}
+          onRetryLoadMore={() => void ctl.retryLoadMore()}
           renderItem={(item) => (
             <TransferFileCard
               item={item}
@@ -129,7 +141,9 @@ export function MediaTransferView() {
           overscan={8}
           hasMore={ctl.hasMore}
           loadingMore={ctl.loadingMore}
+          autoLoadBlocked={ctl.loadMoreError}
           onLoadMore={() => void ctl.loadMore()}
+          onRetryLoadMore={() => void ctl.retryLoadMore()}
           renderItem={(group) => (
             <TransferGroupCard
               group={group}

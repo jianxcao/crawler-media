@@ -80,42 +80,60 @@ pub(crate) async fn season_detail(
     }
 }
 
-fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value> {
-    let canonical_id = media
-        .tmdb_id
-        .as_deref()
-        .and_then(|id| {
-            store
-                .get_media_by_alias_kind("tmdb", id, Some(media.kind))
-                .ok()
-                .flatten()
-        })
-        .map(|m| m.id)
-        .unwrap_or(media.id);
-    let mut links = Vec::new();
-    for row in store
-        .file_coverage_for_media_batch(&[canonical_id, media.id])
-        .unwrap_or_default()
-    {
-        {
-            if let Some(owner) = store
-                .get_media(row.file.media_id)
-                .ok()
-                .flatten()
-                .and_then(|m| crate::http::library::library_for_file(store, &row.file, &m))
-                && !links
+fn find_library_links(
+    state: &ApiState,
+    viewer: Option<domain::UserId>,
+    media: &domain::Media,
+) -> Vec<Value> {
+    crate::http::store_wait::with_store_read(
+        state,
+        &[store::Db::Library, store::Db::App],
+        |store| -> Option<Vec<Value>> {
+            let visible = crate::visible_scope::VisibleLibraries::load(store, viewer).ok()?;
+            let canonical_id = media
+                .tmdb_id
+                .as_deref()
+                .and_then(|id| {
+                    store
+                        .get_media_by_alias_kind("tmdb", id, Some(media.kind))
+                        .ok()
+                        .flatten()
+                })
+                .map(|m| m.id)
+                .unwrap_or(media.id);
+            let mut links = Vec::new();
+            for row in store
+                .file_coverage_for_media_batch(&[canonical_id, media.id])
+                .unwrap_or_default()
+            {
+                if row.file.publication != domain::FilePublication::Published
+                    || row.file.presence == domain::FilePresence::Missing
+                {
+                    continue;
+                }
+                let Some(owner) = visible.get(&row.file.library_id) else {
+                    continue;
+                };
+                if !store.library_accepts_work(&owner.id).unwrap_or(false) {
+                    continue;
+                }
+                if !links
                     .iter()
                     .any(|link: &Value| link["library_id"] == owner.id)
-            {
-                links.push(json!({
-                    "library_id": owner.id,
-                    "library_name": owner.name,
-                    "media_item_id": row.file.media_id.to_string(),
-                }));
+                {
+                    links.push(json!({
+                        "library_id": owner.id,
+                        "library_name": owner.name,
+                        "media_item_id": row.file.media_id.to_string(),
+                    }));
+                }
             }
-        }
-    }
-    links
+            Some(links)
+        },
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 fn fetch_tv_seasons(
@@ -284,11 +302,11 @@ fn media_detail_with_douban(
 
     let (posters, backdrops, poster_url, backdrop_url, related) =
         fetch_images_and_related(catalog, media_kind, &tmdb_id);
-    let library_links = find_library_links(&state.store.as_ref(), &media);
+    let library_links = find_library_links(state, viewer, &media);
     let cast = fetch_cast(&meta);
     let released = media.year.map(|y| format!("{y}-01-01")).unwrap_or_default();
     let tv_panorama = (media_kind == domain::MediaKind::Tv)
-        .then(|| panorama::panorama_for_tmdb_tv(state, viewer, &tmdb_id).1);
+        .then(|| panorama::panorama_for_tmdb_tv(state, viewer, &tmdb_id).2);
     let seasons = fetch_tv_seasons(catalog, media_kind, &tmdb_id, tv_panorama.as_ref());
     let meta = meta.unwrap_or_default();
     let brands = detail_brands(&meta);
