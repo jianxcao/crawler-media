@@ -317,7 +317,7 @@ function SearchPalette({
         role="dialog"
         aria-modal="true"
         aria-label="搜索"
-        className="search-palette-panel flex w-full max-w-[600px] flex-col overflow-hidden rounded-2xl border border-white/[0.09] bg-[rgba(21,23,29,0.96)] shadow-[0_24px_80px_rgba(0,0,0,0.55),0_2px_8px_rgba(0,0,0,0.4)] backdrop-blur-2xl max-md:max-h-[calc(100dvh-var(--safe-top)-var(--keyboard-inset)-20px)]"
+        className="search-palette-panel dialog-surface flex w-full max-w-[600px] flex-col overflow-hidden rounded-2xl max-md:max-h-[calc(100dvh-var(--safe-top)-var(--keyboard-inset)-20px)]"
         onKeyDown={handleKeyDown}
       >
         {/* —— 输入行 —— */}

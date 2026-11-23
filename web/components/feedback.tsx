@@ -228,13 +228,13 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
                 key={t.id}
                 type="button"
                 onClick={() => dismiss(t.id)}
-                className="toast-item pointer-events-auto flex max-w-[min(92vw,26rem)] items-start gap-2.5 rounded-xl border border-white/10 bg-[rgba(16,18,26,0.92)] px-4 py-3 text-left shadow-[0_18px_50px_rgba(0,0,0,0.55)] backdrop-blur-2xl"
+                className="toast-item popover-surface pointer-events-auto flex max-w-[min(92vw,26rem)] items-start gap-2.5 rounded-xl px-4 py-3 text-left"
               >
                 <span
                   aria-hidden
                   className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${TONE_DOT[t.tone]}`}
                 />
-                <span className="min-w-0 text-sub leading-6 text-white/90">{t.message}</span>
+                <span className="min-w-0 text-sub leading-6 text-[var(--text)]">{t.message}</span>
                 {t.action && (
                   <span
                     role="button"
@@ -295,8 +295,8 @@ const CANCEL_BTN_CLS =
 
 function confirmButtonCls(tone: ConfirmOptions["tone"]): string {
   return tone === "danger"
-    ? "rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-white transition hover:bg-red-500"
-    : "rounded-lg bg-white/90 px-4 py-2 text-ui font-medium text-black transition hover:bg-white";
+    ? "rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-[#ffffff] transition hover:bg-red-500"
+    : "btn-accent rounded-lg px-4 py-2 text-ui font-medium";
 }
 
 function ConfirmDialog({

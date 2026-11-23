@@ -114,7 +114,7 @@ function FacetDropdown<T extends string | number>({
         </span>
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-2 max-h-[46dvh] w-max max-w-[420px] overflow-y-auto rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.96)] p-3 shadow-2xl backdrop-blur-2xl max-md:max-w-[calc(100vw-2rem)]">
+        <div className="popover-surface absolute left-0 top-full z-30 mt-2 max-h-[46dvh] w-max max-w-[420px] overflow-y-auto rounded-2xl p-3 max-md:max-w-[calc(100vw-2rem)]">
           <div className="flex flex-wrap gap-1.5">
             {options.map((o) => (
               <FacetChip
@@ -187,7 +187,7 @@ function SortDropdown({
         </span>
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-2 w-44 rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.96)] p-1.5 shadow-2xl backdrop-blur-2xl">
+        <div className="popover-surface absolute left-0 top-full z-30 mt-2 w-44 rounded-2xl p-1.5">
           <p className="px-2.5 pb-1 pt-1.5 text-micro text-[var(--text-faint)]">常规</p>
           {SORT_OPTIONS.map(item)}
           {smartOptions.length > 0 && (
@@ -235,7 +235,7 @@ function FilterSheet({
   const okSites = sites.filter((s) => !s.error);
 
   return (
-    <div className="absolute right-0 top-full z-30 mt-2 max-h-[60dvh] w-[480px] max-w-[82vw] overflow-y-auto rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.96)] p-4 shadow-2xl backdrop-blur-2xl">
+    <div className="popover-surface absolute right-0 top-full z-30 mt-2 max-h-[60dvh] w-[480px] max-w-[82vw] overflow-y-auto rounded-2xl p-4">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <p className="text-ui font-medium text-[var(--text)]">筛选结果</p>

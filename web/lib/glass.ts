@@ -64,6 +64,20 @@ export function sidebarGlass(
   },
   themeId?: string,
 ) {
+  if (themeId === "paper") {
+    return {
+      variant: SIDEBAR_GLASS_VARIANT,
+      sampleBackground: 0,
+      settings: {
+        ...SIDEBAR_GLASS,
+        tint: prefs.brightness,
+        depth: prefs.depth,
+        opacity: 0.96 * (1 - prefs.transparency),
+      },
+      hairlineAlpha: 0.085 * (1 - prefs.transparency),
+      fallbackAlpha: prefs.transparency >= 0.99 ? 0 : 1 - prefs.transparency * 0.35,
+    };
+  }
   if (themeId === "liquid") {
     return {
       variant: LIQUID_SIDEBAR_GLASS_VARIANT,

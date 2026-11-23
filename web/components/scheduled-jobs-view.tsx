@@ -294,7 +294,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                           onClick={() => setScheduleSecs(preset.secs)}
                           className={`rounded px-2 py-1 text-xs transition ${
                             scheduleSecs === preset.secs
-                              ? "bg-sky-500 font-medium text-white"
+                              ? "bg-sky-600 font-medium text-[#ffffff]"
                               : "bg-white/10 text-white/70 hover:bg-white/20"
                           }`}
                         >
@@ -313,13 +313,13 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                           const floor = isMaintenanceJob(job) ? 3600 : 5;
                           setScheduleSecs(Math.max(floor, parseInt(e.target.value, 10) || floor));
                         }}
-                        className="w-24 rounded border border-white/20 bg-black/40 px-2 py-1 text-xs text-white"
+                        className="w-24 rounded border border-[var(--line)] bg-[var(--surface-inset)] px-2 py-1 text-xs text-[var(--text)]"
                       />
                       <button
                         type="button"
                         disabled={updatingSchedule}
                         onClick={() => void handleUpdateSchedule(job.id, scheduleSecs)}
-                        className="rounded bg-sky-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-sky-600 disabled:opacity-50"
+                        className="rounded bg-sky-600 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-500 disabled:opacity-50"
                       >
                         {updatingSchedule ? "保存中..." : "保存周期"}
                       </button>
@@ -353,12 +353,12 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                   </>
                 )}
 
-                <div className="mt-4 space-y-1.5 rounded-lg bg-black/20 p-3 font-mono text-xs text-white/80">
+                <div className="code-well mt-4 space-y-1.5 rounded-lg p-3 font-mono text-xs text-white/80">
                   <div className="flex justify-between">
                     <span className="font-sans text-[var(--text-muted)]">下次计划执行:</span>
                     <span
                       className={`font-sans font-bold ${
-                        job.enabled ? "text-sky-400" : "text-white/40"
+                        job.enabled ? "text-[var(--info)]" : "text-[var(--text-faint)]"
                       }`}
                     >
                       {countdownLabel}
@@ -382,8 +382,8 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                     </div>
                   )}
                   {job.last_status === "failed" && job.last_error && (
-                    <div className="mt-2 break-all rounded border border-red-500/20 bg-red-500/10 p-2 font-sans text-red-300">
-                      <div className="font-semibold text-red-400">失败原因:</div>
+                    <div className="mt-2 break-all rounded border border-[var(--danger)]/20 bg-[var(--danger)]/10 p-2 font-sans text-[var(--danger)]">
+                      <div className="font-semibold">失败原因:</div>
                       <div>{job.last_error}</div>
                     </div>
                   )}
@@ -395,7 +395,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                   type="button"
                   onClick={() => void handleRunNow(job)}
                   disabled={isRunning}
-                  className="rounded-lg bg-sky-500/20 px-3.5 py-1.5 text-xs font-semibold text-sky-300 transition hover:bg-sky-500/30 disabled:opacity-50"
+                  className="rounded-lg bg-[var(--info)]/15 px-3.5 py-1.5 text-xs font-semibold text-[var(--info)] transition hover:bg-[var(--info)]/25 disabled:opacity-50"
                 >
                   {isRunning ? "正在执行..." : "立即执行"}
                 </button>

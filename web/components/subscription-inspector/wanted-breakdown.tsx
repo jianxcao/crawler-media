@@ -44,7 +44,7 @@ export function WantedBreakdown({
   const [openWanted, setOpenWanted] = useState<string | null>(null);
   if (wanted.length === 0) {
     return (
-      <p className="rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] p-5 text-sub leading-6 text-[var(--text-muted)] backdrop-blur-xl">
+      <p className="css-glass rounded-2xl p-5 text-sub leading-6 text-[var(--text-muted)]">
         当前没有追踪项。开启「自动续订」后，新集播出会自动加入。
       </p>
     );
@@ -68,7 +68,7 @@ export function WantedBreakdown({
           return (
             <div
               key={season}
-              className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] backdrop-blur-xl"
+              className="css-glass overflow-hidden rounded-2xl"
             >
               {!isMovie && (
                 <div
@@ -212,8 +212,8 @@ function WantedRow({
                     i === lit
                       ? color
                       : m.state === "done"
-                        ? "rgba(255,255,255,.38)"
-                        : "rgba(255,255,255,.14)",
+                        ? "color-mix(in oklab, var(--text) 38%, transparent)"
+                        : "color-mix(in oklab, var(--text) 14%, transparent)",
                   boxShadow:
                     i === lit
                       ? `0 0 5px color-mix(in oklab, ${color} 60%, transparent)`
@@ -332,7 +332,7 @@ function MilestoneChain({ chain, color }: { chain: Milestone[]; color: string })
                 {m.det}
               </span>
               {m.why && (
-                <span className="basis-full text-caption leading-5 text-[#ff8a8a]/90">
+                <span className="basis-full text-caption leading-5 text-[var(--danger)]">
                   {m.why}
                 </span>
               )}

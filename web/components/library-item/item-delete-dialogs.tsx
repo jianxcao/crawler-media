@@ -74,7 +74,7 @@ export function DeleteDialog({
               )}
             </div>
             {result.errors.length > 0 && (
-              <div className="mt-3 space-y-1 text-sub leading-5 text-[#ff9f9f]">
+              <div className="mt-3 space-y-1 text-sub leading-5 text-[var(--danger)]">
                 {result.errors.map((e) => (
                   <p key={e}>{e}</p>
                 ))}
@@ -96,12 +96,12 @@ export function DeleteDialog({
         ) : (
           <>
             <h3 className="flex items-center gap-2 text-title-sm font-semibold text-[var(--text)]">
-              <TrashIcon className="size-4.5 text-[#ff9f9f]" />
+              <TrashIcon className="size-4.5 text-[var(--danger)]" />
               删除「{detail.title}」
             </h3>
             <p className="mt-3 text-ui leading-6 text-white/80">
               这不是「从列表移除」——将把下列目录从磁盘
-              <span className="font-semibold text-[#ff9f9f]">彻底删除</span>
+              <span className="font-semibold text-[var(--danger)]">彻底删除</span>
               ，包括视频文件、NFO、海报、字幕等全部刮削产物，共{" "}
               <span className="tnum font-semibold">{detail.files.length}</span> 个媒体文件。
               此操作不可恢复。
@@ -126,7 +126,7 @@ export function DeleteDialog({
               />
               我已明白：以上目录及其中全部文件将被永久删除，无法恢复。
             </label>
-            {error && <p className="mt-3 text-sub text-[#ff9f9f]">{error}</p>}
+            {error && <p className="mt-3 text-sub text-[var(--danger)]">{error}</p>}
             <div className="mt-5 flex justify-end gap-3">
               <button
                 type="button"
@@ -140,10 +140,10 @@ export function DeleteDialog({
                 type="button"
                 onClick={run}
                 disabled={!confirmed || busy}
-                className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-white transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-[#ffffff] transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {busy && (
-                  <span className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />
                 )}
                 {busy ? "正在删除…" : "彻底删除"}
               </button>
@@ -190,11 +190,11 @@ export function DeleteFileDialog({
     <Modal open onClose={busy ? () => {} : onClose} label="删除单个文件" width="lg">
       <div className="p-6">
         <h3 className="flex items-center gap-2 text-title-sm font-semibold text-[var(--text)]">
-          <TrashIcon className="size-4.5 text-[#ff9f9f]" />
+          <TrashIcon className="size-4.5 text-[var(--danger)]" />
           删除文件「{fileNameOf(file.path)}」
         </h3>
         <p className="mt-3 text-ui leading-6 text-white/80">
-          将从磁盘和媒体库台账中<span className="font-semibold text-[#ff9f9f]">永久删除</span>
+          将从磁盘和媒体库台账中<span className="font-semibold text-[var(--danger)]">永久删除</span>
           下列单个文件，其他版本文件会保留。此操作不可恢复。
         </p>
         <div className="mt-4 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3.5">
@@ -211,7 +211,7 @@ export function DeleteFileDialog({
           />
           我已明白：该文件将被永久删除，无法恢复。
         </label>
-        {error && <p className="mt-3 text-sub text-[#ff9f9f]">{error}</p>}
+        {error && <p className="mt-3 text-sub text-[var(--danger)]">{error}</p>}
         <div className="mt-5 flex justify-end gap-3">
           <button
             type="button"
@@ -225,10 +225,10 @@ export function DeleteFileDialog({
             type="button"
             onClick={() => void run()}
             disabled={!confirmed || busy}
-            className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-white transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-[#ffffff] transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             {busy && (
-              <span className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+              <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />
             )}
             {busy ? "正在删除…" : "删除此文件"}
           </button>

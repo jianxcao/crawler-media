@@ -208,7 +208,7 @@ function DownloadTaskFeedItem({
           type="button"
           onClick={() => onReplace(task)}
           disabled={replacing}
-          className="mt-2 rounded-lg border border-[var(--danger)]/25 bg-[var(--danger)]/[0.07] px-2.5 py-1.5 text-caption font-semibold text-[#fee2e2] transition hover:bg-[var(--danger)]/[0.13] disabled:cursor-wait disabled:opacity-50"
+          className="mt-2 rounded-lg border border-[var(--danger)]/25 bg-[var(--danger)]/[0.07] px-2.5 py-1.5 text-caption font-semibold text-[var(--danger)] transition hover:bg-[var(--danger)]/[0.13] disabled:cursor-wait disabled:opacity-50"
         >
           {replacing ? "正在换种…" : "立即换种"}
         </button>
@@ -249,12 +249,12 @@ export function DownloadTaskGroupCard({
   const isTv = group.kind === "tv";
   const firstSubscription = group.tasks.flatMap((task) => task.subscriptions)[0];
   return (
-    <article className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[rgba(14,16,22,0.52)] backdrop-blur-xl">
+    <article className="card-row-surface overflow-hidden rounded-2xl">
       {/* 影片身份集中在紧凑顶部，种子列表另起整行占满卡片宽度。海报不再
           作为贯穿整组的左栏，长种子名、状态和操作按钮因此有完整横向空间。 */}
       <div className="flex items-center gap-3.5 border-b border-white/[0.07] px-4 py-3 max-md:px-3.5">
         <div className="w-10 shrink-0 max-md:w-9">
-          <div className="aspect-[2/3] overflow-hidden rounded-lg bg-[#141824] ring-1 ring-white/10">
+          <div className="dark-media-surface aspect-[2/3] overflow-hidden rounded-lg bg-[#141824] ring-1 ring-white/10">
             <div className="flex size-full items-center justify-center bg-gradient-to-b from-white/[0.07] to-[#11141c] text-white/25">
               {isTv ? <TvIcon className="size-4" /> : <FilmIcon className="size-4" />}
             </div>
@@ -340,8 +340,8 @@ function DownloadTaskCard({
     <article
       className={
         grouped
-          ? "rounded-xl border border-white/[0.06] bg-black/15 p-3"
-          : "rounded-2xl border border-white/[0.08] bg-[rgba(14,16,22,0.5)] p-4 backdrop-blur-xl max-md:p-3.5"
+          ? "rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-3"
+          : "card-row-surface rounded-2xl p-4 max-md:p-3.5"
       }
     >
       <div className="min-w-0">
@@ -394,7 +394,7 @@ function DownloadTaskCard({
                   type="button"
                   onClick={() => onReplace(task)}
                   disabled={replacing}
-                  className="shrink-0 rounded-lg border border-[var(--danger)]/30 bg-[var(--danger)]/[0.1] px-3 py-1.5 text-caption font-semibold text-[#fee2e2] transition hover:border-[var(--danger)]/45 hover:bg-[var(--danger)]/[0.16] disabled:cursor-wait disabled:opacity-55"
+                  className="shrink-0 rounded-lg border border-[var(--danger)]/30 bg-[var(--danger)]/[0.1] px-3 py-1.5 text-caption font-semibold text-[var(--danger)] transition hover:border-[var(--danger)]/45 hover:bg-[var(--danger)]/[0.16] disabled:cursor-wait disabled:opacity-55"
                 >
                   {replacing ? "正在换种…" : "立即换种"}
                 </button>

@@ -49,3 +49,17 @@ test("sidebarGlass：液态玻璃启用曲面光学折射参数，银玻璃保�
   assert.ok(liquid.settings.chromaticAberration > silver.settings.chromaticAberration);
   assert.ok(liquid.settings.specular > silver.settings.specular);
 });
+
+test("sidebarGlass：纸感玻璃默认保持约 83% 清透白瓷，拉满全透时无残留描边与兜底", () => {
+  const defaultPaper = sidebarGlass({ transparency: 0.49, brightness: 0, depth: 32 }, "paper");
+  assert.equal(defaultPaper.variant, "frosted");
+  assert.equal(defaultPaper.sampleBackground, 0);
+  assert.ok(Math.abs(defaultPaper.fallbackAlpha - (1 - 0.49 * 0.35)) < 1e-6);
+  assert.ok(Math.abs(defaultPaper.hairlineAlpha - 0.085 * (1 - 0.49)) < 1e-6);
+  assert.ok(Math.abs(defaultPaper.settings.opacity - 0.96 * (1 - 0.49)) < 1e-6);
+
+  const fullTransparent = sidebarGlass({ transparency: 1, brightness: 0, depth: 32 }, "paper");
+  assert.equal(fullTransparent.fallbackAlpha, 0);
+  assert.equal(fullTransparent.hairlineAlpha, 0);
+  assert.equal(fullTransparent.settings.opacity, 0);
+});

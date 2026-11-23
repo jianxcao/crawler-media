@@ -45,7 +45,7 @@ export const TorrentRow = memo(function TorrentRow({
   const snatched = hit.snatched ?? 0;
 
   return (
-    <li className="group relative rounded-2xl border border-white/[0.06] bg-[rgba(16,18,25,0.82)] px-4 py-3.5 transition-all [contain-intrinsic-size:auto_72px] [content-visibility:auto] hover:-translate-y-px hover:border-white/[0.13] hover:bg-[rgba(22,25,33,0.9)] hover:shadow-[0_12px_30px_-18px_rgba(0,0,0,0.8)]">
+    <li className="card-row-surface card-row-surface--interactive group relative rounded-2xl px-4 py-3.5 transition-all [contain-intrinsic-size:auto_72px] [content-visibility:auto] hover:-translate-y-px">
       {(hit.detail_url || hit.enclosure) && (
         <button
           type="button"
@@ -108,7 +108,7 @@ export const TorrentRow = memo(function TorrentRow({
         </div>
 
         {(hit.detail_url || hit.enclosure) && (
-          <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center gap-1.5 rounded-r-2xl bg-gradient-to-l from-[rgba(20,23,31,0.98)] from-65% to-transparent pl-16 pr-2 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:hidden [@media(hover:none)]:hidden">
+          <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center gap-1.5 rounded-r-2xl bg-gradient-to-l from-[var(--row-fade-bg)] via-[var(--row-fade-bg)] via-65% to-transparent pl-16 pr-2 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:hidden [@media(hover:none)]:hidden">
             {hit.detail_url && (
               <a
                 href={hit.detail_url}
@@ -121,7 +121,7 @@ export const TorrentRow = memo(function TorrentRow({
             )}
             <GrabButton
               hit={hit}
-              className="flex h-7 items-center rounded-full border border-[#6aa7ff]/50 bg-[#6aa7ff]/20 px-3 text-caption font-medium text-[#b9d4ff] transition-colors hover:bg-[#6aa7ff]/35"
+              className="flex h-7 items-center rounded-full border border-[var(--info)]/40 bg-[var(--info)]/15 px-3 text-caption font-medium text-[var(--info)] transition-colors hover:bg-[var(--info)]/25"
             />
             <DownloadButton
               hit={hit}

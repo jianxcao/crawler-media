@@ -28,7 +28,9 @@ const guardedCanvases = new WeakSet<HTMLCanvasElement>();
 export class LiquidGlassRenderer {
   private gl: WebGLRenderingContext;
   private uniforms: Uniforms = {};
-  private texture!: WebGLTexture;
+  private program: WebGLProgram | null = null;
+  private quad: WebGLBuffer | null = null;
+  private texture: WebGLTexture | null = null;
   private image: HTMLImageElement;
   private imageAbort: AbortController | null = null;
   private video: HTMLVideoElement | null = null;
@@ -60,7 +62,7 @@ private sampleBackground = 0;
   private lastScroll = { x: Number.NaN, y: Number.NaN };
   private lastRect = { left: Number.NaN, top: Number.NaN, width: Number.NaN, height: Number.NaN };
   private handleImageLoad = () => {
-    if (this.disposed) return;
+    if (this.disposed || this.gl.isContextLost() || !this.texture) return;
     const { gl } = this;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -148,6 +150,18 @@ private sampleBackground = 0;
   /** 创建全部 GL 资源。构造时调用一次；上下文丢失后恢复时会再次调用重建。 */
   private initGL() {
     const { gl } = this;
+    if (this.texture) {
+      gl.deleteTexture(this.texture);
+      this.texture = null;
+    }
+    if (this.quad) {
+      gl.deleteBuffer(this.quad);
+      this.quad = null;
+    }
+    if (this.program) {
+      gl.deleteProgram(this.program);
+      this.program = null;
+    }
     // 趁上下文健康缓存 WEBGL_lose_context（丢失态下 getExtension 只会返回 null）
     if (!loseContextExt.has(gl)) {
       loseContextExt.set(gl, gl.getExtension("WEBGL_lose_context"));
@@ -160,6 +174,7 @@ private sampleBackground = 0;
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
         const stage = type === gl.VERTEX_SHADER ? "vertex" : "fragment";
         const details = gl.getShaderInfoLog(shader)?.trim();
+        gl.deleteShader(shader);
         throw new Error(
           details || `Liquid Glass ${stage} shader compilation failed (context lost: ${gl.isContextLost()}).`
         );
@@ -168,12 +183,29 @@ private sampleBackground = 0;
     };
     const program = gl.createProgram();
     if (!program) throw new Error("Unable to create WebGL program.");
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexShader));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentShader));
+    const vs = compile(gl.VERTEX_SHADER, vertexShader);
+    let fs: WebGLShader;
+    try {
+      fs = compile(gl.FRAGMENT_SHADER, fragmentShader);
+    } catch (err) {
+      gl.deleteShader(vs);
+      gl.deleteProgram(program);
+      throw err;
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) ?? "Shader link failed.");
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const info = gl.getProgramInfoLog(program) ?? "Shader link failed.";
+      gl.deleteProgram(program);
+      throw new Error(info);
+    }
+    this.program = program;
     gl.useProgram(program);
     const quad = gl.createBuffer();
+    this.quad = quad;
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
     const position = gl.getAttribLocation(program, "a_pos");
@@ -339,7 +371,18 @@ private sampleBackground = 0;
     this.video?.removeEventListener("loadeddata", this.handleVideoReady);
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
     this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
-    this.gl.deleteTexture(this.texture);
+    if (this.texture) {
+      this.gl.deleteTexture(this.texture);
+      this.texture = null;
+    }
+    if (this.quad) {
+      this.gl.deleteBuffer(this.quad);
+      this.quad = null;
+    }
+    if (this.program) {
+      this.gl.deleteProgram(this.program);
+      this.program = null;
+    }
     this.gl.clearColor(0, 0, 0, 0);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     // 本项目改动：主动归还上下文名额。浏览器对每页活跃 WebGL 上下文数量有硬上限
@@ -375,7 +418,7 @@ private sampleBackground = 0;
   }
   draw() {
     // 上下文丢失期间 GL 调用全是无效操作，直接跳过，等 restored 回调重建后再画
-    if (!this.ready || this.gl.isContextLost()) return;
+    if (!this.ready || this.gl.isContextLost() || !this.texture) return;
     const { gl, canvas, settings: s } = this;
     const source = this.video ?? this.image;
     if (this.video) {

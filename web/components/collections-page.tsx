@@ -125,7 +125,7 @@ export function CollectionsPage() {
                 type="button"
                 onClick={() => void remove(collection)}
                 aria-label={`删除 ${collection.name}`}
-                className="absolute right-2 top-2 hidden rounded-full bg-black/50 px-2 py-0.5 text-caption text-white/70 backdrop-blur transition group-hover:block hover:text-white"
+                className="dark-media-surface absolute right-2 top-2 hidden rounded-full bg-black/50 px-2 py-0.5 text-caption text-white/70 backdrop-blur transition group-hover:block hover:text-white"
               >
                 删除
               </button>

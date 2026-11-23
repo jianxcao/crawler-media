@@ -110,7 +110,7 @@ export function Tooltip({
           >
             <div
               style={transitionStyles}
-              className="select-text rounded-xl border border-white/[0.12] bg-[rgba(16,18,26,0.97)] px-3.5 py-2.5 text-sub leading-relaxed text-[var(--text)] shadow-2xl backdrop-blur-2xl"
+              className="select-text rounded-xl border border-[var(--tooltip-stroke)] bg-[var(--tooltip-bg)] px-3.5 py-2.5 text-sub leading-relaxed text-[var(--text)] shadow-2xl backdrop-blur-2xl"
             >
               <FloatingArrow
                 ref={arrowRef}
@@ -118,9 +118,9 @@ export function Tooltip({
                 width={12}
                 height={6}
                 tipRadius={2}
-                fill="rgba(16,18,26,0.97)"
+                fill="var(--tooltip-bg)"
                 strokeWidth={1}
-                stroke="rgba(243,245,249,0.12)"
+                stroke="var(--tooltip-stroke)"
               />
               {content}
             </div>

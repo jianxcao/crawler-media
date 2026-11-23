@@ -176,10 +176,10 @@ export function Modal({
         type="button"
         aria-label="关闭"
         onClick={onClose}
-        className="absolute inset-0 cursor-default bg-black/60 backdrop-blur-sm"
+        className="modal-scrim absolute inset-0 cursor-default"
       />
       <div
-        className={`relative flex w-full flex-col ${WIDTH_CLS[width]} ${defaultMaxH} overflow-hidden rounded-2xl border border-white/10 bg-[rgba(16,18,26,0.92)] shadow-[0_32px_90px_rgba(0,0,0,0.7)] backdrop-blur-2xl max-md:!max-h-full max-md:!max-w-none max-md:rounded-b-none max-md:border-x-0 max-md:border-b-0 max-md:pb-[calc(var(--safe-bottom)+var(--vp-overshoot))] ${panelClassName}`}
+        className={`dialog-surface relative flex w-full flex-col ${WIDTH_CLS[width]} ${defaultMaxH} overflow-hidden rounded-2xl max-md:!max-h-full max-md:!max-w-none max-md:rounded-b-none max-md:!border-x-0 max-md:!border-b-0 max-md:pb-[calc(var(--safe-bottom)+var(--vp-overshoot))] ${panelClassName}`}
       >
         <div className={SCROLL_CLS}>{children}</div>
       </div>

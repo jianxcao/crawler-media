@@ -81,12 +81,12 @@ export function DiscoveryFilterControl({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="btn-glass relative flex size-11 shrink-0 items-center justify-center rounded-full text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:text-[var(--text)]"
+          className="btn-glass relative size-11 shrink-0 rounded-full text-sub font-semibold backdrop-blur-xl"
           aria-label={activeCount > 0 ? `筛选，已启用 ${activeCount} 项` : "筛选影片"}
         >
           <FilterIcon className="size-[18px]" />
           {activeCount > 0 && (
-            <span className="tnum absolute -right-1 -top-1 flex size-[18px] items-center justify-center rounded-full bg-[var(--accent)] text-micro font-bold text-black">
+            <span className="tnum absolute -right-1 -top-1 flex size-[18px] items-center justify-center rounded-full bg-[var(--accent)] text-micro font-bold text-[var(--accent-ink)]">
               {activeCount}
             </span>
           )}
@@ -95,12 +95,12 @@ export function DiscoveryFilterControl({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="btn-glass relative flex h-9 shrink-0 items-center rounded-full px-4 text-sub font-semibold text-[var(--text-muted)] backdrop-blur-xl transition hover:text-[var(--text)]"
+          className="btn-glass relative h-9 shrink-0 rounded-full px-4 text-sub font-semibold backdrop-blur-xl"
           aria-label={activeCount > 0 ? `筛选，已启用 ${activeCount} 项` : "筛选影片"}
         >
           筛选
           {activeCount > 0 && (
-            <span className="tnum ml-2 flex size-5 items-center justify-center rounded-full bg-[var(--accent)] text-micro font-bold text-black">
+            <span className="tnum ml-2 flex size-5 items-center justify-center rounded-full bg-[var(--accent)] text-micro font-bold text-[var(--accent-ink)]">
               {activeCount}
             </span>
           )}
@@ -148,7 +148,7 @@ export function DiscoveryFilterControl({
                       className={`rounded-full border px-3 py-1.5 text-sub font-semibold transition ${
                         selected
                           ? "border-white/25 bg-white/15 text-white"
-                          : "border-white/[0.07] bg-black/20 text-[var(--text-muted)] hover:text-white"
+                          : "border-white/[0.07] bg-[var(--glass-fill)] text-[var(--text-muted)] hover:text-white"
                       }`}
                     >
                       {genre.name}

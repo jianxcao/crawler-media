@@ -218,7 +218,7 @@ export function ArtworkPickerDialog({
                 type="button"
                 disabled={applying !== null}
                 onClick={() => void apply(c.file_path)}
-                className={`group relative overflow-hidden rounded-lg ring-1 transition disabled:opacity-60 ${
+                className={`dark-media-surface group relative overflow-hidden rounded-lg ring-1 transition disabled:opacity-60 ${
                   c.file_path === current
                     ? "ring-2 ring-[var(--accent-2)]"
                     : "ring-white/10 hover:ring-[var(--accent-2)]"
@@ -233,7 +233,7 @@ export function ArtworkPickerDialog({
                 />
                 {/* 标出正在用的那张，消除"我现在用的是哪张"的疑问 */}
                 {c.file_path === current && (
-                  <span className="absolute left-1.5 top-1.5 rounded bg-[var(--accent-2)] px-1.5 py-0.5 text-micro font-semibold text-black/85">
+                  <span className="absolute left-1.5 top-1.5 rounded bg-[var(--accent-2)] px-1.5 py-0.5 text-micro font-semibold text-[var(--accent-ink)]">
                     当前
                   </span>
                 )}

@@ -28,7 +28,7 @@ export function SearchRoundBar({
     .sort()[0];
 
   return (
-    <div className="rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] backdrop-blur-xl">
+    <div className="css-glass rounded-2xl">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
         <span
           className="size-1.5 shrink-0 rounded-full bg-[var(--info)]"
@@ -60,7 +60,7 @@ export function ActivityLogSection({ activities }: { activities: SubscriptionAct
   const [open, setOpen] = useState(false);
   if (activities.length === 0) return null;
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] backdrop-blur-xl">
+    <div className="css-glass overflow-hidden rounded-2xl">
       <button
         type="button"
         aria-expanded={open}
@@ -96,7 +96,7 @@ function ActivityTimeline({
 }) {
   if (activities.length === 0) {
     return (
-      <p className="rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] p-5 text-sub leading-6 text-[var(--text-muted)] backdrop-blur-xl">
+      <p className="css-glass rounded-2xl p-5 text-sub leading-6 text-[var(--text-muted)]">
         暂无活动记录。系统开始搜索、匹配或投递后，每个动作都会记录在这里。
       </p>
     );
@@ -106,7 +106,7 @@ function ActivityTimeline({
       className={
         bare
           ? "px-6 py-5 max-md:px-4"
-          : "rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] px-6 py-5 backdrop-blur-xl"
+          : "css-glass rounded-2xl px-6 py-5"
       }
     >
       <ol>

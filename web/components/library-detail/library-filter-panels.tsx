@@ -38,7 +38,7 @@ export function ConditionRow({
           {/* 维度之间是「且」——语义画出来，不写在脚注里 */}
           {index > 0 && <span className="text-caption tracking-wide text-white/30">且</span>}
           <span className="glass-row flex h-7 !w-auto items-center gap-1.5 rounded-lg !bg-[var(--glass-fill-active)] !px-2 py-0">
-            <span className="rounded bg-black/25 px-1.5 py-0.5 text-caption text-white/40">
+            <span className="rounded bg-[var(--glass-fill)] px-1.5 py-0.5 text-caption text-[var(--text-faint)]">
               {group.label}
             </span>
             {group.values.map((value, i) => {
@@ -161,13 +161,13 @@ export function MoreFiltersPanel({
 
   if (loading) {
     return (
-      <div className="mt-2.5 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-6 text-center text-sub text-[var(--text-faint)] max-md:mt-0 max-md:rounded-none max-md:border-x-0 max-md:border-b-0 max-md:border-white/[0.08] max-md:bg-transparent max-md:px-0 max-md:py-4">
+      <div className="mt-2.5 rounded-2xl border border-white/[0.1] bg-[var(--glass-fill)] px-4 py-6 text-center text-sub text-[var(--text-faint)] max-md:mt-0 max-md:rounded-none max-md:border-x-0 max-md:border-b-0 max-md:border-white/[0.08] max-md:bg-transparent max-md:px-0 max-md:py-4">
         正在数各档位还剩多少部…
       </div>
     );
   }
   return (
-    <div className="mt-2.5 grid grid-cols-2 gap-x-6 rounded-2xl border border-white/[0.1] bg-black/20 p-4 max-md:mt-0 max-md:grid-cols-1 max-md:rounded-none max-md:border-0 max-md:bg-transparent max-md:p-0">
+    <div className="mt-2.5 grid grid-cols-2 gap-x-6 rounded-2xl border border-white/[0.1] bg-[var(--glass-fill)] p-4 max-md:mt-0 max-md:grid-cols-1 max-md:rounded-none max-md:border-0 max-md:bg-transparent max-md:p-0">
       <div className="max-md:border-t max-md:border-white/[0.08] max-md:pt-3">
         <p className="mb-3 border-b border-white/[0.08] pb-2 text-sub font-semibold text-white max-md:mb-2.5 max-md:border-b-0 max-md:pb-0">
           找片
@@ -276,7 +276,7 @@ export function FilterSheet({
         className="flex-1 cursor-default bg-black/25"
       />
       {/* 装下一二级全部维度，比原先只装二级时高一些，但仍给上方留出一截墙 */}
-      <div className="flex max-h-[70dvh] flex-col rounded-t-2xl border-t border-white/10 bg-[rgba(16,18,26,0.92)] shadow-[0_-12px_40px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
+      <div className="popover-surface flex max-h-[70dvh] flex-col rounded-t-2xl !border-x-0 !border-b-0">
         <div className="flex shrink-0 items-center justify-center py-2">
           <span className="h-1 w-9 rounded-full bg-white/25" />
         </div>

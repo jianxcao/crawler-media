@@ -94,7 +94,7 @@ export function PreferredSitesField({
           );
         })}
         <select
-          className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-white"
+          className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-2 text-[var(--text)]"
           value=""
           onChange={(event) => {
             const value = event.target.value;

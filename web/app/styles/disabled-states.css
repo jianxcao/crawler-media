@@ -6,7 +6,7 @@ textarea:disabled,
 [aria-disabled="true"] {
   color: var(--text-faint);
 }
-button:disabled:not(:has(img)) {
+:is(.btn-accent, .btn-glass, button.text-black):disabled:not(:has(img)) {
   opacity: 1;
 }
 button.text-black:disabled {
@@ -17,8 +17,17 @@ html[data-theme="paper"] button.text-black:disabled {
   background: rgba(32, 42, 58, 0.06);
   box-shadow: inset 0 0 0 1px var(--line);
 }
-button:disabled :not(svg),
-[aria-disabled="true"] :not(svg) {
+html[data-theme="liquid"] button.text-black:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-faint);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  filter: none;
+  transform: none;
+  opacity: 1;
+  cursor: not-allowed;
+}
+button:disabled *,
+[aria-disabled="true"] * {
   color: var(--text-faint);
 }
 
@@ -34,7 +43,7 @@ html[data-theme="netflix"] button.text-black:disabled {
   opacity: 1;
   cursor: not-allowed;
 }
-html[data-theme="netflix"] button:disabled :not(svg),
-html[data-theme="netflix"] [aria-disabled="true"] :not(svg) {
+html[data-theme="netflix"] button:disabled *,
+html[data-theme="netflix"] [aria-disabled="true"] * {
   color: var(--text-faint);
 }

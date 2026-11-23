@@ -142,7 +142,7 @@ export function TransferModeCard() {
             type="button"
             disabled={!settings || busyMode || busyIntake}
             onClick={() => void handleSaveIntake(intakePath)}
-            className="inline-flex h-9 shrink-0 items-center rounded-lg bg-[var(--accent)] px-3.5 text-ui font-medium text-black transition hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
+            className="btn-accent inline-flex h-9 shrink-0 items-center rounded-lg px-3.5 text-ui font-medium active:scale-[0.98] disabled:opacity-50"
           >
             保存
           </button>

@@ -176,7 +176,7 @@ export function FilteredDiscoveryView({
         <div className="py-24 text-center text-body text-[var(--text-muted)]">没有符合条件的影片</div>
       )}
       {error && (
-        <div className="mt-12 rounded-2xl border border-white/10 bg-black/25 p-8 text-center">
+        <div className="css-glass mt-12 rounded-2xl p-8 text-center">
           <p className="text-body text-[var(--text-muted)]">{error}</p>
           <button type="button" onClick={() => void loadPage(nextPage)} className="btn-accent mt-4 h-9 rounded-full px-5 text-ui font-semibold">
             重试

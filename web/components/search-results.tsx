@@ -341,14 +341,14 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       <DownloadTargetPrefContext.Provider value={downloadTargetPrefs}>
         <div className="relative flex h-full flex-col">
           {grabTarget && (
-            <div className="mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-[#6aa7ff]/30 bg-[#6aa7ff]/12 px-4 py-2.5 text-sub text-[#b9d4ff] backdrop-blur-sm max-md:mx-4">
+            <div className="mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-[var(--info)]/30 bg-[var(--info)]/10 px-4 py-2.5 text-sub text-[var(--info)] backdrop-blur-sm max-md:mx-4">
               <span className="min-w-0">
                 正在为《{grabTarget.title}》手动选种——点资源上的「投给订阅」直接下载并计入该订阅
                 （跳过规则组限制）
               </span>
               <Link
                 to={`/subscriptions/${grabTarget.id}`}
-                className="ml-auto shrink-0 font-medium text-white/85 hover:underline"
+                className="ml-auto shrink-0 font-medium text-[var(--text)] hover:underline"
               >
                 返回订阅 ›
               </Link>
@@ -360,18 +360,18 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
                 {query.keyword ? `“${query.keyword}”` : "最新资源"}
               </h1>
               {query.scope.label && (
-                <span className="rounded-full bg-black/30 px-2.5 py-0.5 text-caption text-[var(--accent)] backdrop-blur-sm">
+                <span className="rounded-full border border-[var(--line)] bg-[var(--accent-soft)] px-2.5 py-0.5 text-caption text-[var(--accent)]">
                   {query.scope.label}
                 </span>
               )}
               {phase === "streaming" && (
-                <span className="text-on-image flex items-center gap-1.5 text-sub text-[rgba(243,245,249,0.75)]">
+                <span className="text-on-image flex items-center gap-1.5 text-sub text-[var(--text-muted)]">
                   <span className="size-1.5 animate-pulse rounded-full bg-[var(--accent)]" />
                   已找到 {items.length} 条
                 </span>
               )}
               {phase === "done" && (
-                <span className="text-on-image text-sub text-[rgba(243,245,249,0.75)]">
+                <span className="text-on-image text-sub text-[var(--text-muted)]">
                   {filtering
                     ? `筛选后 ${filtered.length} / 共 ${items.length} 条`
                     : `共 ${items.length} 条结果`}
@@ -394,7 +394,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
               </div>
             </div>
             {phase === "done" && siteProgress.length === 0 && !snapshotAt && (
-              <p className="text-on-image mt-2 text-sub text-[rgba(243,245,249,0.7)]">
+              <p className="text-on-image mt-2 text-sub text-[var(--text-muted)]">
                 当前没有「已启用且验证通过」的站点，请先在设置里配置站点。
               </p>
             )}

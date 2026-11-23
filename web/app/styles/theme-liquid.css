@@ -22,8 +22,13 @@ html[data-theme="liquid"] {
   --accent: #7dd3fc;
   --accent-strong: #f0f9ff;
   --accent-2: #bae6fd;
+  --accent-ink: #071426;
   --accent-soft: rgba(125, 211, 252, 0.16);
   --accent-ring: rgba(125, 211, 252, 0.62);
+
+  --tooltip-bg: rgba(10, 23, 44, 0.96);
+  --tooltip-stroke: rgba(186, 230, 253, 0.2);
+  --row-fade-bg: rgba(10, 24, 46, 0.96);
 
   --glass-fill: rgba(186, 230, 253, 0.06);
   --glass-fill-hover: rgba(186, 230, 253, 0.12);
@@ -85,6 +90,23 @@ html[data-theme="liquid"] .detail-ambient {
     background: #06101f;
   }
 }
+html[data-theme="liquid"] .detail-mobile-hero-fade {
+  background: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0) 0%,
+    rgba(6, 16, 31, 0.58) 52%,
+    #06101f 100%
+  );
+}
+
+html[data-theme="liquid"] .mobile-topbar {
+  background: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0.88) 0%,
+    rgba(6, 16, 31, 0.6) 58%,
+    rgba(6, 16, 31, 0) 100%
+  );
+}
 
 html[data-theme="liquid"] .panel--sidebar {
   background: rgb(8 20 38 / calc(0.58 * var(--glass-fallback, 1)));
@@ -142,6 +164,72 @@ html[data-theme="liquid"] .notice-surface {
   backdrop-filter: blur(30px) saturate(1.8);
 }
 
+html[data-theme="liquid"] .dialog-surface,
+html[data-theme="liquid"] .popover-surface,
+html[data-theme="liquid"] .search-palette-panel,
+html[data-theme="liquid"] .toast-item {
+  border-color: rgba(186, 230, 253, 0.2);
+  background: linear-gradient(
+    145deg,
+    rgba(20, 42, 76, 0.9) 0%,
+    rgba(8, 20, 40, 0.94) 100%
+  );
+  box-shadow:
+    0 26px 72px rgba(2, 8, 22, 0.68),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.36),
+    inset 0 -1px 0.5px rgba(125, 211, 252, 0.16);
+  backdrop-filter: blur(34px) saturate(1.85);
+}
+
+html[data-theme="liquid"] .card-row-surface {
+  border-color: rgba(186, 230, 253, 0.15);
+  background: linear-gradient(
+    135deg,
+    rgba(18, 38, 68, 0.62) 0%,
+    rgba(9, 21, 41, 0.72) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.22),
+    0 12px 28px -12px rgba(2, 8, 22, 0.45);
+}
+html[data-theme="liquid"] .card-row-surface--interactive:hover {
+  border-color: rgba(186, 230, 253, 0.28);
+  background: linear-gradient(
+    135deg,
+    rgba(24, 50, 88, 0.72) 0%,
+    rgba(12, 27, 52, 0.82) 100%
+  );
+}
+
+html[data-theme="liquid"] .sub-hero-card {
+  background: #081529;
+  border-color: rgba(186, 230, 253, 0.18);
+  box-shadow:
+    0 24px 68px -16px rgba(2, 8, 22, 0.65),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.28);
+}
+html[data-theme="liquid"] .sub-hero-tint {
+  background: linear-gradient(
+    90deg,
+    rgba(6, 16, 31, 0.96) 0%,
+    rgba(8, 20, 40, 0.88) 54%,
+    rgba(12, 28, 54, 0.8) 100%
+  );
+}
+
+html[data-theme="liquid"] .page-nav-btn {
+  border-color: rgba(186, 230, 253, 0.22);
+  background: rgba(8, 20, 40, 0.56);
+  color: rgba(244, 249, 255, 0.92);
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(16px) saturate(1.6);
+}
+html[data-theme="liquid"] .page-nav-btn:hover {
+  border-color: rgba(224, 242, 254, 0.36);
+  background: rgba(14, 32, 60, 0.74);
+  color: #ffffff;
+}
+
 html[data-theme="liquid"] .arrival-calendar-surface {
   border-color: rgba(186, 230, 253, 0.2);
   background: linear-gradient(
@@ -188,6 +276,12 @@ html[data-theme="liquid"] .segmented-glass__item[aria-pressed="true"] {
   box-shadow:
     inset 0 1px 0.5px rgba(255, 255, 255, 0.48),
     0 4px 12px -2px rgba(8, 145, 178, 0.28);
+}
+
+html[data-theme="liquid"] select option,
+html[data-theme="liquid"] select optgroup {
+  background-color: #0b182e;
+  color: var(--text);
 }
 
 html[data-theme="liquid"] .code-well {

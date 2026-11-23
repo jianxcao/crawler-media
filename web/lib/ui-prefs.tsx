@@ -6,7 +6,9 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import {
@@ -67,9 +69,13 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
   // 惰性初始化读缓存：本 Provider 只在 AuthGate 确认登录后于客户端渲染
   // （见 components/app-shell.tsx），不参与 SSR，故可直接读 localStorage。
   // 无缓存（或缓存被写坏）时用内置默认，与首次安装的观感一致。
-  const [prefs, setPrefs] = useState<UiPreferences>(
+  const [initialPrefs] = useState<UiPreferences>(
     () => readUiPrefsCache() ?? DEFAULT_UI_PREFS,
   );
+  const [prefs, setPrefs] = useState<UiPreferences>(initialPrefs);
+  const committedPrefsRef = useRef<UiPreferences>(initialPrefs);
+  const saveSeqRef = useRef(0);
+  const committedSeqRef = useRef(0);
   const [preview, setPreview] = useState<UiPreferences | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -77,8 +83,9 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     fetchUiPreferences()
       .then((data) => {
-        if (cancelled) return;
+        if (cancelled || saveSeqRef.current > 0) return;
         const normalized = normalizeUiPrefs(data);
+        committedPrefsRef.current = normalized;
         setPrefs(normalized);
         // 服务端值即下次启动的首帧值
         writeUiPrefsCache(normalized);
@@ -106,17 +113,15 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
   // 主题同步：把生效主题（含设置页的预览草稿——点主题卡实时预览就靠它）写到
   // <html> 的 data-theme 属性上。token 层与圆角换档都挂在这个作用域，属性一改
   // 全站换肤；结构层（外壳分支）由 useTheme() 的消费方跟随同一份值渲染。
-  // 默认主题移除属性而不是写 data-theme="silver"，与防闪烁脚本（只认 netflix）
-  // 的落点保持一致，SSR 首屏也无需任何属性。
+  // 默认主题移除属性而不是写 data-theme="silver"，与 index.html 首帧防闪烁脚本
+  // （对 paper / liquid / netflix 写入 data-theme）的落点保持一致。
   const effectiveTheme = normalizeThemeId((preview ?? prefs).theme);
   useEffect(() => {
     const root = document.documentElement;
     if (effectiveTheme === DEFAULT_THEME_ID) root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", effectiveTheme);
     // 浏览器 UI 框颜色与画布同源跟随（含设置页实时预览切主题的瞬间）。
-    // Next 的路由元数据机制可能在客户端导航时把 viewport 导出的静态
-    // themeColor（银玻璃值）写回 meta——用观察器持续断言当前主题的画布色，
-    // 无论被谁改写都拉回，避免主题与浏览器框颜色脱节。
+    // 用观察器持续断言当前主题的画布色，无论被谁改写都拉回，避免主题与浏览器框颜色脱节。
     const desired =
       THEME_BROWSER_CHROME[effectiveTheme] ?? THEME_BROWSER_CHROME[DEFAULT_THEME_ID];
     const apply = () => {
@@ -132,24 +137,29 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
     return () => observer.disconnect();
   }, [effectiveTheme]);
 
-  const savePrefs = useCallback(
-    async (next: UiPreferences) => {
-      const previous = prefs;
-      // 乐观更新：开关立即生效；保存失败回滚并抛给调用方提示
-      setPrefs(next);
-      try {
-        const saved = await updateUiPreferences(next);
-        setPrefs(saved);
-        writeUiPrefsCache(saved);
-        // 保存成功后草稿使命完成，撤销以免遮住刚落库的新值
-        setPreview(null);
-      } catch (err) {
-        setPrefs(previous);
-        throw err;
+  const savePrefs = useCallback(async (next: UiPreferences) => {
+    const seq = ++saveSeqRef.current;
+    const optimistic = normalizeUiPrefs(next);
+    // 乐观更新：开关立即生效；并发乱序返回由 saveSeqRef 挡住旧响应覆盖新状态
+    setPrefs(optimistic);
+    try {
+      const saved = normalizeUiPrefs(await updateUiPreferences(next));
+      if (seq >= committedSeqRef.current) {
+        committedSeqRef.current = seq;
+        committedPrefsRef.current = saved;
       }
-    },
-    [prefs],
-  );
+      if (seq !== saveSeqRef.current) return;
+      setPrefs(saved);
+      writeUiPrefsCache(saved);
+      // 保存成功后草稿使命完成，撤销以免遮住刚落库的新值
+      setPreview(null);
+    } catch (err) {
+      if (seq === saveSeqRef.current) {
+        setPrefs(committedPrefsRef.current);
+      }
+      throw err;
+    }
+  }, []);
 
   const value = useMemo<UiPrefsContextValue>(
     () => ({ prefs: preview ?? prefs, savedPrefs: prefs, loading, savePrefs, setPreview }),
@@ -157,6 +167,46 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <UiPrefsContext.Provider value={value}>{children}</UiPrefsContext.Provider>;
+}
+
+const NOOP_UNSUBSCRIBE = () => {};
+
+function subscribeDocumentTheme(onStoreChange: () => void): () => void {
+  if (typeof document === "undefined") return NOOP_UNSUBSCRIBE;
+  const observer = new MutationObserver(onStoreChange);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
+  });
+  return () => observer.disconnect();
+}
+
+function getDocumentThemeSnapshot(): string | null {
+  return typeof document !== "undefined"
+    ? document.documentElement.getAttribute("data-theme")
+    : null;
+}
+
+function getServerDocumentThemeSnapshot(): string | null {
+  return null;
+}
+
+/**
+ * 在 UiPrefsProvider 外部（如 /login、/setup、/play）按需订阅 <html> 的 data-theme 属性；
+ * Provider 内部存在 Context 时 enabled=false，不挂载任何 MutationObserver。
+ */
+function useDocumentThemeId(enabled: boolean) {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      enabled ? subscribeDocumentTheme(onStoreChange) : NOOP_UNSUBSCRIBE,
+    [enabled],
+  );
+  const raw = useSyncExternalStore(
+    subscribe,
+    enabled ? getDocumentThemeSnapshot : getServerDocumentThemeSnapshot,
+    getServerDocumentThemeSnapshot,
+  );
+  return normalizeThemeId(raw);
 }
 
 /** 读取界面偏好与保存方法。必须在 UiPrefsProvider 内使用。 */
@@ -169,20 +219,17 @@ export function useUiPrefs(): UiPrefsContextValue {
 /**
  * 读取当前主题（含设置页未保存的预览草稿）。
  *
- * 在 UiPrefsProvider 外调用（登录 / 初始化页的 GlassPanel 等前置页面）不抛错、
- * 按默认主题渲染：那些页面还没有账号上下文，主题本就未知；token 层不受影响
- * ——layout.tsx 的内联脚本已按 localStorage 缓存把 data-theme 写上 <html>，
- * 纯 CSS 换肤在任意页面都生效，这里兜底的只是结构层的分支选择。
+ * 在 UiPrefsProvider 外调用（登录 / 初始化页的 GlassPanel、独立播放页等前置或平级路由）
+ * 不抛错，直接通过 useDocumentThemeId 同步读取并响应 index.html 首帧脚本写入 <html> 的
+ * data-theme 属性，保证任意页面上的 GlassPanel 与主题分支一致。
  *
- * **只换皮肤（token 层）的消费方用它就够**；要按主题换路由或换整页结构的
- * 消费方必须改用 useThemeState()，原因见该函数说明。
+ * **只换皮肤或面板形态的消费方用它就够**；要按主题换路由的消费方必须改用 useThemeState()，
+ * 原因见该函数说明。
  */
 export function useTheme(): ThemeMeta {
   const ctx = useContext(UiPrefsContext);
-  if (ctx) return themeMeta(ctx.prefs.theme);
-  const docTheme =
-    typeof document !== "undefined" ? document.documentElement.getAttribute("data-theme") : null;
-  return themeMeta(normalizeThemeId(docTheme));
+  const docThemeId = useDocumentThemeId(ctx === null);
+  return themeMeta(ctx ? ctx.prefs.theme : docThemeId);
 }
 
 /**
@@ -198,9 +245,10 @@ export function useTheme(): ThemeMeta {
  */
 export function useThemeState(): { theme: ThemeMeta; loading: boolean } {
   const ctx = useContext(UiPrefsContext);
+  const docThemeId = useDocumentThemeId(ctx === null);
   return {
-    theme: themeMeta(ctx ? ctx.prefs.theme : DEFAULT_THEME_ID),
-    // Provider 外（登录页等）没有偏好可等，直接按「已落定」处理
+    theme: themeMeta(ctx ? ctx.prefs.theme : docThemeId),
+    // Provider 外（登录页等）没有服务端偏好可等，直接按 DOM 当前主题且「已落定」处理
     loading: ctx ? ctx.loading : false,
   };
 }

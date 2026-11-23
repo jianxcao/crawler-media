@@ -201,7 +201,7 @@ export function PlayerPage({
 
   if (failed) {
     return (
-      <div className="flex size-full items-center justify-center bg-black px-6 text-center">
+      <div className="dark-media-surface flex size-full items-center justify-center bg-black px-6 text-center">
         <div>
           <p className="text-[15px] text-white">{failed}</p>
           <button

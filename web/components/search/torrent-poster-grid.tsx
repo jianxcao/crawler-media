@@ -41,7 +41,7 @@ export function PosterResults({ hits }: { hits: TorrentHit[] }) {
       {withoutPoster.length > 0 && (
         <div>
           {withPoster.length > 0 && (
-            <p className="text-on-image mb-2 text-caption text-[rgba(243,245,249,0.7)]">
+            <p className="text-on-image mb-2 text-caption text-[var(--text-muted)]">
               以下 {withoutPoster.length} 条结果没有海报，按列表展示
             </p>
           )}
@@ -250,7 +250,7 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
 
   return (
     <li
-      className={`group overflow-hidden rounded-xl border border-white/[0.08] bg-[rgba(14,16,22,0.75)] transition-colors hover:border-white/[0.2] ${
+      className={`card-row-surface group overflow-hidden rounded-xl transition-colors hover:border-[var(--line-strong)] ${
         measuring ? "relative" : "absolute"
       }`}
       style={measuring ? undefined : { left: x, top: y, width }}
@@ -267,7 +267,7 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
             setViewerIndex(0);
           }
         }}
-        className="relative aspect-[2/3] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
+        className="dark-media-surface relative aspect-[2/3] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
       >
         <PosterImage
           src={posterUrl ? cachedImageUrl(posterUrl, "gallery-tile") : undefined}
@@ -369,8 +369,8 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
             {hit.upload_time ? ` · ${formatRelativeTime(hit.upload_time)}` : ""}
           </span>
           <span className="tnum ml-auto shrink-0">
-            <span className="text-[#a7d9b6]">↑{seeders}</span>
-            <span className="ml-1 text-[#e0c19f]">↓{leechers}</span>
+            <span className="text-[var(--ok)]">↑{seeders}</span>
+            <span className="ml-1 text-[var(--warn)]">↓{leechers}</span>
           </span>
         </p>
       </div>

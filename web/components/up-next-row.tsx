@@ -162,7 +162,7 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
         className="group/card block outline-none"
       >
         <div
-          className="relative aspect-video overflow-hidden rounded-2xl bg-[#141824] shadow-[0_10px_28px_rgba(0,0,0,0.38)] ring-1 ring-white/[0.08] transition duration-300 group-hover/recent:-translate-y-1 group-hover/recent:shadow-[0_18px_42px_rgba(0,0,0,0.55)] group-hover/recent:ring-white/25 group-focus-visible/card:ring-2 group-focus-visible/card:ring-white/80"
+          className="dark-media-surface relative aspect-video overflow-hidden rounded-2xl bg-[#141824] shadow-[0_10px_28px_rgba(0,0,0,0.38)] ring-1 ring-white/[0.08] transition duration-300 group-hover/recent:-translate-y-1 group-hover/recent:shadow-[0_18px_42px_rgba(0,0,0,0.55)] group-hover/recent:ring-white/25 group-focus-visible/card:ring-2 group-focus-visible/card:ring-white/80"
         >
           {artworkUrl ? (
             <PosterImage
@@ -284,7 +284,7 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
 
           外层 flex 用与剧照相同的 aspect-video 定位，保证圆心落在画面正中；
           抬升动画跟着卡片一起做，否则悬停时剧照上浮 4px、播放键留在原地。 */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex aspect-video items-center justify-center transition duration-300 group-hover/recent:-translate-y-1">
+      <div className="dark-media-surface pointer-events-none absolute inset-x-0 top-0 flex aspect-video items-center justify-center transition duration-300 group-hover/recent:-translate-y-1">
         <Link to={cardPlayHref(item)}
           aria-label={`${playVerb(item)}《${item.title}》${context ? ` ${context}` : ""}`}
           {...playTapGuard}

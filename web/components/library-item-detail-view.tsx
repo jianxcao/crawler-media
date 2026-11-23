@@ -234,7 +234,7 @@ export function LibraryItemDetailView({
           )}
 
           {c.refreshError && (
-            <div className="mt-4 max-w-2xl rounded-xl border border-white/[0.1] bg-[rgba(14,16,22,0.6)] px-4 py-3 text-sub leading-6 text-[#ff9f9f] backdrop-blur-md">
+            <div className="mt-4 max-w-2xl rounded-xl border border-[var(--danger)]/25 bg-[var(--danger)]/10 px-4 py-3 text-sub leading-6 text-[var(--danger)] backdrop-blur-md">
               {c.refreshError}
             </div>
           )}

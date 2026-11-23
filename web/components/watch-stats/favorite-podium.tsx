@@ -21,12 +21,14 @@ function TopEntry({
   hero,
   drilled,
   previous,
+  ambient,
 }: {
   row: PlaybackStatsTitleRow;
   rank: number;
   hero: boolean;
   drilled: boolean;
   previous: PlaybackStatsTitleRow[];
+  ambient: boolean;
 }) {
   const change = rankChange(row, rank, previous);
   const kind = KIND_LABELS[row.media.kind];
@@ -39,7 +41,11 @@ function TopEntry({
     <div className="flex min-w-0 items-end">
       <span
         aria-hidden="true"
-        className={`relative inline-block shrink-0 select-none text-left font-black leading-[0.78] tracking-[-0.06em] text-transparent [-webkit-text-stroke:2px_rgba(255,255,255,0.62)] ${
+        className={`relative inline-block shrink-0 select-none text-left font-black leading-[0.78] tracking-[-0.06em] text-transparent ${
+          ambient
+            ? "[-webkit-text-stroke:2px_rgba(255,255,255,0.62)]"
+            : "[-webkit-text-stroke:2px_var(--line-strong)]"
+        } ${
           hero ? "-mr-[0.12em] w-[0.6em] text-[128px]" : "-mr-[0.12em] w-[0.6em] text-[96px]"
         }`}
       >
@@ -137,7 +143,7 @@ export function FavoritePodium({
       )}
       <div className="relative p-4 md:p-5">
         <div className="flex items-center gap-2.5">
-          <span className="rounded-[3px] bg-[var(--info)] px-1.5 py-[3px] text-[10px] font-black leading-none tracking-[0.12em] text-[#0b0d13]">
+          <span className="rounded-[3px] bg-[var(--accent)] px-1.5 py-[3px] text-[10px] font-black leading-none tracking-[0.12em] text-[var(--accent-ink)]">
             TOP 3
           </span>
           <p className="text-ui font-semibold text-white/90">
@@ -151,7 +157,7 @@ export function FavoritePodium({
           className="mt-5 grid items-end gap-x-5 gap-y-6 md:[grid-template-columns:var(--podium-cols)]"
           style={{ "--podium-cols": columns } as React.CSSProperties}
         >
-          <TopEntry row={first} rank={0} hero drilled={drilled} previous={previous} />
+          <TopEntry row={first} rank={0} hero drilled={drilled} previous={previous} ambient={Boolean(ambient)} />
           {rest.map((row, i) => (
             <TopEntry
               key={row.media.media_item_id}
@@ -160,6 +166,7 @@ export function FavoritePodium({
               hero={false}
               drilled={drilled}
               previous={previous}
+              ambient={Boolean(ambient)}
             />
           ))}
         </div>

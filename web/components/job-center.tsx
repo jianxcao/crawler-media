@@ -291,7 +291,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
   const compact =
     (status === "succeeded" || status === "cancelled") && !hasDomainAlert;
   const cardBorder =
-    statusStyle?.border ?? (hasDomainAlert ? "border-amber-300/15" : "border-white/[0.08]");
+    statusStyle?.border ?? (hasDomainAlert ? "border-amber-400/25" : "");
   const jobTypeLabel = JOB_TYPE_LABELS[job.kind] || job.kind;
   const title = job.friendly_name || job.name || jobTypeLabel;
   const completedSubtitleLanguage =
@@ -375,7 +375,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
 
   return (
     <article
-      className={`overflow-hidden rounded-2xl border bg-[rgba(14,16,22,0.52)] ${cardBorder} ${compact ? "px-3.5 py-2.5" : "p-4"}`}
+      className={`card-row-surface overflow-hidden rounded-2xl ${cardBorder} ${compact ? "px-3.5 py-2.5" : "p-4"}`}
     >
       <div className="min-w-0">
         <div className="flex items-start justify-between gap-3">
@@ -447,7 +447,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
         )}
 
         {actionError && (
-          <p className="mt-2 text-caption leading-5 text-[#ff9f9f]">{actionError}</p>
+          <p className="mt-2 text-caption leading-5 text-[var(--danger)]">{actionError}</p>
         )}
       </div>
       <footer className={`${compact ? "mt-1.5" : "mt-3"} flex flex-wrap items-center gap-2`}>
@@ -456,7 +456,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
           tooltipContent={`${originLabel(job)} · ${formatDateTime(
             job.last_finished_at ?? job.next_run_after,
           )}`}
-          className="text-micro text-white/25"
+          className="text-micro text-[var(--text-faint)]"
         >
           {originLabel(job)} · {formatRelativeTime(job.last_finished_at ?? job.next_run_after)}
         </OverflowText>
@@ -523,7 +523,7 @@ function DismissJobDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="rounded-lg bg-white/90 px-4 py-2 text-ui font-medium text-black transition hover:bg-white disabled:opacity-40"
+            className="btn-accent rounded-lg px-4 py-2 text-ui font-medium disabled:opacity-40"
           >
             {busy ? "正在忽略…" : "忽略"}
           </button>

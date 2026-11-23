@@ -51,7 +51,7 @@ function TrailerCard({
       {...tapGuard}
       className="group/trailer w-[264px] shrink-0 text-left max-md:w-[208px]"
     >
-      <div className="relative aspect-video overflow-hidden rounded-xl bg-[#141824] ring-1 ring-white/[0.08] transition-all duration-300 ease-out group-hover/trailer:-translate-y-1 group-hover/trailer:shadow-[0_16px_40px_rgba(0,0,0,0.55)] group-hover/trailer:ring-white/30">
+      <div className="dark-media-surface relative aspect-video overflow-hidden rounded-xl bg-[#141824] ring-1 ring-white/[0.08] transition-all duration-300 ease-out group-hover/trailer:-translate-y-1 group-hover/trailer:shadow-[0_16px_40px_rgba(0,0,0,0.55)] group-hover/trailer:ring-white/30">
         <PosterImage
           src={video.thumbnailUrl}
           alt={`${title} ${video.kind}`}

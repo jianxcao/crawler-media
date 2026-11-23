@@ -56,7 +56,7 @@ export function SiteStatusSummary({
           <>
             <span className="tnum">{sites.length} 站点</span>
             {failed > 0 && (
-              <span className="tnum text-[#ff9a9a]">· {failed} 失败</span>
+              <span className="tnum text-[var(--danger)]">· {failed} 失败</span>
             )}
           </>
         )}
@@ -66,7 +66,7 @@ export function SiteStatusSummary({
       {open && (
         <>
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-30 mt-2 w-[320px] max-w-[82vw] rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.94)] p-2 shadow-2xl backdrop-blur-2xl">
+          <div className="popover-surface absolute right-0 top-full z-30 mt-2 w-[320px] max-w-[82vw] rounded-2xl p-2">
             <ul className="flex flex-col">
               {sites.map((s) => (
                 <li key={s.site_id} className="rounded-lg px-2 py-1.5">
@@ -76,7 +76,7 @@ export function SiteStatusSummary({
                         s.phase === "searching"
                           ? "animate-pulse bg-[var(--accent)]"
                           : s.phase === "error"
-                            ? "bg-[#ff6b6b]"
+                            ? "bg-[var(--danger)]"
                             : "bg-[var(--ok)]"
                       }`}
                     />
@@ -99,7 +99,7 @@ export function SiteStatusSummary({
                       </span>
                     )}
                     {s.phase === "error" && (
-                      <span className="tnum shrink-0 text-caption text-[#ff9a9a]">
+                      <span className="tnum shrink-0 text-caption text-[var(--danger)]">
                         失败
                         {s.elapsed_ms !== null && (
                           <span className="opacity-75"> · {formatElapsed(s.elapsed_ms)}</span>
@@ -110,7 +110,7 @@ export function SiteStatusSummary({
                   {s.phase === "error" && s.error && (
                     <p
                       title={s.error}
-                      className="mt-0.5 line-clamp-2 pl-3.5 text-caption leading-4 text-[#ff9a9a]/80"
+                      className="mt-0.5 line-clamp-2 pl-3.5 text-caption leading-4 text-[var(--danger)]/85"
                     >
                       {s.error}
                     </p>
@@ -172,7 +172,7 @@ const SKELETON_TITLE_WIDTHS = ["72%", "58%", "80%", "64%", "70%", "52%"];
 export function SkeletonList({ siteCount }: { siteCount: number }) {
   return (
     <div>
-      <div className="text-on-image flex items-center gap-2 px-1 pb-3 text-sub text-[rgba(243,245,249,0.8)]">
+      <div className="text-on-image flex items-center gap-2 px-1 pb-3 text-sub text-[var(--text-muted)]">
         <svg
           viewBox="0 0 24 24"
           className="size-3.5 animate-spin text-[var(--accent)]"
@@ -192,7 +192,7 @@ export function SkeletonList({ siteCount }: { siteCount: number }) {
         {SKELETON_TITLE_WIDTHS.map((width, i) => (
           <li
             key={i}
-            className="rounded-2xl border border-white/[0.05] bg-[rgba(14,16,22,0.35)] px-4 py-3 backdrop-blur-xl"
+            className="css-glass rounded-2xl px-4 py-3"
             style={{ opacity: 1 - i * 0.13, "--stagger": `${i * 120}ms` } as React.CSSProperties}
           >
             <div className="flex items-center gap-1.5">
@@ -218,7 +218,7 @@ export function EmptyHint({ title, hint }: { title: string; hint: string }) {
   return (
     <div className="flex min-h-[240px] flex-col items-center justify-center text-center">
       <p className="text-on-image text-body-lg font-medium text-white">{title}</p>
-      <p className="text-on-image mt-1.5 max-w-sm text-ui leading-6 text-[rgba(243,245,249,0.82)]">
+      <p className="text-on-image mt-1.5 max-w-sm text-ui leading-6 text-[var(--text-muted)]">
         {hint}
       </p>
     </div>
@@ -237,7 +237,7 @@ export function SnapshotBadge({
     <>
       <span
         title="这是历史留存的结果快照，站点数据（做种数/促销/链接）可能已变化"
-        className="flex items-center gap-1.5 rounded-full border border-[#6aa7ff]/30 bg-[#6aa7ff]/12 px-2.5 py-1 text-caption text-[#b9d4ff] backdrop-blur-sm"
+        className="flex items-center gap-1.5 rounded-full border border-[var(--info)]/30 bg-[var(--info)]/10 px-2.5 py-1 text-caption text-[var(--info)] backdrop-blur-sm"
       >
         <svg
           viewBox="0 0 24 24"

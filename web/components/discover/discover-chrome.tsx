@@ -151,7 +151,7 @@ export function DiscoverError({ error, onRetry }: { error: DiscoverErrorInfo; on
   const unreachable = error.code === "UPSTREAM_UNREACHABLE";
   return (
     <div className="flex flex-1 items-center justify-center px-6">
-      <div className="max-w-md rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] p-8 text-center backdrop-blur-xl">
+      <div className="css-glass max-w-md rounded-2xl p-8 text-center">
         {unreachable && (
           <span className="icon-chip mx-auto mb-4 flex size-11 !rounded-2xl">
             <GlobeIcon className="size-5" />

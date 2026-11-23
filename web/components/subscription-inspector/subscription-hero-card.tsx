@@ -419,13 +419,13 @@ function ProgressStrip({
       >
         <div className="bg-[var(--ok)]" style={{ width: `${(importedSettled / denom) * 100}%` }} />
         <div className="bg-[#2dd4bf]" style={{ width: `${(upgrading / denom) * 100}%` }} />
-        <div className="bg-[#6aa7ff]" style={{ width: `${(inPipeline / denom) * 100}%` }} />
+        <div className="bg-[var(--info)]" style={{ width: `${(inPipeline / denom) * 100}%` }} />
       </div>
       <div className="tnum mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-caption text-white/45">
         <ProgressLegend color="var(--ok)" label={`已入库 ${importedSettled}`} />
         {upgrading > 0 && <ProgressLegend color="#2dd4bf" label={`洗版中 ${upgrading}`} />}
         <ProgressLegend color="var(--info)" label={`下载中 ${inPipeline}`} />
-        <ProgressLegend color="rgba(255,255,255,0.2)" label={`缺失 ${missing}`} />
+        <ProgressLegend color="var(--line-strong)" label={`缺失 ${missing}`} />
       </div>
     </div>
   );
