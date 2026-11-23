@@ -174,7 +174,7 @@ fn persist_subscription(
     let pack_fallback_after_days = body.pack_fallback_after_days;
     let incoming = incoming_media(media_kind, media_input);
     let subscribe =
-        match subscribe_from_input(&state, user_id, incoming.id, fetch_mode, coverage, &body) {
+        match subscribe_from_input(&state, user_id, &incoming, fetch_mode, coverage, &body) {
             Ok(subscribe) => subscribe,
             Err(response) => return response,
         };
@@ -238,13 +238,32 @@ fn persist_subscription(
 fn subscribe_from_input(
     state: &ApiState,
     user_id: UserId,
-    media_id: MediaId,
+    incoming: &Media,
     fetch_mode: FetchMode,
     coverage: Coverage,
     body: &CreateSubscriptionInput,
 ) -> Result<Subscribe, Response> {
+    let media_kind = incoming.kind;
+    let explicit_library_id = body.library_id.as_deref().filter(|value| !value.is_empty());
+    let auto_library = if explicit_library_id.is_none() {
+        crate::http::routing_preview::auto_match_library(
+            state,
+            media_kind,
+            incoming.tmdb_id.as_deref(),
+        )
+    } else {
+        None
+    };
     let store = state.store.as_ref();
-    let filter_id = resolve_filter_id(&store, body)?;
+    let library_id = match explicit_library_id {
+        Some(raw) => super::library_target::resolve(store, Some(raw), media_kind)?,
+        None => auto_library
+            .as_ref()
+            .filter(|lib| store.library_accepts_work(&lib.id).unwrap_or(false))
+            .and_then(|lib| domain::LibraryId::from_str(&lib.id).ok()),
+    };
+    let effective_library_id = library_id.map(|id| id.to_string());
+    let filter_id = resolve_filter_id(store, body, effective_library_id.as_deref(), media_kind)?;
     let filter_keep_old = store
         .get_filter(filter_id)
         .ok()
@@ -252,19 +271,10 @@ fn subscribe_from_input(
         .map(|f| f.keep_old_versions)
         .unwrap_or(false);
     let effective_keep_old = body.keep_old_versions.unwrap_or(filter_keep_old);
-    let library_id = super::library_target::resolve(
-        store,
-        body.library_id.as_deref(),
-        if matches!(coverage, Coverage::Movie) {
-            MediaKind::Movie
-        } else {
-            MediaKind::Tv
-        },
-    )?;
     Ok(Subscribe {
         id: SubscribeId::new(),
         user_id,
-        media_id,
+        media_id: incoming.id,
         coverage,
         fetch_mode,
         filter_id,
@@ -303,20 +313,29 @@ fn incoming_media(media_kind: MediaKind, media_input: MediaInput) -> Media {
 fn resolve_filter_id(
     store: &crate::Store,
     body: &CreateSubscriptionInput,
+    library_id: Option<&str>,
+    media_kind: MediaKind,
 ) -> Result<FilterId, Response> {
     match &body.filter_id {
         Some(raw) => existing_filter_id(store, raw),
-        None => inherited_filter_id(store, body.library_id.as_deref()),
+        None => inherited_filter_id(store, library_id, media_kind),
     }
 }
 
 fn inherited_filter_id(
     store: &crate::Store,
     library_id: Option<&str>,
+    media_kind: MediaKind,
 ) -> Result<FilterId, Response> {
-    let id = library_id
-        .filter(|id| !id.is_empty())
-        .and_then(|id| store.get_library(id).ok().flatten())
+    let target_library = match library_id.filter(|id| !id.is_empty()) {
+        Some(id) => store.get_library(id).ok().flatten(),
+        None => store
+            .default_library(media_kind)
+            .ok()
+            .flatten()
+            .filter(|lib| store.library_accepts_work(&lib.id).unwrap_or(false)),
+    };
+    let id = target_library
         .and_then(|lib| lib.default_filter_id)
         .and_then(|id_str| FilterId::from_str(&id_str).ok());
     let id = if let Some(id) = id {

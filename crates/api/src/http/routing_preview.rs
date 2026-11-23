@@ -35,6 +35,7 @@ pub(crate) struct RoutingPreviewInput {
 
 struct RoutingSnapshot {
     libraries: Vec<Library>,
+    removing_libraries: std::collections::HashSet<String>,
     requested_downloader: Option<Option<DownloaderRow>>,
     default_downloader: Option<DownloaderRow>,
     naming_pattern: String,
@@ -80,6 +81,7 @@ pub(crate) async fn preview(
             );
             let (library, matched, reason) = select_library(
                 &snapshot.libraries,
+                &snapshot.removing_libraries,
                 kind,
                 body.library_id.as_deref(),
                 meta.as_ref(),
@@ -121,6 +123,12 @@ fn load_snapshot(
             ));
         }
     };
+    let removing_libraries = store
+        .pending_library_removals()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|removal| removal.library_id)
+        .collect();
     let requested_downloader = downloader_id.map(|raw| {
         domain::DownloaderId::from_str(raw)
             .ok()
@@ -128,6 +136,7 @@ fn load_snapshot(
     });
     Ok(RoutingSnapshot {
         libraries,
+        removing_libraries,
         requested_downloader,
         default_downloader: store.default_downloader().ok().flatten(),
         naming_pattern: store
@@ -144,7 +153,7 @@ fn match_metadata(
     library_id: Option<&str>,
     tmdb_id: Option<&str>,
 ) -> Option<media::ItemMeta> {
-    if library_id.is_some() {
+    if library_id.is_some_and(|id| !id.is_empty()) {
         return None;
     }
     let tmdb_id = tmdb_id.filter(|id| !id.is_empty())?;
@@ -153,19 +162,56 @@ fn match_metadata(
         .flatten()
 }
 
+/// 当未显式传入 `library_id` 时，按各媒体库 `match_rules` 自动匹配目标库。
+/// 先快照可接收新任务的候选库并立即释放读租约，再在锁外拉取 TMDB 元数据。
+pub(crate) fn auto_match_library(
+    state: &ApiState,
+    kind: MediaKind,
+    tmdb_id: Option<&str>,
+) -> Option<Library> {
+    let tmdb_id = tmdb_id.filter(|id| !id.is_empty())?;
+    let candidates: Vec<Library> = state
+        .store
+        .library_read_snapshot(|db| -> Result<Vec<Library>, store::StoreError> {
+            let mut matched = Vec::new();
+            for lib in db.list_libraries()? {
+                if lib.kind == kind
+                    && !lib.match_rules.is_empty()
+                    && db.library_accepts_work(&lib.id)?
+                {
+                    matched.push(lib);
+                }
+            }
+            Ok(matched)
+        })
+        .ok()?
+        .ok()?;
+    if candidates.is_empty() {
+        return None;
+    }
+    let meta = crate::scrape_metadata::fetch_tmdb_metadata(state, kind, tmdb_id)
+        .ok()
+        .flatten()?;
+    candidates
+        .into_iter()
+        .find(|lib| library_match_reason(lib, &meta).is_some())
+}
+
 fn select_library<'a>(
     libraries: &'a [Library],
+    removing_libraries: &std::collections::HashSet<String>,
     kind: MediaKind,
     library_id: Option<&str>,
     meta: Option<&media::ItemMeta>,
 ) -> (Option<&'a Library>, bool, Option<String>) {
-    if let Some(id) = library_id {
+    if let Some(id) = library_id.filter(|id| !id.is_empty()) {
         return (libraries.iter().find(|lib| lib.id == id), false, None);
     }
+    let accepts = |lib: &&Library| lib.kind == kind && !removing_libraries.contains(&lib.id);
     if let Some(meta) = meta
         && let Some((library, reason)) = libraries
             .iter()
-            .filter(|lib| lib.kind == kind && !lib.match_rules.is_empty())
+            .filter(|lib| accepts(lib) && !lib.match_rules.is_empty())
             .find_map(|lib| library_match_reason(lib, meta).map(|reason| (lib, reason)))
     {
         return (Some(library), true, Some(reason));
@@ -173,8 +219,8 @@ fn select_library<'a>(
     (
         libraries
             .iter()
-            .find(|lib| lib.kind == kind && lib.is_default)
-            .or_else(|| libraries.iter().find(|lib| lib.kind == kind)),
+            .find(|lib| accepts(lib) && lib.is_default)
+            .or_else(|| libraries.iter().find(accepts)),
         false,
         None,
     )

@@ -48,6 +48,10 @@ fn read_entries(dir: &Path) -> Option<Vec<PathBuf>> {
     });
     match entries {
         Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %dir.display(), "附属文件目录已不存在，跳过清理");
+            None
+        }
         Err(error) => {
             tracing::warn!(path = %dir.display(), %error, "读取附属文件目录失败，停止清理");
             None
@@ -215,5 +219,42 @@ mod tests {
         prune_after_delete(&film, &root);
         assert!(!dir.exists());
         assert!(root.exists());
+    }
+
+    #[test]
+    fn missing_parent_dir_skips_cleanup_without_warn_log() {
+        struct WarnCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl tracing::Subscriber for WarnCounter {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                *metadata.level() <= tracing::Level::WARN
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() <= tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tv");
+        fs::create_dir_all(&root).unwrap();
+        let already_moved = root.join("两京十五日 (2026)/Season 01/两京十五日 S01E01.mkv");
+        let warns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let removed = tracing::subscriber::with_default(WarnCounter(warns.clone()), || {
+            prune_after_delete(&already_moved, &root)
+        });
+        assert!(removed.is_empty());
+        assert_eq!(
+            warns.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "already-moved directory during missing-row cleanup should not emit WARN"
+        );
     }
 }

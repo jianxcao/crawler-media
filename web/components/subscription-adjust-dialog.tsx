@@ -107,6 +107,10 @@ export function SubscriptionAdjustDialog({
       detail.media.kind,
       libraryId,
       detail.media.tmdb_id ?? null,
+      {
+        title: detail.media.title,
+        year: detail.media.year ?? null,
+      },
     )
       .then((p) => {
         if (!cancelled) setPreview(p);
@@ -115,7 +119,14 @@ export function SubscriptionAdjustDialog({
     return () => {
       cancelled = true;
     };
-  }, [canManageSubscriptions, detail.media.kind, detail.media.tmdb_id, libraryId]);
+  }, [
+    canManageSubscriptions,
+    detail.media.kind,
+    detail.media.title,
+    detail.media.tmdb_id,
+    detail.media.year,
+    libraryId,
+  ]);
 
   const toggleSeason = (n: number) => setSelectedSeasons(new Set([n]));
 
@@ -263,9 +274,9 @@ export function SubscriptionAdjustDialog({
                 onChange={(e) =>
                   setLibraryId(e.target.value === "" ? null : e.target.value)
                 }
-                className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+                className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25"
               >
-                <option value="">（按默认库路由）</option>
+                <option value="">（按规则或默认库自动路由）</option>
                 {libraries.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}

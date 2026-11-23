@@ -209,7 +209,14 @@ impl<'a> RoutedDownloader<'a> {
             .get_media(subscribe.media_id)
             .map_err(error)?
             .ok_or_else(|| error("Media not found"))?;
-        let library_id = subscribe.library_id.map(|id| id.to_string());
+        let library_id = subscribe.library_id.map(|id| id.to_string()).or_else(|| {
+            crate::http::routing_preview::auto_match_library(
+                self.state,
+                media.kind,
+                media.tmdb_id.as_deref(),
+            )
+            .map(|library| library.id)
+        });
         // The transfer root still decides *where* a new file lands and guards a
         // Library that is being deleted; the sources are the target Library's
         // recorded files, never the files whose path happens to match. A root

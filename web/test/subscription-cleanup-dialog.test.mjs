@@ -135,6 +135,38 @@ test("cancellation marks inferred torrent counts and keeps deletion opt in", asy
   for (const toggle of nodes(tree).filter((node) => node.type === "input")) assert.equal(toggle.props.checked, false);
 });
 
+test("adjust dialog passes media title and year when previewing download routing", async () => {
+  const calls = [];
+  const app = fixture("subscription-adjust-dialog", {
+    previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
+    previewSubscriptionDownloadRouting: async (...args) => {
+      calls.push(args);
+      return { ok: true, mode: "inplace", entry_dir: "/tv/china/两京十五日 (2026)/Season 01" };
+    },
+    updateSubscription: async () => ({}),
+  });
+  const props = {
+    detail: {
+      id: "s1",
+      media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
+      coverage: { kind: "tv", season: 1 },
+      wanted: [],
+      library_id: "lib-china",
+    },
+    onClose() {},
+    onSaved() {},
+  };
+  app.render(props);
+  await settle();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), [
+    "tv",
+    "lib-china",
+    "203483",
+    { title: "两京十五日", year: 2026 },
+  ]);
+});
+
 test("cancellation explains synchronous cleanup after deletion is selected", async () => {
   const app = fixture("subscription-cancel-dialog", { getSubscriptionRemovalPreview: async () => preview });
   const props = { open: true, subscriptionId: "s1", title: "Fixture", onClose() {}, onConfirm() {} };

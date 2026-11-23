@@ -83,9 +83,21 @@ pub(crate) fn resolve_transfer_plan(
     media: &Media,
     subscribe: &Subscribe,
 ) -> Result<TransferPlan, String> {
+    let matched_library_id = if subscribe.library_id.is_none() {
+        crate::http::routing_preview::auto_match_library(
+            state,
+            media.kind,
+            media.tmdb_id.as_deref(),
+        )
+        .map(|library| library.id)
+    } else {
+        None
+    };
     state
         .store
-        .library_read_snapshot(|db| resolve_library_plan(db, media, subscribe))
+        .library_read_snapshot(|db| {
+            resolve_library_plan(db, media, subscribe, matched_library_id.as_deref())
+        })
         .map_err(|error| error.to_string())?
 }
 
@@ -93,12 +105,31 @@ fn resolve_library_plan(
     store: &store::LibraryConnection<'_>,
     media: &Media,
     subscribe: &Subscribe,
+    matched_library_id: Option<&str>,
 ) -> Result<TransferPlan, String> {
     let library = match subscribe.library_id {
-        Some(id) => store.get_library(&id.to_string()),
-        None => store.default_library(media.kind),
+        Some(id) => store
+            .get_library(&id.to_string())
+            .map_err(|e| e.to_string())?,
+        None => {
+            let matched = match matched_library_id {
+                Some(id)
+                    if store
+                        .library_accepts_work(id)
+                        .map_err(|error| error.to_string())? =>
+                {
+                    store.get_library(id).map_err(|e| e.to_string())?
+                }
+                _ => None,
+            };
+            match matched {
+                Some(library) => Some(library),
+                None => store
+                    .default_library(media.kind)
+                    .map_err(|e| e.to_string())?,
+            }
+        }
     }
-    .map_err(|e| e.to_string())?
     .ok_or("目标 Library 不存在")?;
     if !store
         .library_accepts_work(&library.id)
