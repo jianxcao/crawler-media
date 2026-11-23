@@ -151,9 +151,9 @@ export function MediaSearchResults({
                   }}
                   className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-caption text-white/90 backdrop-blur-md outline-none transition focus:border-[var(--accent)]"
                 >
-                  <option value="default" className="bg-[#12141a] text-white">默认相关度</option>
-                  <option value="year_desc" className="bg-[#12141a] text-white">年份（最新优先）</option>
-                  <option value="year_asc" className="bg-[#12141a] text-white">年份（最早优先）</option>
+                  <option value="default">默认相关度</option>
+                  <option value="year_desc">年份（最新优先）</option>
+                  <option value="year_asc">年份（最早优先）</option>
                 </select>
               </div>
             )}

@@ -77,7 +77,7 @@ const STATUS_STYLE: Record<JobStatus, { dot: string; border?: string }> = {
   succeeded: { dot: "bg-[var(--ok)]" },
   failed: {
     dot: "bg-[var(--danger)]",
-    border: "border-[var(--danger)]/20",
+    border: "card-row-surface--danger",
   },
   cancelled: { dot: "bg-white/30" },
 };
@@ -243,7 +243,7 @@ export function TaskActionsMenu({
               disabled={item.disabled}
               className={`${itemClass} ${
                 item.tone === "danger"
-                  ? "!text-[#ff6b6b] data-[highlighted]:!bg-[#ff6b6b]/10"
+                  ? "!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10"
                   : "text-white/75"
               }`}
             >
@@ -291,7 +291,7 @@ export function JobCard({ job, onNavigate }: { job: JobView; onNavigate: () => v
   const compact =
     (status === "succeeded" || status === "cancelled") && !hasDomainAlert;
   const cardBorder =
-    statusStyle?.border ?? (hasDomainAlert ? "border-amber-400/25" : "");
+    statusStyle?.border ?? (hasDomainAlert ? "card-row-surface--warn" : "");
   const jobTypeLabel = JOB_TYPE_LABELS[job.kind] || job.kind;
   const title = job.friendly_name || job.name || jobTypeLabel;
   const completedSubtitleLanguage =

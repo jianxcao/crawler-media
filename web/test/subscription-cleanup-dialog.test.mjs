@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 
-function fixture(relative, api = {}) {
+function fixture(relative, api = {}, libraries = []) {
   const state = [], effects = [], deps = [];
   let index = 0;
   const jsx = (type, props) => ({ type, props });
@@ -31,7 +31,7 @@ function fixture(relative, api = {}) {
     "@/components/feedback": { useToast: () => toast },
     "@/lib/permissions": { usePermissions: () => ({ canManageSubscriptions: true }) },
     "@/lib/subscription-form": { isLibraryDirty: (a, b) => a !== b, libraryPatch: () => ({}) },
-    "@/lib/api/libraries": { listLibraries: async () => [] },
+    "@/lib/api/libraries": { listLibraries: async () => libraries },
     "@/lib/format": { formatBytes: (value) => `${value} B` },
     "@/lib/api/subscriptions": api,
   };
@@ -135,17 +135,17 @@ test("cancellation marks inferred torrent counts and keeps deletion opt in", asy
   for (const toggle of nodes(tree).filter((node) => node.type === "input")) assert.equal(toggle.props.checked, false);
 });
 
-test("adjust dialog passes media title and year when previewing download routing", async () => {
-  const calls = [];
-  const app = fixture("subscription-adjust-dialog", {
+test("adjust dialog passes tmdb_id for explicit library and null tmdb_id for default-library routing", async () => {
+  const explicitCalls = [];
+  const explicitApp = fixture("subscription-adjust-dialog", {
     previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
     previewSubscriptionDownloadRouting: async (...args) => {
-      calls.push(args);
+      explicitCalls.push(args);
       return { ok: true, mode: "inplace", entry_dir: "/tv/china/两京十五日 (2026)/Season 01" };
     },
     updateSubscription: async () => ({}),
   });
-  const props = {
+  explicitApp.render({
     detail: {
       id: "s1",
       media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
@@ -155,16 +155,55 @@ test("adjust dialog passes media title and year when previewing download routing
     },
     onClose() {},
     onSaved() {},
-  };
-  app.render(props);
+  });
   await settle();
-  assert.equal(calls.length, 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), [
+  assert.equal(explicitCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(explicitCalls[0])), [
     "tv",
     "lib-china",
     "203483",
     { title: "两京十五日", year: 2026 },
   ]);
+
+  const defaultCalls = [];
+  const defaultApp = fixture(
+    "subscription-adjust-dialog",
+    {
+      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
+      previewSubscriptionDownloadRouting: async (...args) => {
+        defaultCalls.push(args);
+        return { ok: true, mode: "inplace", entry_dir: "/tv/default/两京十五日 (2026)/Season 01" };
+      },
+      updateSubscription: async () => ({}),
+    },
+    [{ id: "lib-default", name: "默认剧集库", kind: "tv", is_default: true }],
+  );
+  const defaultProps = {
+    detail: {
+      id: "s2",
+      media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
+      coverage: { kind: "tv", season: 1 },
+      wanted: [],
+      library_id: null,
+    },
+    onClose() {},
+    onSaved() {},
+  };
+  defaultApp.render(defaultProps);
+  await settle();
+  const renderedDefault = defaultApp.render(defaultProps);
+  assert.equal(defaultCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(defaultCalls[0])), [
+    "tv",
+    null,
+    null,
+    { title: "两京十五日", year: 2026 },
+  ]);
+  const placeholderOption = nodes(renderedDefault).find(
+    (node) => node.type === "option" && node.props?.value === "",
+  );
+  assert.ok(placeholderOption, "must render default-library option");
+  assert.equal(text(placeholderOption), "（按默认库路由）");
 });
 
 test("cancellation explains synchronous cleanup after deletion is selected", async () => {

@@ -309,7 +309,7 @@ export function DiscoverView({
       {toolbar}
       {page.tmdbConfigured === false && (
         <div className={isNf ? undefined : "px-6 max-md:px-4"}>
-          <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#f5c451]/25 bg-[#f5c451]/8 px-4 py-2.5 text-sub text-[#f5c451]">
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-[var(--warn)]/25 bg-[var(--warn)]/[0.08] px-4 py-2.5 text-sub text-[var(--warn)]">
             <span aria-hidden="true">⚠️</span>
             <span>
               TMDB API key 未配置,当前展示豆瓣数据。到

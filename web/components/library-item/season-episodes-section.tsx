@@ -316,7 +316,7 @@ function SeasonEpisodesHeader({
         <select
           value={season}
           onChange={(e) => onSeasonChange(Number(e.target.value))}
-          className="tnum rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+          className="tnum rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25"
         >
           {seasons.map((s) => (
             <option key={s} value={s}>

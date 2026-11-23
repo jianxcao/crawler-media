@@ -138,7 +138,7 @@ export function NetworkProxyHealthPanel() {
           {hasIssues && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 p-4">
               <div>
-                <p className="text-ui font-semibold text-[#fee2e2]">部分外部元数据服务网络连接失败或超时</p>
+                <p className="text-ui font-semibold text-[var(--danger)]">部分外部元数据服务网络连接失败或超时</p>
                 <p className="mt-0.5 text-sub text-white/70">
                   可能受本地网络 DNS 污染或防火墙阻断影响，建议配置专用的元数据网络代理（支持 SOCKS5 / HTTP）。
                 </p>

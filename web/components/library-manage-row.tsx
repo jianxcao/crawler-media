@@ -221,7 +221,7 @@ function LibraryThumb({ library, Icon }: { library: MediaLibrary; Icon: typeof M
     ? `${publicEnv.apiBaseUrl}${library.cover_url}`
     : `${publicEnv.apiBaseUrl}/libraries/${library.id}/cover?t=${library.stats.item_count}`;
   return (
-    <div className="relative h-11 w-[72px] shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0c0f17]">
+    <div className="dark-media-surface relative h-11 w-[72px] shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0c0f17]">
       {showImage ? (
         <ArtworkImage
           src={coverSrc}

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
+import { sidebarGlass } from "../lib/glass.ts";
+
+const webDir = fileURLToPath(new URL("../", import.meta.url));
 const css = await loadBundledCss(new URL("../app/globals.css", import.meta.url));
 
 async function loadBundledCss(entryUrl) {
@@ -196,4 +201,199 @@ test("settings keeps a saved theme selector for every registered theme", () => {
   assert.match(settingsView, /THEMES\.map\(\(theme\) =>/);
   assert.match(settingsView, /aria-pressed=\{selected\}/);
   assert.match(settingsView, /savePrefs\(\{ \.\.\.prefs, theme: themeId \}\)/);
+});
+
+async function collectTsxFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectTsxFiles(full)));
+    } else if (entry.isFile() && /\.(ts|tsx)$/.test(entry.name)) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+test("unlayered surface modifiers and active states work across all 4 themes without dead utility overrides", async () => {
+  // .card-row-surface--danger & .card-row-surface--warn in base + paper + liquid + netflix
+  assert.match(css, /\.card-row-surface--danger\s*\{[^}]*border-color:/);
+  assert.match(css, /\.card-row-surface--warn\s*\{[^}]*border-color:/);
+  for (const theme of ["paper", "liquid", "netflix"]) {
+    assert.match(css, new RegExp(`html\\[data-theme="${theme}"\\]\\s+\\.card-row-surface--danger\\s*\\{`));
+    assert.match(css, new RegExp(`html\\[data-theme="${theme}"\\]\\s+\\.card-row-surface--warn\\s*\\{`));
+    assert.match(
+      css,
+      new RegExp(
+        `html\\[data-theme="${theme}"\\]\\s+\\.page-nav-btn\\[data-active="true"\\],[\\s\\S]*?html\\[data-theme="${theme}"\\]\\s+\\.page-nav-btn\\[data-state="open"\\]`,
+      ),
+    );
+    assert.match(
+      css,
+      new RegExp(
+        `html\\[data-theme="${theme}"\\]\\s+\\.segmented-glass__item:is\\(\\[aria-pressed="true"\\],\\s*\\[aria-selected="true"\\],\\s*\\[aria-checked="true"\\]\\)`,
+      ),
+    );
+  }
+  assert.match(css, /\.page-nav-btn\[data-active="true"\],\s*\.page-nav-btn\[data-state="open"\]/);
+  assert.match(
+    css,
+    /\.segmented-glass__item:is\(\[aria-pressed="true"\],\s*\[aria-selected="true"\],\s*\[aria-checked="true"\]\)/,
+  );
+  assert.match(css, /\.btn-glass--ok\s*\{[^}]*color:\s*var\(--ok\)/);
+  assert.match(css, /\.btn-glass--danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.match(css, /html\[data-theme="paper"\]\s+\.btn-glass--ok\s*\{[^}]*color:\s*var\(--ok\)/);
+  assert.match(css, /html\[data-theme="paper"\]\s+\.btn-glass--danger\s*\{[^}]*color:\s*var\(--danger\)/);
+  assert.match(css, /\.input-glass\s*\{/);
+
+  const jobCenter = await readFile(path.join(webDir, "components/job-center.tsx"), "utf8");
+  assert.match(jobCenter, /card-row-surface--danger/);
+  assert.match(jobCenter, /card-row-surface--warn/);
+
+  const posterGrid = await readFile(
+    path.join(webDir, "components/search/torrent-poster-grid.tsx"),
+    "utf8",
+  );
+  assert.match(posterGrid, /card-row-surface card-row-surface--interactive/);
+  assert.doesNotMatch(posterGrid, /hover:border-\[var\(--line-strong\)\]/);
+
+  const favoritesView = await readFile(path.join(webDir, "components/favorites-view.tsx"), "utf8");
+  assert.match(favoritesView, /data-active=\{gallery \? "true" : undefined\}/);
+  assert.doesNotMatch(favoritesView, /data-\[state=open\]:bg-black\/55/);
+
+  const systemLogs = await readFile(path.join(webDir, "components/system-logs-section.tsx"), "utf8");
+  assert.match(systemLogs, /btn-glass--ok/);
+  assert.match(systemLogs, /btn-glass--danger/);
+});
+
+test("search page, DiscoverEpisodeCard, PlayLayout, and disabled solid buttons remain contrast-safe in paper theme", async () => {
+  const searchPage = await readFile(path.join(webDir, "app/(app)/search/page.tsx"), "utf8");
+  assert.match(searchPage, /segmented-glass\b/);
+  assert.match(searchPage, /segmented-glass__item\b/);
+  assert.doesNotMatch(searchPage, /rgba\(243,\s*245,\s*249,/);
+
+  const seasonsSection = await readFile(
+    path.join(webDir, "components/media-detail/seasons-section.tsx"),
+    "utf8",
+  );
+  assert.match(seasonsSection, /dark-media-surface[^\n]*bg-\[#141824\]/);
+  assert.doesNotMatch(seasonsSection, /dark-media-surface[^\n]*bg-white\/\[0\.04\]/);
+  assert.match(seasonsSection, /bg-emerald-950\/80/);
+  assert.match(seasonsSection, /bg-sky-950\/80/);
+  assert.match(seasonsSection, /bg-orange-950\/80/);
+
+  const playLayout = await readFile(path.join(webDir, "app/play/layout.tsx"), "utf8");
+  assert.match(playLayout, /viewport-overlay-height/);
+  assert.doesNotMatch(playLayout, /\bh-dvh\b/);
+
+  // Paper /play dark canvas isolation & dark-media-surface token + scrollbar restoration
+  assert.match(css, /html\[data-theme="paper"\]:has\(\.player-root\)\s+body\s*\{[^}]*background:\s*#000000/);
+  assert.match(css, /html\[data-theme="paper"\]:has\(\.player-root\)\s+body::before\s*\{[^}]*display:\s*none/);
+  assert.match(
+    css,
+    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\.media-lightbox[\s\S]*?\)\s*\{[\s\S]*?color-scheme:\s*dark[\s\S]*?--text:\s*#f3f5f9/,
+  );
+  assert.match(
+    css,
+    /html\[data-theme="paper"\]\s+:is\(\.dark-media-surface,\s*\.player-root,\s*\.media-lightbox\)\s+\.scroll-thin::-webkit-scrollbar-thumb/,
+  );
+
+  // Solid danger & colored button disabled neutralization + ProbeQueueCard amber fill
+  assert.match(css, /\.btn-danger\s*\{[^}]*background:\s*var\(--danger-solid\)/);
+  assert.match(css, /button\[class\*="bg-red-"\]:disabled/);
+  assert.match(css, /button\[class\*="bg-blue-"\]:disabled/);
+  assert.match(css, /button\[class\*="bg-sky-"\]:disabled/);
+  assert.match(css, /button\[class\*="bg-\[var\(--danger-solid\)\]"\]:disabled/);
+
+  const probeQueueCard = await readFile(
+    path.join(webDir, "components/task-center/probe-queue-card.tsx"),
+    "utf8",
+  );
+  assert.match(probeQueueCard, /bg-\[#fbbf24\]/);
+  assert.doesNotMatch(probeQueueCard, /bg-amber-400\/90/);
+});
+
+test("LiquidGlassRenderer tracks DPR + top-aligns backdrop UV and sidebarGlass avoids transparency cliff", async () => {
+  const rendererSource = await readFile(
+    path.join(webDir, "vendor/liquid-glass/core/LiquidGlassRenderer.ts"),
+    "utf8",
+  );
+  assert.match(rendererSource, /private\s+lastDpr\s*=\s*0/);
+  assert.match(rendererSource, /1\s*-\s*imageRatio\s*\/\s*viewRatio/);
+
+  for (let step = 0; step < 100; step++) {
+    const a = sidebarGlass({ transparency: step / 100, brightness: 0, depth: 32 }, "paper").fallbackAlpha;
+    const b = sidebarGlass({ transparency: (step + 1) / 100, brightness: 0, depth: 32 }, "paper").fallbackAlpha;
+    assert.ok(a >= b, `paper fallbackAlpha must be monotonic at ${step / 100}`);
+    assert.ok(a - b < 0.05, `paper fallbackAlpha must not have a cliff at ${step / 100}: ${a} -> ${b}`);
+  }
+});
+
+test("source guardrails forbid hardcoded dark <option> backgrounds, unguarded silver rgba text, and dead card-row-surface border utilities", async () => {
+  const sourceFiles = [
+    ...(await collectTsxFiles(path.join(webDir, "app"))),
+    ...(await collectTsxFiles(path.join(webDir, "components"))),
+  ];
+
+  const optionViolations = [];
+  const rgbaViolations = [];
+  const cardRowBorderViolations = [];
+
+  for (const file of sourceFiles) {
+    const rel = path.relative(webDir, file);
+    const content = await readFile(file, "utf8");
+
+    if (/\[&>option\]:bg-\[#|<option[^>]*bg-\[#/i.test(content)) {
+      optionViolations.push(rel);
+    }
+
+    const lines = content.split("\n");
+    lines.forEach((line, idx) => {
+      if (
+        /rgba\(\s*243,\s*245,\s*249,/.test(line) &&
+        !line.includes("dark-media-surface")
+      ) {
+        rgbaViolations.push(`${rel}:${idx + 1}`);
+      }
+      if (
+        line.includes("card-row-surface") &&
+        /(?:^|[\s"'`])(?:hover:)?border-(?!0\b|none\b|collapse\b|separate\b|spacing|t\b|b\b|l\b|r\b|x\b|y\b)/.test(
+          line,
+        )
+      ) {
+        cardRowBorderViolations.push(`${rel}:${idx + 1}`);
+      }
+    });
+  }
+
+  assert.deepEqual(optionViolations, [], `Hardcoded dark <option> classes found: ${optionViolations.join(", ")}`);
+  assert.deepEqual(rgbaViolations, [], `Unguarded rgba(243,245,249,...) found: ${rgbaViolations.join(", ")}`);
+  assert.deepEqual(
+    cardRowBorderViolations,
+    [],
+    `.card-row-surface paired with @layer utilities border color override: ${cardRowBorderViolations.join(", ")}`,
+  );
+
+  // Also check dark media frames carry dark-media-surface and UI chrome avoids hardcoded dark hexes
+  for (const rel of [
+    "components/library-cover-modal.tsx",
+    "components/cast-row.tsx",
+    "components/discovered-person-detail-view.tsx",
+    "components/subscribe-dialog/subscribe-form-sections.tsx",
+    "components/media-detail/photo-wall.tsx",
+    "components/library-view.tsx",
+    "components/library-manage-row.tsx",
+    "components/poster-wall.tsx",
+  ]) {
+    const src = await readFile(path.join(webDir, rel), "utf8");
+    assert.match(src, /dark-media-surface/, `${rel} must guard its dark artwork surface with dark-media-surface`);
+  }
+
+  const healthPage = await readFile(path.join(webDir, "app/health/page.tsx"), "utf8");
+  assert.doesNotMatch(healthPage, /bg-\[#111111\]|bg-white\/80/);
+
+  const notFound = await readFile(path.join(webDir, "src/not-found.tsx"), "utf8");
+  assert.doesNotMatch(notFound, /bg-\[#0a0b10\]/);
 });

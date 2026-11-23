@@ -202,11 +202,11 @@ export function SystemLogsSection() {
             type="button"
             onClick={() => setAutoScroll(!autoScroll)}
             className={`btn-glass px-2.5 py-1 text-sub ${
-              autoScroll ? "text-emerald-400 font-semibold" : "text-[var(--text-muted)]"
+              autoScroll ? "btn-glass--ok font-semibold" : "text-[var(--text-muted)]"
             }`}
             title="新日志进入时自动滚到底部"
           >
-            <span className={`inline-block size-2 rounded-full mr-1.5 ${autoScroll ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"}`} />
+            <span className={`inline-block size-2 rounded-full mr-1.5 ${autoScroll ? "bg-[var(--ok)] animate-pulse" : "bg-zinc-500"}`} />
             自动滚动
           </button>
 
@@ -214,7 +214,7 @@ export function SystemLogsSection() {
           <button
             type="button"
             onClick={handleExport}
-            className="btn-glass px-2.5 py-1 text-sub text-[var(--text)] hover:text-white"
+            className="btn-glass px-2.5 py-1 text-sub"
           >
             导出日志
           </button>
@@ -223,7 +223,7 @@ export function SystemLogsSection() {
           <button
             type="button"
             onClick={handleClear}
-            className="btn-glass px-2.5 py-1 text-sub text-red-400 hover:text-red-300"
+            className="btn-glass btn-glass--danger px-2.5 py-1 text-sub"
           >
             清空
           </button>

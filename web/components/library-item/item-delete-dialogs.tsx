@@ -140,7 +140,7 @@ export function DeleteDialog({
                 type="button"
                 onClick={run}
                 disabled={!confirmed || busy}
-                className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-[#ffffff] transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                className="btn-danger flex items-center gap-2 rounded-full px-5 py-2 text-ui font-semibold"
               >
                 {busy && (
                   <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />
@@ -225,7 +225,7 @@ export function DeleteFileDialog({
             type="button"
             onClick={() => void run()}
             disabled={!confirmed || busy}
-            className="flex items-center gap-2 rounded-full bg-[var(--danger-solid)] px-5 py-2 text-ui font-semibold text-[#ffffff] transition hover:bg-[var(--danger-solid-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="btn-danger flex items-center gap-2 rounded-full px-5 py-2 text-ui font-semibold"
           >
             {busy && (
               <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />

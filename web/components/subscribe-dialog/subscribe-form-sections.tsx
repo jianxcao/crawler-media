@@ -36,7 +36,7 @@ export function AmbiguousCandidatesGrid({
             onClick={() => onPick(c)}
             className="group text-left"
           >
-            <div className="aspect-[2/3] overflow-hidden rounded-lg bg-[#141824] ring-1 ring-white/10 transition group-hover:ring-white/40">
+            <div className="dark-media-surface aspect-[2/3] overflow-hidden rounded-lg bg-[#141824] ring-1 ring-white/10 transition group-hover:ring-white/40">
               <PosterImage
                 src={c.poster_url ? cachedImageUrl(c.poster_url) : undefined}
                 alt={c.title}
@@ -225,7 +225,7 @@ export function SubscribeReadyForm({
             <select
               value={ruleSetId ?? undefined}
               onChange={(e) => onRuleSetChange(e.target.value)}
-              className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+              className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25"
             >
               {selectableRules.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -263,7 +263,7 @@ export function SubscribeReadyForm({
           <select
             value={libraryId ?? undefined}
             onChange={(e) => onLibraryChange(e.target.value)}
-            className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+            className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25"
           >
             {libraries.map((l) => (
               <option key={l.id} value={l.id}>

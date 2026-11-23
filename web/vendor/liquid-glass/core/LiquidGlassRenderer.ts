@@ -61,6 +61,7 @@ private sampleBackground = 0;
   private lastViewport = { width: 0, height: 0 };
   private lastScroll = { x: Number.NaN, y: Number.NaN };
   private lastRect = { left: Number.NaN, top: Number.NaN, width: Number.NaN, height: Number.NaN };
+  private lastDpr = 0;
   private handleImageLoad = () => {
     if (this.disposed || this.gl.isContextLost() || !this.texture) return;
     const { gl } = this;
@@ -282,6 +283,10 @@ private sampleBackground = 0;
   private watchPosition = () => {
     if (this.disposed) return;
     const rect = this.canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (dpr !== this.lastDpr && rect.width > 0 && rect.height > 0) {
+      this.resize(rect.width, rect.height);
+    }
     const viewport = {
       width: window.innerWidth,
       height: window.innerHeight
@@ -394,6 +399,7 @@ private sampleBackground = 0;
   }
   resize(width: number, height: number) {
     const deviceScale = window.devicePixelRatio || 1;
+    this.lastDpr = Math.min(deviceScale, 2);
     // 超采样只对小控件有意义（边缘占比大，锯齿明显）；大面板（侧栏/登录面板）
     // 边缘只占极小比例，高倍率的视觉收益有限而像素成本按平方增长，压到 1.5。
     const compactSupersampling = height <= 80 ? 3 : height <= 140 ? 2.5 : 1.5;
@@ -431,8 +437,11 @@ private sampleBackground = 0;
     const rect = canvas.getBoundingClientRect();
     const backgroundElement = canvas.ownerDocument.querySelector<HTMLElement>("[data-liquid-glass-background]");
     const measuredBackgroundRect = backgroundElement?.getBoundingClientRect();
-    const backgroundRect = measuredBackgroundRect && measuredBackgroundRect.width > 0 && measuredBackgroundRect.height > 0
-      ? measuredBackgroundRect
+    const hasMeasuredBackground = Boolean(
+      measuredBackgroundRect && measuredBackgroundRect.width > 0 && measuredBackgroundRect.height > 0
+    );
+    const backgroundRect = hasMeasuredBackground
+      ? measuredBackgroundRect!
       : {
           left: 0,
           top: 0,
@@ -449,7 +458,12 @@ private sampleBackground = 0;
     const viewRatio = viewportWidth / viewportHeight;
     const bg = imageRatio > viewRatio
       ? { sx: viewRatio / imageRatio, sy: 1, ox: (1 - viewRatio / imageRatio) / 2, oy: 0 }
-      : { sx: 1, sy: imageRatio / viewRatio, ox: 0, oy: (1 - imageRatio / viewRatio) / 2 };
+      : {
+          sx: 1,
+          sy: imageRatio / viewRatio,
+          ox: 0,
+          oy: hasMeasuredBackground ? (1 - imageRatio / viewRatio) / 2 : 1 - imageRatio / viewRatio
+        };
     const localScaleX = rect.width / viewportWidth;
     const localScaleY = rect.height / viewportHeight;
     const localOffsetX = (rect.left - backgroundRect.left) / viewportWidth;

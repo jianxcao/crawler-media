@@ -185,7 +185,7 @@ html[data-theme="netflix"] .segmented-glass {
   background: #141414;
   backdrop-filter: none;
 }
-html[data-theme="netflix"] .segmented-glass__item[aria-pressed="true"] {
+html[data-theme="netflix"] .segmented-glass__item:is([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"]) {
   background: rgba(255, 255, 255, 0.16);
   color: #ffffff;
   box-shadow: none;
@@ -217,6 +217,12 @@ html[data-theme="netflix"] .card-row-surface--interactive:hover {
   border-color: var(--line-strong);
   background: #222222;
 }
+html[data-theme="netflix"] .card-row-surface--danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+html[data-theme="netflix"] .card-row-surface--warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+}
 
 html[data-theme="netflix"] .page-nav-btn {
   border-color: var(--line);
@@ -226,6 +232,12 @@ html[data-theme="netflix"] .page-nav-btn {
 }
 html[data-theme="netflix"] .page-nav-btn:hover {
   background: #2f2f2f;
+  color: #ffffff;
+}
+html[data-theme="netflix"] .page-nav-btn[data-active="true"],
+html[data-theme="netflix"] .page-nav-btn[data-state="open"] {
+  border-color: var(--line-strong);
+  background: #383838;
   color: #ffffff;
 }
 
@@ -255,6 +267,8 @@ html[data-theme="netflix"] .btn-glass:hover {
   background: rgba(109, 109, 110, 0.4);
   border-color: transparent;
 }
+html[data-theme="netflix"] .btn-glass--ok { color: var(--ok); }
+html[data-theme="netflix"] .btn-glass--danger { color: var(--danger); }
 
 /* —— 选中胶囊：白系（§4；侧栏在 netflix 主题只服务于设置模式） —— */
 html[data-theme="netflix"] .nav-item[data-active="true"] {

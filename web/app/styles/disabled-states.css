@@ -6,8 +6,29 @@ textarea:disabled,
 [aria-disabled="true"] {
   color: var(--text-faint);
 }
-:is(.btn-accent, .btn-glass, button.text-black):disabled:not(:has(img)) {
+:is(.btn-accent, .btn-glass, button.text-black):disabled:not(:has(img)),
+:is(
+  .btn-danger,
+  button[class*="bg-red-"],
+  button[class*="bg-blue-"],
+  button[class*="bg-sky-"],
+  button[class*="bg-[var(--danger-solid)]"]
+):disabled:not(:has(img)) {
   opacity: 1;
+}
+.btn-danger:disabled,
+button[class*="bg-red-"]:disabled,
+button[class*="bg-blue-"]:disabled,
+button[class*="bg-sky-"]:disabled,
+button[class*="bg-[var(--danger-solid)]"]:disabled {
+  background: var(--surface-inset);
+  border-color: var(--line);
+  color: var(--text-faint);
+  box-shadow: inset 0 0 0 1px var(--line);
+  filter: none;
+  transform: none;
+  opacity: 1;
+  cursor: not-allowed;
 }
 button.text-black:disabled {
   background: rgba(255, 255, 255, 0.08);
@@ -33,7 +54,14 @@ button:disabled *,
 
 html[data-theme="netflix"] .btn-accent:disabled,
 html[data-theme="netflix"] .btn-glass:disabled,
-html[data-theme="netflix"] button.text-black:disabled {
+html[data-theme="netflix"] .btn-danger:disabled,
+html[data-theme="netflix"] button.text-black:disabled,
+html[data-theme="netflix"] :is(
+  button[class*="bg-red-"],
+  button[class*="bg-blue-"],
+  button[class*="bg-sky-"],
+  button[class*="bg-[var(--danger-solid)]"]
+):disabled {
   background: #404040;
   border-color: transparent;
   color: var(--text-faint);

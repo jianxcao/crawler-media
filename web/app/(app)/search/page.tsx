@@ -167,7 +167,7 @@ function SearchVerticals({
   if (searchAccess.ready && visibleVerticalTabs.length === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center">
-        <p className="text-on-image text-body text-[rgba(243,245,249,0.72)]">
+        <p className="text-body text-[var(--text-muted)]">
           当前账号没有可用的搜索入口，请联系管理员调整成员权限。
         </p>
       </div>
@@ -176,13 +176,13 @@ function SearchVerticals({
 
   return (
     <div className="flex h-full flex-col">
-      {/* 垂直选项卡（Google 式「综合/图片」）：深色胶囊分段，压在背景大图上 */}
+      {/* 垂直选项卡（Google 式「综合/图片」）：语义分段胶囊，跨四套主题自适应 */}
       <div className="shrink-0 px-6 pt-7 max-md:px-4 max-md:pt-4">
         <div className="flex flex-wrap items-center gap-2">
           <div
             role="tablist"
             aria-label="搜索垂直类别"
-            className="inline-flex gap-1 rounded-full bg-black/25 p-1 backdrop-blur-sm"
+            className="segmented-glass inline-flex gap-1 rounded-full p-1"
           >
             {visibleVerticalTabs.map((tab) => {
               const active = tab.id === vertical;
@@ -193,11 +193,7 @@ function SearchVerticals({
                   role="tab"
                   aria-selected={active}
                   onClick={() => !active && onSwitch(tab.id)}
-                  className={`rounded-full px-3.5 py-1 text-sub font-medium transition-colors ${
-                    active
-                      ? "bg-white/[0.16] text-white"
-                      : "text-[rgba(243,245,249,0.72)] hover:bg-white/[0.08] hover:text-white"
-                  }`}
+                  className="segmented-glass__item rounded-full px-3.5 py-1 text-sub font-medium transition-colors"
                 >
                   {tab.label}
                 </button>
@@ -305,8 +301,8 @@ function ScopeChip({
       onClick={() => !active && onClick()}
       className={`rounded-full px-2.5 py-1 text-sub transition-colors ${
         active
-          ? "bg-white/[0.16] font-medium text-white"
-          : "text-[rgba(243,245,249,0.68)] hover:bg-white/[0.08] hover:text-white"
+          ? "bg-[var(--glass-fill-active)] font-medium text-[var(--text)] shadow-xs"
+          : "text-[var(--text-muted)] hover:bg-[var(--glass-fill-hover)] hover:text-[var(--text)]"
       }`}
     >
       {label}

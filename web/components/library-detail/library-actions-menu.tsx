@@ -77,7 +77,7 @@ export function LibraryActionsMenu({
           type="button"
           aria-label="更多操作"
           // 长在顶栏里，与返回键并排：共用顶栏控件形状，不再是页面里的胶囊按钮
-          className={`${PAGE_NAV_BUTTON_CLASS} relative data-[state=open]:bg-black/55 data-[state=open]:text-white`}
+          className={`${PAGE_NAV_BUTTON_CLASS} relative`}
         >
           <MoreIcon className="size-[18px] max-md:size-[22px]" />
         </button>

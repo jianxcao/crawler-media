@@ -65,6 +65,7 @@ export function sidebarGlass(
   themeId?: string,
 ) {
   if (themeId === "paper") {
+    const t = Math.min(1, Math.max(0, prefs.transparency));
     return {
       variant: SIDEBAR_GLASS_VARIANT,
       sampleBackground: 0,
@@ -72,10 +73,10 @@ export function sidebarGlass(
         ...SIDEBAR_GLASS,
         tint: prefs.brightness,
         depth: prefs.depth,
-        opacity: 0.96 * (1 - prefs.transparency),
+        opacity: 0.96 * (1 - t),
       },
-      hairlineAlpha: 0.085 * (1 - prefs.transparency),
-      fallbackAlpha: prefs.transparency >= 0.99 ? 0 : 1 - prefs.transparency * 0.35,
+      hairlineAlpha: 0.085 * (1 - t),
+      fallbackAlpha: Math.round((1 - t) * (1 + 0.85 * t) * 1000) / 1000,
     };
   }
   if (themeId === "liquid") {

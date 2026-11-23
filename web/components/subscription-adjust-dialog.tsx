@@ -106,7 +106,7 @@ export function SubscriptionAdjustDialog({
     previewSubscriptionDownloadRouting(
       detail.media.kind,
       libraryId,
-      detail.media.tmdb_id ?? null,
+      libraryId === null ? null : (detail.media.tmdb_id ?? null),
       {
         title: detail.media.title,
         year: detail.media.year ?? null,
@@ -276,7 +276,7 @@ export function SubscriptionAdjustDialog({
                 }
                 className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25"
               >
-                <option value="">（按规则或默认库自动路由）</option>
+                <option value="">（按默认库路由）</option>
                 {libraries.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}

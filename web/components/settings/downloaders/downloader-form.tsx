@@ -272,11 +272,11 @@ export function DownloaderForm({
               添加映射
             </button>
             {!mappingsComplete ? (
-              <p className="text-caption text-[#ffb46b]">
+              <p className="text-caption text-[var(--warn)]">
                 每条映射两边都要填：左边浏览选择，右边填下载器上以 / 开头的绝对路径；不需要的行请删除。
               </p>
             ) : !mappingsUnique ? (
-              <p className="text-caption text-[#ffb46b]">
+              <p className="text-caption text-[var(--warn)]">
                 映射的路径不能重复：同一本机路径或同一下载器路径只能出现一次，请修改或删除重复的行。
               </p>
             ) : null}

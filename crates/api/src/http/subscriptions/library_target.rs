@@ -2,7 +2,7 @@
 use std::str::FromStr;
 
 use axum::{http::StatusCode, response::Response};
-use domain::{LibraryId, MediaKind};
+use domain::{LibraryId, MediaKind, UserId};
 
 use crate::{Store, http::err};
 
@@ -10,14 +10,19 @@ pub(super) fn resolve(
     store: &Store,
     raw: Option<&str>,
     kind: MediaKind,
+    user_id: UserId,
 ) -> Result<Option<LibraryId>, Response> {
     let Some(raw) = raw.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     let id = LibraryId::from_str(raw).map_err(|_| invalid("library_id 无效"))?;
+    let is_admin = store.user_role(user_id).map_err(store_error)? == "admin";
     let library = store
         .get_library(raw)
         .map_err(store_error)?
+        .filter(|lib| {
+            crate::http::routing_preview::user_can_target_library(lib, Some(user_id), is_admin)
+        })
         .ok_or_else(|| invalid("指定的媒体库不存在"))?;
     if library.kind != kind {
         return Err(invalid("订阅媒体类型与目标库类型不匹配"));

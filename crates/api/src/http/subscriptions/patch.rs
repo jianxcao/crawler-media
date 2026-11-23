@@ -107,7 +107,7 @@ fn load_and_patch(
     };
     super::ensure_subscribe_owner(&store, &subscribe, user_id)?;
     let previous = subscribe.clone();
-    apply_patch_fields(&store, &mut subscribe, body)?;
+    apply_patch_fields(&store, &mut subscribe, user_id, body)?;
     let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {
         return Err(err(
             StatusCode::NOT_FOUND,

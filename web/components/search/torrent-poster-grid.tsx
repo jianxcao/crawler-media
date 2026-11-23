@@ -250,7 +250,7 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
 
   return (
     <li
-      className={`card-row-surface group overflow-hidden rounded-xl transition-colors hover:border-[var(--line-strong)] ${
+      className={`card-row-surface card-row-surface--interactive group overflow-hidden rounded-xl transition-colors ${
         measuring ? "relative" : "absolute"
       }`}
       style={measuring ? undefined : { left: x, top: y, width }}

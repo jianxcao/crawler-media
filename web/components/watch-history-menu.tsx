@@ -202,7 +202,7 @@ function ClearLibraryHistoryDialog({
             value={libraryId === null ? "" : libraryId}
             onChange={(e) => setLibraryId(e.target.value === "" ? null : e.target.value)}
             disabled={libraries.length === 0}
-            className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 disabled:opacity-50 [&>option]:bg-[#181c28]"
+            className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 disabled:opacity-50"
           >
             {libraries.length === 0 && <option value="">没有可浏览的媒体库</option>}
             {libraries.map((library) => (

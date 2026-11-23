@@ -480,7 +480,7 @@ function DialogContent({
 
       <div className="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
         {reason && (
-          <p className="rounded-xl border border-[var(--warn-line,rgba(245,196,81,.28))] bg-[rgba(245,196,81,.09)] px-3 py-2 text-sub leading-relaxed text-[#f6dfab]">
+          <p className="rounded-xl border border-[var(--warn)]/30 bg-[var(--warn)]/10 px-3 py-2 text-sub leading-relaxed text-[var(--warn)]">
             {reason}
           </p>
         )}
@@ -583,7 +583,7 @@ function DialogContent({
                   setDownloaderId(nextDownloaderId);
                   reloadManualTarget(nextDownloaderId, selectedCandidateId);
                 }}
-                className="min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+                className="min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25"
               >
                 {downloaders.map((d) => (
                   <option key={d.id} value={d.id}>

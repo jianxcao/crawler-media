@@ -50,15 +50,26 @@ test("sidebarGlass：液态玻璃启用曲面光学折射参数，银玻璃保�
   assert.ok(liquid.settings.specular > silver.settings.specular);
 });
 
-test("sidebarGlass：纸感玻璃默认保持约 83% 清透白瓷，拉满全透时无残留描边与兜底", () => {
+test("sidebarGlass：纸感玻璃保持平滑连续的白瓷不透明度曲线，拉满全透时无残留描边与兜底", () => {
+  const lowTransparency = sidebarGlass({ transparency: 0.28, brightness: 0, depth: 32 }, "paper");
+  assert.ok(
+    lowTransparency.fallbackAlpha >= 0.69 && lowTransparency.fallbackAlpha <= 0.9,
+    `expected paper fallbackAlpha at 0.28 in [0.69, 0.90], got ${lowTransparency.fallbackAlpha}`,
+  );
+
   const defaultPaper = sidebarGlass({ transparency: 0.49, brightness: 0, depth: 32 }, "paper");
   assert.equal(defaultPaper.variant, "frosted");
   assert.equal(defaultPaper.sampleBackground, 0);
-  assert.ok(Math.abs(defaultPaper.fallbackAlpha - (1 - 0.49 * 0.35)) < 1e-6);
+  assert.ok(defaultPaper.fallbackAlpha >= 0.68 && defaultPaper.fallbackAlpha <= 0.85);
   assert.ok(Math.abs(defaultPaper.hairlineAlpha - 0.085 * (1 - 0.49)) < 1e-6);
   assert.ok(Math.abs(defaultPaper.settings.opacity - 0.96 * (1 - 0.49)) < 1e-6);
 
+  const nearFullA = sidebarGlass({ transparency: 0.98, brightness: 0, depth: 32 }, "paper");
+  const nearFullB = sidebarGlass({ transparency: 0.99, brightness: 0, depth: 32 }, "paper");
   const fullTransparent = sidebarGlass({ transparency: 1, brightness: 0, depth: 32 }, "paper");
+  assert.ok(nearFullA.fallbackAlpha > nearFullB.fallbackAlpha);
+  assert.ok(nearFullB.fallbackAlpha > 0 && nearFullB.fallbackAlpha < 0.05);
+  assert.ok(nearFullA.fallbackAlpha - nearFullB.fallbackAlpha < 0.05, "no cliff near 0.99");
   assert.equal(fullTransparent.fallbackAlpha, 0);
   assert.equal(fullTransparent.hairlineAlpha, 0);
   assert.equal(fullTransparent.settings.opacity, 0);

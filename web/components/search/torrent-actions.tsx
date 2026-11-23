@@ -323,7 +323,7 @@ export function TorrentActionsSheet({
           )}
           <GrabButton
             hit={hit}
-            className="flex h-11 w-full items-center justify-center rounded-full border border-[#6aa7ff]/50 bg-[#6aa7ff]/20 text-ui font-medium text-[#b9d4ff] transition-colors active:bg-[#6aa7ff]/35"
+            className="flex h-11 w-full items-center justify-center rounded-full border border-[var(--info)]/45 bg-[var(--info)]/15 text-ui font-medium text-[var(--info)] transition-colors active:bg-[var(--info)]/25"
           />
           <DownloadButton
             hit={hit}

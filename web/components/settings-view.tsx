@@ -359,7 +359,7 @@ function WatchHistoryCard() {
         type="button"
         onClick={() => void clearAll()}
         disabled={busy}
-        className="btn-glass h-9 shrink-0 px-4 text-ui font-medium !text-[#ff9f9f] disabled:opacity-40"
+        className="btn-glass btn-glass--danger h-9 shrink-0 px-4 text-ui font-medium"
       >
         {busy ? "清空中…" : "清空"}
       </button>

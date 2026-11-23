@@ -615,7 +615,7 @@ function LibraryCard({ library, items }: { library: MediaLibrary; items: Library
         aria-label={`打开「${library.name}」`}
         className="block overflow-hidden rounded-2xl ring-1 ring-white/10 outline-none transition duration-300 hover:ring-white/35 focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
       >
-        <div className="relative aspect-[21/10] bg-[#0a0c12]">
+        <div className="dark-media-surface relative aspect-[21/10] bg-[#0a0c12]">
           <LibraryCover
             libraryId={library.id}
             kind={library.kind}

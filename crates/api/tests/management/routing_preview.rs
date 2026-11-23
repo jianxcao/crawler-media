@@ -12,8 +12,11 @@ use tower::ServiceExt;
 
 use super::common::*;
 
-struct StoreLockingCatalog {
-    store: Arc<Store>,
+mod acl_and_preview;
+mod create_and_runtime;
+
+pub(super) struct StoreLockingCatalog {
+    pub(super) store: Arc<Store>,
 }
 
 impl Catalog for StoreLockingCatalog {
@@ -77,12 +80,12 @@ impl Catalog for StoreLockingCatalog {
     }
 }
 
-fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
+pub(super) fn locking_preview_state(tmp: &tempfile::TempDir) -> api::ApiState {
     let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
     let catalog = Arc::new(StoreLockingCatalog {
         store: store.clone(),
     });
-    let state = api::ApiState::new_arc(
+    api::ApiState::new_arc(
         store,
         "management-secret".into(),
         indexer::ProfileSet::load(None).unwrap(),
@@ -93,8 +96,11 @@ fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )
     .unwrap()
-    .with_catalog(catalog);
-    router(state)
+    .with_catalog(catalog)
+}
+
+pub(super) fn locking_preview_app(tmp: &tempfile::TempDir) -> axum::Router {
+    router(locking_preview_state(tmp))
 }
 
 #[tokio::test]
@@ -198,7 +204,7 @@ fn catalog_metadata_rejects_an_inherited_library_writer() {
         .unwrap();
 }
 
-async fn create_named_rule_set(app: &axum::Router, name: &str) -> String {
+pub(super) async fn create_named_rule_set(app: &axum::Router, name: &str) -> String {
     let res = app
         .clone()
         .oneshot(request(
@@ -216,7 +222,7 @@ async fn create_named_rule_set(app: &axum::Router, name: &str) -> String {
     json_data(res).await["id"].as_str().unwrap().to_string()
 }
 
-async fn seed_tv_routing_libraries(
+pub(super) async fn seed_tv_routing_libraries(
     app: &axum::Router,
     tmp: &tempfile::TempDir,
 ) -> (String, String, String, String) {

@@ -558,7 +558,7 @@ function RowItem({
          这一行不加 transition：跟手要 1:1，加了过渡就拖在手指后面。 */
       className={
         dragging
-          ? "rounded-xl bg-[#1d222d]/95 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.75)] ring-1 ring-white/[0.16] backdrop-blur-md"
+          ? "rounded-xl bg-[var(--surface-raised)] shadow-[0_16px_40px_-12px_rgba(0,0,0,0.45)] ring-1 ring-[var(--line-strong)] backdrop-blur-md"
           : `transition ${open ? "bg-white/[0.045]" : ""}`
       }
     >

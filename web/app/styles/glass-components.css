@@ -184,7 +184,7 @@
 .segmented-glass__item:hover {
   color: var(--text);
 }
-.segmented-glass__item[aria-pressed="true"] {
+.segmented-glass__item:is([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"]) {
   background: rgba(255, 255, 255, 0.15);
   color: var(--text);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
@@ -242,6 +242,12 @@
   border-color: rgba(255, 255, 255, 0.14);
   background: rgba(22, 25, 33, 0.88);
 }
+.card-row-surface--danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.card-row-surface--warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+}
 
 .page-nav-btn {
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -252,6 +258,23 @@
 .page-nav-btn:hover {
   background: rgba(0, 0, 0, 0.5);
   color: #ffffff;
+}
+.page-nav-btn[data-active="true"],
+.page-nav-btn[data-state="open"] {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.58);
+  color: #ffffff;
+}
+
+.input-glass {
+  border: 1px solid var(--line);
+  background: var(--surface-inset);
+  color: var(--text);
+  outline: none;
+  transition: border-color 150ms ease, background-color 150ms ease, width 150ms ease;
+}
+.input-glass:focus {
+  border-color: var(--line-strong);
 }
 
 /*
@@ -440,11 +463,20 @@
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition:
-    background 150ms ease,
-    border-color 150ms ease,
-    color 150ms ease;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
 }
+.btn-glass--ok { color: var(--ok); }
+.btn-glass--danger { color: var(--danger); }
+.btn-danger {
+  background: var(--danger-solid);
+  color: #ffffff;
+  transition: background-color 150ms ease, filter 150ms ease, transform 120ms ease;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-solid-hover);
+  filter: brightness(1.04);
+}
+.btn-danger:active:not(:disabled) { transform: scale(0.96); }
 .btn-accent:disabled {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-faint);
@@ -735,12 +767,8 @@ body.cmdk-open .app-shell {
 
 /* —— 搜索等待态：骨架 shimmer 与进度条扫光（见 components/search-results.tsx） —— */
 @keyframes search-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
 .skeleton-block {
   display: inline-block;
@@ -748,20 +776,12 @@ body.cmdk-open .app-shell {
   background-image: linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, 0.13) 50%, transparent 65%);
   background-size: 220% 100%;
   animation: search-shimmer 1.8s linear infinite;
-  /* 各骨架行通过 --stagger 错峰，扫光斜向依次掠过，比整片同步呼吸更有"加载中"的动感 */
   animation-delay: var(--stagger, 0ms);
 }
-/* 扫光动画走 transform 而非 left：left 是布局属性，每帧都要重排重绘；
-   transform 在合成器上执行，搜索期间常驻的动画不该持续占用主线程。
-   translateX 以自身宽度（父宽 40%）为基准：-100% 自身 = 原 left:-40%，
-   250% 自身 = 原 left:100%。 */
+/* 扫光走 transform（合成器线程）：-100% 自身 = 原 left:-40%，250% 自身 = 原 left:100%。 */
 @keyframes search-progress-sweep {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(250%);
-  }
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
 }
 .progress-sweep {
   left: 0;
