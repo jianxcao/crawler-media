@@ -114,7 +114,7 @@ export const TorrentRow = memo(function TorrentRow({
                 href={hit.detail_url}
                 target="_blank"
                 rel="noreferrer"
-                className="btn-glass h-7 px-3 text-caption text-[var(--text-muted)]"
+                className="btn-glass btn-glass--muted h-7 px-3 text-caption"
               >
                 详情
               </a>
@@ -181,7 +181,7 @@ export function AttrBadges({ release }: { release: Release }) {
   const seasonEp = seasonEpLabel(release);
   if (seasonEp) chips.push({ key: "se", text: seasonEp, cls: "text-[var(--accent-2)]" });
   if (release.resolution) chips.push({ key: "res", text: release.resolution });
-  if (release.hdr) chips.push({ key: "hdr", text: release.hdr, cls: "text-[#c8a6ff]" });
+  if (release.hdr) chips.push({ key: "hdr", text: release.hdr, cls: "text-purple-300" });
   if (release.group) chips.push({ key: "group", text: release.group, cls: "text-[var(--accent)]" });
   if (release.source) chips.push({ key: "source", text: release.source });
   if (release.codec) chips.push({ key: "codec", text: release.codec });

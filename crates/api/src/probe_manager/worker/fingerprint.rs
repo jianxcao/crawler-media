@@ -38,29 +38,53 @@ pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
             .shutting_down
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            manager.seen.lock().remove(&id.ledger_id);
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
             continue;
         }
-        let owns_running = process_fingerprint(&manager, work).await;
+        if manager.background_is_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        let Some(owns_running) = process_fingerprint(&manager, work).await else {
+            continue;
+        };
         retry_dispatch(&manager, &id, owns_running).await;
     }
 }
 
-async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::FingerprintWork) -> bool {
+async fn process_fingerprint(
+    manager: &Arc<ProbeManager>,
+    work: probe::FingerprintWork,
+) -> Option<bool> {
     let owns_running = work.start_job;
     let unit = work.unit.clone();
     let ready = step(&manager, {
         let unit = unit.clone();
         move |manager| {
-            source_ready(manager, &unit)
+            let ledger_id = unit.row.file.file_id.to_string();
+            if let Some(job_id) = unit.job_id.as_deref()
+                && manager.background_is_paused()
+                && !manager.is_dispatch_paused_exempt(job_id, &ledger_id)
+            {
+                manager.remove_seen_if_job(&ledger_id, job_id);
+                return Err(());
+            }
+            Ok(source_ready(manager, &unit)
                 && (!work.start_job
-                    || start_persisted_unit(manager, &unit, store::ProbeDispatchStage::Fingerprint))
+                    || start_persisted_unit(
+                        manager,
+                        &unit,
+                        store::ProbeDispatchStage::Fingerprint,
+                    )))
         }
     })
-    .await
-    .unwrap_or(false);
-    if !ready {
-        return false;
+    .await;
+    match ready {
+        Ok(Ok(true)) => {}
+        Ok(Err(())) => return None,
+        Ok(Ok(false)) | Err(_) => return Some(false),
     }
     let leased = step(&manager, {
         let unit = unit.clone();
@@ -83,9 +107,9 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
                 })
                 .await;
             }
-            return owns_running;
+            return Some(owns_running);
         }
-        Err(_) => return owns_running,
+        Err(_) => return Some(owns_running),
     };
     let owner = unit.row.file.library_id.to_string();
     let control = _refresh_leases
@@ -112,7 +136,7 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         Ok(outcome) => outcome,
         Err(error) => {
             tracing::error!(%error, "声纹流水线 worker 失败，保留持久单元供重试");
-            return owns_running;
+            return Some(owns_running);
         }
     };
     let _ = step(&manager, move |manager| {
@@ -129,7 +153,7 @@ async fn process_fingerprint(manager: &Arc<ProbeManager>, work: probe::Fingerpri
         finish_fingerprint_outcome(manager, &unit, outcome);
     })
     .await;
-    owns_running
+    Some(owns_running)
 }
 
 fn finish_fingerprint_outcome(

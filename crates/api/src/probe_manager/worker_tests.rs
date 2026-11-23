@@ -56,7 +56,7 @@ async fn interrupted_unit_retries_after_store_contention_without_resetting_other
     let manager = Arc::new(ProbeManager::new(store.clone()).unwrap());
     add_running_job(&store.as_ref(), "first", "file-1");
     add_running_job(&store.as_ref(), "second", "file-2");
-    manager.seen.lock().insert("file-1".into());
+    manager.set_seen("file-1".into(), "first".into());
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let held_store = store.clone();
@@ -85,7 +85,7 @@ async fn interrupted_unit_retries_after_store_contention_without_resetting_other
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(!task.is_finished());
-    assert!(manager.seen.lock().contains("file-1"));
+    assert!(manager.has_seen("file-1"));
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), task)
@@ -98,7 +98,7 @@ async fn interrupted_unit_retries_after_store_contention_without_resetting_other
         store.probe_job_units("second").unwrap()[0].status,
         "running"
     );
-    assert!(!manager.seen.lock().contains("file-1"));
+    assert!(!manager.has_seen("file-1"));
 }
 
 #[tokio::test]
@@ -109,7 +109,7 @@ async fn old_cleanup_does_not_release_new_job_dispatch() {
     add_running_job(&store.as_ref(), "old", "file");
     store.as_ref().cancel_probe_job("old", "cancelled").unwrap();
     add_running_job(&store.as_ref(), "new", "file");
-    manager.seen.lock().insert("file".into());
+    manager.set_seen("file".into(), "new".into());
     retry_dispatch(
         &manager,
         &store::ProbeDispatchId {
@@ -120,7 +120,7 @@ async fn old_cleanup_does_not_release_new_job_dispatch() {
         true,
     )
     .await;
-    assert!(manager.seen.lock().contains("file"));
+    assert!(manager.has_seen("file"));
     assert_eq!(
         store.as_ref().probe_job_units("new").unwrap()[0].status,
         "running"

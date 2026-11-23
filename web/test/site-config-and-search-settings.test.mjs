@@ -115,7 +115,10 @@ function buildSearchSystem({
     } else if (spec === "@/lib/http") {
       loaded = { HttpError: FakeHttpError };
     } else if (spec === "@/components/feedback") {
-      loaded = { useConfirm: () => async () => true };
+      loaded = {
+        useConfirm: () => async () => true,
+        useToast: () => ({ success() {}, error() {}, info() {} }),
+      };
     } else if (spec === "@/components/icons") {
       loaded = {
         PlusIcon: () => React.createElement("span", null, "+"),
@@ -441,4 +444,155 @@ test("SearchSection warns on ghost deleted site_ids and PresetEditor lets user r
   await act(async () => {
     rZero.unmount();
   });
+});
+
+test("SiteRow avoids duplicate 已停用 badge and surfaces toast + inline feedback on 立即签到", async () => {
+  const toasts = { success: [], error: [] };
+  let checkInImpl = async () => ({
+    id: "site-hda",
+    name: "HDArea",
+    url: "https://hdarea.club",
+    profile_id: "hdarea",
+    enabled: false,
+    auth_type: "cookie",
+    maintenance_via: "http",
+  });
+
+  const DropdownStub = {
+    Root: ({ children }) => React.createElement("div", null, children),
+    Trigger: ({ children }) => React.createElement("div", null, children),
+    Portal: ({ children }) => React.createElement("div", null, children),
+    Content: ({ children }) => React.createElement("div", null, children),
+    Item: ({ children, onSelect, disabled }) =>
+      React.createElement(
+        "button",
+        { type: "button", disabled, onClick: () => onSelect?.() },
+        children,
+      ),
+  };
+
+  const resolveImport = (spec) => {
+    if (spec === "@radix-ui/react-dropdown-menu") return DropdownStub;
+    if (spec === "react-router-dom") {
+      return { Link: ({ children, to }) => React.createElement("a", { href: to }, children) };
+    }
+    if (spec === "@/components/feedback") {
+      return {
+        useConfirm: () => async () => true,
+        useToast: () => ({
+          success: (msg) => toasts.success.push(msg),
+          error: (msg) => toasts.error.push(msg),
+          info() {},
+        }),
+      };
+    }
+    if (spec === "@/components/icons") {
+      return {
+        ChevronDownIcon: () => React.createElement("span", null, "v"),
+        MoreIcon: () => React.createElement("span", null, "..."),
+      };
+    }
+    if (spec === "@/components/settings/sites/boost-settings-modal") {
+      return {
+        BoostReadout: () => null,
+        BoostSettingsModal: () => null,
+      };
+    }
+    if (spec === "@/components/settings/sites/site-form") {
+      return {
+        AUTH_TYPE_LABEL: { cookie: "Cookie", apikey: "API Key", credential: "账密", none: "无" },
+        SiteForm: () => null,
+      };
+    }
+    if (spec === "@/lib/api/sites") {
+      return {
+        checkInSite: (id) => checkInImpl(id),
+        deleteSite: async () => ({ site_id: "site-hda" }),
+        reverifySite: async (id) => checkInImpl(id),
+        setSiteEnabled: async (_id, enabled) => ({ ...(await checkInImpl(_id)), enabled }),
+        setSiteRatioBoost: async (id) => checkInImpl(id),
+        updateSite: async (id) => checkInImpl(id),
+      };
+    }
+    if (spec === "@/lib/download-tasks") {
+      return { useDownloadTasks: () => ({ tasks: [] }) };
+    }
+    if (spec === "@/lib/format") {
+      return { formatBytes: (n) => `${n} B` };
+    }
+    return require(spec);
+  };
+
+  const { SiteRow } = transpileFile("components/settings/sites/site-row.tsx", resolveImport);
+
+  const disabledSite = {
+    id: "site-hda",
+    name: "HDArea",
+    url: "https://hdarea.club",
+    profile_id: "hdarea",
+    cookie: null,
+    api_key: null,
+    rss_url: null,
+    proxy: null,
+    rate_limit_per_minute: null,
+    cdp_url: null,
+    downloader_id: null,
+    enabled: false,
+    auth_type: "cookie",
+    maintenance_via: "http",
+  };
+
+  const changed = [];
+  const errors = [];
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(SiteRow, {
+        item: { profile_id: "hdarea", auth_types: ["cookie"], supports_check_in: true },
+        site: disabledSite,
+        expanded: false,
+        onToggle() {},
+        onOpen() {},
+        onChanged: (next) => changed.push(next),
+        onDeleted() {},
+        onError: (msg) => errors.push(msg),
+      }),
+    );
+  });
+
+  try {
+    // 1. Disabled site must render "已停用" only ONCE (not duplicated adjacent badges!)
+    const rowText = textOf(renderer.root);
+    const disabledOccurrences = rowText.match(/已停用/g) ?? [];
+    assert.equal(
+      disabledOccurrences.length,
+      1,
+      `Disabled SiteRow must render '已停用' once, got ${disabledOccurrences.length} in: ${rowText}`,
+    );
+
+    // 2. Click "立即签到" -> succeeds with toast.success feedback
+    const checkInBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => textOf(btn).trim() === "立即签到");
+    assert.ok(checkInBtn, "SiteRow menu must render 立即签到 action");
+
+    await act(async () => {
+      checkInBtn.props.onClick();
+    });
+    assert.equal(changed.length, 1);
+    assert.equal(toasts.success.length, 1, "Successful checkInSite must trigger toast.success");
+    assert.match(toasts.success[0], /签到/);
+
+    // 3. Click "立即签到" when checkInSite rejects -> surfaces toast.error feedback
+    checkInImpl = async () => {
+      throw new Error("Cookie 已失效");
+    };
+    await act(async () => {
+      checkInBtn.props.onClick();
+    });
+    assert.equal(toasts.error.length, 1, "Failed checkInSite must trigger toast.error");
+    assert.match(toasts.error[0], /Cookie 已失效/);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
 });

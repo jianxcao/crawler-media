@@ -334,9 +334,21 @@ pub(crate) async fn item_detail(
             let probe_queued = store
                 .probe_queued_among(&file_ids)
                 .map_err(browse_store_error)?;
+            let is_admin = match user_id {
+                Some(uid) => store.user_role(uid).map(|r| r == "admin").unwrap_or(false),
+                None => false,
+            };
+            let subscriber_filter = if is_admin { None } else { Some(user_id) };
             let panorama = (detail.item.kind == MediaKind::Tv)
                 .then(|| {
-                    store.episode_panorama(&[media_id], &[lib_id], Some(lib_id), "", release::parse)
+                    store.episode_panorama_scoped(
+                        &[media_id],
+                        &[lib_id],
+                        Some(lib_id),
+                        "",
+                        subscriber_filter,
+                        release::parse,
+                    )
                 })
                 .transpose()
                 .map_err(browse_store_error)?;
@@ -705,8 +717,16 @@ pub(crate) async fn item_episodes(
                     Ok((episodes, media))
                 })
                 .map_err(browse_store_error)??;
+            let subscriber_filter = if is_admin { None } else { Some(user_id) };
             let panorama = store
-                .episode_panorama(&[media_id], &[lib_id], Some(lib_id), "", release::parse)
+                .episode_panorama_scoped(
+                    &[media_id],
+                    &[lib_id],
+                    Some(lib_id),
+                    "",
+                    subscriber_filter,
+                    release::parse,
+                )
                 .map_err(browse_store_error)?;
             super::media::append_concrete_season_stubs(season, &panorama, &mut episodes);
             let mut states = HashMap::new();

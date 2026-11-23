@@ -362,3 +362,331 @@ async fn routing_preview_validates_explicit_library_and_skips_unmatched_rule_fal
     );
     assert!(unmatched["library_id"].is_null());
 }
+
+async fn setup_restricted_default_tv(
+    app: &axum::Router,
+    store: &api::Store,
+    tmp: &tempfile::TempDir,
+) -> (String, String, String, String) {
+    let preseeded_id = store
+        .default_library(domain::MediaKind::Tv)
+        .unwrap()
+        .map(|lib| lib.id);
+    let (_outsider_id, outsider_token) = create_member(app, "outsider-def").await;
+    let (allowed_id, allowed_token) = create_member(app, "allowed-def").await;
+    let restricted_filter = create_named_rule_set(app, "restricted-def-filter").await;
+    let restricted_root = tmp.path().join("tv-restricted-default");
+    std::fs::create_dir_all(&restricted_root).unwrap();
+    let restricted_lib = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "受限默认剧库",
+                    "kind": "tv",
+                    "root_paths": [restricted_root.display().to_string()],
+                    "access_mode": "selected",
+                    "member_ids": [allowed_id.to_string()],
+                    "default_filter_id": restricted_filter,
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let restricted_lib_id = restricted_lib["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PUT",
+                &format!("/api/v1/libraries/{restricted_lib_id}/default"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    if let Some(preseeded_id) = preseeded_id {
+        store.begin_library_removal(&preseeded_id).unwrap();
+    }
+    (
+        restricted_lib_id,
+        restricted_filter,
+        outsider_token,
+        allowed_token,
+    )
+}
+
+#[tokio::test]
+async fn restricted_default_library_rejects_outsider_until_fallback_exists_and_blocks_null_patch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = locking_preview_state(&tmp);
+    let store = state.store();
+    let app = api::router(state);
+    let (_restricted_id, restricted_filter, outsider_token, allowed_token) =
+        setup_restricted_default_tv(&app, &store, &tmp).await;
+
+    let rejected = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some(&outsider_token),
+            json!({
+                "title_ref": "tmdb:tv:1399",
+                "coverage": { "kind": "tv", "season": 1, "episode_from": 1 },
+                "fetch_mode": "search"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let rej_err = json_error(rejected).await;
+    assert_eq!(rej_err["code"], "subscription.invalid");
+    assert_eq!(rej_err["message"], "没有可用的目标媒体库");
+
+    let fallback_filter = create_named_rule_set(&app, "public-fallback-filter").await;
+    let public_root = tmp.path().join("tv-public-secondary");
+    std::fs::create_dir_all(&public_root).unwrap();
+    let public_lib = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "公开备用剧库",
+                    "kind": "tv",
+                    "root_paths": [public_root.display().to_string()],
+                    "default_filter_id": fallback_filter,
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let public_lib_id = public_lib["id"].as_str().unwrap().to_string();
+
+    let sub = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some(&outsider_token),
+                json!({
+                    "title_ref": "tmdb:tv:1399",
+                    "coverage": { "kind": "tv", "season": 1, "episode_from": 1 },
+                    "fetch_mode": "search"
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(sub["library_id"], public_lib_id);
+    assert_eq!(sub["filter_id"], fallback_filter);
+
+    let sub_id = sub["id"].as_str().unwrap();
+    for raw_lib in [Value::Null, json!("")] {
+        let patch_null = app
+            .clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/subscriptions/{sub_id}"),
+                Some(&outsider_token),
+                json!({ "library_id": raw_lib }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(patch_null.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_error(patch_null).await["message"],
+            "指定的媒体库不存在"
+        );
+    }
+
+    let allowed_sub = json_data(
+        app.oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some(&allowed_token),
+            json!({
+                "title_ref": "tmdb:tv:1399",
+                "coverage": { "kind": "tv", "season": 1, "episode_from": 1 },
+                "fetch_mode": "search"
+            }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(allowed_sub["library_id"].is_null());
+    assert_eq!(allowed_sub["filter_id"], restricted_filter);
+}
+
+#[tokio::test]
+async fn admin_auto_routing_skips_hidden_library_while_allowing_explicit_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = locking_preview_app(&tmp);
+    let public_filter = create_named_rule_set(&app, "visible-tv-filter").await;
+    let hidden_filter = create_named_rule_set(&app, "hidden-cn-filter").await;
+    let visible_root = tmp.path().join("tv-visible");
+    let hidden_root = tmp.path().join("tv-hidden-cn");
+    std::fs::create_dir_all(&visible_root).unwrap();
+    std::fs::create_dir_all(&hidden_root).unwrap();
+
+    let visible_lib = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "可见默认剧库",
+                    "kind": "tv",
+                    "root_paths": [visible_root.display().to_string()],
+                    "default_filter_id": public_filter,
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let visible_lib_id = visible_lib["id"].as_str().unwrap().to_string();
+    app.clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/api/v1/libraries/{visible_lib_id}/default"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+
+    let hidden_lib = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "管理员隐藏国产剧库",
+                    "kind": "tv",
+                    "root_paths": [hidden_root.display().to_string()],
+                    "admin_visible": false,
+                    "default_filter_id": hidden_filter,
+                    "match_rules": [{ "field": "origin_countries", "op": "any_of", "values": ["CN"] }],
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let hidden_lib_id = hidden_lib["id"].as_str().unwrap().to_string();
+
+    let preview = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions/download-routing-preview",
+                Some("management-secret"),
+                json!({ "kind": "tv", "tmdb_id": "203483", "title": "两京十五日" }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(preview["library_id"], visible_lib_id);
+    assert!(preview["route_matched"].is_null());
+
+    let admin_auto = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some("management-secret"),
+                json!({
+                    "title_ref": "tmdb:tv:203483",
+                    "coverage": { "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 2 },
+                    "fetch_mode": "search"
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(admin_auto["library_id"].is_null());
+    assert_eq!(admin_auto["filter_id"], public_filter);
+
+    let admin_explicit = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some("management-secret"),
+            json!({
+                "title_ref": "tmdb:tv:203483",
+                "coverage": { "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 2 },
+                "fetch_mode": "search",
+                "library_id": hidden_lib_id
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_explicit.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn overlap_conflict_redacts_other_member_subscription_uuid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = locking_preview_app(&tmp);
+    let (_, member_a_token) = create_member(&app, "overlap-a").await;
+    let (_, member_b_token) = create_member(&app, "overlap-b").await;
+    let fx = setup_private_routing(&app, &tmp).await;
+
+    let a_sub = json_data(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/subscriptions",
+                Some(&member_a_token),
+                json!({
+                    "title_ref": "tmdb:tv:1399",
+                    "coverage": { "kind": "tv", "season": 2, "episode_from": 1, "episode_to": 3 },
+                    "fetch_mode": "search",
+                    "library_id": fx.default_lib_id
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let a_sub_id = a_sub["id"].as_str().unwrap();
+
+    let b_conflict = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some(&member_b_token),
+            json!({
+                "title_ref": "tmdb:tv:1399",
+                "coverage": { "kind": "tv", "season": 2, "episode_from": 2, "episode_to": 4 },
+                "fetch_mode": "search",
+                "library_id": fx.default_lib_id
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(b_conflict.status(), StatusCode::CONFLICT);
+    let b_err = json_error(b_conflict).await;
+    assert_eq!(b_err["code"], "subscription.overlap");
+    assert_eq!(
+        b_err["message"],
+        "同一媒体库中已有覆盖重叠的订阅，请调整集数范围"
+    );
+    assert!(!b_err["message"].as_str().unwrap().contains(a_sub_id));
+}

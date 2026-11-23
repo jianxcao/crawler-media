@@ -55,94 +55,381 @@ function collectText(node) {
   return "";
 }
 
-test("computeVirtualRange renders <= 25 items for 8,230 rows at any scroll offset with exact spacer heights", () => {
-  const load = createModuleLoader();
-  const { computeVirtualRange } = load("components/transfers/transfer-helpers.tsx");
+test("transfer-helpers drops dead computeVirtualRange and VirtualTransferList uses stable measureRow + ResizeObserver scrollMargin", async () => {
+  const iconStub = () => React.createElement("span");
+  const measureCalls = [];
+  let latestVirtualizerOpts = null;
 
-  const count = 8230;
-  const defaultItemHeight = 148;
-  const gap = 12;
-  const viewportHeight = 900;
-  const overscan = 6;
-  const expectedTotal = count * defaultItemHeight + (count - 1) * gap;
+  const loadWithSpy = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@tanstack/react-virtual": {
+      useVirtualizer: (opts) => {
+        latestVirtualizerOpts = opts;
+        const [instance] = React.useState(() => ({
+          options: { scrollMargin: 0 },
+          getTotalSize: () => latestVirtualizerOpts.count * 148,
+          getVirtualItems: () =>
+            latestVirtualizerOpts.count > 0
+              ? [
+                  {
+                    index: 0,
+                    key: latestVirtualizerOpts.getItemKey(0),
+                    start: latestVirtualizerOpts.scrollMargin ?? 0,
+                    size: 148,
+                  },
+                ]
+              : [],
+          measureElement(el) {
+            measureCalls.push(el);
+          },
+        }));
+        instance.options.scrollMargin = opts.scrollMargin ?? 0;
+        return instance;
+      },
+    },
+  });
 
-  const offsetsToTest = [0, 320, 4800, 65000, 640000, expectedTotal - 900, expectedTotal + 500];
-  for (const scrollTop of offsetsToTest) {
-    const range = computeVirtualRange({
-      count,
-      scrollTop,
-      viewportHeight,
-      listOffsetTop: 240,
-      overscan,
-      defaultItemHeight,
-      gap,
+  const helpers = loadWithSpy("components/transfers/transfer-helpers.tsx");
+  assert.equal(
+    "computeVirtualRange" in helpers,
+    false,
+    "Dead legacy computeVirtualRange helper must be deleted",
+  );
+
+  const { VirtualTransferList } = loadWithSpy("components/transfers/virtual-transfer-list.tsx");
+
+  const resizeObservers = [];
+  const prevWindow = globalThis.window;
+  const prevResizeObserver = globalThis.ResizeObserver;
+  globalThis.window = {
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  globalThis.ResizeObserver = class {
+    constructor(cb) {
+      this.cb = cb;
+      this.targets = [];
+      resizeObservers.push(this);
+    }
+    observe(target) {
+      this.targets.push(target);
+    }
+    unobserve() {}
+    disconnect() {
+      this.disconnected = true;
+    }
+  };
+
+  let containerTop = 180;
+  const parentEl = { nodeName: "DIV" };
+  const fakeScroller = {
+    scrollTop: 0,
+    getBoundingClientRect: () => ({ top: 40, bottom: 840, left: 0, right: 1000, width: 1000, height: 800 }),
+  };
+  const rowDomNode = {
+    getAttribute: (name) => (name === "data-index" ? "0" : null),
+  };
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(VirtualTransferList, {
+          items: [{ id: "r1", label: "Row 1" }],
+          getKey: (it) => it.id,
+          defaultItemHeight: 148,
+          scrollElement: fakeScroller,
+          hasMore: true,
+          loadingMore: false,
+          onLoadMore() {},
+          renderItem: (it) => React.createElement("span", null, it.label),
+        }),
+        {
+          createNodeMock(element) {
+            if (element.props?.["data-transfer-row"] !== undefined) {
+              return rowDomNode;
+            }
+            if (element.type === "div") {
+              return {
+                parentElement: parentEl,
+                getBoundingClientRect: () => ({
+                  top: containerTop,
+                  bottom: containerTop + 500,
+                  left: 0,
+                  right: 1000,
+                  width: 1000,
+                  height: 500,
+                }),
+              };
+            }
+            return null;
+          },
+        },
+      );
     });
 
-    assert.ok(
-      range.visibleCount > 0 && range.visibleCount <= 25,
-      `scrollTop=${scrollTop}: expected 1..25 rendered items, got ${range.visibleCount}`,
-    );
-    assert.equal(range.endIndex - range.startIndex, range.visibleCount);
-    assert.equal(range.totalHeightPx, expectedTotal);
+    assert.equal(latestVirtualizerOpts.scrollMargin, 140);
+    const initialMeasureCount = measureCalls.length;
+    assert.ok(initialMeasureCount >= 1);
 
-    const renderedSliceHeight =
-      range.visibleCount * defaultItemHeight + (range.visibleCount - 1) * gap;
+    // Re-rendering with updated prop (loadingMore=true) must NOT re-attach inline callback ref!
+    await act(async () => {
+      renderer.update(
+        React.createElement(VirtualTransferList, {
+          items: [{ id: "r1", label: "Row 1" }],
+          getKey: (it) => it.id,
+          defaultItemHeight: 148,
+          scrollElement: fakeScroller,
+          hasMore: true,
+          loadingMore: true,
+          onLoadMore() {},
+          renderItem: (it) => React.createElement("span", null, it.label),
+        }),
+      );
+    });
     assert.equal(
-      range.topSpacerPx + renderedSliceHeight + range.bottomSpacerPx,
-      expectedTotal,
-      `scrollTop=${scrollTop}: top + slice + bottom must equal totalHeightPx`,
+      measureCalls.length,
+      initialMeasureCount,
+      "Stable useCallback ref must not re-fire measureElement on parent re-renders",
     );
+
+    // Layout shift above list (e.g. error banner mounted or Sidebar toggled) reported via ResizeObserver updates scrollMargin!
+    assert.ok(
+      resizeObservers.some((ro) => ro.targets.includes(fakeScroller)),
+      "ResizeObserver must observe activeScrollEl",
+    );
+    containerTop = 260;
+    await act(async () => {
+      for (const ro of resizeObservers) ro.cb([]);
+    });
+    assert.equal(
+      latestVirtualizerOpts.scrollMargin,
+      220,
+      "ResizeObserver callback must recalculate scrollMargin when layout shifts",
+    );
+
+    // Unmounting row must forward null to measureElement so @tanstack/virtual-core purges detached nodes!
+    await act(async () => {
+      renderer.update(
+        React.createElement(VirtualTransferList, {
+          items: [],
+          getKey: (it) => it.id,
+          defaultItemHeight: 148,
+          scrollElement: fakeScroller,
+          hasMore: false,
+          loadingMore: false,
+          onLoadMore() {},
+          renderItem: (it) => React.createElement("span", null, it.label),
+        }),
+      );
+    });
+    assert.equal(
+      measureCalls.at(-1),
+      null,
+      "Unmounting a virtual row must invoke measureElement(null) to purge elementsCache",
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevResizeObserver === undefined) delete globalThis.ResizeObserver;
+    else globalThis.ResizeObserver = prevResizeObserver;
   }
+});
 
-  const head = computeVirtualRange({
-    count,
-    scrollTop: 0,
-    viewportHeight,
-    listOffsetTop: 0,
-    overscan,
-    defaultItemHeight,
-    gap,
-  });
-  assert.equal(head.startIndex, 0);
-  assert.equal(head.topSpacerPx, 0);
+test("MediaTransferView avoids empty-state and stale-list flashes across viewMode & filter transitions", async () => {
+  const iconStub = () => React.createElement("span");
+  const pendingResolvers = [];
 
-  const tail = computeVirtualRange({
-    count,
-    scrollTop: expectedTotal,
-    viewportHeight,
-    listOffsetTop: 0,
-    overscan,
-    defaultItemHeight,
-    gap,
-  });
-  assert.equal(tail.endIndex, count);
-  assert.equal(tail.bottomSpacerPx, 0);
+  const summary = {
+    total_files: 10,
+    media_count: 3,
+    movie_files: 0,
+    tv_files: 10,
+    strm_count: 10,
+    hardlink_count: 0,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: 0,
+    probed_duration_ms: 600_000,
+    strm_probed_count: 10,
+  };
 
-  // Variable measured heights (e.g. expanded group row among collapsed group rows)
-  const measured = new Map([
-    [10, 420],
-    [11, 310],
-  ]);
-  const variableRange = computeVirtualRange({
-    count,
-    scrollTop: 950,
-    viewportHeight: 800,
-    listOffsetTop: 0,
-    overscan: 5,
-    defaultItemHeight: 88,
-    gap: 12,
-    getItemHeight: (idx) => measured.get(idx),
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: (params) =>
+        new Promise((resolve) => {
+          pendingResolvers.push({ params, resolve });
+        }),
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
   });
-  assert.ok(variableRange.visibleCount <= 25);
-  let sliceHeight = 0;
-  for (let i = variableRange.startIndex; i < variableRange.endIndex; i += 1) {
-    sliceHeight += measured.get(i) ?? 88;
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView));
+  });
+
+  try {
+    // 1. Resolve initial files load
+    assert.equal(pendingResolvers.length, 1);
+    await act(async () => {
+      pendingResolvers.shift().resolve({
+        summary,
+        view: "files",
+        filtered_total: 1,
+        filtered_file_total: 1,
+        offset: 0,
+        limit: 50,
+        has_more: false,
+        items: [
+          {
+            id: "f-1",
+            media_id: "m-1",
+            library_id: "lib-1",
+            media_title: "初始文件作品",
+            media_kind: "tv",
+            path: "/tv/S01E01.strm",
+            source_path: null,
+            units: [{ season: 1, episode: 1 }],
+            resolution: "1080p",
+            codec: "hevc",
+            hdr: null,
+            quality_source: "probe",
+            confidence: "high",
+            filter_score: null,
+            is_strm: true,
+            transfer_mode: "strm",
+            file_size: null,
+            duration_ms: 60_000,
+          },
+        ],
+        groups: [],
+      });
+    });
+
+    // 2. Switch to "groups" BEFORE resolving the groups fetch -> must show loading indicator, NOT "未找到匹配的入库记录"!
+    const groupToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("按作品聚合"));
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+
+    const midSwitchText = collectText(renderer.toJSON());
+    assert.doesNotMatch(
+      midSwitchText,
+      /未找到匹配的入库记录|暂无整理入库记录/,
+      "Switching viewMode must not flash empty state while new mode is fetching",
+    );
+    assert.ok(
+      renderer.root.findAll((n) => n.props?.role === "status").length > 0,
+      "MediaTransferView must render a loading skeleton/status when activeListCount === 0 && ctl.loading",
+    );
+
+    // Resolve groups with unfiltered item "未过滤旧分组"
+    await act(async () => {
+      pendingResolvers.shift().resolve({
+        summary,
+        view: "groups",
+        filtered_total: 1,
+        filtered_file_total: 1,
+        offset: 0,
+        limit: 50,
+        has_more: false,
+        items: [],
+        groups: [
+          {
+            media_id: "g-old",
+            media_title: "未过滤旧分组",
+            media_kind: "tv",
+            library_id: "lib-1",
+            file_count: 1,
+            strm_count: 1,
+            hardlink_count: 0,
+            local_size_bytes: 0,
+            total_duration_ms: 60_000,
+            primary_resolution: "1080p",
+            primary_mode: "strm",
+            sample_dir: "/tv",
+          },
+        ],
+      });
+    });
+    assert.match(collectText(renderer.toJSON()), /未过滤旧分组/);
+
+    // 3. Switch back to "files", resolve it, then change kindFilter to "movie" (which invalidates inactive groupItems!)
+    const filesToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("逐文件列表"));
+    await act(async () => {
+      filesToggle.props.onClick();
+    });
+    await act(async () => {
+      pendingResolvers.shift().resolve({
+        summary,
+        view: "files",
+        filtered_total: 0,
+        filtered_file_total: 0,
+        offset: 0,
+        limit: 50,
+        has_more: false,
+        items: [],
+        groups: [],
+      });
+    });
+
+    const movieFilterBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).trim() === "电影");
+    await act(async () => {
+      movieFilterBtn.props.onClick();
+    });
+    await act(async () => {
+      pendingResolvers.shift().resolve({
+        summary,
+        view: "files",
+        filtered_total: 0,
+        filtered_file_total: 0,
+        offset: 0,
+        limit: 50,
+        has_more: false,
+        items: [],
+        groups: [],
+      });
+    });
+
+    // 4. Now switch back to "groups" while "movie" filter is active -> must NOT flash stale "未过滤旧分组"!
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+    assert.doesNotMatch(
+      collectText(renderer.toJSON()),
+      /未过滤旧分组/,
+      "Changing filters in files view must clear stale groupItems so switching back never flashes unfiltered groups",
+    );
+    assert.doesNotMatch(
+      collectText(renderer.toJSON()),
+      /未找到匹配的入库记录/,
+      "Switching back to cleared groups view must show loading state until fetch completes",
+    );
+  } finally {
+    await act(async () => renderer.unmount());
   }
-  sliceHeight += (variableRange.visibleCount - 1) * 12;
-  assert.equal(
-    variableRange.topSpacerPx + sliceHeight + variableRange.bottomSpacerPx,
-    variableRange.totalHeightPx,
-  );
 });
 
 test("listTransfers sends server-paginated query parameters while preserving legacy exports", async () => {

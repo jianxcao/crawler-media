@@ -118,6 +118,7 @@ export function Sidebar({
             <ArtworkImage
               src="/logo-mark.svg"
               alt={publicEnv.appName}
+              loading="eager"
               width={32}
               height={32}
               className="size-8 object-contain drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)]"
@@ -133,6 +134,7 @@ export function Sidebar({
               <ArtworkImage
                 src="/logo-mark.svg"
                 alt=""
+                loading="eager"
                 width={30}
                 height={30}
                 className="size-[30px] shrink-0 object-contain drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)]"

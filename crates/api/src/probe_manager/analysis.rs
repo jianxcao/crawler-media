@@ -110,16 +110,18 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
             "analysis handoff rejected".into(),
         ));
     }
-    manager.seen.lock().remove(&id);
-    observe_dirty(
-        manager,
-        SeasonKey {
-            media_id: prepared.context().media_id,
-            season: prepared.context().season,
-        },
-        dirty_at,
-    )?;
-    manager.wake.notify_waiters();
+    manager.remove_seen_if_job(&id, job);
+    if !manager.background_is_paused() || manager.is_dispatch_paused_exempt(job, &id) {
+        observe_dirty(
+            manager,
+            SeasonKey {
+                media_id: prepared.context().media_id,
+                season: prepared.context().season,
+            },
+            dirty_at,
+        )?;
+        manager.wake.notify_waiters();
+    }
     Ok(())
 }
 
@@ -129,13 +131,36 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
         if manager.shutting_down.load(Ordering::SeqCst) {
             break;
         }
+        if manager.background_is_paused() && !manager.has_paused_exempt_work() {
+            after = None;
+            tokio::select! {
+                _ = super::worker::wait_for_shutdown(&manager) => break,
+                _ = manager.wake.notified() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+            }
+            continue;
+        }
         let loaded = super::worker::step(&manager, move |manager| {
+            let paused = manager.background_is_paused();
+            if paused && !manager.has_paused_exempt_work() {
+                return Ok::<_, store::StoreError>((None, Vec::new()));
+            }
             let keys = manager.store.pending_probe_analysis_keys(after, 16)?;
             let mut result = Vec::new();
             for (media, season) in &keys {
                 let rows = manager
                     .store
                     .probe_analysis_participants(*media, *season, None, 16)?;
+                if paused
+                    && !rows.iter().any(|row| {
+                        manager.is_dispatch_paused_exempt(
+                            &row.dispatch().job_id,
+                            &row.dispatch().ledger_id,
+                        )
+                    })
+                {
+                    continue;
+                }
                 let digest = rows
                     .iter()
                     .map(|row| row.context().context_key.as_str())
@@ -173,8 +198,26 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
         if let Some(ticket) = ticket {
             super::worker::wait_for_metadata_idle(&manager).await;
             let key = ticket.key;
-            let result =
-                super::worker::step(&manager, move |manager| compute::run(manager, key)).await;
+            let result = super::worker::step(&manager, move |manager| {
+                if manager.background_is_paused() {
+                    let rows = manager.store.probe_analysis_participants(
+                        key.media_id,
+                        key.season,
+                        None,
+                        16,
+                    )?;
+                    if !rows.iter().any(|row| {
+                        manager.is_dispatch_paused_exempt(
+                            &row.dispatch().job_id,
+                            &row.dispatch().ledger_id,
+                        )
+                    }) {
+                        return Ok(None);
+                    }
+                }
+                compute::run(manager, key)
+            })
+            .await;
             let mut continuation = None;
             match result {
                 Ok(Ok(next)) => {

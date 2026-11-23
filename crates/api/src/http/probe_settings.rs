@@ -168,23 +168,32 @@ pub(crate) async fn pause(State(state): State<ApiState>) -> Response {
 }
 
 pub(crate) async fn resume(State(state): State<ApiState>) -> Response {
-    state.probe.set_background_paused_flag(false);
     let worker_state = state.clone();
-    if let Err(error) = state
+    match state
         .http_work
         .run_to_completion(move || {
-            if let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(
-                &worker_state.store,
-                &worker_state.probe,
-            ) {
-                tracing::warn!(%err, "恢复后台探测时派发待办义务失败，等待后台重试");
-            }
-            worker_state.probe.resume_background();
+            super::store_wait::with_foreground_store(&worker_state, |store| {
+                worker_state.require_writable()?;
+                worker_state.require_write_admitted()?;
+                worker_state.probe.set_background_paused_flag(false);
+                if let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(
+                    store,
+                    &worker_state.probe,
+                ) {
+                    tracing::warn!(%err, "恢复后台探测时派发待办义务失败，等待后台重试");
+                }
+                worker_state.probe.resume_background();
+                Ok::<(), Response>(())
+            })
         })
         .await
     {
-        tracing::warn!(%error, "恢复后台探测即时补充窗口繁忙，交由后台调度器跟进");
-        state.probe.wake_dispatch();
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(response))) | Ok(Err(response)) => return response,
+        Err(error) => {
+            tracing::warn!(%error, "恢复后台探测即时补充窗口繁忙");
+            return super::store_wait::busy_response();
+        }
     }
     tracing::info!("后台批量媒体探测队列已手动恢复执行");
     build_status_response(&state).await

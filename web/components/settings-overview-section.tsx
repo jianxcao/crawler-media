@@ -160,7 +160,7 @@ export function NetworkProxyHealthPanel() {
               <span
                 className={`rounded-md px-2 py-0.5 font-medium ${
                   data.active_proxy
-                    ? "bg-[#38bdf8]/15 text-[#38bdf8]"
+                    ? "bg-[var(--info)]/15 text-[var(--info)]"
                     : "bg-white/10 text-white/80"
                 }`}
               >
@@ -191,7 +191,7 @@ export function NetworkProxyHealthPanel() {
                     <span
                       className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
                         item.is_proxied
-                          ? "bg-[#38bdf8]/15 text-[#38bdf8]"
+                          ? "bg-[var(--info)]/15 text-[var(--info)]"
                           : "bg-emerald-500/15 text-emerald-400"
                       }`}
                     >

@@ -361,7 +361,7 @@ function FilterSheet({
         <button
           type="button"
           onClick={() => onChange(emptyFilters())}
-          className="btn-glass h-8 px-3 text-caption text-[var(--text-muted)]"
+          className="btn-glass btn-glass--muted h-8 px-3 text-caption"
         >
           清除全部
         </button>

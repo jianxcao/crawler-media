@@ -147,13 +147,252 @@ test("silver remains the default and Netflix keeps its own theme block", () => {
   assert.match(themes, /DEFAULT_THEME_ID = "silver"/);
 });
 
-test("GlassPanel keeps a single DOM tree across themes and avoids WebGL teardown between silver and liquid", () => {
+test("GlassPanel keeps a single DOM tree across themes and updates backdrop textures in-place without WebGL teardown", async () => {
   assert.match(glassPanel, /const usesWebgl = theme\.id !== "netflix" && theme\.id !== "paper"/);
-  assert.match(glassPanel, /\},\s*\[backgroundImage,\s*apply,\s*usesWebgl\]\)/);
-  assert.doesNotMatch(glassPanel, /\},\s*\[backgroundImage,\s*apply,\s*theme\.id\]\)/);
+  assert.match(glassPanel, /\},\s*\[apply,\s*usesWebgl\]\)/);
+  assert.doesNotMatch(glassPanel, /\},\s*\[backgroundImage,\s*apply/);
+  assert.match(glassPanel, /setImage\(backgroundImage\)/);
   const contentSlots = glassPanel.match(/glass-panel__content/g) ?? [];
   // Only 1 JSX className occurrence (comments don't mention glass-panel__content)
   assert.equal(contentSlots.length, 1);
+
+  // Behavioral verification of LiquidGlassRenderer currentUrl deduplication + 6-entry LRU imageCache
+  const { createRequire } = await import("node:module");
+  const ts = (await import("typescript")).default;
+  const require = createRequire(import.meta.url);
+
+  const rendererTs = await readFile(
+    path.join(webDir, "vendor/liquid-glass/core/LiquidGlassRenderer.ts"),
+    "utf8",
+  );
+  const rendererJs = ts.transpileModule(rendererTs, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  const createdLoads = [];
+  class FakeImage extends globalThis.EventTarget {
+    complete = false;
+    naturalWidth = 1920;
+    naturalHeight = 1080;
+    crossOrigin = "";
+    _src = "";
+    set src(v) {
+      // Simulate real browser resolving relative URLs like "/backdrop-default.jpg" to full origin URL!
+      this._src = v ? new URL(v, "http://localhost:3334").href : "";
+    }
+    get src() {
+      return this._src;
+    }
+    get currentSrc() {
+      return this._src;
+    }
+  }
+
+  let loseContextCalls = 0;
+  let createProgramCalls = 0;
+  const prevWindow = globalThis.window;
+  const prevImage = globalThis.Image;
+  const prevHTMLVideoElement = globalThis.HTMLVideoElement;
+  globalThis.window = {
+    devicePixelRatio: 1,
+    innerWidth: 1280,
+    innerHeight: 800,
+    scrollX: 0,
+    scrollY: 0,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+  };
+  globalThis.Image = FakeImage;
+  globalThis.HTMLVideoElement = class {};
+
+  const mod = { exports: {} };
+  new Function("require", "module", "exports", rendererJs)(
+    (spec) => {
+      if (spec === "./shaders") {
+        return { vertexShader: "void main(){}", fragmentShader: "void main(){}" };
+      }
+      if (spec === "@/lib/artwork-loading") {
+        return {
+          createArtworkImage: () => {
+            const image = new FakeImage();
+            return {
+              image,
+              load(url) {
+                createdLoads.push(url);
+                image.src = url;
+                image.complete = true;
+                image.dispatchEvent(new globalThis.Event("load"));
+              },
+            };
+          },
+        };
+      }
+      return require(spec);
+    },
+    mod,
+    mod.exports,
+  );
+
+  try {
+    const fakeGl = {
+      VERTEX_SHADER: 1,
+      FRAGMENT_SHADER: 2,
+      COMPILE_STATUS: 3,
+      LINK_STATUS: 4,
+      ARRAY_BUFFER: 5,
+      STATIC_DRAW: 6,
+      FLOAT: 7,
+      TEXTURE0: 8,
+      TEXTURE_2D: 9,
+      TEXTURE_MIN_FILTER: 10,
+      TEXTURE_MAG_FILTER: 11,
+      TEXTURE_WRAP_S: 12,
+      TEXTURE_WRAP_T: 13,
+      LINEAR: 14,
+      CLAMP_TO_EDGE: 15,
+      UNPACK_FLIP_Y_WEBGL: 16,
+      RGBA: 17,
+      UNSIGNED_BYTE: 18,
+      COLOR_BUFFER_BIT: 19,
+      TRIANGLE_STRIP: 20,
+      isContextLost: () => false,
+      getExtension: (name) =>
+        name === "WEBGL_lose_context"
+          ? {
+              loseContext() {
+                loseContextCalls += 1;
+              },
+              restoreContext() {},
+            }
+          : null,
+      createShader: () => ({}),
+      shaderSource() {},
+      compileShader() {},
+      getShaderParameter: () => true,
+      deleteShader() {},
+      createProgram: () => {
+        createProgramCalls += 1;
+        return {};
+      },
+      attachShader() {},
+      linkProgram() {},
+      getProgramParameter: () => true,
+      useProgram() {},
+      deleteProgram() {},
+      createBuffer: () => ({}),
+      bindBuffer() {},
+      bufferData() {},
+      deleteBuffer() {},
+      getAttribLocation: () => 0,
+      enableVertexAttribArray() {},
+      vertexAttribPointer() {},
+      getUniformLocation: () => ({}),
+      createTexture: () => ({}),
+      deleteTexture() {},
+      activeTexture() {},
+      bindTexture() {},
+      texParameteri() {},
+      texImage2D() {},
+      pixelStorei() {},
+      uniform1i() {},
+      uniform1f() {},
+      uniform2f() {},
+      uniform3f() {},
+      uniform3fv() {},
+      viewport() {},
+      clearColor() {},
+      clear() {},
+      drawArrays() {},
+    };
+
+    const fakeCanvas = {
+      width: 300,
+      height: 600,
+      clientWidth: 300,
+      style: {},
+      ownerDocument: { querySelector: () => null },
+      addEventListener() {},
+      removeEventListener() {},
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        right: 300,
+        bottom: 600,
+        width: 300,
+        height: 600,
+      }),
+      getContext: () => fakeGl,
+    };
+
+    const defaultSettings = {
+      lensWidth: 300,
+      lensHeight: 600,
+      radius: 16,
+      blur: 10,
+      depth: 10,
+      refraction: 0.5,
+      chromaticAberration: 0.1,
+      edgeHighlight: 0.2,
+      specular: 0.2,
+      fresnel: 0.2,
+      brightness: 1,
+      saturation: 1,
+      shadow: 0.2,
+      darkTint: 0.4,
+      distortion: 0.2,
+      tintStrength: 0.1,
+      tint: 0,
+      tintColor: [1, 1, 1],
+      opacity: 1,
+      bevel: 0,
+    };
+
+    const { LiquidGlassRenderer } = mod.exports;
+    const r = new LiquidGlassRenderer(fakeCanvas, "/backdrop-default.jpg", defaultSettings);
+    assert.equal(createProgramCalls, 1);
+    assert.deepEqual(createdLoads, ["/backdrop-default.jpg"]);
+
+    // Calling setImage with identical relative URL "/backdrop-default.jpg" MUST be a no-op even though img.src resolved to http://localhost:3334/backdrop-default.jpg!
+    r.setImage("/backdrop-default.jpg");
+    assert.equal(createdLoads.length, 1, "setImage('/backdrop-default.jpg') must deduplicate via currentUrl");
+
+    // Load 5 more distinct URLs -> cache now holds 6 entries: ["/backdrop-default.jpg", u1, u2, u3, u4, u5]
+    for (let i = 1; i <= 5; i += 1) {
+      r.setImage(`https://cdn.invalid/backdrop-${i}.jpg`);
+    }
+    assert.equal(createdLoads.length, 6);
+    assert.equal(loseContextCalls, 0);
+    assert.equal(createProgramCalls, 1);
+
+    // Hit u1 -> refreshes u1 to MRU; oldest non-default is now u2!
+    const loadsBeforeHit = createdLoads.length;
+    r.setImage("https://cdn.invalid/backdrop-1.jpg");
+    assert.equal(createdLoads.length, loadsBeforeHit, "u1 must be served from cache");
+
+    // Load u6 -> must evict u2 (NOT "/backdrop-default.jpg" and NOT recently-hit u1!)
+    r.setImage("https://cdn.invalid/backdrop-6.jpg");
+    assert.equal(createdLoads.length, loadsBeforeHit + 1);
+
+    // "/backdrop-default.jpg" and u1 are still cached (0 network loads)
+    r.setImage("/backdrop-default.jpg");
+    r.setImage("https://cdn.invalid/backdrop-1.jpg");
+    assert.equal(createdLoads.length, loadsBeforeHit + 1, "default backdrop and MRU entry must remain cached");
+
+    // u2 was evicted so requesting it again triggers a fresh load
+    r.setImage("https://cdn.invalid/backdrop-2.jpg");
+    assert.equal(createdLoads.length, loadsBeforeHit + 2, "evicted LRU entry u2 must reload when requested again");
+
+    r.dispose();
+    assert.equal(loseContextCalls, 1, "dispose() releases WebGL context once on unmount");
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevImage === undefined) delete globalThis.Image;
+    else globalThis.Image = prevImage;
+    if (prevHTMLVideoElement === undefined) delete globalThis.HTMLVideoElement;
+    else globalThis.HTMLVideoElement = prevHTMLVideoElement;
+  }
 });
 
 test("paper and liquid are applied before the first paint and use matching browser chrome colors", () => {
@@ -396,4 +635,95 @@ test("source guardrails forbid hardcoded dark <option> backgrounds, unguarded si
 
   const notFound = await readFile(path.join(webDir, "src/not-found.tsx"), "utf8");
   assert.doesNotMatch(notFound, /bg-\[#0a0b10\]/);
+});
+
+test("paper light theme contrast fixes, --ok-ink, .btn-glass modifiers, and amber disabled buttons", async () => {
+  const paper = themeBlock("paper");
+
+  // 1. TrackTone.Text (--color-cyan-100) and TrackTone.Ai contrast on paper .menu-surface
+  assert.ok(paper.includes("--color-cyan-100:"), "paper theme must map --color-cyan-100 for TrackTone.Text");
+  const mediaTrackFormat = await readFile(path.join(webDir, "lib/media-track-format.ts"), "utf8");
+  assert.doesNotMatch(
+    mediaTrackFormat,
+    /text-\[#eef2f8\]/,
+    "TrackTone.Ai must not hardcode silver #eef2f8 text on light paper menus",
+  );
+
+  // 2. --ok-ink token & SourceWarning / check badges
+  assert.ok(css.includes("--ok-ink:"), ":root must define --ok-ink");
+  assert.match(paper, /--ok-ink:\s*#ffffff/i, "paper theme must set --ok-ink: #ffffff for deep #157a48 --ok badges");
+  const taskLayout = await readFile(path.join(webDir, "components/task-center/task-layout.tsx"), "utf8");
+  assert.doesNotMatch(taskLayout, /\btext-amber-50\b/, "SourceWarning link must not use 1.09:1 text-amber-50");
+  assert.match(taskLayout, /text-\[var\(--warn\)\]/);
+  assert.doesNotMatch(taskLayout, /text-\[#07120b\]/);
+  const seasonEpisodes = await readFile(
+    path.join(webDir, "components/library-item/season-episodes-section.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(seasonEpisodes, /text-\[#07120c\]/);
+
+  // 3. Torrent search seeders, promo badges, and HDR chip contrast on paper .card-row-surface
+  const torrentSearchView = await readFile(path.join(webDir, "lib/torrent-search-view.ts"), "utf8");
+  assert.doesNotMatch(torrentSearchView, /text-\[#ff9a9a\]|text-\[#79d193\]/);
+  const torrentRow = await readFile(path.join(webDir, "components/search/torrent-row.tsx"), "utf8");
+  assert.doesNotMatch(torrentRow, /text-\[#c8a6ff\]/, "HDR chip must not hardcode pastel #c8a6ff on white paper rows");
+
+  // 4. Settings & inspector semantic tokens instead of pastel hexes
+  const cdpBrowser = await readFile(
+    path.join(webDir, "components/settings/sites/cdp-browser-section.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(cdpBrowser, /text-\[#51cf66\]/);
+
+  const settingsOverview = await readFile(
+    path.join(webDir, "components/settings-overview-section.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(settingsOverview, /text-\[#38bdf8\]/);
+
+  const metadataSettings = await readFile(
+    path.join(webDir, "components/metadata-settings-section.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(metadataSettings, /text-\[#38bdf8\]/);
+
+  const wantedBreakdown = await readFile(
+    path.join(webDir, "components/subscription-inspector/wanted-breakdown.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(wantedBreakdown, /text-\[#2dd4bf\]/);
+
+  const membersSection = await readFile(path.join(webDir, "components/members-section.tsx"), "utf8");
+  assert.doesNotMatch(membersSection, /!text-\[#ffb36b\]/);
+
+  // 5. SiteRow avoids #c0c4cc low contrast
+  const siteRow = await readFile(path.join(webDir, "components/settings/sites/site-row.tsx"), "utf8");
+  assert.doesNotMatch(siteRow, /#c0c4cc/);
+
+  // 6. disabled-states.css neutralizes solid amber / #fbbf24 buttons (ProbeQueueCard)
+  assert.match(css, /button\[class\*="bg-amber-"\]:disabled/);
+  assert.match(css, /button\[class\*="bg-\[#fbbf24\]"\]:disabled/);
+
+  // 7. .btn-glass--accent and .btn-glass--muted defined in base + paper and applied across components
+  assert.match(css, /\.btn-glass--accent\s*\{[^}]*color:\s*var\(--accent\)/);
+  assert.match(css, /\.btn-glass--muted\s*\{[^}]*color:\s*var\(--text-muted\)/);
+  assert.match(css, /html\[data-theme="paper"\]\s+\.btn-glass--accent\s*\{[^}]*color:\s*var\(--accent\)/);
+  assert.match(css, /html\[data-theme="paper"\]\s+\.btn-glass--muted\s*\{[^}]*color:\s*var\(--text-muted\)/);
+
+  const reidentifyDialog = await readFile(path.join(webDir, "components/reidentify-dialog.tsx"), "utf8");
+  assert.match(reidentifyDialog, /btn-glass--danger/);
+  assert.doesNotMatch(reidentifyDialog, /btn-glass[^\n]*text-\[#ffb4b4\]/);
+
+  assert.match(metadataSettings, /btn-glass--danger/);
+  assert.match(metadataSettings, /btn-glass--accent/);
+  assert.doesNotMatch(metadataSettings, /btn-glass[^\n]*text-\[#ffaaaa\]/);
+
+  assert.match(settingsView, /btn-glass--muted/);
+
+  const filterToolbar = await readFile(
+    path.join(webDir, "components/search/torrent-filter-toolbar.tsx"),
+    "utf8",
+  );
+  assert.match(filterToolbar, /btn-glass--muted/);
+  assert.match(torrentRow, /btn-glass--muted/);
 });

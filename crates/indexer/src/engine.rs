@@ -103,7 +103,11 @@ impl Indexer {
         if profile.framework != Framework::Api || uses_html_cookie_fallback(site, profile) {
             return Ok(None);
         }
-        if profile.api_dialect == ApiDialect::HdareaV1 && profile.download.is_none() {
+        if profile.api_dialect == ApiDialect::HdareaV1
+            && (profile.download.is_none()
+                || torrent.enclosure.contains("dl_token=")
+                || torrent.enclosure.contains("passkey="))
+        {
             return Ok(None);
         }
         let id = torrent
@@ -113,11 +117,6 @@ impl Indexer {
             .map(str::to_string)
             .or_else(|| parse::extract_id(&torrent.enclosure));
         let Some(id) = id else {
-            if profile.api_dialect == ApiDialect::HdareaV1
-                && torrent.enclosure.contains("dl_token=")
-            {
-                return Ok(Some(torrent.enclosure.clone()));
-            }
             return Err(IndexerError::Parse(
                 "API Torrent 缺少 ID，无法获取下载令牌".into(),
             ));

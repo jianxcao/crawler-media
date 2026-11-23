@@ -102,8 +102,8 @@ pub struct ProbeManager {
     fingerprint_tx: mpsc::Sender<(store::ProbeDispatchId, probe::FingerprintWork)>,
     metadata_overflowed: AtomicBool,
     fingerprint_overflowed: AtomicBool,
-    /// 幂等去重：窗口内或执行中的 ledger_id，不是全量积压。
-    seen: Mutex<HashSet<String>>,
+    /// 幂等去重：窗口内或执行中的 `ledger_id -> job_id`，不是全量积压。
+    seen: Mutex<HashMap<String, String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
     next_marker_refresh_id: AtomicU64,
     pub(crate) metadata_pending: Arc<AtomicUsize>,
@@ -123,6 +123,7 @@ pub struct ProbeManager {
     workers_started: AtomicBool,
     background_paused: AtomicBool,
     paused_exempt_jobs: std::sync::Mutex<HashSet<String>>,
+    paused_exempt_units: Mutex<HashSet<(String, String)>>,
     obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
@@ -266,7 +267,7 @@ impl ProbeManager {
             fingerprint_tx: channels.fingerprint_tx,
             metadata_overflowed: AtomicBool::new(false),
             fingerprint_overflowed: AtomicBool::new(false),
-            seen: Mutex::new(HashSet::new()),
+            seen: Mutex::new(HashMap::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
             metadata_pending: Arc::new(AtomicUsize::new(0)),
@@ -286,6 +287,7 @@ impl ProbeManager {
             workers_started: AtomicBool::new(false),
             background_paused: AtomicBool::new(initial_background_paused),
             paused_exempt_jobs: std::sync::Mutex::new(HashSet::new()),
+            paused_exempt_units: Mutex::new(HashSet::new()),
             obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
@@ -482,6 +484,7 @@ impl ProbeManager {
     pub fn pause_background(&self) {
         self.background_paused.store(true, Ordering::Release);
         self.clear_paused_exempt_jobs();
+        self.analysis_schedule.lock().clear_unstarted();
         self.drain_buffered_dispatch();
     }
 
@@ -491,9 +494,36 @@ impl ProbeManager {
 
     pub fn resume_background(&self) {
         self.background_paused.store(false, Ordering::Release);
+        self.clear_paused_exempt_jobs();
         self.fill_dispatch_windows();
         self.wake.notify_waiters();
         self.obligation_wake.notify_waiters();
+    }
+
+    pub(super) fn has_seen(&self, ledger_id: &str) -> bool {
+        self.seen.lock().contains_key(ledger_id)
+    }
+
+    pub(super) fn try_insert_seen(&self, ledger_id: String, job_id: String) -> bool {
+        let mut seen = self.seen.lock();
+        if seen.contains_key(&ledger_id) {
+            return false;
+        }
+        seen.insert(ledger_id, job_id);
+        true
+    }
+
+    pub(super) fn set_seen(&self, ledger_id: String, job_id: String) {
+        self.seen.lock().insert(ledger_id, job_id);
+    }
+
+    pub(super) fn remove_seen_if_job(&self, ledger_id: &str, job_id: &str) -> bool {
+        let mut seen = self.seen.lock();
+        remove_seen_entry_if_job(&mut seen, ledger_id, job_id)
+    }
+
+    pub(super) fn remove_seen_any(&self, ledger_id: &str) -> bool {
+        self.seen.lock().remove(ledger_id).is_some()
     }
 
     pub(super) fn mark_job_paused_exempt(&self, job_id: String) -> bool {
@@ -508,6 +538,7 @@ impl ProbeManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(job_id);
+        self.paused_exempt_units.lock().retain(|(j, _)| j != job_id);
     }
 
     pub(super) fn is_job_paused_exempt(&self, job_id: &str) -> bool {
@@ -517,12 +548,37 @@ impl ProbeManager {
             .contains(job_id)
     }
 
+    pub(super) fn mark_unit_paused_exempt(&self, job_id: String, ledger_id: String) -> bool {
+        self.paused_exempt_units.lock().insert((job_id, ledger_id))
+    }
+
+    pub(super) fn unmark_unit_paused_exempt(&self, job_id: &str, ledger_id: &str) {
+        self.paused_exempt_units
+            .lock()
+            .retain(|(j, l)| !(j == job_id && l == ledger_id));
+    }
+
+    pub(super) fn is_unit_paused_exempt(&self, job_id: &str, ledger_id: &str) -> bool {
+        self.paused_exempt_units
+            .lock()
+            .iter()
+            .any(|(j, l)| j == job_id && l == ledger_id)
+    }
+
+    pub(super) fn is_dispatch_paused_exempt(&self, job_id: &str, ledger_id: &str) -> bool {
+        self.is_job_paused_exempt(job_id) || self.is_unit_paused_exempt(job_id, ledger_id)
+    }
+
     pub(super) fn has_paused_exempt_jobs(&self) -> bool {
         !self
             .paused_exempt_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
+    }
+
+    pub(super) fn has_paused_exempt_work(&self) -> bool {
+        self.has_paused_exempt_jobs() || !self.paused_exempt_units.lock().is_empty()
     }
 
     pub(super) fn paused_exempt_job_ids(&self) -> Vec<String> {
@@ -534,11 +590,23 @@ impl ProbeManager {
             .collect()
     }
 
-    pub(super) fn paused_exempt_jobs_snapshot(&self) -> HashSet<String> {
-        self.paused_exempt_jobs
+    pub(super) fn paused_exempt_unit_pairs(&self) -> Vec<(String, String)> {
+        self.paused_exempt_units.lock().iter().cloned().collect()
+    }
+
+    pub(super) fn paused_exempt_jobs_for_ledgers(&self, ledger_ids: &[String]) -> HashSet<String> {
+        let mut jobs = self
+            .paused_exempt_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        let units = self.paused_exempt_units.lock();
+        for (job_id, lid) in units.iter() {
+            if ledger_ids.iter().any(|target| target == lid) {
+                jobs.insert(job_id.clone());
+            }
+        }
+        jobs
     }
 
     pub(super) fn prune_inactive_exempt_jobs(&self, checked: &[String], active: &[String]) {
@@ -554,11 +622,26 @@ impl ProbeManager {
         }
     }
 
+    pub(super) fn prune_inactive_exempt_units(
+        &self,
+        checked: &[(String, String)],
+        active: &[(String, String)],
+    ) {
+        let active_set: HashSet<&(String, String)> = active.iter().collect();
+        let mut guard = self.paused_exempt_units.lock();
+        for pair in checked {
+            if !active_set.contains(pair) {
+                guard.remove(pair);
+            }
+        }
+    }
+
     pub(super) fn clear_paused_exempt_jobs(&self) {
         self.paused_exempt_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.paused_exempt_units.lock().clear();
     }
 
     pub(crate) fn obligation_wake(&self) -> Arc<Notify> {
@@ -575,9 +658,22 @@ impl ProbeManager {
                 seen.remove(file_id);
             }
         }
-        if !self.background_is_paused() || self.has_paused_exempt_jobs() {
+        if !self.background_is_paused() || self.has_paused_exempt_work() {
             self.wake.notify_waiters();
         }
+    }
+}
+
+pub(super) fn remove_seen_entry_if_job(
+    seen: &mut HashMap<String, String>,
+    ledger_id: &str,
+    job_id: &str,
+) -> bool {
+    if seen.get(ledger_id).is_some_and(|active| active == job_id) {
+        seen.remove(ledger_id);
+        true
+    } else {
+        false
     }
 }
 

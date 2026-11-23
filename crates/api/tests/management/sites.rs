@@ -289,3 +289,119 @@ async fn create_site_rejects_empty_url_when_profile_has_no_base_url() {
     let body = json_body(res).await;
     assert_eq!(body["error"]["code"], "site.invalid");
 }
+
+#[tokio::test]
+async fn put_site_falls_back_to_profile_base_url_or_rejects_empty_url_and_sets_auth_type() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+
+    let hdarea = post_site(
+        &app,
+        json!({
+            "name": "HDArea",
+            "url": "https://www.hdarea.co",
+            "profile_id": "hdarea",
+            "api_key": "0123456789abcdef0123456789abcdef",
+            "enabled": true
+        }),
+    )
+    .await;
+    let hdarea_id = hdarea["id"].as_str().unwrap();
+    let put_hdarea = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/api/v1/sites/{hdarea_id}"),
+            Some("management-secret"),
+            json!({
+                "name": "HDArea",
+                "url": "   ",
+                "profile_id": "hdarea",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_hdarea.status(), StatusCode::OK);
+    let hdarea_body = json_data(put_hdarea).await;
+    assert_eq!(hdarea_body["url"], "https://hdarea.club");
+    assert_eq!(hdarea_body["auth_type"], "apikey");
+
+    let hdsky = post_site(
+        &app,
+        json!({
+            "name": "HDSky",
+            "url": "https://hdsky.me/",
+            "profile_id": "hdsky",
+            "cookie": "uid=1; pass=abc",
+            "enabled": true
+        }),
+    )
+    .await;
+    let hdsky_id = hdsky["id"].as_str().unwrap();
+    let put_empty = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/api/v1/sites/{hdsky_id}"),
+            Some("management-secret"),
+            json!({
+                "name": "HDSky",
+                "url": "",
+                "profile_id": "hdsky",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_empty.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(put_empty).await["error"]["code"], "site.invalid");
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let stored = store
+        .get_site(SiteId::from_str(hdsky_id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.url, "https://hdsky.me/");
+}
+
+#[tokio::test]
+async fn site_write_responses_mask_cookie_and_api_key_consistently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_site(
+        &app,
+        json!({
+            "name": "MaskedWrite",
+            "url": "https://pterclub.net/",
+            "profile_id": "pterclub",
+            "cookie": "uid=1; pass=topsecret",
+            "enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(created["auth_type"], "cookie");
+    assert!(created["cookie"].is_null());
+    assert!(created["api_key"].is_null());
+
+    let id = created["id"].as_str().unwrap();
+    let updated = json_data(
+        app.oneshot(request(
+            "PUT",
+            &format!("/api/v1/sites/{id}"),
+            Some("management-secret"),
+            json!({
+                "name": "MaskedWrite Updated",
+                "url": "https://pterclub.net/",
+                "profile_id": "pterclub",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(updated["auth_type"], "cookie");
+    assert!(updated["cookie"].is_null());
+    assert!(updated["api_key"].is_null());
+}

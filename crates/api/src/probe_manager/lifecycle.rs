@@ -20,8 +20,10 @@ impl ProbeManager {
                 })?;
                 if !job.is_active() {
                     self.unmark_job_paused_exempt(&job.id);
+                } else {
+                    self.unmark_unit_paused_exempt(&unit.job_id, ledger_id);
                 }
-                self.seen.lock().remove(ledger_id);
+                self.remove_seen_if_job(ledger_id, &unit.job_id);
             }
         }
         Ok(())
@@ -35,13 +37,13 @@ impl ProbeManager {
         let queued = self.store.is_probe_queued(ledger_id);
         match queued {
             Ok(queued) => queued,
-            Err(_) => self.seen.lock().contains(ledger_id),
+            Err(_) => self.has_seen(ledger_id),
         }
     }
 
     /// True only while this ledger sits in the in-memory dispatch window.
     pub fn holds_dispatch_id(&self, ledger_id: &str) -> bool {
-        self.seen.lock().contains(ledger_id)
+        self.has_seen(ledger_id)
     }
 
     pub(crate) fn marker_refresh_job(
@@ -56,7 +58,7 @@ impl ProbeManager {
     #[cfg(test)]
     pub(crate) fn take_queued_for_test(&self) -> Option<ProbeUnit> {
         let id = self.metadata_rx.lock().as_mut()?.try_recv().ok()?;
-        self.seen.lock().remove(&id.ledger_id);
+        self.remove_seen_if_job(&id.ledger_id, &id.job_id);
 
         if let Some((unit, _)) = self.load_dispatch_unit_inner(&id, false) {
             return Some(unit);
@@ -126,12 +128,19 @@ impl ProbeManager {
         if cancelled {
             if let Some(id) = unit.job_id.as_deref() {
                 self.unmark_job_paused_exempt(id);
+                self.remove_seen_if_job(&ledger_id, id);
+            } else {
+                self.remove_seen_any(&ledger_id);
             }
-            self.seen.lock().remove(&ledger_id);
             return;
         }
         let persisted = self.finish_persisted_unit_with_status(unit, status, error_kind, error);
-        self.seen.lock().remove(&ledger_id);
+        if let Some(job_id) = unit.job_id.as_deref() {
+            self.unmark_unit_paused_exempt(job_id, &ledger_id);
+            self.remove_seen_if_job(&ledger_id, job_id);
+        } else {
+            self.remove_seen_any(&ledger_id);
+        }
         if persisted && status == "failed" {
             self.mark_failed(&ledger_id);
         }
@@ -139,10 +148,12 @@ impl ProbeManager {
 
     pub(crate) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
         let ledger_id = unit.row.file.file_id.to_string();
-        self.seen.lock().remove(&ledger_id);
         let Some(job_id) = unit.job_id.as_deref() else {
+            self.remove_seen_any(&ledger_id);
             return;
         };
+        self.unmark_unit_paused_exempt(job_id, &ledger_id);
+        self.remove_seen_if_job(&ledger_id, job_id);
         let result = self.store.library_write(|store| {
             store
                 .cancel_probe_unit(job_id, &ledger_id, reason)
@@ -163,7 +174,7 @@ impl ProbeManager {
                     if let Ok(units) = units {
                         let mut seen = self.seen.lock();
                         for pending in units {
-                            seen.remove(&pending.ledger_id);
+                            super::remove_seen_entry_if_job(&mut seen, &pending.ledger_id, job_id);
                         }
                     }
                     timings::log_terminal_job(&self.store_access(), &self.timings, &job);

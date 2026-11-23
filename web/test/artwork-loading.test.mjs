@@ -392,3 +392,197 @@ test("DetailBackdropSlideshow passes loading='eager' to its ArtworkImage layers"
     assert.match(snippet, /loading="eager"/, `Expected loading="eager" on ArtworkImage:\n${snippet}`);
   }
 });
+
+test("ArtworkImage keeps stable attachment across inline callback refs and disconnects observer on lazy -> eager", async () => {
+  let observeStops = 0;
+  let manageCalls = 0;
+  const activeSubscriptions = new Set();
+
+  const source = readFileSync(new URL("../components/artwork-image.tsx", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const mod = { exports: {} };
+  new Function("require", "module", "exports", js)(
+    (name) => {
+      if (name === "@/lib/artwork-loading") {
+        return {
+          manageArtworkImage: (...args) => {
+            manageCalls += 1;
+            return artworkLoading.manageArtworkImage(...args);
+          },
+          observeArtworkImage: (_image, change) => {
+            const sub = { stopped: false, change };
+            activeSubscriptions.add(sub);
+            return () => {
+              if (!sub.stopped) {
+                sub.stopped = true;
+                observeStops += 1;
+                activeSubscriptions.delete(sub);
+              }
+            };
+          },
+        };
+      }
+      return require(name);
+    },
+    mod,
+    mod.exports,
+  );
+  const { ArtworkImage } = mod.exports;
+
+  const img = new ImageFixture();
+  const seenRefs = [];
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(ArtworkImage, {
+        src: "https://app.invalid/posters/hero-lazy.jpg",
+        loading: "lazy",
+        ref: (el) => {
+          seenRefs.push(el);
+        },
+      }),
+      { createNodeMock: () => img },
+    );
+  });
+
+  try {
+    assert.equal(manageCalls, 1);
+    assert.equal(activeSubscriptions.size, 1);
+    assert.equal(img.src, "", "lazy offscreen ArtworkImage waits for observer or eager upgrade");
+
+    // Parent re-renders with a brand-new inline callback ref function
+    await act(async () => {
+      renderer.update(
+        React.createElement(ArtworkImage, {
+          src: "https://app.invalid/posters/hero-lazy.jpg",
+          loading: "lazy",
+          ref: (el) => {
+            seenRefs.push(el);
+          },
+        }),
+      );
+    });
+    assert.equal(
+      manageCalls,
+      1,
+      "Inline callback ref must not recreate manageArtworkImage on parent re-renders",
+    );
+
+    // Upgrade loading="lazy" -> loading="eager"
+    await act(async () => {
+      renderer.update(
+        React.createElement(ArtworkImage, {
+          src: "https://app.invalid/posters/hero-lazy.jpg",
+          loading: "eager",
+          ref: (el) => {
+            seenRefs.push(el);
+          },
+        }),
+      );
+    });
+    assert.equal(img.src, "https://app.invalid/posters/hero-lazy.jpg");
+    assert.equal(observeStops, 1, "Switching loading to eager must immediately disconnect active observer subscription");
+    assert.equal(activeSubscriptions.size, 0);
+
+    // Any still-active observer callback (none should remain!) firing offscreen must NOT abort the eager preload!
+    for (const sub of activeSubscriptions) {
+      sub.change(false, 1);
+    }
+    assert.equal(
+      img.src,
+      "https://app.invalid/posters/hero-lazy.jpg",
+      "Late offscreen observer callback must never clear an eager ArtworkImage src",
+    );
+  } finally {
+    await act(async () => {
+      renderer.unmount();
+    });
+  }
+});
+
+test("PosterImage resets broken fallback state automatically when src updates after metadata refresh", async () => {
+  const artworkSource = readFileSync(new URL("../components/artwork-image.tsx", import.meta.url), "utf8");
+  const posterSource = readFileSync(new URL("../components/poster-image.tsx", import.meta.url), "utf8");
+  const compile = (code) =>
+    ts.transpileModule(code, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+
+  const artMod = { exports: {} };
+  new Function("require", "module", "exports", compile(artworkSource))(
+    (name) => (name === "@/lib/artwork-loading" ? artworkLoading : require(name)),
+    artMod,
+    artMod.exports,
+  );
+  const posterMod = { exports: {} };
+  new Function("require", "module", "exports", compile(posterSource))(
+    (name) => (name === "@/components/artwork-image" ? artMod.exports : require(name)),
+    posterMod,
+    posterMod.exports,
+  );
+  const { PosterImage } = posterMod.exports;
+
+  const img = new ImageFixture();
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(PosterImage, {
+        src: "https://app.invalid/posters/broken-v1.jpg",
+        alt: "海报",
+        preload: true,
+        fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+      }),
+      { createNodeMock: (el) => (el.type === "img" ? img : null) },
+    );
+  });
+
+  try {
+    // Exhaust retries or trigger error handler on PosterImage's <img>
+    const renderedImg = renderer.root.findByType("img");
+    await act(async () => {
+      renderedImg.props.onError();
+    });
+    assert.equal(renderer.root.findAllByType("img").length, 0, "broken src must show fallback");
+
+    // Metadata refresh supplies a new valid poster URL -> must immediately render <img> again!
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: "https://app.invalid/posters/refreshed-v2.jpg",
+          alt: "海报",
+          preload: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    assert.equal(
+      renderer.root.findAllByType("img").length,
+      1,
+      "Updating src on PosterImage must reset broken state and mount ArtworkImage for the new URL",
+    );
+  } finally {
+    await act(async () => {
+      renderer.unmount();
+    });
+  }
+});
+
+test("Above-the-fold brand logos and detail/library hero ArtworkImage elements pass loading='eager'", () => {
+  for (const rel of [
+    "../components/brand-loader.tsx",
+    "../components/sidebar.tsx",
+    "../components/app-shell.tsx",
+    "../components/library-item-detail-view.tsx",
+    "../components/media-detail/media-detail-scaffold.tsx",
+    "../components/netflix/library-hero.tsx",
+  ]) {
+    const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+    const matches = [...src.matchAll(/<ArtworkImage\b[\s\S]*?\/>/g)];
+    assert.ok(matches.length > 0, `Expected at least one <ArtworkImage /> in ${rel}`);
+    for (const [snippet] of matches) {
+      assert.match(snippet, /loading="eager"/, `Expected loading="eager" in ${rel}:\n${snippet}`);
+    }
+  }
+});

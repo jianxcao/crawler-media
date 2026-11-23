@@ -41,6 +41,7 @@ impl Drop for HelperPermit {
 
 impl<H: CatalogGet + Sync> Douban<H> {
     pub fn subject_with_credits(&self, id: &str) -> Result<DoubanSubject, TmdbError> {
+        super::validate_subject_id(id)?;
         let subject_path = format!("/rexxar/api/v2/movie/{id}?for_mobile=1");
         let credits_path = format!("/rexxar/api/v2/movie/{id}/celebrities?for_mobile=1");
         if let (Some(subject), Some(celebrities)) = (

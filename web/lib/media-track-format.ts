@@ -201,7 +201,7 @@ export const TRACK_TONE_CLASS: Record<TrackTone, string> = {
   [TrackTone.Pgs]: "bg-amber-300/[0.1] text-amber-100/90",
   [TrackTone.VobSub]: "bg-orange-300/[0.1] text-orange-100/90",
   [TrackTone.Text]: "bg-cyan-300/[0.1] text-cyan-100/90",
-  [TrackTone.Ai]: "bg-[#cdd6e6]/[0.12] text-[#eef2f8]/90",
+  [TrackTone.Ai]: "bg-[var(--accent-soft)] text-[var(--text)]",
   [TrackTone.Other]: "bg-white/[0.065] text-white/75",
 };
 

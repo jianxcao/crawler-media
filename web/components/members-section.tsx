@@ -313,13 +313,13 @@ function MemberActionsMenu({
           <DropdownMenu.Separator className="my-1 h-px bg-white/[0.07]" />
           <DropdownMenu.Item
             onSelect={onToggleStatus}
-            className={`${itemClass} ${enabled ? "!text-[#ffb36b] data-[highlighted]:!bg-[#ffb36b]/10" : ""}`}
+            className={`${itemClass} ${enabled ? "!text-[var(--warn)] data-[highlighted]:!bg-[var(--warn)]/10" : ""}`}
           >
             {enabled ? "停用成员" : "启用成员"}
           </DropdownMenu.Item>
           <DropdownMenu.Item
             onSelect={onDelete}
-            className={`${itemClass} !text-[#ff6b6b] data-[highlighted]:!bg-[#ff6b6b]/10`}
+            className={`${itemClass} !text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10`}
           >
             删除成员
           </DropdownMenu.Item>

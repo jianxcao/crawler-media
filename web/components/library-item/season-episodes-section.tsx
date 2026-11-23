@@ -451,7 +451,7 @@ function EpisodeCard({
             {episode.played && (
               <span
                 aria-label="已看完"
-                className="flex size-5 items-center justify-center rounded-full bg-[var(--ok)] text-[#07120c] shadow-lg"
+                className="flex size-5 items-center justify-center rounded-full bg-[var(--ok)] text-[var(--ok-ink)] shadow-lg"
               >
                 <CheckIcon className="size-3 stroke-[2.5]" />
               </span>
@@ -563,7 +563,7 @@ function EpisodeGridCell({
           {episode.played && (
             <span
               aria-label="已看完"
-              className="flex size-4 items-center justify-center rounded-full bg-[var(--ok)] text-[#07120c]"
+              className="flex size-4 items-center justify-center rounded-full bg-[var(--ok)] text-[var(--ok-ink)]"
             >
               <CheckIcon className="size-2.5 stroke-[2.5]" />
             </span>

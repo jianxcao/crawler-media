@@ -97,13 +97,12 @@ impl ProbeManager {
         unit.job_id = Some(job_id.clone());
         if self.should_defer_remote_dispatch(&unit.row.file.path) {
             tracing::info!(%job_id, %ledger_id, "远程读取已暂停，媒体信息刷新任务保留在持久队列");
-        } else {
-            self.seen.lock().insert(ledger_id.clone());
-            if self.queue_metadata(unit).is_err() {
-                self.seen.lock().remove(&ledger_id);
-                tracing::info!(%job_id, %ledger_id, "媒体信息派发窗口已满，抓取任务保留在持久队列");
-                self.wake.notify_waiters();
-            }
+        } else if self.try_insert_seen(ledger_id.clone(), job_id.clone())
+            && self.queue_metadata(unit).is_err()
+        {
+            self.remove_seen_if_job(&ledger_id, &job_id);
+            tracing::info!(%job_id, %ledger_id, "媒体信息派发窗口已满，抓取任务保留在持久队列");
+            self.wake.notify_waiters();
         }
         Ok(ProbeRequestResult::Queued { job_id })
     }

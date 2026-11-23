@@ -315,9 +315,12 @@ pub(crate) async fn search_history(
     }
 }
 
+const MAX_PRESETS_COUNT: usize = 64;
+const MAX_PRESETS_BYTES: usize = 64 * 1024;
+
 fn normalize_presets(
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
-) -> Result<Value, Response> {
+) -> Result<(Value, String), Response> {
     let Ok(Json(body)) = body else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -336,6 +339,13 @@ fn normalize_presets(
             "presets 必须是数组",
         ));
     };
+    if items.len() > MAX_PRESETS_COUNT {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 数量不能超过 64 个",
+        ));
+    }
     let mut seen_ids = std::collections::HashSet::with_capacity(items.len());
     let mut normalized = Vec::with_capacity(items.len());
     for entry in items {
@@ -360,7 +370,16 @@ fn normalize_presets(
         }
         normalized.push(entry.clone());
     }
-    Ok(Value::Array(normalized))
+    let value = Value::Array(normalized);
+    let serialized = value.to_string();
+    if serialized.len() > MAX_PRESETS_BYTES {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 总大小不能超过 64 KiB",
+        ));
+    }
+    Ok((value, serialized))
 }
 
 pub(crate) async fn get_presets(
@@ -406,21 +425,34 @@ pub(crate) async fn put_presets(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let presets = match normalize_presets(body) {
+    let (presets, value) = match normalize_presets(body) {
         Ok(presets) => presets,
         Err(response) => return response,
     };
     let key = user_setting_key("search.presets", user_id);
-    let value = presets.to_string();
     match store_write(
         &state,
         move |store| -> Result<(), crate::store::StoreError> {
             let is_admin = store.user_role(user_id)? == "admin";
-            store.put_setting(&key, &value)?;
             if is_admin {
-                store.put_setting(crate::settings_keys::SEARCH_PRESETS, &value)?;
+                store.with_writer(store::Db::App, |app| {
+                    let tx = app.unchecked_transaction()?;
+                    tx.execute(
+                        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        rusqlite::params![&key, &value],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        rusqlite::params![crate::settings_keys::SEARCH_PRESETS, &value],
+                    )?;
+                    tx.commit()?;
+                    Ok(())
+                })
+            } else {
+                store.put_setting(&key, &value)
             }
-            Ok(())
         },
     )
     .await
@@ -544,5 +576,28 @@ pub(crate) async fn clear_search_history_route(
             )
         }
         Err(response) => response,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_presets;
+    use axum::Json;
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_presets_caps_count_and_serialized_byte_size() {
+        let too_many: Vec<_> = (0..65)
+            .map(|i| json!({ "id": format!("p-{i}"), "name": format!("Preset {i}") }))
+            .collect();
+        let res = normalize_presets(Ok(Json(json!({ "presets": too_many }))));
+        assert_eq!(res.unwrap_err().status(), StatusCode::BAD_REQUEST);
+
+        let huge_blob = "x".repeat(70 * 1024);
+        let res_bytes = normalize_presets(Ok(Json(json!({
+            "presets": [{ "id": "p-1", "payload": huge_blob }]
+        }))));
+        assert_eq!(res_bytes.unwrap_err().status(), StatusCode::BAD_REQUEST);
     }
 }

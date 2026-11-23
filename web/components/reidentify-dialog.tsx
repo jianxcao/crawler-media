@@ -449,7 +449,7 @@ function GroupRow({
           type="button"
           disabled={busy}
           onClick={() => void detach()}
-          className="btn-glass px-3 py-1.5 text-sub font-medium text-[#ffb4b4] disabled:opacity-40"
+          className="btn-glass btn-glass--danger px-3 py-1.5 text-sub font-medium"
         >
           不是独立作品
         </button>

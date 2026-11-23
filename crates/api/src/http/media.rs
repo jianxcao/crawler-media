@@ -493,6 +493,13 @@ pub(crate) async fn person_detail(
     Path(id): Path<String>,
     Query(query): Query<PersonPageQuery>,
 ) -> Response {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "media.invalid_id",
+            "影人 id 必须是纯数字",
+        );
+    }
     let state_clone = state.clone();
     let id_clone = id.clone();
     let person_handle = state

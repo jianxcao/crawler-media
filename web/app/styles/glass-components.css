@@ -467,6 +467,9 @@
 }
 .btn-glass--ok { color: var(--ok); }
 .btn-glass--danger { color: var(--danger); }
+.btn-glass--accent { color: var(--accent); }
+.btn-glass--muted { color: var(--text-muted); }
+.btn-glass--muted:hover:not(:disabled) { color: var(--text); }
 .btn-danger {
   background: var(--danger-solid);
   color: #ffffff;

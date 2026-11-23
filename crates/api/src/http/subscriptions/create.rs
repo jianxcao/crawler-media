@@ -311,7 +311,7 @@ fn create_with_auto_library_fallback(
         }
         other => other,
     };
-    outcome.map_err(map_create_error)
+    outcome.map_err(|error| map_create_error(&state.store, prepared.user_id, error))
 }
 
 fn reset_subscribe_to_default_library(
@@ -321,10 +321,19 @@ fn reset_subscribe_to_default_library(
     media_kind: MediaKind,
     user_id: UserId,
 ) -> Result<(), Response> {
-    subscribe.library_id = None;
+    let is_admin = store.user_role(user_id).map_err(store_err_response)? == "admin";
+    let fallback_library_id = resolve_untargeted_library(store, media_kind, user_id, is_admin)?;
+    subscribe.library_id = fallback_library_id;
     if body.filter_id.is_none() {
-        let is_admin = store.user_role(user_id).map_err(store_err_response)? == "admin";
-        let filter_id = resolve_filter_id(store, body, None, media_kind, user_id, is_admin)?;
+        let effective_lib = fallback_library_id.map(|id| id.to_string());
+        let filter_id = resolve_filter_id(
+            store,
+            body,
+            effective_lib.as_deref(),
+            media_kind,
+            user_id,
+            is_admin,
+        )?;
         subscribe.filter_id = filter_id;
         if body.keep_old_versions.is_none() {
             subscribe.keep_old_versions = store
@@ -337,13 +346,85 @@ fn reset_subscribe_to_default_library(
     Ok(())
 }
 
-fn map_create_error(error: crate::subscribe_create::CreateError) -> Response {
+fn resolve_untargeted_library(
+    store: &crate::Store,
+    media_kind: MediaKind,
+    user_id: UserId,
+    is_admin: bool,
+) -> Result<Option<domain::LibraryId>, Response> {
+    let ownership = store.library_ownership().map_err(store_err_response)?;
+    let kind_libs: Vec<&store::Library> = ownership
+        .libraries()
+        .iter()
+        .filter(|lib| lib.kind == media_kind)
+        .collect();
+    if kind_libs.is_empty() {
+        return Ok(None);
+    }
+    let can_auto_route = |lib: &&store::Library| {
+        ownership.accepts_work(&lib.id)
+            && crate::http::routing_preview::user_can_auto_route_library(
+                lib,
+                Some(user_id),
+                is_admin,
+            )
+    };
+    if kind_libs
+        .iter()
+        .any(|lib| lib.is_default && can_auto_route(lib))
+    {
+        return Ok(None);
+    }
+    if let Some(fallback) = kind_libs
+        .iter()
+        .find(|lib| lib.match_rules.is_empty() && can_auto_route(lib))
+    {
+        let id = domain::LibraryId::from_str(&fallback.id).map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "媒体库 ID 格式无效",
+            )
+        })?;
+        return Ok(Some(id));
+    }
+    Err(err(
+        StatusCode::BAD_REQUEST,
+        "subscription.invalid",
+        "没有可用的目标媒体库",
+    ))
+}
+
+pub(super) fn overlap_conflict_response(
+    store: &crate::Store,
+    user_id: UserId,
+    other_id: &str,
+) -> Response {
+    let can_disclose = store
+        .user_role(user_id)
+        .map(|role| role == "admin")
+        .unwrap_or(false)
+        || SubscribeId::from_str(other_id)
+            .ok()
+            .and_then(|sid| store.get_subscribe(sid).ok().flatten())
+            .is_some_and(|existing| existing.user_id == user_id);
+    let message = if can_disclose {
+        format!("同一媒体库中已有覆盖重叠的订阅（{other_id}），请合并或调整集数范围")
+    } else {
+        "同一媒体库中已有覆盖重叠的订阅，请调整集数范围".to_string()
+    };
+    err(StatusCode::CONFLICT, "subscription.overlap", &message)
+}
+
+fn map_create_error(
+    store: &crate::Store,
+    user_id: UserId,
+    error: crate::subscribe_create::CreateError,
+) -> Response {
     match error {
-        crate::subscribe_create::CreateError::Overlap(other) => err(
-            StatusCode::CONFLICT,
-            "subscription.overlap",
-            &format!("同一媒体库中已有覆盖重叠的订阅（{other}），请合并或调整集数范围"),
-        ),
+        crate::subscribe_create::CreateError::Overlap(other) => {
+            overlap_conflict_response(store, user_id, &other.to_string())
+        }
         crate::subscribe_create::CreateError::Store(store::StoreError::WriteBusy) => {
             crate::http::store_wait::busy_response()
         }
@@ -372,18 +453,22 @@ fn subscribe_from_prepared(
     let is_admin = store.user_role(user_id).map_err(store_err_response)? == "admin";
     let library_id = match prepared.explicit_library_id.as_deref() {
         Some(raw) => super::library_target::resolve(store, Some(raw), media_kind, user_id)?,
-        None => prepared
+        None => match prepared
             .auto_library
             .as_ref()
             .filter(|lib| {
                 store.library_accepts_work(&lib.id).unwrap_or(false)
-                    && crate::http::routing_preview::user_can_target_library(
+                    && crate::http::routing_preview::user_can_auto_route_library(
                         lib,
                         Some(user_id),
                         is_admin,
                     )
             })
-            .and_then(|lib| domain::LibraryId::from_str(&lib.id).ok()),
+            .and_then(|lib| domain::LibraryId::from_str(&lib.id).ok())
+        {
+            Some(matched_id) => Some(matched_id),
+            None => resolve_untargeted_library(store, media_kind, user_id, is_admin)?,
+        },
     };
     let effective_library_id = library_id.map(|id| id.to_string());
     let filter_id = resolve_filter_id(
@@ -470,7 +555,7 @@ fn inherited_filter_id(
                 if store
                     .library_accepts_work(&lib.id)
                     .map_err(store_err_response)?
-                    && crate::http::routing_preview::user_can_target_library(
+                    && crate::http::routing_preview::user_can_auto_route_library(
                         &lib,
                         Some(user_id),
                         is_admin,

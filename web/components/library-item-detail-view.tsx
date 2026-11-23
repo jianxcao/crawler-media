@@ -153,6 +153,7 @@ export function LibraryItemDetailView({
             <ArtworkImage
               src={c.immersiveUrl}
               alt=""
+              loading="eager"
               decoding="async"
               className="aspect-[2/3] w-44 shrink-0 rounded-xl object-cover shadow-[0_18px_45px_rgba(0,0,0,0.55)] ring-1 ring-white/15"
             />

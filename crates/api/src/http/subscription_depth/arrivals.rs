@@ -200,7 +200,11 @@ fn push_grabbed_arrivals(
             .clone()
             .unwrap_or_else(|| release::parse(&pd.torrent.title));
         let grabbed_at = pd.submitted_at.map(crate::store::rfc3339_from_secs);
-        let season = parsed.season.or(default_season);
+        let season = if parsed.season_inferred {
+            default_season.or(parsed.season)
+        } else {
+            parsed.season.or(default_season)
+        };
         if let (Some(s), Some(ep_from)) = (season, parsed.episode) {
             let ep_to = parsed
                 .episode_to
@@ -396,5 +400,135 @@ pub(crate) async fn today_arrivals(
             "arrivals.worker",
             &error.to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::{
+        Coverage, FetchMode, FilterId, Media, MediaId, MediaKind, SiteId, Subscribe,
+        SubscribeFacts, SubscribeId, Torrent, UserId,
+    };
+
+    struct StubSeason2Catalog;
+    impl crate::catalog::Catalog for StubSeason2Catalog {
+        fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
+            Ok(None)
+        }
+        fn cached_season_episodes(
+            &self,
+            _: &str,
+            season: u32,
+        ) -> Result<Option<Vec<media::SeasonEpisode>>, String> {
+            if season != 2 {
+                return Ok(None);
+            }
+            Ok(Some(vec![media::SeasonEpisode {
+                episode_number: 3,
+                air_date: Some("2026-01-15".into()),
+            }]))
+        }
+    }
+
+    #[test]
+    fn season_inferred_pending_release_uses_subscription_season_in_today_arrivals() {
+        let media = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Tv,
+            title: "葬送的芙莉莲".into(),
+            year: Some(2026),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: Some("209867".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        let subscribe = Subscribe {
+            id: SubscribeId::new(),
+            user_id: UserId::new(),
+            media_id: media.id,
+            coverage: Coverage::Tv {
+                season: 2,
+                episode_from: 1,
+                episode_to: None,
+            },
+            fetch_mode: FetchMode::Both,
+            filter_id: FilterId::new(),
+            wash_cut: false,
+            wash_cut_filter_id: None,
+            keep_old_versions: false,
+            full_season_pack: false,
+            downloader_id: None,
+            library_id: None,
+            tracking_state: "active".into(),
+            follow_future: true,
+            search_interval_secs: 1800,
+        };
+        let raw_title = "Sousou.no.Frieren.EP03.1080p.WEB-DL.mkv";
+        let check_parsed = release::parse(raw_title);
+        assert_eq!(check_parsed.season, Some(1));
+        assert_eq!(check_parsed.episode, Some(3));
+        assert!(check_parsed.season_inferred);
+        let pending = vec![(
+            1,
+            crate::store::PendingDownload {
+                torrent: Torrent {
+                    site_id: SiteId::new(),
+                    title: raw_title.into(),
+                    enclosure: "https://example.invalid/03.torrent".into(),
+                    size_bytes: None,
+                    seeders: None,
+                    free: false,
+                    hr: None,
+                    imdb_id: None,
+                    id: None,
+                    leechers: None,
+                    snatched: None,
+                    upload_time: None,
+                    detail_url: None,
+                    category: None,
+                    poster_url: None,
+                },
+                release_override: None,
+                downloader_id: None,
+                submitted_at: Some(1_768_435_200),
+            },
+        )];
+        let now = parse_upload_time("2026-01-15").unwrap();
+        let items = build_arrivals(
+            vec![ArrivalSnapshot {
+                subscribe,
+                media,
+                pending,
+                facts: SubscribeFacts::default(),
+                rows: Vec::new(),
+                episodes: Vec::new(),
+            }],
+            &StubSeason2Catalog,
+            now,
+        );
+        assert_eq!(
+            items.len(),
+            1,
+            "grabbed S02E03 must suppress duplicate wanted item: {items:?}"
+        );
+        assert_eq!(items[0]["status"], "grabbed");
+        assert_eq!(items[0]["season"], 2);
+        assert_eq!(items[0]["episode"], 3);
     }
 }

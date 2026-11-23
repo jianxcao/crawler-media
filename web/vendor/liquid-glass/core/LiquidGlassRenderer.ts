@@ -4,8 +4,37 @@ import type { LiquidGlassSettings } from "./types";
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
+const DEFAULT_BACKDROP_URL = "/backdrop-default.jpg";
+const MAX_IMAGE_CACHE_ENTRIES = 6;
 const imageCache = new Map<string, HTMLImageElement>();
 const isVideoUrl = (url: string) => /\.(mp4|webm|mov)(?:$|[?#])/i.test(url);
+
+function getCachedImage(url: string): HTMLImageElement | undefined {
+  const cached = imageCache.get(url);
+  if (!cached) return undefined;
+  imageCache.delete(url);
+  imageCache.set(url, cached);
+  return cached;
+}
+
+function setCachedImage(url: string, image: HTMLImageElement): void {
+  if (imageCache.has(url)) {
+    imageCache.delete(url);
+  } else {
+    while (imageCache.size >= MAX_IMAGE_CACHE_ENTRIES) {
+      let victim: string | undefined;
+      for (const key of imageCache.keys()) {
+        if (key !== DEFAULT_BACKDROP_URL) {
+          victim = key;
+          break;
+        }
+      }
+      if (victim === undefined) break;
+      imageCache.delete(victim);
+    }
+  }
+  imageCache.set(url, image);
+}
 
 /**
  * 各上下文的 WEBGL_lose_context 扩展缓存。必须在上下文健康时取好存下——
@@ -31,6 +60,7 @@ export class LiquidGlassRenderer {
   private program: WebGLProgram | null = null;
   private quad: WebGLBuffer | null = null;
   private texture: WebGLTexture | null = null;
+  private currentUrl = "";
   private image: HTMLImageElement;
   private imageAbort: AbortController | null = null;
   private video: HTMLVideoElement | null = null;
@@ -233,6 +263,7 @@ private sampleBackground = 0;
   }
 
   private loadSource(url: string) {
+    this.currentUrl = url;
     this.image.removeEventListener("load", this.handleImageLoad);
     this.imageAbort?.abort();
     this.imageAbort = null;
@@ -261,7 +292,7 @@ private sampleBackground = 0;
       }
       return;
     }
-    const cachedImage = imageCache.get(url);
+    const cachedImage = getCachedImage(url);
     if (cachedImage) {
       this.image = cachedImage;
       this.handleImageLoad();
@@ -274,7 +305,7 @@ private sampleBackground = 0;
     const image = this.image;
     image.addEventListener("load", () => {
       // Only completed bitmaps may outlive their owner's abort controller.
-      imageCache.set(url, image);
+      setCachedImage(url, image);
       this.handleImageLoad();
     }, { once: true, signal: this.imageAbort.signal });
     request.load(url);
@@ -332,7 +363,7 @@ private sampleBackground = 0;
   }
 
   setImage(url: string) {
-    if (this.video?.currentSrc === url || this.video?.src === url || this.image.currentSrc === url || this.image.src === url) return;
+    if (this.currentUrl === url) return;
     this.loadSource(url);
   }
   setSettings(settings: LiquidGlassSettings) { this.settings = settings; this.size = { width: settings.lensWidth, height: settings.lensHeight }; this.requestDraw(); }

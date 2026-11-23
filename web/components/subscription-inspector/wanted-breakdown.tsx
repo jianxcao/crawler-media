@@ -112,7 +112,7 @@ export function WantedBreakdown({
                       </span>
                     )}
                     {items.some((w) => w.upgrade?.active) && (
-                      <span className="tnum ml-2 font-normal text-[#2dd4bf]/80">
+                      <span className="tnum ml-2 font-normal text-[var(--ok)]">
                         洗版 {items.filter((w) => w.upgrade?.active).length}
                       </span>
                     )}

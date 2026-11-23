@@ -151,6 +151,7 @@ export function MediaDetailScaffold({
           <ArtworkImage
             src={mobileHeroSrc}
             alt=""
+            loading="eager"
             decoding="async"
             className="size-full object-cover object-center"
           />

@@ -35,6 +35,7 @@ html[data-theme="liquid"] {
   --glass-fill-active: rgba(125, 211, 252, 0.2);
 
   --ok: #34d399;
+  --ok-ink: #07120c;
   --info: #38bdf8;
   --warn: #fbbf24;
   --danger: #fb7185;

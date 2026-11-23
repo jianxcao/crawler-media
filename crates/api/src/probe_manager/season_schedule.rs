@@ -120,4 +120,11 @@ impl SeasonAnalysisSchedule {
             self.entries.remove(&ticket.key);
         }
     }
+
+    pub fn clear_unstarted(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.dirty = None;
+        }
+        self.entries.retain(|_, entry| entry.running.is_some());
+    }
 }

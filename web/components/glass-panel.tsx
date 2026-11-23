@@ -89,6 +89,8 @@ export function GlassPanel({
   // （如设置页拖动侧栏透明度滑杆、银玻璃 ↔ 液态玻璃互切）不必销毁重建 WebGL 渲染器。
   const propsRef = useRef({ variant, settings, radius, sampleBackground });
   propsRef.current = { variant, settings, radius, sampleBackground };
+  const backgroundImageRef = useRef(backgroundImage);
+  backgroundImageRef.current = backgroundImage;
 
   // 用序列化后的配置做依赖：内联传入的 settings 每次渲染都是新对象，
   // 直接进依赖会导致 effect 被反复触发，这里比对内容而非引用。
@@ -112,8 +114,8 @@ export function GlassPanel({
     renderer.setGeometry(width / 2, height / 2, 0, false, 1, 1, 0);
   }, []);
 
-  // 渲染器随背景图或 WebGL 启用态（usesWebgl）创建/销毁；silver <-> liquid 互切时
-  // usesWebgl 恒为 true，直接经下方 apply() 更新 uniform，零 loseContext 闪烁。
+  // 渲染器仅随 WebGL 启用态（usesWebgl）创建/销毁；背景图切换走下方 setImage 热换纹理，
+  // silver <-> liquid 互切直接经 apply() 更新 uniform，全程零 loseContext 闪烁与着色器重编译。
   useEffect(() => {
     if (!usesWebgl) return;
     const root = rootRef.current;
@@ -125,7 +127,7 @@ export function GlassPanel({
     try {
       renderer = new LiquidGlassRenderer(
         canvas,
-        backgroundImage,
+        backgroundImageRef.current,
         resolveLiquidGlassSettings(variant, { radius, ...settings }),
       );
     } catch (err) {
@@ -150,7 +152,12 @@ export function GlassPanel({
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [backgroundImage, apply, usesWebgl]);
+  }, [apply, usesWebgl]);
+
+  // 背景图切换时原地更新 WebGL 纹理，不销毁重建上下文。
+  useEffect(() => {
+    rendererRef.current?.setImage(backgroundImage);
+  }, [backgroundImage]);
 
   // 参数（variant/settings/radius/sampleBackground）内容变化时热更新，不重建渲染器。
   useEffect(() => {

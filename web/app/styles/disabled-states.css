@@ -12,6 +12,8 @@ textarea:disabled,
   button[class*="bg-red-"],
   button[class*="bg-blue-"],
   button[class*="bg-sky-"],
+  button[class*="bg-amber-"],
+  button[class*="bg-[#fbbf24]"],
   button[class*="bg-[var(--danger-solid)]"]
 ):disabled:not(:has(img)) {
   opacity: 1;
@@ -20,6 +22,8 @@ textarea:disabled,
 button[class*="bg-red-"]:disabled,
 button[class*="bg-blue-"]:disabled,
 button[class*="bg-sky-"]:disabled,
+button[class*="bg-amber-"]:disabled,
+button[class*="bg-[#fbbf24]"]:disabled,
 button[class*="bg-[var(--danger-solid)]"]:disabled {
   background: var(--surface-inset);
   border-color: var(--line);
@@ -60,6 +64,8 @@ html[data-theme="netflix"] :is(
   button[class*="bg-red-"],
   button[class*="bg-blue-"],
   button[class*="bg-sky-"],
+  button[class*="bg-amber-"],
+  button[class*="bg-[#fbbf24]"],
   button[class*="bg-[var(--danger-solid)]"]
 ):disabled {
   background: #404040;

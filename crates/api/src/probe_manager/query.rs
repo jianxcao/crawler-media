@@ -150,11 +150,11 @@ impl ProbeManager {
     fn query_persist(
         &self,
         unit: &ProbeUnit,
+        job_id: &str,
         kind: &str,
         budget: &QueryBudget,
         writable: &Arc<AtomicBool>,
     ) -> Result<PersistOutcome, LibraryReadError> {
-        let job_id = uuid::Uuid::new_v4().to_string();
         let ledger_id = unit.row.file.file_id.to_string();
         let scope = format!("ledger:{ledger_id}");
         let spec = crate::store::ProbeJobUnitSpec {
@@ -182,7 +182,7 @@ impl ProbeManager {
             }
             store
                 .create_probe_job(
-                    &job_id,
+                    job_id,
                     kind,
                     &unit.row.file.media_id.to_string(),
                     super::single_season_opt(&unit.row),
@@ -191,7 +191,7 @@ impl ProbeManager {
                 )
                 .map(|created| {
                     if created {
-                        PersistOutcome::Created(job_id)
+                        PersistOutcome::Created(job_id.to_string())
                     } else {
                         PersistOutcome::Duplicate
                     }
@@ -225,32 +225,33 @@ impl ProbeManager {
             return Ok(policy::ProbeRequestResult::AlreadyRunning);
         }
         self.last_failure.lock().remove(&ledger_id);
-        if !self.seen.lock().insert(ledger_id.clone()) {
+        let job_id = uuid::Uuid::new_v4().to_string();
+        if !self.try_insert_seen(ledger_id.clone(), job_id.clone()) {
             return Ok(policy::ProbeRequestResult::AlreadyRunning);
         }
-        let job_id = match self.query_persist(&unit, "media_probe", budget, writable) {
+        let job_id = match self.query_persist(&unit, &job_id, "media_probe", budget, writable) {
             Ok(PersistOutcome::Created(job_id)) => job_id,
             Ok(PersistOutcome::Duplicate) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Ok(policy::ProbeRequestResult::AlreadyRunning);
             }
             Ok(PersistOutcome::ReadOnly) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Ok(policy::ProbeRequestResult::Disabled);
             }
             Err(error) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Err(error);
             }
         };
         unit.job_id = Some(job_id.clone());
         if let Err(error) = budget.check() {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             return Err(error);
         }
         tracing::info!(job_id, "Page auto-probe durably queued");
         if self.should_defer_remote_dispatch(&unit.row.file.path) {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             tracing::info!(
                 ledger_id,
                 job_id,
@@ -260,7 +261,7 @@ impl ProbeManager {
             return Ok(policy::ProbeRequestResult::Queued { job_id });
         }
         if self.queue_metadata(unit).is_err() {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             tracing::info!(
                 ledger_id,
                 job_id,
@@ -295,31 +296,32 @@ impl ProbeManager {
         writable: &Arc<AtomicBool>,
     ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
         let ledger_id = unit.row.file.file_id.to_string();
+        let job_id = uuid::Uuid::new_v4().to_string();
         // Review L3: 只把「这次准入在跑」登记进 `seen`，登记完立刻放锁。
         // 下面的 `query_persist` 要等进程级 `Store` 锁（长批持锁时可能一直等到
         // 请求截止），占着 `seen` 等锁会把同一文件的下一次准入一起拖住。
-        if !self.seen.lock().insert(ledger_id.clone()) {
+        if !self.try_insert_seen(ledger_id.clone(), job_id.clone()) {
             return Ok(policy::ProbeRequestResult::AlreadyRunning);
         }
-        let persisted = self.query_persist(&unit, "fingerprint_probe", budget, writable);
+        let persisted = self.query_persist(&unit, &job_id, "fingerprint_probe", budget, writable);
         let job_id = match persisted {
             Ok(PersistOutcome::Created(job_id)) => job_id,
             Ok(PersistOutcome::Duplicate) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Ok(policy::ProbeRequestResult::AlreadyRunning);
             }
             Ok(PersistOutcome::ReadOnly) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Ok(policy::ProbeRequestResult::Disabled);
             }
             Err(error) => {
-                self.forget_seen(&ledger_id);
+                self.forget_seen(&ledger_id, &job_id);
                 return Err(error);
             }
         };
         unit.job_id = Some(job_id.clone());
         if let Err(error) = budget.check() {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             return Err(error);
         }
         let work = probe::FingerprintWork {
@@ -335,13 +337,13 @@ impl ProbeManager {
             stage: store::ProbeDispatchStage::Fingerprint,
         };
         if self.should_defer_remote_dispatch(&work.unit.row.file.path) {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             tracing::info!(
                 job_id,
                 "Remote reads paused; durable fingerprint unit remains queued"
             );
         } else if self.fingerprint_tx.try_send((id, work)).is_err() {
-            self.forget_seen(&ledger_id);
+            self.forget_seen(&ledger_id, &job_id);
             tracing::info!(
                 job_id,
                 "Fingerprint window full; durable unit remains queued"
@@ -352,8 +354,8 @@ impl ProbeManager {
     }
 
     /// 撤销一次准入的 `seen` 登记（失败路径）。锁只在 remove 这一行里持有。
-    fn forget_seen(&self, ledger_id: &str) {
-        self.seen.lock().remove(ledger_id);
+    fn forget_seen(&self, ledger_id: &str, job_id: &str) {
+        self.remove_seen_if_job(ledger_id, job_id);
     }
 }
 
@@ -458,7 +460,7 @@ mod tests {
                     .try_recv()
                     .unwrap();
                 assert!(
-                    manager.seen.lock().remove(&id.ledger_id),
+                    manager.remove_seen_if_job(&id.ledger_id, &id.job_id),
                     "the consumer must observe the admission before receiving it"
                 );
                 manager.metadata_stage_finished();
@@ -468,7 +470,7 @@ mod tests {
             result,
             Ok(policy::ProbeRequestResult::Queued { .. })
         ));
-        assert!(!manager.seen.lock().contains(&ledger_id));
+        assert!(!manager.has_seen(&ledger_id));
     }
 
     #[test]
@@ -643,7 +645,7 @@ mod tests {
         let mut registered = false;
         while Instant::now() < wait {
             if let Some(seen) = manager.seen.try_lock_for(Duration::from_millis(5))
-                && seen.contains(&ledger_id)
+                && seen.contains_key(&ledger_id)
             {
                 registered = true;
                 break;

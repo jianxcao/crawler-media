@@ -170,6 +170,7 @@ impl<H: CatalogGet> Douban<H> {
     /// 豆瓣 subject 详情：抓移动端 Rexxar JSON `/rexxar/api/v2/movie/{id}?for_mobile=1`
     /// 解析标题/原名/年份/别名/类型。
     pub fn detail(&self, id: &str) -> Result<Option<Media>, TmdbError> {
+        validate_subject_id(id)?;
         let path = format!("/rexxar/api/v2/movie/{id}?for_mobile=1");
         match self
             .cache
@@ -473,6 +474,17 @@ fn encode(value: &str) -> String {
     encoded
 }
 
+pub(super) fn validate_subject_id(id: &str) -> Result<(), TmdbError> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(TmdbError::Parse(format!("invalid Douban subject id: {id}")));
+    }
+    Ok(())
+}
+
 pub(super) fn check_rexxar_not_found(v: &serde_json::Value, id: &str) -> Result<(), TmdbError> {
     if v.get("code").and_then(|c| c.as_i64()) == Some(5000)
         || ["msg", "localized_message"].iter().any(|field| {
@@ -602,5 +614,37 @@ mod tests {
             parse_rexxar_detail("99999999", json),
             Err(TmdbError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn detail_and_subject_reject_unsafe_ids_before_upstream_fetch() {
+        struct PanicGet;
+        impl crate::CatalogGet for PanicGet {
+            fn get(&self, path: &str) -> Result<String, TmdbError> {
+                panic!("unexpected upstream request for invalid id: {path}");
+            }
+        }
+
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let douban = super::Douban::new(PanicGet, &dir.path().join("cache.db")).unwrap();
+        for bad_id in [
+            "",
+            "1292052?foo=1",
+            "1292052/../../x",
+            "1292052#frag",
+            " 1292052",
+        ] {
+            assert!(
+                matches!(douban.detail(bad_id), Err(TmdbError::Parse(_))),
+                "detail({bad_id:?}) should reject unsafe id"
+            );
+            assert!(
+                matches!(
+                    douban.subject_with_credits(bad_id),
+                    Err(TmdbError::Parse(_))
+                ),
+                "subject_with_credits({bad_id:?}) should reject unsafe id"
+            );
+        }
     }
 }

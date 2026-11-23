@@ -61,7 +61,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
         <button
           type="button"
           onClick={onBack}
-          className="btn-glass px-3.5 py-1.5 text-sub font-medium text-[var(--text-muted)] hover:text-[var(--text)]"
+          className="btn-glass btn-glass--muted px-3.5 py-1.5 text-sub font-medium"
         >
           <ArrowLeftIcon className="size-4" />
           <span>返回工作台</span>

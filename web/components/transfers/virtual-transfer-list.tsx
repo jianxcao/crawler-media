@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { RefreshIcon } from "@/components/icons";
 
@@ -71,11 +71,24 @@ export function VirtualTransferList<T>({
     };
 
     updateMargin();
-    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-      window.addEventListener("resize", updateMargin, { passive: true });
-      return () => window.removeEventListener("resize", updateMargin);
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateMargin) : null;
+    resizeObserver?.observe(scroller);
+    const parentEl = container.parentElement;
+    if (parentEl && parentEl !== scroller) {
+      resizeObserver?.observe(parentEl);
     }
-    return undefined;
+    const hasWindowResize =
+      typeof window !== "undefined" && typeof window.addEventListener === "function";
+    if (hasWindowResize) {
+      window.addEventListener("resize", updateMargin, { passive: true });
+    }
+    return () => {
+      resizeObserver?.disconnect();
+      if (hasWindowResize) {
+        window.removeEventListener("resize", updateMargin);
+      }
+    };
   }, [activeScrollEl, items.length]);
 
   const rowVirtualizer = useVirtualizer({
@@ -91,6 +104,15 @@ export function VirtualTransferList<T>({
     scrollMargin,
     initialRect: { width: 1024, height: 840 },
   });
+
+  const measureRow = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (!el || typeof el.getAttribute === "function") {
+        rowVirtualizer.measureElement(el);
+      }
+    },
+    [rowVirtualizer],
+  );
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const lastVirtualIndex = virtualItems.length > 0 ? virtualItems[virtualItems.length - 1].index : -1;
@@ -122,11 +144,7 @@ export function VirtualTransferList<T>({
               key={virtualRow.key}
               data-index={virtualRow.index}
               data-transfer-row={virtualRow.index}
-              ref={(el) => {
-                if (el && typeof el.getAttribute === "function") {
-                  rowVirtualizer.measureElement(el);
-                }
-              }}
+              ref={measureRow}
               style={{
                 position: "absolute",
                 top: 0,

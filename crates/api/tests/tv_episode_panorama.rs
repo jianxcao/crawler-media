@@ -539,3 +539,148 @@ fn discover_season_panorama_respects_viewer_library_visibility() {
         assert_eq!(member_eps[2]["status"], "missing");
     });
 }
+
+const OTHER_MEMBER_TOKEN: &str = "panorama-other-member-token";
+
+fn seed_private_member_subscriptions(
+    store: &Store,
+    owner_id: UserId,
+    media_id: MediaId,
+    lib_id: LibraryId,
+) {
+    seed_subscriptions(store, owner_id, media_id, lib_id);
+    let sub3 = make_subscribe(owner_id, media_id, 3, lib_id);
+    store.insert_subscribe(&sub3).unwrap();
+    store
+        .record_wanted_grab(
+            sub3.id,
+            Some(3),
+            Some(1),
+            "Blossoms.Shanghai.S03E01.1080p.WEB-DL",
+            1_700_000_200,
+        )
+        .unwrap();
+}
+
+#[test]
+fn shared_library_panorama_hides_other_member_private_subscriptions() {
+    let (_dir, state, lib_id, media_id) = seed_panorama_fixture("everyone");
+    {
+        let store = state.store();
+        let member_a = User {
+            id: UserId::new(),
+            login: "member-a".into(),
+            enabled: true,
+            role: UserRole::Member,
+        };
+        let member_b = User {
+            id: UserId::new(),
+            login: "member-b".into(),
+            enabled: true,
+            role: UserRole::Member,
+        };
+        store.insert_user(&member_a).unwrap();
+        store.set_user_token(member_a.id, MEMBER_TOKEN).unwrap();
+        store.insert_user(&member_b).unwrap();
+        store
+            .set_user_token(member_b.id, OTHER_MEMBER_TOKEN)
+            .unwrap();
+        seed_private_member_subscriptions(&store, member_a.id, media_id, lib_id);
+    }
+    let app = api::router(state);
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let a_detail = get_json(
+            app.clone(),
+            &format!("/api/v1/libraries/{lib_id}/items/{media_id}"),
+            MEMBER_TOKEN,
+        )
+        .await;
+        assert_eq!(
+            a_detail["data"]["season_summaries"][0]["downloading_count"],
+            1
+        );
+        assert_eq!(
+            a_detail["data"]["season_summaries"][1]["downloading_count"],
+            4
+        );
+
+        let b_detail = get_json(
+            app.clone(),
+            &format!("/api/v1/libraries/{lib_id}/items/{media_id}"),
+            OTHER_MEMBER_TOKEN,
+        )
+        .await;
+        assert_eq!(
+            b_detail["data"]["season_summaries"],
+            json!([
+                { "season_number": 1, "owned_count": 1, "total_count": 6, "downloading_count": 0 },
+                { "season_number": 2, "owned_count": 0, "total_count": 4, "downloading_count": 0 },
+            ]),
+            "Member B must not see Member A's downloading counts or synthetic Season 3"
+        );
+
+        let b_s1 = get_json(
+            app.clone(),
+            &format!("/api/v1/libraries/{lib_id}/items/{media_id}/episodes?season=1"),
+            OTHER_MEMBER_TOKEN,
+        )
+        .await;
+        let b_statuses: Vec<&str> = b_s1["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            b_statuses,
+            vec![
+                "in_library",
+                "missing",
+                "file_missing",
+                "missing",
+                "missing",
+                "unaired"
+            ],
+            "Member B must not see Member A's downloading E2 or SubscribeFacts file_missing E4"
+        );
+
+        let b_s3 = get_json(
+            app,
+            &format!("/api/v1/libraries/{lib_id}/items/{media_id}/episodes?season=3"),
+            OTHER_MEMBER_TOKEN,
+        )
+        .await;
+        assert_eq!(
+            b_s3["data"],
+            json!([]),
+            "Member B must not see Member A's synthetic Season 3 stubs"
+        );
+    });
+}
+
+#[test]
+fn douban_and_person_detail_reject_unsafe_or_non_numeric_ids_with_400() {
+    let (_dir, state, _, _) = seed_panorama_fixture("everyone");
+    let app = api::router(state);
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for uri in [
+            "/api/v1/media/douban/123%2e%2e%2fsecret",
+            "/api/v1/media/douban/123%3ffoo%3dbar",
+            "/api/v1/media/person/not-a-number",
+            "/api/v1/media/person/999_extra",
+        ] {
+            let req = Request::get(uri)
+                .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for {uri}"
+            );
+        }
+    });
+}

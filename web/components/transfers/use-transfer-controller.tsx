@@ -139,6 +139,8 @@ export function useTransferController() {
   const [error, setError] = useState<string | null>(null);
 
   const loadMoreErrorRef = useRef(false);
+  const viewModeRef = useRef<TransferViewMode>(viewMode);
+  viewModeRef.current = viewMode;
   const fileItemsRef = useRef<TransferFileItem[]>([]);
   fileItemsRef.current = fileItems;
   const groupItemsRef = useRef<TransferGroupItem[]>([]);
@@ -149,15 +151,35 @@ export function useTransferController() {
   const toast = useToast();
   const expansion = useGroupExpansion(modeFilter, kindFilter, debouncedQuery);
 
+  const clearInactiveList = useCallback((activeMode: TransferViewMode) => {
+    if (activeMode === "files") {
+      setGroupItems([]);
+    } else {
+      setFileItems([]);
+    }
+  }, []);
+
   useEffect(() => {
     const trimmed = searchTerm.trim();
     if (!trimmed) {
-      setDebouncedQuery("");
+      setDebouncedQuery((prev) => {
+        if (prev === "") return prev;
+        clearInactiveList(viewModeRef.current);
+        setLoading(true);
+        return "";
+      });
       return undefined;
     }
-    const timer = setTimeout(() => setDebouncedQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    const timer = setTimeout(() => {
+      setDebouncedQuery((prev) => {
+        if (prev === trimmed) return prev;
+        clearInactiveList(viewModeRef.current);
+        setLoading(true);
+        return trimmed;
+      });
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [searchTerm]);
+  }, [searchTerm, clearInactiveList]);
 
   const fetchHeadPage = useCallback(
     async (options: { silent?: boolean } = {}) => {
@@ -359,27 +381,46 @@ export function useTransferController() {
     ...actions,
     setSearchTerm,
     changeViewMode: (next: TransferViewMode) => {
+      if (next === viewMode) return;
       expansion.resetExpanded();
+      setLoading(true);
+      setLoadingMore(false);
       setViewMode(next);
     },
     clearSearch: () => {
       setSearchTerm("");
-      setDebouncedQuery("");
+      if (debouncedQuery !== "") {
+        expansion.resetExpanded();
+        clearInactiveList(viewMode);
+        setLoading(true);
+        setDebouncedQuery("");
+      }
     },
     changeModeFilter: (next: TransferFilterMode) => {
+      if (next === modeFilter) return;
       expansion.resetExpanded();
+      clearInactiveList(viewMode);
+      setLoading(true);
       setModeFilter(next);
     },
     changeKindFilter: (next: TransferKindFilter) => {
+      if (next === kindFilter) return;
       expansion.resetExpanded();
+      clearInactiveList(viewMode);
+      setLoading(true);
       setKindFilter(next);
     },
     resetFilters: () => {
+      const changed = debouncedQuery !== "" || modeFilter !== "all" || kindFilter !== "all";
       expansion.resetExpanded();
       setSearchTerm("");
-      setDebouncedQuery("");
-      setModeFilter("all");
-      setKindFilter("all");
+      if (changed) {
+        clearInactiveList(viewMode);
+        setLoading(true);
+        setDebouncedQuery("");
+        setModeFilter("all");
+        setKindFilter("all");
+      }
     },
     refresh: () => fetchHeadPage(),
     loadMore,

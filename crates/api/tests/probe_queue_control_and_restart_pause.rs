@@ -16,9 +16,12 @@ use serde_json::{Value, json};
 use store::ScannedLedger;
 use tower::ServiceExt;
 
+type FirstProbeGate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
 struct CountingTracks {
     calls: AtomicUsize,
     fail: AtomicBool,
+    block_first: Mutex<Option<FirstProbeGate>>,
 }
 
 impl CountingTracks {
@@ -26,11 +29,69 @@ impl CountingTracks {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             fail: AtomicBool::new(fail),
+            block_first: Mutex::new(None),
         })
+    }
+
+    fn blocking_first() -> (
+        Arc<Self>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let tracks = Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+            block_first: Mutex::new(Some((entered_tx, release_rx))),
+        });
+        (tracks, entered_rx, release_tx)
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl marker::FingerprintEngine for CountingTracks {
+    fn extract_at(
+        &self,
+        _: &Path,
+        _: u32,
+        _: u32,
+        _: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
+        Ok(vec![11, 22, 33, 44])
+    }
+
+    fn find_common_segment(
+        &self,
+        _: &[u32],
+        _: &[u32],
+        _: f32,
+        _: f32,
+    ) -> Option<marker::CommonSegment> {
+        None
+    }
+}
+
+impl marker::FingerprintCaptureEngine for CountingTracks {
+    fn capture_window(
+        &self,
+        req: &marker::CaptureRequest,
+    ) -> Result<marker::CapturedFingerprint, marker::CaptureFailure> {
+        Ok(marker::CapturedFingerprint {
+            window: req.window.clone(),
+            words: vec![11, 22, 33, 44],
+            pcm_duration_ms: Some(req.window.duration_ms()),
+            metrics: marker::CaptureMetrics {
+                time_mapping_version: 3,
+                audio_stream_index: Some(0),
+                pcm_timeline: marker::PcmTimeline::Contiguous,
+                contiguous_pcm_start_ms: Some(req.window.start_ms),
+                ..Default::default()
+            },
+        })
     }
 }
 
@@ -41,26 +102,54 @@ impl api::probe_manager::TracksProbe for CountingTracks {
         _control: &library::WorkControl,
     ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some((entered_tx, release_rx)) = self.block_first.lock().take() {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }
         if self.fail.load(Ordering::SeqCst) {
             return Err(library::LibraryError::Probe("HTTP 403 Forbidden".into()));
         }
+        let src = marker::CaptureSourceFacts {
+            audio_stream_index: 0,
+            format_start_time_us: Some(0),
+            stream_start_pts: Some(0),
+            stream_time_base: Some("1/16000".into()),
+            codec_name: None,
+            native_sample_rate: None,
+            audio_channels: None,
+            provenance: "fixture".into(),
+        };
         Ok((
             library::Tracks {
                 video: Some(library::VideoTrack {
                     codec: Some("h264".into()),
                     width: Some(1920),
                     height: Some(1080),
-                    duration_secs: Some(120.0),
+                    duration_secs: Some(1_200.0),
                     ..Default::default()
                 }),
+                audio: vec![library::AudioTrack {
+                    stream_index: Some(0),
+                    is_default: true,
+                    capture_source: Some(src),
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
-            Some(120_000),
+            Some(1_200_000),
         ))
     }
 }
 
 fn production_state(root: &Path, tracks: Arc<CountingTracks>) -> api::ApiState {
+    production_state_with_writable(root, tracks, true)
+}
+
+fn production_state_with_writable(
+    root: &Path,
+    tracks: Arc<CountingTracks>,
+    writable: bool,
+) -> api::ApiState {
     let root = root.to_path_buf();
     let base = std::thread::spawn(move || {
         let store = Arc::new(api::Store::open(root.join("data")).unwrap());
@@ -80,34 +169,23 @@ fn production_state(root: &Path, tracks: Arc<CountingTracks>) -> api::ApiState {
             }),
             Arc::new(MemoryDownloader::new(root.join("dl"))),
             action,
-            true,
+            writable,
         )
         .unwrap()
     })
     .join()
     .unwrap();
-    base.with_probe_engines(
-        Arc::new(marker::ChromaprintEngine),
-        Arc::new(marker::ChromaprintEngine),
-        tracks,
-    )
-    .unwrap()
+    base.with_probe_engines(tracks.clone(), tracks.clone(), tracks)
+        .unwrap()
 }
 
-fn seed_scanned_movie(
-    store: &api::Store,
-    lib_root: &Path,
-    title: &str,
-    index: usize,
-) -> (MediaId, LedgerId) {
-    let path = lib_root.join(format!("{title}-{index}.mkv"));
-    std::fs::write(&path, b"fixture-bytes").unwrap();
-    let media_id = MediaId::new();
+fn insert_test_media(store: &api::Store, kind: MediaKind, title: String) -> MediaId {
+    let id = MediaId::new();
     store
         .insert_media(&Media {
-            id: media_id,
-            kind: MediaKind::Movie,
-            title: format!("{title} {index}"),
+            id,
+            kind,
+            title,
             year: Some(2026),
             original_title: None,
             aliases: Vec::new(),
@@ -118,6 +196,18 @@ fn seed_scanned_movie(
             anilist_id: None,
         })
         .unwrap();
+    id
+}
+
+fn seed_scanned_movie(
+    store: &api::Store,
+    lib_root: &Path,
+    title: &str,
+    index: usize,
+) -> (MediaId, LedgerId) {
+    let path = lib_root.join(format!("{title}-{index}.mkv"));
+    std::fs::write(&path, b"fixture-bytes").unwrap();
+    let media_id = insert_test_media(store, MediaKind::Movie, format!("{title} {index}"));
     let file_id = LedgerId::new();
     let source_version = api::fingerprint_job::current_source_version(&path);
     store
@@ -193,6 +283,26 @@ async fn admin_json(app: &axum::Router, method: &str, uri: &str, body: Value) ->
     common::json_data(response).await
 }
 
+fn create_lib(
+    store: &api::Store,
+    kind: MediaKind,
+    name: &str,
+    root: &Path,
+    auto_probe: bool,
+) -> String {
+    store
+        .create_library(
+            kind,
+            name,
+            &[root.to_str().unwrap()],
+            "everyone",
+            auto_probe,
+            &[],
+        )
+        .unwrap()
+        .id
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_restart_starts_paused_without_double_counting_and_resumes_on_command() {
     let dir = tempfile::tempdir().unwrap();
@@ -202,26 +312,8 @@ async fn production_restart_starts_paused_without_double_counting_and_resumes_on
     std::fs::create_dir_all(&movie_root).unwrap();
     {
         let store = api::Store::open(dir.path().join("data")).unwrap();
-        store
-            .create_library(
-                MediaKind::Movie,
-                "国产剧",
-                &[tv_root.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-        store
-            .create_library(
-                MediaKind::Movie,
-                "欧美电影",
-                &[movie_root.to_str().unwrap()],
-                "everyone",
-                false,
-                &[],
-            )
-            .unwrap();
+        create_lib(&store, MediaKind::Movie, "国产剧", &tv_root, true);
+        create_lib(&store, MediaKind::Movie, "欧美电影", &movie_root, false);
         let (m1, f1) = seed_scanned_movie(&store, &tv_root, "overlap", 0);
         // f1 has BOTH an un-acked scan obligation AND an interrupted running unit.
         create_queued_job(&store, m1, f1, true);
@@ -274,11 +366,9 @@ async fn production_restart_starts_paused_without_double_counting_and_resumes_on
     assert_eq!(resumed["paused"], false);
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let current = admin_json(&app, "GET", "/api/v1/probe/status", Value::Null).await;
-            if current["total_pending"] == 0 {
-                break;
-            }
+        while admin_json(&app, "GET", "/api/v1/probe/status", Value::Null).await["total_pending"]
+            != 0
+        {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
@@ -297,33 +387,15 @@ async fn cancel_endpoint_clears_library_or_global_backlog() {
     std::fs::create_dir_all(&root_b).unwrap();
     let lib_a_id = {
         let store = api::Store::open(dir.path().join("data")).unwrap();
-        let lib_a = store
-            .create_library(
-                MediaKind::Movie,
-                "国产剧",
-                &[root_a.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-        store
-            .create_library(
-                MediaKind::Movie,
-                "动漫",
-                &[root_b.to_str().unwrap()],
-                "everyone",
-                false,
-                &[],
-            )
-            .unwrap();
+        let lib_a_id = create_lib(&store, MediaKind::Movie, "国产剧", &root_a, true);
+        create_lib(&store, MediaKind::Movie, "动漫", &root_b, false);
         let (m1, f1) = seed_scanned_movie(&store, &root_a, "a", 0);
         create_queued_job(&store, m1, f1, false);
         seed_scanned_movie(&store, &root_a, "a", 1);
         let (m2, f2) = seed_scanned_movie(&store, &root_b, "b", 2);
         create_queued_job(&store, m2, f2, false);
         seed_scanned_movie(&store, &root_b, "b", 3);
-        lib_a.id
+        lib_a_id
     };
 
     let tracks = CountingTracks::new(false);
@@ -373,19 +445,10 @@ async fn single_item_probe_runs_while_paused_and_library_media_info_refresh_auto
     std::fs::create_dir_all(&root).unwrap();
     let (lib_id, m1, f1, _m2, f2) = {
         let store = api::Store::open(dir.path().join("data")).unwrap();
-        let lib = store
-            .create_library(
-                MediaKind::Movie,
-                "电影库",
-                &[root.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
+        let lib_id = create_lib(&store, MediaKind::Movie, "电影库", &root, true);
         let (m1, f1) = seed_scanned_movie(&store, &root, "single", 0);
         let (m2, f2) = seed_scanned_movie(&store, &root, "bulk", 1);
-        (lib.id, m1, f1, m2, f2)
+        (lib_id, m1, f1, m2, f2)
     };
 
     let tracks = CountingTracks::new(false);
@@ -401,18 +464,14 @@ async fn single_item_probe_runs_while_paused_and_library_media_info_refresh_auto
     )
     .await;
     assert_eq!(single["queued"], 1);
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while state
+    poll_until(|| {
+        state
             .store()
             .get_file_meta(&f1.to_string())
             .unwrap()
-            .is_none()
-        {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-        }
+            .is_some()
     })
-    .await
-    .expect("explicit single-item probe must complete even while background is paused");
+    .await;
     assert!(state.probe.background_is_paused());
     assert!(
         state
@@ -426,26 +485,19 @@ async fn single_item_probe_runs_while_paused_and_library_media_info_refresh_auto
         &app,
         "POST",
         &format!("/api/v1/libraries/{lib_id}/media-info/refresh"),
-        json!({
-            "mode": "missing",
-            "request_id": uuid::Uuid::new_v4().to_string(),
-        }),
+        json!({ "mode": "missing", "request_id": uuid::Uuid::new_v4().to_string() }),
     )
     .await;
     assert_eq!(refresh["queued"], 1);
     assert!(!state.probe.background_is_paused());
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while state
+    poll_until(|| {
+        state
             .store()
             .get_file_meta(&f2.to_string())
             .unwrap()
-            .is_none()
-        {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-        }
+            .is_some()
     })
-    .await
-    .expect("explicit library media-info refresh must auto-resume and drain");
+    .await;
     state.probe.shutdown_workers().await.unwrap();
 }
 
@@ -458,16 +510,7 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
     let root = dir.path().join("strm");
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(api::Store::open(dir.path().join("data")).unwrap());
-    store
-        .create_library(
-            MediaKind::Movie,
-            "STRM",
-            &[root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
+    create_lib(&store, MediaKind::Movie, "STRM", &root, true);
     let (_media_id, file_id) = seed_scanned_movie(&store, &root, "broken", 0);
     let row = store.file_coverage_by_id(file_id).unwrap().unwrap();
     let tracks = CountingTracks::new(true);
@@ -487,17 +530,13 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
             .unwrap(),
         ProbeRequestResult::Queued { .. }
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while store
+    poll_until(|| {
+        store
             .active_probe_unit_for_ledger(&file_id.to_string())
             .unwrap()
-            .is_some()
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+            .is_none()
     })
-    .await
-    .unwrap();
+    .await;
     let waiting = manager
         .request_probe(&row, ProbeRequestOrigin::Detail)
         .unwrap();
@@ -525,32 +564,24 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
             .unwrap(),
         ProbeRequestResult::Queued { .. }
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while store
+    poll_until(|| {
+        store
             .active_probe_unit_for_ledger(&file_id.to_string())
             .unwrap()
-            .is_some()
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+            .is_none()
     })
-    .await
-    .unwrap();
+    .await;
 
     for deadline in [1_360_000, 2_260_000, 5_860_000] {
         clock.set(deadline);
         assert_eq!(restarted.dispatch_due(deadline, 32).unwrap(), 1);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while store
+        poll_until(|| {
+            store
                 .active_probe_unit_for_ledger(&file_id.to_string())
                 .unwrap()
-                .is_some()
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+                .is_none()
         })
-        .await
-        .unwrap();
+        .await;
     }
     clock.set(i64::MAX / 4);
     assert_eq!(restarted.dispatch_due(i64::MAX / 4, 32).unwrap(), 0);
@@ -562,4 +593,197 @@ async fn metadata_ffprobe_failure_persists_backoff_across_restarts_until_exhaust
     );
     assert_eq!(tracks.calls(), 5);
     restarted.shutdown_workers().await.unwrap();
+}
+
+fn seed_tv_episodes(store: &api::Store, tv_root: &Path, count: u32) -> (MediaId, Vec<LedgerId>) {
+    use store::test_support::{FixtureFile, publish_fixture_file};
+    let lib_id = create_lib(store, MediaKind::Tv, "TV", tv_root, true);
+    store
+        .set_library_intro_settings(&lib_id, true, true)
+        .unwrap();
+    let show = insert_test_media(store, MediaKind::Tv, "Paused Show".into());
+    let ids = (1..=count)
+        .map(|ep| {
+            let p = tv_root.join(format!("S01E0{ep}.mkv"));
+            std::fs::write(&p, b"tv-bytes").unwrap();
+            let spec = FixtureFile {
+                media_id: show,
+                path: p.display().to_string(),
+                season: Some(1),
+                episode: Some(ep),
+                ..Default::default()
+            };
+            publish_fixture_file(store, &spec).unwrap().file_id
+        })
+        .collect();
+    (show, ids)
+}
+
+async fn poll_until(mut cond: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn has_meta(state: &api::ApiState, id: LedgerId) -> bool {
+    state
+        .store()
+        .get_file_meta(&id.to_string())
+        .unwrap()
+        .is_some()
+}
+
+fn in_analysis(state: &api::ApiState, id: LedgerId) -> bool {
+    state
+        .store()
+        .active_probe_unit_for_ledger(&id.to_string())
+        .unwrap()
+        .is_some_and(|u| u.stage.as_str() == "analysis")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promoting_one_episode_of_paused_marker_refresh_keeps_siblings_queued() {
+    use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
+    let dir = tempfile::tempdir().unwrap();
+    let tv_root = dir.path().join("shows");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let ep_ids = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        let (show, ids) = seed_tv_episodes(&store, &tv_root, 3);
+        let strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let specs: Vec<_> = strings
+            .iter()
+            .map(|lid| store::ProbeJobUnitSpec {
+                ledger_id: lid,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: false,
+            })
+            .collect();
+        let scope = format!("marker-refresh:{show}:1");
+        assert!(
+            store
+                .create_probe_job(
+                    "season-refresh-1",
+                    "marker_refresh",
+                    &show.to_string(),
+                    Some(1),
+                    &scope,
+                    &specs
+                )
+                .unwrap()
+        );
+        ids
+    };
+    let tracks = CountingTracks::new(false);
+    let state = production_state(dir.path(), tracks.clone());
+    assert!(state.probe.try_start_workers());
+    let ep1_row = state
+        .store()
+        .file_coverage_by_id(ep_ids[0])
+        .unwrap()
+        .unwrap();
+    let promoted = state
+        .probe
+        .request_probe(&ep1_row, ProbeRequestOrigin::Playback)
+        .unwrap();
+    assert_eq!(
+        promoted,
+        ProbeRequestResult::Queued {
+            job_id: "season-refresh-1".into()
+        }
+    );
+    poll_until(|| in_analysis(&state, ep_ids[0])).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(state.probe.background_is_paused());
+    assert!(has_meta(&state, ep_ids[0]));
+    for &sibling in &ep_ids[1..] {
+        assert!(!has_meta(&state, sibling));
+    }
+    let units = state.store().probe_job_units("season-refresh-1").unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .filter(|u| u.status == "queued" && u.stage.as_str() == "metadata")
+            .count(),
+        2
+    );
+    assert_eq!(tracks.calls(), 1);
+    state.probe.shutdown_workers().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_stops_waiting_buffered_workers_and_halts_pending_analysis_and_readonly_resume() {
+    use api::probe_manager::policy::ProbeRequestOrigin;
+    let dir = tempfile::tempdir().unwrap();
+    let movie_root = dir.path().join("movies");
+    let tv_root = dir.path().join("tv");
+    std::fs::create_dir_all(&movie_root).unwrap();
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let (movies, tv_eps) = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        create_lib(&store, MediaKind::Movie, "Movies", &movie_root, true);
+        let movies: Vec<_> = (0..4)
+            .map(|idx| seed_scanned_movie(&store, &movie_root, "buf", idx).1)
+            .collect();
+        let (_, tv_eps) = seed_tv_episodes(&store, &tv_root, 2);
+        (movies, tv_eps)
+    };
+    let ro_state = production_state_with_writable(dir.path(), CountingTracks::new(false), false);
+    let ro_req = common::request(
+        "POST",
+        "/api/v1/probe/resume",
+        Some("management-secret"),
+        json!({}),
+    );
+    assert_ne!(
+        api::router(ro_state.clone())
+            .oneshot(ro_req)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(ro_state.probe.background_is_paused());
+
+    let (tracks, entered_rx, release_tx) = CountingTracks::blocking_first();
+    let state = production_state(dir.path(), tracks);
+    let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000));
+    state.probe.set_clock(clock.clone());
+    assert!(state.probe.try_start_workers());
+    let app = api::router(state.clone());
+    admin_json(&app, "POST", "/api/v1/probe/resume", json!({})).await;
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        admin_json(&app, "POST", "/api/v1/probe/pause", json!({})).await["paused"],
+        true
+    );
+    release_tx.send(()).unwrap();
+    poll_until(|| has_meta(&state, movies[0])).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for &unstarted in &movies[1..] {
+        assert!(!has_meta(&state, unstarted));
+    }
+
+    for &ep in &tv_eps {
+        let row = state.store().file_coverage_by_id(ep).unwrap().unwrap();
+        state
+            .probe
+            .request_probe(&row, ProbeRequestOrigin::Playback)
+            .unwrap();
+    }
+    poll_until(|| tv_eps.iter().all(|&ep| in_analysis(&state, ep))).await;
+    admin_json(&app, "POST", "/api/v1/probe/pause", json!({})).await;
+    clock.set(25_000);
+    state.probe.wake_dispatch();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(state.probe.comparison_runs.load(Ordering::SeqCst), 0);
+    state.probe.shutdown_workers().await.unwrap();
 }

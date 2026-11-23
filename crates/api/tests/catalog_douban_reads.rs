@@ -239,3 +239,15 @@ fn douban_detail_resolves_configured_fanout_source() {
     assert_eq!(body["data"]["item"]["title"], "Complete movie");
     assert_eq!(body["data"]["info"]["cast"][0]["name"], "Actor");
 }
+
+#[test]
+fn douban_detail_rejects_path_traversal_and_query_injection_ids() {
+    let (_dir, app) = fixture();
+    runtime().block_on(async {
+        for bad in ["123%2e%2e%2fsecret", "123%3ffoo%3dbar", "123%23frag", ".."] {
+            let (status, body) = get(app.clone(), bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+            assert_eq!(body["error"]["code"], "media.invalid_id");
+        }
+    });
+}

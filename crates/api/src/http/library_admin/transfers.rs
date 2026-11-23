@@ -50,8 +50,11 @@ pub(crate) async fn list_transfers(
     };
     let sql_ms = sql_started.elapsed().as_secs_f64() * 1000.0;
 
-    let needs_fs_stat =
-        page.view == store::TransferViewMode::Files && page.files.iter().any(|row| !row.is_strm);
+    let needs_fs_stat = page.view == store::TransferViewMode::Files
+        && page
+            .files
+            .iter()
+            .any(|row| !row.is_strm && row.coverage.file.size_bytes.is_none());
     if !needs_fs_stat {
         tracing::debug!(
             view = page.view.as_str(),
@@ -195,24 +198,16 @@ fn serialize_file_row(
     let (transfer_mode, file_size) = if row.is_strm {
         ("strm".to_string(), Value::Null)
     } else {
-        let meta = files.and_then(|fs| fs.metadata(&file.path).ok());
-        let size = file
-            .size_bytes
-            .or_else(|| meta.as_ref().map(|m| m.len()))
-            .unwrap_or(0);
-        let mode = match files {
-            Some(fs) => super::transfer_mode_label(
-                false,
-                meta.as_ref(),
-                file.source_path.as_deref(),
-                file.transfer_mode,
-                global_transfer_mode,
-                fs,
-            ),
-            None => file
-                .transfer_mode
-                .unwrap_or_else(|| global_transfer_mode.to_string()),
+        let size = match file.size_bytes {
+            Some(bytes) => bytes,
+            None => files
+                .and_then(|fs| fs.metadata(&file.path).ok())
+                .map_or(0, |m| m.len()),
         };
+        let mode = file
+            .transfer_mode
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| global_transfer_mode.to_string());
         (mode, json!(size))
     };
 

@@ -102,15 +102,18 @@ export function SystemLogsSection() {
     count: filteredLogs.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 28,
+    getItemKey: (index) => filteredLogs[index]?.id ?? index,
     overscan: 20,
   });
+
+  const tailLogId = filteredLogs[filteredLogs.length - 1]?.id ?? null;
 
   // Auto-scroll to bottom when new logs arrive if enabled
   useEffect(() => {
     if (autoScroll && filteredLogs.length > 0) {
       rowVirtualizer.scrollToIndex(filteredLogs.length - 1, { align: "end" });
     }
-  }, [filteredLogs.length, autoScroll, rowVirtualizer]);
+  }, [filteredLogs.length, tailLogId, autoScroll, rowVirtualizer]);
 
   const handleClear = async () => {
     const ok = await confirm({
@@ -202,7 +205,7 @@ export function SystemLogsSection() {
             type="button"
             onClick={() => setAutoScroll(!autoScroll)}
             className={`btn-glass px-2.5 py-1 text-sub ${
-              autoScroll ? "btn-glass--ok font-semibold" : "text-[var(--text-muted)]"
+              autoScroll ? "btn-glass--ok font-semibold" : "btn-glass--muted"
             }`}
             title="新日志进入时自动滚到底部"
           >

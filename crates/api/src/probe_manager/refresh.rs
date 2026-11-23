@@ -82,13 +82,15 @@ impl ProbeManager {
             if self.should_defer_remote_dispatch(&unit.row.file.path) {
                 tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，刷新单元保持数据库排队");
             } else {
-                self.seen.lock().insert(unit.row.file.file_id.to_string());
-                if self.queue_metadata(unit.clone()).is_ok() {
-                    queued += 1;
-                } else {
-                    overflowed = true;
-                    self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                    tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "刷新窗口已满，单元保持数据库排队");
+                let ledger_id = unit.row.file.file_id.to_string();
+                if self.try_insert_seen(ledger_id.clone(), job_id.clone()) {
+                    if self.queue_metadata(unit.clone()).is_ok() {
+                        queued += 1;
+                    } else {
+                        overflowed = true;
+                        self.remove_seen_if_job(&ledger_id, &job_id);
+                        tracing::info!(job_id, ledger_id, "刷新窗口已满，单元保持数据库排队");
+                    }
                 }
             }
         }
@@ -116,7 +118,7 @@ impl ProbeManager {
         }
         let paused = self.background_is_paused();
         let exempt_jobs = if paused {
-            self.paused_exempt_jobs_snapshot()
+            self.paused_exempt_jobs_for_ledgers(ledger_ids)
         } else {
             HashSet::new()
         };
@@ -241,13 +243,15 @@ impl ProbeManager {
                 if self.should_defer_remote_dispatch(&unit.row.file.path) {
                     tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，整条目单元保持数据库排队");
                 } else {
-                    self.seen.lock().insert(unit.row.file.file_id.to_string());
-                    if self.queue_metadata(unit.clone()).is_ok() {
-                        queued += 1;
-                    } else {
-                        overflowed = true;
-                        self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                        tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+                    let ledger_id = unit.row.file.file_id.to_string();
+                    if self.try_insert_seen(ledger_id.clone(), batch.job_id.clone()) {
+                        if self.queue_metadata(unit.clone()).is_ok() {
+                            queued += 1;
+                        } else {
+                            overflowed = true;
+                            self.remove_seen_if_job(&ledger_id, &batch.job_id);
+                            tracing::info!(job_id = %batch.job_id, ledger_id, "整条目窗口已满，单元保持数据库排队");
+                        }
                     }
                 }
             }
@@ -272,8 +276,17 @@ impl ProbeManager {
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
         let paused = self.background_is_paused();
+        let target_ids: Vec<String> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .units
+                    .iter()
+                    .map(|unit| unit.row.file.file_id.to_string())
+            })
+            .collect();
         let exempt_jobs = if paused {
-            self.paused_exempt_jobs_snapshot()
+            self.paused_exempt_jobs_for_ledgers(&target_ids)
         } else {
             HashSet::new()
         };
@@ -291,15 +304,6 @@ impl ProbeManager {
                 admitted()?;
                 store.with_write_tx(map_store_err, |store| {
                     let cancelled = if paused {
-                        let target_ids: Vec<String> = batches
-                            .iter()
-                            .flat_map(|batch| {
-                                batch
-                                    .units
-                                    .iter()
-                                    .map(|unit| unit.row.file.file_id.to_string())
-                            })
-                            .collect();
                         store
                             .cancel_dormant_queued_units_for_ledgers(
                                 &target_ids,

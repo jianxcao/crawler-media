@@ -44,54 +44,139 @@ impl crate::LibraryConnection<'_> {
         local_only: bool,
         limit: usize,
     ) -> Result<(Vec<ProbeDispatchId>, Vec<String>), StoreError> {
+        let (ids, active_jobs, _) =
+            self.pending_probe_dispatch_ids_for_exemptions(stage, job_ids, &[], local_only, limit)?;
+        Ok((ids, active_jobs))
+    }
+
+    pub fn pending_probe_dispatch_ids_for_exemptions(
+        &self,
+        stage: ProbeDispatchStage,
+        job_ids: &[String],
+        unit_pairs: &[(String, String)],
+        local_only: bool,
+        limit: usize,
+    ) -> Result<(Vec<ProbeDispatchId>, Vec<String>, Vec<(String, String)>), StoreError> {
+        if job_ids.is_empty() && unit_pairs.is_empty() {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+        let active_jobs = self.active_exempt_jobs(job_ids)?;
+        let active_units = self.active_exempt_units(unit_pairs)?;
+        if (active_jobs.is_empty() && active_units.is_empty()) || limit == 0 {
+            return Ok((Vec::new(), active_jobs, active_units));
+        }
+        let active_jobs_json = serde_json::to_string(&active_jobs)?;
+        let active_units_json = serde_json::to_string(&active_units)?;
+        let sql = if local_only {
+            "WITH exempt_units(job_id, file_id) AS (
+                 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]')
+                 FROM json_each(?3)
+             )
+             SELECT job_id, file_id FROM (
+                 SELECT u.job_id AS job_id, u.file_id AS file_id
+                 FROM probe_job_units u
+                 JOIN probe_jobs j ON j.id = u.job_id
+                 JOIN library_files f ON f.file_id = u.file_id
+                 WHERE u.job_id IN (SELECT value FROM json_each(?2))
+                   AND u.stage = ?1 AND u.status = 'queued'
+                   AND j.status IN ('queued', 'running')
+                   AND lower(f.display_path) NOT LIKE '%.strm'
+                 UNION
+                 SELECT u.job_id AS job_id, u.file_id AS file_id
+                 FROM exempt_units eu
+                 JOIN probe_job_units u ON u.job_id = eu.job_id AND u.file_id = eu.file_id
+                 JOIN probe_jobs j ON j.id = u.job_id
+                 JOIN library_files f ON f.file_id = u.file_id
+                 WHERE u.stage = ?1 AND u.status = 'queued'
+                   AND j.status IN ('queued', 'running')
+                   AND lower(f.display_path) NOT LIKE '%.strm'
+             )
+             ORDER BY job_id, file_id
+             LIMIT ?4"
+        } else {
+            "WITH exempt_units(job_id, file_id) AS (
+                 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]')
+                 FROM json_each(?3)
+             )
+             SELECT job_id, file_id FROM (
+                 SELECT u.job_id AS job_id, u.file_id AS file_id
+                 FROM probe_job_units u
+                 JOIN probe_jobs j ON j.id = u.job_id
+                 WHERE u.job_id IN (SELECT value FROM json_each(?2))
+                   AND u.stage = ?1 AND u.status = 'queued'
+                   AND j.status IN ('queued', 'running')
+                 UNION
+                 SELECT u.job_id AS job_id, u.file_id AS file_id
+                 FROM exempt_units eu
+                 JOIN probe_job_units u ON u.job_id = eu.job_id AND u.file_id = eu.file_id
+                 JOIN probe_jobs j ON j.id = u.job_id
+                 WHERE u.stage = ?1 AND u.status = 'queued'
+                   AND j.status IN ('queued', 'running')
+             )
+             ORDER BY job_id, file_id
+             LIMIT ?4"
+        };
+        let mut stmt = self.library.prepare(sql)?;
+        let ids = stmt
+            .query_map(
+                params![
+                    stage.as_str(),
+                    active_jobs_json,
+                    active_units_json,
+                    limit as i64
+                ],
+                |row| {
+                    Ok(ProbeDispatchId {
+                        job_id: row.get(0)?,
+                        ledger_id: row.get(1)?,
+                        stage,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((ids, active_jobs, active_units))
+    }
+
+    fn active_exempt_jobs(&self, job_ids: &[String]) -> Result<Vec<String>, StoreError> {
         if job_ids.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Vec::new());
         }
         let jobs_json = serde_json::to_string(job_ids)?;
-        let mut active_stmt = self.library.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT id FROM probe_jobs
              WHERE id IN (SELECT value FROM json_each(?1))
                AND status IN ('queued', 'running')",
         )?;
-        let active_jobs: Vec<String> = active_stmt
+        let active = stmt
             .query_map([&jobs_json], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        if active_jobs.is_empty() || limit == 0 {
-            return Ok((Vec::new(), active_jobs));
+        Ok(active)
+    }
+
+    fn active_exempt_units(
+        &self,
+        unit_pairs: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        if unit_pairs.is_empty() {
+            return Ok(Vec::new());
         }
-        let active_json = serde_json::to_string(&active_jobs)?;
-        let sql = if local_only {
-            "SELECT u.job_id, u.file_id
-             FROM probe_job_units u
+        let units_json = serde_json::to_string(unit_pairs)?;
+        let mut stmt = self.library.prepare(
+            "WITH exempt_units(job_id, file_id) AS (
+                 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]')
+                 FROM json_each(?1)
+             )
+             SELECT u.job_id, u.file_id
+             FROM exempt_units eu
+             JOIN probe_job_units u ON u.job_id = eu.job_id AND u.file_id = eu.file_id
              JOIN probe_jobs j ON j.id = u.job_id
-             JOIN library_files f ON f.file_id = u.file_id
-             WHERE u.stage = ?1 AND u.status = 'queued'
-               AND u.job_id IN (SELECT value FROM json_each(?2))
-               AND j.status IN ('queued', 'running')
-               AND lower(f.display_path) NOT LIKE '%.strm'
-             ORDER BY u.job_id, u.file_id
-             LIMIT ?3"
-        } else {
-            "SELECT u.job_id, u.file_id
-             FROM probe_job_units u
-             JOIN probe_jobs j ON j.id = u.job_id
-             WHERE u.stage = ?1 AND u.status = 'queued'
-               AND u.job_id IN (SELECT value FROM json_each(?2))
-               AND j.status IN ('queued', 'running')
-             ORDER BY u.job_id, u.file_id
-             LIMIT ?3"
-        };
-        let mut stmt = self.library.prepare(sql)?;
-        let ids = stmt
-            .query_map(params![stage.as_str(), active_json, limit as i64], |row| {
-                Ok(ProbeDispatchId {
-                    job_id: row.get(0)?,
-                    ledger_id: row.get(1)?,
-                    stage,
-                })
-            })?
+             WHERE u.status IN ('queued', 'running')
+               AND j.status IN ('queued', 'running')",
+        )?;
+        let active = stmt
+            .query_map([&units_json], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((ids, active_jobs))
+        Ok(active)
     }
 
     pub fn pending_probe_dispatch_ids(

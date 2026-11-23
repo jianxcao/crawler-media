@@ -237,7 +237,7 @@ function NetflixBillboard({
       <div className="absolute inset-0 overflow-hidden bg-black">
         {artSrc ? (
           <div className="nf-billboard-art absolute inset-0">
-            <ArtworkImage src={artSrc} alt="" className="size-full object-cover" />
+            <ArtworkImage src={artSrc} alt="" loading="eager" className="size-full object-cover" />
           </div>
         ) : artworkUrl ? null : libraryItem?.poster_url ? (
           <PosterFallbackFill url={libraryItem.poster_url} aspect={2 / 3} />
@@ -304,13 +304,13 @@ function PosterFallbackFill({ url, aspect }: { url: string; aspect: number }) {
   const src = imageUrl(url, cardVariantFor(aspect));
   return (
     <>
-      <ArtworkImage src={src} alt="" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
+      <ArtworkImage src={src} alt="" loading="eager" className="absolute inset-0 size-full scale-110 object-cover opacity-40 blur-2xl" />
       <div className="absolute inset-0 flex items-center justify-center">
         <div
           style={{ aspectRatio: aspect, height: "86%" }}
           className="overflow-hidden rounded-[4px] shadow-[0_0_40px_rgba(0,0,0,0.6)]"
         >
-          <PosterImage src={src} alt="" className="size-full" />
+          <PosterImage src={src} alt="" preload className="size-full" />
         </div>
       </div>
     </>

@@ -33,7 +33,7 @@ async fn wait_for_worker_cleanup(harness: &RefreshHarness) {
             .manager
             .metadata_pending
             .load(std::sync::atomic::Ordering::Acquire);
-        let seen_keys: Vec<String> = harness.manager.seen.lock().iter().cloned().collect();
+        let seen_keys: Vec<String> = harness.manager.seen.lock().keys().cloned().collect();
         let has_active_work = harness.registry.has_active_work();
         panic!(
             "wait_for_worker_cleanup timed out: metadata_pending={metadata_pending} (expected 0), seen={seen_keys:?} (expected empty), has_active_work={has_active_work} (expected false)"
@@ -52,7 +52,8 @@ async fn window1_queued_stage_freeze_aborts_cleanly_and_releases_scope() {
     );
 
     let active_job = harness
-        .store.as_ref()
+        .store
+        .as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .expect("刷新任务应当已入库持有 scope");
@@ -69,7 +70,8 @@ async fn window1_queued_stage_freeze_aborts_cleanly_and_releases_scope() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store.as_ref()
+            .store
+            .as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -88,7 +90,8 @@ async fn window2_execution_handover_freeze_prevents_publication() {
         2
     );
     let job_id = harness
-        .store.as_ref()
+        .store
+        .as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .unwrap()
@@ -118,7 +121,8 @@ async fn window2_execution_handover_freeze_prevents_publication() {
     harness.assert_old_markers_intact();
     assert!(
         harness
-            .store.as_ref()
+            .store
+            .as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()
@@ -154,13 +158,12 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
     assert!(
         harness
             .manager
-            .seen
-            .lock()
-            .contains(&harness.rows[0].file.file_id.to_string())
+            .has_seen(&harness.rows[0].file.file_id.to_string())
     );
 
     let job_id = harness
-        .store.as_ref()
+        .store
+        .as_ref()
         .active_probe_job_for_scope(&harness.scope)
         .unwrap()
         .expect("刷新任务应当已入库持有 scope")
@@ -182,7 +185,8 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
     assert!(!harness.registry.has_active_work());
     assert!(
         harness
-            .store.as_ref()
+            .store
+            .as_ref()
             .active_probe_job_for_scope(&harness.scope)
             .unwrap()
             .is_none()

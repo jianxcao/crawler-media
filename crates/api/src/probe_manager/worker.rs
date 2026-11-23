@@ -23,23 +23,37 @@ impl MetadataAdmission {
 async fn next_metadata_work(
     manager: &Arc<ProbeManager>,
 ) -> Option<(store::ProbeDispatchId, MetadataPermit, MetadataStageGuard)> {
-    // Keep exclusive reception until the queue head has admission. Otherwise
-    // idle workers hide older ids while a completing worker takes a newer id
-    // and races those waiters for the newly available slot.
-    let _receiver = tokio::select! {
-        _ = wait_for_shutdown(manager) => return None,
-        guard = manager.metadata_receiver.lock() => guard,
-    };
-    let mut rx = manager.metadata_rx.lock().take()?;
-    let id = tokio::select! {
-        _ = wait_for_shutdown(manager) => return None,
-        id = rx.recv() => id,
-    };
-    let id = id?;
-    *manager.metadata_rx.lock() = Some(rx);
-    let pending = MetadataStageGuard(manager.clone());
-    let permit = metadata_permit(manager).await?;
-    Some((id, permit, pending))
+    loop {
+        // Keep exclusive reception until the queue head has admission. Otherwise
+        // idle workers hide older ids while a completing worker takes a newer id
+        // and races those waiters for the newly available slot.
+        let _receiver = tokio::select! {
+            _ = wait_for_shutdown(manager) => return None,
+            guard = manager.metadata_receiver.lock() => guard,
+        };
+        let mut rx = manager.metadata_rx.lock().take()?;
+        let id = tokio::select! {
+            _ = wait_for_shutdown(manager) => return None,
+            id = rx.recv() => id,
+        };
+        let id = id?;
+        *manager.metadata_rx.lock() = Some(rx);
+        let pending = MetadataStageGuard(manager.clone());
+        if manager.background_is_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        let permit = metadata_permit(manager).await?;
+        if manager.background_is_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        return Some((id, permit, pending));
+    }
 }
 
 async fn metadata_permit(manager: &Arc<ProbeManager>) -> Option<MetadataPermit> {
@@ -231,7 +245,13 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
             break;
         };
         if manager.shutting_down.load(Ordering::SeqCst) {
-            manager.seen.lock().remove(&id.ledger_id);
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        if manager.background_is_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
             continue;
         }
         let (handed_off, owns_running) = process_metadata(&manager, &id).await;
@@ -327,14 +347,23 @@ async fn process_metadata(
     };
     let ready = step(&manager, {
         let unit = unit.clone();
+        let id = id.clone();
         move |manager| {
-            source_ready(manager, &unit)
-                && start_persisted_unit(manager, &unit, store::ProbeDispatchStage::Metadata)
+            if manager.background_is_paused()
+                && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+            {
+                manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+                return Err(());
+            }
+            Ok(source_ready(manager, &unit)
+                && start_persisted_unit(manager, &unit, store::ProbeDispatchStage::Metadata))
         }
     })
     .await;
-    if !ready.unwrap_or(false) {
-        return (false, false);
+    match ready {
+        Ok(Ok(true)) => {}
+        Ok(Err(())) => return (true, false),
+        Ok(Ok(false)) | Err(_) => return (false, false),
     }
     let _refresh_leases = if unit.marker_refresh_id.is_some() {
         let leases = step(&manager, {
@@ -411,6 +440,9 @@ async fn retry_dispatch(
                         .as_ref()
                         .is_none_or(|unit| unit.job_id != id.job_id || unit.stage != id.stage)
                     {
+                        if active.as_ref().is_none_or(|unit| unit.job_id != id.job_id) {
+                            super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
+                        }
                         return Ok(false);
                     }
                     if active.as_ref().is_some_and(|unit| unit.status == "running") && !owns_running
@@ -428,7 +460,7 @@ async fn retry_dispatch(
                             .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
                             .is_some_and(|row| super::dispatch::is_strm_path(&row.file.path));
                     if is_paused_strm {
-                        seen.remove(&id.ledger_id);
+                        super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
                     }
                     Ok(!is_paused_strm)
                 })
@@ -439,12 +471,12 @@ async fn retry_dispatch(
             if should_backoff {
                 tokio::select! {
                     _ = wait_for_shutdown(manager) => {
-                        manager.seen.lock().remove(&id.ledger_id);
+                        manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
                         return;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
                 }
-                manager.seen.lock().remove(&id.ledger_id);
+                manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
             }
             manager.wake.notify_one();
             return;
@@ -474,7 +506,7 @@ fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) 
     });
     match cancelled {
         Ok(true) => {
-            manager.seen.lock().remove(&id.ledger_id);
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
         }
         Ok(false) => {}
         Err(error) => {
@@ -524,7 +556,7 @@ async fn run_window_dispatcher(manager: Arc<ProbeManager>) {
             if recover_completed {
                 manager.recover_completed_jobs();
             }
-            if !manager.background_is_paused() || manager.has_paused_exempt_jobs() {
+            if !manager.background_is_paused() || manager.has_paused_exempt_work() {
                 manager.refill_drained_windows();
             }
         })
@@ -589,10 +621,12 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
     let recorded = match recorded {
         Ok(Some(recorded)) => recorded,
         Ok(None) => {
-            manager
-                .seen
-                .lock()
-                .remove(&unit.row.file.file_id.to_string());
+            let ledger_id = unit.row.file.file_id.to_string();
+            if let Some(job_id) = unit.job_id.as_deref() {
+                manager.remove_seen_if_job(&ledger_id, job_id);
+            } else {
+                manager.remove_seen_any(&ledger_id);
+            }
             return false;
         }
         Err(error) if super::store_access::is_busy(&error) => {
@@ -674,19 +708,17 @@ fn start_persisted_unit(
 ) -> bool {
     let ledger_id = unit.row.file.file_id.to_string();
     let store = manager.store.as_ref();
-    let started = match unit.job_id.as_deref() {
-        Some(job_id) => store.start_probe_unit(job_id, &ledger_id, stage),
-        None => {
-            tracing::error!(ledger_id, "队列单元缺少任务 ID，无法启动持久化任务");
-            return false;
-        }
+    let Some(job_id) = unit.job_id.as_deref() else {
+        tracing::error!(ledger_id, "队列单元缺少任务 ID，无法启动持久化任务");
+        return false;
     };
+    let started = store.start_probe_unit(job_id, &ledger_id, stage);
 
     match started {
         Ok(true) => true,
         Ok(false) => {
             tracing::warn!(ledger_id, "队列单元已被处理或数据库状态缺失，跳过重复执行");
-            manager.seen.lock().remove(&ledger_id);
+            manager.remove_seen_if_job(&ledger_id, job_id);
             false
         }
         Err(error) => {

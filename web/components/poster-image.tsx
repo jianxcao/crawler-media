@@ -46,9 +46,10 @@ export function PosterImage({
    */
   preload?: boolean;
 }) {
-  const [broken, setBroken] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const broken = Boolean(src && failedSrc === src);
   // 换图时保持已显示状态：同一个 <img> 换 src 后旧位图会继续显示到新图就位
   // （浏览器原生行为），主动复位反而把旧图藏掉、露一下底色——发现页 Hero 的
   // 「同图升清」（w1280 → original，discover-view.tsx）就踩在这条路径上。
@@ -81,8 +82,11 @@ export function PosterImage({
         // 只有几毫秒，且只有真正被绘制的格子才会解码，无首屏卡顿之虞。
         decoding="sync"
         referrerPolicy="no-referrer"
-        onError={() => setBroken(true)}
-        onLoad={() => setLoaded(true)}
+        onError={() => setFailedSrc(src ?? null)}
+        onLoad={() => {
+          setFailedSrc((prev) => (prev === src ? null : prev));
+          setLoaded(true);
+        }}
         // 加载完成前先透明、就位后 500ms 淡入：避免大图解码完成那一帧「突然出现」。
         // 就位后不再带任何 opacity 类——不干扰调用方自己的 hover 透明度效果。
         className={`bg-[#141824] object-cover transition-opacity duration-500 ease-out ${

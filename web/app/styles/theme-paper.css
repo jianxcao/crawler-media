@@ -36,6 +36,7 @@ html[data-theme="paper"] {
   --glass-fill-active: rgba(43, 91, 163, 0.11);
 
   --ok: #157a48;
+  --ok-ink: #ffffff;
   --info: #1f62ad;
   --warn: #9a5b00;
   --danger: #c42b3b;
@@ -70,6 +71,8 @@ html[data-theme="paper"] {
   --color-orange-300: #a3480b;
   --color-blue-300: #1b5dab;
   --color-pink-400: #b8296b;
+  --color-cyan-100: #0b556a;
+  --color-cyan-200: #0d6178;
   --color-cyan-300: #0e6982;
 
   --color-white: var(--text);
@@ -359,6 +362,9 @@ html[data-theme="paper"] .btn-glass:hover {
 }
 html[data-theme="paper"] .btn-glass--ok { color: var(--ok); }
 html[data-theme="paper"] .btn-glass--danger { color: var(--danger); }
+html[data-theme="paper"] .btn-glass--accent { color: var(--accent); }
+html[data-theme="paper"] .btn-glass--muted { color: var(--text-muted); }
+html[data-theme="paper"] .btn-glass--muted:hover:not(:disabled) { color: var(--text); }
 
 html[data-theme="paper"] .icon-chip {
   border-color: rgba(32, 42, 58, 0.09);
@@ -554,7 +560,9 @@ html[data-theme="paper"] :is(
   --line-strong: rgba(255, 255, 255, 0.15);
   --color-white: #ffffff;
   --accent-2: #9fb0c9;
+  --accent-soft: rgba(205, 214, 230, 0.14);
   --ok: #4ade80;
+  --ok-ink: #07120c;
   --info: #7fb0ff;
   --warn: #f5c451;
   --danger: #ff6b6b;
@@ -585,6 +593,8 @@ html[data-theme="paper"] :is(
   --color-orange-300: #fdba74;
   --color-blue-300: #93c5fd;
   --color-pink-400: #f472b6;
+  --color-cyan-100: #cffafe;
+  --color-cyan-200: #a5f3fc;
   --color-cyan-300: #67e8f9;
 }
 

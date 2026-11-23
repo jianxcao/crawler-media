@@ -315,3 +315,84 @@ fn paused_remote_reads_keep_query_and_refresh_strm_out_of_channels() {
     }
     manager.apply_remote_reads_pause(false);
 }
+
+#[test]
+fn stale_cancelled_dispatch_does_not_evict_replacement_job_seen_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(store::Store::open(tmp.path().join("data")).unwrap());
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let path = root.join("movie.mkv");
+    std::fs::write(&path, b"video").unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Seen Replacement".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let row = super::super::test_support::publish(
+        &store,
+        &super::super::test_support::coverage(media.id, path.to_str().unwrap(), None, None),
+    );
+    let ledger_id = row.file.file_id.to_string();
+
+    store
+        .create_probe_job(
+            "job-1-stale",
+            "media_probe",
+            &media.id.to_string(),
+            None,
+            &format!("ledger:{ledger_id}"),
+            &[store::ProbeJobUnitSpec {
+                ledger_id: &ledger_id,
+                kind: "movie",
+                force_fingerprint: false,
+                reuse_fingerprint_cache: true,
+                overwrite_markers: false,
+                reuse_media_info_cache: true,
+            }],
+        )
+        .unwrap();
+    store
+        .cancel_probe_job("job-1-stale", "manual_cancel")
+        .unwrap();
+
+    let manager = ProbeManager::new(store.clone()).unwrap();
+    let replacement = manager
+        .request_probe(&row, super::super::policy::ProbeRequestOrigin::Playback)
+        .unwrap();
+    assert!(matches!(
+        replacement,
+        super::super::policy::ProbeRequestResult::Queued { .. }
+    ));
+    assert!(manager.holds_dispatch_id(&ledger_id));
+
+    let stale = ProbeDispatchId {
+        job_id: "job-1-stale".into(),
+        ledger_id: ledger_id.clone(),
+        stage: ProbeDispatchStage::Metadata,
+    };
+    assert!(manager.load_dispatch_unit(&stale).is_none());
+    assert!(
+        manager.holds_dispatch_id(&ledger_id),
+        "retiring stale cancelled job-1 must not evict active job-2 from seen"
+    );
+}

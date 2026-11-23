@@ -213,6 +213,12 @@ fn publish(manager: &ProbeManager, commit: &ProbeAnalysisCommit) -> Result<(), s
                 if let Some(frames) = manager.chapter_frames() {
                     frames.notify_pending();
                 }
+                for participant in &commit.claim.participants {
+                    manager.unmark_unit_paused_exempt(
+                        &participant.dispatch().job_id,
+                        &participant.dispatch().ledger_id,
+                    );
+                }
                 for job in jobs {
                     manager.unmark_job_paused_exempt(&job.id);
                     super::super::timings::finalize_terminal_job(

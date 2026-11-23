@@ -36,6 +36,8 @@ pub(crate) struct RoutingPreviewInput {
 struct RoutingSnapshot {
     ownership: store::LibraryOwnership,
     targetable_libraries: Vec<Library>,
+    current_user: Option<UserId>,
+    is_admin: bool,
     requested_downloader: Option<Option<DownloaderRow>>,
     default_downloader: Option<DownloaderRow>,
     naming_pattern: String,
@@ -60,6 +62,22 @@ pub(crate) fn user_can_target_library(
         return true;
     };
     is_admin || library.access_mode == "everyone" || library.member_ids.contains(&uid)
+}
+
+/// 自动选库与省略 `library_id` 默认落库准入：管理员（或无用户上下文）要求 `admin_visible` 为真，
+/// 避免未显式选库时静默落入隐藏库；显式 `library_id` 仍走 `user_can_target_library`。
+pub(crate) fn user_can_auto_route_library(
+    library: &Library,
+    user_id: Option<UserId>,
+    is_admin: bool,
+) -> bool {
+    if is_admin || user_id.is_none() {
+        return library.admin_visible;
+    }
+    match user_id {
+        Some(uid) => library.access_mode == "everyone" || library.member_ids.contains(&uid),
+        None => library.admin_visible,
+    }
 }
 
 pub(crate) async fn preview(
@@ -120,7 +138,10 @@ fn evaluate_preview(
         return render_preview(kind, body, snapshot, Some(lib), false, None);
     }
     let has_rule_candidates = snapshot.targetable_libraries.iter().any(|lib| {
-        lib.kind == kind && !lib.match_rules.is_empty() && snapshot.ownership.accepts_work(&lib.id)
+        lib.kind == kind
+            && !lib.match_rules.is_empty()
+            && snapshot.ownership.accepts_work(&lib.id)
+            && user_can_auto_route_library(lib, snapshot.current_user, snapshot.is_admin)
     });
     let meta = if has_rule_candidates {
         match_metadata(state, kind, body.tmdb_id.as_deref())
@@ -132,6 +153,8 @@ fn evaluate_preview(
         &snapshot.ownership,
         kind,
         meta.as_ref(),
+        snapshot.current_user,
+        snapshot.is_admin,
     );
     render_preview(kind, body, snapshot, library, matched, reason)
 }
@@ -181,6 +204,8 @@ fn load_snapshot(
     Ok(RoutingSnapshot {
         ownership,
         targetable_libraries,
+        current_user,
+        is_admin,
         requested_downloader,
         default_downloader: store.default_downloader().ok().flatten(),
         naming_pattern: store
@@ -235,7 +260,7 @@ pub(crate) fn auto_match_library(
                     lib.kind == kind
                         && !lib.match_rules.is_empty()
                         && ownership.accepts_work(&lib.id)
-                        && user_can_target_library(lib, user_id, is_admin)
+                        && user_can_auto_route_library(lib, user_id, is_admin)
                 })
                 .cloned()
                 .collect())
@@ -269,8 +294,14 @@ fn select_auto_library<'a>(
     ownership: &store::LibraryOwnership,
     kind: MediaKind,
     meta: Option<&media::ItemMeta>,
+    user_id: Option<UserId>,
+    is_admin: bool,
 ) -> (Option<&'a Library>, bool, Option<String>) {
-    let accepts = |lib: &&Library| lib.kind == kind && ownership.accepts_work(&lib.id);
+    let accepts = |lib: &&Library| {
+        lib.kind == kind
+            && ownership.accepts_work(&lib.id)
+            && user_can_auto_route_library(lib, user_id, is_admin)
+    };
     if let Some(meta) = meta
         && let Some((library, reason)) = libraries
             .iter()

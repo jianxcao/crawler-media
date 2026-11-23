@@ -7,28 +7,34 @@ fn normalize_optional(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn resolve_site_url(
+    raw_url: &str,
+    profile: Option<&indexer::Profile>,
+) -> Result<String, (StatusCode, &'static str, &'static str)> {
+    if !raw_url.trim().is_empty() {
+        return Ok(raw_url.to_string());
+    }
+    match profile.and_then(|p| p.base_url.as_deref()).map(str::trim) {
+        Some(base) if !base.is_empty() => Ok(base.to_string()),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "site.invalid",
+            "该站点模板未内置基底地址，站点 URL 不能为空",
+        )),
+    }
+}
+
 async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteInput>) -> Response {
-    if state.indexer.profile(&body.profile_id).is_none() {
+    let Some(profile) = state.indexer.profile(&body.profile_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "site.unknown_profile",
             &format!("未知的站点模板 {}", body.profile_id),
         );
-    }
-    let profile = state.indexer.profile(&body.profile_id);
-    let url = if body.url.trim().is_empty() {
-        match profile.and_then(|p| p.base_url.clone()) {
-            Some(base) if !base.is_empty() => base,
-            _ => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "site.invalid",
-                    "该站点模板未内置基底地址，站点 URL 不能为空",
-                );
-            }
-        }
-    } else {
-        body.url
+    };
+    let url = match resolve_site_url(&body.url, Some(profile)) {
+        Ok(url) => url,
+        Err((status, code, msg)) => return err(status, code, msg),
     };
     let downloader_id = body
         .downloader_id
@@ -90,17 +96,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
                 &error.to_string(),
             );
         }
-        let mut view = site_public(&site, auth_type(&site), true);
-        view["cookie"] = site
-            .cookie
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null);
-        view["api_key"] = site
-            .api_key
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null);
+        let view = site_public(&site, auth_type(&site), true);
         (StatusCode::CREATED, ok(view)).into_response()
     })
     .await
@@ -112,13 +108,17 @@ async fn put_site_inner(
     Path(id): Path<String>,
     Json(body): Json<SiteInput>,
 ) -> Response {
-    if state.indexer.profile(&body.profile_id).is_none() {
+    let Some(profile) = state.indexer.profile(&body.profile_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "site.invalid",
             &format!("未知站点配置: {}", body.profile_id),
         );
-    }
+    };
+    let resolved_url = match resolve_site_url(&body.url, Some(profile)) {
+        Ok(url) => url,
+        Err((status, code, msg)) => return err(status, code, msg),
+    };
     let site_id = match SiteId::from_str(&id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
@@ -140,12 +140,12 @@ async fn put_site_inner(
             Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
             Err(error) => return site_store_error(&error),
         };
-        let site = match replacement_site(expected.clone(), body, downloader_id) {
+        let site = match replacement_site(expected.clone(), body, resolved_url, downloader_id) {
             Ok(site) => site,
             Err((status, code, msg)) => return err(status, code, msg),
         };
         match store.save_site_if_current(&site, &expected) {
-            Ok(true) => ok(site_json(&site)).into_response(),
+            Ok(true) => ok(site_public(&site, auth_type(&site), true)).into_response(),
             Ok(false) => site_changed(),
             Err(error) => site_store_error(&error),
         }
@@ -158,6 +158,7 @@ async fn put_site_inner(
 fn replacement_site(
     current: Site,
     body: SiteInput,
+    url: String,
     downloader_id: Option<domain::DownloaderId>,
 ) -> Result<Site, (StatusCode, &'static str, &'static str)> {
     let maintenance_via = match body.maintenance_via.as_deref() {
@@ -196,7 +197,7 @@ fn replacement_site(
     Ok(Site {
         id: current.id,
         name: body.name,
-        url: body.url,
+        url,
         profile_id: body.profile_id,
         cookie: replacement_credential(body.cookie, current.cookie),
         api_key: replacement_credential(body.api_key, current.api_key),

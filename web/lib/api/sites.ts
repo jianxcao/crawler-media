@@ -148,9 +148,15 @@ export async function reverifySite(siteId: string): Promise<Site> {
 
 /** 手动触发一次站点签到（POST /sites/{id}/check-in），返回刷新后的站点视图。 */
 export async function checkInSite(siteId: string): Promise<Site> {
-  await unwrap(
-    request<ApiEnvelope<{ ok: boolean }>>(`/sites/${siteId}/check-in`, { method: "POST" }),
+  const result = await unwrap(
+    request<ApiEnvelope<{ ok: boolean; message?: string | null; error?: string | null }>>(
+      `/sites/${siteId}/check-in`,
+      { method: "POST" },
+    ),
   );
+  if (result && result.ok === false) {
+    throw new Error(result.error || result.message || "站点签到失败");
+  }
   return getSite(siteId);
 }
 

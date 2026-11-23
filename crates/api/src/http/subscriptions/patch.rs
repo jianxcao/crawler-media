@@ -51,7 +51,7 @@ fn patch_blocking(
         Ok(result) => result,
         Err(response) => return response,
     };
-    if let Err(response) = persist_subscription(&state, &previous, &subscribe) {
+    if let Err(response) = persist_subscription(&state, user_id, &previous, &subscribe) {
         return response;
     }
     if let Some(days) = pack_fallback_after_days {
@@ -120,6 +120,7 @@ fn load_and_patch(
 
 fn persist_subscription(
     state: &ApiState,
+    user_id: UserId,
     previous: &Subscribe,
     subscribe: &Subscribe,
 ) -> Result<(), Response> {
@@ -136,10 +137,10 @@ fn persist_subscription(
             return Err(err(StatusCode::CONFLICT, "subscription.conflict", &message));
         }
         if let crate::store::StoreError::SubscribeOverlap { subscribe_id } = error {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "subscription.overlap",
-                &format!("同一媒体库中已有覆盖重叠的订阅（{subscribe_id}），请合并或调整集数范围"),
+            return Err(super::create::overlap_conflict_response(
+                state.store.as_ref(),
+                user_id,
+                &subscribe_id.to_string(),
             ));
         }
         return Err(err(

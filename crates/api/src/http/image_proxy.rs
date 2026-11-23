@@ -145,6 +145,37 @@ pub(crate) fn allowed_url(url: &str) -> bool {
     })
 }
 
+fn host_matches_domain(host: &str, domain: &str) -> bool {
+    host.eq_ignore_ascii_case(domain) || host.to_ascii_lowercase().ends_with(&format!(".{domain}"))
+}
+
+fn is_douban_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str().map(|host| {
+                host_matches_domain(host, "douban.com") || host_matches_domain(host, "doubanio.com")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn referer_for_url(url: &str) -> &'static str {
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    else {
+        return "";
+    };
+    if host_matches_domain(&host, "douban.com") || host_matches_domain(&host, "doubanio.com") {
+        "https://movie.douban.com/"
+    } else if host_matches_domain(&host, "bgm.tv") {
+        "https://bgm.tv/"
+    } else {
+        ""
+    }
+}
+
 /// 单跳、不自动跟随重定向的 agent（重定向由调用方逐跳校验后手动跟进）。
 fn no_redirect_agent(url: &str) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
@@ -153,7 +184,7 @@ fn no_redirect_agent(url: &str) -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(5)))
         .timeout_global(Some(Duration::from_secs(8)));
 
-    let is_douban = url.contains("douban");
+    let is_douban = is_douban_url(url);
     let bypass_douban = is_douban && crate::http_agent::douban_bypass();
 
     if !bypass_douban {
@@ -191,13 +222,7 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), runtime::DeliveryError> {
         if !allowed_url(&current) {
             return Err(format!("不允许的主机: {current}").into());
         }
-        let referer = if current.contains("douban") {
-            "https://movie.douban.com/"
-        } else if current.contains("bgm.tv") {
-            "https://bgm.tv/"
-        } else {
-            ""
-        };
+        let referer = referer_for_url(&current);
         let mut request = agent.get(&current).header("User-Agent", UA);
         if !referer.is_empty() {
             request = request.header("Referer", referer);
@@ -318,5 +343,23 @@ mod tests {
         assert!(!allowed_url("ftp://image.tmdb.org/x"));
         // 无主机。
         assert!(!allowed_url("https:///path"));
+    }
+
+    #[test]
+    fn douban_and_referer_classification_ignore_query_substrings() {
+        assert!(super::is_douban_url(
+            "https://img1.doubanio.com/view/photo/l/public/p1.jpg"
+        ));
+        assert!(!super::is_douban_url(
+            "https://image.tmdb.org/t/p/w342/abc.jpg?src=douban"
+        ));
+        assert_eq!(
+            super::referer_for_url("https://lain.bgm.tv/pic/cover/l/abc.jpg"),
+            "https://bgm.tv/"
+        );
+        assert_eq!(
+            super::referer_for_url("https://image.tmdb.org/t/p/w342/abc.jpg?from=douban&x=bgm.tv"),
+            ""
+        );
     }
 }

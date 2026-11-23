@@ -19,34 +19,57 @@ export function ArtworkImage({
   style,
   ...props
 }: ComponentPropsWithRef<"img">) {
+  const imageRef = useRef<HTMLImageElement | null>(null);
   const current = useRef<ReturnType<typeof manageArtworkImage> | null>(null);
+  const stopObserverRef = useRef<(() => void) | null>(null);
+  const forwardedRef = useRef(ref);
+  forwardedRef.current = ref;
   const [hasBitmap, setHasBitmap] = useState(false);
   const eager = loading === "eager";
   const eagerRef = useRef(eager);
   eagerRef.current = eager;
+
   const attach = useCallback((image: HTMLImageElement | null) => {
     if (!image) return;
+    imageRef.current = image;
     const managed = manageArtworkImage(image, 1, undefined, setHasBitmap);
-    managed.setVisible(eagerRef.current, eagerRef.current ? 0 : undefined);
+    managed.setVisible(eagerRef.current, eagerRef.current ? 0 : 1);
     current.current = managed;
-    const stop = eagerRef.current
-      ? () => undefined
+    stopObserverRef.current = eagerRef.current
+      ? null
       : observeArtworkImage(image, (near, priority) => managed.setVisible(near, priority));
-    const detachRef = typeof ref === "function" ? ref(image) : undefined;
-    if (ref && typeof ref !== "function") ref.current = image;
+    const targetRef = forwardedRef.current;
+    const detachRef = typeof targetRef === "function" ? targetRef(image) : undefined;
+    if (targetRef && typeof targetRef !== "function") targetRef.current = image;
     return () => {
-      stop();
+      stopObserverRef.current?.();
+      stopObserverRef.current = null;
       managed.dispose();
       current.current = null;
+      imageRef.current = null;
+      const cleanupTarget = forwardedRef.current;
       if (typeof detachRef === "function") detachRef();
-      else if (typeof ref === "function") ref(null);
-      else if (ref) ref.current = null;
+      else if (typeof cleanupTarget === "function") cleanupTarget(null);
+      else if (cleanupTarget) cleanupTarget.current = null;
     };
-  }, [ref]);
+  }, []);
+
   useLayoutEffect(() => {
-    if (loading === "eager") current.current?.setVisible(true, 0);
-    current.current?.load({ src, srcSet, sizes });
-  }, [src, srcSet, sizes, loading, ref]);
+    const image = imageRef.current;
+    const managed = current.current;
+    if (!image || !managed) return;
+    if (eager) {
+      stopObserverRef.current?.();
+      stopObserverRef.current = null;
+      managed.setVisible(true, 0);
+    } else if (!stopObserverRef.current) {
+      managed.setVisible(false, 1);
+      stopObserverRef.current = observeArtworkImage(image, (near, priority) =>
+        managed.setVisible(near, priority),
+      );
+    }
+    managed.load({ src, srcSet, sizes });
+  }, [src, srcSet, sizes, eager]);
   // Hide <img> until a decoded bitmap exists so queued/retrying/broken <img>
   // elements never flash the browser's broken-image icon + alt text.
   const mergedStyle = hasBitmap ? style : { ...style, opacity: 0 };

@@ -89,7 +89,13 @@ export function MediaTransferView() {
         </div>
       )}
 
-      {activeListCount === 0 && !ctl.loading ? (
+      {activeListCount === 0 && ctl.loading ? (
+        <div role="status" aria-label="正在加载整理记录" className="mt-6 space-y-3">
+          <div className="card-row-surface h-24 animate-pulse rounded-2xl" />
+          <div className="card-row-surface h-24 animate-pulse rounded-2xl" />
+          <div className="card-row-surface h-24 animate-pulse rounded-2xl" />
+        </div>
+      ) : activeListCount === 0 ? (
         <div className="mt-6">
           <ContentEmptyState
             variant="library"
@@ -103,6 +109,7 @@ export function MediaTransferView() {
         </div>
       ) : ctl.viewMode === "files" ? (
         <VirtualTransferList
+          key={ctl.viewMode}
           items={ctl.fileItems}
           getKey={(item) => item.id}
           defaultItemHeight={148}
@@ -134,6 +141,7 @@ export function MediaTransferView() {
         />
       ) : (
         <VirtualTransferList
+          key={ctl.viewMode}
           items={ctl.groupItems}
           getKey={(group) => group.media_id}
           defaultItemHeight={88}

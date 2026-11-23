@@ -144,8 +144,8 @@ export function CdpBrowserSection() {
         <div
           className={`rounded-xl border px-4 py-3 text-body ${
             msg.tone === "success"
-              ? "border-[#51cf66]/30 bg-[#51cf66]/10 text-[#51cf66]"
-              : "border-[#ff6b6b]/30 bg-[#ff6b6b]/10 text-[#ff6b6b]"
+              ? "border-[var(--ok)]/30 bg-[var(--ok)]/10 text-[var(--ok)]"
+              : "border-[var(--danger)]/30 bg-[var(--danger)]/10 text-[var(--danger)]"
           }`}
         >
           {msg.text}
@@ -241,13 +241,13 @@ export function CdpBrowserSection() {
               <span
                 className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-caption font-medium ${
                   obscuraStatus.running
-                    ? "bg-[#51cf66]/10 text-[#51cf66]"
+                    ? "bg-[var(--ok)]/10 text-[var(--ok)]"
                     : "bg-white/10 text-[var(--text-muted)]"
                 }`}
               >
                 <span
                   className={`h-2 w-2 rounded-full ${
-                    obscuraStatus.running ? "bg-[#51cf66]" : "bg-white/30"
+                    obscuraStatus.running ? "bg-[var(--ok)]" : "bg-white/30"
                   }`}
                 />
                 {obscuraStatus.running

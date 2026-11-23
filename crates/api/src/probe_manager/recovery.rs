@@ -157,7 +157,7 @@ impl ProbeManager {
                     self.recovery_deferred.store(true, Ordering::SeqCst);
                     return;
                 }
-                self.seen.lock().remove(&file);
+                self.remove_seen_if_job(&file, &job);
                 previous_batch.insert((job, file));
             }
         }
@@ -216,7 +216,7 @@ impl ProbeManager {
             self.recovery_deferred.store(true, Ordering::SeqCst);
             return;
         }
-        self.seen.lock().remove(file);
+        self.remove_seen_if_job(file, job);
     }
     pub(super) fn recover_completed_jobs(&self) {
         let jobs = match self.store.active_completed_probe_jobs(64) {

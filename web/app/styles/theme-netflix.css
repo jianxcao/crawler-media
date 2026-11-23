@@ -57,6 +57,7 @@ html[data-theme="netflix"] {
   /* —— 状态语义色（Netflix 化；--danger 刻意不等于品牌红，红点/红字是状态
         信号，与品牌色混用会让满屏红失去语义，见 §4 备注） —— */
   --ok: #46d369;
+  --ok-ink: #07120c;
   --info: #6ba6ff;
   --warn: #e87c03;
   --danger: #eb3942;
@@ -269,6 +270,9 @@ html[data-theme="netflix"] .btn-glass:hover {
 }
 html[data-theme="netflix"] .btn-glass--ok { color: var(--ok); }
 html[data-theme="netflix"] .btn-glass--danger { color: var(--danger); }
+html[data-theme="netflix"] .btn-glass--accent { color: var(--accent); }
+html[data-theme="netflix"] .btn-glass--muted { color: var(--text-muted); }
+html[data-theme="netflix"] .btn-glass--muted:hover:not(:disabled) { color: #ffffff; }
 
 /* —— 选中胶囊：白系（§4；侧栏在 netflix 主题只服务于设置模式） —— */
 html[data-theme="netflix"] .nav-item[data-active="true"] {

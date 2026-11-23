@@ -89,7 +89,7 @@ export function SourceWarning({ error }: { error: string }) {
       <InfoIcon className="mt-0.5 size-4 shrink-0" />
       <p className="min-w-0 flex-1">{error}</p>
       <Link to={"/settings/downloaders"}
-        className="shrink-0 font-semibold text-amber-50 hover:underline"
+        className="shrink-0 font-semibold text-[var(--warn)] hover:underline"
       >
         检查设置
       </Link>
@@ -190,7 +190,7 @@ export function TaskTimelineItem({
     tone === "waiting"
       ? "bg-[var(--warn)] ring-[var(--warn)]/25"
       : tone === "success"
-        ? "bg-[var(--ok)] text-[#07120b] ring-[var(--ok)]/20"
+        ? "bg-[var(--ok)] text-[var(--ok-ink)] ring-[var(--ok)]/20"
         : tone === "cancelled"
           ? "bg-white/20 text-white/60 ring-white/10"
           : "bg-[var(--info)] ring-[var(--info)]/30";

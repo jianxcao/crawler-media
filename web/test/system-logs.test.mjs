@@ -119,6 +119,7 @@ test("SystemLogsSection passes ConfirmOptions description and confirmLabel to co
         module: ts.ModuleKind.CommonJS,
         jsx: ts.JsxEmit.ReactJSX,
         target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true,
       },
     },
   ).outputText;
@@ -225,4 +226,109 @@ test("FeedbackApi confirm overload rejects excess properties in TypeScript", () 
     `Expected TS excess property error for invalid 'content' on confirm(), got: ${diagnostics.map((d) => d.messageText).join("; ")}`,
   );
   assert.doesNotMatch(feedbackSource, /confirm:\s*<O extends ConfirmOptions>/);
+});
+
+test("SystemLogsSection keys virtual rows by log id and auto-scrolls on SSE appends at the 3,000-log cap", async () => {
+  let latestVirtualizerOptions = null;
+  const scrollToIndexCalls = [];
+  let onSseLog = null;
+
+  const initialEntries = Array.from({ length: 3000 }, (_, i) => ({
+    id: i + 1,
+    timestamp: 1_700_000_000_000 + i * 1000,
+    level: "INFO",
+    target: "api",
+    message: `initial log ${i + 1}`,
+  }));
+
+  const js = ts.transpileModule(
+    readFileSync(path.join(webRoot, "components/system-logs-section.tsx"), "utf8"),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true,
+      },
+    },
+  ).outputText;
+  const mod = { exports: {} };
+  const virtualizerStub = {
+    getTotalSize: () => 3000 * 28,
+    getVirtualItems: () => [{ index: 2999, key: 3000, start: 2999 * 28, size: 28 }],
+    scrollToIndex(index, opts) {
+      scrollToIndexCalls.push({ index, opts });
+    },
+    measureElement() {},
+  };
+
+  new Function("require", "module", "exports", js)(
+    (name) => {
+      if (name === "@tanstack/react-virtual") {
+        return {
+          useVirtualizer: (opts) => {
+            latestVirtualizerOptions = opts;
+            return virtualizerStub;
+          },
+        };
+      }
+      if (name === "@/lib/api/logs") {
+        return {
+          listSystemLogs: async () => ({ total: 3000, entries: initialEntries }),
+          clearSystemLogs: async () => ({ cleared: true }),
+          subscribeSystemLogs: ({ onLog }) => {
+            onSseLog = onLog;
+            return () => {};
+          },
+          exportLogsUrl: () => "/api/v1/system/logs/export",
+        };
+      }
+      if (name === "@/components/feedback") {
+        return {
+          useToast: () => ({ success() {}, error() {}, info() {} }),
+          useConfirm: () => async () => false,
+        };
+      }
+      return require(name);
+    },
+    mod,
+    mod.exports,
+  );
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(mod.exports.SystemLogsSection));
+  });
+
+  try {
+    assert.equal(typeof latestVirtualizerOptions?.getItemKey, "function", "useVirtualizer must receive getItemKey");
+    assert.equal(latestVirtualizerOptions.getItemKey(0), 1);
+    assert.equal(latestVirtualizerOptions.getItemKey(2999), 3000);
+    assert.equal(scrollToIndexCalls.length, 1, "initial 3,000 logs must auto-scroll once");
+    assert.deepEqual(scrollToIndexCalls[0], { index: 2999, opts: { align: "end" } });
+
+    // Append log #3001 at the 3,000-entry ring buffer cap (filteredLogs.length stays 3000!)
+    await act(async () => {
+      onSseLog({
+        id: 3001,
+        timestamp: 1_700_003_000_000,
+        level: "INFO",
+        target: "api",
+        message: "appended at cap 3001",
+      });
+    });
+
+    assert.equal(latestVirtualizerOptions.getItemKey(0), 2, "shifted head item key must follow log.id");
+    assert.equal(latestVirtualizerOptions.getItemKey(2999), 3001, "tail item key must follow new log.id");
+    assert.equal(
+      scrollToIndexCalls.length,
+      2,
+      "appending at the 3,000-log cap must still trigger scrollToIndex when autoScroll is enabled",
+    );
+    assert.deepEqual(scrollToIndexCalls[1], { index: 2999, opts: { align: "end" } });
+  } finally {
+    await act(async () => {
+      renderer.unmount();
+    });
+  }
 });
