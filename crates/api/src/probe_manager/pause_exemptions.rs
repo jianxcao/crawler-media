@@ -142,13 +142,12 @@ impl ProbeManager {
             }
         }
         for job_id in pruned_jobs {
-            if self.job_has_unit_exemption_or_promotion(&job_id)
-                && self
-                    .store
-                    .get_probe_job(&job_id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|job| job.is_active() && job.kind == "marker_refresh")
+            if self
+                .store
+                .get_probe_job(&job_id)
+                .ok()
+                .flatten()
+                .is_some_and(|job| job.is_active() && job.kind == "marker_refresh")
             {
                 let _ = self.reconcile_marker_refresh_after_retirement(&job_id);
             }

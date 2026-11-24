@@ -179,28 +179,21 @@ pub(crate) async fn resume(State(state): State<ApiState>) -> Response {
     match state
         .http_work
         .run_to_completion(move || {
-            let mut changed_from_paused = false;
             let admitted = super::store_wait::with_foreground_store(&worker_state, |store| {
                 worker_state.require_writable()?;
                 worker_state.require_write_admitted()?;
-                let Some(was_paused) = worker_state.probe.begin_resume_if_epoch(epoch) else {
+                if worker_state.probe.pause_epoch() != epoch {
                     return Ok::<bool, Response>(false);
-                };
-                changed_from_paused = was_paused;
+                }
                 store.library_write(|_| Ok(())).map_err(store_error)?;
                 worker_state.require_writable()?;
                 worker_state.require_write_admitted()?;
-                Ok(true)
+                Ok(worker_state.probe.pause_epoch() == epoch)
             });
             let resumed = match admitted {
                 Ok(Ok(true)) => worker_state.probe.resume_background_if_epoch(epoch),
                 Ok(Ok(false)) => false,
-                Ok(Err(response)) | Err(response) => {
-                    if changed_from_paused {
-                        worker_state.probe.pause_background_if_epoch(epoch);
-                    }
-                    return Err(response);
-                }
+                Ok(Err(response)) | Err(response) => return Err(response),
             };
             if resumed
                 && let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(

@@ -493,8 +493,8 @@ impl ProbeManager {
             let _guard = self.pause_state_lock.lock();
             self.pause_epoch.fetch_add(1, Ordering::AcqRel);
             self.background_paused.store(true, Ordering::Release);
+            self.clear_paused_exempt_jobs();
         }
-        self.clear_paused_exempt_jobs();
         self.analysis_schedule.lock().clear_unstarted();
         self.drain_buffered_dispatch();
     }
@@ -503,49 +503,36 @@ impl ProbeManager {
         self.pause_epoch.load(Ordering::Acquire)
     }
 
-    pub(crate) fn begin_resume_if_epoch(&self, epoch: u64) -> Option<bool> {
-        let _guard = self.pause_state_lock.lock();
-        if self.pause_epoch.load(Ordering::Acquire) != epoch {
-            return None;
-        }
-        let was_paused = self.background_paused.swap(false, Ordering::AcqRel);
-        Some(was_paused)
-    }
-
-    pub(crate) fn pause_background_if_epoch(&self, epoch: u64) -> bool {
+    pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
         {
             let _guard = self.pause_state_lock.lock();
             if self.pause_epoch.load(Ordering::Acquire) != epoch {
                 return false;
             }
-            self.pause_epoch.fetch_add(1, Ordering::AcqRel);
-            self.background_paused.store(true, Ordering::Release);
+            self.background_paused.store(false, Ordering::Release);
+            self.clear_paused_exempt_jobs();
         }
-        self.analysis_schedule.lock().clear_unstarted();
-        self.drain_buffered_dispatch();
-        self.refill_drained_windows();
-        if self.has_paused_exempt_work() {
-            self.wake.notify_waiters();
-        }
-        true
+        self.finish_resume_after_epoch(epoch)
     }
 
-    pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
-        let committed_epoch = {
+    #[cfg(test)]
+    pub(crate) fn set_background_paused_flag(&self, paused: bool) {
+        self.background_paused.store(paused, Ordering::Release);
+    }
+
+    pub fn resume_background(&self) {
+        let epoch = {
             let _guard = self.pause_state_lock.lock();
-            if self.pause_epoch.load(Ordering::Acquire) != epoch {
-                return false;
-            }
-            let next = self
-                .pause_epoch
-                .fetch_add(1, Ordering::AcqRel)
-                .wrapping_add(1);
             self.background_paused.store(false, Ordering::Release);
-            next
+            self.clear_paused_exempt_jobs();
+            self.pause_epoch.load(Ordering::Acquire)
         };
-        self.clear_paused_exempt_jobs();
+        let _ = self.finish_resume_after_epoch(epoch);
+    }
+
+    fn finish_resume_after_epoch(&self, epoch: u64) -> bool {
         self.fill_dispatch_windows();
-        if self.pause_epoch() != committed_epoch && self.background_is_paused() {
+        if self.pause_epoch() != epoch && self.background_is_paused() {
             self.drain_buffered_dispatch();
             self.refill_drained_windows();
             if self.has_paused_exempt_work() {
@@ -556,35 +543,6 @@ impl ProbeManager {
         self.wake.notify_waiters();
         self.obligation_wake.notify_waiters();
         true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_background_paused_flag(&self, paused: bool) {
-        self.background_paused.store(paused, Ordering::Release);
-    }
-
-    pub fn resume_background(&self) {
-        let committed_epoch = {
-            let _guard = self.pause_state_lock.lock();
-            let next = self
-                .pause_epoch
-                .fetch_add(1, Ordering::AcqRel)
-                .wrapping_add(1);
-            self.background_paused.store(false, Ordering::Release);
-            next
-        };
-        self.clear_paused_exempt_jobs();
-        self.fill_dispatch_windows();
-        if self.pause_epoch() != committed_epoch && self.background_is_paused() {
-            self.drain_buffered_dispatch();
-            self.refill_drained_windows();
-            if self.has_paused_exempt_work() {
-                self.wake.notify_waiters();
-            }
-            return;
-        }
-        self.wake.notify_waiters();
-        self.obligation_wake.notify_waiters();
     }
 
     pub(super) fn has_seen(&self, ledger_id: &str) -> bool {

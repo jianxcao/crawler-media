@@ -90,6 +90,13 @@ pub(crate) fn resync_probe_job(conn: &Connection, job_id: &str) -> Result<(), St
         )?;
         return Ok(());
     }
+    if crate::probe_analysis::fail_incomplete_marker_refresh_in_tx(
+        conn,
+        job_id,
+        crate::unix_now() * 1000,
+    )? {
+        return Ok(());
+    }
     let cancelled: i64 = conn.query_row(
         "SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'cancelled'",
         [job_id],

@@ -653,3 +653,5 @@ mod paused_analysis;
 mod remediation_cases;
 #[path = "probe_queue_control_and_restart_pause/round3_remediation.rs"]
 mod round3_remediation;
+#[path = "probe_queue_control_and_restart_pause/round4_remediation.rs"]
+mod round4_remediation;

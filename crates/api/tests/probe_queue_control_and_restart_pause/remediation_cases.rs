@@ -439,6 +439,7 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
     });
     held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
+    let baseline_permits = state.http_work.available_permits();
     let resume_app = app.clone();
     let resume_task = tokio::spawn(async move {
         resume_app
@@ -451,7 +452,12 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
             .await
             .unwrap()
     });
-    poll_until(|| !state.probe.background_is_paused()).await;
+    poll_until(|| state.http_work.available_permits() < baseline_permits).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        state.probe.background_is_paused(),
+        "resume blocked on library_write must not speculatively unpause background probing"
+    );
     let gate = state.write_gate();
     let gate_guard = gate.close();
     release_tx.send(()).unwrap();
@@ -462,7 +468,7 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
     drop(gate_guard);
     assert!(
         state.probe.background_is_paused(),
-        "resume refused with 503 mid-flight must re-pause background probing"
+        "resume refused with 503 mid-flight must keep background probing paused"
     );
 
     // 2. Concurrent POST /probe/pause while POST /probe/resume is mid-flight must stay paused.
@@ -480,6 +486,7 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
     });
     held_rx2.recv_timeout(Duration::from_secs(2)).unwrap();
 
+    let baseline_permits2 = state.http_work.available_permits();
     let resume_app2 = app.clone();
     let resume_task2 = tokio::spawn(async move {
         resume_app2
@@ -492,7 +499,9 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
             .await
             .unwrap()
     });
-    poll_until(|| !state.probe.background_is_paused()).await;
+    poll_until(|| state.http_work.available_permits() < baseline_permits2).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(state.probe.background_is_paused());
     let pause_resp = admin_json(&app, "POST", "/api/v1/probe/pause", json!({})).await;
     assert_eq!(pause_resp["paused"], true);
     release_tx2.send(()).unwrap();

@@ -3,6 +3,7 @@ mod optional;
 #[path = "probe_tasks/queue_control.rs"]
 mod queue_control;
 
+pub(crate) use counters::reconcile_counts_in_transaction;
 pub use queue_control::{ProbeCancelSummary, ProbeLibraryQueueSummary, ProbeQueueSummary};
 
 use rusqlite::{OptionalExtension, params};

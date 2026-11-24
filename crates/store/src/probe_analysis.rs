@@ -140,22 +140,16 @@ impl Store {
         job_id: &str,
     ) -> Result<Option<crate::ProbeJob>, StoreError> {
         self.with_library_write(|db| {
-            let tx=crate::write_tx(db.library)?;
-            let failed:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM probe_jobs j
-                WHERE j.id=?1 AND j.kind='marker_refresh' AND j.status IN ('queued','running')
-                AND EXISTS(SELECT 1 FROM probe_job_units u WHERE u.job_id=j.id AND u.status IN ('failed','partial'))
-                AND NOT EXISTS(SELECT 1 FROM probe_job_units u WHERE u.job_id=j.id
-                    AND u.status IN ('queued','running') AND u.stage<>'analysis'))",[job_id],|row|row.get(0))?;
-            if !failed {return Ok(None);}
-            let mut statement=tx.prepare("SELECT file_id FROM probe_job_units WHERE job_id=?1 AND status IN ('queued','running')")?;
-            let files=statement.query_map([job_id],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            drop(statement);
-            for file in files {
-                db.finish_probe_unit_with_status(job_id,&file,"failed",Some("capture_incomplete"),Some("refresh capture incomplete"))?;
+            let tx = crate::write_tx(db.library)?;
+            let now = crate::unix_now() * 1000;
+            if !fail_incomplete_marker_refresh_in_tx(&tx, job_id, now)? {
+                return Ok(None);
             }
-            db.finish_probe_job(job_id,false,Some("refresh capture incomplete"))?;
-            let job=db.get_probe_job(job_id)?.ok_or_else(||StoreError::Missing(format!("analysis refresh {job_id}")))?;
-            tx.commit()?;Ok(Some(job))
+            let job = db
+                .get_probe_job(job_id)?
+                .ok_or_else(|| StoreError::Missing(format!("analysis refresh {job_id}")))?;
+            tx.commit()?;
+            Ok(Some(job))
         })
     }
 
@@ -440,4 +434,50 @@ impl Store {
         }
         Ok(participants)
     }
+}
+
+pub(crate) fn fail_incomplete_marker_refresh_in_tx(
+    tx: &rusqlite::Connection,
+    job_id: &str,
+    now: i64,
+) -> Result<bool, StoreError> {
+    let incomplete: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM probe_jobs j
+            WHERE j.id = ?1
+              AND j.kind = 'marker_refresh'
+              AND j.status IN ('queued', 'running')
+              AND EXISTS(
+                  SELECT 1 FROM probe_job_units u
+                  WHERE u.job_id = j.id AND u.status IN ('failed', 'partial')
+              )
+              AND NOT EXISTS(
+                  SELECT 1 FROM probe_job_units u
+                  WHERE u.job_id = j.id
+                    AND u.status IN ('queued', 'running')
+                    AND u.stage <> 'analysis'
+              )
+        )",
+        [job_id],
+        |row| row.get(0),
+    )?;
+    if !incomplete {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE probe_job_units
+         SET status = 'failed', error = 'refresh capture incomplete'
+         WHERE job_id = ?1 AND status IN ('queued', 'running')",
+        [job_id],
+    )?;
+    crate::probe_tasks::reconcile_counts_in_transaction(tx, job_id)?;
+    tx.execute(
+        "UPDATE probe_jobs
+         SET status = 'failed',
+             error = COALESCE('refresh capture incomplete', error),
+             finished_at_ms = COALESCE(finished_at_ms, ?2)
+         WHERE id = ?1 AND status IN ('queued', 'running')",
+        rusqlite::params![job_id, now],
+    )?;
+    Ok(true)
 }
