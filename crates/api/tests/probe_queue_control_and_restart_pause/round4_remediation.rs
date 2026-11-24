@@ -232,3 +232,260 @@ async fn retiring_last_exempt_unit_via_delete_files_fails_paused_marker_refresh_
             .is_none()
     );
 }
+
+fn seed_two_lib_partial_refresh(dir: &Path, job_id: &str) -> (String, LedgerId, LedgerId) {
+    let root_a = dir.join(format!("tv-a-{job_id}"));
+    let root_b = dir.join(format!("tv-b-{job_id}"));
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let store = api::Store::open(dir.join("data")).unwrap();
+    let lib_a = create_lib(&store, MediaKind::Tv, "TV-A", &root_a, true);
+    let lib_b = create_lib(&store, MediaKind::Tv, "TV-B", &root_b, false);
+    store
+        .set_library_intro_settings(&lib_a, true, true)
+        .unwrap();
+    store
+        .set_library_intro_settings(&lib_b, true, true)
+        .unwrap();
+    let show = insert_test_media(&store, MediaKind::Tv, format!("Show {job_id}"));
+    let ep1 = seed_tv_episodes(&store, &root_a, show, 1)[0];
+    let p2 = root_b.join("S01E02.mkv");
+    std::fs::write(&p2, b"tv-bytes").unwrap();
+    let ep2 = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: show,
+            path: p2.display().to_string(),
+            season: Some(1),
+            episode: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .file_id;
+    let (l1, l2) = (ep1.to_string(), ep2.to_string());
+    let specs = [&l1, &l2].map(|lid| store::ProbeJobUnitSpec {
+        ledger_id: lid,
+        kind: "tv",
+        force_fingerprint: true,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: true,
+        reuse_media_info_cache: false,
+    });
+    assert!(
+        store
+            .create_probe_job(
+                job_id,
+                "marker_refresh",
+                &show.to_string(),
+                Some(1),
+                &format!("marker-refresh:{show}:1"),
+                &specs,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .start_probe_unit(job_id, &l1, store::ProbeDispatchStage::Metadata)
+            .unwrap()
+    );
+    store
+        .finish_probe_unit_with_status(job_id, &l1, "partial", Some("timeout"), Some("tail err"))
+        .unwrap();
+    (lib_b, ep1, ep2)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_last_unit_of_partial_marker_refresh_fails_job_in_recovery_and_worker_cancel() {
+    use api::probe_manager::policy::ProbeRequestOrigin;
+
+    // 1. Startup recovery cancelling unit in removed library when prior unit was partial -> failed.
+    let dir_rec = tempfile::tempdir().unwrap();
+    let (lib_b, _ep1, _ep2) = seed_two_lib_partial_refresh(dir_rec.path(), "r5-rec-partial");
+    {
+        let store = api::Store::open(dir_rec.path().join("data")).unwrap();
+        store.begin_library_removal(&lib_b).unwrap();
+    }
+    let state_rec = production_state(dir_rec.path(), CountingTracks::new(false));
+    let rec_job = state_rec
+        .store()
+        .get_probe_job("r5-rec-partial")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rec_job.status, "failed",
+        "startup recovery cancelling last unit of partial marker_refresh must fail job"
+    );
+
+    // 2. Worker cancelling deleted file on disk when prior unit was partial -> failed (not cancelled).
+    let dir_wrk = tempfile::tempdir().unwrap();
+    let (_lib_b2, _w_ep1, w_ep2) = seed_two_lib_partial_refresh(dir_wrk.path(), "r5-wrk-partial");
+    let state_wrk = production_state(dir_wrk.path(), CountingTracks::new(false));
+    let row2 = state_wrk
+        .store()
+        .file_coverage_by_id(w_ep2)
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(&row2.file.path).unwrap();
+    assert!(state_wrk.probe.try_start_workers());
+    state_wrk
+        .probe
+        .request_probe(&row2, ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| {
+        !state_wrk
+            .store()
+            .get_probe_job("r5-wrk-partial")
+            .unwrap()
+            .unwrap()
+            .is_active()
+    })
+    .await;
+    let wrk_job = state_wrk
+        .store()
+        .get_probe_job("r5-wrk-partial")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wrk_job.status, "failed",
+        "worker cancelling missing source when prior unit was partial must fail marker_refresh"
+    );
+    state_wrk.probe.shutdown_workers().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_deleting_unpromoted_sibling_completes_paused_unit_promoted_marker_refresh() {
+    use api::probe_manager::policy::ProbeRequestOrigin;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tv-r5-promoted-sibling");
+    std::fs::create_dir_all(&root).unwrap();
+    let eps = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        let lib_id = create_lib(&store, MediaKind::Tv, "TV", &root, true);
+        store
+            .set_library_intro_settings(&lib_id, true, true)
+            .unwrap();
+        let show = insert_test_media(&store, MediaKind::Tv, "Promoted Sibling Show".into());
+        let eps = seed_tv_episodes(&store, &root, show, 2);
+        let lids: Vec<String> = eps.iter().map(ToString::to_string).collect();
+        let specs: Vec<_> = lids
+            .iter()
+            .map(|lid| store::ProbeJobUnitSpec {
+                ledger_id: lid,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: false,
+            })
+            .collect();
+        assert!(
+            store
+                .create_probe_job(
+                    "r5-promoted-refresh",
+                    "marker_refresh",
+                    &show.to_string(),
+                    Some(1),
+                    &format!("marker-refresh:{show}:1"),
+                    &specs,
+                )
+                .unwrap()
+        );
+        eps
+    };
+
+    let state = production_state(dir.path(), CountingTracks::new(false));
+    assert!(state.probe.background_is_paused());
+    assert!(state.probe.try_start_workers());
+
+    let row1 = state.store().file_coverage_by_id(eps[0]).unwrap().unwrap();
+    state
+        .probe
+        .request_probe(&row1, ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| in_analysis(&state, eps[0])).await;
+    assert!(!state.probe.has_paused_exempt_work());
+
+    let row2 = state.store().file_coverage_by_id(eps[1]).unwrap().unwrap();
+    state
+        .store()
+        .delete_ledger_path(row2.file.path.to_str().unwrap())
+        .unwrap();
+
+    poll_until(|| {
+        state
+            .store()
+            .get_probe_job("r5-promoted-refresh")
+            .unwrap()
+            .unwrap()
+            .status
+            == "succeeded"
+    })
+    .await;
+    state.probe.shutdown_workers().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chapter_refresh_endpoint_supersedes_dormant_paused_unit_and_queues_marker_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tv-r5-chapter-refresh");
+    std::fs::create_dir_all(&root).unwrap();
+    let (tv_lib_id, show, ep1) = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        let lib_id = create_lib(&store, MediaKind::Tv, "TV", &root, true);
+        store
+            .set_library_intro_settings(&lib_id, true, true)
+            .unwrap();
+        let show = insert_test_media(&store, MediaKind::Tv, "Chapter Refresh Show".into());
+        let ep1 = seed_tv_episodes(&store, &root, show, 1)[0];
+        let lid = ep1.to_string();
+        assert!(
+            store
+                .create_probe_job(
+                    "dormant-media-probe",
+                    "media_probe",
+                    &show.to_string(),
+                    Some(1),
+                    &format!("ledger:{lid}"),
+                    &[store::ProbeJobUnitSpec {
+                        ledger_id: &lid,
+                        kind: "tv",
+                        force_fingerprint: false,
+                        reuse_fingerprint_cache: true,
+                        overwrite_markers: false,
+                        reuse_media_info_cache: true,
+                    }],
+                )
+                .unwrap()
+        );
+        (lib_id, show, ep1)
+    };
+
+    let state = production_state(dir.path(), CountingTracks::new(false));
+    assert!(state.probe.background_is_paused());
+    let app = api::router(state.clone());
+
+    let path = format!(
+        "/api/v1/libraries/{tv_lib_id}/items/{show}/chapters/refresh?file_id={ep1}&season=1&episode=1"
+    );
+    let data = super::admin_json(
+        &app,
+        "POST",
+        &path,
+        json!({ "capture_policy": "recapture" }),
+    )
+    .await;
+    assert_eq!(data["fingerprint_refresh_queued"], true);
+    assert_eq!(data["fingerprint_refresh_already_running"], false);
+    assert_eq!(data["fingerprint_refresh_job"]["kind"], "marker_refresh");
+    assert_eq!(
+        state
+            .store()
+            .get_probe_job("dormant-media-probe")
+            .unwrap()
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+}

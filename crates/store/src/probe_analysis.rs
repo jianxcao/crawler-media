@@ -153,6 +153,36 @@ impl Store {
         })
     }
 
+    pub fn incomplete_marker_refresh_job_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_library_read(|db| {
+            let mut stmt = db.library.prepare(
+                "SELECT j.id
+                 FROM probe_jobs j
+                 WHERE j.kind = 'marker_refresh'
+                   AND j.status IN ('queued', 'running')
+                   AND EXISTS (
+                       SELECT 1 FROM probe_job_units u
+                       WHERE u.job_id = j.id AND u.status IN ('failed', 'partial')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM probe_job_units u
+                       WHERE u.job_id = j.id
+                         AND u.status IN ('queued', 'running')
+                         AND u.stage <> 'analysis'
+                   )
+                 ORDER BY j.created_at_ms, j.id LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+    }
+
     pub fn probe_analysis_job_participants(
         &self,
         job_id: &str,

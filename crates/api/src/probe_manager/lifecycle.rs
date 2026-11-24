@@ -293,7 +293,7 @@ impl ProbeManager {
             store
                 .cancel_probe_unit(job_id, &ledger_id, reason)
                 .and_then(|(job, _, all_done)| {
-                    if all_done && job.succeeded == 0 {
+                    if all_done && job.succeeded == 0 && job.failed == 0 && job.partial == 0 {
                         store.cancel_probe_job(job_id, reason)?;
                     }
                     store.get_probe_job(job_id)
@@ -449,7 +449,7 @@ impl ProbeManager {
         }
     }
 
-    fn fail_refresh_if_capture_failed(&self, job_id: &str) -> bool {
+    pub(super) fn fail_refresh_if_capture_failed(&self, job_id: &str) -> bool {
         match self
             .store
             .fail_probe_analysis_refresh_if_capture_failed(job_id)

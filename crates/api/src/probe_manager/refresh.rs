@@ -23,16 +23,25 @@ impl ProbeManager {
 
     pub fn enqueue_marker_refresh_with_policy(
         &self,
-        mut units: Vec<ProbeUnit>,
+        units: Vec<ProbeUnit>,
         capture_policy: crate::fingerprint_job::CapturePolicy,
     ) -> usize {
+        self.enqueue_marker_refresh_job_with_policy(units, capture_policy)
+            .1
+    }
+
+    pub(crate) fn enqueue_marker_refresh_job_with_policy(
+        &self,
+        mut units: Vec<ProbeUnit>,
+        capture_policy: crate::fingerprint_job::CapturePolicy,
+    ) -> (bool, usize) {
         let reuse = capture_policy == crate::fingerprint_job::CapturePolicy::ReuseValid;
         let Some(first) = units.first() else {
-            return 0;
+            return (false, 0);
         };
         let media_id = first.row.file.media_id;
         let Ok((season, _)) = super::require_episode_coordinates(&first.row) else {
-            return 0;
+            return (false, 0);
         };
         if units.iter().any(|unit| {
             unit.row.file.media_id != media_id
@@ -40,7 +49,7 @@ impl ProbeManager {
                 || single_season_opt(&unit.row) != Some(season)
         }) {
             tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
-            return 0;
+            return (false, 0);
         }
 
         let id = self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed);
@@ -66,7 +75,7 @@ impl ProbeManager {
             .collect::<Vec<_>>();
         if !self.persist_marker_refresh_job(&job_id, media_id, season, &scope, &ledger_ids, &specs)
         {
-            return 0;
+            return (false, 0);
         }
         self.mark_job_paused_exempt(job_id.clone());
 
@@ -100,7 +109,7 @@ impl ProbeManager {
         tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "【片头片尾】已启动强制刷新，旧标记保持可见直到整季探测完成");
-        queued
+        (true, queued)
     }
 
     fn persist_marker_refresh_job(

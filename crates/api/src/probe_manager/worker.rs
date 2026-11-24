@@ -514,7 +514,7 @@ pub(super) fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeD
         }
         let (job, _, all_done) =
             store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")?;
-        if all_done && job.succeeded == 0 {
+        if all_done && job.succeeded == 0 && job.failed == 0 && job.partial == 0 {
             store.cancel_probe_job(&id.job_id, "file_deleted")?;
         }
         Ok(match store.get_probe_job(&id.job_id)? {

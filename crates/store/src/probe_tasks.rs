@@ -401,6 +401,7 @@ pub(crate) fn probe_job_terminal_status(
         return Some("failed");
     }
     match kind {
+        "marker_refresh" if partial > 0 => Some("failed"),
         "marker_refresh" if cancelled < total => None,
         _ if cancelled > 0 => Some("cancelled"),
         _ if partial > 0 => Some("partial"),

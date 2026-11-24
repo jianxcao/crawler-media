@@ -85,6 +85,9 @@ impl crate::LibraryConnection<'_> {
                 error
             ])?;
             vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
+            if status == "cancelled" {
+                crate::probe_analysis::fail_incomplete_marker_refresh_in_tx(&tx, job_id, now_ms())?;
+            }
         }
         let accepted = changed == 1;
         if accepted {

@@ -119,25 +119,33 @@ async fn finalize_chapter_refresh(
         .run_to_completion(move || {
             let outcome = crate::http::store_wait::with_foreground_store(&worker, |store| {
                 let _ = store;
-                let (probe_queued, season_probe_was_active) =
+                let (job_created, probe_queued, season_probe_was_active) =
                     enqueue_season_refresh(&worker, &media, &rows, season, capture_policy);
                 let marker_job = worker
                     .probe
                     .marker_refresh_job(media_id, season)
                     .map_err(chapter_store_error)?;
-                Ok::<_, Response>((probe_queued, season_probe_was_active, marker_job))
+                Ok::<_, Response>((
+                    job_created,
+                    probe_queued,
+                    season_probe_was_active,
+                    marker_job,
+                ))
             })??;
-            let (probe_queued, season_probe_was_active, marker_job) = outcome;
+            let (job_created, probe_queued, season_probe_was_active, marker_job) = outcome;
             let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
             let active_after_enqueue = rows
                 .iter()
                 .any(|candidate| worker.probe.is_queued(&candidate.file.file_id.to_string()));
-            let already_running = probe_queued == 0
+            let already_running = !job_created
+                && probe_queued == 0
                 && (marker_job_active || season_probe_was_active || active_after_enqueue);
             let enqueue_failed = should_queue_voiceprint_refresh(media.kind)
+                && !job_created
                 && probe_queued == 0
                 && !already_running;
             Ok::<_, Response>((
+                job_created,
                 probe_queued,
                 marker_job_active,
                 already_running,
@@ -146,15 +154,15 @@ async fn finalize_chapter_refresh(
             ))
         })
         .await;
-    let (probe_queued, marker_job_active, already_running, enqueue_failed, marker_job) = match after
-    {
-        Ok(Ok(after)) => after,
-        Ok(Err(response)) => return response,
-        Err(error) => return crate::http::library::browse_work_error(error),
-    };
+    let (job_created, probe_queued, marker_job_active, already_running, enqueue_failed, marker_job) =
+        match after {
+            Ok(Ok(after)) => after,
+            Ok(Err(response)) => return response,
+            Err(error) => return crate::http::library::browse_work_error(error),
+        };
     ok(json!({
         "chapters": items,
-        "fingerprint_refresh_queued": probe_queued > 0 || marker_job_active,
+        "fingerprint_refresh_queued": job_created || probe_queued > 0 || marker_job_active,
         "fingerprint_refresh_already_running": already_running,
         "fingerprint_refresh_error": enqueue_failed.then_some("声纹刷新任务未能入队"),
         "fingerprint_refresh_job": marker_job.as_ref().map(probe_job_json),
@@ -186,10 +194,12 @@ fn enqueue_season_refresh(
     fingerprint_rows: &[domain::FileCoverage],
     season: u32,
     capture_policy: crate::fingerprint_job::CapturePolicy,
-) -> (usize, bool) {
-    let season_probe_was_active = fingerprint_rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
+) -> (bool, usize, bool) {
+    let season_probe_was_active = !state.probe.background_is_paused()
+        && fingerprint_rows
+            .iter()
+            .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
+    let mut job_created = false;
     let mut probe_queued = 0;
     if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
         let units = fingerprint_rows
@@ -205,16 +215,18 @@ fn enqueue_season_refresh(
                 job_id: None,
             })
             .collect();
-        probe_queued = state
+        (job_created, probe_queued) = state
             .probe
-            .enqueue_marker_refresh_with_policy(units, capture_policy);
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = fingerprint_rows.len(),
-            queued = probe_queued,
-            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
-        );
+            .enqueue_marker_refresh_job_with_policy(units, capture_policy);
+        if job_created {
+            tracing::info!(
+                media = %media.title,
+                season,
+                rows = fingerprint_rows.len(),
+                queued = probe_queued,
+                "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
+            );
+        }
     } else if season_probe_was_active {
         tracing::info!(
             media = %media.title,
@@ -224,7 +236,7 @@ fn enqueue_season_refresh(
         );
     }
 
-    (probe_queued, season_probe_was_active)
+    (job_created, probe_queued, season_probe_was_active)
 }
 
 #[derive(serde::Deserialize)]

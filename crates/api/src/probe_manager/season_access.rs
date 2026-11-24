@@ -48,7 +48,7 @@ impl SeasonAccess {
         };
         let result = self.store.library_write(|store| {
             let (job, _, all_done) = store.cancel_probe_unit(job_id, &ledger_id, reason)?;
-            if all_done && job.succeeded == 0 {
+            if all_done && job.succeeded == 0 && job.failed == 0 && job.partial == 0 {
                 store.cancel_probe_job(job_id, reason)?;
             }
             store.get_probe_job(job_id)

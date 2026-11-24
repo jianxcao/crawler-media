@@ -70,6 +70,29 @@ impl ProbeManager {
         self.has_paused_exempt_jobs() || !self.paused_exempt_units.lock().is_empty()
     }
 
+    pub(super) fn has_paused_exempt_analysis_work(&self) -> bool {
+        self.has_paused_exempt_work() || !self.promoted_units.lock().is_empty()
+    }
+
+    pub(super) fn prune_stale_promoted_units_from_store(&self) {
+        let promoted = self.promoted_unit_pairs();
+        if promoted.is_empty() {
+            return;
+        }
+        let mut stale = Vec::new();
+        for (job_id, ledger_id) in promoted {
+            if let Ok(false) = self.store.is_probe_unit_active(&job_id, &ledger_id) {
+                stale.push((job_id, ledger_id));
+            }
+        }
+        if !stale.is_empty() {
+            let mut guard = self.promoted_units.lock();
+            for pair in stale {
+                guard.remove(&pair);
+            }
+        }
+    }
+
     pub(super) fn paused_exempt_job_ids(&self) -> Vec<String> {
         self.paused_exempt_jobs
             .lock()

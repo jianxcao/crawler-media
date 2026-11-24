@@ -250,7 +250,7 @@ fn scan_analysis_keys(
     after: Option<(domain::MediaId, u32)>,
 ) -> Result<(Option<(domain::MediaId, u32)>, Vec<(SeasonKey, String)>), store::StoreError> {
     let paused = manager.background_is_paused();
-    if paused && !manager.has_paused_exempt_work() {
+    if paused && !manager.has_paused_exempt_analysis_work() {
         return Ok((None, Vec::new()));
     }
     let keys = manager.store.pending_probe_analysis_keys(after, 16)?;
@@ -317,7 +317,7 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
         if manager.shutting_down.load(Ordering::SeqCst) {
             break;
         }
-        if manager.background_is_paused() && !manager.has_paused_exempt_work() {
+        if manager.background_is_paused() && !manager.has_paused_exempt_analysis_work() {
             after = None;
             tokio::select! {
                 _ = super::worker::wait_for_shutdown(&manager) => break,
