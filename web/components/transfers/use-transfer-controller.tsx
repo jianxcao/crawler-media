@@ -18,6 +18,22 @@ import { useGroupExpansion } from "./use-group-expansion";
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 200;
 
+interface ModePaginationState {
+  filteredTotal: number;
+  filteredFileTotal: number;
+  hasMore: boolean;
+  nextOffset: number;
+  loaded: boolean;
+}
+
+const EMPTY_MODE_PAGINATION: ModePaginationState = {
+  filteredTotal: 0,
+  filteredFileTotal: 0,
+  hasMore: false,
+  nextOffset: 0,
+  loaded: false,
+};
+
 function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const name = "name" in error ? String((error as { name?: unknown }).name) : "";
@@ -129,18 +145,25 @@ export function useTransferController() {
   const [summary, setSummary] = useState<TransferSummary>(EMPTY_TRANSFER_SUMMARY);
   const [fileItems, setFileItems] = useState<TransferFileItem[]>([]);
   const [groupItems, setGroupItems] = useState<TransferGroupItem[]>([]);
-  const [filteredTotal, setFilteredTotal] = useState(0);
-  const [filteredFileTotal, setFilteredFileTotal] = useState(0);
-  const [nextOffset, setNextOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [paginationByMode, setPaginationByMode] = useState<
+    Record<TransferViewMode, ModePaginationState>
+  >({
+    files: EMPTY_MODE_PAGINATION,
+    groups: EMPTY_MODE_PAGINATION,
+  });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const activePagination = paginationByMode[viewMode];
+  const { filteredTotal, filteredFileTotal, hasMore, nextOffset } = activePagination;
+
   const loadMoreErrorRef = useRef(false);
   const viewModeRef = useRef<TransferViewMode>(viewMode);
   viewModeRef.current = viewMode;
+  const debouncedQueryRef = useRef(debouncedQuery);
+  debouncedQueryRef.current = debouncedQuery;
   const fileItemsRef = useRef<TransferFileItem[]>([]);
   fileItemsRef.current = fileItems;
   const groupItemsRef = useRef<TransferGroupItem[]>([]);
@@ -149,40 +172,52 @@ export function useTransferController() {
   const appendAbortRef = useRef<AbortController | null>(null);
   const summaryAbortRef = useRef<AbortController | null>(null);
   const toast = useToast();
-  const expansion = useGroupExpansion(modeFilter, kindFilter, debouncedQuery);
+  const {
+    expandedGroups,
+    resetExpanded,
+    toggleGroupExpand,
+    loadMoreGroupFiles,
+    removeExpandedFile,
+    updateExpandedFilePath,
+  } = useGroupExpansion(modeFilter, kindFilter, debouncedQuery);
 
   const clearInactiveList = useCallback((activeMode: TransferViewMode) => {
+    const inactiveMode: TransferViewMode = activeMode === "files" ? "groups" : "files";
     if (activeMode === "files") {
       setGroupItems([]);
     } else {
       setFileItems([]);
     }
+    setPaginationByMode((prev) => ({
+      ...prev,
+      [inactiveMode]: EMPTY_MODE_PAGINATION,
+    }));
   }, []);
 
   useEffect(() => {
     const trimmed = searchTerm.trim();
     if (!trimmed) {
-      setDebouncedQuery((prev) => {
-        if (prev === "") return prev;
+      if (debouncedQueryRef.current !== "") {
+        debouncedQueryRef.current = "";
         clearInactiveList(viewModeRef.current);
         setLoading(true);
-        return "";
-      });
+        setDebouncedQuery("");
+      }
       return undefined;
     }
     const timer = setTimeout(() => {
-      setDebouncedQuery((prev) => {
-        if (prev === trimmed) return prev;
-        clearInactiveList(viewModeRef.current);
-        setLoading(true);
-        return trimmed;
-      });
+      if (debouncedQueryRef.current === trimmed) return;
+      debouncedQueryRef.current = trimmed;
+      clearInactiveList(viewModeRef.current);
+      setLoading(true);
+      setDebouncedQuery(trimmed);
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [searchTerm, clearInactiveList]);
 
   const fetchHeadPage = useCallback(
     async (options: { silent?: boolean } = {}) => {
+      const mode = viewMode;
       headAbortRef.current?.abort();
       appendAbortRef.current?.abort();
       summaryAbortRef.current?.abort();
@@ -195,23 +230,28 @@ export function useTransferController() {
         if (!options.silent) setLoading(true);
         setLoadingMore(false);
         const page = await listTransfers(
-          { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: 0, limit: PAGE_SIZE },
+          { view: mode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: 0, limit: PAGE_SIZE },
           { signal: controller.signal },
         );
         if (controller.signal.aborted) return;
 
-        const returnedCount = viewMode === "files" ? page.items.length : page.groups.length;
+        const returnedCount = mode === "files" ? page.items.length : page.groups.length;
         setSummary(page.summary);
-        setFilteredTotal(page.filtered_total);
-        setFilteredFileTotal(page.filtered_file_total);
-        setHasMore(returnedCount > 0 && page.has_more);
-        if (viewMode === "files") {
+        if (mode === "files") {
           setFileItems(page.items);
-          setNextOffset(page.items.length);
         } else {
           setGroupItems(page.groups);
-          setNextOffset(page.groups.length);
         }
+        setPaginationByMode((prev) => ({
+          ...prev,
+          [mode]: {
+            filteredTotal: page.filtered_total,
+            filteredFileTotal: page.filtered_file_total,
+            hasMore: returnedCount > 0 && page.has_more,
+            nextOffset: returnedCount,
+            loaded: true,
+          },
+        }));
         setError(null);
       } catch (e) {
         if (!isAbortError(e) && !controller.signal.aborted) {
@@ -235,6 +275,7 @@ export function useTransferController() {
 
   const loadMoreInternal = useCallback(
     async (force = false) => {
+      const mode = viewMode;
       if (loading || loadingMore || !hasMore || (!force && loadMoreErrorRef.current)) return;
       appendAbortRef.current?.abort();
       const controller = new AbortController();
@@ -243,7 +284,7 @@ export function useTransferController() {
 
       try {
         const page = await listTransfers(
-          { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: nextOffset, limit: PAGE_SIZE },
+          { view: mode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: nextOffset, limit: PAGE_SIZE },
           { signal: controller.signal },
         );
         if (controller.signal.aborted) return;
@@ -251,25 +292,28 @@ export function useTransferController() {
         loadMoreErrorRef.current = false;
         setLoadMoreError(false);
         setSummary(page.summary);
-        setFilteredTotal(page.filtered_total);
-        setFilteredFileTotal(page.filtered_file_total);
-        const returnedCount = viewMode === "files" ? page.items.length : page.groups.length;
-        setHasMore(returnedCount > 0 && page.has_more);
-        if (viewMode === "files") {
-          if (page.items.length > 0) {
-            setFileItems((prev) => {
-              const seen = new Set(prev.map((item) => item.id));
-              return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
-            });
-            setNextOffset(page.offset + page.items.length);
-          }
-        } else if (page.groups.length > 0) {
+        const returnedCount = mode === "files" ? page.items.length : page.groups.length;
+        if (mode === "files" && page.items.length > 0) {
+          setFileItems((prev) => {
+            const seen = new Set(prev.map((item) => item.id));
+            return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
+          });
+        } else if (mode === "groups" && page.groups.length > 0) {
           setGroupItems((prev) => {
             const seen = new Set(prev.map((item) => item.media_id));
             return [...prev, ...page.groups.filter((item) => !seen.has(item.media_id))];
           });
-          setNextOffset(page.offset + page.groups.length);
         }
+        setPaginationByMode((prev) => ({
+          ...prev,
+          [mode]: {
+            filteredTotal: page.filtered_total,
+            filteredFileTotal: page.filtered_file_total,
+            hasMore: returnedCount > 0 && page.has_more,
+            nextOffset: returnedCount > 0 ? page.offset + returnedCount : prev[mode].nextOffset,
+            loaded: true,
+          },
+        }));
       } catch (e) {
         if (!isAbortError(e) && !controller.signal.aborted) {
           loadMoreErrorRef.current = true;
@@ -295,7 +339,7 @@ export function useTransferController() {
     (target: TransferFileItem) => {
       const hadFile = fileItemsRef.current.some((item) => item.id === target.id);
       setFileItems((prev) => prev.filter((item) => item.id !== target.id));
-      expansion.removeExpandedFile(target.media_id, target.id);
+      removeExpandedFile(target.media_id, target.id);
       const isStrm = target.is_strm || target.transfer_mode === "strm";
       const targetGroup = groupItemsRef.current.find((g) => g.media_id === target.media_id);
       const groupWillRemove = Boolean(targetGroup && targetGroup.file_count <= 1);
@@ -318,42 +362,67 @@ export function useTransferController() {
           )
           .filter((g) => g.file_count > 0),
       );
-      if (viewMode === "files" && hadFile) {
-        setNextOffset((prev) => Math.max(0, prev - 1));
-      } else if (viewMode === "groups" && groupWillRemove) {
-        setNextOffset((prev) => Math.max(0, prev - 1));
-      }
-      setFilteredFileTotal((prev) => Math.max(0, prev - 1));
-      if (viewMode === "files" || groupWillRemove) {
-        setFilteredTotal((prev) => Math.max(0, prev - 1));
-      }
+      setPaginationByMode((prev) => ({
+        files: prev.files.loaded
+          ? {
+              ...prev.files,
+              filteredTotal: Math.max(0, prev.files.filteredTotal - 1),
+              filteredFileTotal: Math.max(0, prev.files.filteredFileTotal - 1),
+              nextOffset: hadFile ? Math.max(0, prev.files.nextOffset - 1) : prev.files.nextOffset,
+            }
+          : prev.files,
+        groups: prev.groups.loaded
+          ? {
+              ...prev.groups,
+              filteredTotal: groupWillRemove
+                ? Math.max(0, prev.groups.filteredTotal - 1)
+                : prev.groups.filteredTotal,
+              filteredFileTotal: Math.max(0, prev.groups.filteredFileTotal - 1),
+              nextOffset: groupWillRemove
+                ? Math.max(0, prev.groups.nextOffset - 1)
+                : prev.groups.nextOffset,
+            }
+          : prev.groups,
+      }));
     },
-    [expansion, viewMode],
+    [removeExpandedFile],
   );
 
-  const handleItemRetransferred = useCallback((target: TransferFileItem, destination?: string) => {
-    if (!destination || destination === target.path) return;
-    setFileItems((prev) =>
-      prev.map((item) => (item.id === target.id ? { ...item, path: destination } : item)),
-    );
-  }, []);
+  const handleItemRetransferred = useCallback(
+    (target: TransferFileItem, destination?: string) => {
+      if (!destination || destination === target.path) return;
+      setFileItems((prev) =>
+        prev.map((item) => (item.id === target.id ? { ...item, path: destination } : item)),
+      );
+      updateExpandedFilePath(target.media_id, target.id, destination);
+    },
+    [updateExpandedFilePath],
+  );
 
   const refreshSummaryOnly = useCallback(async () => {
+    const mode = viewMode;
     summaryAbortRef.current?.abort();
     const controller = new AbortController();
     summaryAbortRef.current = controller;
     try {
       const page = await listTransfers(
-        { view: viewMode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: 0, limit: 1 },
+        { view: mode, q: debouncedQuery, mode: modeFilter, kind: kindFilter, offset: 0, limit: 1 },
         { signal: controller.signal },
       );
       if (controller.signal.aborted) return;
       setSummary(page.summary);
-      setFilteredTotal(page.filtered_total);
-      setFilteredFileTotal(page.filtered_file_total);
       const loadedCount =
-        viewMode === "files" ? fileItemsRef.current.length : groupItemsRef.current.length;
-      setHasMore((prev) => prev && loadedCount < page.filtered_total);
+        mode === "files" ? fileItemsRef.current.length : groupItemsRef.current.length;
+      setPaginationByMode((prev) => ({
+        ...prev,
+        [mode]: {
+          ...prev[mode],
+          filteredTotal: page.filtered_total,
+          filteredFileTotal: page.filtered_file_total,
+          hasMore: prev[mode].hasMore && loadedCount < page.filtered_total,
+          loaded: true,
+        },
+      }));
     } catch {
       // 摘要后台刷新失败时保留本地乐观状态
     }
@@ -377,20 +446,21 @@ export function useTransferController() {
     loadingMore,
     loadMoreError,
     error,
-    expandedGroups: expansion.expandedGroups,
+    expandedGroups,
     ...actions,
     setSearchTerm,
     changeViewMode: (next: TransferViewMode) => {
       if (next === viewMode) return;
-      expansion.resetExpanded();
+      resetExpanded();
       setLoading(true);
       setLoadingMore(false);
       setViewMode(next);
     },
     clearSearch: () => {
       setSearchTerm("");
-      if (debouncedQuery !== "") {
-        expansion.resetExpanded();
+      if (debouncedQueryRef.current !== "") {
+        debouncedQueryRef.current = "";
+        resetExpanded();
         clearInactiveList(viewMode);
         setLoading(true);
         setDebouncedQuery("");
@@ -398,23 +468,25 @@ export function useTransferController() {
     },
     changeModeFilter: (next: TransferFilterMode) => {
       if (next === modeFilter) return;
-      expansion.resetExpanded();
+      resetExpanded();
       clearInactiveList(viewMode);
       setLoading(true);
       setModeFilter(next);
     },
     changeKindFilter: (next: TransferKindFilter) => {
       if (next === kindFilter) return;
-      expansion.resetExpanded();
+      resetExpanded();
       clearInactiveList(viewMode);
       setLoading(true);
       setKindFilter(next);
     },
     resetFilters: () => {
-      const changed = debouncedQuery !== "" || modeFilter !== "all" || kindFilter !== "all";
-      expansion.resetExpanded();
+      const changed =
+        debouncedQueryRef.current !== "" || modeFilter !== "all" || kindFilter !== "all";
+      resetExpanded();
       setSearchTerm("");
       if (changed) {
+        debouncedQueryRef.current = "";
         clearInactiveList(viewMode);
         setLoading(true);
         setDebouncedQuery("");
@@ -422,10 +494,13 @@ export function useTransferController() {
         setKindFilter("all");
       }
     },
-    refresh: () => fetchHeadPage(),
+    refresh: () => {
+      resetExpanded();
+      return fetchHeadPage();
+    },
     loadMore,
     retryLoadMore,
-    toggleGroupExpand: expansion.toggleGroupExpand,
-    loadMoreGroupFiles: expansion.loadMoreGroupFiles,
+    toggleGroupExpand,
+    loadMoreGroupFiles,
   };
 }

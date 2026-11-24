@@ -149,74 +149,13 @@ impl ProbeManager {
     ) -> bool {
         let ledger_id = work.unit.row.file.file_id.to_string();
         let Some(current_job_id) = work.unit.job_id.clone() else {
-            tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化任务 ID");
+            tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化 ID");
             self.remove_seen_any(&ledger_id);
             return false;
         };
-        let store = self.store.as_ref();
-        let current_job = store.get_probe_job(&current_job_id);
-
-        let current_job = match current_job {
-            Ok(Some(job)) => job,
-            Ok(None) => {
-                tracing::error!(ledger_id, job_id = %current_job_id, "媒体信息任务已不存在，无法转入声纹");
-                self.remove_seen_if_job(&ledger_id, &current_job_id);
-                return false;
-            }
-            Err(error) => {
-                tracing::error!(%error, ledger_id, "读取媒体信息任务失败，声纹保持排队");
-                self.wake.notify_waiters();
-                return false;
-            }
-        };
-
-        let parent_job_exempt = self.is_job_paused_exempt(&current_job_id);
-        let parent_unit_exempt = self.is_unit_paused_exempt(&current_job_id, &ledger_id);
-        if current_job.kind == "media_probe" {
-            let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
-            let store = self.store.as_ref();
-            let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
-                &current_job_id,
-                &ledger_id,
-                &fingerprint_job_id,
-            ) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    tracing::error!(%error, ledger_id, "持久化媒体信息到声纹的交接失败");
-                    false
-                }
-            };
-
-            if !transitioned {
-                if (parent_job_exempt || parent_unit_exempt)
-                    && self
-                        .store
-                        .get_probe_job(&current_job_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|job| !job.is_active())
-                {
-                    self.unmark_job_paused_exempt(&current_job_id);
-                }
-                return false;
-            }
-            self.unmark_unit_paused_exempt(&current_job_id, &ledger_id);
-            if parent_job_exempt {
-                self.unmark_job_paused_exempt(&current_job_id);
-                self.mark_job_paused_exempt(fingerprint_job_id.clone());
-            } else if parent_unit_exempt {
-                self.mark_unit_paused_exempt(fingerprint_job_id.clone(), ledger_id.clone());
-            }
-            work.unit.job_id = Some(fingerprint_job_id);
-            work.start_job = true;
-        } else if !self.advance_running_unit(&current_job_id, &ledger_id) {
-            tracing::warn!(ledger_id, job_id = %current_job_id, "声纹阶段未持久化，保持原任务可恢复");
-            self.wake.notify_waiters();
+        if !self.transition_to_fingerprint_stage(&current_job_id, &ledger_id, &mut work) {
             return false;
-        } else {
-            work.start_job = true;
         }
-
         let Some(job_id) = work.unit.job_id.clone() else {
             return false;
         };
@@ -262,6 +201,74 @@ impl ProbeManager {
                 self.remove_seen_if_job(&ledger_id, &job_id);
                 false
             }
+        }
+    }
+
+    fn transition_to_fingerprint_stage(
+        &self,
+        current_job_id: &str,
+        ledger_id: &str,
+        work: &mut probe::FingerprintWork,
+    ) -> bool {
+        let store = self.store.as_ref();
+        let current_job = match store.get_probe_job(current_job_id) {
+            Ok(Some(job)) => job,
+            Ok(None) => {
+                tracing::error!(ledger_id, job_id = %current_job_id, "媒体信息任务已不存在，无法转入声纹");
+                self.remove_seen_if_job(ledger_id, current_job_id);
+                return false;
+            }
+            Err(error) => {
+                tracing::error!(%error, ledger_id, "读取媒体信息任务失败，声纹保持排队");
+                self.wake.notify_waiters();
+                return false;
+            }
+        };
+        let parent_job_exempt = self.is_job_paused_exempt(current_job_id);
+        let parent_unit_exempt = self.is_unit_paused_exempt(current_job_id, ledger_id);
+        if current_job.kind == "media_probe" {
+            let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
+            let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
+                current_job_id,
+                ledger_id,
+                &fingerprint_job_id,
+            ) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::error!(%error, ledger_id, "持久化媒体信息到声纹的交接失败");
+                    false
+                }
+            };
+            if !transitioned {
+                if (parent_job_exempt || parent_unit_exempt)
+                    && self
+                        .store
+                        .get_probe_job(current_job_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|job| !job.is_active())
+                {
+                    self.unmark_job_paused_exempt(current_job_id);
+                }
+                return false;
+            }
+            self.unmark_unit_paused_exempt(current_job_id, ledger_id);
+            if parent_job_exempt {
+                self.unmark_job_paused_exempt(current_job_id);
+                self.mark_job_paused_exempt(fingerprint_job_id.clone());
+            } else if parent_unit_exempt {
+                self.mark_unit_paused_exempt(fingerprint_job_id.clone(), ledger_id.to_string());
+            }
+            work.unit.job_id = Some(fingerprint_job_id);
+            work.start_job = true;
+            true
+        } else if !self.advance_running_unit(current_job_id, ledger_id) {
+            tracing::warn!(ledger_id, job_id = %current_job_id, "声纹阶段未持久化，保持原任务可恢复");
+            self.wake.notify_waiters();
+            false
+        } else {
+            work.start_job = true;
+            true
         }
     }
 

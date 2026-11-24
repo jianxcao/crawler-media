@@ -1321,3 +1321,281 @@ test("confirmDelete preserves loaded >50 list without resetting scroll, and useG
     renderer.unmount();
   });
 });
+
+test("useTransferController isolates per-mode pagination, resets expanded groups on refresh, updates expanded path on retransfer, and keeps StrictMode search updaters pure", async () => {
+  const iconStub = () => React.createElement("span");
+  const apiCalls = [];
+  let failFilesRefetch = false;
+  let groupEpisodeGeneration = 1;
+
+  const summary = {
+    total_files: 120,
+    media_count: 5,
+    movie_files: 0,
+    tv_files: 120,
+    strm_count: 0,
+    hardlink_count: 120,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: 120_000_000,
+    probed_duration_ms: 7_200_000,
+    strm_probed_count: 0,
+  };
+
+  const makeFileItem = (i, mediaId = "tv-1") => ({
+    id: `file-${i}`,
+    media_id: mediaId,
+    library_id: "lib-1",
+    media_title: `剧集作品 ${mediaId}`,
+    media_kind: "tv",
+    path: `/media/tv/${mediaId}/ep-${i}-v${groupEpisodeGeneration}.mkv`,
+    source_path: `/downloads/${mediaId}/raw-${i}.mkv`,
+    units: [{ season: 1, episode: i + 1 }],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: false,
+    transfer_mode: "hardlink",
+    file_size: 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  const makeGroupItem = (i) => ({
+    media_id: `tv-${i}`,
+    media_title: `聚合作品 ${i}`,
+    media_kind: "tv",
+    library_id: "lib-1",
+    file_count: 24,
+    strm_count: 0,
+    hardlink_count: 24,
+    local_size_bytes: 24_000_000,
+    total_duration_ms: 1_440_000,
+    primary_resolution: "1080p",
+    primary_mode: "hardlink",
+    sample_dir: `/media/tv/tv-${i}`,
+  });
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: ({ text }) => React.createElement("button", { type: "button", "data-copy": text }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => ({ success() {}, error() {} }),
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params) => {
+        apiCalls.push(params);
+        if (params.media_id) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 1,
+            filtered_file_total: 1,
+            offset: 0,
+            limit: 200,
+            has_more: false,
+            items: [makeFileItem(0, params.media_id)],
+            groups: [],
+          };
+        }
+        if (params.view === "groups") {
+          return {
+            summary,
+            view: "groups",
+            filtered_total: 5,
+            filtered_file_total: 120,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: Array.from({ length: 5 }, (_, i) => makeGroupItem(i + 1)),
+          };
+        }
+        if (params.limit === 1) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 120,
+            filtered_file_total: 120,
+            offset: 0,
+            limit: 1,
+            has_more: true,
+            items: [makeFileItem(0)],
+            groups: [],
+          };
+        }
+        if (params.offset === 0 && failFilesRefetch) {
+          throw new Error("切换回逐文件时网络抖动");
+        }
+        if (params.offset === 0) {
+          return {
+            summary,
+            view: "files",
+            filtered_total: 120,
+            filtered_file_total: 120,
+            offset: 0,
+            limit: 50,
+            has_more: true,
+            items: Array.from({ length: 50 }, (_, i) => makeFileItem(i)),
+            groups: [],
+          };
+        }
+        return {
+          summary,
+          view: "files",
+          filtered_total: 120,
+          filtered_file_total: 120,
+          offset: params.offset,
+          limit: 50,
+          has_more: false,
+          items: Array.from({ length: 10 }, (_, i) => makeFileItem(params.offset + i)),
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async (id) => ({
+        retransferred: true,
+        source: "/downloads/tv-1/raw-0.mkv",
+        destination: `/media/tv/tv-1/rebuilt-${id}.mkv`,
+      }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  const consoleErrors = [];
+  const origConsoleError = console.error;
+  console.error = (...args) => {
+    const msg = args.map(String).join(" ");
+    if (msg.includes("react-test-renderer is deprecated")) return;
+    consoleErrors.push(msg);
+  };
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(React.StrictMode, null, React.createElement(MediaTransferView)),
+      );
+    });
+
+    // 1. Initial "files" mode has 50 items, filteredTotal=120, hasMore=true, nextOffset=50
+    assert.match(collectText(renderer.toJSON()), /共找到\s*120\s*条入库记录/);
+
+    // 2. Switch to "groups" -> filteredTotal=5, hasMore=false, nextOffset=5
+    const groupToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("按作品聚合"));
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+    assert.match(collectText(renderer.toJSON()), /共匹配\s*5\s*部作品/);
+
+    // 3. Expand tv-1 -> shows ep-0-v1.mkv; retransfer file-0 inside expanded group -> path updates immediately!
+    const expandFirstGroup = () =>
+      renderer.root
+        .findAllByType("button")
+        .find((btn) => collectText(btn).includes("展开文件"));
+    await act(async () => {
+      expandFirstGroup().props.onClick();
+    });
+    assert.match(collectText(renderer.toJSON()), /ep-0-v1\.mkv/);
+
+    const rebuildBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).trim() === "重建");
+    assert.ok(rebuildBtn, "Expanded hardlink episode must render 重建 button");
+    await act(async () => {
+      await rebuildBtn.props.onClick();
+    });
+    assert.match(
+      collectText(renderer.toJSON()),
+      /rebuilt-file-0\.mkv/,
+      "Retransferring an episode inside an expanded group must immediately update its displayed path",
+    );
+
+    // 4. Collapse tv-1 (which caches items), bump server episode generation to v2, click "刷新记录", then re-expand tv-1 -> must fetch fresh v2 instead of stale cache!
+    const collapseBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("收起文件"));
+    await act(async () => {
+      collapseBtn.props.onClick();
+    });
+    groupEpisodeGeneration = 2;
+
+    const refreshBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("刷新记录"));
+    await act(async () => {
+      await refreshBtn.props.onClick();
+    });
+    await act(async () => {
+      expandFirstGroup().props.onClick();
+    });
+    assert.match(
+      collectText(renderer.toJSON()),
+      /ep-0-v2\.mkv/,
+      "Manual 刷新记录 must clear cached expandedGroups so re-expanding fetches fresh episodes",
+    );
+
+    // 5. Switch back to "files" when head refetch fails -> cached 50 fileItems MUST keep files slice (filteredTotal=120, hasMore=true, nextOffset=50), NOT groups slice (5 / false / 5)!
+    failFilesRefetch = true;
+    const filesToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("逐文件列表"));
+    await act(async () => {
+      filesToggle.props.onClick();
+    });
+
+    const textAfterFailedSwitch = collectText(renderer.toJSON());
+    assert.match(
+      textAfterFailedSwitch,
+      /共找到\s*120\s*条入库记录/,
+      "Switching back to files must read files pagination slice (120), not groups filteredTotal (5)",
+    );
+    const loadMoreBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("加载更多"));
+    assert.ok(
+      loadMoreBtn,
+      "Switching back to files must preserve files hasMore=true even when head refresh fails",
+    );
+    failFilesRefetch = false;
+    await act(async () => {
+      loadMoreBtn.props.onClick();
+    });
+    assert.equal(
+      apiCalls.at(-1).offset,
+      50,
+      "loadMore in files mode must use files nextOffset (50), not groups nextOffset (5)",
+    );
+
+    // 6. Debounced search under <React.StrictMode> must keep state updaters pure (zero React render-phase update console errors)
+    const searchInput = renderer.root.findByType("input");
+    await act(async () => {
+      searchInput.props.onChange({ target: { value: "漫长" } });
+      await new Promise((r) => setTimeout(r, 240));
+    });
+    await act(async () => {
+      searchInput.props.onChange({ target: { value: "" } });
+    });
+    assert.deepEqual(
+      consoleErrors,
+      [],
+      `StrictMode search debounce/clear must not trigger impure state updater warnings: ${consoleErrors.join(" | ")}`,
+    );
+  } finally {
+    console.error = origConsoleError;
+    if (renderer) {
+      await act(async () => renderer.unmount());
+    }
+  }
+});

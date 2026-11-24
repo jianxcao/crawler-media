@@ -435,19 +435,9 @@ pub(crate) async fn put_presets(
         move |store| -> Result<(), crate::store::StoreError> {
             let is_admin = store.user_role(user_id)? == "admin";
             if is_admin {
-                store.with_writer(store::Db::App, |app| {
-                    let tx = app.unchecked_transaction()?;
-                    tx.execute(
-                        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        rusqlite::params![&key, &value],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        rusqlite::params![crate::settings_keys::SEARCH_PRESETS, &value],
-                    )?;
-                    tx.commit()?;
+                store.writers().with_app(|app| {
+                    app.put_setting(&key, &value)?;
+                    app.put_setting(crate::settings_keys::SEARCH_PRESETS, &value)?;
                     Ok(())
                 })
             } else {

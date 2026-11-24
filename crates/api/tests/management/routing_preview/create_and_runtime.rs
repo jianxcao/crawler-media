@@ -360,6 +360,7 @@ async fn patch_null_library_id_on_cn_drama_transfers_to_default_library_without_
 struct SignalOnMetadataCatalog {
     inner: StoreLockingCatalog,
     matched_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    resume_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl Catalog for SignalOnMetadataCatalog {
@@ -383,6 +384,10 @@ impl Catalog for SignalOnMetadataCatalog {
         if let Some(tx) = self.matched_tx.lock().take() {
             let _ = tx.send(());
         }
+        let rx = self.resume_rx.lock().take();
+        if let Some(rx) = rx {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
         res
     }
 }
@@ -397,6 +402,7 @@ async fn concurrent_deletion_of_auto_matched_library_falls_back_to_default_libra
             store: store.clone(),
         },
         matched_tx: Mutex::new(Some(matched_tx)),
+        resume_rx: Mutex::new(None),
     });
     let state = ApiState::new_arc(
         store.clone(),
@@ -453,6 +459,76 @@ async fn concurrent_deletion_of_auto_matched_library_falls_back_to_default_libra
         .unwrap();
     sub_blocker.join().unwrap();
     racer.join().unwrap();
+
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let sub = json_data(res).await;
+    assert!(sub["library_id"].is_null());
+    assert_eq!(sub["filter_id"], default_filter);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_matched_library_hidden_during_metadata_io_falls_back_to_default_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
+    let (matched_tx, matched_rx) = std::sync::mpsc::channel();
+    let (hidden_tx, hidden_rx) = std::sync::mpsc::channel();
+    let catalog = Arc::new(SignalOnMetadataCatalog {
+        inner: StoreLockingCatalog {
+            store: store.clone(),
+        },
+        matched_tx: Mutex::new(Some(matched_tx)),
+        resume_rx: Mutex::new(Some(hidden_rx)),
+    });
+    let state = ApiState::new_arc(
+        store,
+        "management-secret".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .unwrap()
+    .with_catalog(catalog);
+    let app = router(state);
+    let (_default_lib_id, china_lib_id, default_filter, _china_filter) =
+        seed_tv_routing_libraries(&app, &tmp).await;
+
+    let patch_app = app.clone();
+    let hide_id = china_lib_id.clone();
+    let hider = tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || matched_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .unwrap();
+        let resp = patch_app
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/libraries/{hide_id}"),
+                Some("management-secret"),
+                json!({ "admin_visible": false }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = hidden_tx.send(());
+    });
+
+    let res = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some("management-secret"),
+            json!({
+                "title_ref": "tmdb:tv:203483",
+                "coverage": { "kind": "tv", "season": 1, "episode_from": 1 },
+                "fetch_mode": "search"
+            }),
+        ))
+        .await
+        .unwrap();
+    hider.await.unwrap();
 
     assert_eq!(res.status(), StatusCode::CREATED);
     let sub = json_data(res).await;

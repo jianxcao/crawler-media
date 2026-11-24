@@ -203,11 +203,36 @@ export function useGroupExpansion(
     });
   }, []);
 
+  const updateExpandedFilePath = useCallback(
+    (mediaId: string, fileId: string, destination: string) => {
+      setExpandedGroups((prev) => {
+        const groupState = prev[mediaId];
+        if (!groupState) return prev;
+        let changed = false;
+        const nextItems = groupState.items.map((item) => {
+          if (item.id !== fileId || item.path === destination) return item;
+          changed = true;
+          return { ...item, path: destination };
+        });
+        if (!changed) return prev;
+        return {
+          ...prev,
+          [mediaId]: {
+            ...groupState,
+            items: nextItems,
+          },
+        };
+      });
+    },
+    [],
+  );
+
   return {
     expandedGroups,
     resetExpanded,
     toggleGroupExpand,
     loadMoreGroupFiles,
     removeExpandedFile,
+    updateExpandedFilePath,
   };
 }

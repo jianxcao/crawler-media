@@ -111,6 +111,20 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
         ));
     }
     manager.remove_seen_if_job(&id, job);
+    if manager.background_is_paused()
+        && !manager.is_job_paused_exempt(job)
+        && manager.is_unit_paused_exempt(job, &id)
+        && manager
+            .store
+            .get_probe_job(job)?
+            .is_some_and(|row| row.kind == "marker_refresh")
+        && manager
+            .store
+            .probe_analysis_job_participants(job)?
+            .is_none()
+    {
+        manager.unmark_unit_paused_exempt(job, &id);
+    }
     if !manager.background_is_paused() || manager.is_dispatch_paused_exempt(job, &id) {
         observe_dirty(
             manager,
@@ -123,6 +137,111 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
         manager.wake.notify_waiters();
     }
     Ok(())
+}
+
+pub(super) fn season_has_paused_exempt_analysis(
+    manager: &ProbeManager,
+    media: domain::MediaId,
+    season: u32,
+) -> Result<bool, store::StoreError> {
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let rows = manager.store.probe_analysis_participants(
+            media,
+            season,
+            after.as_ref().map(|(j, f)| (j.as_str(), f.as_str())),
+            16,
+        )?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        if rows.iter().any(|row| {
+            manager.is_dispatch_paused_exempt(&row.dispatch().job_id, &row.dispatch().ledger_id)
+        }) {
+            return Ok(true);
+        }
+        let Some(last) = rows.last() else {
+            return Ok(false);
+        };
+        after = Some((
+            last.dispatch().job_id.clone(),
+            last.dispatch().ledger_id.clone(),
+        ));
+    }
+}
+
+fn scan_analysis_keys(
+    manager: &ProbeManager,
+    after: Option<(domain::MediaId, u32)>,
+) -> Result<(Option<(domain::MediaId, u32)>, Vec<(SeasonKey, String)>), store::StoreError> {
+    let paused = manager.background_is_paused();
+    if paused && !manager.has_paused_exempt_work() {
+        return Ok((None, Vec::new()));
+    }
+    let keys = manager.store.pending_probe_analysis_keys(after, 16)?;
+    let mut result = Vec::new();
+    for (media, season) in &keys {
+        if paused && !season_has_paused_exempt_analysis(manager, *media, *season)? {
+            continue;
+        }
+        let rows = manager
+            .store
+            .probe_analysis_participants(*media, *season, None, 16)?;
+        if !rows.is_empty() {
+            let digest = rows
+                .iter()
+                .map(|row| row.context().context_key.as_str())
+                .collect::<Vec<_>>()
+                .join("|");
+            result.push((
+                SeasonKey {
+                    media_id: *media,
+                    season: *season,
+                },
+                digest,
+            ));
+        }
+    }
+    Ok((keys.last().copied(), result))
+}
+
+async fn execute_due_ticket(
+    manager: &Arc<ProbeManager>,
+    ticket: super::season_schedule::AnalysisTicket,
+) {
+    super::worker::wait_for_metadata_idle(manager).await;
+    let key = ticket.key;
+    let result = super::worker::step(manager, move |manager| {
+        if manager.background_is_paused()
+            && !season_has_paused_exempt_analysis(manager, key.media_id, key.season)?
+        {
+            return Ok(None);
+        }
+        compute::run(manager, key)
+    })
+    .await;
+    let mut continuation = None;
+    match result {
+        Ok(Ok(next)) => continuation = next,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, media_id = %key.media_id, season = key.season, "分析未提交，保留持久工作")
+        }
+        Err(error) => tracing::error!(%error, "分析 worker 失败"),
+    }
+    let now = manager.clock.lock().now_ms();
+    let mut schedule = manager.analysis_schedule.lock();
+    schedule.finish(&ticket, now);
+    if let Some((digest, unchanged)) = continuation {
+        schedule.mark_dirty(
+            key,
+            digest,
+            if unchanged {
+                now.saturating_sub(2_000)
+            } else {
+                now
+            },
+        );
+    }
 }
 
 pub(super) async fn run(manager: Arc<ProbeManager>) {
@@ -140,46 +259,8 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
             }
             continue;
         }
-        let loaded = super::worker::step(&manager, move |manager| {
-            let paused = manager.background_is_paused();
-            if paused && !manager.has_paused_exempt_work() {
-                return Ok::<_, store::StoreError>((None, Vec::new()));
-            }
-            let keys = manager.store.pending_probe_analysis_keys(after, 16)?;
-            let mut result = Vec::new();
-            for (media, season) in &keys {
-                let rows = manager
-                    .store
-                    .probe_analysis_participants(*media, *season, None, 16)?;
-                if paused
-                    && !rows.iter().any(|row| {
-                        manager.is_dispatch_paused_exempt(
-                            &row.dispatch().job_id,
-                            &row.dispatch().ledger_id,
-                        )
-                    })
-                {
-                    continue;
-                }
-                let digest = rows
-                    .iter()
-                    .map(|row| row.context().context_key.as_str())
-                    .collect::<Vec<_>>()
-                    .join("|");
-                if !rows.is_empty() {
-                    result.push((
-                        SeasonKey {
-                            media_id: *media,
-                            season: *season,
-                        },
-                        digest,
-                    ));
-                }
-            }
-            Ok::<_, store::StoreError>((keys.last().copied(), result))
-        })
-        .await;
-        match loaded {
+        match super::worker::step(&manager, move |manager| scan_analysis_keys(manager, after)).await
+        {
             Ok(Ok((cursor, rows))) => {
                 after = cursor;
                 let now = manager.clock.lock().now_ms();
@@ -190,64 +271,19 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
                         .mark_dirty(key, digest, now);
                 }
             }
-            Ok(Err(error)) => tracing::warn!(%error,"分析窗口读取失败，持久工作保持排队"),
-            Err(error) => tracing::error!(%error,"分析窗口 worker 失败"),
+            Ok(Err(error)) => tracing::warn!(%error, "分析窗口读取失败，持久工作保持排队"),
+            Err(error) => tracing::error!(%error, "分析窗口 worker 失败"),
         }
         let now = manager.clock.lock().now_ms();
         let ticket = manager.analysis_schedule.lock().take_due(now);
         if let Some(ticket) = ticket {
-            super::worker::wait_for_metadata_idle(&manager).await;
-            let key = ticket.key;
-            let result = super::worker::step(&manager, move |manager| {
-                if manager.background_is_paused() {
-                    let rows = manager.store.probe_analysis_participants(
-                        key.media_id,
-                        key.season,
-                        None,
-                        16,
-                    )?;
-                    if !rows.iter().any(|row| {
-                        manager.is_dispatch_paused_exempt(
-                            &row.dispatch().job_id,
-                            &row.dispatch().ledger_id,
-                        )
-                    }) {
-                        return Ok(None);
-                    }
-                }
-                compute::run(manager, key)
-            })
-            .await;
-            let mut continuation = None;
-            match result {
-                Ok(Ok(next)) => {
-                    continuation = next;
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(%error,media_id=%key.media_id,season=key.season,"分析未提交，保留持久工作")
-                }
-                Err(error) => tracing::error!(%error,"分析 worker 失败"),
-            }
-            let now = manager.clock.lock().now_ms();
-            let mut schedule = manager.analysis_schedule.lock();
-            schedule.finish(&ticket, now);
-            if let Some((digest, unchanged)) = continuation {
-                schedule.mark_dirty(
-                    key,
-                    digest,
-                    if unchanged {
-                        now.saturating_sub(2_000)
-                    } else {
-                        now
-                    },
-                );
-            }
+            execute_due_ticket(&manager, ticket).await;
             continue;
         }
         tokio::select! {
-            _=super::worker::wait_for_shutdown(&manager)=>break,
-            _=manager.wake.notified()=>{},
-            _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{},
+            _ = super::worker::wait_for_shutdown(&manager) => break,
+            _ = manager.wake.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
         }
     }
 }

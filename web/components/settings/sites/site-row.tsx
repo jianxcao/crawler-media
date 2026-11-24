@@ -84,23 +84,9 @@ export function SiteRow({
     setActionStatus(null);
     try {
       const res = await checkInSite(site.id);
-      const maybeResult = res as Site & {
-        ok?: boolean;
-        message?: string | null;
-        error?: string | null;
-      };
-      if (maybeResult && maybeResult.ok === false) {
-        const errMsg = maybeResult.error || maybeResult.message || "签到失败";
-        setActionStatus({ tone: "danger", text: errMsg });
-        toast.error(`「${site.name}」${errMsg}`);
-        return;
-      }
-      if (res && "id" in res) {
-        onChanged(res);
-      }
-      const statusText = maybeResult?.message || "签到成功";
-      setActionStatus({ tone: "ok", text: statusText });
-      toast.success(maybeResult?.message || `「${site.name}」签到成功`);
+      onChanged(res);
+      setActionStatus({ tone: "ok", text: "已触发签到" });
+      toast.success(`「${site.name}」签到成功`);
     } catch (e) {
       const errMsg = (e as Error).message || "签到失败";
       setActionStatus({ tone: "danger", text: errMsg });

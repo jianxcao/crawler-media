@@ -405,3 +405,82 @@ async fn site_write_responses_mask_cookie_and_api_key_consistently() {
     assert!(updated["cookie"].is_null());
     assert!(updated["api_key"].is_null());
 }
+
+#[tokio::test]
+async fn patch_site_empty_url_falls_back_to_profile_base_url_or_rejects_missing_base_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+
+    let hdarea = post_site(
+        &app,
+        json!({
+            "name": "HDArea",
+            "url": "https://www.hdarea.co",
+            "profile_id": "hdarea",
+            "api_key": "0123456789abcdef0123456789abcdef",
+            "enabled": true
+        }),
+    )
+    .await;
+    let hdarea_id = hdarea["id"].as_str().unwrap();
+
+    let omit_url = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/sites/{hdarea_id}"),
+            Some("management-secret"),
+            json!({ "name": "HDArea Custom" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(omit_url.status(), StatusCode::OK);
+    assert_eq!(json_data(omit_url).await["url"], "https://www.hdarea.co");
+
+    let reset_url = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/sites/{hdarea_id}"),
+            Some("management-secret"),
+            json!({ "url": "" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reset_url.status(), StatusCode::OK);
+    assert_eq!(json_data(reset_url).await["url"], "https://hdarea.club");
+
+    let hdsky = post_site(
+        &app,
+        json!({
+            "name": "HDSky",
+            "url": "https://hdsky.me/",
+            "profile_id": "hdsky",
+            "cookie": "uid=1; pass=abc",
+            "enabled": true
+        }),
+    )
+    .await;
+    let hdsky_id = hdsky["id"].as_str().unwrap();
+    let patch_empty = app
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/sites/{hdsky_id}"),
+            Some("management-secret"),
+            json!({ "url": "" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patch_empty.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(patch_empty).await["error"]["code"],
+        "site.invalid"
+    );
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let stored = store
+        .get_site(SiteId::from_str(hdsky_id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.url, "https://hdsky.me/");
+}

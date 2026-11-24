@@ -244,6 +244,7 @@ async fn patch_site_inner(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
+    let indexer = state.indexer.clone();
     crate::http::store_wait::store_write(&state, move |store| {
         let expected = match store.get_site(id) {
             Ok(Some(site)) => site,
@@ -254,8 +255,12 @@ async fn patch_site_inner(
         if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
             site.name = name;
         }
-        if let Some(url) = body.url.filter(|u| !u.trim().is_empty()) {
-            site.url = url;
+        if let Some(raw_url) = body.url {
+            let profile = indexer.profile(&site.profile_id);
+            match resolve_site_url(&raw_url, profile) {
+                Ok(url) => site.url = url,
+                Err((status, code, msg)) => return err(status, code, msg),
+            }
         }
         if let Some(cookie) = body.cookie {
             site.cookie = normalize_optional(cookie);

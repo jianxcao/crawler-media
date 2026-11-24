@@ -282,13 +282,13 @@ export function CdpBrowserSection() {
                 </div>
               )}
               {obscuraStatus?.last_error && (
-                <div className="text-[#ff6b6b]">
+                <div className="text-[var(--danger)]">
                   <span className="text-[var(--text-faint)]">最近错误: </span>
                   {obscuraStatus.last_error}
                 </div>
               )}
               {Object.entries(incompatible).map(([endpoint, reason]) => (
-                <div key={endpoint} className="text-[#ff6b6b]">
+                <div key={endpoint} className="text-[var(--danger)]">
                   <span className="text-[var(--text-faint)]">不兼容端点 {endpoint}: </span>
                   {reason}
                 </div>

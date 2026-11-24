@@ -577,7 +577,7 @@ impl ProbeManager {
             .is_empty()
     }
 
-    pub(super) fn has_paused_exempt_work(&self) -> bool {
+    pub fn has_paused_exempt_work(&self) -> bool {
         self.has_paused_exempt_jobs() || !self.paused_exempt_units.lock().is_empty()
     }
 

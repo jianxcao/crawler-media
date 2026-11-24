@@ -14,14 +14,24 @@ pub(super) fn resolve(
 ) -> Result<Option<LibraryId>, Response> {
     let is_admin = store.user_role(user_id).map_err(store_error)? == "admin";
     let Some(raw) = raw.filter(|value| !value.is_empty()) else {
-        if let Some(default_lib) = store.default_library(kind).map_err(store_error)?
-            && !crate::http::routing_preview::user_can_target_library(
+        if let Some(default_lib) = store.default_library(kind).map_err(store_error)? {
+            if !crate::http::routing_preview::user_can_auto_route_library(
                 &default_lib,
                 Some(user_id),
                 is_admin,
-            )
-        {
-            return Err(invalid("指定的媒体库不存在"));
+            ) {
+                return Err(invalid("指定的媒体库不存在"));
+            }
+            if !store
+                .library_accepts_work(&default_lib.id)
+                .map_err(store_error)?
+            {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "subscription.library_unavailable",
+                    "目标媒体库正在删除或重建",
+                ));
+            }
         }
         return Ok(None);
     };

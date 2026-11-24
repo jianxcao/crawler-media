@@ -453,22 +453,28 @@ fn subscribe_from_prepared(
     let is_admin = store.user_role(user_id).map_err(store_err_response)? == "admin";
     let library_id = match prepared.explicit_library_id.as_deref() {
         Some(raw) => super::library_target::resolve(store, Some(raw), media_kind, user_id)?,
-        None => match prepared
-            .auto_library
-            .as_ref()
-            .filter(|lib| {
-                store.library_accepts_work(&lib.id).unwrap_or(false)
-                    && crate::http::routing_preview::user_can_auto_route_library(
-                        lib,
-                        Some(user_id),
-                        is_admin,
-                    )
-            })
-            .and_then(|lib| domain::LibraryId::from_str(&lib.id).ok())
-        {
-            Some(matched_id) => Some(matched_id),
-            None => resolve_untargeted_library(store, media_kind, user_id, is_admin)?,
-        },
+        None => {
+            let live_auto_lib = match prepared.auto_library.as_ref() {
+                Some(lib) => store.get_library(&lib.id).map_err(store_err_response)?,
+                None => None,
+            };
+            match live_auto_lib
+                .as_ref()
+                .filter(|lib| {
+                    lib.kind == media_kind
+                        && store.library_accepts_work(&lib.id).unwrap_or(false)
+                        && crate::http::routing_preview::user_can_auto_route_library(
+                            lib,
+                            Some(user_id),
+                            is_admin,
+                        )
+                })
+                .and_then(|lib| domain::LibraryId::from_str(&lib.id).ok())
+            {
+                Some(matched_id) => Some(matched_id),
+                None => resolve_untargeted_library(store, media_kind, user_id, is_admin)?,
+            }
+        }
     };
     let effective_library_id = library_id.map(|id| id.to_string());
     let filter_id = resolve_filter_id(

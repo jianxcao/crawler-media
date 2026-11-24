@@ -131,6 +131,29 @@ fn observed_participants(
     Ok(participants)
 }
 
+fn clear_queued_analysis_unit_exemptions(
+    manager: &ProbeManager,
+    job_id: &str,
+) -> Result<(), store::StoreError> {
+    for (exempt_job, lid) in manager.paused_exempt_unit_pairs() {
+        if exempt_job != job_id {
+            continue;
+        }
+        if manager
+            .store
+            .active_probe_unit_for_ledger(&lid)?
+            .is_some_and(|u| {
+                u.job_id == job_id
+                    && u.stage == store::ProbeDispatchStage::Analysis
+                    && u.status == "queued"
+            })
+        {
+            manager.unmark_unit_paused_exempt(job_id, &lid);
+        }
+    }
+    Ok(())
+}
+
 fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError> {
     if let Some(job) = manager
         .store
@@ -145,6 +168,9 @@ fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError
         return Ok(());
     }
     let Some(participants) = manager.store.probe_analysis_job_participants(job_id)? else {
+        if manager.background_is_paused() && !manager.is_job_paused_exempt(job_id) {
+            clear_queued_analysis_unit_exemptions(manager, job_id)?;
+        }
         return Ok(());
     };
     let Some(claim) = manager

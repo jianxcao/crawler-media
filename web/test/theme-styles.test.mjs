@@ -674,6 +674,30 @@ test("paper light theme contrast fixes, --ok-ink, .btn-glass modifiers, and ambe
     "utf8",
   );
   assert.doesNotMatch(cdpBrowser, /text-\[#51cf66\]/);
+  assert.doesNotMatch(
+    cdpBrowser,
+    /text-\[#ff6b6b\]/,
+    "CdpBrowserSection diagnostics must use semantic text-[var(--danger)] instead of pastel #ff6b6b",
+  );
+
+  // Paper .dark-media-surface restores the full silver accent token group so accent badges use dark #141821 ink
+  const darkSurfaceMatch = css.match(
+    /html\[data-theme="paper"\]\s+:is\(\s*\.dark-media-surface,[\s\S]*?\)\s*\{([\s\S]*?)\n\}/,
+  );
+  assert.ok(darkSurfaceMatch, "paper theme must define .dark-media-surface override block");
+  const darkSurfaceBody = darkSurfaceMatch[1];
+  for (const token of [
+    "--accent: #cdd6e6;",
+    "--accent-strong: #eef2f8;",
+    "--accent-2: #9fb0c9;",
+    "--accent-ink: #141821;",
+    "--accent-soft: rgba(205, 214, 230, 0.14);",
+  ]) {
+    assert.ok(
+      darkSurfaceBody.includes(token),
+      `paper .dark-media-surface block must restore ${token}`,
+    );
+  }
 
   const settingsOverview = await readFile(
     path.join(webDir, "components/settings-overview-section.tsx"),

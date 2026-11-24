@@ -559,7 +559,10 @@ html[data-theme="paper"] :is(
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.15);
   --color-white: #ffffff;
+  --accent: #cdd6e6;
+  --accent-strong: #eef2f8;
   --accent-2: #9fb0c9;
+  --accent-ink: #141821;
   --accent-soft: rgba(205, 214, 230, 0.14);
   --ok: #4ade80;
   --ok-ink: #07120c;

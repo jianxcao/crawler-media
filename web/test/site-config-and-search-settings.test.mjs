@@ -582,6 +582,11 @@ test("SiteRow avoids duplicate 已停用 badge and surfaces toast + inline feedb
     assert.equal(changed.length, 1);
     assert.equal(toasts.success.length, 1, "Successful checkInSite must trigger toast.success");
     assert.match(toasts.success[0], /签到/);
+    assert.match(
+      textOf(renderer.root),
+      /已触发签到/,
+      "Successful checkInSite must display inline 已触发签到 actionStatus",
+    );
 
     // 3. Click "立即签到" when checkInSite rejects -> surfaces toast.error feedback
     checkInImpl = async () => {
