@@ -63,7 +63,6 @@ impl crate::LibraryConnection<'_> {
         let succeeded = current.succeeded + delta.succeeded;
         let failed = current.failed + delta.failed;
         let partial = current.partial + delta.partial;
-        let all_done = completed >= total;
         if changed == 1 {
             let cancelled = completed - succeeded - failed - partial;
             let terminal =
@@ -106,6 +105,7 @@ impl crate::LibraryConnection<'_> {
         let job = self
             .get_probe_job(job_id)?
             .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
+        let all_done = job.completed >= job.total;
         Ok((job, accepted, all_done, vm_steps))
     }
 

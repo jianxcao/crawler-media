@@ -50,9 +50,26 @@ impl ProbeManager {
             self.drain_buffered_dispatch();
         }
         self.prune_exemptions_and_reconcile_promoted_from_store();
+        self.reconcile_terminal_active_timings();
         self.evict_inactive_seen_for_files(file_ids);
         if !self.background_is_paused() || self.has_paused_exempt_work() {
             self.wake.notify_waiters();
+        }
+    }
+
+    pub(super) fn reconcile_terminal_active_timings(&self) {
+        for job_id in self.timings.active_job_ids() {
+            match self.store.get_probe_job(&job_id) {
+                Ok(Some(job)) if !job.is_active() => {
+                    self.unmark_job_paused_exempt(&job.id);
+                    timings::finalize_terminal_job(&self.store_access(), &self.timings, &job);
+                }
+                Ok(None) => {
+                    self.unmark_job_paused_exempt(&job_id);
+                    self.timings.drop_missing_job(&job_id);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -146,6 +163,7 @@ impl ProbeManager {
                 })?;
                 if !job.is_active() {
                     self.unmark_job_paused_exempt(&job.id);
+                    timings::finalize_terminal_job(&self.store_access(), &self.timings, &job);
                 } else {
                     self.unmark_unit_paused_exempt(&unit.job_id, ledger_id);
                     self.unmark_unit_promoted(&unit.job_id, ledger_id);
@@ -400,15 +418,17 @@ impl ProbeManager {
             timings::log_terminal_job(&self.store_access(), &self.timings, job);
             return;
         }
-        if job.failed > 0 {
+        if job.failed > 0 || job.status == "failed" {
             self.unmark_job_paused_exempt(&job.id);
-            if let Err(error) = self.store.library_write(|store| {
-                store.finish_probe_job(
-                    &job.id,
-                    false,
-                    job.error.as_deref().or(Some("一个或多个探测单元失败")),
-                )
-            }) {
+            if job.is_active()
+                && let Err(error) = self.store.library_write(|store| {
+                    store.finish_probe_job(
+                        &job.id,
+                        false,
+                        job.error.as_deref().or(Some("一个或多个探测单元失败")),
+                    )
+                })
+            {
                 tracing::error!(%error, job_id = %job.id, "持久化探测任务失败状态失败");
             }
             tracing::warn!(

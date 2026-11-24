@@ -433,6 +433,11 @@ async fn chapter_refresh_endpoint_supersedes_dormant_paused_unit_and_queues_mark
     std::fs::create_dir_all(&root).unwrap();
     let (tv_lib_id, show, ep1) = {
         let store = api::Store::open(dir.path().join("data")).unwrap();
+        store
+            .save_raw_scrape_settings(
+                &json!({ "fingerprint_sampling_mode": "adaptive" }).to_string(),
+            )
+            .unwrap();
         let lib_id = create_lib(&store, MediaKind::Tv, "TV", &root, true);
         store
             .set_library_intro_settings(&lib_id, true, true)
@@ -487,5 +492,138 @@ async fn chapter_refresh_endpoint_supersedes_dormant_paused_unit_and_queues_mark
             .unwrap()
             .status,
         "cancelled"
+    );
+}
+
+struct FailingCaptureTracks(CountingTracks);
+
+impl marker::FingerprintEngine for FailingCaptureTracks {
+    fn extract_at(
+        &self,
+        _p: &Path,
+        _s: u32,
+        _d: u32,
+        _c: &marker::WorkControl,
+    ) -> Result<Vec<u32>, String> {
+        Err("simulated full window failure".into())
+    }
+
+    fn find_common_segment(
+        &self,
+        a: &[u32],
+        b: &[u32],
+        m: f32,
+        t: f32,
+    ) -> Option<marker::CommonSegment> {
+        self.0.find_common_segment(a, b, m, t)
+    }
+}
+
+impl marker::FingerprintCaptureEngine for FailingCaptureTracks {
+    fn capture_window(
+        &self,
+        req: &marker::CaptureRequest,
+    ) -> Result<marker::CapturedFingerprint, marker::CaptureFailure> {
+        if req.window.start_ms == 0 {
+            return self.0.capture_window(req);
+        }
+        Err(marker::CaptureFailure {
+            kind: marker::CaptureFailureKind::Timeout,
+            message: "simulated outro timeout".into(),
+            metrics: marker::CaptureMetrics::default(),
+        })
+    }
+}
+
+impl api::probe_manager::TracksProbe for FailingCaptureTracks {
+    fn probe(
+        &self,
+        path: &Path,
+        control: &library::WorkControl,
+    ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
+        self.0.probe(path, control)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_single_episode_marker_refresh_with_partial_capture_clears_exemption_and_finalizes_timings()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tv-r6-partial-timings");
+    std::fs::create_dir_all(&root).unwrap();
+    let (tv_lib_id, show, ep1) = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        store
+            .save_raw_scrape_settings(
+                &json!({ "fingerprint_sampling_mode": "adaptive" }).to_string(),
+            )
+            .unwrap();
+        let lib_id = create_lib(&store, MediaKind::Tv, "TV", &root, true);
+        store
+            .set_library_intro_settings(&lib_id, true, true)
+            .unwrap();
+        let show = insert_test_media(&store, MediaKind::Tv, "Partial Timings Show".into());
+        let ep1 = seed_tv_episodes(&store, &root, show, 2)[0];
+        (lib_id, show, ep1)
+    };
+
+    let engine = std::sync::Arc::new(FailingCaptureTracks(CountingTracks {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        fail: std::sync::atomic::AtomicBool::new(false),
+        block_first: parking_lot::Mutex::new(None),
+    }));
+    let base = production_state(dir.path(), CountingTracks::new(false));
+    let state = base
+        .with_probe_engines(engine.clone(), engine.clone(), engine)
+        .unwrap();
+    assert!(state.probe.background_is_paused());
+    assert!(state.probe.try_start_workers());
+    let app = api::router(state.clone());
+
+    let path = format!(
+        "/api/v1/libraries/{tv_lib_id}/items/{show}/chapters/refresh?file_id={ep1}&season=1&episode=1"
+    );
+    let data = super::admin_json(
+        &app,
+        "POST",
+        &path,
+        json!({ "capture_policy": "recapture" }),
+    )
+    .await;
+    let job_id = data["fingerprint_refresh_job"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    poll_until(|| {
+        state
+            .store()
+            .get_probe_job(&job_id)
+            .unwrap()
+            .unwrap()
+            .status
+            == "failed"
+    })
+    .await;
+    let final_job = state.store().get_probe_job(&job_id).unwrap().unwrap();
+    assert_eq!(
+        (final_job.failed, final_job.partial),
+        (0, 2),
+        "{final_job:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    state.probe.shutdown_workers().await.unwrap();
+
+    assert!(
+        !state.probe.has_paused_exempt_work(),
+        "failed all-done partial marker_refresh must clear paused_exempt_jobs"
+    );
+    let snapshot = state
+        .probe
+        .timing_snapshot(&job_id)
+        .expect("timing snapshot");
+    assert!(
+        snapshot.persisted_attempts_complete,
+        "failed all-done partial marker_refresh must finalize terminal job timings"
     );
 }

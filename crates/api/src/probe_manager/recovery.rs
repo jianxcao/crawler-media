@@ -249,5 +249,6 @@ impl ProbeManager {
                 tracing::error!(%error,job_id=%job.id,"恢复探测终态失败");
             }
         }
+        self.reconcile_terminal_active_timings();
     }
 }

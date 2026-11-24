@@ -240,12 +240,18 @@ impl ProbeManager {
             match self.store.get_probe_job(cancelled_job_id) {
                 Ok(Some(job)) if !job.is_active() => {
                     self.unmark_job_paused_exempt(&job.id);
+                    super::timings::finalize_terminal_job(
+                        &self.store_access(),
+                        &self.timings,
+                        &job,
+                    );
                 }
                 Ok(Some(job)) if job.kind == "marker_refresh" => {
                     let _ = self.reconcile_marker_refresh_after_retirement(cancelled_job_id);
                 }
                 Ok(None) => {
                     self.unmark_job_paused_exempt(cancelled_job_id);
+                    self.timings.drop_missing_job(cancelled_job_id);
                 }
                 Ok(Some(_)) => {}
                 Err(_) => {

@@ -54,6 +54,14 @@ impl ProbeTimingLedger {
         })
     }
 
+    pub(super) fn active_job_ids(&self) -> Vec<String> {
+        self.0.lock().active.keys().cloned().collect()
+    }
+
+    pub(super) fn drop_missing_job(&self, job_id: &str) {
+        self.0.lock().active.remove(job_id);
+    }
+
     pub(crate) fn record_analysis(
         &self,
         job_id: Option<&str>,

@@ -494,10 +494,7 @@ pub(super) fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeD
     enum DeletedDispatchOutcome {
         StillPresent,
         JobGone,
-        Job {
-            active: bool,
-            is_marker_refresh: bool,
-        },
+        Job(Box<store::ProbeJob>),
     }
     let Some(file_id) = super::ledger_id(&id.ledger_id) else {
         return;
@@ -518,24 +515,23 @@ pub(super) fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeD
             store.cancel_probe_job(&id.job_id, "file_deleted")?;
         }
         Ok(match store.get_probe_job(&id.job_id)? {
-            Some(job) => DeletedDispatchOutcome::Job {
-                active: job.is_active(),
-                is_marker_refresh: job.kind == "marker_refresh",
-            },
+            Some(job) => DeletedDispatchOutcome::Job(Box::new(job)),
             None => DeletedDispatchOutcome::JobGone,
         })
     });
     match cancelled {
-        Ok(DeletedDispatchOutcome::Job {
-            active,
-            is_marker_refresh,
-        }) => {
+        Ok(DeletedDispatchOutcome::Job(job)) => {
             manager.unmark_unit_paused_exempt(&id.job_id, &id.ledger_id);
             manager.unmark_unit_promoted(&id.job_id, &id.ledger_id);
             manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
-            if !active {
+            if !job.is_active() {
                 manager.unmark_job_paused_exempt(&id.job_id);
-            } else if is_marker_refresh {
+                super::timings::finalize_terminal_job(
+                    &manager.store_access(),
+                    &manager.timings,
+                    &job,
+                );
+            } else if job.kind == "marker_refresh" {
                 let _ = manager.reconcile_marker_refresh_after_retirement(&id.job_id);
             }
         }
@@ -543,6 +539,7 @@ pub(super) fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeD
             manager.unmark_unit_paused_exempt(&id.job_id, &id.ledger_id);
             manager.unmark_unit_promoted(&id.job_id, &id.ledger_id);
             manager.unmark_job_paused_exempt(&id.job_id);
+            manager.timings.drop_missing_job(&id.job_id);
             manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
         }
         Ok(DeletedDispatchOutcome::StillPresent) => {}
