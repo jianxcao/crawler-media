@@ -38,14 +38,16 @@ impl CountingTracks {
         std::sync::mpsc::Receiver<()>,
         std::sync::mpsc::Sender<()>,
     ) {
+        let tracks = Self::new(false);
+        let (entered_rx, release_tx) = tracks.arm_block_next();
+        (tracks, entered_rx, release_tx)
+    }
+
+    fn arm_block_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let tracks = Arc::new(Self {
-            calls: AtomicUsize::new(0),
-            fail: AtomicBool::new(false),
-            block_first: Mutex::new(Some((entered_tx, release_rx))),
-        });
-        (tracks, entered_rx, release_tx)
+        *self.block_first.lock() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
     }
 
     fn calls(&self) -> usize {
@@ -649,3 +651,5 @@ fn in_analysis(state: &api::ApiState, id: LedgerId) -> bool {
 mod paused_analysis;
 #[path = "probe_queue_control_and_restart_pause/remediation_cases.rs"]
 mod remediation_cases;
+#[path = "probe_queue_control_and_restart_pause/round3_remediation.rs"]
+mod round3_remediation;

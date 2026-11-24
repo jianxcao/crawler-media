@@ -200,7 +200,7 @@ pub(super) fn season_has_paused_exempt_analysis(
                 None if manager.is_job_paused_exempt(job_id) => return Ok(true),
                 Some(true)
                     if manager.is_job_paused_exempt(job_id)
-                        || manager.was_unit_promoted(job_id, lid) =>
+                        || manager.job_has_unit_exemption_or_promotion(job_id) =>
                 {
                     return Ok(true);
                 }

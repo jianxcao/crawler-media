@@ -97,7 +97,9 @@ pub(super) fn request_next(
     let claim_unit_exempt = claim.participants.iter().any(|p| {
         let job_id = &p.dispatch().job_id;
         let lid = &p.dispatch().ledger_id;
-        manager.is_unit_paused_exempt(job_id, lid) || manager.was_unit_promoted(job_id, lid)
+        manager.is_unit_paused_exempt(job_id, lid)
+            || manager.was_unit_promoted(job_id, lid)
+            || manager.job_has_unit_exemption_or_promotion(job_id)
     });
     // Validate every participant before any pending transition can launch IO.
     let plans = claim
@@ -187,7 +189,7 @@ fn request_participant_followup(
     let job_id = &participant.dispatch().job_id;
     if manager.background_is_paused()
         && !manager.is_job_paused_exempt(job_id)
-        && (claim_unit_exempt || manager.was_unit_promoted(job_id, id))
+        && (claim_unit_exempt || manager.job_has_unit_exemption_or_promotion(job_id))
     {
         manager.mark_unit_paused_exempt(job_id.clone(), id.clone());
         manager.mark_unit_promoted(job_id.clone(), id.clone());

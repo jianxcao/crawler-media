@@ -155,12 +155,7 @@ impl ProbeManager {
             });
         match outcome {
             Ok(cancelled) => {
-                if !cancelled.is_empty() {
-                    let mut seen = self.seen.lock();
-                    for id in cancelled {
-                        seen.remove(&id);
-                    }
-                }
+                self.finish_superseding_cancelled_units(&cancelled);
                 true
             }
             Err(RefreshPersistErr::Conflict) => {
@@ -365,12 +360,7 @@ impl ProbeManager {
                     Ok(cancelled)
                 })
             })?;
-        if !cancelled.is_empty() {
-            let mut seen = self.seen.lock();
-            for id in cancelled {
-                seen.remove(&id);
-            }
-        }
+        self.finish_superseding_cancelled_units(&cancelled);
         Ok(())
     }
 }

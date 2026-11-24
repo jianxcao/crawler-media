@@ -160,15 +160,6 @@ fn auth_type_for(site: &Site, profile: Option<&indexer::Profile>) -> &'static st
     }
 }
 
-fn auth_type(site: &Site) -> &'static str {
-    static BUILTIN_PROFILES: std::sync::LazyLock<Option<indexer::ProfileSet>> =
-        std::sync::LazyLock::new(|| indexer::ProfileSet::load(None).ok());
-    let profile = BUILTIN_PROFILES
-        .as_ref()
-        .and_then(|profiles| profiles.get(&site.profile_id));
-    auth_type_for(site, profile)
-}
-
 mod boost;
 mod maintenance;
 mod read;

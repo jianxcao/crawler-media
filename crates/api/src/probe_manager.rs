@@ -32,6 +32,7 @@ mod lifecycle;
 mod markers;
 mod media_info;
 pub(crate) use media_info::MediaInfoRefreshError;
+mod pause_exemptions;
 pub mod policy;
 mod presence;
 mod probe;
@@ -520,24 +521,36 @@ impl ProbeManager {
             self.pause_epoch.fetch_add(1, Ordering::AcqRel);
             self.background_paused.store(true, Ordering::Release);
         }
-        self.clear_paused_exempt_jobs();
         self.analysis_schedule.lock().clear_unstarted();
         self.drain_buffered_dispatch();
+        self.refill_drained_windows();
+        if self.has_paused_exempt_work() {
+            self.wake.notify_waiters();
+        }
         true
     }
 
     pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
-        {
+        let committed_epoch = {
             let _guard = self.pause_state_lock.lock();
             if self.pause_epoch.load(Ordering::Acquire) != epoch {
                 return false;
             }
+            let next = self
+                .pause_epoch
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
             self.background_paused.store(false, Ordering::Release);
-        }
+            next
+        };
         self.clear_paused_exempt_jobs();
         self.fill_dispatch_windows();
-        if self.pause_epoch.load(Ordering::Acquire) != epoch {
+        if self.pause_epoch() != committed_epoch && self.background_is_paused() {
             self.drain_buffered_dispatch();
+            self.refill_drained_windows();
+            if self.has_paused_exempt_work() {
+                self.wake.notify_waiters();
+            }
             return false;
         }
         self.wake.notify_waiters();
@@ -551,12 +564,25 @@ impl ProbeManager {
     }
 
     pub fn resume_background(&self) {
-        {
+        let committed_epoch = {
             let _guard = self.pause_state_lock.lock();
+            let next = self
+                .pause_epoch
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
             self.background_paused.store(false, Ordering::Release);
-        }
+            next
+        };
         self.clear_paused_exempt_jobs();
         self.fill_dispatch_windows();
+        if self.pause_epoch() != committed_epoch && self.background_is_paused() {
+            self.drain_buffered_dispatch();
+            self.refill_drained_windows();
+            if self.has_paused_exempt_work() {
+                self.wake.notify_waiters();
+            }
+            return;
+        }
         self.wake.notify_waiters();
         self.obligation_wake.notify_waiters();
     }

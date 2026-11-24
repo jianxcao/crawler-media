@@ -739,6 +739,29 @@ async fn patch_null_library_id_rejects_hidden_or_deleting_default_library() {
         assert_eq!(err["message"], "指定的媒体库不存在");
     }
 
+    store
+        .with_writer(store::Db::Library, |conn| {
+            conn.execute("UPDATE libraries SET is_default = 0 WHERE kind = 'tv'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    for raw_lib in [Value::Null, json!("")] {
+        let no_def = app
+            .clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/subscriptions/{sub_id}"),
+                Some("management-secret"),
+                json!({ "library_id": raw_lib }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(no_def.status(), StatusCode::BAD_REQUEST);
+        let err = json_error(no_def).await;
+        assert_eq!(err["code"], "subscription.invalid");
+        assert_eq!(err["message"], "没有可用的目标媒体库");
+    }
+
     set_default_lib(&app, &secondary_id).await;
     store.begin_library_removal(&secondary_id).unwrap();
 

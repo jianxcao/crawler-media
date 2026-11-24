@@ -490,7 +490,15 @@ async fn retry_dispatch(
         }
     }
 }
-fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
+pub(super) fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
+    enum DeletedDispatchOutcome {
+        StillPresent,
+        JobGone,
+        Job {
+            active: bool,
+            is_marker_refresh: bool,
+        },
+    }
     let Some(file_id) = super::ledger_id(&id.ledger_id) else {
         return;
     };
@@ -499,16 +507,45 @@ fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) 
     }
     let cancelled = manager.store.library_write(|store| {
         if store.file_coverage_by_id(file_id)?.is_some() {
-            return Ok(false);
+            return Ok(DeletedDispatchOutcome::StillPresent);
         }
-        store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")?;
-        Ok(true)
+        if store.get_probe_job(&id.job_id)?.is_none() {
+            return Ok(DeletedDispatchOutcome::JobGone);
+        }
+        let (job, _, all_done) =
+            store.cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")?;
+        if all_done && job.succeeded == 0 {
+            store.cancel_probe_job(&id.job_id, "file_deleted")?;
+        }
+        Ok(match store.get_probe_job(&id.job_id)? {
+            Some(job) => DeletedDispatchOutcome::Job {
+                active: job.is_active(),
+                is_marker_refresh: job.kind == "marker_refresh",
+            },
+            None => DeletedDispatchOutcome::JobGone,
+        })
     });
     match cancelled {
-        Ok(true) => {
+        Ok(DeletedDispatchOutcome::Job {
+            active,
+            is_marker_refresh,
+        }) => {
+            manager.unmark_unit_paused_exempt(&id.job_id, &id.ledger_id);
+            manager.unmark_unit_promoted(&id.job_id, &id.ledger_id);
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            if !active {
+                manager.unmark_job_paused_exempt(&id.job_id);
+            } else if is_marker_refresh {
+                let _ = manager.reconcile_marker_refresh_after_retirement(&id.job_id);
+            }
+        }
+        Ok(DeletedDispatchOutcome::JobGone) => {
+            manager.unmark_unit_paused_exempt(&id.job_id, &id.ledger_id);
+            manager.unmark_unit_promoted(&id.job_id, &id.ledger_id);
+            manager.unmark_job_paused_exempt(&id.job_id);
             manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
         }
-        Ok(false) => {}
+        Ok(DeletedDispatchOutcome::StillPresent) => {}
         Err(error) => {
             tracing::error!(%error, job_id=%id.job_id, ledger_id=%id.ledger_id, "删除文件后取消探测单元失败")
         }

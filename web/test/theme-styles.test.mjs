@@ -1090,10 +1090,22 @@ test("LiquidGlassRenderer defers image-load draws to RAF, avoids unconfigured co
 
 test("paper theme restores dark .btn-glass and disabled .btn-accent inside .dark-media-surface and .player-root", async () => {
   const paperCss = await readFile(path.join(webDir, "app/styles/theme-paper.css"), "utf8");
+  const darkBtnGlassMatch = paperCss.match(
+    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-glass\s*\{([^}]*)\}/,
+  );
+  assert.ok(
+    darkBtnGlassMatch,
+    "paper theme must define dark-surface .btn-glass rule inside .dark-media-surface/.player-root",
+  );
   assert.match(
-    paperCss,
-    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-glass\s*\{[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.0[4-9]\d*\)/,
+    darkBtnGlassMatch[1],
+    /background:\s*rgba\(255,\s*255,\s*255,\s*0\.0[4-9]\d*\)/,
     "paper theme must restore translucent dark-surface .btn-glass background inside .dark-media-surface/.player-root",
+  );
+  assert.doesNotMatch(
+    darkBtnGlassMatch[1],
+    /(?:^|[\s;])color\s*:/,
+    "dark-surface .btn-glass (0,3,1) must not set color: directly or it clobbers .btn-glass--{ok,danger,accent,muted} (0,2,1)",
   );
   assert.match(
     paperCss,
@@ -1105,4 +1117,55 @@ test("paper theme restores dark .btn-glass and disabled .btn-accent inside .dark
     /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-accent:disabled\s*\{/,
     "paper theme must restore dark-surface .btn-accent:disabled fill",
   );
+});
+
+test("standalone non-AppShell views stack above body::before and modal/12px action buttons meet paper contrast", async () => {
+  for (const rel of [
+    "app/play/layout.tsx",
+    "components/player/player-page.tsx",
+    "src/not-found.tsx",
+    "components/route-fallback.tsx",
+  ]) {
+    const src = await readFile(path.join(webDir, rel), "utf8");
+    assert.match(
+      src,
+      /\brelative\s+z-10\b/,
+      `${rel} must establish relative z-10 stacking context above body::before (position: fixed; z-index: 0)`,
+    );
+  }
+
+  const sourceFiles = [
+    ...(await collectTsxFiles(path.join(webDir, "app"))),
+    ...(await collectTsxFiles(path.join(webDir, "components"))),
+  ];
+  const red85Violations = [];
+  const sky600Violations = [];
+  for (const file of sourceFiles) {
+    const rel = path.relative(webDir, file);
+    const content = await readFile(file, "utf8");
+    if (content.includes("bg-red-500/85")) red85Violations.push(rel);
+    if (/(?:^|[\s"'`])bg-sky-600\b/.test(content)) sky600Violations.push(rel);
+  }
+  assert.deepEqual(red85Violations, [], `Translucent bg-red-500/85 buttons found: ${red85Violations.join(", ")}`);
+  assert.deepEqual(sky600Violations, [], `Low-contrast 12px bg-sky-600 buttons found: ${sky600Violations.join(", ")}`);
+
+  for (const rel of [
+    "components/subscription-cancel-dialog.tsx",
+    "components/season-cleanup-dialog.tsx",
+    "components/media-activity/device-action-dialogs.tsx",
+    "components/task-center/task-layout.tsx",
+    "components/watch-history-menu.tsx",
+  ]) {
+    const src = await readFile(path.join(webDir, rel), "utf8");
+    assert.match(src, /\bbtn-danger\b/, `${rel} destructive modal button must use .btn-danger`);
+  }
+
+  for (const rel of [
+    "components/scheduled-jobs-view.tsx",
+    "components/maintenance-job-settings.tsx",
+  ]) {
+    const src = await readFile(path.join(webDir, rel), "utf8");
+    assert.match(src, /\bbg-sky-700\b/, `${rel} 12px sky action buttons must use bg-sky-700`);
+    assert.match(src, /\bhover:bg-sky-600\b/, `${rel} 12px sky action buttons must use hover:bg-sky-600`);
+  }
 });

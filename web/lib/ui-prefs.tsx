@@ -147,10 +147,10 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
       if (seq >= committedSeqRef.current) {
         committedSeqRef.current = seq;
         committedPrefsRef.current = saved;
+        writeUiPrefsCache(saved);
       }
       if (seq !== saveSeqRef.current) return;
       setPrefs(saved);
-      writeUiPrefsCache(saved);
       // 保存成功后草稿使命完成，撤销以免遮住刚落库的新值
       setPreview(null);
     } catch (err) {

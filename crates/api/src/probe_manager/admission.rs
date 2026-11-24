@@ -263,22 +263,19 @@ impl ProbeManager {
                 return false;
             }
         }
-        self.mark_job_paused_exempt(job_id.clone());
         unit.job_id = Some(job_id.clone());
         if self.should_defer_remote_dispatch(&unit.row.file.path) {
-            if paused {
-                self.remove_seen_any(&ledger_id);
-            } else {
-                self.remove_seen_if_job(&ledger_id, &job_id);
-            }
+            self.remove_seen_if_job(&ledger_id, &job_id);
+            self.mark_job_paused_exempt(job_id.clone());
             tracing::info!(
                 ledger_id,
                 job_id,
                 "远程读取已暂停，强制探测任务保持数据库排队"
             );
         } else {
-            self.set_seen(ledger_id.clone(), job_id.clone());
-            if self.queue_metadata(unit).is_err() {
+            let claimed = !paused || self.try_insert_seen(ledger_id.clone(), job_id.clone());
+            self.mark_job_paused_exempt(job_id.clone());
+            if claimed && self.queue_metadata(unit).is_err() {
                 self.remove_seen_if_job(&ledger_id, &job_id);
                 tracing::info!(ledger_id, job_id, "强制探测窗口已满，任务保持数据库排队");
                 self.wake.notify_waiters();
@@ -405,10 +402,10 @@ impl ProbeManager {
         // Presence may have changed after policy assessment. Keep this final check and
         // persistence under the same Store lock that presence writes take: a source
         // recorded missing must never gain probe work, whichever admission path asked.
-        self.store.library_write(|store| {
+        let (created, cancelled) = self.store.library_write(|store| {
             if store.ledger_is_missing(&ledger_id)? {
                 tracing::info!(ledger_id, "源文件已标记缺失，拒绝创建探测任务");
-                return Ok(false);
+                return Ok((false, Vec::new()));
             }
             let paused = supersede_when_paused && self.background_is_paused();
             if !paused {
@@ -420,10 +417,7 @@ impl ProbeManager {
                     &scope,
                     &[spec],
                 )?;
-                if created && supersede_when_paused {
-                    self.mark_job_paused_exempt(job_id.to_string());
-                }
-                return Ok(created);
+                return Ok((created, Vec::new()));
             }
             let exempt_jobs = self.paused_exempt_jobs_for_ledgers(std::slice::from_ref(&ledger_id));
             enum SingleTxErr {
@@ -431,7 +425,7 @@ impl ProbeManager {
                 Store(store::StoreError),
             }
             match store.with_write_tx(SingleTxErr::Store, |store| {
-                store
+                let cancelled = store
                     .cancel_dormant_queued_units_for_ledgers(
                         std::slice::from_ref(&ledger_id),
                         &exempt_jobs,
@@ -451,16 +445,18 @@ impl ProbeManager {
                 if !created {
                     return Err(SingleTxErr::Conflict);
                 }
-                Ok(())
+                Ok(cancelled)
             }) {
-                Ok(()) => {
-                    self.mark_job_paused_exempt(job_id.to_string());
-                    Ok(true)
-                }
-                Err(SingleTxErr::Conflict) => Ok(false),
+                Ok(cancelled) => Ok((true, cancelled)),
+                Err(SingleTxErr::Conflict) => Ok((false, Vec::new())),
                 Err(SingleTxErr::Store(err)) => Err(err),
             }
-        })
+        })?;
+        if !created {
+            return Ok(false);
+        }
+        self.finish_superseding_cancelled_units(&cancelled);
+        Ok(true)
     }
 }
 

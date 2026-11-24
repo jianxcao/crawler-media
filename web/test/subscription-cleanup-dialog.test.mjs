@@ -447,3 +447,40 @@ test("cancellation explains synchronous cleanup after deletion is selected", asy
   assert.doesNotMatch(selected, /后台|任务中心/);
   assert.match(selected, /等待.*结果/);
 });
+
+test("SeasonCleanupDialog and SubscriptionCancelDialog use theme-safe .btn-danger for destructive confirm buttons", async () => {
+  const seasonApp = fixture("season-cleanup-dialog");
+  const seasonTree = seasonApp.render({
+    open: true,
+    title: "Fixture",
+    seasons: [2],
+    onClose() {},
+    onConfirm() {},
+  });
+  const seasonConfirm = nodes(seasonTree).find(
+    (node) => node.type === "button" && text(node).includes("清理第"),
+  );
+  assert.ok(seasonConfirm, "SeasonCleanupDialog confirm button must exist");
+  assert.match(seasonConfirm.props.className, /\bbtn-danger\b/);
+  assert.doesNotMatch(seasonConfirm.props.className, /bg-red-500\/85/);
+
+  const cancelApp = fixture("subscription-cancel-dialog", {
+    getSubscriptionRemovalPreview: async () => preview,
+  });
+  const cancelProps = {
+    open: true,
+    subscriptionId: "s1",
+    title: "Fixture",
+    onClose() {},
+    onConfirm() {},
+  };
+  cancelApp.render(cancelProps);
+  await settle();
+  const cancelTree = cancelApp.render(cancelProps);
+  const cancelConfirm = nodes(cancelTree).find(
+    (node) => node.type === "button" && text(node).includes("取消订阅"),
+  );
+  assert.ok(cancelConfirm, "SubscriptionCancelDialog confirm button must exist");
+  assert.match(cancelConfirm.props.className, /\bbtn-danger\b/);
+  assert.doesNotMatch(cancelConfirm.props.className, /bg-red-500\/85/);
+});

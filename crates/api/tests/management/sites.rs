@@ -686,3 +686,111 @@ async fn create_and_patch_site_reject_invalid_downloader_id_and_clear_on_null_or
     .await;
     assert!(clear_empty["downloader_id"].is_null());
 }
+
+#[tokio::test]
+async fn apikey_only_site_strips_explicit_cookie_while_preserving_omitted_put_cookie() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_site(
+        &app,
+        json!({
+            "name": "M-Team", "url": "https://api.m-team.cc/", "profile_id": "mteam",
+            "api_key": "k1", "cookie": "explicit-post-cookie", "enabled": true
+        }),
+    )
+    .await;
+    let id = SiteId::from_str(created["id"].as_str().unwrap()).unwrap();
+    let uri = format!("/api/v1/sites/{id}");
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    assert_eq!(store.get_site(id).unwrap().unwrap().cookie, None);
+
+    let seed_cookie = || {
+        let cur = store.get_site(id).unwrap().unwrap();
+        let mut next = cur.clone();
+        next.cookie = Some("legacy-cookie".into());
+        assert!(store.save_site_if_current(&next, &cur).unwrap());
+    };
+    seed_cookie();
+
+    let put_omitted = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &uri,
+            Some("management-secret"),
+            json!({ "name": "M-Team Kept", "url": "https://api.m-team.cc/", "profile_id": "mteam", "enabled": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_omitted.status(), StatusCode::OK);
+    assert_eq!(
+        store.get_site(id).unwrap().unwrap().cookie.as_deref(),
+        Some("legacy-cookie")
+    );
+
+    for (method, payload) in [
+        (
+            "PUT",
+            json!({ "name": "M-Team", "url": "https://api.m-team.cc/", "profile_id": "mteam", "cookie": "strip", "enabled": true }),
+        ),
+        ("PATCH", json!({ "cookie": "strip-patch" })),
+    ] {
+        seed_cookie();
+        let resp = app
+            .clone()
+            .oneshot(request(method, &uri, Some("management-secret"), payload))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(store.get_site(id).unwrap().unwrap().cookie, None);
+    }
+}
+
+#[tokio::test]
+async fn list_and_get_sites_resolve_auth_type_against_overlay_profiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay_dir = tmp.path().join("profiles");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("customapi.yaml"),
+        "id: customapi\nframework: api\nauth_types: [apikey]\nbase_url: https://custom.example\nsearch:\n  path: /api/torrents\n  query_param: q\n",
+    )
+    .unwrap();
+    let app = router(
+        api::ApiState::new(
+            Store::open(tmp.path().join("data")).unwrap(),
+            "management-secret".into(),
+            indexer::ProfileSet::load(Some(&overlay_dir)).unwrap(),
+            Arc::new(Fixtures {
+                requests: Mutex::new(Vec::new()),
+                bodies: HashMap::new(),
+            }),
+            Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+        )
+        .unwrap(),
+    );
+    let created = post_site(
+        &app,
+        json!({ "name": "CustomAPI", "profile_id": "customapi", "cookie": "strip" }),
+    )
+    .await;
+    let id = SiteId::from_str(created["id"].as_str().unwrap()).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let cur = store.get_site(id).unwrap().unwrap();
+    assert_eq!(cur.cookie, None);
+    let mut stale = cur.clone();
+    stale.cookie = Some("stale-cookie".into());
+    assert!(store.save_site_if_current(&stale, &cur).unwrap());
+
+    for uri in [format!("/api/v1/sites/{id}"), "/api/v1/sites".into()] {
+        let data = json_data(
+            app.clone()
+                .oneshot(request("GET", &uri, Some("management-secret"), Value::Null))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let row = data.as_array().map(|a| &a[0]).unwrap_or(&data);
+        assert_eq!(row["auth_type"], "none", "{uri}");
+    }
+}

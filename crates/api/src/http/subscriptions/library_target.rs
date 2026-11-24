@@ -14,23 +14,35 @@ pub(super) fn resolve(
 ) -> Result<Option<LibraryId>, Response> {
     let is_admin = store.user_role(user_id).map_err(store_error)? == "admin";
     let Some(raw) = raw.filter(|value| !value.is_empty()) else {
-        if let Some(default_lib) = store.default_library(kind).map_err(store_error)? {
-            if !crate::http::routing_preview::user_can_auto_route_library(
-                &default_lib,
-                Some(user_id),
-                is_admin,
-            ) {
-                return Err(invalid("指定的媒体库不存在"));
+        match store.default_library(kind).map_err(store_error)? {
+            Some(default_lib) => {
+                if !crate::http::routing_preview::user_can_auto_route_library(
+                    &default_lib,
+                    Some(user_id),
+                    is_admin,
+                ) {
+                    return Err(invalid("指定的媒体库不存在"));
+                }
+                if !store
+                    .library_accepts_work(&default_lib.id)
+                    .map_err(store_error)?
+                {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "subscription.library_unavailable",
+                        "目标媒体库正在删除或重建",
+                    ));
+                }
             }
-            if !store
-                .library_accepts_work(&default_lib.id)
-                .map_err(store_error)?
-            {
-                return Err(err(
-                    StatusCode::CONFLICT,
-                    "subscription.library_unavailable",
-                    "目标媒体库正在删除或重建",
-                ));
+            None => {
+                if store
+                    .list_libraries()
+                    .map_err(store_error)?
+                    .iter()
+                    .any(|l| l.kind == kind)
+                {
+                    return Err(invalid("没有可用的目标媒体库"));
+                }
             }
         }
         return Ok(None);
@@ -116,5 +128,66 @@ mod tests {
         store.reader_pool(store::Db::Library).close();
         let resp = resolve(&store, None, MediaKind::Tv, user_id).unwrap_err();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn resolve_rejects_untargeted_when_kind_has_libraries_but_no_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let user_id = UserId::new();
+        store
+            .insert_user_with_password(
+                &domain::User {
+                    id: user_id,
+                    login: "admin".into(),
+                    enabled: true,
+                    role: domain::UserRole::Admin,
+                },
+                "secret",
+            )
+            .unwrap();
+        let movie_root = tmp.path().join("movies");
+        let tv_root = tmp.path().join("tv");
+        std::fs::create_dir_all(&movie_root).unwrap();
+        std::fs::create_dir_all(&tv_root).unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "电影",
+                &[movie_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(resolve(&store, None, MediaKind::Tv, user_id).unwrap(), None);
+        assert_eq!(
+            resolve(&store, Some(""), MediaKind::Tv, user_id).unwrap(),
+            None
+        );
+
+        store
+            .create_library(
+                MediaKind::Tv,
+                "剧集",
+                &[tv_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        store
+            .with_writer(store::Db::Library, |conn| {
+                conn.execute("UPDATE libraries SET is_default = 0 WHERE kind = 'tv'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.default_library(MediaKind::Tv).unwrap().is_none());
+
+        for raw in [None, Some("")] {
+            let resp = resolve(&store, raw, MediaKind::Tv, user_id).unwrap_err();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

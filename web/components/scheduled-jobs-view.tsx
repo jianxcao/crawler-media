@@ -317,7 +317,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                           onClick={() => setScheduleSecs(String(preset.secs))}
                           className={`rounded px-2 py-1 text-xs transition ${
                             scheduleSecs.trim() !== "" && Number(scheduleSecs) === preset.secs
-                              ? "bg-sky-600 font-medium text-[#ffffff]"
+                              ? "bg-sky-700 font-medium text-[#ffffff] hover:bg-sky-600"
                               : "bg-white/10 text-white/70 hover:bg-white/20"
                           }`}
                         >
@@ -348,7 +348,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                           setScheduleSecs(String(clamped));
                           void handleUpdateSchedule(job.id, clamped);
                         }}
-                        className="rounded bg-sky-600 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-500 disabled:opacity-50"
+                        className="rounded bg-sky-700 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-600 disabled:opacity-50"
                       >
                         {updatingSchedule ? "保存中..." : "保存周期"}
                       </button>

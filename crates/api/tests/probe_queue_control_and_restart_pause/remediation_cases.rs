@@ -17,12 +17,12 @@ use super::{
     poll_until, production_state, seed_scanned_movie, seed_tv_episodes,
 };
 
-struct AdaptiveFallbackTracks {
-    captures: AtomicUsize,
+pub(super) struct AdaptiveFallbackTracks {
+    pub(super) captures: AtomicUsize,
 }
 
 impl AdaptiveFallbackTracks {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             captures: AtomicUsize::new(0),
         })
@@ -118,7 +118,10 @@ impl api::probe_manager::TracksProbe for AdaptiveFallbackTracks {
     }
 }
 
-fn adaptive_production_state(root: &Path, tracks: Arc<AdaptiveFallbackTracks>) -> api::ApiState {
+pub(super) fn adaptive_production_state(
+    root: &Path,
+    tracks: Arc<AdaptiveFallbackTracks>,
+) -> api::ApiState {
     let root = root.to_path_buf();
     let base = std::thread::spawn(move || {
         let store = Arc::new(api::Store::open(root.join("data")).unwrap());
@@ -448,7 +451,7 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
             .await
             .unwrap()
     });
-    poll_until(|| state.probe.assessments.load(Ordering::SeqCst) >= 1).await;
+    poll_until(|| !state.probe.background_is_paused()).await;
     let gate = state.write_gate();
     let gate_guard = gate.close();
     release_tx.send(()).unwrap();
@@ -463,7 +466,6 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
     );
 
     // 2. Concurrent POST /probe/pause while POST /probe/resume is mid-flight must stay paused.
-    let before = state.probe.assessments.load(Ordering::SeqCst);
     let (held_tx2, held_rx2) = std::sync::mpsc::channel();
     let (release_tx2, release_rx2) = std::sync::mpsc::channel();
     let writer_store2 = state.store();
@@ -490,7 +492,7 @@ async fn resume_keeps_paused_on_midflight_write_gate_refusal_and_concurrent_paus
             .await
             .unwrap()
     });
-    poll_until(|| state.probe.assessments.load(Ordering::SeqCst) > before).await;
+    poll_until(|| !state.probe.background_is_paused()).await;
     let pause_resp = admin_json(&app, "POST", "/api/v1/probe/pause", json!({})).await;
     assert_eq!(pause_resp["paused"], true);
     release_tx2.send(()).unwrap();

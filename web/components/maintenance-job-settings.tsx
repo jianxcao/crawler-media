@@ -340,7 +340,7 @@ export function MaintenanceJobSettings({
           type="button"
           onClick={handleSave}
           disabled={saving || retentionInvalid}
-          className="rounded bg-sky-600 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-500 disabled:opacity-50"
+          className="rounded bg-sky-700 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-600 disabled:opacity-50"
         >
           {saving ? "保存中..." : "保存维护配置"}
         </button>

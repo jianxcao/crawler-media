@@ -25,7 +25,7 @@ export default function PlayLayout() {
 
   return (
     <AuthGate>
-      <div className="viewport-overlay-height w-full overflow-hidden bg-black">
+      <div className="relative z-10 viewport-overlay-height w-full overflow-hidden bg-black">
         <Suspense fallback={<RouteFallback />}>
           <Outlet />
         </Suspense>

@@ -1059,11 +1059,13 @@ test("Item 8: MaintenanceJobSettings preserves operations_days and uses toast.er
       }),
     );
   });
+  const saveMaintBtn = mRenderer.root
+    .findAllByType("button")
+    .find((b) => textOf(b).includes("保存维护配置"));
+  assert.match(saveMaintBtn.props.className, /\bbg-sky-700\b/);
+  assert.match(saveMaintBtn.props.className, /\bhover:bg-sky-600\b/);
   await act(async () => {
-    await mRenderer.root
-      .findAllByType("button")
-      .find((b) => textOf(b).includes("保存维护配置"))
-      .props.onClick();
+    await saveMaintBtn.props.onClick();
   });
   assert.equal(savedConfigs.length, 1);
   assert.equal(
@@ -1161,6 +1163,18 @@ test("Item 8: MaintenanceJobSettings preserves operations_days and uses toast.er
   await act(async () => {
     editScheduleBtn.props.onClick();
   });
+
+  const activePresetBtn = sjRenderer.root
+    .findAllByType("button")
+    .find((b) => textOf(b) === "1天");
+  assert.match(activePresetBtn.props.className, /\bbg-sky-700\b/);
+  assert.match(activePresetBtn.props.className, /\bhover:bg-sky-600\b/);
+
+  const saveScheduleBtnInitial = sjRenderer.root
+    .findAllByType("button")
+    .find((b) => textOf(b).includes("保存周期"));
+  assert.match(saveScheduleBtnInitial.props.className, /\bbg-sky-700\b/);
+  assert.match(saveScheduleBtnInitial.props.className, /\bhover:bg-sky-600\b/);
 
   const getScheduleInput = () =>
     sjRenderer.root.find((n) => n.type === "input" && n.props.type === "number");
@@ -1339,4 +1353,301 @@ test("Item 10: CatalogCacheView replaces native window.confirm and alert with us
   assert.deepEqual(deletedCalls[0], { source: "tmdb", keys: ["k1", "k2"] });
 
   await act(async () => ccRenderer.unmount());
+});
+
+test("Round 3: standalone non-AppShell views render relative z-10 roots and modal/12px buttons render contrast-safe classes", async () => {
+  const prevDoc = globalThis.document;
+  globalThis.document = { querySelector: () => null };
+  try {
+    // 1. PlayLayout root wrapper
+    const { default: PlayLayout } = transpileFile("app/play/layout.tsx", {
+      "react-router-dom": { Outlet: () => React.createElement("div", { "data-testid": "outlet" }) },
+      "@/components/auth-gate": { AuthGate: ({ children }) => React.createElement(React.Fragment, null, children) },
+      "@/components/route-fallback": { RouteFallback: () => null },
+    });
+    let playRenderer;
+    await act(async () => {
+      playRenderer = create(React.createElement(PlayLayout));
+    });
+    const playRoot = playRenderer.root.findByType("div");
+    assert.match(playRoot.props.className, /\brelative\b/);
+    assert.match(playRoot.props.className, /\bz-10\b/);
+    await act(async () => playRenderer.unmount());
+
+    // 2. PlayerPage failed state root wrapper
+    const { PlayerPage } = transpileFile("components/player/player-page.tsx", {
+      "react-router-dom": { useNavigate: () => () => {} },
+      "@/components/player/video-player": { VideoPlayer: () => null },
+      "@/lib/api/playback": {
+        DEFAULT_PLAYBACK_SCOPE: "member",
+        getPlaybackItem: async () => {
+          throw new Error("条目不可见");
+        },
+        getPlaybackItemEpisodes: async () => ({ season_number: 1, episodes: [] }),
+      },
+      "@/lib/image-proxy": { imageUrl: (u) => u },
+      "@/lib/player/play-links": { playerReturnPath: () => null },
+    });
+    let failedPlayerRenderer;
+    await act(async () => {
+      failedPlayerRenderer = create(React.createElement(PlayerPage, { mediaItemId: "item-err" }));
+      await Promise.resolve();
+    });
+    const failedRoot = failedPlayerRenderer.root
+      .findAllByType("div")
+      .find((d) => String(d.props.className ?? "").includes("dark-media-surface"));
+    assert.ok(failedRoot, "PlayerPage failed screen must render dark-media-surface wrapper");
+    assert.match(failedRoot.props.className, /\brelative\b/);
+    assert.match(failedRoot.props.className, /\bz-10\b/);
+    await act(async () => failedPlayerRenderer.unmount());
+
+    // 3. NotFound & RouteFallback root wrappers
+    const { NotFound } = transpileFile("src/not-found.tsx");
+    let nfRenderer;
+    await act(async () => {
+      nfRenderer = create(React.createElement(NotFound));
+    });
+    const nfRoot = nfRenderer.root.findByType("div");
+    assert.match(nfRoot.props.className, /\brelative\b/);
+    assert.match(nfRoot.props.className, /\bz-10\b/);
+    await act(async () => nfRenderer.unmount());
+
+    const { RouteFallback } = transpileFile("components/route-fallback.tsx", {
+      "@/components/brand-loader": { BrandLoader: () => React.createElement("span") },
+    });
+    let rfRenderer;
+    await act(async () => {
+      rfRenderer = create(React.createElement(RouteFallback));
+    });
+    const rfRoot = rfRenderer.root.findByType("div");
+    assert.match(rfRoot.props.className, /\brelative\b/);
+    assert.match(rfRoot.props.className, /\bz-10\b/);
+    await act(async () => rfRenderer.unmount());
+
+    // 4. RevokeDeviceDialog, DeleteDownloadTaskDialog, and ClearLibraryHistoryDialog use .btn-danger
+    const { RevokeDeviceDialog } = transpileFile("components/media-activity/device-action-dialogs.tsx", {
+      "@/components/modal": { Modal: ModalStub },
+    });
+    let revokeRenderer;
+    await act(async () => {
+      revokeRenderer = create(
+        React.createElement(RevokeDeviceDialog, {
+          target: { userId: "u1", deviceId: "d1", label: "Apple TV" },
+          busy: false,
+          onClose() {},
+          onConfirm() {},
+        }),
+      );
+    });
+    const revokeBtn = revokeRenderer.root
+      .findAllByType("button")
+      .find((b) => textOf(b).includes("注销设备"));
+    assert.match(revokeBtn.props.className, /\bbtn-danger\b/);
+    assert.doesNotMatch(revokeBtn.props.className, /bg-red-500\/85/);
+    await act(async () => revokeRenderer.unmount());
+
+    const { DeleteDownloadTaskDialog } = transpileFile("components/task-center/task-layout.tsx", {
+      "react-router-dom": { Link: ({ to, children }) => React.createElement("a", { href: to }, children) },
+      "@/components/icons": IconStub,
+      "@/components/modal": { Modal: ModalStub },
+      "@/lib/format": { formatBytes: (v) => `${v} B` },
+    });
+    let delTaskRenderer;
+    await act(async () => {
+      delTaskRenderer = create(
+        React.createElement(DeleteDownloadTaskDialog, {
+          task: {
+            downloader_id: "dl-1",
+            downloader_name: "qB",
+            info_hash: "abc",
+            name: "Demo.mkv",
+            subscriptions: [],
+          },
+          busy: false,
+          onClose() {},
+          onConfirm() {},
+        }),
+      );
+    });
+    const delTaskBtn = delTaskRenderer.root
+      .findAllByType("button")
+      .find((b) => textOf(b).includes("仅删除任务"));
+    assert.match(delTaskBtn.props.className, /\bbtn-danger\b/);
+    assert.doesNotMatch(delTaskBtn.props.className, /bg-red-500\/85/);
+    await act(async () => delTaskRenderer.unmount());
+
+    const { WatchHistoryMenu } = transpileFile("components/watch-history-menu.tsx", {
+      "@radix-ui/react-dropdown-menu": DropdownStub,
+      "@/components/feedback": {
+        useConfirm: () => async () => false,
+        useToast: () => ({ success() {}, error() {}, info() {} }),
+      },
+      "@/components/icons": IconStub,
+      "@/components/modal": { Modal: ModalStub },
+      "@/lib/api/playback": { clearPlaybackHistory: async () => ({ deleted_states: 1 }) },
+    });
+    let whRenderer;
+    await act(async () => {
+      whRenderer = create(
+        React.createElement(WatchHistoryMenu, {
+          libraries: [{ id: "lib-1", name: "电影", kind: "movie" }],
+          onCleared() {},
+        }),
+      );
+    });
+    await act(async () => {
+      whRenderer.root
+        .findAllByType("button")
+        .find((b) => textOf(b).includes("清空某个媒体库的观看记录"))
+        .props.onClick();
+    });
+    const clearLibBtn = whRenderer.root
+      .findAllByType("button")
+      .find((b) => textOf(b).includes("清空「电影」"));
+    assert.match(clearLibBtn.props.className, /\bbtn-danger\b/);
+    assert.doesNotMatch(clearLibBtn.props.className, /bg-red-500\/85/);
+    await act(async () => whRenderer.unmount());
+  } finally {
+    if (prevDoc === undefined) delete globalThis.document;
+    else globalThis.document = prevDoc;
+  }
+});
+
+test("Round 3: UiPrefsProvider.savePrefs writes server-committed prefs to localStorage even when superseded by a concurrent save that fails", async () => {
+  const prevWin = globalThis.window;
+  const prevDoc = globalThis.document;
+  const prevStorage = globalThis.localStorage;
+  const prevMO = globalThis.MutationObserver;
+
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  globalThis.window = { localStorage: globalThis.localStorage };
+  globalThis.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+  };
+  globalThis.document = {
+    documentElement: {
+      style: { setProperty() {} },
+      setAttribute() {},
+      removeAttribute() {},
+      getAttribute: () => null,
+    },
+    querySelector: () => null,
+  };
+
+  try {
+    const basePrefs = {
+      theme: "silver",
+      sidebar: { transparency: 0.49, brightness: -0.36, depth: 28 },
+      scrim: { blur: 13, dark: 0.69 },
+      nav: { order: [] },
+      home: { rows: [] },
+    };
+    store.set("crawler-media.ui-prefs", JSON.stringify(basePrefs));
+
+    const pendingUpdates = [];
+    const { UiPrefsProvider, useUiPrefs } = transpileFile("lib/ui-prefs.tsx", {
+      "@/lib/api/ui": {
+        DEFAULT_UI_PREFS: basePrefs,
+        fetchUiPreferences: async () => basePrefs,
+        updateUiPreferences: (next) =>
+          new Promise((resolve, reject) => {
+            pendingUpdates.push({ next, resolve, reject });
+          }),
+      },
+    });
+
+    let latestCtx = null;
+    function Probe() {
+      latestCtx = useUiPrefs();
+      return null;
+    }
+
+    let renderer;
+    await act(async () => {
+      renderer = create(
+        React.createElement(UiPrefsProvider, null, React.createElement(Probe)),
+      );
+      await Promise.resolve();
+    });
+    assert.equal(latestCtx.prefs.theme, "silver");
+
+    // Trigger save #1 (paper), then immediately save #2 (liquid) while #1 is in flight
+    let save1Promise;
+    let save2Promise;
+    await act(async () => {
+      save1Promise = latestCtx.savePrefs({ ...basePrefs, theme: "paper" });
+      save2Promise = latestCtx.savePrefs({ ...basePrefs, theme: "liquid" });
+    });
+    assert.equal(pendingUpdates.length, 2);
+    assert.equal(latestCtx.prefs.theme, "liquid");
+
+    // Save #1 succeeds on server while save #2 is still in flight
+    await act(async () => {
+      pendingUpdates[0].resolve({ ...basePrefs, theme: "paper" });
+      await save1Promise;
+    });
+    // localStorage FOUC cache must already record the newly server-committed "paper"
+    assert.equal(
+      JSON.parse(store.get("crawler-media.ui-prefs")).theme,
+      "paper",
+      "superseded save #1 that succeeded on server must still update localStorage cache",
+    );
+
+    // Save #2 fails -> React state rolls back to "paper" AND localStorage matches "paper"
+    let save2Err = null;
+    await act(async () => {
+      pendingUpdates[1].reject(new Error("500 write timeout"));
+      try {
+        await save2Promise;
+      } catch (err) {
+        save2Err = err;
+      }
+    });
+    assert.ok(save2Err instanceof Error);
+    assert.equal(latestCtx.prefs.theme, "paper", "React prefs must roll back to save #1 ('paper')");
+    assert.equal(
+      JSON.parse(store.get("crawler-media.ui-prefs")).theme,
+      "paper",
+      "localStorage cache must match rolled-back server state ('paper'), not stale 'silver'",
+    );
+
+    // Also verify out-of-order resolution: save #3 (liquid) vs save #4 (netflix) where #4 resolves first
+    let save3Promise;
+    let save4Promise;
+    await act(async () => {
+      save3Promise = latestCtx.savePrefs({ ...basePrefs, theme: "liquid" });
+      save4Promise = latestCtx.savePrefs({ ...basePrefs, theme: "netflix" });
+    });
+    await act(async () => {
+      pendingUpdates[3].resolve({ ...basePrefs, theme: "netflix" });
+      await save4Promise;
+    });
+    await act(async () => {
+      pendingUpdates[2].resolve({ ...basePrefs, theme: "liquid" });
+      await save3Promise;
+    });
+    assert.equal(latestCtx.prefs.theme, "netflix");
+    assert.equal(
+      JSON.parse(store.get("crawler-media.ui-prefs")).theme,
+      "netflix",
+      "older out-of-order save #3 must not overwrite newer committed cache ('netflix')",
+    );
+
+    await act(async () => renderer.unmount());
+  } finally {
+    if (prevWin === undefined) delete globalThis.window;
+    else globalThis.window = prevWin;
+    if (prevDoc === undefined) delete globalThis.document;
+    else globalThis.document = prevDoc;
+    if (prevStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = prevStorage;
+    if (prevMO === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = prevMO;
+  }
 });

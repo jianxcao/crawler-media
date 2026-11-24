@@ -50,7 +50,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         Ok(id) => id,
         Err((status, code, msg)) => return err(status, code, msg),
     };
-    let (allow_api_key, _) = profile_auth_support(Some(profile));
+    let (allow_api_key, allow_cookie) = profile_auth_support(Some(profile));
     let maintenance_via = match body.maintenance_via.as_deref() {
         Some(s) => match s.parse::<domain::MaintenanceVia>() {
             Ok(v) => v,
@@ -87,7 +87,11 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         name: body.name,
         url,
         profile_id: body.profile_id,
-        cookie: body.cookie.and_then(normalize_optional),
+        cookie: if allow_cookie {
+            body.cookie.and_then(normalize_optional)
+        } else {
+            None
+        },
         api_key: if allow_api_key {
             body.api_key.and_then(normalize_optional)
         } else {
@@ -216,6 +220,11 @@ fn replacement_site(
     } else {
         None
     };
+    let cookie = match body.cookie {
+        Some(v) if allow_cookie => normalize_optional(v),
+        Some(_) => None,
+        None => retain_cookie,
+    };
     let api_key = if allow_api_key {
         replacement_credential(body.api_key, current.api_key)
     } else {
@@ -226,7 +235,7 @@ fn replacement_site(
         name: body.name,
         url,
         profile_id: body.profile_id,
-        cookie: replacement_credential(body.cookie, retain_cookie),
+        cookie,
         api_key,
         rss_url: replacement_credential(body.rss_url, current.rss_url),
         proxy,
@@ -283,7 +292,7 @@ async fn patch_site_inner(
             site.name = name;
         }
         let profile = indexer.profile(&site.profile_id);
-        let (allow_api_key, _) = profile_auth_support(profile);
+        let (allow_api_key, allow_cookie) = profile_auth_support(profile);
         if let Some(raw_url) = body.url {
             match resolve_site_url(&raw_url, profile) {
                 Ok(url) => site.url = url,
@@ -291,7 +300,11 @@ async fn patch_site_inner(
             }
         }
         if let Some(cookie) = body.cookie {
-            site.cookie = normalize_optional(cookie);
+            site.cookie = if allow_cookie {
+                normalize_optional(cookie)
+            } else {
+                None
+            };
         }
         if let Some(api_key) = body.api_key {
             site.api_key = if allow_api_key {

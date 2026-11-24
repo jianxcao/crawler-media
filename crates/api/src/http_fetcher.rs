@@ -58,17 +58,8 @@ impl Fetcher for HttpFetcher {
             .read_to_string()
             .map_err(|error| IndexerError::Fetch(error.to_string()))?;
         if status.as_u16() >= 400 {
-            let has_api_error_envelope = is_api_key
-                && !request.key.starts_with("rss:")
-                && serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|value| value.as_object().cloned())
-                    .is_some_and(|obj| {
-                        obj.get("success") == Some(&serde_json::Value::Bool(false))
-                            || obj
-                                .get("code")
-                                .is_some_and(|c| !c.is_null() && c != "0" && c != 0)
-                    });
+            let has_api_error_envelope =
+                is_api_key && !request.key.starts_with("rss:") && has_dialect_error_envelope(&body);
             if !has_api_error_envelope {
                 return Err(IndexerError::Fetch(format!(
                     "http status: {}",
@@ -78,6 +69,29 @@ impl Fetcher for HttpFetcher {
         }
         Ok(body)
     }
+}
+
+fn has_dialect_error_envelope(body: &str) -> bool {
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let success_failed = match obj.get("success") {
+        Some(serde_json::Value::Bool(false)) => true,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(0),
+        Some(serde_json::Value::String(s)) => {
+            matches!(s.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no")
+        }
+        _ => false,
+    };
+    let code_failed = match obj.get("code") {
+        Some(serde_json::Value::String(s)) => {
+            let t = s.trim();
+            !t.is_empty() && t != "0"
+        }
+        Some(serde_json::Value::Number(n)) => n.to_string() != "0",
+        _ => false,
+    };
+    success_failed || code_failed
 }
 
 #[cfg(test)]
@@ -108,10 +122,14 @@ mod tests {
     }
 
     #[test]
-    fn api_key_request_preserves_dialect_error_envelopes_and_rejects_other_http_errors() {
+    fn api_key_request_preserves_scalar_dialect_error_envelopes() {
         for json_body in [
             r#"{"success":false,"message":"Invalid API Key"}"#,
+            r#"{"success":0,"message":"Invalid API Key"}"#,
+            r#"{"success":"false","message":"Invalid API Key"}"#,
+            r#"{"success":"no","message":"Invalid API Key"}"#,
             r#"{"code":"401","message":"bad key"}"#,
+            r#"{"code":401,"message":"bad key"}"#,
         ] {
             let url = spawn_one_shot_http("401 Unauthorized", "application/json", json_body);
             let req = FetchRequest {
@@ -127,6 +145,29 @@ mod tests {
             assert_eq!(HttpFetcher.fetch(&req).unwrap(), json_body);
         }
 
+        let rss_url = spawn_one_shot_http(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"success":false,"message":"Invalid API Key"}"#,
+        );
+        let rss_req = FetchRequest {
+            key: "rss:https://example.test/rss".into(),
+            url: rss_url,
+            method: FetchMethod::Get,
+            body: None,
+            cookie: None,
+            api_key: Some("bad-key".into()),
+            proxy: None,
+            cdp_url: None,
+        };
+        assert_eq!(
+            HttpFetcher.fetch(&rss_req).unwrap_err().to_string(),
+            "http status: 401"
+        );
+    }
+
+    #[test]
+    fn api_key_request_rejects_non_error_or_non_scalar_http_errors() {
         for (status_line, content_type, body, expected_err) in [
             (
                 "401 Unauthorized",
@@ -139,6 +180,42 @@ mod tests {
                 "application/json",
                 r#"{"error":"Bad Gateway"}"#,
                 "http status: 502",
+            ),
+            (
+                "502 Bad Gateway",
+                "application/json",
+                r#"{"code":[]}"#,
+                "http status: 502",
+            ),
+            (
+                "502 Bad Gateway",
+                "application/json",
+                r#"{"code":{}}"#,
+                "http status: 502",
+            ),
+            (
+                "500 Internal Server Error",
+                "application/json",
+                r#"{"code":false}"#,
+                "http status: 500",
+            ),
+            (
+                "500 Internal Server Error",
+                "application/json",
+                r#"{"code":""}"#,
+                "http status: 500",
+            ),
+            (
+                "500 Internal Server Error",
+                "application/json",
+                r#"{"code":"   "}"#,
+                "http status: 500",
+            ),
+            (
+                "500 Internal Server Error",
+                "application/json",
+                r#"{"code":" 0 "}"#,
+                "http status: 500",
             ),
             (
                 "502 Bad Gateway",
@@ -167,26 +244,6 @@ mod tests {
             let err = HttpFetcher.fetch(&req).unwrap_err();
             assert_eq!(err.to_string(), expected_err, "body={body}");
         }
-
-        let rss_url = spawn_one_shot_http(
-            "401 Unauthorized",
-            "application/json",
-            r#"{"success":false,"message":"Invalid API Key"}"#,
-        );
-        let rss_req = FetchRequest {
-            key: "rss:https://example.test/rss".into(),
-            url: rss_url,
-            method: FetchMethod::Get,
-            body: None,
-            cookie: None,
-            api_key: Some("bad-key".into()),
-            proxy: None,
-            cdp_url: None,
-        };
-        assert_eq!(
-            HttpFetcher.fetch(&rss_req).unwrap_err().to_string(),
-            "http status: 401"
-        );
     }
 
     #[test]

@@ -87,7 +87,7 @@ export function RevokeDeviceDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-[#ffffff] transition hover:bg-red-500 disabled:opacity-40"
+            className="btn-danger rounded-lg px-4 py-2 text-ui font-medium"
           >
             {busy ? "正在注销…" : "注销设备"}
           </button>

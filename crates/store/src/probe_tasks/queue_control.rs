@@ -179,12 +179,14 @@ impl crate::LibraryConnection<'_> {
     /// Cancel unstarted `status = 'queued'` units on `ledger_ids` whose `job_id`
     /// is not in `exempt_job_ids`, allowing an explicit refresh while paused to
     /// supersede dormant background work without touching running or exempt jobs.
+    ///
+    /// Returns `(cancelled_job_id, file_id)` pairs in cancellation order.
     pub fn cancel_dormant_queued_units_for_ledgers(
         &self,
         ledger_ids: &[String],
         exempt_job_ids: &HashSet<String>,
         reason: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    ) -> Result<Vec<(String, String)>, StoreError> {
         if ledger_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -195,8 +197,8 @@ impl crate::LibraryConnection<'_> {
             tx.commit()?;
             return Ok(Vec::new());
         }
-        let mut cancelled_files = Vec::with_capacity(targets.len());
-        let mut seen_files = BTreeSet::new();
+        let mut cancelled_units = Vec::with_capacity(targets.len());
+        let mut seen_pairs = BTreeSet::new();
         let mut affected_jobs = BTreeSet::new();
         let mut analysis_targets = Vec::new();
         cancel_selected_targets(
@@ -204,8 +206,8 @@ impl crate::LibraryConnection<'_> {
             targets,
             reason,
             &mut affected_jobs,
-            &mut seen_files,
-            &mut cancelled_files,
+            &mut seen_pairs,
+            &mut cancelled_units,
             Some(&mut analysis_targets),
         )?;
         for (job_id, file_id) in analysis_targets {
@@ -218,8 +220,8 @@ impl crate::LibraryConnection<'_> {
                 residual,
                 reason,
                 &mut affected_jobs,
-                &mut seen_files,
-                &mut cancelled_files,
+                &mut seen_pairs,
+                &mut cancelled_units,
                 None,
             )?;
         }
@@ -228,7 +230,7 @@ impl crate::LibraryConnection<'_> {
             reconcile_cancelled_job(&tx, &job_id, reason, now)?;
         }
         tx.commit()?;
-        Ok(cancelled_files)
+        Ok(cancelled_units)
     }
 }
 
@@ -446,8 +448,8 @@ fn cancel_selected_targets(
     targets: Vec<(String, String, String)>,
     reason: &str,
     affected_jobs: &mut BTreeSet<String>,
-    seen_files: &mut BTreeSet<String>,
-    cancelled_files: &mut Vec<String>,
+    seen_pairs: &mut BTreeSet<(String, String)>,
+    cancelled_units: &mut Vec<(String, String)>,
     mut analysis_targets: Option<&mut Vec<(String, String)>>,
 ) -> Result<(), StoreError> {
     let mut update = tx.prepare(
@@ -461,11 +463,77 @@ fn cancel_selected_targets(
             {
                 list.push((job_id.clone(), file_id.clone()));
             }
-            affected_jobs.insert(job_id);
-            if seen_files.insert(file_id.clone()) {
-                cancelled_files.push(file_id);
+            affected_jobs.insert(job_id.clone());
+            let pair = (job_id, file_id);
+            if seen_pairs.insert(pair.clone()) {
+                cancelled_units.push(pair);
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::{ProbeDispatchStage, ProbeJobUnitSpec, Store};
+
+    #[test]
+    fn cancel_dormant_queued_units_returns_job_and_file_pairs_while_preserving_exempt_and_running()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("data")).unwrap();
+        for (job_id, file_id) in [
+            ("job-dormant", "file-1"),
+            ("job-exempt", "file-2"),
+            ("job-running", "file-3"),
+        ] {
+            assert!(
+                store
+                    .create_probe_job(
+                        job_id,
+                        "media_probe",
+                        "media-1",
+                        None,
+                        &format!("ledger:{file_id}"),
+                        &[ProbeJobUnitSpec {
+                            ledger_id: file_id,
+                            kind: "movie",
+                            force_fingerprint: false,
+                            reuse_fingerprint_cache: true,
+                            overwrite_markers: false,
+                            reuse_media_info_cache: true,
+                        }],
+                    )
+                    .unwrap()
+            );
+        }
+        assert!(
+            store
+                .start_probe_unit("job-running", "file-3", ProbeDispatchStage::Metadata)
+                .unwrap()
+        );
+        let exempt = HashSet::from(["job-exempt".to_string()]);
+        let target_ids = vec![
+            "file-1".to_string(),
+            "file-2".to_string(),
+            "file-3".to_string(),
+        ];
+        let cancelled = store
+            .with_library_write(|db| {
+                db.cancel_dormant_queued_units_for_ledgers(&target_ids, &exempt, "superseded")
+            })
+            .unwrap();
+        assert_eq!(
+            cancelled,
+            vec![("job-dormant".to_string(), "file-1".to_string())]
+        );
+        assert_eq!(
+            store.get_probe_job("job-dormant").unwrap().unwrap().status,
+            "cancelled"
+        );
+        assert!(store.is_probe_unit_active("job-exempt", "file-2").unwrap());
+        assert!(store.is_probe_unit_active("job-running", "file-3").unwrap());
+    }
 }
