@@ -99,13 +99,13 @@ private sampleBackground = 0;
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.image);
     this.ready = true;
-    this.draw();
+    this.requestDraw();
   };
   private handleVideoReady = () => {
     if (this.disposed || !this.video) return;
     this.ready = true;
     void this.video.play().catch(() => {});
-    this.draw();
+    this.requestDraw();
   };
 
   /**
@@ -175,7 +175,7 @@ private sampleBackground = 0;
     }
     this.image = new Image();
     this.loadSource(imageUrl);
-    this.watchPosition();
+    this.positionFrame = window.requestAnimationFrame(this.watchPosition);
   }
 
   /** 创建全部 GL 资源。构造时调用一次；上下文丢失后恢复时会再次调用重建。 */
@@ -315,8 +315,10 @@ private sampleBackground = 0;
     if (this.disposed) return;
     const rect = this.canvas.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (dpr !== this.lastDpr && rect.width > 0 && rect.height > 0) {
-      this.resize(rect.width, rect.height);
+    const layoutWidth = this.canvas.clientWidth || rect.width;
+    const layoutHeight = this.canvas.clientHeight || rect.height;
+    if (dpr !== this.lastDpr && layoutWidth > 0 && layoutHeight > 0) {
+      this.resize(layoutWidth, layoutHeight);
     }
     const viewport = {
       width: window.innerWidth,

@@ -289,12 +289,13 @@ fn create_with_auto_library_fallback(
     let outcome = match first {
         Err(crate::subscribe_create::CreateError::Store(store::StoreError::Conflict(_)))
             if prepared.explicit_library_id.is_none()
-                && subscribe.library_id.is_some_and(|id| {
-                    !state
+                && match subscribe.library_id {
+                    Some(id) => !state
                         .store
                         .library_accepts_work(&id.to_string())
-                        .unwrap_or(false)
-                }) =>
+                        .map_err(store_err_response)?,
+                    None => false,
+                } =>
         {
             tracing::warn!(
                 library_id = ?subscribe.library_id,
@@ -425,9 +426,13 @@ fn map_create_error(
         crate::subscribe_create::CreateError::Overlap(other) => {
             overlap_conflict_response(store, user_id, &other.to_string())
         }
-        crate::subscribe_create::CreateError::Store(store::StoreError::WriteBusy) => {
-            crate::http::store_wait::busy_response()
-        }
+        crate::subscribe_create::CreateError::Store(
+            store::StoreError::ReadBusy
+            | store::StoreError::ReadClosed
+            | store::StoreError::ReadDeadline
+            | store::StoreError::ReadCancelled
+            | store::StoreError::WriteBusy,
+        ) => crate::http::store_wait::busy_response(),
         crate::subscribe_create::CreateError::Store(store::StoreError::Conflict(message)) => {
             err(StatusCode::CONFLICT, "subscription.conflict", &message)
         }
@@ -458,11 +463,17 @@ fn subscribe_from_prepared(
                 Some(lib) => store.get_library(&lib.id).map_err(store_err_response)?,
                 None => None,
             };
+            let live_auto_accepts = match live_auto_lib.as_ref() {
+                Some(lib) => store
+                    .library_accepts_work(&lib.id)
+                    .map_err(store_err_response)?,
+                None => false,
+            };
             match live_auto_lib
                 .as_ref()
                 .filter(|lib| {
                     lib.kind == media_kind
-                        && store.library_accepts_work(&lib.id).unwrap_or(false)
+                        && live_auto_accepts
                         && crate::http::routing_preview::user_can_auto_route_library(
                             lib,
                             Some(user_id),
@@ -679,9 +690,101 @@ fn optional_downloader_id(
 }
 
 fn store_err_response(error: store::StoreError) -> Response {
-    err(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "store.error",
-        &error.to_string(),
-    )
+    match error {
+        store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled
+        | store::StoreError::WriteBusy => crate::http::store_wait::busy_response(),
+        error => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct NoFetch;
+    impl indexer::Fetcher for NoFetch {
+        fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+            Err(indexer::IndexerError::Fetch("offline".into()))
+        }
+    }
+
+    #[test]
+    fn subscribe_from_prepared_propagates_library_accepts_work_and_busy_errors() {
+        for err_variant in [
+            store::StoreError::ReadBusy,
+            store::StoreError::ReadDeadline,
+            store::StoreError::WriteBusy,
+        ] {
+            let resp = store_err_response(err_variant);
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::Store::open(tmp.path().join("data")).unwrap());
+        let state = ApiState::new_arc(
+            store.clone(),
+            "management-secret".into(),
+            indexer::ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+        )
+        .unwrap();
+        let admin_id = store
+            .user_id_by_token("management-secret")
+            .unwrap()
+            .unwrap();
+        let root_b = tmp.path().join("tv-auto");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let auto_lib = store
+            .create_library_with_rules(
+                MediaKind::Tv,
+                "CN",
+                &[root_b.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+                &[serde_json::json!({"field":"origin_countries","op":"any_of","values":["CN"]})],
+            )
+            .unwrap();
+        let media_in: MediaInput = serde_json::from_value(
+            serde_json::json!({"kind":"tv","title":"Test","tmdb_id":"203483"}),
+        )
+        .unwrap();
+        let prepared = PreparedSubscription {
+            user_id: admin_id,
+            incoming: incoming_media(MediaKind::Tv, media_in),
+            fetch_mode: FetchMode::Search,
+            coverage: Coverage::Tv {
+                season: 1,
+                episode_from: 1,
+                episode_to: None,
+            },
+            explicit_library_id: None,
+            auto_library: Some(auto_lib.clone()),
+            body: serde_json::from_value(serde_json::json!({"fetch_mode":"search"})).unwrap(),
+        };
+
+        // `get_library` succeeds while `library_accepts_work` fails querying `library_removals`:
+        // error must propagate right at `library_accepts_work` via `store_err_response`.
+        let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
+        conn.execute_batch("DROP TABLE library_removals;").unwrap();
+        let Err(sql_err) = subscribe_from_prepared(&state, &prepared) else {
+            panic!("library_accepts_work error must propagate");
+        };
+        assert_eq!(sql_err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        store.reader_pool(store::Db::Library).close();
+        let Err(busy_err) = subscribe_from_prepared(&state, &prepared) else {
+            panic!("closed reader pool must return 503");
+        };
+        assert_eq!(busy_err.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

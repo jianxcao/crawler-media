@@ -23,45 +23,122 @@ struct Inputs {
     templates: marker::adaptive::TemplateContext,
 }
 
+fn is_marker_refresh_job(
+    manager: &ProbeManager,
+    cache: &mut HashMap<String, bool>,
+    job_id: &str,
+) -> Result<bool, store::StoreError> {
+    if let Some(&cached) = cache.get(job_id) {
+        return Ok(cached);
+    }
+    let is_refresh = manager
+        .store
+        .get_probe_job(job_id)?
+        .is_some_and(|job| job.kind == "marker_refresh");
+    cache.insert(job_id.to_string(), is_refresh);
+    Ok(is_refresh)
+}
+
+fn observe_season_sources(manager: &ProbeManager, key: SeasonKey) -> Result<(), store::StoreError> {
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let page = manager.store.probe_analysis_participants(
+            key.media_id,
+            key.season,
+            after.as_ref().map(|(j, f)| (j.as_str(), f.as_str())),
+            16,
+        )?;
+        let Some(last) = page.last() else {
+            return Ok(());
+        };
+        after = Some((
+            last.dispatch().job_id.clone(),
+            last.dispatch().ledger_id.clone(),
+        ));
+        for participant in &page {
+            if let Err(reason) =
+                crate::fingerprint_job::source::observe_source(&participant.context().target)
+            {
+                if crate::fingerprint_job::source::is_file_deleted(&reason) {
+                    manager.cancel_ledger_work(
+                        std::slice::from_ref(&participant.dispatch().ledger_id),
+                        &reason,
+                    )?;
+                } else {
+                    return Err(store::StoreError::Invalid(reason));
+                }
+            }
+        }
+    }
+}
+
+fn collect_eligible_non_refresh(
+    manager: &ProbeManager,
+    key: SeasonKey,
+    job_kinds: &mut HashMap<String, bool>,
+    run_refresh: bool,
+) -> Result<(bool, Vec<ProbeAnalysisParticipant>), store::StoreError> {
+    let mut after: Option<(String, String)> = None;
+    let mut tried_refresh = std::collections::HashSet::new();
+    let mut eligible = Vec::new();
+    let paused = manager.background_is_paused();
+    loop {
+        let page = manager.store.probe_analysis_participants(
+            key.media_id,
+            key.season,
+            after.as_ref().map(|(j, f)| (j.as_str(), f.as_str())),
+            16,
+        )?;
+        let Some(last) = page.last() else {
+            return Ok((false, eligible));
+        };
+        after = Some((
+            last.dispatch().job_id.clone(),
+            last.dispatch().ledger_id.clone(),
+        ));
+        for participant in page {
+            let job_id = &participant.dispatch().job_id;
+            if is_marker_refresh_job(manager, job_kinds, job_id)? {
+                if run_refresh && tried_refresh.insert(job_id.clone()) && refresh(manager, job_id)?
+                {
+                    return Ok((true, Vec::new()));
+                }
+                continue;
+            }
+            if eligible.len() < 16
+                && (!paused
+                    || manager.is_dispatch_paused_exempt(job_id, &participant.dispatch().ledger_id))
+            {
+                eligible.push(participant);
+            }
+        }
+        if !run_refresh && eligible.len() >= 16 {
+            return Ok((false, eligible));
+        }
+    }
+}
+
 pub(super) fn run(
     manager: &ProbeManager,
     key: SeasonKey,
 ) -> Result<Option<(String, bool)>, store::StoreError> {
-    let participants =
-        manager
-            .store
-            .probe_analysis_participants(key.media_id, key.season, None, 16)?;
-    for participant in &participants {
-        if let Err(reason) =
-            crate::fingerprint_job::source::observe_source(&participant.context().target)
-        {
-            if crate::fingerprint_job::source::is_file_deleted(&reason) {
-                manager.cancel_ledger_work(&[participant.dispatch().ledger_id.clone()], &reason)?;
-            } else {
-                return Err(store::StoreError::Invalid(reason));
-            }
-        }
-    }
-    let participants =
-        manager
-            .store
-            .probe_analysis_participants(key.media_id, key.season, None, 16)?;
-    if participants.is_empty() {
+    observe_season_sources(manager, key)?;
+    let mut job_kinds = HashMap::new();
+    let (refresh_handled, eligible) =
+        collect_eligible_non_refresh(manager, key, &mut job_kinds, true)?;
+    if refresh_handled || eligible.is_empty() {
         return Ok(None);
     }
-    for participant in &participants {
-        if manager
-            .store
-            .get_probe_job(&participant.dispatch().job_id)?
-            .is_some_and(|j| j.kind == "marker_refresh")
-        {
-            refresh(manager, &participant.dispatch().job_id)?;
-            return Ok(None);
-        }
+    let anchor = &eligible[0];
+    let inputs = load_inputs(manager, key, anchor)?;
+    reconcile(manager, anchor, &inputs)?;
+    let mut participants =
+        observed_participants(manager, key, anchor.context(), &inputs, &mut job_kinds)?;
+    if manager.background_is_paused() {
+        participants.retain(|p| {
+            manager.is_dispatch_paused_exempt(&p.dispatch().job_id, &p.dispatch().ledger_id)
+        });
     }
-    let inputs = load_inputs(manager, key, &participants[0])?;
-    reconcile(manager, &participants[0], &inputs)?;
-    let participants = observed_participants(manager, key, participants[0].context(), &inputs)?;
     let Some(claim) = manager
         .store
         .claim_probe_analysis(&uuid::Uuid::new_v4().to_string(), &participants)?
@@ -74,18 +151,14 @@ pub(super) fn run(
         manager.store.requeue_probe_analysis(&claim)?;
     }
     result?;
-    let pending = manager
-        .store
-        .probe_analysis_participants(key.media_id, key.season, None, 16)?;
+    let (_, pending) = collect_eligible_non_refresh(manager, key, &mut job_kinds, false)?;
     if pending.is_empty() {
         return Ok(None);
     }
     let current = load_inputs(manager, key, &pending[0])?;
-    let digest = pending
-        .iter()
-        .map(|p| p.context().context_key.as_str())
-        .collect::<Vec<_>>()
-        .join("|");
+    let Some(digest) = super::season_analysis_digest(manager, key.media_id, key.season)? else {
+        return Ok(None);
+    };
     Ok(Some((
         digest,
         current.reference_key == inputs.reference_key,
@@ -97,13 +170,38 @@ fn observed_participants(
     key: SeasonKey,
     anchor: &store::ProbeAnalysisContext,
     inputs: &Inputs,
+    job_kinds: &mut HashMap<String, bool>,
 ) -> Result<Vec<ProbeAnalysisParticipant>, store::StoreError> {
-    let participants = manager
-        .store
-        .probe_analysis_participants(key.media_id, key.season, None, 16)?
-        .into_iter()
-        .filter(|p| {
-            p.context().sampling_mode == anchor.sampling_mode
+    let mut participants = Vec::new();
+    let mut after: Option<(String, String)> = None;
+    let paused = manager.background_is_paused();
+    while participants.len() < 16 {
+        let page = manager.store.probe_analysis_participants(
+            key.media_id,
+            key.season,
+            after.as_ref().map(|(j, f)| (j.as_str(), f.as_str())),
+            16,
+        )?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = Some((
+            last.dispatch().job_id.clone(),
+            last.dispatch().ledger_id.clone(),
+        ));
+        for p in page {
+            if participants.len() >= 16 {
+                break;
+            }
+            if is_marker_refresh_job(manager, job_kinds, &p.dispatch().job_id)? {
+                continue;
+            }
+            if paused
+                && !manager.is_dispatch_paused_exempt(&p.dispatch().job_id, &p.dispatch().ledger_id)
+            {
+                continue;
+            }
+            let matches_anchor = p.context().sampling_mode == anchor.sampling_mode
                 && p.context().analysis_policy_key == anchor.analysis_policy_key
                 && inputs.observed.iter().any(|current| {
                     let observed_samples = current
@@ -113,9 +211,12 @@ fn observed_participants(
                         .filter_map(|(id, _)| id.strip_prefix("sample:"))
                         .collect::<Vec<_>>();
                     p.observed_by(current, &observed_samples)
-                })
-        })
-        .collect::<Vec<_>>();
+                });
+            if matches_anchor {
+                participants.push(p);
+            }
+        }
+    }
     tracing::debug!(media_id=%key.media_id,season=key.season,participants=participants.len(),references=inputs.references.len(),reference_key=%inputs.reference_key,"analysis observed input selection");
     for participant in &participants {
         if manager
@@ -125,7 +226,7 @@ fn observed_participants(
                 !state.reconcile_done || state.wanted_reference_key != inputs.reference_key
             })
         {
-            reconcile(manager, participant, &inputs)?;
+            reconcile(manager, participant, inputs)?;
         }
     }
     Ok(participants)
@@ -154,7 +255,7 @@ fn clear_queued_analysis_unit_exemptions(
     Ok(())
 }
 
-fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError> {
+fn refresh(manager: &ProbeManager, job_id: &str) -> Result<bool, store::StoreError> {
     if let Some(job) = manager
         .store
         .fail_probe_analysis_refresh_if_capture_failed(job_id)?
@@ -165,19 +266,28 @@ fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError
             &manager.timings,
             &job,
         );
-        return Ok(());
+        return Ok(true);
     }
     let Some(participants) = manager.store.probe_analysis_job_participants(job_id)? else {
         if manager.background_is_paused() && !manager.is_job_paused_exempt(job_id) {
             clear_queued_analysis_unit_exemptions(manager, job_id)?;
         }
-        return Ok(());
+        return Ok(false);
     };
+    if manager.background_is_paused()
+        && !manager.is_job_paused_exempt(job_id)
+        && !participants.iter().any(|p| {
+            let lid = &p.dispatch().ledger_id;
+            manager.is_unit_paused_exempt(job_id, lid) || manager.was_unit_promoted(job_id, lid)
+        })
+    {
+        return Ok(false);
+    }
     let Some(claim) = manager
         .store
         .claim_probe_analysis(&uuid::Uuid::new_v4().to_string(), &participants)?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let result = (|| {
         let mut combined = ProbeAnalysisCommit {
@@ -229,7 +339,7 @@ fn refresh(manager: &ProbeManager, job_id: &str) -> Result<(), store::StoreError
     if result.is_err() {
         manager.store.requeue_probe_analysis(&claim)?;
     }
-    result
+    result.map(|()| true)
 }
 
 fn publish(manager: &ProbeManager, commit: &ProbeAnalysisCommit) -> Result<(), store::StoreError> {
@@ -240,10 +350,10 @@ fn publish(manager: &ProbeManager, commit: &ProbeAnalysisCommit) -> Result<(), s
                     frames.notify_pending();
                 }
                 for participant in &commit.claim.participants {
-                    manager.unmark_unit_paused_exempt(
-                        &participant.dispatch().job_id,
-                        &participant.dispatch().ledger_id,
-                    );
+                    let jid = &participant.dispatch().job_id;
+                    let lid = &participant.dispatch().ledger_id;
+                    manager.unmark_unit_paused_exempt(jid, lid);
+                    manager.unmark_unit_promoted(jid, lid);
                 }
                 for job in jobs {
                     manager.unmark_job_paused_exempt(&job.id);

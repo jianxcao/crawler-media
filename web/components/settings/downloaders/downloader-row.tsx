@@ -369,7 +369,7 @@ export function DownloaderActionsMenu({
           <DropdownMenu.Item
             onSelect={onDelete}
             disabled={busy}
-            className={`${itemClass} !text-[#ff6b6b] data-[highlighted]:!bg-[#ff6b6b]/10`}
+            className={`${itemClass} !text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10`}
           >
             删除配置
           </DropdownMenu.Item>

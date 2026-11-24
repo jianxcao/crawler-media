@@ -101,7 +101,7 @@ export function DownloaderLimitsModal({
 
       <div className="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
         {error && (
-          <div className="rounded-xl border border-[#ff6b6b]/30 bg-[#ff6b6b]/10 px-4 py-3 text-body text-[#ff6b6b]">
+          <div className="rounded-xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-4 py-3 text-body text-[var(--danger)]">
             {error}
           </div>
         )}

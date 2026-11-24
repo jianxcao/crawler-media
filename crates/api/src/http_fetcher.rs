@@ -21,8 +21,13 @@ impl Fetcher for HttpFetcher {
         }
         let agent = config.build().new_agent();
         const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        let response = match request.method {
-            FetchMethod::Get => {
+        let content_type = match request.method {
+            FetchMethod::Get => None,
+            FetchMethod::PostJson => Some("application/json"),
+            FetchMethod::PostForm => Some("application/x-www-form-urlencoded"),
+        };
+        let response = match content_type {
+            None => {
                 let mut builder = agent.get(&request.url).header("User-Agent", UA);
                 if let Some(cookie) = &request.cookie {
                     builder = builder.header("Cookie", cookie);
@@ -32,7 +37,7 @@ impl Fetcher for HttpFetcher {
                 }
                 builder.call()
             }
-            FetchMethod::PostJson | FetchMethod::PostForm => {
+            Some(content_type) => {
                 let mut builder = agent.post(&request.url).header("User-Agent", UA);
                 if let Some(cookie) = &request.cookie {
                     builder = builder.header("Cookie", cookie);
@@ -40,11 +45,6 @@ impl Fetcher for HttpFetcher {
                 if let Some(key) = &request.api_key {
                     builder = builder.header("x-api-key", key);
                 }
-                let content_type = match request.method {
-                    FetchMethod::PostJson => "application/json",
-                    FetchMethod::PostForm => "application/x-www-form-urlencoded",
-                    FetchMethod::Get => unreachable!(),
-                };
                 builder
                     .header("Accept", "application/json")
                     .header("Content-Type", content_type)
@@ -187,5 +187,46 @@ mod tests {
             HttpFetcher.fetch(&rss_req).unwrap_err().to_string(),
             "http status: 401"
         );
+    }
+
+    #[test]
+    fn post_json_and_post_form_bind_matching_content_type_headers() {
+        for (method, expected_ct, payload) in [
+            (FetchMethod::PostJson, "application/json", r#"{"id":"99"}"#),
+            (
+                FetchMethod::PostForm,
+                "application/x-www-form-urlencoded",
+                "id=99",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+                raw
+            });
+            let req = FetchRequest {
+                key: "download:test:99".into(),
+                url: format!("http://{addr}/dl"),
+                method,
+                body: Some(payload.into()),
+                cookie: None,
+                api_key: Some("k".into()),
+                proxy: None,
+                cdp_url: None,
+            };
+            assert_eq!(HttpFetcher.fetch(&req).unwrap(), "{}");
+            let raw = handle.join().unwrap().to_ascii_lowercase();
+            assert!(
+                raw.contains(&format!("content-type: {expected_ct}")),
+                "raw={raw}"
+            );
+        }
     }
 }

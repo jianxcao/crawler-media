@@ -86,6 +86,19 @@ export function SubscriptionCancelDialog({
   const torrentCount = preview?.torrent_count ?? 0;
   const fileCount = preview?.library_file_count ?? 0;
 
+  useEffect(() => {
+    const win = globalThis.window;
+    if (!open || !raised || !win) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!busy) onClose();
+    };
+    win.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => win.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [open, raised, busy, onClose]);
+
   return (
     <Modal
       open={open}

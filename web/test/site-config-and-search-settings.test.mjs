@@ -601,3 +601,259 @@ test("SiteRow avoids duplicate 已停用 badge and surfaces toast + inline feedb
     await act(async () => renderer.unmount());
   }
 });
+
+test("CdpBrowserSection persists browser settings before syncCdp/startObscura, polls Obscura status after 202 start & save, and styles toggle thumb with --accent-ink", async () => {
+  const sequence = [];
+  let statusQueue = [
+    {
+      installed: false,
+      running: false,
+      downloading: false,
+      port: 0,
+      cdp_url: null,
+      expected_version: "v0.2.3",
+      reported_version: null,
+      binary_path: "/bin/obscura",
+      install_policy: "preinstalled",
+      last_error: null,
+      not_started_reason: "switch_off",
+    },
+  ];
+  const scheduledTimers = [];
+  const clearedTimers = new Set();
+  const prevSetTimeout = globalThis.setTimeout;
+  const prevClearTimeout = globalThis.clearTimeout;
+  let timerIdSeq = 1000;
+
+  globalThis.setTimeout = (fn, ms) => {
+    const id = ++timerIdSeq;
+    scheduledTimers.push({ id, fn, ms });
+    return id;
+  };
+  globalThis.clearTimeout = (id) => {
+    clearedTimers.add(id);
+  };
+
+  class FakeHttpError extends Error {
+    constructor(message, status = 400) {
+      super(message);
+      this.status = status;
+    }
+  }
+
+  let savedSettings = {
+    cdp: { enabled: false, url: "" },
+    obscura: { install: "preinstalled" },
+    user_agent: "crawler-media/0.1.0",
+    managed_browser_sites: 2,
+    incompatible_endpoints: {},
+  };
+
+  const resolveImport = (spec) => {
+    if (spec === "@/lib/http") return { HttpError: FakeHttpError };
+    if (spec === "@/lib/api/browser-settings") {
+      return {
+        fetchBrowserSettings: async () => {
+          sequence.push({ op: "fetchBrowserSettings" });
+          return savedSettings;
+        },
+        updateBrowserSettings: async (payload) => {
+          sequence.push({ op: "updateBrowserSettings", payload });
+          savedSettings = {
+            ...savedSettings,
+            cdp: { ...payload.cdp },
+            obscura: { ...payload.obscura },
+            user_agent: payload.user_agent,
+          };
+          return savedSettings;
+        },
+        fetchObscuraStatus: async () => {
+          sequence.push({ op: "fetchObscuraStatus" });
+          if (statusQueue.length > 1) return statusQueue.shift();
+          return statusQueue[0];
+        },
+        startObscura: async () => {
+          sequence.push({ op: "startObscura", savedInstall: savedSettings.obscura.install });
+          return {
+            ...statusQueue[0],
+            running: false,
+            downloading: true,
+            not_started_reason: null,
+          };
+        },
+        stopObscura: async () => {
+          sequence.push({ op: "stopObscura" });
+          return { ...statusQueue[0], running: false, not_started_reason: "stopped_manually" };
+        },
+        syncCdp: async () => {
+          sequence.push({
+            op: "syncCdp",
+            savedEnabled: savedSettings.cdp.enabled,
+            savedUrl: savedSettings.cdp.url,
+          });
+          return { total_cookies_scanned: 12, updated_sites: 2, candidate_sites: [] };
+        },
+      };
+    }
+    return require(spec);
+  };
+
+  const { CdpBrowserSection } = transpileFile(
+    "components/settings/sites/cdp-browser-section.tsx",
+    resolveImport,
+  );
+
+  const flushNextTimer = async () => {
+    const next = scheduledTimers.find((t) => !clearedTimers.has(t.id));
+    assert.ok(next, "expected a scheduled poll timer");
+    clearedTimers.add(next.id);
+    await act(async () => {
+      await next.fn();
+    });
+  };
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(React.createElement(CdpBrowserSection));
+    });
+
+    // Check toggle thumb contrast class (Item 5)
+    const toggleTrack = renderer.root
+      .findAllByType("div")
+      .find((d) => String(d.props.className ?? "").includes("peer-checked:bg-[var(--accent)]"));
+    assert.ok(toggleTrack, "must render peer toggle track");
+    assert.match(
+      toggleTrack.props.className,
+      /peer-checked:after:bg-\[var\(--accent-ink\)\]/,
+      "toggle thumb must switch to var(--accent-ink) when checked",
+    );
+
+    // 1. Toggle CDP on + enter endpoint + click syncCdp WITHOUT clicking Save first
+    const checkbox = renderer.root.find((n) => n.type === "input" && n.props.type === "checkbox");
+    await act(async () => {
+      checkbox.props.onChange({ target: { checked: true } });
+    });
+    const urlInput = renderer.root
+      .findAll((n) => n.type === "input" && n.props.type === "text")
+      .find((n) => String(n.props.placeholder ?? "").includes("9222"));
+    await act(async () => {
+      urlInput.props.onChange({ target: { value: "http://127.0.0.1:9222" } });
+    });
+
+    sequence.length = 0;
+    const syncBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => textOf(btn).includes("立即从浏览器扫描并同步 Cookie"));
+    assert.ok(syncBtn);
+    await act(async () => {
+      await syncBtn.props.onClick();
+    });
+
+    assert.deepEqual(
+      sequence.map((s) => s.op),
+      ["updateBrowserSettings", "syncCdp"],
+      "handleTriggerSync must save browser settings before calling syncCdp",
+    );
+    assert.equal(sequence[1].savedEnabled, true);
+    assert.equal(sequence[1].savedUrl, "http://127.0.0.1:9222");
+
+    // 2. Clear URL, switch install policy to "download", click "手动启动 Obscura" -> saves first, then polls until running=true
+    await act(async () => {
+      urlInput.props.onChange({ target: { value: "" } });
+    });
+    const downloadPolicyBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => textOf(btn).includes("自动下载"));
+    await act(async () => {
+      downloadPolicyBtn.props.onClick();
+    });
+
+    sequence.length = 0;
+    scheduledTimers.length = 0;
+    clearedTimers.clear();
+    statusQueue = [
+      {
+        ...statusQueue[0],
+        installed: false,
+        running: false,
+        downloading: true,
+        not_started_reason: null,
+      },
+      {
+        ...statusQueue[0],
+        installed: true,
+        running: true,
+        downloading: false,
+        port: 19222,
+        cdp_url: "http://127.0.0.1:19222",
+        not_started_reason: null,
+      },
+    ];
+
+    const startBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => textOf(btn).includes("手动启动 Obscura"));
+    assert.ok(startBtn);
+    await act(async () => {
+      await startBtn.props.onClick();
+    });
+
+    assert.equal(sequence[0]?.op, "updateBrowserSettings");
+    assert.equal(sequence[1]?.op, "startObscura");
+    assert.equal(
+      sequence[1]?.savedInstall,
+      "download",
+      "startObscura must see newly toggled obscuraInstall persisted in SQLite",
+    );
+    assert.match(textOf(renderer.root), /下载安装中/);
+
+    // First poll tick -> still downloading; second poll tick -> running=true (port 19222) and stops polling
+    await flushNextTimer();
+    await flushNextTimer();
+    assert.match(textOf(renderer.root), /运行中 \(端口: 19222\)/);
+    const activeAfterRunning = scheduledTimers.filter((t) => !clearedTimers.has(t.id));
+    assert.equal(activeAfterRunning.length, 0, "polling must stop once running === true");
+
+    // 3. Save browser settings when managed Obscura is starting -> polls until last_error settles, and cancels on unmount
+    statusQueue = [
+      {
+        ...statusQueue[0],
+        installed: false,
+        running: false,
+        downloading: false,
+        last_error: null,
+        not_started_reason: null,
+      },
+      {
+        ...statusQueue[0],
+        installed: false,
+        running: false,
+        downloading: false,
+        last_error: "binary checksum mismatch",
+        not_started_reason: null,
+      },
+    ];
+    scheduledTimers.length = 0;
+    clearedTimers.clear();
+    const saveBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => textOf(btn).includes("保存浏览器与网络设置"));
+    await act(async () => {
+      await saveBtn.props.onClick();
+    });
+    await flushNextTimer();
+    assert.match(textOf(renderer.root), /binary checksum mismatch/);
+    assert.equal(
+      scheduledTimers.filter((t) => !clearedTimers.has(t.id)).length,
+      0,
+      "polling must stop once last_error settles",
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => renderer.unmount());
+    }
+    globalThis.setTimeout = prevSetTimeout;
+    globalThis.clearTimeout = prevClearTimeout;
+  }
+});

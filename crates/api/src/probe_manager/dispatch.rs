@@ -15,6 +15,13 @@ use crate::scrape_store::ScrapeStoreExt;
 pub(super) const METADATA_WINDOW: usize = 64;
 pub(super) const FINGERPRINT_WINDOW: usize = 16;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FingerprintDispatchError {
+    Overflowed,
+    Full,
+    Closed,
+}
+
 pub(super) struct DispatchChannels {
     pub(super) metadata_tx: mpsc::Sender<ProbeDispatchId>,
     pub(super) metadata_rx: mpsc::Receiver<ProbeDispatchId>,
@@ -175,19 +182,18 @@ impl ProbeManager {
             self.remove_seen_if_job(&ledger_id, &job_id);
             return false;
         }
-        if self.fingerprint_overflowed.load(Ordering::Acquire) {
-            tracing::info!(
-                ledger_id,
-                "声纹队列存在积压，已完成的媒体信息按顺序留在数据库排队"
-            );
-            self.remove_seen_if_job(&ledger_id, &job_id);
-            self.wake.notify_waiters();
-            return false;
-        }
-        match self.fingerprint_tx.try_send((id, work)) {
+        match self.dispatch_fingerprint_work(id, work) {
             Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.fingerprint_overflowed.store(true, Ordering::Release);
+            Err(FingerprintDispatchError::Overflowed) => {
+                tracing::info!(
+                    ledger_id,
+                    "声纹队列存在积压，已完成的媒体信息按顺序留在数据库排队"
+                );
+                self.remove_seen_if_job(&ledger_id, &job_id);
+                self.wake.notify_waiters();
+                false
+            }
+            Err(FingerprintDispatchError::Full) => {
                 tracing::info!(
                     ledger_id,
                     "声纹窗口已满，已完成的媒体信息保持排队等待下一次派发"
@@ -196,7 +202,7 @@ impl ProbeManager {
                 self.wake.notify_waiters();
                 false
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(FingerprintDispatchError::Closed) => {
                 tracing::info!(ledger_id, "声纹 worker 已停止，已完成的媒体信息保持排队");
                 self.remove_seen_if_job(&ledger_id, &job_id);
                 false
@@ -226,6 +232,7 @@ impl ProbeManager {
         };
         let parent_job_exempt = self.is_job_paused_exempt(current_job_id);
         let parent_unit_exempt = self.is_unit_paused_exempt(current_job_id, ledger_id);
+        let parent_promoted = self.was_unit_promoted(current_job_id, ledger_id);
         if current_job.kind == "media_probe" {
             let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
             let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
@@ -240,7 +247,7 @@ impl ProbeManager {
                 }
             };
             if !transitioned {
-                if (parent_job_exempt || parent_unit_exempt)
+                if (parent_job_exempt || parent_unit_exempt || parent_promoted)
                     && self
                         .store
                         .get_probe_job(current_job_id)
@@ -253,11 +260,13 @@ impl ProbeManager {
                 return false;
             }
             self.unmark_unit_paused_exempt(current_job_id, ledger_id);
+            self.unmark_unit_promoted(current_job_id, ledger_id);
             if parent_job_exempt {
                 self.unmark_job_paused_exempt(current_job_id);
                 self.mark_job_paused_exempt(fingerprint_job_id.clone());
-            } else if parent_unit_exempt {
+            } else if parent_unit_exempt || parent_promoted {
                 self.mark_unit_paused_exempt(fingerprint_job_id.clone(), ledger_id.to_string());
+                self.mark_unit_promoted(fingerprint_job_id.clone(), ledger_id.to_string());
             }
             work.unit.job_id = Some(fingerprint_job_id);
             work.start_job = true;
@@ -298,6 +307,24 @@ impl ProbeManager {
         permit.send(id);
         observed();
         Ok(())
+    }
+
+    pub(super) fn dispatch_fingerprint_work(
+        &self,
+        id: ProbeDispatchId,
+        work: probe::FingerprintWork,
+    ) -> Result<(), FingerprintDispatchError> {
+        if self.fingerprint_overflowed.load(Ordering::Acquire) {
+            return Err(FingerprintDispatchError::Overflowed);
+        }
+        match self.fingerprint_tx.try_send((id, work)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.fingerprint_overflowed.store(true, Ordering::Release);
+                Err(FingerprintDispatchError::Full)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(FingerprintDispatchError::Closed),
+        }
     }
 
     pub(super) fn dispatch_metadata_id(&self, id: ProbeDispatchId) -> Result<(), ()> {

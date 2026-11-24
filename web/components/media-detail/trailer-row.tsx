@@ -103,7 +103,7 @@ function TrailerPlayer({
         </button>
       </div>
 
-      <div className="aspect-video w-full bg-black">
+      <div className="dark-media-surface aspect-video w-full bg-black">
         {reach === "blocked" ? (
           <div className="flex size-full flex-col items-center justify-center gap-3 px-6 text-center">
             <p className="text-ui font-medium text-[var(--text)]">当前浏览器无法直连 YouTube</p>

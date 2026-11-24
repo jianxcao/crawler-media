@@ -484,3 +484,205 @@ async fn patch_site_empty_url_falls_back_to_profile_base_url_or_rejects_missing_
         .unwrap();
     assert_eq!(stored.url, "https://hdsky.me/");
 }
+
+#[tokio::test]
+async fn put_switching_api_site_to_cookie_only_nexusphp_clears_api_key_and_auth_type() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+
+    let created = post_site(
+        &app,
+        json!({
+            "name": "M-Team",
+            "url": "https://api.m-team.cc/",
+            "profile_id": "mteam",
+            "api_key": "secret-mteam-key",
+            "enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(created["auth_type"], "apikey");
+    let id = created["id"].as_str().unwrap();
+
+    let switched = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/api/v1/sites/{id}"),
+            Some("management-secret"),
+            json!({
+                "name": "PTerClub",
+                "url": "https://pterclub.net/",
+                "profile_id": "pterclub",
+                "cookie": "uid=42; pass=xyz",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(switched.status(), StatusCode::OK);
+    let switched_body = json_data(switched).await;
+    assert_eq!(switched_body["auth_type"], "cookie");
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let stored = store
+        .get_site(SiteId::from_str(id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.profile_id, "pterclub");
+    assert_eq!(stored.cookie.as_deref(), Some("uid=42; pass=xyz"));
+    assert_eq!(
+        stored.api_key, None,
+        "cookie-only NexusPHP profile must not retain prior API key"
+    );
+
+    let detail = json_data(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/sites/{id}"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["auth_type"], "cookie");
+
+    let switched_no_cookie = json_data(
+        app.oneshot(request(
+            "PUT",
+            &format!("/api/v1/sites/{id}"),
+            Some("management-secret"),
+            json!({
+                "name": "HDSky",
+                "url": "https://hdsky.me/",
+                "profile_id": "hdsky",
+                "cookie": "",
+                "api_key": "ignored-on-cookie-only",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(switched_no_cookie["auth_type"], "none");
+    let stored_after = store
+        .get_site(SiteId::from_str(id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_after.api_key, None);
+}
+
+#[tokio::test]
+async fn create_and_patch_site_reject_invalid_downloader_id_and_clear_on_null_or_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let dl_id = domain::DownloaderId::new();
+
+    let bad_post = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/sites",
+            Some("management-secret"),
+            json!({
+                "name": "PTerClub",
+                "url": "https://pterclub.net/",
+                "profile_id": "pterclub",
+                "cookie": "uid=1",
+                "downloader_id": "not-a-uuid",
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad_post.status(), StatusCode::BAD_REQUEST);
+    let bad_post_err = json_body(bad_post).await;
+    assert_eq!(bad_post_err["error"]["code"], "site.invalid");
+    assert_eq!(bad_post_err["error"]["message"], "下载器 id 无效");
+
+    let created = post_site(
+        &app,
+        json!({
+            "name": "PTerClub",
+            "url": "https://pterclub.net/",
+            "profile_id": "pterclub",
+            "cookie": "uid=1",
+            "downloader_id": dl_id.to_string(),
+            "enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(created["downloader_id"], dl_id.to_string());
+    let id = created["id"].as_str().unwrap();
+
+    let bad_patch = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/sites/{id}"),
+            Some("management-secret"),
+            json!({ "downloader_id": "not-a-uuid" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad_patch.status(), StatusCode::BAD_REQUEST);
+    let bad_patch_err = json_body(bad_patch).await;
+    assert_eq!(bad_patch_err["error"]["code"], "site.invalid");
+    assert_eq!(bad_patch_err["error"]["message"], "下载器 id 无效");
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let unchanged = store
+        .get_site(SiteId::from_str(id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged.downloader_id,
+        Some(dl_id),
+        "invalid PATCH downloader_id must not wipe existing binding"
+    );
+
+    let clear_null = json_data(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/sites/{id}"),
+                Some("management-secret"),
+                json!({ "downloader_id": Value::Null }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(clear_null["downloader_id"].is_null());
+
+    let rebind = json_data(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/sites/{id}"),
+                Some("management-secret"),
+                json!({ "downloader_id": dl_id.to_string() }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(rebind["downloader_id"], dl_id.to_string());
+
+    let clear_empty = json_data(
+        app.oneshot(request(
+            "PATCH",
+            &format!("/api/v1/sites/{id}"),
+            Some("management-secret"),
+            json!({ "downloader_id": "   " }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(clear_empty["downloader_id"].is_null());
+}

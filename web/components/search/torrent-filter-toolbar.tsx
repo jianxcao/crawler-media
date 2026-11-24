@@ -23,10 +23,6 @@ const CHIP_ACTIVE_CLS =
   "border-white/[0.2] bg-white/[0.14] text-[var(--text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]";
 const CHIP_IDLE_CLS =
   "border-white/[0.08] bg-white/[0.035] text-[var(--text-muted)] hover:border-white/[0.15] hover:bg-white/[0.07] hover:text-[var(--text)]";
-const SEGMENT_ACTIVE_CLS =
-  "bg-white/[0.14] font-medium text-[var(--text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]";
-const SEGMENT_IDLE_CLS =
-  "text-[var(--text-muted)] hover:bg-white/[0.05] hover:text-[var(--text)]";
 
 function FacetChip({
   label,
@@ -410,7 +406,7 @@ export function FilterToolbar({
   );
 
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-white/[0.07] bg-black/[0.14] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-xl">
+    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-white/[0.07] bg-[var(--surface-inset)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-xl">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         <SortDropdown sort={sort} smartOptions={smartOptions} onChange={onSortChange} />
 
@@ -468,7 +464,7 @@ export function FilterToolbar({
       </div>
 
       <div className="relative ml-auto flex flex-wrap items-center justify-end gap-1.5">
-        <div className="flex items-center rounded-full border border-white/[0.08] bg-black/[0.16] p-0.5">
+        <div className="segmented-glass flex items-center rounded-full p-0.5">
           {(
             [
               { v: "group", label: "分组", Icon: LayersIcon, hint: "分组：按作品聚合，组内是各版本" },
@@ -483,7 +479,7 @@ export function FilterToolbar({
               aria-label={label}
               title={hint}
               onClick={() => onViewChange(v)}
-              className={`grid h-6 w-8 place-items-center rounded-full transition-all ${view === v ? SEGMENT_ACTIVE_CLS : SEGMENT_IDLE_CLS}`}
+              className={`segmented-glass__item grid h-6 w-8 place-items-center rounded-full transition-all ${view === v ? "font-medium" : ""}`}
             >
               <Icon className="size-3.5" />
             </button>

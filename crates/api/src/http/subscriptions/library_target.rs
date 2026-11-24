@@ -61,10 +61,60 @@ fn invalid(message: &str) -> Response {
 }
 
 fn store_error(error: store::StoreError) -> Response {
-    tracing::error!(%error, "Subscribe target Library validation failed");
-    err(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "store.error",
-        &error.to_string(),
-    )
+    match error {
+        store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled
+        | store::StoreError::WriteBusy => crate::http::store_wait::busy_response(),
+        error => {
+            tracing::error!(%error, "Subscribe target Library validation failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_maps_busy_and_deadline_store_errors_to_503_retry_after() {
+        for err_variant in [
+            store::StoreError::ReadBusy,
+            store::StoreError::ReadDeadline,
+            store::StoreError::WriteBusy,
+        ] {
+            let resp = store_error(err_variant);
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                resp.headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let user_id = UserId::new();
+        store
+            .insert_user_with_password(
+                &domain::User {
+                    id: user_id,
+                    login: "admin".into(),
+                    enabled: true,
+                    role: domain::UserRole::Admin,
+                },
+                "secret",
+            )
+            .unwrap();
+        store.reader_pool(store::Db::Library).close();
+        let resp = resolve(&store, None, MediaKind::Tv, user_id).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

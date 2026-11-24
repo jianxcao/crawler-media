@@ -586,3 +586,161 @@ test("Above-the-fold brand logos and detail/library hero ArtworkImage elements p
     }
   }
 });
+
+test("PosterImage resets loaded when ArtworkImage unmounts on !src or onError, while keeping loaded=true on mounted w1280 -> original upgrades", async () => {
+  const artworkSource = readFileSync(new URL("../components/artwork-image.tsx", import.meta.url), "utf8");
+  const posterSource = readFileSync(new URL("../components/poster-image.tsx", import.meta.url), "utf8");
+  const compile = (code) =>
+    ts.transpileModule(code, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+
+  const artMod = { exports: {} };
+  new Function("require", "module", "exports", compile(artworkSource))(
+    (name) => (name === "@/lib/artwork-loading" ? artworkLoading : require(name)),
+    artMod,
+    artMod.exports,
+  );
+  const posterMod = { exports: {} };
+  new Function("require", "module", "exports", compile(posterSource))(
+    (name) => (name === "@/components/artwork-image" ? artMod.exports : require(name)),
+    posterMod,
+    posterMod.exports,
+  );
+  const { PosterImage } = posterMod.exports;
+
+  let currentImg = new ImageFixture();
+  let renderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(PosterImage, {
+        src: "https://image.tmdb.org/t/p/w1280/hero.jpg",
+        alt: "海报",
+        preload: true,
+        pulseWhileLoading: true,
+        fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+      }),
+      { createNodeMock: (el) => (el.type === "img" ? currentImg : null) },
+    );
+  });
+
+  try {
+    // 1. Before initial load finishes: opacity-0 class & pulse span present
+    assert.match(renderer.root.findByType("img").props.className, /\bopacity-0\b/);
+    assert.equal(renderer.root.findAllByType("span").length, 1);
+
+    await act(async () => {
+      currentImg.finish("load");
+      renderer.root.findByType("img").props.onLoad();
+    });
+    assert.doesNotMatch(renderer.root.findByType("img").props.className, /\bopacity-0\b/);
+    assert.equal(renderer.root.findAllByType("span").length, 0);
+
+    // 2. Mounted w1280 -> original upgrade: ArtworkImage stays mounted, loaded MUST remain true!
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: "https://image.tmdb.org/t/p/original/hero.jpg",
+          alt: "海报",
+          preload: true,
+          pulseWhileLoading: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    assert.doesNotMatch(
+      renderer.root.findByType("img").props.className,
+      /\bopacity-0\b/,
+      "Mounted w1280 -> original upgrade must keep loaded=true so old bitmap stays visible",
+    );
+    assert.equal(renderer.root.findAllByType("span").length, 0);
+
+    // 3. Unmount via !src (src = null), then remount with a fresh URL -> loaded must be reset to false!
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: null,
+          alt: "海报",
+          preload: true,
+          pulseWhileLoading: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    assert.equal(renderer.root.findAllByType("img").length, 0);
+
+    currentImg = new ImageFixture();
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: "https://app.invalid/posters/after-null.jpg",
+          alt: "海报",
+          preload: true,
+          pulseWhileLoading: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    assert.match(
+      renderer.root.findByType("img").props.className,
+      /\bopacity-0\b/,
+      "Remounting ArtworkImage after !src must reset loaded=false so fade-in applies",
+    );
+    assert.equal(
+      renderer.root.findAllByType("span").length,
+      1,
+      "Remounting ArtworkImage after !src must restore pulseWhileLoading placeholder",
+    );
+
+    // Finish load so loaded=true again
+    await act(async () => {
+      currentImg.finish("load");
+      renderer.root.findByType("img").props.onLoad();
+    });
+    assert.equal(renderer.root.findAllByType("span").length, 0);
+
+    // 4. Unmount via onError, then remount with a fresh URL -> loaded must be reset to false!
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: "https://app.invalid/posters/broken-next.jpg",
+          alt: "海报",
+          preload: true,
+          pulseWhileLoading: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    await act(async () => {
+      renderer.root.findByType("img").props.onError();
+    });
+    assert.equal(renderer.root.findAllByType("img").length, 0);
+
+    currentImg = new ImageFixture();
+    await act(async () => {
+      renderer.update(
+        React.createElement(PosterImage, {
+          src: "https://app.invalid/posters/recovered-after-error.jpg",
+          alt: "海报",
+          preload: true,
+          pulseWhileLoading: true,
+          fallback: React.createElement("div", { "data-testid": "poster-fallback" }, "FALLBACK"),
+        }),
+      );
+    });
+    assert.match(
+      renderer.root.findByType("img").props.className,
+      /\bopacity-0\b/,
+      "Remounting ArtworkImage after onError must reset loaded=false so fade-in applies",
+    );
+    assert.equal(
+      renderer.root.findAllByType("span").length,
+      1,
+      "Remounting ArtworkImage after onError must restore pulseWhileLoading placeholder",
+    );
+  } finally {
+    await act(async () => {
+      renderer.unmount();
+    });
+  }
+});

@@ -168,28 +168,51 @@ pub(crate) async fn pause(State(state): State<ApiState>) -> Response {
 }
 
 pub(crate) async fn resume(State(state): State<ApiState>) -> Response {
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|()| state.require_write_admitted())
+    {
+        return response;
+    }
+    let epoch = state.probe.pause_epoch();
     let worker_state = state.clone();
     match state
         .http_work
         .run_to_completion(move || {
-            super::store_wait::with_foreground_store(&worker_state, |store| {
+            let mut changed_from_paused = true;
+            let outcome = super::store_wait::with_foreground_store(&worker_state, |store| {
                 worker_state.require_writable()?;
                 worker_state.require_write_admitted()?;
-                worker_state.probe.set_background_paused_flag(false);
+                let Some(was_paused) = worker_state.probe.begin_resume_if_epoch(epoch) else {
+                    changed_from_paused = false;
+                    return Ok::<(), Response>(());
+                };
+                changed_from_paused = was_paused;
                 if let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(
                     store,
                     &worker_state.probe,
                 ) {
                     tracing::warn!(%err, "恢复后台探测时派发待办义务失败，等待后台重试");
                 }
-                worker_state.probe.resume_background();
-                Ok::<(), Response>(())
-            })
+                worker_state.require_writable()?;
+                worker_state.require_write_admitted()?;
+                worker_state.probe.resume_background_if_epoch(epoch);
+                Ok(())
+            });
+            match outcome {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(response)) | Err(response) => {
+                    if changed_from_paused {
+                        worker_state.probe.pause_background_if_epoch(epoch);
+                    }
+                    Err(response)
+                }
+            }
         })
         .await
     {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(response))) | Ok(Err(response)) => return response,
+        Ok(Ok(())) => {}
+        Ok(Err(response)) => return response,
         Err(error) => {
             tracing::warn!(%error, "恢复后台探测即时补充窗口繁忙");
             return super::store_wait::busy_response();
@@ -222,16 +245,17 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let global_cancel = library_id.is_none();
+    let probe = state.probe.clone();
     let result = super::store_wait::store_write(&state, move |store| {
-        store
-            .library_write(|db| db.cancel_queued_probe_work(library_id.as_deref(), "manual_cancel"))
+        let summary = store.library_write(|db| {
+            db.cancel_queued_probe_work(library_id.as_deref(), "manual_cancel")
+        })?;
+        probe.purge_cancelled_seen(&summary.cancelled_file_ids, global_cancel);
+        Ok::<_, store::StoreError>(summary)
     })
     .await;
     match result {
         Ok(Ok(summary)) => {
-            state
-                .probe
-                .purge_cancelled_seen(&summary.cancelled_file_ids, global_cancel);
             tracing::info!(
                 cancelled_units = summary.cancelled_units,
                 cleared_obligations = summary.cleared_obligations,

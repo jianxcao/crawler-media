@@ -751,3 +751,358 @@ test("paper light theme contrast fixes, --ok-ink, .btn-glass modifiers, and ambe
   assert.match(filterToolbar, /btn-glass--muted/);
   assert.match(torrentRow, /btn-glass--muted/);
 });
+
+test("theme selector .css-glass interactive rules are unlayered across all 4 themes without dead utility overrides", () => {
+  assert.match(css, /button\.css-glass:hover:not\(:disabled\)\s*\{/);
+  assert.match(css, /\.css-glass\[aria-pressed="true"\]/);
+  for (const theme of ["paper", "liquid", "netflix"]) {
+    assert.match(
+      css,
+      new RegExp(`html\\[data-theme="${theme}"\\]\\s+button\\.css-glass:hover:not\\(:disabled\\)\\s*\\{`),
+      `missing unlayered hover rule for .css-glass in ${theme}`,
+    );
+    assert.match(
+      css,
+      new RegExp(`html\\[data-theme="${theme}"\\]\\s+\\.css-glass\\[aria-pressed="true"\\]`),
+      `missing unlayered aria-pressed rule for .css-glass in ${theme}`,
+    );
+  }
+  assert.doesNotMatch(
+    settingsView,
+    /border-\[var\(--accent\)\]\/55|hover:bg-\[var\(--glass-fill-hover\)\]/,
+    "AppearanceSection .css-glass theme cards must not carry dead @layer utilities hover/selected overrides",
+  );
+});
+
+test("ConfirmDialog danger button, DeleteDialog spinners, paper dark-media-surface tokens, and settings danger banners stay contrast-safe", async () => {
+  const feedbackSource = await readFile(path.join(webDir, "components/feedback.tsx"), "utf8");
+  assert.match(feedbackSource, /\bbtn-danger\b/, "ConfirmDialog danger button must use .btn-danger");
+  assert.doesNotMatch(
+    feedbackSource,
+    /bg-red-500\/85|hover:bg-red-500/,
+    "ConfirmDialog danger button must not use translucent bg-red-500/85",
+  );
+
+  const itemDeleteDialogs = await readFile(
+    path.join(webDir, "components/library-item/item-delete-dialogs.tsx"),
+    "utf8",
+  );
+  const currentSpinners = itemDeleteDialogs.match(/border-current\/30\s+border-t-current/g) ?? [];
+  assert.equal(currentSpinners.length, 2, "Both DeleteDialog and DeleteFileDialog spinners must follow currentColor");
+  assert.doesNotMatch(
+    itemDeleteDialogs,
+    /border-\[#ffffff\]\/30|border-t-\[#ffffff\]/,
+    "Delete dialog spinners inside .btn-danger must not hardcode white borders",
+  );
+
+  assert.match(
+    css,
+    /html\[data-theme="paper"\]\s+button\.text-black:disabled:not\(:is\(\.dark-media-surface,\s*\.player-root\)\s*\*\)\s*\{/,
+    "paper disabled button.text-black rule must exclude .dark-media-surface and .player-root descendants",
+  );
+  assert.doesNotMatch(
+    css,
+    /html\[data-theme="paper"\]\s+button\.text-black:disabled\s*\{/,
+    "unscoped paper button.text-black:disabled rule must not bleed into dark surfaces",
+  );
+
+  const darkSurfaceMatch = css.match(
+    /html\[data-theme="paper"\]\s+:is\(\s*\.dark-media-surface,[\s\S]*?\)\s*\{([\s\S]*?)\n\}/,
+  );
+  assert.ok(darkSurfaceMatch);
+  const darkSurfaceBody = darkSurfaceMatch[1];
+  for (const token of [
+    "--surface-inset: rgba(255, 255, 255, 0.05);",
+    "--glass-fill: rgba(255, 255, 255, 0.04);",
+    "--glass-fill-hover: rgba(255, 255, 255, 0.075);",
+    "--glass-fill-active: rgba(255, 255, 255, 0.12);",
+  ]) {
+    assert.ok(darkSurfaceBody.includes(token), `paper .dark-media-surface must restore ${token}`);
+  }
+
+  for (const rel of [
+    "components/site-config-section.tsx",
+    "components/settings/sites/boost-settings-modal.tsx",
+    "components/downloader-config-section.tsx",
+    "components/settings/downloaders/downloader-limits-modal.tsx",
+    "components/settings/downloaders/downloader-row.tsx",
+  ]) {
+    const src = await readFile(path.join(webDir, rel), "utf8");
+    assert.doesNotMatch(src, /text-\[#ff6b6b\]/, `${rel} must replace pastel text-[#ff6b6b] with text-[var(--danger)]`);
+    assert.match(src, /text-\[var\(--danger\)\]/, `${rel} must use semantic text-[var(--danger)]`);
+  }
+});
+
+test("LiquidGlassRenderer defers image-load draws to RAF, avoids unconfigured constructor draw, and resizes with untransformed layout dimensions", async () => {
+  const { createRequire } = await import("node:module");
+  const ts = (await import("typescript")).default;
+  const require = createRequire(import.meta.url);
+
+  const rendererTs = await readFile(
+    path.join(webDir, "vendor/liquid-glass/core/LiquidGlassRenderer.ts"),
+    "utf8",
+  );
+  const rendererJs = ts.transpileModule(rendererTs, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  class FakeImage extends globalThis.EventTarget {
+    complete = false;
+    naturalWidth = 1920;
+    naturalHeight = 1080;
+    crossOrigin = "";
+    _src = "";
+    set src(v) {
+      this._src = v ? new URL(v, "http://localhost:3334").href : "";
+    }
+    get src() {
+      return this._src;
+    }
+  }
+
+  let rafCallback = null;
+  let drawArraysCalls = 0;
+  const centerUniforms = [];
+
+  const prevWindow = globalThis.window;
+  const prevImage = globalThis.Image;
+  const prevHTMLVideoElement = globalThis.HTMLVideoElement;
+  globalThis.window = {
+    devicePixelRatio: 1,
+    innerWidth: 1280,
+    innerHeight: 800,
+    scrollX: 0,
+    scrollY: 0,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    requestAnimationFrame: (cb) => {
+      rafCallback = cb;
+      return 42;
+    },
+    cancelAnimationFrame() {
+      rafCallback = null;
+    },
+  };
+  globalThis.Image = FakeImage;
+  globalThis.HTMLVideoElement = class {};
+
+  const mod = { exports: {} };
+  new Function("require", "module", "exports", rendererJs)(
+    (spec) => {
+      if (spec === "./shaders") {
+        return { vertexShader: "void main(){}", fragmentShader: "void main(){}" };
+      }
+      if (spec === "@/lib/artwork-loading") {
+        return {
+          createArtworkImage: () => {
+            const image = new FakeImage();
+            return {
+              image,
+              load(url) {
+                image.src = url;
+                image.complete = true;
+                image.dispatchEvent(new globalThis.Event("load"));
+              },
+            };
+          },
+        };
+      }
+      return require(spec);
+    },
+    mod,
+    mod.exports,
+  );
+
+  try {
+    const uCenterLoc = { name: "u_center" };
+    const fakeGl = {
+      VERTEX_SHADER: 1,
+      FRAGMENT_SHADER: 2,
+      COMPILE_STATUS: 3,
+      LINK_STATUS: 4,
+      ARRAY_BUFFER: 5,
+      STATIC_DRAW: 6,
+      FLOAT: 7,
+      TEXTURE0: 8,
+      TEXTURE_2D: 9,
+      TEXTURE_MIN_FILTER: 10,
+      TEXTURE_MAG_FILTER: 11,
+      TEXTURE_WRAP_S: 12,
+      TEXTURE_WRAP_T: 13,
+      LINEAR: 14,
+      CLAMP_TO_EDGE: 15,
+      UNPACK_FLIP_Y_WEBGL: 16,
+      RGBA: 17,
+      UNSIGNED_BYTE: 18,
+      COLOR_BUFFER_BIT: 19,
+      TRIANGLE_STRIP: 20,
+      isContextLost: () => false,
+      getExtension: () => ({ loseContext() {}, restoreContext() {} }),
+      createShader: () => ({}),
+      shaderSource() {},
+      compileShader() {},
+      getShaderParameter: () => true,
+      deleteShader() {},
+      createProgram: () => ({}),
+      attachShader() {},
+      linkProgram() {},
+      getProgramParameter: () => true,
+      useProgram() {},
+      deleteProgram() {},
+      createBuffer: () => ({}),
+      bindBuffer() {},
+      bufferData() {},
+      deleteBuffer() {},
+      getAttribLocation: () => 0,
+      enableVertexAttribArray() {},
+      vertexAttribPointer() {},
+      getUniformLocation: (_prog, name) => (name === "u_center" ? uCenterLoc : {}),
+      createTexture: () => ({}),
+      deleteTexture() {},
+      activeTexture() {},
+      bindTexture() {},
+      texParameteri() {},
+      texImage2D() {},
+      pixelStorei() {},
+      uniform1i() {},
+      uniform1f() {},
+      uniform2f(loc, x, y) {
+        if (loc === uCenterLoc) centerUniforms.push([x, y]);
+      },
+      uniform3f() {},
+      uniform3fv() {},
+      viewport() {},
+      clearColor() {},
+      clear() {},
+      drawArrays() {
+        drawArraysCalls += 1;
+      },
+    };
+
+    // Simulate CSS transform scale(0.8) where getBoundingClientRect() is 240x480 while layout clientWidth/clientHeight is 300x600
+    const fakeCanvas = {
+      width: 300,
+      height: 600,
+      clientWidth: 300,
+      clientHeight: 600,
+      style: {},
+      ownerDocument: { querySelector: () => null },
+      addEventListener() {},
+      removeEventListener() {},
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        right: 240,
+        bottom: 480,
+        width: 240,
+        height: 480,
+      }),
+      getContext: () => fakeGl,
+    };
+
+    const defaultSettings = {
+      lensWidth: 54,
+      lensHeight: 34,
+      radius: 16,
+      blur: 10,
+      depth: 10,
+      refraction: 0.5,
+      chromaticAberration: 0.1,
+      edgeHighlight: 0.2,
+      specular: 0.2,
+      fresnel: 0.2,
+      brightness: 1,
+      saturation: 1,
+      shadow: 0.2,
+      darkTint: 0.4,
+      distortion: 0.2,
+      tintStrength: 0.1,
+      tint: 0,
+      tintColor: [1, 1, 1],
+      opacity: 1,
+      bevel: 0,
+    };
+
+    const { LiquidGlassRenderer } = mod.exports;
+    const r = new LiquidGlassRenderer(fakeCanvas, "/backdrop-raf-init.jpg", defaultSettings);
+
+    // 1. Even though "/backdrop-raf-init.jpg" loaded synchronously, constructor must NOT draw before GlassPanel configures geometry!
+    assert.equal(
+      drawArraysCalls,
+      0,
+      "Constructor & handleImageLoad must schedule draw via requestDraw/RAF instead of drawing unconfigured (0,0) geometry",
+    );
+
+    // GlassPanel configures geometry synchronously right after construction
+    r.resize(300, 600);
+    r.setSettings({ ...defaultSettings, lensWidth: 300, lensHeight: 600 });
+    r.setGeometry(150, 300, 0, false, 1, 1, 0);
+    assert.equal(drawArraysCalls, 0);
+
+    // Flush scheduled RAF -> draws once with configured center!
+    assert.equal(typeof rafCallback, "function");
+    const firstFrame = rafCallback;
+    rafCallback = null;
+    firstFrame(16);
+    assert.equal(drawArraysCalls, 1);
+    assert.ok(
+      centerUniforms.at(-1)[0] > 0 && centerUniforms.at(-1)[1] > 0,
+      "First draw must use GlassPanel's configured non-zero center",
+    );
+
+    // 2. setImage -> handleImageLoad must call requestDraw() (deferred to RAF), NOT synchronous draw()
+    r.setImage("https://cdn.invalid/backdrop-raf-2.jpg");
+    assert.equal(
+      drawArraysCalls,
+      1,
+      "handleImageLoad must defer draw via requestDraw() instead of synchronous draw()",
+    );
+    const secondFrame = rafCallback;
+    rafCallback = null;
+    secondFrame(32);
+    assert.equal(drawArraysCalls, 2);
+
+    // 3. DPR changes 1 -> 2 while element is CSS-transformed (rect=240x480, client=300x600)
+    globalThis.window.devicePixelRatio = 2;
+    const thirdFrame = rafCallback;
+    rafCallback = null;
+    thirdFrame(48);
+    assert.equal(
+      fakeCanvas.style.width,
+      "300px",
+      "watchPosition DPR resize must use untransformed clientWidth (300), not transformed rect.width (240)",
+    );
+    assert.equal(
+      fakeCanvas.style.height,
+      "600px",
+      "watchPosition DPR resize must use untransformed clientHeight (600), not transformed rect.height (480)",
+    );
+
+    r.dispose();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevImage === undefined) delete globalThis.Image;
+    else globalThis.Image = prevImage;
+    if (prevHTMLVideoElement === undefined) delete globalThis.HTMLVideoElement;
+    else globalThis.HTMLVideoElement = prevHTMLVideoElement;
+  }
+});
+
+test("paper theme restores dark .btn-glass and disabled .btn-accent inside .dark-media-surface and .player-root", async () => {
+  const paperCss = await readFile(path.join(webDir, "app/styles/theme-paper.css"), "utf8");
+  assert.match(
+    paperCss,
+    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-glass\s*\{[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.0[4-9]\d*\)/,
+    "paper theme must restore translucent dark-surface .btn-glass background inside .dark-media-surface/.player-root",
+  );
+  assert.match(
+    paperCss,
+    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-glass:hover:not\(:disabled\)\s*\{/,
+    "paper theme must restore dark-surface .btn-glass hover rule instead of solid #ffffff",
+  );
+  assert.match(
+    paperCss,
+    /html\[data-theme="paper"\]\s+:is\([\s\S]*?\.dark-media-surface[\s\S]*?\.player-root[\s\S]*?\)\s+\.btn-accent:disabled\s*\{/,
+    "paper theme must restore dark-surface .btn-accent:disabled fill",
+  );
+});

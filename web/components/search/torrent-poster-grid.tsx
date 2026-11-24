@@ -267,7 +267,7 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
             setViewerIndex(0);
           }
         }}
-        className="dark-media-surface relative aspect-[2/3] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
+        className="dark-media-surface relative aspect-[2/3] cursor-zoom-in bg-[#141824] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
       >
         <PosterImage
           src={posterUrl ? cachedImageUrl(posterUrl, "gallery-tile") : undefined}

@@ -514,7 +514,7 @@ async fn arrivals_emit_concrete_season_and_episode_for_grabbed_and_imported_unit
     {
         let store = state.store();
         let guard = store.as_ref();
-        guard
+        let lib = guard
             .create_library(
                 MediaKind::Tv,
                 "剧集库",
@@ -524,6 +524,7 @@ async fn arrivals_emit_concrete_season_and_episode_for_grabbed_and_imported_unit
                 &[],
             )
             .unwrap();
+        guard.set_default_library(&lib.id).unwrap();
         guard
             .record_pending_submission(
                 subscribe_id,

@@ -95,8 +95,8 @@ impl ProbeManager {
         }
         self.last_failure.lock().remove(&ledger_id);
         unit.job_id = Some(job_id.clone());
-        if self.should_defer_remote_dispatch(&unit.row.file.path) {
-            tracing::info!(%job_id, %ledger_id, "远程读取已暂停，媒体信息刷新任务保留在持久队列");
+        if self.background_is_paused() || self.should_defer_remote_dispatch(&unit.row.file.path) {
+            tracing::info!(%job_id, %ledger_id, "后台探测或远程读取已暂停，媒体信息刷新任务保留在持久队列");
         } else if self.try_insert_seen(ledger_id.clone(), job_id.clone())
             && self.queue_metadata(unit).is_err()
         {
@@ -137,4 +137,58 @@ fn target_current(
         && store.library_lifecycle_state(&owner)? == "ready"
         && store.library_root_owning_key(std::path::Path::new(&current.path_key), file.kind)?
             == Some((owner, file.root_id.clone())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::{Media, MediaId, MediaKind};
+    use std::sync::Arc;
+
+    #[test]
+    fn paused_background_keeps_media_info_refresh_durable_without_buffering_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::Store::open(dir.path().join("data")).unwrap());
+        let root = dir.path().join("movies");
+        std::fs::create_dir_all(&root).unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "Movies",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let path = root.join("movie.mkv");
+        std::fs::write(&path, b"fixture").unwrap();
+        let media_id = MediaId::new();
+        store
+            .insert_media(&Media {
+                id: media_id,
+                kind: MediaKind::Movie,
+                title: "Paused Refresh".into(),
+                year: None,
+                original_title: None,
+                aliases: vec![],
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let row = super::super::test_support::publish(
+            &store,
+            &super::super::test_support::coverage(media_id, path.to_str().unwrap(), None, None),
+        );
+        let manager = ProbeManager::new_paused(store.clone()).unwrap();
+        let res = manager
+            .request_media_info_refresh(&row, true, &uuid::Uuid::new_v4())
+            .unwrap();
+        assert!(matches!(res, ProbeRequestResult::Queued { .. }));
+        assert!(!manager.holds_dispatch_id(&row.file.file_id.to_string()));
+        assert!(manager.take_queued_for_test().is_none());
+    }
 }

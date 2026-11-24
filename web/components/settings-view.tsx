@@ -227,9 +227,7 @@ function AppearanceSection() {
                 aria-pressed={selected}
                 disabled={loading}
                 onClick={() => void selectTheme(theme.id)}
-                className={`css-glass flex min-h-28 items-center gap-4 p-4 text-left transition disabled:cursor-wait disabled:opacity-60 ${
-                  selected ? "border-[var(--accent)]/55 bg-[var(--accent-soft)]" : "hover:bg-[var(--glass-fill-hover)]"
-                }`}
+                className="css-glass flex min-h-28 items-center gap-4 p-4 text-left transition disabled:cursor-wait disabled:opacity-60"
               >
                 <span
                   aria-hidden="true"

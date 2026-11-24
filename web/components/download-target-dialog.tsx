@@ -8,8 +8,8 @@
  *   1. 智能入库（种子解析出可靠身份时）：走后端与订阅同源的三级兜底
  *      （监听目录 / 库条目目录），并用 dispatch-preview 预检结论展示
  *      真实归宿与配置警示；
- *   2. 下载器已配置的目录：默认保存目录 + 各路径映射的本机侧目录，
- *      双视角展示（本机路径 → 下载器路径），跨容器部署一眼可核对；
+ *   2. 下载器已配置的目录：各路径映射的下载器侧保存路径（m.from），并附带
+ *      本机对应目录（m.to），跨容器部署一眼可核对；
  *   3. 下载器默认目录兜底：不指定路径，由下载器自行决定。
  * 底部小字引导去「设置 → 下载器」配置路径映射。
  *
@@ -110,22 +110,22 @@ export async function submitRememberedTarget(
   });
 }
 
-/** 与后端 translate_save_path 同规则的前端版（仅用于展示下载器视角）。 */
-function toRemoteView(path: string, mappings: PathMap[] | null): string {
-  if (!mappings) return path;
+/** 按路径映射把下载器保存路径（PathMap.from）换算为本机对应目录（PathMap.to）。 */
+function toLocalView(downloaderPath: string, mappings: PathMap[] | null): string | null {
+  if (!mappings) return null;
   let best: PathMap | null = null;
   for (const m of mappings) {
     const from = m.from.replace(/\/+$/, "");
     if (
-      (path === from || path.startsWith(from + "/")) &&
+      (downloaderPath === from || downloaderPath.startsWith(from + "/")) &&
       (best === null || from.length > best.from.replace(/\/+$/, "").length)
     ) {
       best = m;
     }
   }
-  if (!best) return path;
+  if (!best) return null;
   const from = best.from.replace(/\/+$/, "");
-  return best.to.replace(/\/+$/, "") + path.slice(from.length);
+  return best.to.replace(/\/+$/, "") + downloaderPath.slice(from.length);
 }
 
 /** 一个可选的保存目标。 */
@@ -372,7 +372,7 @@ function DialogContent({
     if (showOtherTargets) {
       const seen = new Set<string>();
       const dirs: { path: string; source: string }[] = [];
-      // 新契约 Downloader 无默认保存目录（save_path 字段已删除），目录候选只来自路径映射
+      // 新契约 Downloader 无默认保存目录（save_path 字段已删除），目录候选只来自路径映射（PathMap.from=下载器路径，PathMap.to=本机目录）
       for (const m of downloader?.path_maps ?? []) {
         if (!seen.has(m.from)) {
           dirs.push({ path: m.from, source: "路径映射" });
@@ -380,13 +380,13 @@ function DialogContent({
         seen.add(m.from);
       }
       for (const dir of dirs) {
-        const remote = toRemoteView(dir.path, downloader?.path_maps ?? null);
+        const localDir = toLocalView(dir.path, downloader?.path_maps ?? null);
         result.push({
           key: `dir:${dir.path}`,
           kind: "dir",
           savePath: dir.path,
-          label: dir.path,
-          detail: remote !== dir.path ? `下载器视角：${remote}（${dir.source}）` : dir.source,
+          label: `下载器保存路径：${dir.path}`,
+          detail: localDir ? `本机对应目录：${localDir}（${dir.source}）` : dir.source,
           warning: null,
         });
       }
@@ -621,13 +621,14 @@ function DialogContent({
 
           {showOtherTargets && (
             <p className="text-caption leading-relaxed text-[var(--text-faint)]">
-              本机与下载器不在同一容器/主机、看到的路径不同？到
-              <Link to="/settings/downloaders"
+              没看到常用的下载器目录，或跨容器部署需要核对本机路径？到
+              <Link
+                to="/settings/downloaders"
                 className="mx-0.5 text-[var(--accent)] hover:underline"
               >
                 设置 → 下载器
               </Link>
-              配置路径映射，提交时会自动翻译成下载器视角。
+              配置路径映射后，这里会列出对应的下载器保存路径（提交时原样传给下载器）并显示本机对应目录。
             </p>
           )}
       </div>

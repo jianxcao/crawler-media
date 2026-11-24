@@ -67,10 +67,13 @@ export function DownloadButton({
 
   function settle(result: DownloadSubmitResult) {
     setState(result.already_exists ? "exists" : "done");
+    const submittedText = result.downloader_name
+      ? `已提交到「${result.downloader_name}」`
+      : "已提交到下载器";
     toast.success(
       result.already_exists
         ? "该种子已在下载器中，未重复添加"
-        : `已提交到「${result.downloader_name}」${result.save_path ? ` · ${result.save_path}` : ""}`,
+        : `${submittedText}${result.save_path ? ` · ${result.save_path}` : ""}`,
     );
   }
 

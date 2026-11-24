@@ -99,11 +99,13 @@ export function PlayerPage({
       .then((loaded) => {
         if (!cancelled) setInfo(loaded);
       })
-      .catch((error: unknown) =>
+      .catch((error: unknown) => {
         // 条目信息拿不到几乎必然意味着会话也开不了（同一套可见性判据），
         // 这里给出人话；真正的播放错误由播放器自己的错误页负责
-        setFailed(error instanceof Error ? error.message : "读取条目信息失败"),
-      );
+        if (!cancelled) {
+          setFailed(error instanceof Error ? error.message : "读取条目信息失败");
+        }
+      });
     return () => {
       cancelled = true;
     };

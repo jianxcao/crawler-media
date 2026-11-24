@@ -295,7 +295,7 @@ const CANCEL_BTN_CLS =
 
 function confirmButtonCls(tone: ConfirmOptions["tone"]): string {
   return tone === "danger"
-    ? "rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-[#ffffff] transition hover:bg-red-500"
+    ? "btn-danger rounded-lg px-4 py-2 text-ui font-medium"
     : "btn-accent rounded-lg px-4 py-2 text-ui font-medium";
 }
 

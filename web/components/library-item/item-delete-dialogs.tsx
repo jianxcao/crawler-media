@@ -143,7 +143,7 @@ export function DeleteDialog({
                 className="btn-danger flex items-center gap-2 rounded-full px-5 py-2 text-ui font-semibold"
               >
                 {busy && (
-                  <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />
+                  <span className="size-3.5 animate-spin rounded-full border-2 border-current/30 border-t-current" />
                 )}
                 {busy ? "正在删除…" : "彻底删除"}
               </button>
@@ -228,7 +228,7 @@ export function DeleteFileDialog({
             className="btn-danger flex items-center gap-2 rounded-full px-5 py-2 text-ui font-semibold"
           >
             {busy && (
-              <span className="size-3.5 animate-spin rounded-full border-2 border-[#ffffff]/30 border-t-[#ffffff]" />
+              <span className="size-3.5 animate-spin rounded-full border-2 border-current/30 border-t-current" />
             )}
             {busy ? "正在删除…" : "删除此文件"}
           </button>

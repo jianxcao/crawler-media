@@ -331,7 +331,7 @@ function RowMenu({
               <DropdownMenu.Separator className="my-1 h-px bg-white/[0.07]" />
               <DropdownMenu.Item
                 onSelect={() => actions.onDelete(library)}
-                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium text-red-400 outline-none data-[highlighted]:!bg-red-500/20 data-[highlighted]:!text-red-300"
+                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
               >
                 删除媒体库
               </DropdownMenu.Item>

@@ -90,7 +90,9 @@ pub fn search_request_page_categories(
     } else {
         site.cookie.clone()
     };
-    let api_key = if html_fallback {
+    let supports_api_key = profile.framework != Framework::Nexusphp
+        && profile.effective_auth_types().contains(&"apikey");
+    let api_key = if html_fallback || !supports_api_key {
         None
     } else {
         site.api_key.clone()
@@ -218,14 +220,20 @@ fn hdarea_v1_search_url(
     url
 }
 
-pub fn rss_request(site: &Site, _profile: &Profile) -> FetchRequest {
+pub fn rss_request(site: &Site, profile: &Profile) -> FetchRequest {
+    let supports_api_key = profile.framework != Framework::Nexusphp
+        && profile.effective_auth_types().contains(&"apikey");
     FetchRequest {
         key: format!("rss:{}", site.id),
         url: site.rss_url.clone().unwrap_or_else(|| site.url.clone()),
         method: FetchMethod::Get,
         body: None,
         cookie: site.cookie.clone(),
-        api_key: site.api_key.clone(),
+        api_key: if supports_api_key {
+            site.api_key.clone()
+        } else {
+            None
+        },
         proxy: site.proxy.clone(),
         cdp_url: site.cdp_url.clone(),
     }

@@ -122,8 +122,11 @@ pub struct ProbeManager {
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
     background_paused: AtomicBool,
+    pause_epoch: AtomicU64,
+    pause_state_lock: Mutex<()>,
     paused_exempt_jobs: std::sync::Mutex<HashSet<String>>,
     paused_exempt_units: Mutex<HashSet<(String, String)>>,
+    promoted_units: Mutex<HashSet<(String, String)>>,
     obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
@@ -286,8 +289,11 @@ impl ProbeManager {
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
             background_paused: AtomicBool::new(initial_background_paused),
+            pause_epoch: AtomicU64::new(0),
+            pause_state_lock: Mutex::new(()),
             paused_exempt_jobs: std::sync::Mutex::new(HashSet::new()),
             paused_exempt_units: Mutex::new(HashSet::new()),
+            promoted_units: Mutex::new(HashSet::new()),
             obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
@@ -482,18 +488,73 @@ impl ProbeManager {
     }
 
     pub fn pause_background(&self) {
-        self.background_paused.store(true, Ordering::Release);
+        {
+            let _guard = self.pause_state_lock.lock();
+            self.pause_epoch.fetch_add(1, Ordering::AcqRel);
+            self.background_paused.store(true, Ordering::Release);
+        }
         self.clear_paused_exempt_jobs();
         self.analysis_schedule.lock().clear_unstarted();
         self.drain_buffered_dispatch();
     }
 
+    pub(crate) fn pause_epoch(&self) -> u64 {
+        self.pause_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn begin_resume_if_epoch(&self, epoch: u64) -> Option<bool> {
+        let _guard = self.pause_state_lock.lock();
+        if self.pause_epoch.load(Ordering::Acquire) != epoch {
+            return None;
+        }
+        let was_paused = self.background_paused.swap(false, Ordering::AcqRel);
+        Some(was_paused)
+    }
+
+    pub(crate) fn pause_background_if_epoch(&self, epoch: u64) -> bool {
+        {
+            let _guard = self.pause_state_lock.lock();
+            if self.pause_epoch.load(Ordering::Acquire) != epoch {
+                return false;
+            }
+            self.pause_epoch.fetch_add(1, Ordering::AcqRel);
+            self.background_paused.store(true, Ordering::Release);
+        }
+        self.clear_paused_exempt_jobs();
+        self.analysis_schedule.lock().clear_unstarted();
+        self.drain_buffered_dispatch();
+        true
+    }
+
+    pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
+        {
+            let _guard = self.pause_state_lock.lock();
+            if self.pause_epoch.load(Ordering::Acquire) != epoch {
+                return false;
+            }
+            self.background_paused.store(false, Ordering::Release);
+        }
+        self.clear_paused_exempt_jobs();
+        self.fill_dispatch_windows();
+        if self.pause_epoch.load(Ordering::Acquire) != epoch {
+            self.drain_buffered_dispatch();
+            return false;
+        }
+        self.wake.notify_waiters();
+        self.obligation_wake.notify_waiters();
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_background_paused_flag(&self, paused: bool) {
         self.background_paused.store(paused, Ordering::Release);
     }
 
     pub fn resume_background(&self) {
-        self.background_paused.store(false, Ordering::Release);
+        {
+            let _guard = self.pause_state_lock.lock();
+            self.background_paused.store(false, Ordering::Release);
+        }
         self.clear_paused_exempt_jobs();
         self.fill_dispatch_windows();
         self.wake.notify_waiters();
@@ -526,141 +587,12 @@ impl ProbeManager {
         self.seen.lock().remove(ledger_id).is_some()
     }
 
-    pub(super) fn mark_job_paused_exempt(&self, job_id: String) -> bool {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(job_id)
-    }
-
-    pub(super) fn unmark_job_paused_exempt(&self, job_id: &str) {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(job_id);
-        self.paused_exempt_units.lock().retain(|(j, _)| j != job_id);
-    }
-
-    pub(super) fn is_job_paused_exempt(&self, job_id: &str) -> bool {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(job_id)
-    }
-
-    pub(super) fn mark_unit_paused_exempt(&self, job_id: String, ledger_id: String) -> bool {
-        self.paused_exempt_units.lock().insert((job_id, ledger_id))
-    }
-
-    pub(super) fn unmark_unit_paused_exempt(&self, job_id: &str, ledger_id: &str) {
-        self.paused_exempt_units
-            .lock()
-            .retain(|(j, l)| !(j == job_id && l == ledger_id));
-    }
-
-    pub(super) fn is_unit_paused_exempt(&self, job_id: &str, ledger_id: &str) -> bool {
-        self.paused_exempt_units
-            .lock()
-            .iter()
-            .any(|(j, l)| j == job_id && l == ledger_id)
-    }
-
-    pub(super) fn is_dispatch_paused_exempt(&self, job_id: &str, ledger_id: &str) -> bool {
-        self.is_job_paused_exempt(job_id) || self.is_unit_paused_exempt(job_id, ledger_id)
-    }
-
-    pub(super) fn has_paused_exempt_jobs(&self) -> bool {
-        !self
-            .paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-    }
-
-    pub fn has_paused_exempt_work(&self) -> bool {
-        self.has_paused_exempt_jobs() || !self.paused_exempt_units.lock().is_empty()
-    }
-
-    pub(super) fn paused_exempt_job_ids(&self) -> Vec<String> {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn paused_exempt_unit_pairs(&self) -> Vec<(String, String)> {
-        self.paused_exempt_units.lock().iter().cloned().collect()
-    }
-
-    pub(super) fn paused_exempt_jobs_for_ledgers(&self, ledger_ids: &[String]) -> HashSet<String> {
-        let mut jobs = self
-            .paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let units = self.paused_exempt_units.lock();
-        for (job_id, lid) in units.iter() {
-            if ledger_ids.iter().any(|target| target == lid) {
-                jobs.insert(job_id.clone());
-            }
-        }
-        jobs
-    }
-
-    pub(super) fn prune_inactive_exempt_jobs(&self, checked: &[String], active: &[String]) {
-        let active_set: HashSet<&str> = active.iter().map(String::as_str).collect();
-        let mut guard = self
-            .paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for job_id in checked {
-            if !active_set.contains(job_id.as_str()) {
-                guard.remove(job_id);
-            }
-        }
-    }
-
-    pub(super) fn prune_inactive_exempt_units(
-        &self,
-        checked: &[(String, String)],
-        active: &[(String, String)],
-    ) {
-        let active_set: HashSet<&(String, String)> = active.iter().collect();
-        let mut guard = self.paused_exempt_units.lock();
-        for pair in checked {
-            if !active_set.contains(pair) {
-                guard.remove(pair);
-            }
-        }
-    }
-
-    pub(super) fn clear_paused_exempt_jobs(&self) {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.paused_exempt_units.lock().clear();
-    }
-
     pub(crate) fn obligation_wake(&self) -> Arc<Notify> {
         Arc::clone(&self.obligation_wake)
     }
 
     pub(crate) fn purge_cancelled_seen(&self, file_ids: &[String], global_cancel: bool) {
-        if global_cancel {
-            self.drain_buffered_dispatch();
-        }
-        {
-            let mut seen = self.seen.lock();
-            for file_id in file_ids {
-                seen.remove(file_id);
-            }
-        }
-        if !self.background_is_paused() || self.has_paused_exempt_work() {
-            self.wake.notify_waiters();
-        }
+        self.purge_cancelled_seen_inner(file_ids, global_cancel);
     }
 }
 

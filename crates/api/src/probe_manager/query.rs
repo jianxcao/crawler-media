@@ -342,13 +342,15 @@ impl ProbeManager {
                 job_id,
                 "Remote reads paused; durable fingerprint unit remains queued"
             );
-        } else if self.fingerprint_tx.try_send((id, work)).is_err() {
+        } else if let Err(err) = self.dispatch_fingerprint_work(id, work) {
             self.forget_seen(&ledger_id, &job_id);
             tracing::info!(
                 job_id,
                 "Fingerprint window full; durable unit remains queued"
             );
-            self.wake.notify_waiters();
+            if !matches!(err, super::dispatch::FingerprintDispatchError::Closed) {
+                self.wake.notify_waiters();
+            }
         }
         Ok(policy::ProbeRequestResult::Queued { job_id })
     }

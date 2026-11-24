@@ -51,8 +51,7 @@ interface DragState {
 
 /**
  * MediaLibrary → 首页行清单的投影（lib/home-rows.ts 的 HomeLibraryLike）。
- * 与 library-view.tsx 的 toHomeLibraryLike 同一口径：新契约的库 id 是 UUID
- * 字符串、viewer_access / exclude_from_home 字段已删，所有库都对首页可见。
+ * 与 library-view.tsx 的 toHomeLibraryLike 同一口径：遵守管理页的 exclude_from_home 开关。
  */
 function toHomeLibraryLike(libraries: MediaLibrary[]): HomeLibraryLike[] {
   return libraries.map((lib) => ({
@@ -60,7 +59,7 @@ function toHomeLibraryLike(libraries: MediaLibrary[]): HomeLibraryLike[] {
     name: lib.name,
     kind: lib.kind,
     viewer_access: true,
-    exclude_from_home: false,
+    exclude_from_home: Boolean(lib.exclude_from_home),
   }));
 }
 
@@ -317,8 +316,8 @@ export function LibraryCustomizeView() {
     };
   };
 
-  // 新契约的库不再带 viewer_access：所有库都作为「从哪来」的候选
-  const visibleLibraries = libraries ?? [];
+  // 排除设置了「不在首页展示」的媒体库
+  const visibleLibraries = (libraries ?? []).filter((l) => !l.exclude_from_home);
   const shownCount = rows.filter((row) => !row.hidden).length;
 
   return (

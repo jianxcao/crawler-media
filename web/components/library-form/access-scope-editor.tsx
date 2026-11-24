@@ -200,7 +200,9 @@ function ViewerCombobox({
             } else if (e.key === "Enter") {
               e.preventDefault();
               if (open && matches[active]) toggle(matches[active].id);
-            } else if (e.key === "Escape") {
+            } else if (e.key === "Escape" && open) {
+              e.preventDefault();
+              e.stopPropagation();
               setOpen(false);
             } else if (e.key === "Backspace" && query === "" && chosen.length > 0) {
               toggle(chosen[chosen.length - 1].id);

@@ -137,8 +137,21 @@ function SearchPalette({
   const inputRef = useRef<HTMLInputElement>(null);
   const availableModes = searchAccess.available;
 
-  // 挂载即聚焦输入框
-  useEffect(() => inputRef.current?.focus(), []);
+  // 挂载即聚焦输入框，并在面板打开期间监听全局 Escape（防焦点移出对话框后失灵）
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    inputRef.current?.focus();
+    const win = globalThis.window;
+    if (!win) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onCloseRef.current();
+    };
+    win.addEventListener("keydown", onKeyDown);
+    return () => win.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   useEffect(() => {
     if (!searchAccess.ready) return;
@@ -274,6 +287,7 @@ function SearchPalette({
   const removeOne = (id: string) => {
     setItems((prev) => (prev ? prev.filter((i) => i.id !== id) : prev));
     deleteSearchHistoryEntry(id).catch(() => undefined);
+    inputRef.current?.focus();
   };
 
   const removeGroup = async (group: HistoryGroup) => {
@@ -285,6 +299,7 @@ function SearchPalette({
         tone: "danger",
       }))
     ) {
+      inputRef.current?.focus();
       return;
     }
     const ids = new Set(group.items.map((item) => item.id));
@@ -292,6 +307,7 @@ function SearchPalette({
     Promise.all(group.items.map((item) => deleteSearchHistoryEntry(item.id))).catch(
       () => undefined,
     );
+    inputRef.current?.focus();
   };
 
   const toggleGroup = (groupKey: string) => {
@@ -306,6 +322,7 @@ function SearchPalette({
   const removeAll = () => {
     setItems([]);
     clearSearchHistory().catch(() => undefined);
+    inputRef.current?.focus();
   };
 
   return (

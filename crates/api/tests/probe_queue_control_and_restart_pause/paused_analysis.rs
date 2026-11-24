@@ -175,7 +175,205 @@ async fn paused_analysis_runs_for_exempt_episode_sorting_after_16_non_exempt_row
     })
     .await;
     assert!(!state.probe.has_paused_exempt_work());
-    assert!(state.probe.comparison_runs.load(Ordering::SeqCst) >= 2);
+    assert_eq!(state.probe.comparison_runs.load(Ordering::SeqCst), 1);
+    for &ep in &ep_ids {
+        if ep != tail_ledger {
+            assert!(
+                in_analysis(&state, ep),
+                "non-exempt episode {ep} must remain queued in analysis while paused"
+            );
+        }
+    }
+    state.probe.shutdown_workers().await.unwrap();
+}
+
+fn create_season_marker_refresh(
+    store: &api::Store,
+    job_id: &str,
+    show: domain::MediaId,
+    episodes: &[domain::LedgerId],
+) {
+    let strings: Vec<String> = episodes.iter().map(ToString::to_string).collect();
+    let specs: Vec<_> = strings
+        .iter()
+        .map(|lid| store::ProbeJobUnitSpec {
+            ledger_id: lid,
+            kind: "tv",
+            force_fingerprint: true,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: true,
+            reuse_media_info_cache: false,
+        })
+        .collect();
+    assert!(
+        store
+            .create_probe_job(
+                job_id,
+                "marker_refresh",
+                &show.to_string(),
+                Some(1),
+                &format!("marker-refresh:{show}:1"),
+                &specs,
+            )
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_or_non_exempt_marker_refresh_does_not_starve_exempt_fingerprint_or_bypass_pause()
+ {
+    use api::probe_manager::policy::ProbeRequestOrigin;
+    let dir = tempfile::tempdir().unwrap();
+    let tv_root = dir.path().join("tv-starve");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let (show, ep_ids) = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        let (show, ids) = seed_tv_episodes(&store, &tv_root, 4);
+        create_season_marker_refresh(&store, "000-refresh-incomplete", show, &ids[..2]);
+        (show, ids)
+    };
+    let state = production_state(dir.path(), CountingTracks::new(false));
+    let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000));
+    state.probe.set_clock(clock.clone());
+    assert!(state.probe.try_start_workers());
+    let app = api::router(state.clone());
+
+    let row_of = |ep| state.store().file_coverage_by_id(ep).unwrap().unwrap();
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[0]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| in_analysis(&state, ep_ids[0])).await;
+
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[2]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    let mut now = 1_000;
+    poll_until(|| {
+        now += 2_500;
+        clock.set(now);
+        state.probe.wake_dispatch();
+        has_meta(&state, ep_ids[2])
+            && state
+                .store()
+                .active_probe_unit_for_ledger(&ep_ids[2].to_string())
+                .unwrap()
+                .is_none()
+    })
+    .await;
+    assert!(!state.probe.has_paused_exempt_work());
+    assert!(in_analysis(&state, ep_ids[0]));
+    assert!(!has_meta(&state, ep_ids[1]));
+
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[1]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| in_analysis(&state, ep_ids[1])).await;
+    admin_json(&app, "POST", "/api/v1/probe/pause", json!({})).await;
+    assert!(!state.probe.has_paused_exempt_work());
+
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[3]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| {
+        now += 2_500;
+        clock.set(now);
+        state.probe.wake_dispatch();
+        has_meta(&state, ep_ids[3])
+            && state
+                .store()
+                .active_probe_unit_for_ledger(&ep_ids[3].to_string())
+                .unwrap()
+                .is_none()
+    })
+    .await;
+    let refresh_job = state
+        .store()
+        .get_probe_job("000-refresh-incomplete")
+        .unwrap()
+        .unwrap();
+    assert!(
+        refresh_job.is_active(),
+        "complete but non-exempt marker_refresh {show} must not bypass pause: {refresh_job:?}"
+    );
+    state.probe.shutdown_workers().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unit_promoted_marker_refresh_completes_on_sibling_cancel_and_fails_on_sibling_failure() {
+    use api::probe_manager::policy::ProbeRequestOrigin;
+    let dir = tempfile::tempdir().unwrap();
+    let tv_root = dir.path().join("tv-promoted-lifecycle");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let (show, ep_ids) = {
+        let store = api::Store::open(dir.path().join("data")).unwrap();
+        seed_tv_episodes(&store, &tv_root, 4)
+    };
+    let tracks = CountingTracks::new(false);
+    let state = production_state(dir.path(), tracks.clone());
+    let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000));
+    state.probe.set_clock(clock.clone());
+    assert!(state.probe.try_start_workers());
+
+    let row_of = |ep| state.store().file_coverage_by_id(ep).unwrap().unwrap();
+    create_season_marker_refresh(
+        &state.store(),
+        "refresh-cancel-sibling",
+        show,
+        &ep_ids[0..2],
+    );
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[0]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| in_analysis(&state, ep_ids[0])).await;
+    assert!(!state.probe.has_paused_exempt_work());
+
+    state
+        .probe
+        .cancel_ledger_work(&[ep_ids[1].to_string()], "file_deleted")
+        .unwrap();
+    let mut now = 1_000;
+    poll_until(|| {
+        now += 2_500;
+        clock.set(now);
+        state.probe.wake_dispatch();
+        state
+            .store()
+            .get_probe_job("refresh-cancel-sibling")
+            .unwrap()
+            .unwrap()
+            .status
+            == "succeeded"
+    })
+    .await;
+    assert!(!state.probe.has_paused_exempt_work());
+
+    create_season_marker_refresh(&state.store(), "refresh-fail-sibling", show, &ep_ids[2..4]);
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[2]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| in_analysis(&state, ep_ids[2])).await;
+    tracks.fail.store(true, Ordering::SeqCst);
+    state
+        .probe
+        .request_probe(&row_of(ep_ids[3]), ProbeRequestOrigin::Playback)
+        .unwrap();
+    poll_until(|| {
+        state
+            .store()
+            .get_probe_job("refresh-fail-sibling")
+            .unwrap()
+            .unwrap()
+            .status
+            == "failed"
+    })
+    .await;
+    assert!(!state.probe.has_paused_exempt_work());
     state.probe.shutdown_workers().await.unwrap();
 }
 

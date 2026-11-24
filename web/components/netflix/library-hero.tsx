@@ -41,8 +41,8 @@ export function NetflixLibraryHero() {
       });
     listLibraries()
       .then(async (libs) => {
-        // 新契约无 viewer_access / exclude_from_home：所有库都可作最近入库兜底
-        const visible = libs;
+        // 遵守管理页的 exclude_from_home：排除不在首页展示的库
+        const visible = libs.filter((lib) => !lib.exclude_from_home);
         const entries = await Promise.all(
           visible.map(async (lib) => {
             try {
@@ -132,10 +132,9 @@ function NetflixBillboard({
   // 画面：横版剧照直出（billboard 的正确素材）——继续观看用集剧照/背景图，
   // 库内条目用接口给的 backdrop_url（与海报同一套本地资产优先规则）。
   // 连横图都没有的条目（家庭录像等）才回落海报模糊铺底。
-  // 新契约的 LibraryItem 无 backdrop_url：库内条目只回落到海报模糊铺底兜底
   const artworkUrl = upNextItem
     ? (upNextItem.episode_still_url ?? upNextItem.backdrop_url)
-    : null;
+    : (libraryItem?.backdrop_url ?? null);
   const playHref = upNextItem
     ? playHrefOf(upNextItem)
     : libraryItem && libraryItem.media_item_id != null

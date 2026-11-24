@@ -123,22 +123,29 @@ pub(crate) fn parse_html(
 pub(crate) fn parse_mteam_items(body: &str) -> Result<Vec<MTeamItem>, IndexerError> {
     let parsed: MTeamResponse =
         serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
-    // M-Team signals rate limits and bad keys in the envelope rather than the
-    // HTTP status; surface its own message instead of an empty result list.
-    if let Some(code) = parsed.code.as_deref()
-        && code != "0"
-    {
-        return Err(IndexerError::Parse(format!(
-            "M-Team 返回错误 {code}：{}",
-            parsed.message.unwrap_or_else(|| "无描述".into())
-        )));
+    // M-Team signals rate limits and bad keys in the envelope rather than (or
+    // alongside) the HTTP status; surface its own message instead of an empty list.
+    check_mteam_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.message.as_deref(),
+    )?;
+    match parsed.data {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(payload) => serde_json::from_value::<MTeamData>(payload)
+            .map(|d| d.data)
+            .map_err(|err| IndexerError::Parse(err.to_string())),
     }
-    Ok(parsed.data.map(|payload| payload.data).unwrap_or_default())
 }
 
 pub(crate) fn parse_mteam_download(body: &str) -> Result<String, IndexerError> {
     let parsed: MTeamDownloadResponse =
         serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
+    check_mteam_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.message.as_deref(),
+    )?;
     match parsed.data {
         Some(url) if !url.is_empty() => Ok(url),
         _ => Err(IndexerError::Parse(format!(
@@ -146,6 +153,22 @@ pub(crate) fn parse_mteam_download(body: &str) -> Result<String, IndexerError> {
             parsed.message.unwrap_or_else(|| "无描述".into())
         ))),
     }
+}
+
+fn check_mteam_envelope(
+    success: Option<bool>,
+    code: Option<&str>,
+    message: Option<&str>,
+) -> Result<(), IndexerError> {
+    let code_failed = code.is_some_and(|c| c != "0");
+    if !code_failed && success != Some(false) {
+        return Ok(());
+    }
+    let msg = message.unwrap_or("无描述");
+    let label = code.filter(|c| *c != "0").unwrap_or("error");
+    Err(IndexerError::Parse(format!(
+        "M-Team 返回错误 {label}：{msg}"
+    )))
 }
 
 impl MTeamItem {
@@ -461,12 +484,14 @@ where
 
 #[derive(Deserialize)]
 struct MTeamResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
     code: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     message: Option<String>,
     #[serde(default)]
-    data: Option<MTeamData>,
+    data: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -514,7 +539,11 @@ struct MTeamStatus {
 
 #[derive(Deserialize)]
 struct MTeamDownloadResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
     message: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     data: Option<String>,

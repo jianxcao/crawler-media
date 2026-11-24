@@ -96,15 +96,19 @@ test("season cleanup choices are unchecked, available and describe whole shared 
   assert.equal(submitted.deleteLibraryFiles, true);
 });
 
-for (const total of [0, 99]) {
+  for (const total of [0, 99]) {
   test(`switching seasons offers explicit cleanup even with work-wide count ${total}`, async () => {
-    const app = fixture("subscription-adjust-dialog", {
-      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }, { season_number: 2 }] }),
-      previewSubscriptionDownloadRouting: async () => ({ ok: true }),
-      updateSubscription: async () => ({}),
-      getSubscriptionRemovalPreview: async () => ({ ...preview, torrent_count: total, library_file_count: total }),
-      cleanupSubscriptionSeasons: async () => ({}),
-    });
+    const app = fixture(
+      "subscription-adjust-dialog",
+      {
+        previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }, { season_number: 2 }] }),
+        previewSubscriptionDownloadRouting: async () => ({ ok: true }),
+        updateSubscription: async () => ({}),
+        getSubscriptionRemovalPreview: async () => ({ ...preview, torrent_count: total, library_file_count: total }),
+        cleanupSubscriptionSeasons: async () => ({}),
+      },
+      [{ id: "lib-default", name: "默认剧集库", kind: "tv", is_default: true }],
+    );
     let saved = false;
     const props = { detail: { id: "s1", media: { kind: "tv", tmdb_id: 1, title: "Fixture" },
       coverage: { kind: "tv", season: 1 }, wanted: [], library_id: null },
@@ -135,7 +139,7 @@ test("cancellation marks inferred torrent counts and keeps deletion opt in", asy
   for (const toggle of nodes(tree).filter((node) => node.type === "input")) assert.equal(toggle.props.checked, false);
 });
 
-test("adjust dialog passes tmdb_id for explicit library and null tmdb_id for default-library routing", async () => {
+test("adjust dialog passes tmdb_id unconditionally, guards default-library option & save, renders staging_path, and disables save on failed preview", async () => {
   const explicitCalls = [];
   const explicitApp = fixture("subscription-adjust-dialog", {
     previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
@@ -165,14 +169,20 @@ test("adjust dialog passes tmdb_id for explicit library and null tmdb_id for def
     { title: "两京十五日", year: 2026 },
   ]);
 
+  // Default library exists -> passes tmdb_id unconditionally & renders selectable default-library option & staging_path
   const defaultCalls = [];
   const defaultApp = fixture(
     "subscription-adjust-dialog",
     {
-      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
+      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }, { season_number: 2 }] }),
       previewSubscriptionDownloadRouting: async (...args) => {
         defaultCalls.push(args);
-        return { ok: true, mode: "inplace", entry_dir: "/tv/default/两京十五日 (2026)/Season 01" };
+        return {
+          ok: true,
+          mode: "watch",
+          path: "/downloads/watch",
+          staging_path: "/downloads/staging/两京十五日 (2026)",
+        };
       },
       updateSubscription: async () => ({}),
     },
@@ -196,14 +206,235 @@ test("adjust dialog passes tmdb_id for explicit library and null tmdb_id for def
   assert.deepEqual(JSON.parse(JSON.stringify(defaultCalls[0])), [
     "tv",
     null,
-    null,
+    "203483",
     { title: "两京十五日", year: 2026 },
   ]);
   const placeholderOption = nodes(renderedDefault).find(
     (node) => node.type === "option" && node.props?.value === "",
   );
-  assert.ok(placeholderOption, "must render default-library option");
+  assert.ok(placeholderOption, "must render default-library option when default exists");
   assert.equal(text(placeholderOption), "（按默认库路由）");
+  assert.ok(!placeholderOption.props.disabled);
+  assert.match(
+    text(renderedDefault),
+    /整理到.*\/downloads\/staging\/两京十五日 \(2026\).*文件进入媒体库根目录后自动入账/,
+  );
+
+  // No default library + detail.library_id === null -> disabled placeholder, save disabled until explicit library picked
+  let previewOk = true;
+  const noDefaultApp = fixture(
+    "subscription-adjust-dialog",
+    {
+      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }, { season_number: 2 }] }),
+      previewSubscriptionDownloadRouting: async () =>
+        previewOk ? { ok: true, mode: "inplace", entry_dir: "/tv/anime" } : { ok: false, warning: "下载器未连接" },
+      updateSubscription: async () => ({}),
+    },
+    [{ id: "lib-anime", name: "动漫库", kind: "tv", is_default: false }],
+  );
+  const noDefaultProps = {
+    detail: {
+      id: "s3",
+      media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
+      coverage: { kind: "tv", season: 1 },
+      wanted: [],
+      library_id: null,
+    },
+    onClose() {},
+    onSaved() {},
+  };
+  noDefaultApp.render(noDefaultProps);
+  await settle();
+  let noDefaultTree = noDefaultApp.render(noDefaultProps);
+  const disabledPlaceholder = nodes(noDefaultTree).find(
+    (node) => node.type === "option" && node.props?.value === "",
+  );
+  assert.ok(disabledPlaceholder, "must render disabled placeholder when library_id is null and no default exists");
+  assert.equal(disabledPlaceholder.props.disabled, true);
+  assert.equal(text(disabledPlaceholder), "（当前默认库不可用，请选择目标媒体库）");
+
+  // Even after changing season (dirty=true), save stays disabled while libraryId === null and no default exists
+  nodes(noDefaultTree)
+    .find((node) => node.type === "season" && node.props.season.season_number === 2)
+    .props.onToggle();
+  noDefaultTree = noDefaultApp.render(noDefaultProps);
+  const saveBeforePick = nodes(noDefaultTree).find(
+    (node) => node.type === "button" && text(node).includes("保存调整"),
+  );
+  assert.equal(saveBeforePick.props.disabled, true, "must disable saving null libraryId when no default exists");
+
+  // Selecting an explicit library enables save when preview.ok === true
+  nodes(noDefaultTree)
+    .find((node) => node.type === "select")
+    .props.onChange({ target: { value: "lib-anime" } });
+  noDefaultApp.render(noDefaultProps);
+  await settle();
+  noDefaultTree = noDefaultApp.render(noDefaultProps);
+  const saveAfterPick = nodes(noDefaultTree).find(
+    (node) => node.type === "button" && text(node).includes("保存调整"),
+  );
+  assert.equal(saveAfterPick.props.disabled, false);
+
+  // When preview.ok === false, save button is disabled
+  previewOk = false;
+  const badPreviewApp = fixture(
+    "subscription-adjust-dialog",
+    {
+      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }, { season_number: 2 }] }),
+      previewSubscriptionDownloadRouting: async () => ({ ok: false, warning: "没有可用下载器" }),
+      updateSubscription: async () => ({}),
+    },
+    [{ id: "lib-default", name: "默认库", kind: "tv", is_default: true }],
+  );
+  badPreviewApp.render(defaultProps);
+  await settle();
+  let badTree = badPreviewApp.render(defaultProps);
+  nodes(badTree)
+    .find((node) => node.type === "season" && node.props.season.season_number === 2)
+    .props.onToggle();
+  badTree = badPreviewApp.render(defaultProps);
+  const saveOnFailedPreview = nodes(badTree).find(
+    (node) => node.type === "button" && text(node).includes("保存调整"),
+  );
+  assert.equal(saveOnFailedPreview.props.disabled, true, "must disable save when preview.ok === false");
+
+  // Explicit library + no default library -> must NOT offer <option value="">
+  const explicitNoDefaultApp = fixture(
+    "subscription-adjust-dialog",
+    {
+      previewSubscriptionTitle: async () => ({ status: "ready", seasons: [{ season_number: 1 }] }),
+      previewSubscriptionDownloadRouting: async () => ({ ok: true, mode: "inplace", entry_dir: "/tv/anime" }),
+      updateSubscription: async () => ({}),
+    },
+    [{ id: "lib-anime", name: "动漫库", kind: "tv", is_default: false }],
+  );
+  explicitNoDefaultApp.render({
+    detail: {
+      id: "s4",
+      media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
+      coverage: { kind: "tv", season: 1 },
+      wanted: [],
+      library_id: "lib-anime",
+    },
+    onClose() {},
+    onSaved() {},
+  });
+  await settle();
+  const explicitNoDefaultTree = explicitNoDefaultApp.render({
+    detail: {
+      id: "s4",
+      media: { kind: "tv", tmdb_id: "203483", title: "两京十五日", year: 2026 },
+      coverage: { kind: "tv", season: 1 },
+      wanted: [],
+      library_id: "lib-anime",
+    },
+    onClose() {},
+    onSaved() {},
+  });
+  const emptyOpt = nodes(explicitNoDefaultTree).find(
+    (node) => node.type === "option" && node.props?.value === "",
+  );
+  assert.equal(emptyOpt, undefined, "must not offer empty default-library option when no default library exists and library_id is non-null");
+});
+
+test("SubscriptionCancelDialog intercepts Escape in capture phase when open and raised so parent SubscribeDialog stays open", async () => {
+  const captureListeners = [];
+  const bubbleListeners = [];
+  const prevWindow = globalThis.window;
+  const fakeWindow = {
+    addEventListener(type, fn, opts) {
+      const capture = typeof opts === "boolean" ? opts : Boolean(opts?.capture);
+      if (type === "keydown") {
+        (capture ? captureListeners : bubbleListeners).push(fn);
+      }
+    },
+    removeEventListener(type, fn, opts) {
+      const capture = typeof opts === "boolean" ? opts : Boolean(opts?.capture);
+      if (type === "keydown") {
+        const list = capture ? captureListeners : bubbleListeners;
+        const idx = list.indexOf(fn);
+        if (idx >= 0) list.splice(idx, 1);
+      }
+    },
+  };
+  globalThis.window = fakeWindow;
+
+  try {
+    let parentClosed = false;
+    let cancelClosed = false;
+    bubbleListeners.push((e) => {
+      if (e.key === "Escape") parentClosed = true;
+    });
+
+    // Inject globalThis.window into fixture via read/transpile
+    const source = readFileSync(new URL("../components/subscription-cancel-dialog.tsx", import.meta.url), "utf8");
+    const code = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+    const cleanups = [];
+    const jsx = (type, props) => ({ type, props });
+    const mod = { exports: {} };
+    vm.runInNewContext(code, {
+      window: fakeWindow,
+      globalThis: { window: fakeWindow },
+      module: mod,
+      exports: mod.exports,
+      require: (name) => {
+        if (name === "react") {
+          return {
+            useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+            useEffect: (fn) => {
+              const cleanup = fn();
+              if (typeof cleanup === "function") cleanups.push(cleanup);
+            },
+          };
+        }
+        if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
+        if (name === "@/components/modal") return { Modal: "modal" };
+        if (name === "@/lib/format") return { formatBytes: (v) => `${v} B` };
+        if (name === "@/lib/api/subscriptions") {
+          return { getSubscriptionRemovalPreview: async () => preview };
+        }
+        throw new Error(`unexpected import ${name}`);
+      },
+    });
+
+    mod.exports.SubscriptionCancelDialog({
+      open: true,
+      raised: true,
+      subscriptionId: "s1",
+      title: "Fixture",
+      onClose: () => {
+        cancelClosed = true;
+      },
+      onConfirm: () => {},
+    });
+
+    assert.ok(captureListeners.length > 0, "raised SubscriptionCancelDialog must register capture-phase keydown listener");
+
+    let stopped = false;
+    const escEvent = {
+      key: "Escape",
+      preventDefault() {},
+      stopPropagation() {
+        stopped = true;
+      },
+    };
+    for (const fn of [...captureListeners]) fn(escEvent);
+    if (!stopped) {
+      for (const fn of [...bubbleListeners]) fn(escEvent);
+    }
+
+    assert.equal(stopped, true, "Escape in raised SubscriptionCancelDialog must stopPropagation");
+    assert.equal(cancelClosed, true, "Escape must close SubscriptionCancelDialog");
+    assert.equal(parentClosed, false, "Parent SubscribeDialog bubbling Escape listener must not fire");
+
+    cleanups.forEach((fn) => fn());
+    assert.equal(captureListeners.length, 0, "cleanup must remove capture listener");
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+  }
 });
 
 test("cancellation explains synchronous cleanup after deletion is selected", async () => {

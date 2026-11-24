@@ -647,3 +647,5 @@ fn in_analysis(state: &api::ApiState, id: LedgerId) -> bool {
 
 #[path = "probe_queue_control_and_restart_pause/paused_analysis.rs"]
 mod paused_analysis;
+#[path = "probe_queue_control_and_restart_pause/remediation_cases.rs"]
+mod remediation_cases;

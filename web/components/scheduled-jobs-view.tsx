@@ -39,6 +39,28 @@ function formatCountdown(targetTimestamp: number | string | null, currentMs: num
   return `${hours} 小时 ${mins} 分后`;
 }
 
+function expectedMaintenancePayload(job: JobView): Record<string, unknown> {
+  if (job.payload_token) {
+    try {
+      const parsed: unknown = JSON.parse(job.payload_token);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall back to job.payload when payload_token is not valid JSON.
+    }
+  }
+  return job.payload || {};
+}
+
+function clampScheduleSecs(raw: string, job: JobView): number {
+  const floor = isMaintenanceJob(job) ? 3600 : 5;
+  const ceiling = isMaintenanceJob(job) ? 31536000 : 86400 * 7;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return floor;
+  return Math.min(ceiling, Math.max(floor, parsed));
+}
+
 export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } = {}) {
   const toast = useToast();
   const [jobs, setJobs] = useState<JobView[]>([]);
@@ -78,7 +100,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
 
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
-  const [scheduleSecs, setScheduleSecs] = useState<number>(30);
+  const [scheduleSecs, setScheduleSecs] = useState<string>("30");
   const [updatingSchedule, setUpdatingSchedule] = useState(false);
   const [settingsJobId, setSettingsJobId] = useState<string | null>(null);
   const [maintenanceError, setMaintenanceError] = useState<string | null>(null);
@@ -89,7 +111,8 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
       const targetJob = jobs.find((j) => j.id === jobId);
       if (targetJob && isMaintenanceJob(targetJob)) {
         const draft = targetJob.payload || {};
-        await updateMaintenanceConfig(jobId, draft, draft, secs);
+        const expectedPayload = expectedMaintenancePayload(targetJob);
+        await updateMaintenanceConfig(jobId, draft, expectedPayload, secs);
       } else {
         await updateJobSchedule(jobId, secs);
       }
@@ -204,7 +227,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         type="button"
                         onClick={() => {
                           setEditingScheduleId(editingScheduleId === job.id ? null : job.id);
-                          setScheduleSecs(job.schedule ? job.schedule.interval_secs : 30);
+                          setScheduleSecs(String(job.schedule ? job.schedule.interval_secs : 30));
                         }}
                         title="点击调整调度周期"
                         className="inline-flex cursor-pointer items-center gap-1 rounded bg-white/10 px-2 py-0.5 text-xs text-white/90 transition hover:bg-white/20"
@@ -291,9 +314,9 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         <button
                           key={preset.secs}
                           type="button"
-                          onClick={() => setScheduleSecs(preset.secs)}
+                          onClick={() => setScheduleSecs(String(preset.secs))}
                           className={`rounded px-2 py-1 text-xs transition ${
-                            scheduleSecs === preset.secs
+                            scheduleSecs.trim() !== "" && Number(scheduleSecs) === preset.secs
                               ? "bg-sky-600 font-medium text-[#ffffff]"
                               : "bg-white/10 text-white/70 hover:bg-white/20"
                           }`}
@@ -310,15 +333,21 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         max={isMaintenanceJob(job) ? 31536000 : 86400 * 7}
                         value={scheduleSecs}
                         onChange={(e) => {
-                          const floor = isMaintenanceJob(job) ? 3600 : 5;
-                          setScheduleSecs(Math.max(floor, parseInt(e.target.value, 10) || floor));
+                          setScheduleSecs(e.target.value);
+                        }}
+                        onBlur={() => {
+                          setScheduleSecs(String(clampScheduleSecs(scheduleSecs, job)));
                         }}
                         className="w-24 rounded border border-[var(--line)] bg-[var(--surface-inset)] px-2 py-1 text-xs text-[var(--text)]"
                       />
                       <button
                         type="button"
                         disabled={updatingSchedule}
-                        onClick={() => void handleUpdateSchedule(job.id, scheduleSecs)}
+                        onClick={() => {
+                          const clamped = clampScheduleSecs(scheduleSecs, job);
+                          setScheduleSecs(String(clamped));
+                          void handleUpdateSchedule(job.id, clamped);
+                        }}
                         className="rounded bg-sky-600 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-500 disabled:opacity-50"
                       >
                         {updatingSchedule ? "保存中..." : "保存周期"}

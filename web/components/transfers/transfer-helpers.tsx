@@ -94,3 +94,26 @@ export function transferModeBadgeMeta(mode: TransferMode): {
       };
   }
 }
+
+export function recomputeGroupPrimaryMode(
+  nextStrm: number,
+  nextHardlink: number,
+  nextMove: number,
+  nextCopy: number,
+  fallback: TransferMode,
+): TransferMode {
+  let bestMode: TransferMode = fallback;
+  let bestCount = 0;
+  for (const [mode, count] of [
+    ["strm", nextStrm],
+    ["hardlink", nextHardlink],
+    ["move", nextMove],
+    ["copy", nextCopy],
+  ] as const) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestMode = mode;
+    }
+  }
+  return bestCount > 0 ? bestMode : fallback;
+}

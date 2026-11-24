@@ -24,6 +24,16 @@ fn resolve_site_url(
     }
 }
 
+fn parse_downloader_id(
+    raw: Option<&str>,
+) -> Result<Option<domain::DownloaderId>, (StatusCode, &'static str, &'static str)> {
+    raw.map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(domain::DownloaderId::from_str)
+        .transpose()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "site.invalid", "下载器 id 无效"))
+}
+
 async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteInput>) -> Response {
     let Some(profile) = state.indexer.profile(&body.profile_id) else {
         return err(
@@ -36,12 +46,11 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         Ok(url) => url,
         Err((status, code, msg)) => return err(status, code, msg),
     };
-    let downloader_id = body
-        .downloader_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .and_then(|id| domain::DownloaderId::from_str(id).ok());
+    let downloader_id = match parse_downloader_id(body.downloader_id.as_deref()) {
+        Ok(id) => id,
+        Err((status, code, msg)) => return err(status, code, msg),
+    };
+    let (allow_api_key, _) = profile_auth_support(Some(profile));
     let maintenance_via = match body.maintenance_via.as_deref() {
         Some(s) => match s.parse::<domain::MaintenanceVia>() {
             Ok(v) => v,
@@ -79,7 +88,11 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         url,
         profile_id: body.profile_id,
         cookie: body.cookie.and_then(normalize_optional),
-        api_key: body.api_key.and_then(normalize_optional),
+        api_key: if allow_api_key {
+            body.api_key.and_then(normalize_optional)
+        } else {
+            None
+        },
         rss_url: body.rss_url.and_then(normalize_optional),
         proxy,
         rate_limit_per_minute: body.rate_limit_per_minute,
@@ -88,6 +101,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         enabled: body.enabled,
         maintenance_via,
     };
+    let auth = auth_type_for(&site, Some(profile));
     crate::http::store_wait::store_write(&state, move |store| {
         if let Err(error) = store.insert_site(&site) {
             return err(
@@ -96,7 +110,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
                 &error.to_string(),
             );
         }
-        let view = site_public(&site, auth_type(&site), true);
+        let view = site_public(&site, auth, true);
         (StatusCode::CREATED, ok(view)).into_response()
     })
     .await
@@ -123,29 +137,31 @@ async fn put_site_inner(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    let downloader_id = match body
-        .downloader_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(domain::DownloaderId::from_str)
-        .transpose()
-    {
+    let downloader_id = match parse_downloader_id(body.downloader_id.as_deref()) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "下载器 id 无效"),
+        Err((status, code, msg)) => return err(status, code, msg),
     };
+    let auth_support = profile_auth_support(Some(profile));
+    let indexer = state.indexer.clone();
     crate::http::store_wait::store_write(&state, move |store| {
         let expected = match store.get_site(site_id) {
             Ok(Some(site)) => site,
             Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
             Err(error) => return site_store_error(&error),
         };
-        let site = match replacement_site(expected.clone(), body, resolved_url, downloader_id) {
+        let site = match replacement_site(
+            expected.clone(),
+            body,
+            resolved_url,
+            downloader_id,
+            auth_support,
+        ) {
             Ok(site) => site,
             Err((status, code, msg)) => return err(status, code, msg),
         };
+        let auth = auth_type_for(&site, indexer.profile(&site.profile_id));
         match store.save_site_if_current(&site, &expected) {
-            Ok(true) => ok(site_public(&site, auth_type(&site), true)).into_response(),
+            Ok(true) => ok(site_public(&site, auth, true)).into_response(),
             Ok(false) => site_changed(),
             Err(error) => site_store_error(&error),
         }
@@ -160,6 +176,7 @@ fn replacement_site(
     body: SiteInput,
     url: String,
     downloader_id: Option<domain::DownloaderId>,
+    (allow_api_key, allow_cookie): (bool, bool),
 ) -> Result<Site, (StatusCode, &'static str, &'static str)> {
     let maintenance_via = match body.maintenance_via.as_deref() {
         Some(s) => match s.parse::<domain::MaintenanceVia>() {
@@ -194,13 +211,23 @@ fn replacement_site(
             "无效的 CDP discovery 端点",
         ));
     }
+    let retain_cookie = if allow_cookie || current.profile_id == body.profile_id {
+        current.cookie
+    } else {
+        None
+    };
+    let api_key = if allow_api_key {
+        replacement_credential(body.api_key, current.api_key)
+    } else {
+        None
+    };
     Ok(Site {
         id: current.id,
         name: body.name,
         url,
         profile_id: body.profile_id,
-        cookie: replacement_credential(body.cookie, current.cookie),
-        api_key: replacement_credential(body.api_key, current.api_key),
+        cookie: replacement_credential(body.cookie, retain_cookie),
+        api_key,
         rss_url: replacement_credential(body.rss_url, current.rss_url),
         proxy,
         rate_limit_per_minute: body.rate_limit_per_minute,
@@ -255,8 +282,9 @@ async fn patch_site_inner(
         if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
             site.name = name;
         }
+        let profile = indexer.profile(&site.profile_id);
+        let (allow_api_key, _) = profile_auth_support(profile);
         if let Some(raw_url) = body.url {
-            let profile = indexer.profile(&site.profile_id);
             match resolve_site_url(&raw_url, profile) {
                 Ok(url) => site.url = url,
                 Err((status, code, msg)) => return err(status, code, msg),
@@ -266,7 +294,11 @@ async fn patch_site_inner(
             site.cookie = normalize_optional(cookie);
         }
         if let Some(api_key) = body.api_key {
-            site.api_key = normalize_optional(api_key);
+            site.api_key = if allow_api_key {
+                normalize_optional(api_key)
+            } else {
+                None
+            };
         }
         if let Some(rss_url) = body.rss_url {
             site.rss_url = normalize_optional(rss_url);
@@ -291,8 +323,10 @@ async fn patch_site_inner(
             site.cdp_url = normalized;
         }
         if let Some(downloader_id) = body.downloader_id {
-            site.downloader_id = normalize_optional(downloader_id)
-                .and_then(|trimmed| domain::DownloaderId::from_str(&trimmed).ok());
+            match parse_downloader_id(downloader_id.as_deref()) {
+                Ok(parsed) => site.downloader_id = parsed,
+                Err((status, code, msg)) => return err(status, code, msg),
+            }
         }
         if let Some(mv_str) = body.maintenance_via {
             match mv_str.parse::<domain::MaintenanceVia>() {
@@ -318,8 +352,9 @@ async fn patch_site_inner(
                 "浏览器维护方式不支持配置代理",
             );
         }
+        let auth = auth_type_for(&site, profile);
         match store.save_site_if_current(&site, &expected) {
-            Ok(true) => ok(site_public(&site, auth_type(&site), true)).into_response(),
+            Ok(true) => ok(site_public(&site, auth, true)).into_response(),
             Ok(false) => site_changed(),
             Err(error) => site_store_error(&error),
         }

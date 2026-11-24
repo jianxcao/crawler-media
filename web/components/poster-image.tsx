@@ -56,9 +56,13 @@ export function PosterImage({
   // 只有挂载首图才需要 complete 检测：缓存直出的图 load 事件可能早于本组件
   // 挂载，不补这一下占位就撤不掉。
   useEffect(() => {
+    if (!src || broken) {
+      setLoaded(false);
+      return;
+    }
     const image = imgRef.current;
     setLoaded((prev) => prev || Boolean(image?.complete && image.naturalWidth > 0));
-  }, [src]);
+  }, [src, broken]);
   if (!src || broken) {
     return (
       fallback ?? (
@@ -82,7 +86,10 @@ export function PosterImage({
         // 只有几毫秒，且只有真正被绘制的格子才会解码，无首屏卡顿之虞。
         decoding="sync"
         referrerPolicy="no-referrer"
-        onError={() => setFailedSrc(src ?? null)}
+        onError={() => {
+          setFailedSrc(src ?? null);
+          setLoaded(false);
+        }}
         onLoad={() => {
           setFailedSrc((prev) => (prev === src ? null : prev));
           setLoaded(true);

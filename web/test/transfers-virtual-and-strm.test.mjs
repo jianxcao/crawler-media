@@ -11,6 +11,7 @@ import ts from "typescript";
 const require = createRequire(import.meta.url);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
+const toastStub = { success() {}, error() {} };
 
 function createModuleLoader(overrides = {}) {
   const resolveFile = (base) => {
@@ -261,7 +262,7 @@ test("MediaTransferView avoids empty-state and stale-list flashes across viewMod
       CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
     },
     "@/components/feedback": {
-      useToast: () => ({ success() {}, error() {} }),
+      useToast: () => toastStub,
     },
     "@/components/modal": {
       Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
@@ -591,7 +592,7 @@ test("MediaTransferView fetches first 50 rows, toggles to grouped view, and expa
       CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
     },
     "@/components/feedback": {
-      useToast: () => ({ success() {}, error() {} }),
+      useToast: () => toastStub,
     },
     "@/components/modal": {
       Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
@@ -900,7 +901,7 @@ test("VirtualTransferList & useTransferController block auto-load on error, allo
       CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
     },
     "@/components/feedback": {
-      useToast: () => ({ success() {}, error() {} }),
+      useToast: () => toastStub,
     },
     "@/components/modal": {
       Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
@@ -1066,7 +1067,7 @@ test("confirmDelete preserves loaded >50 list without resetting scroll, and useG
       CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
     },
     "@/components/feedback": {
-      useToast: () => ({ success() {}, error() {} }),
+      useToast: () => toastStub,
     },
     "@/components/modal": {
       Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
@@ -1384,7 +1385,7 @@ test("useTransferController isolates per-mode pagination, resets expanded groups
       CopyButton: ({ text }) => React.createElement("button", { type: "button", "data-copy": text }, "copy"),
     },
     "@/components/feedback": {
-      useToast: () => ({ success() {}, error() {} }),
+      useToast: () => toastStub,
     },
     "@/components/modal": {
       Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
@@ -1597,5 +1598,571 @@ test("useTransferController isolates per-mode pagination, resets expanded groups
     if (renderer) {
       await act(async () => renderer.unmount());
     }
+  }
+});
+
+test("useTransferController tracks filterKey across failed filter fetches & rapid mode switches, and useGroupExpansion epoch blocks stale resolves", async () => {
+  const iconStub = () => React.createElement("span");
+  const apiCalls = [];
+  let failStrmHeadOnce = true;
+  let holdMovieHead = false;
+  const heldMovieResolvers = [];
+  const pendingGroupPromises = [];
+
+  const summary = {
+    total_files: 120,
+    media_count: 5,
+    movie_files: 20,
+    tv_files: 100,
+    strm_count: 40,
+    hardlink_count: 80,
+    copy_count: 0,
+    move_count: 0,
+    local_size_bytes: 80_000_000,
+    probed_duration_ms: 3_600_000,
+    strm_probed_count: 40,
+  };
+
+  const makeFile = (id, mode = "hardlink") => ({
+    id,
+    media_id: `m-${id}`,
+    library_id: "lib-1",
+    media_title: `记录_${id}`,
+    media_kind: "tv",
+    path: `/media/tv/${id}.${mode === "strm" ? "strm" : "mkv"}`,
+    source_path: mode === "strm" ? null : `/downloads/${id}.mkv`,
+    units: [{ season: 1, episode: 1 }],
+    resolution: "1080p",
+    codec: "hevc",
+    hdr: null,
+    quality_source: "probe",
+    confidence: "high",
+    filter_score: null,
+    is_strm: mode === "strm",
+    transfer_mode: mode,
+    file_size: mode === "strm" ? null : 1_000_000,
+    duration_ms: 60_000,
+  });
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => toastStub,
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: (params) => {
+        apiCalls.push(params);
+        if (params.media_id) {
+          // Intentionally ignore init.signal to prove generation epoch alone blocks stale resolves!
+          return new Promise((resolve) => {
+            pendingGroupPromises.push({ params, resolve });
+          });
+        }
+        if (params.mode === "strm" && params.offset === 0 && failStrmHeadOnce) {
+          failStrmHeadOnce = false;
+          return Promise.reject(new Error("STRM 筛选请求失败"));
+        }
+        if (params.mode === "strm" && (params.offset ?? 0) > 0) {
+          return Promise.resolve({
+            summary,
+            view: "files",
+            filtered_total: 80,
+            filtered_file_total: 80,
+            offset: params.offset,
+            limit: 50,
+            has_more: false,
+            items: [makeFile("STRM_PAGE2_CORRUPTION", "strm")],
+            groups: [],
+          });
+        }
+        if (holdMovieHead && params.kind === "movie") {
+          return new Promise((resolve) => {
+            heldMovieResolvers.push({ params, resolve });
+          });
+        }
+        if (params.view === "groups") {
+          return Promise.resolve({
+            summary,
+            view: "groups",
+            filtered_total: 1,
+            filtered_file_total: 3,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [
+              {
+                media_id: "grp-epoch-1",
+                media_title: "纪元分组作品",
+                media_kind: "tv",
+                library_id: "lib-1",
+                file_count: 3,
+                strm_count: 0,
+                hardlink_count: 3,
+                local_size_bytes: 3_000_000,
+                total_duration_ms: 180_000,
+                primary_resolution: "1080p",
+                primary_mode: "hardlink",
+                sample_dir: "/media/tv/grp-epoch-1",
+              },
+            ],
+          });
+        }
+        return Promise.resolve({
+          summary,
+          view: "files",
+          filtered_total: 120,
+          filtered_file_total: 120,
+          offset: params.offset ?? 0,
+          limit: 50,
+          has_more: (params.offset ?? 0) === 0,
+          items: Array.from({ length: 50 }, (_, i) =>
+            makeFile(`ALL_OLD_${(params.offset ?? 0) + i}`, "hardlink"),
+          ),
+          groups: [],
+        });
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView));
+  });
+
+  try {
+    // Initial head load in "files" (mode="all") succeeded
+    assert.match(collectText(renderer.toJSON()), /ALL_OLD_0/);
+
+    // 1. Switch modeFilter to "strm" while head fetch fails -> must clear stale ALL_OLD_* items AND never load offset>0 for "strm"!
+    const strmBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).trim() === "STRM 直链");
+    await act(async () => {
+      strmBtn.props.onClick();
+    });
+
+    const afterFailedFilterText = collectText(renderer.toJSON());
+    assert.doesNotMatch(
+      afterFailedFilterText,
+      /ALL_OLD_0/,
+      "Failed head fetch after changing filter must clear stale items from previous filter",
+    );
+    assert.doesNotMatch(
+      afterFailedFilterText,
+      /STRM_PAGE2_CORRUPTION/,
+      "loadMoreInternal must never append page 2 of new filter onto page 1 of old filter",
+    );
+    assert.equal(
+      apiCalls.some((c) => c.mode === "strm" && (c.offset ?? 0) > 0),
+      false,
+      "No offset > 0 request should fire when activePagination.filterKey !== currentFilterKey",
+    );
+
+    // Switch back to "all" so files load cleanly again
+    const allModeBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).trim() === "全部流转");
+    await act(async () => {
+      allModeBtn.props.onClick();
+    });
+    assert.match(collectText(renderer.toJSON()), /ALL_OLD_0/);
+
+    // 2. Rapid filter ("movie") -> switch to "groups" -> switch back to "files" while "movie" fetches are still pending
+    holdMovieHead = true;
+    const movieBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).trim() === "电影");
+    await act(async () => {
+      movieBtn.props.onClick();
+    });
+
+    const groupToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("按作品聚合"));
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+
+    const filesToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("逐文件列表"));
+    await act(async () => {
+      filesToggle.props.onClick();
+    });
+
+    const rapidSwitchBackText = collectText(renderer.toJSON());
+    assert.doesNotMatch(
+      rapidSwitchBackText,
+      /ALL_OLD_0/,
+      "Rapid filter -> mode switch -> switch back must clear stale unfiltered items",
+    );
+    assert.ok(
+      renderer.root.findAll((n) => n.props?.role === "status").length > 0,
+      "Rapid filter -> mode switch -> switch back must show loading skeleton",
+    );
+
+    // Reset filters and switch to "groups" to test useGroupExpansion reset epoch against non-aborting promises
+    holdMovieHead = false;
+    const resetBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("重置所有筛选"));
+    await act(async () => {
+      resetBtn.props.onClick();
+    });
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+    assert.match(collectText(renderer.toJSON()), /纪元分组作品/);
+
+    // 3a. Start toggleGroupExpand -> click manual "刷新记录" (calls resetExpanded) -> resolve stale expand promise (ignoring signal)
+    const expandBtn = () =>
+      renderer.root
+        .findAllByType("button")
+        .find((btn) => collectText(btn).includes("展开文件"));
+    await act(async () => {
+      expandBtn().props.onClick();
+    });
+    assert.equal(pendingGroupPromises.length, 1);
+    const staleExpandPromise = pendingGroupPromises.shift();
+
+    const refreshBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("刷新记录"));
+    await act(async () => {
+      await refreshBtn.props.onClick();
+    });
+
+    await act(async () => {
+      staleExpandPromise.resolve({
+        summary,
+        view: "files",
+        filtered_total: 1,
+        filtered_file_total: 1,
+        offset: 0,
+        limit: 200,
+        has_more: false,
+        items: [makeFile("STALE_AFTER_RESET_EXPAND")],
+        groups: [],
+      });
+    });
+    assert.doesNotMatch(
+      collectText(renderer.toJSON()),
+      /STALE_AFTER_RESET_EXPAND/,
+      "useGroupExpansion generation ref must ignore toggleGroupExpand resolving after resetExpanded()",
+    );
+
+    // 3b. Expand cleanly with has_more=true, start loadMoreGroupFiles -> click "刷新记录" -> resolve stale loadMoreGroupFiles
+    await act(async () => {
+      expandBtn().props.onClick();
+    });
+    await act(async () => {
+      pendingGroupPromises.shift().resolve({
+        summary,
+        view: "files",
+        filtered_total: 2,
+        filtered_file_total: 2,
+        offset: 0,
+        limit: 200,
+        has_more: true,
+        items: [makeFile("FRESH_EP_1")],
+        groups: [],
+      });
+    });
+    assert.match(collectText(renderer.toJSON()), /FRESH_EP_1/);
+
+    const loadMoreGroupBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("加载剩余剧集文件"));
+    await act(async () => {
+      loadMoreGroupBtn.props.onClick();
+    });
+    assert.equal(pendingGroupPromises.length, 1);
+    const staleLoadMorePromise = pendingGroupPromises.shift();
+
+    await act(async () => {
+      await refreshBtn.props.onClick();
+    });
+    await act(async () => {
+      staleLoadMorePromise.resolve({
+        summary,
+        view: "files",
+        filtered_total: 2,
+        filtered_file_total: 2,
+        offset: 1,
+        limit: 200,
+        has_more: false,
+        items: [makeFile("STALE_AFTER_RESET_LOADMORE")],
+        groups: [],
+      });
+    });
+    assert.doesNotMatch(
+      collectText(renderer.toJSON()),
+      /STALE_AFTER_RESET_LOADMORE/,
+      "useGroupExpansion generation ref must ignore loadMoreGroupFiles resolving after resetExpanded()",
+    );
+  } finally {
+    await act(async () => renderer.unmount());
+  }
+});
+
+test("handleItemDeleted decrements copy_count/move_count and recomputes group primary_mode in strm > hardlink > move > copy order", async () => {
+  const iconStub = () => React.createElement("span");
+
+  const summary = {
+    total_files: 4,
+    media_count: 1,
+    movie_files: 0,
+    tv_files: 4,
+    strm_count: 1,
+    hardlink_count: 1,
+    copy_count: 1,
+    move_count: 1,
+    local_size_bytes: 3_000_000,
+    probed_duration_ms: 240_000,
+    strm_probed_count: 1,
+  };
+
+  const groupFiles = [
+    {
+      id: "ep-strm",
+      media_id: "m-mixed",
+      library_id: "lib-1",
+      media_title: "多模式合集",
+      media_kind: "tv",
+      path: "/tv/S01E01.strm",
+      source_path: null,
+      units: [{ season: 1, episode: 1 }],
+      resolution: "1080p",
+      codec: "hevc",
+      hdr: null,
+      quality_source: "probe",
+      confidence: "high",
+      filter_score: null,
+      is_strm: true,
+      transfer_mode: "strm",
+      file_size: null,
+      duration_ms: 60_000,
+    },
+    {
+      id: "ep-hl",
+      media_id: "m-mixed",
+      library_id: "lib-1",
+      media_title: "多模式合集",
+      media_kind: "tv",
+      path: "/tv/S01E02.mkv",
+      source_path: "/dl/S01E02.mkv",
+      units: [{ season: 1, episode: 2 }],
+      resolution: "1080p",
+      codec: "hevc",
+      hdr: null,
+      quality_source: "probe",
+      confidence: "high",
+      filter_score: null,
+      is_strm: false,
+      transfer_mode: "hardlink",
+      file_size: 1_000_000,
+      duration_ms: 60_000,
+    },
+    {
+      id: "ep-mv",
+      media_id: "m-mixed",
+      library_id: "lib-1",
+      media_title: "多模式合集",
+      media_kind: "tv",
+      path: "/tv/S01E03.mkv",
+      source_path: null,
+      units: [{ season: 1, episode: 3 }],
+      resolution: "1080p",
+      codec: "hevc",
+      hdr: null,
+      quality_source: "probe",
+      confidence: "high",
+      filter_score: null,
+      is_strm: false,
+      transfer_mode: "move",
+      file_size: 1_000_000,
+      duration_ms: 60_000,
+    },
+    {
+      id: "ep-cp",
+      media_id: "m-mixed",
+      library_id: "lib-1",
+      media_title: "多模式合集",
+      media_kind: "tv",
+      path: "/tv/S01E04.mkv",
+      source_path: "/dl/S01E04.mkv",
+      units: [{ season: 1, episode: 4 }],
+      resolution: "1080p",
+      codec: "hevc",
+      hdr: null,
+      quality_source: "probe",
+      confidence: "high",
+      filter_score: null,
+      is_strm: false,
+      transfer_mode: "copy",
+      file_size: 1_000_000,
+      duration_ms: 60_000,
+    },
+  ];
+
+  const load = createModuleLoader({
+    "@/components/icons": new Proxy({}, { get: () => iconStub }),
+    "@/components/copy-button": {
+      CopyButton: () => React.createElement("button", { type: "button" }, "copy"),
+    },
+    "@/components/feedback": {
+      useToast: () => toastStub,
+    },
+    "@/components/modal": {
+      Modal: ({ open, children }) => (open ? React.createElement("div", null, children) : null),
+    },
+    "@/lib/api/transfers": {
+      listTransfers: async (params) => {
+        if (params.media_id === "m-mixed") {
+          return {
+            summary,
+            view: "files",
+            filtered_total: groupFiles.length,
+            filtered_file_total: groupFiles.length,
+            offset: 0,
+            limit: 200,
+            has_more: false,
+            items: groupFiles,
+            groups: [],
+          };
+        }
+        if (params.limit === 1) {
+          return {
+            summary,
+            view: params.view ?? "groups",
+            filtered_total: 1,
+            filtered_file_total: 3,
+            offset: 0,
+            limit: 1,
+            has_more: false,
+            items: [],
+            groups: [],
+          };
+        }
+        if (params.view === "groups") {
+          return {
+            summary,
+            view: "groups",
+            filtered_total: 1,
+            filtered_file_total: 4,
+            offset: 0,
+            limit: 50,
+            has_more: false,
+            items: [],
+            groups: [
+              {
+                media_id: "m-mixed",
+                media_title: "多模式合集",
+                media_kind: "tv",
+                library_id: "lib-1",
+                file_count: 4,
+                strm_count: 1,
+                hardlink_count: 1,
+                move_count: 1,
+                copy_count: 1,
+                local_size_bytes: 3_000_000,
+                total_duration_ms: 240_000,
+                primary_resolution: "1080p",
+                primary_mode: "strm",
+                sample_dir: "/tv",
+              },
+            ],
+          };
+        }
+        return {
+          summary,
+          view: "files",
+          filtered_total: 4,
+          filtered_file_total: 4,
+          offset: 0,
+          limit: 50,
+          has_more: false,
+          items: groupFiles,
+          groups: [],
+        };
+      },
+      deleteLedgerRow: async () => ({ deleted: true, path: "", file_deleted: false }),
+      retransferLedgerRow: async () => ({ retransferred: true, source: "", destination: "" }),
+      refreshItemMetadata: async () => ({ ok: true }),
+    },
+  });
+
+  const { MediaTransferView } = load("components/media-transfer-view.tsx");
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(MediaTransferView));
+  });
+
+  try {
+    const groupToggle = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("按作品聚合"));
+    await act(async () => {
+      groupToggle.props.onClick();
+    });
+
+    const expandBtn = renderer.root
+      .findAllByType("button")
+      .find((btn) => collectText(btn).includes("展开文件"));
+    await act(async () => {
+      expandBtn.props.onClick();
+    });
+
+    const findModeBadgeText = () => {
+      const spans = renderer.root.findAllByType("span");
+      const badge = spans.find((s) =>
+        /^(混合 \(1 STRM\)|STRM|硬链接|移动|复制)$/.test(collectText(s).trim()),
+      );
+      return badge ? collectText(badge).trim() : "";
+    };
+
+    assert.equal(findModeBadgeText(), "混合 (1 STRM)");
+
+    const deleteFirstRemainingRow = async () => {
+      const delBtn = renderer.root
+        .findAllByType("button")
+        .find((btn) => btn.props.title === "删除此文件记录");
+      await act(async () => {
+        delBtn.props.onClick();
+      });
+      const confirmBtn = renderer.root
+        .findAllByType("button")
+        .find((btn) => collectText(btn).includes("确认删除"));
+      await act(async () => {
+        confirmBtn.props.onClick();
+      });
+    };
+
+    // Delete ep-strm -> tie [hardlink:1, move:1, copy:1] -> "硬链接"
+    await deleteFirstRemainingRow();
+    assert.equal(findModeBadgeText(), "硬链接");
+
+    // Delete ep-hl -> tie [move:1, copy:1] -> "移动"
+    await deleteFirstRemainingRow();
+    assert.equal(findModeBadgeText(), "移动");
+
+    // Delete ep-mv -> remaining [copy:1] -> "复制"
+    await deleteFirstRemainingRow();
+    assert.equal(findModeBadgeText(), "复制");
+  } finally {
+    await act(async () => renderer.unmount());
   }
 });
